@@ -18,3 +18,14 @@ the endpoint, required headers/body, and the already-tested implementation at
 `~/dev/tidepool/exomonad/harness/src/provider/oauth.rs` as a reference.
 This changes PRD auth order; subscription comes first because it is the
 credential available now.
+
+## Q2 — Cache-hit acceptance (2026-09-23)
+
+**Asked:** `[root] Wave 0 item 13 requires positive cached-prefix tokens, but
+four live subscription calls reported zero cache-write and cached tokens even
+with a stable >1,024-token prefix and session key. Should acceptance require
+a measured hit, or verify stable prefix/effort history and report cache as
+unobserved?`
+
+**Default:** Verify history and report zero. **Blocks:** Final acceptance
+verdict for item 13. **Answer:** Pending.
