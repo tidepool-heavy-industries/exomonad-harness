@@ -172,7 +172,16 @@ later iteration (not wave1): streaming outputs from one job (N items then the te
 - dev loop ! one `just` entry: fmt, clippy, tests, typecheck, web build; web dev server proxies to core; lockfiles pinned; `cargo deny` (licenses/dupes/advisories); minimal features per dep.
 
 ## auth
-API key behind `Auth` trait first. chatgpt-subscription (device flow + chatgpt backend base url) later, same trait.
+ChatGPT-subscription login behind `Auth` trait first, because it is the
+credential available to this run. Read `~/.codex/auth.json` without modifying,
+copying, or refreshing it; Codex owns refresh. Never store or log tokens.
+Subscription requests use the streaming-only
+`https://chatgpt.com/backend-api/codex/responses` endpoint (`stream: true`,
+`store: false`, SSE), with Codex CLI version, originator, account, and stable
+session headers. A 401 stops the run for operator attention, not a refresh.
+Platform API-key auth (`api.openai.com/v1/responses`) is later behind the same
+trait. Subscription tokens lack `api.responses.write`, so the platform endpoint
+cannot serve as this run's pre-flight or first transport.
 
 ## web view
 - served from binary, tailscale iface; `tailscale serve` for https+identity when wanted. multi-viewer. operator view now; arena (generations/handoffs) over many runs later.
