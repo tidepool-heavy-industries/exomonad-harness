@@ -1,0 +1,3 @@
+[submodule "exomonad-workspace"]
+	path = .exomonad/workspace
+	url = https://github.com/tidepool-heavy-industries/exomonad-default-workspace.git
