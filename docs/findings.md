@@ -1,13 +1,40 @@
 # Wave 0 API findings
 
-## Pre-flight status (2026-09-23)
+## Pre-flight (2026-09-23)
 
-The two required live Responses requests have **not** run. `OPENAI_API_KEY` is
-not present in this process environment, and the local Codex authentication
-file has no OpenAI API key. Codex session credentials are not substituted for
-an API key. Consequently, there is no observed HTTP status, assistant `phase`,
-sender response, or cached-token count yet. No scaffold was created.
+Credential: Codex-owned ChatGPT subscription login, read only. No token value,
+copy, or refresh was stored. Endpoint:
+`POST https://chatgpt.com/backend-api/codex/responses`; headers included
+`version: 0.155.1`, `originator: codex_cli_rs`, `Accept: text/event-stream`,
+`chatgpt-account-id`, and a stable `session-id`. Bodies set `stream: true`,
+`store: false`, `model: gpt-6-sol`, a stable `prompt_cache_key` equal to that
+session id, stable instructions (about 1,100 input tokens), one strict
+function tool, and request-level `reasoning.effort: low`.
 
-The request/response fields in the PRD remain hypotheses until the live
-pre-flight records the request bodies (with credentials redacted), HTTP status,
-response item types and phases, assistant text, and usage for each call.
+The initial two calls returned **HTTP 200** and `response.completed`. The
+first asked for a brief reply with a function tool present. The second kept
+the same prefix and added an assistant-role agent envelope, a
+`configuration_update` raising effort to medium, and a user request to
+address the sender. Both reported `usage.input_tokens_details.cached_tokens:
+0` and `cache_write_tokens: 0` (first input tokens 1,187; second 1,219).
+Our initial SSE reader inspected only `response.completed.response.output`,
+which was empty; that **does not establish absence of an assistant message**.
+
+Two diagnostic calls corrected the SSE observation. The backend emitted the
+assistant message in `response.output_item.done`, with
+`role: assistant`, `phase: final_answer`. The first diagnostic returned
+`PREFLIGHT_INSPECT_OK`. The second, with the agent envelope and positional
+effort update, returned `Acknowledged, Peer.` Both returned HTTP 200; the
+second again reported zero cached and cache-write tokens (1,205 input).
+Thus assistant `phase` is present, the assistant-role envelope and
+`configuration_update` are accepted, and the model addressed the sender.
+Cache reuse **was not observed**, despite an unchanged >1,024-token prefix
+and stable session/key. No 401 occurred.
+
+### Consequence
+
+The SSE parser must build output items from `response.output_item.done`;
+`response.completed` supplies status/usage but its `output` may be empty on
+this endpoint. Do not gate correctness on a positive cache counter. Retain
+cache affinity and record its actual counters; investigate cache controls
+separately without claiming a hit.
