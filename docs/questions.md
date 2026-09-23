@@ -28,4 +28,5 @@ a measured hit, or verify stable prefix/effort history and report cache as
 unobserved?`
 
 **Default:** Verify history and report zero. **Blocks:** Final acceptance
-verdict for item 13. **Answer:** Pending.
+verdict for item 13. **Answer:** Verify history and report cache unobserved;
+a positive hit is not required.
