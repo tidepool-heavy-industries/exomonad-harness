@@ -294,3 +294,11 @@ Root preserved the ignored live smoke test from the newer baseline and ran
 integrated fmt, offline workspace tests (73 harness passed, 2 live ignored;
 12 demo passed), Clippy and check. Mid-run mailbox wake still uses an
 in-memory channel and is not yet coupled to durable envelope acknowledgement.
+
+The Store-backed verb service now emits an in-process mailbox-generation hint
+after a committed spawn, message, or follow-up envelope. A host subscribes
+before scanning durable unread rows and rescans on generation changes; tests
+cover all three writes and ensure rejected writes do not notify. Integrated
+fmt, offline workspace tests (73 harness passed, 2 live ignored; 12 demo
+passed), Clippy and check passed. This hint is local to one service instance,
+not a cross-process event log; durable rows remain authoritative.

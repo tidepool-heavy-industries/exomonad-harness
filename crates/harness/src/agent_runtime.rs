@@ -23,15 +23,18 @@ pub struct StoreAgentToolService {
     store: Arc<Store>,
     root: AgentPath,
     child_generation: watch::Sender<u64>,
+    mailbox_generation: watch::Sender<u64>,
 }
 
 impl StoreAgentToolService {
     pub fn new(store: Arc<Store>, root: AgentPath) -> Self {
         let (child_generation, _) = watch::channel(0);
+        let (mailbox_generation, _) = watch::channel(0);
         Self {
             store,
             root,
             child_generation,
+            mailbox_generation,
         }
     }
 
@@ -40,6 +43,18 @@ impl StoreAgentToolService {
     /// durable tree (watch values are hints, not an event log).
     pub fn subscribe_new_children(&self) -> watch::Receiver<u64> {
         self.child_generation.subscribe()
+    }
+
+    /// Subscribe before scanning Store::unread. Each committed message or task
+    /// envelope advances this local generation; notifications are hints to
+    /// rescan the durable mailbox, not an event log or cross-process signal.
+    pub fn subscribe_mailbox_changes(&self) -> watch::Receiver<u64> {
+        self.mailbox_generation.subscribe()
+    }
+
+    fn notify_mailbox_changed(&self) {
+        self.mailbox_generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
     async fn blocking<T, F>(&self, f: F) -> Result<T, AgentVerbError>
@@ -283,6 +298,7 @@ impl AgentToolService for StoreAgentToolService {
         self.child_generation.send_modify(|generation| {
             *generation = generation.wrapping_add(1);
         });
+        self.notify_mailbox_changed();
         Ok(json!({"task_name":created_path.0}))
     }
 
@@ -311,6 +327,7 @@ impl AgentToolService for StoreAgentToolService {
                 Ok(json!({"accepted":true}))
             })
             .await?;
+        self.notify_mailbox_changed();
         Ok(result)
     }
 
@@ -350,6 +367,7 @@ impl AgentToolService for StoreAgentToolService {
                 }))
             })
             .await?;
+        self.notify_mailbox_changed();
         Ok(result)
     }
 
@@ -684,9 +702,30 @@ mod tests {
     #[tokio::test]
     async fn dispatched_message_and_followup_are_persisted_in_arrival_order() {
         let (service, store, _) = service().await;
+        let mut mailbox_changes = service.subscribe_mailbox_changes();
         let root = AgentPath("/root".into());
         let child = AgentPath("/root/worker".into());
         add_agent(&store, &child.0, Some(&root.0), None);
+        add_agent(&store, "/root/worker/grandchild", Some(&child.0), None);
+
+        service
+            .spawn_agent(&root, "spawned", SpawnSource::Prompt, contract())
+            .await
+            .unwrap();
+        mailbox_changes.changed().await.unwrap();
+        assert_eq!(*mailbox_changes.borrow_and_update(), 1);
+
+        assert!(
+            service
+                .send_message(
+                    &root,
+                    AgentPath("/root/worker/grandchild".into()),
+                    "not a direct relation".into(),
+                )
+                .await
+                .is_err()
+        );
+        assert!(!mailbox_changes.has_changed().unwrap());
 
         crate::agents::dispatch_agent_verb(
             &service,
@@ -696,6 +735,8 @@ mod tests {
         )
         .await
         .unwrap();
+        mailbox_changes.changed().await.unwrap();
+        assert_eq!(*mailbox_changes.borrow_and_update(), 2);
         let followup = crate::agents::dispatch_agent_verb(
             &service,
             &root,
@@ -707,6 +748,8 @@ mod tests {
         assert_eq!(followup["status"], "queued");
         assert_eq!(followup["delivery"], "at_boundary");
         assert_eq!(followup["host_scheduling_needed"], true);
+        mailbox_changes.changed().await.unwrap();
+        assert_eq!(*mailbox_changes.borrow_and_update(), 3);
 
         let mailbox = store.unread(&child.0).unwrap();
         assert_eq!(mailbox.len(), 2, "MESSAGE then follow-up");
