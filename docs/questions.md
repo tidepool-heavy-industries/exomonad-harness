@@ -34,10 +34,10 @@ a positive hit is not required.
 ## Tooling friction (not operator questions)
 
 - A roughly 10 KB Bash observation can fail after its command has committed
-  with `observation budget 100000 exhausted`. Operator direction (2026-09-24):
-  set `max_output_bytes <= 8000`, read large files in slices, and inspect
-  retained jobs rather than replaying an uncertain mutation. Relayed to
-  active Luna leads.
+  with `observation budget 100000 exhausted`. Operator advice (2026-09-24):
+  keep `max_output_bytes` modest where useful (often ≤8 KB), read large files
+  in slices, and inspect retained jobs rather than replaying an uncertain
+  mutation. This is advice, not an assignment constraint.
 - The native `spawn_agent` was offered but its child could not use Bash,
   Haskell, or status (`hosted tool call is not authorized`); Exomonad
   `spawnWatched` was the working delegation path.

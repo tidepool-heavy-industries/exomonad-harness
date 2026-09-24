@@ -27,13 +27,31 @@ The core Luna lead's readback at `babfb4d` agrees with the ordered frontier:
 The separate cache-shape probe is findings-only. Hooks and provider-trait
 redesign beyond what (a)–(c) require are not in this wave.
 
+## Steering update — 2026-09-24
+
+Root Sol plans and decides seams. Lunas receive bounded implementation, test
+or review assignments; they do not write the execution plan. A Luna doing
+structural work, or accumulating repeated failed checks without a candidate,
+must stop and ping root: split into a Luna subtree with named seams, or return
+`Blocked` identifying the seam it cannot settle. Assignments need a stop/ping
+condition. Review integration candidates, not findings-only probes; root reads
+their evidence. Keep output observations modest where useful, but the
+operator's 8 KB suggestion is advice, not a contractual limit.
+
+While one candidate is under review, root advances independent ready work
+rather than serializing the wave on that notice. The ordered (a)→(d)
+contract still controls shared loop changes and integration dependencies.
+The operator has requested a handoff-ready stopping point after the next
+Exomonad-improvement wave; unfinished live acceptance must stay explicitly
+open rather than being called complete.
+
 ## Ownership and join
 
 Root owns this contract, actor-spec repair, demo consumer wiring
 (`crates/harness-demo/src/{main,driver}.rs`), interviews, integration commits
-and final checks. Core Luna owns sequential local integration of the crate
-loop corrections and forks Luna leaves, at most two at a time. Contract files
-are amended at core's scaffold before any leaves touch them. Every candidate
+and final checks. Root chooses each shared seam; the core Luna executes bounded
+crate changes and must split or stop if the work becomes design-heavy. Contract
+files are scaffolded before leaves touch them. Every candidate
 is checked against owned paths, reviewed at its exact commit and merged, never
 copied. Each frontier ends in `integrate(<label>)`.
 
