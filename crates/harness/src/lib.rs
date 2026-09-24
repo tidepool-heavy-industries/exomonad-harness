@@ -1,4 +1,5 @@
 //! Standalone, tree-shaped Responses harness.
+pub mod agent_runtime;
 pub mod agents;
 pub mod compaction;
 pub mod engine;

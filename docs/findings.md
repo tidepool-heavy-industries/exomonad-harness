@@ -244,3 +244,17 @@ the temporary SQLite database was removed. This verified HTTP command/session
 and sequential model continuity, **not** a real browser/WebSocket round trip,
 streamed token deltas, or child-agent supervision. Local cookie sessions do
 not survive restart; HTTPS/reverse-proxy serving is not configured.
+
+`harness::agent_runtime::StoreAgentToolService` is now integrated as a scoped
+Store-backed implementation of the model-facing agent verbs. Offline tests
+cover prompt/Here/checkpoint heads, atomic NEW_TASK admission with the correct
+AtBoundary delivery class, subtree authorization, checkpoint corruption,
+message/follow-up persistence, and explicit refusal of service-local wait
+(which the Engine manages). Integrated fmt, offline workspace tests (66 harness
+passed, 2 live ignored; 12 demo passed), Clippy and check passed. This is a
+library service, **not** a running agent tree: the demo provider intentionally
+hides agent verbs, the demo driver supervises only `/root`, and no driver yet
+reconstructs forked prefixes or starts idle-agent follow-ups. The stored
+child-path form is immediate single-segment parent/task, pending resolution of
+the PRD's doubled-path notation. The service's generation watch is local to
+its instance and only hints the host to rescan the durable table.
