@@ -42,3 +42,6 @@ a positive hit is not required.
 - A batched Haskell `lookup` for agent-list APIs failed with a compiler-worker
   diagnostic rather than returning per-query results; individual lookup or
   `observeAgent` remains available.
+- The registered response watch has no incremental progress unless the child
+  publishes a progress stream; repeatedly polling `ResponsePending` added no
+  information, so root switched to reviewing committed Git evidence.
