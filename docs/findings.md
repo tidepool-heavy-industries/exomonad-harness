@@ -132,6 +132,16 @@ no `server_with_config` startup yet, and the web login UI is still pending.
 Sessions are in-memory and do not survive server restart. Login rate-limiting
 and external proxy identity enforcement are not implemented.
 
+The demo CLI now calls the library `Engine` instead of maintaining a second
+request loop. Its single-agent `--db … --ask …` path was verified live with
+read-only subscription auth and returned `DEMO_CLI_OK` (final response usage:
+118 input, 9 output tokens). The temporary SQLite file was removed afterward.
+Workspace fmt, offline tests (56 harness passed, 2 live ignored; 7 demo passed),
+Clippy and check passed. The CLI deliberately hides unimplemented ask/form
+tools, leaves shell opt-in, and denies edits without host-supplied ownership.
+It does not resume an old conversation, supervise child agents, or serve web;
+the displayed usage is for the final response, not an aggregate.
+
 The first request engine is now integrated as `harness::engine`. Its offline
 replay tests cover stateless full-history input, separate durable request
 rows/usage across turns, ordered call/output replay on reopen, dispatch from
