@@ -14,7 +14,7 @@ function Operator() {
   React.useEffect(() => {
     if (new URLSearchParams(location.search).get('live') !== '1') return
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const socket = new WebSocket(`${protocol}//${location.host}/ws`)
+    const socket = new WebSocket(`${protocol}//${location.host}/api/ws`)
     setCommand(connectHarness(socket, setState, setFailure))
     return () => socket.close()
   }, [])

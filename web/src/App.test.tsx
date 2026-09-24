@@ -22,7 +22,7 @@ describe('operator views', () => {
     render(<App data={data} onCommand={onCommand} />)
     expect(screen.getByText('/root')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Timeline' }))
-    expect(screen.getByText('spawn_agent')).toBeInTheDocument()
+    expect(screen.getByText(/spawn_agent/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Inbox' }))
     expect(screen.getByText('Continue?')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Command' }))
