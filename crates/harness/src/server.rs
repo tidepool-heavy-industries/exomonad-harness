@@ -6,14 +6,14 @@
 mod assets;
 
 use axum::{
+    Json, Router,
     extract::State,
     http::StatusCode,
     response::{
-        sse::{Event as SseEvent, KeepAlive, Sse},
         Response,
+        sse::{Event as SseEvent, KeepAlive, Sse},
     },
     routing::{get, post},
-    Json, Router,
 };
 use futures_util::stream::{self, Stream};
 use serde::{Deserialize, Serialize};

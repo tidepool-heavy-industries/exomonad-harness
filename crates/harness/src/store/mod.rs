@@ -345,9 +345,13 @@ mod tests {
                 .unwrap();
             s.create_request(&id("right"), Some(&id("root")), "right")
                 .unwrap();
-            hash = s.append_items(&id("root"), &[shared.clone()]).unwrap()[0].clone();
+            hash = s
+                .append_items(&id("root"), std::slice::from_ref(&shared))
+                .unwrap()[0]
+                .clone();
             assert_eq!(
-                s.append_items(&id("left"), &[shared.clone()]).unwrap()[0],
+                s.append_items(&id("left"), std::slice::from_ref(&shared))
+                    .unwrap()[0],
                 hash
             );
             s.append_items(&id("right"), &[item(serde_json::json!({"x":1}))])
