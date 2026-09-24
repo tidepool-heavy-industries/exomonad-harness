@@ -219,7 +219,7 @@ web: vite, ts (`strict`, `noUncheckedIndexedAccess`), react. radix primitives + 
 - demo hooks: tool-call-admission (owned/mustNot veto), tool-result (the watchdog nudge ledger), child-reply (pass-through + a `reply` schema check), compaction. all others pass-through.
 - demo children = the same provider at another effort or model; a demo run is a real tree (root → leads → leaves) doing a real multi-file task in a scratch git repo, not a scripted transcript.
 - shell/edit marked dev-only; no haskell in the picture; exomonad-blind !
-- wave2: `run` gains a minimal sandbox (cwd = subtree worktree, rlimits, wall timeout, output cap, network off where the platform allows) and a `read{path}` tool, so the demo is a usable standalone coding agent the operator can drive from the page. the sandbox is the provider's (tool meaning), the veto is the crate's. still exomonad-blind !
+- wave2: `run` loses its dev-only gate and gains cwd = subtree worktree + wall timeout; a `read{path}` tool joins; the demo becomes a usable standalone coding agent the operator drives from the page. NO sandbox yet: operator's machine, trusted models. sandboxing (rlimits, network off) is deferred and, when it comes, is the provider's (tool meaning); the veto stays the crate's. still exomonad-blind !
 
 ## hooks (crate ⊥ any judgment service ! the crate knows nothing of jev; it knows it must offer MANY well-typed hooks. ∀hook: typed event in → typed decision out; default = pass-through; provider may attach an opaque `evidence` blob to any decision, stored beside it)
 | hook | event (in) | decision (out) |
