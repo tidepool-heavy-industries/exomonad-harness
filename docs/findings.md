@@ -38,3 +38,20 @@ The SSE parser must build output items from `response.output_item.done`;
 this endpoint. Do not gate correctness on a positive cache counter. Retain
 cache affinity and record its actual counters; investigate cache controls
 separately without claiming a hit.
+
+## Responses transport slice (2026-09-23)
+
+Integrated `d3a0598` on `master`. The transport reads Codex-owned subscription
+credentials without refreshing or storing them, sends stateless streaming
+requests, and assembles output from `response.output_item.done`; completion
+provides the response ID and usage. A 401 returns an authentication error.
+
+Before integration, `cargo fmt -p harness -- --check`, `cargo test -p harness
+--offline` (6 passed, 1 live test ignored), `cargo clippy -p harness
+--all-targets --offline -- -D warnings`, and `cargo check -p harness --offline`
+passed against the submitted commit. After integration, crate fmt, tests, and
+Clippy passed again; the explicit live subscription smoke test passed and
+confirmed a final-answer item plus response ID. Workspace-wide `cargo fmt
+--all -- --check` is not green because of pre-existing formatting in
+`crates/harness-demo/src/main.rs`, outside this slice. No cache hit was claimed
+from the live smoke test. Store, agent tree, server, and web remain deferred.
