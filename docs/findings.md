@@ -121,6 +121,17 @@ browser WebSocket cannot set an Authorization header, so the shipped page
 still cannot reach the secured API directly. Operator login/session versus a
 trusted authenticating proxy remains an explicit delivery decision.
 
+An optional local browser-session API was integrated. It exchanges a
+separate operator secret for a short-lived, HttpOnly, SameSite=Strict cookie
+with same-origin login/command/WebSocket checks; bearer-only fail-closed mode
+remains available. Integrated tests covered unauthorized and authorized
+routes, expiry, logout, and cross-origin rejection. Workspace fmt, offline
+tests (56 harness passed, 2 live ignored; 3 demo passed), Clippy and check
+passed. This is server capability, not an enabled deployment: the demo has
+no `server_with_config` startup yet, and the web login UI is still pending.
+Sessions are in-memory and do not survive server restart. Login rate-limiting
+and external proxy identity enforcement are not implemented.
+
 The first request engine is now integrated as `harness::engine`. Its offline
 replay tests cover stateless full-history input, separate durable request
 rows/usage across turns, ordered call/output replay on reopen, dispatch from
