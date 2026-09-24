@@ -1,4 +1,4 @@
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 pub const SQL: &str = include_str!("schema.sql");
 
 pub fn initialize(conn: &mut rusqlite::Connection) -> rusqlite::Result<()> {
@@ -36,7 +36,11 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     // v1 stored second-resolution Unix timestamps. Convert existing records once;
     // writers explicitly provide millisecond timestamps after this migration.
-    for table in ["requests", "events", "envelopes", "decisions"] {
+    for table in if version == 1 {
+        vec!["requests", "events", "envelopes", "decisions"]
+    } else {
+        vec![]
+    } {
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
             [table],

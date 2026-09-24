@@ -36,3 +36,12 @@ CREATE TABLE IF NOT EXISTS session_state (
  session_id TEXT PRIMARY KEY, state TEXT NOT NULL,
  updated_at INTEGER NOT NULL DEFAULT(CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
 );
+CREATE TABLE IF NOT EXISTS agents (
+ path TEXT PRIMARY KEY, parent_path TEXT REFERENCES agents(path),
+ head_request TEXT REFERENCES requests(id), contract TEXT NOT NULL,
+ fork_source TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','idle','completed','cancelled')),
+ created_at INTEGER NOT NULL,
+ CHECK((path='/root' AND parent_path IS NULL) OR
+       (parent_path IS NOT NULL AND path GLOB parent_path || '/*'))
+);
+CREATE INDEX IF NOT EXISTS agents_parent ON agents(parent_path,path);

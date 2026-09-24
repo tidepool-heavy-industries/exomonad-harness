@@ -3,7 +3,7 @@ pub mod schema;
 
 use crate::{
     item::{Item, ItemHash},
-    model::{CallId, RequestId},
+    model::{AgentPath, CallId, RequestId},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,10 @@ pub enum StoreError {
     MissingRequest(String),
     #[error("claim already exists for call/request")]
     DuplicateClaim,
+    #[error("invalid canonical agent path: {0}")]
+    InvalidAgentPath(String),
+    #[error("agent parent does not exist: {0}")]
+    MissingAgentParent(String),
 }
 pub type Result<T> = std::result::Result<T, StoreError>;
 
@@ -58,6 +62,33 @@ pub struct SessionState {
     pub session_id: String,
     pub state: String,
     pub updated_at: i64,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentState {
+    Active,
+    Idle,
+    Completed,
+    Cancelled,
+}
+impl AgentState {
+    fn parse(s: &str) -> Self {
+        match s {
+            "idle" => Self::Idle,
+            "completed" => Self::Completed,
+            "cancelled" => Self::Cancelled,
+            _ => Self::Active,
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct Agent {
+    pub path: AgentPath,
+    pub parent: Option<AgentPath>,
+    pub head_request: Option<RequestId>,
+    pub contract: serde_json::Value,
+    pub fork_source: serde_json::Value,
+    pub state: AgentState,
+    pub created_at: i64,
 }
 fn utc_millis() -> i64 {
     SystemTime::now()
@@ -111,6 +142,153 @@ pub struct Store {
     conn: Mutex<Connection>,
 }
 impl Store {
+    fn validate_agent_path(path: &str, parent: Option<&str>) -> Result<()> {
+        let valid = |s: &str| {
+            !s.is_empty()
+                && s.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        };
+        let segs: Vec<_> = path.strip_prefix('/').unwrap_or("").split('/').collect();
+        let relation = match parent {
+            None => path == "/root",
+            Some(p) => path.strip_prefix(p).is_some_and(|suffix| {
+                suffix.starts_with('/') && !suffix[1..].contains('/') && valid(&suffix[1..])
+            }),
+        };
+        if !path.starts_with('/') || segs.iter().any(|s| !valid(s)) || !relation {
+            return Err(StoreError::InvalidAgentPath(path.into()));
+        }
+        Ok(())
+    }
+    fn decode_agent(
+        r: (
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+            String,
+            i64,
+        ),
+    ) -> Result<Agent> {
+        Ok(Agent {
+            path: AgentPath(r.0),
+            parent: r.1.map(AgentPath),
+            head_request: r.2.map(RequestId),
+            contract: serde_json::from_str(&r.3)?,
+            fork_source: serde_json::from_str(&r.4)?,
+            state: AgentState::parse(&r.5),
+            created_at: r.6,
+        })
+    }
+    pub fn admit_agent(
+        &self,
+        path: &AgentPath,
+        parent: Option<&AgentPath>,
+        head: Option<&RequestId>,
+        contract: &serde_json::Value,
+        source: &serde_json::Value,
+    ) -> Result<Agent> {
+        Self::validate_agent_path(&path.0, parent.map(|p| p.0.as_str()))?;
+        let mut c = self.lock();
+        let tx = c.transaction()?;
+        if let Some(p) = parent {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agents WHERE path=?1)",
+                [&p.0],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(StoreError::MissingAgentParent(p.0.clone()));
+            }
+        }
+        if let Some(h) = head {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
+                [&h.0],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(StoreError::MissingRequest(h.0.clone()));
+            }
+        }
+        let created_at = utc_millis();
+        tx.execute("INSERT INTO agents(path,parent_path,head_request,contract,fork_source,state,created_at) VALUES (?1,?2,?3,?4,?5,'active',?6)",
+            params![path.0,parent.map(|p|p.0.as_str()),head.map(|h|h.0.as_str()),serde_json::to_string(contract)?,serde_json::to_string(source)?,created_at])?;
+        tx.commit()?;
+        Ok(Agent {
+            path: path.clone(),
+            parent: parent.cloned(),
+            head_request: head.cloned(),
+            contract: contract.clone(),
+            fork_source: source.clone(),
+            state: AgentState::Active,
+            created_at,
+        })
+    }
+    pub fn agent(&self, path: &AgentPath) -> Result<Option<Agent>> {
+        self.lock().query_row("SELECT path,parent_path,head_request,contract,fork_source,state,created_at FROM agents WHERE path=?1",[&path.0],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?.map(Self::decode_agent).transpose()
+    }
+    pub fn children_agents(&self, path: &AgentPath) -> Result<Vec<Agent>> {
+        self.query_agents("SELECT path,parent_path,head_request,contract,fork_source,state,created_at FROM agents WHERE parent_path=?1 ORDER BY path",Some(&path.0))
+    }
+    pub fn list_agents(&self) -> Result<Vec<Agent>> {
+        self.query_agents("SELECT path,parent_path,head_request,contract,fork_source,state,created_at FROM agents ORDER BY path",None)
+    }
+    fn query_agents(&self, sql: &str, arg: Option<&str>) -> Result<Vec<Agent>> {
+        let c = self.lock();
+        let mut q = c.prepare(sql)?;
+        let decode = |r: &rusqlite::Row<'_>| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        };
+        let rows = if let Some(arg) = arg {
+            q.query_map([arg], decode)?.collect::<std::result::Result<
+                Vec<(
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    String,
+                    String,
+                    String,
+                    i64,
+                )>,
+                _,
+            >>()?
+        } else {
+            q.query_map([], decode)?.collect::<std::result::Result<
+                Vec<(
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    String,
+                    String,
+                    String,
+                    i64,
+                )>,
+                _,
+            >>()?
+        };
+        rows.into_iter().map(Self::decode_agent).collect()
+    }
+    pub fn advance_agent_head(
+        &self,
+        path: &AgentPath,
+        expected: Option<&RequestId>,
+        current: Option<&RequestId>,
+    ) -> Result<bool> {
+        Ok(self.lock().execute(
+            "UPDATE agents SET head_request=?3 WHERE path=?1 AND head_request IS ?2",
+            params![path.0, expected.map(|x| &x.0), current.map(|x| &x.0)],
+        )? == 1)
+    }
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path)?;
         Self::from_connection(conn)
@@ -663,7 +841,92 @@ mod tests {
         let version: u32 = conn
             .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         assert!(schema::initialize(&mut conn).is_ok());
+    }
+
+    #[test]
+    fn migrates_v2_without_rewriting_request_timestamp() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE schema_version(version INTEGER NOT NULL); INSERT INTO schema_version VALUES(2); CREATE TABLE requests(id TEXT PRIMARY KEY,parent_id TEXT,branch TEXT,created_at INTEGER NOT NULL,input_tokens INTEGER NOT NULL DEFAULT 0,output_tokens INTEGER NOT NULL DEFAULT 0,cost_micros INTEGER NOT NULL DEFAULT 0); INSERT INTO requests VALUES('kept',NULL,'main',123456,7,8,9);").unwrap();
+        schema::initialize(&mut conn).unwrap();
+        let preserved: (i64, i64, i64, i64) = conn
+            .query_row("SELECT created_at,input_tokens,output_tokens,cost_micros FROM requests WHERE id='kept'", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))
+            .unwrap();
+        assert_eq!(preserved, (123456, 7, 8, 9));
+        let agents: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='agents')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(agents);
+        let version: u32 = conn
+            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+    }
+
+    #[test]
+    fn fresh_agent_has_no_head_and_head_cas_handles_null() {
+        let store = Store::memory().unwrap();
+        let root = AgentPath("/root".into());
+        let fresh = store
+            .admit_agent(
+                &root,
+                None,
+                None,
+                &serde_json::json!({"task":"fresh"}),
+                &serde_json::json!({"source":"branch"}),
+            )
+            .unwrap();
+        assert_eq!(fresh.head_request, None);
+        let child = AgentPath("/root/child_1".into());
+        assert!(
+            store
+                .admit_agent(
+                    &child,
+                    Some(&root),
+                    None,
+                    &serde_json::json!({}),
+                    &serde_json::json!({})
+                )
+                .is_ok()
+        );
+        assert_eq!(store.children_agents(&root).unwrap().len(), 1);
+        assert_eq!(store.list_agents().unwrap().len(), 2);
+        let request = RequestId("r1".into());
+        store.create_request(&request, None, "main").unwrap();
+        assert!(
+            store
+                .advance_agent_head(&root, None, Some(&request))
+                .unwrap()
+        );
+        assert!(!store.advance_agent_head(&root, None, None).unwrap());
+        assert_eq!(
+            store.agent(&root).unwrap().unwrap().head_request,
+            Some(request)
+        );
+        assert!(matches!(
+            store.admit_agent(
+                &AgentPath("/root/a-b".into()),
+                Some(&root),
+                None,
+                &serde_json::json!({}),
+                &serde_json::json!({})
+            ),
+            Err(StoreError::InvalidAgentPath(_))
+        ));
+        assert!(matches!(
+            store.admit_agent(
+                &AgentPath("/root/Upper".into()),
+                Some(&root),
+                None,
+                &serde_json::json!({}),
+                &serde_json::json!({})
+            ),
+            Err(StoreError::InvalidAgentPath(_))
+        ));
     }
 }

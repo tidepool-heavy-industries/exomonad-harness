@@ -194,3 +194,16 @@ production build, and npm audit (0 vulnerabilities). Rust workspace fmt,
 offline tests (56 harness passed, 2 live ignored; 7 demo passed), and Clippy
 also passed. No live browser-to-server run has been made, and the demo CLI does
 not yet start the server. Browser sessions remain optional and in-memory.
+
+Durable agent identity is now a distinct v3 `agents` table, not an inference
+from `requests.parent_id`. The table stores canonical path, parent edge,
+nullable current request head, contract/source, state and creation time.
+Prompt-fresh agents can have a NULL head; a compare-and-swap advances it.
+Focused tests cover NULL head/CAS, path rejection, list/children queries and
+v1/v2 migration without rewriting v2 timestamps. After store-only extraction
+from the reviewed candidate, integrated Rust checks passed: fmt, offline
+workspace tests (58 harness passed, 2 live ignored; 7 demo passed), Clippy and
+check. This is storage capability only: the agent runtime and process-resume
+supervisor are not yet integrated. The existing verb schema currently uses
+single-segment child paths despite PRD's doubled-path example; this contract
+is under operator clarification.
