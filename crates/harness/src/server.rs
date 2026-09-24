@@ -10,11 +10,12 @@ pub use ws_protocol::{Snapshot, WsClientFrame, WsEvent, WsEventPayload, WsServer
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::{
-    extract::{State, WebSocketUpgrade},
-    http::{HeaderMap, StatusCode, Uri},
+    extract::{Request, State, WebSocketUpgrade},
+    http::{header, HeaderMap, StatusCode, Uri},
+    middleware::{self, Next},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
-        Response,
+        IntoResponse, Response,
     },
     routing::{get, post},
     Json, Router,
@@ -49,12 +50,78 @@ pub struct ServerEvent {
     pub payload: serde_json::Value,
 }
 
+/// A bearer credential, intentionally redacted from Debug output.
+#[derive(Clone)]
+pub struct BearerSecret(Arc<str>);
+
+impl std::fmt::Debug for BearerSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BearerSecret([REDACTED])")
+    }
+}
+
+impl BearerSecret {
+    /// Construct an API secret. At least 32 UTF-8 bytes are required.
+    pub fn new(secret: impl Into<String>) -> Result<Self, &'static str> {
+        let secret = secret.into();
+        if secret.len() < 32 {
+            return Err("API bearer secret must be at least 32 bytes");
+        }
+        if secret.bytes().any(|b| b.is_ascii_control()) {
+            return Err("API bearer secret must not contain control bytes");
+        }
+        Ok(Self(Arc::from(secret)))
+    }
+}
+
+/// Explicit server configuration. No bearer secret means API routes fail closed.
+pub struct ServerConfig {
+    pub asset_root: PathBuf,
+    bearer_secret: Option<BearerSecret>,
+    public_origin_scheme: String,
+}
+
+impl ServerConfig {
+    pub fn new(asset_root: PathBuf) -> Self {
+        Self {
+            asset_root,
+            bearer_secret: None,
+            public_origin_scheme: "http".into(),
+        }
+    }
+
+    pub fn with_bearer_secret(mut self, secret: BearerSecret) -> Self {
+        self.bearer_secret = Some(secret);
+        self
+    }
+
+    /// Set the browser-facing scheme used by the WebSocket same-origin check.
+    /// This is explicit configuration, never inferred from proxy headers.
+    pub fn with_public_origin_scheme(
+        mut self,
+        scheme: impl Into<String>,
+    ) -> Result<Self, &'static str> {
+        let scheme = scheme.into();
+        if !matches!(scheme.as_str(), "http" | "https") {
+            return Err("public origin scheme must be http or https");
+        }
+        self.public_origin_scheme = scheme;
+        Ok(self)
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     commands: mpsc::Sender<QueuedCommand>,
     events: broadcast::Sender<ServerEvent>,
     asset_root: Arc<PathBuf>,
     snapshot: Arc<std::sync::RwLock<Snapshot>>,
+    public_origin_scheme: Arc<str>,
+}
+
+#[derive(Clone)]
+struct ApiAuth {
+    bearer_secret: Option<BearerSecret>,
 }
 
 /// Command delivered to the owning scheduler.
@@ -106,11 +173,24 @@ impl ServerControl {
     }
 }
 
-/// Build the HTTP router, scheduler command receiver and event producer.
+/// Build a fail-closed server: public static assets work, but all `/api/*`
+/// routes return 401 until explicit bearer authentication is configured.
 ///
 /// `asset_root` points at a future web build directory. `/` and `/assets/*`
 /// are served from it; the helper rejects traversal and falls back to index.
 pub fn server(asset_root: PathBuf) -> (Router, ServerControl, mpsc::Receiver<QueuedCommand>) {
+    server_with_config(ServerConfig::new(asset_root))
+}
+
+/// Build the server with explicit access policy and asset root.
+pub fn server_with_config(
+    config: ServerConfig,
+) -> (Router, ServerControl, mpsc::Receiver<QueuedCommand>) {
+    let ServerConfig {
+        asset_root,
+        bearer_secret,
+        public_origin_scheme,
+    } = config;
     let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (events, _) = broadcast::channel(EVENT_CAPACITY);
     let state = AppState {
@@ -118,6 +198,7 @@ pub fn server(asset_root: PathBuf) -> (Router, ServerControl, mpsc::Receiver<Que
         events: events.clone(),
         asset_root: Arc::new(asset_root),
         snapshot: Arc::new(std::sync::RwLock::new(Snapshot::default())),
+        public_origin_scheme: Arc::from(public_origin_scheme),
     };
     let snapshot = state.snapshot.clone();
     let control = ServerControl {
@@ -125,14 +206,49 @@ pub fn server(asset_root: PathBuf) -> (Router, ServerControl, mpsc::Receiver<Que
         next_sequence: Arc::new(std::sync::Mutex::new(1)),
         snapshot,
     };
+    let auth = ApiAuth { bearer_secret };
+    let api = Router::new()
+        .route("/commands", post(submit_command))
+        .route("/events", get(event_stream))
+        .route("/ws", get(websocket))
+        .route_layer(middleware::from_fn_with_state(auth, authorize))
+        .with_state(state.clone());
     let router = Router::new()
-        .route("/api/commands", post(submit_command))
-        .route("/api/events", get(event_stream))
-        .route("/api/ws", get(websocket))
+        .nest("/api", api)
         .route("/", get(index_asset))
         .route("/{*path}", get(static_asset))
         .with_state(state);
     (router, control, receiver)
+}
+
+async fn authorize(State(auth): State<ApiAuth>, request: Request, next: Next) -> Response {
+    let is_authorized = auth.bearer_secret.as_ref().is_some_and(|secret| {
+        request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .is_some_and(|provided| constant_time_eq(provided.as_bytes(), secret.0.as_bytes()))
+    });
+    if !is_authorized {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Bearer")],
+            "API authentication required",
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+fn constant_time_eq(provided: &[u8], expected: &[u8]) -> bool {
+    let mut difference = provided.len() ^ expected.len();
+    for index in 0..provided.len().max(expected.len()) {
+        difference |= usize::from(
+            provided.get(index).copied().unwrap_or(0) ^ expected.get(index).copied().unwrap_or(0),
+        );
+    }
+    difference == 0
 }
 
 async fn websocket(
@@ -140,7 +256,7 @@ async fn websocket(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Result<axum::response::Response, StatusCode> {
-    if !same_origin(&headers) {
+    if !same_origin(&headers, &state.public_origin_scheme) {
         return Err(StatusCode::FORBIDDEN);
     }
     // Subscribe before upgrading, so events published during the handshake are
@@ -149,7 +265,7 @@ async fn websocket(
     Ok(upgrade.on_upgrade(move |socket| websocket_session(socket, state, receiver)))
 }
 
-fn same_origin(headers: &HeaderMap) -> bool {
+fn same_origin(headers: &HeaderMap, expected_scheme: &str) -> bool {
     let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
         // Native clients commonly omit Origin. Browser requests always include it.
         return true;
@@ -163,11 +279,10 @@ fn same_origin(headers: &HeaderMap) -> bool {
     let Some(scheme) = origin.scheme_str() else {
         return false;
     };
-    let transport_scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("http");
-    if !matches!(scheme, "http" | "https") || scheme != transport_scheme {
+    // Authorization is always the configured bearer credential. Forwarded
+    // headers are intentionally not consulted; scheme comes from explicit
+    // public-server configuration, not an untrusted x-forwarded-proto header.
+    if scheme != expected_scheme {
         return false;
     }
     let Some(authority) = origin.authority() else {
@@ -319,16 +434,36 @@ mod tests {
         net::TcpStream,
     };
 
-    fn websocket(address: std::net::SocketAddr, origin: &str) -> (TcpStream, String) {
+    const TEST_SECRET: &str = "test-only-secret-for-server-auth-checks";
+
+    fn authorized_server(
+        asset_root: PathBuf,
+    ) -> (Router, ServerControl, mpsc::Receiver<QueuedCommand>) {
+        let secret = BearerSecret::new(TEST_SECRET).unwrap();
+        server_with_config(
+            ServerConfig::new(asset_root)
+                .with_bearer_secret(secret)
+                .with_public_origin_scheme("http")
+                .unwrap(),
+        )
+    }
+
+    fn websocket(
+        address: std::net::SocketAddr,
+        origin: Option<&str>,
+        authorization: Option<&str>,
+    ) -> (TcpStream, String) {
         let mut socket = TcpStream::connect(address).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        write!(
-            socket,
-            "GET /api/ws HTTP/1.1\r\nHost: {address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: {origin}\r\n\r\n"
-        )
-        .unwrap();
+        let authorization = authorization
+            .map(|token| format!("Authorization: Bearer {token}\r\n"))
+            .unwrap_or_default();
+        let origin = origin
+            .map(|origin| format!("Origin: {origin}\r\n"))
+            .unwrap_or_default();
+        write!(socket, "GET /api/ws HTTP/1.1\r\nHost: {address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{origin}{authorization}\r\n").unwrap();
         let mut response = Vec::new();
         loop {
             let mut byte = [0; 1];
@@ -403,9 +538,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bearer_secret_is_strong_enough_and_redacted() {
+        assert!(BearerSecret::new("short").is_err());
+        let secret = BearerSecret::new(TEST_SECRET).unwrap();
+        assert_eq!(format!("{secret:?}"), "BearerSecret([REDACTED])");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn api_fails_closed_without_explicit_bearer_configuration() {
+        let (app, _, _) = server(PathBuf::from("."));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+
+        let post = client
+            .post(format!("http://{address}/api/commands"))
+            .json(&ClientCommand::Submit {
+                command: "start".into(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(post.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            client
+                .get(format!("http://{address}/api/events"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let (_socket, handshake) = websocket(address, Some(&format!("http://{address}")), None);
+        assert!(handshake.starts_with("HTTP/1.1 401"), "{handshake}");
+
+        let (_socket, response) = websocket(address, None, Some("incorrect-bearer-secret"));
+        assert!(response.starts_with("HTTP/1.1 401"), "{response}");
+        server_task.abort();
+    }
+
     #[tokio::test]
     async fn command_route_queues_submission_and_event_route_streams_events() {
-        let (app, control, mut commands) = server(PathBuf::from("."));
+        let (app, control, mut commands) = authorized_server(PathBuf::from("."));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -413,6 +589,7 @@ mod tests {
 
         let response = client
             .post(format!("http://{address}/api/commands"))
+            .bearer_auth(TEST_SECRET)
             .json(&ClientCommand::Submit {
                 command: "start".into(),
             })
@@ -432,6 +609,7 @@ mod tests {
 
         let mut events = client
             .get(format!("http://{address}/api/events"))
+            .bearer_auth(TEST_SECRET)
             .send()
             .await
             .unwrap()
@@ -461,7 +639,7 @@ mod tests {
         tokio::fs::write(root.join("assets/app.css"), "body{}")
             .await
             .unwrap();
-        let (app, _, _) = server(root.clone());
+        let (app, _, _) = authorized_server(root.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -496,7 +674,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn websocket_handshake_snapshot_resync_and_command() {
-        let (app, control, mut commands) = server(PathBuf::from("."));
+        let (app, control, mut commands) = authorized_server(PathBuf::from("."));
         control.set_snapshot(Snapshot {
             seq: 4,
             conversations: vec![json!({"id":"root"})],
@@ -506,7 +684,11 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let (mut socket, handshake) = websocket(address, &format!("http://{address}"));
+        let (mut socket, handshake) = websocket(
+            address,
+            Some(&format!("http://{address}")),
+            Some(TEST_SECRET),
+        );
         assert!(handshake.starts_with("HTTP/1.1 101"), "{handshake}");
         assert_eq!(
             read_ws_text(&mut socket),
@@ -514,6 +696,14 @@ mod tests {
                 "seq":4,"conversations":[{"id":"root"}],"requests":[],"jobs":[],"envelopes":[]
             }})
         );
+        let (mut originless_socket, originless_handshake) =
+            websocket(address, None, Some(TEST_SECRET));
+        assert!(
+            originless_handshake.starts_with("HTTP/1.1 101"),
+            "{originless_handshake}"
+        );
+        assert_eq!(read_ws_text(&mut originless_socket)["type"], "snapshot");
+        drop(originless_socket);
 
         control.set_snapshot(Snapshot {
             seq: 8,
@@ -553,30 +743,32 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn websocket_rejects_cross_origin_handshake() {
-        let (app, _, _) = server(PathBuf::from("."));
+        let (app, _, _) = authorized_server(PathBuf::from("."));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let (_socket, response) = websocket(address, "http://attacker.invalid");
+        let (_socket, response) =
+            websocket(address, Some("http://attacker.invalid"), Some(TEST_SECRET));
         assert!(response.starts_with("HTTP/1.1 403"), "{response}");
         server_task.abort();
     }
 
     #[test]
-    fn origin_check_matches_host_and_proxy_transport_scheme() {
+    fn origin_guard_uses_host_and_ignores_untrusted_forwarded_proto() {
         let mut headers = HeaderMap::new();
         headers.insert(axum::http::header::HOST, "example.test".parse().unwrap());
         headers.insert(
             axum::http::header::ORIGIN,
             "https://example.test".parse().unwrap(),
         );
-        assert!(!same_origin(&headers));
-        headers.insert("x-forwarded-proto", "https".parse().unwrap());
-        assert!(same_origin(&headers));
+        assert!(same_origin(&headers, "https"));
+        headers.insert("x-forwarded-proto", "attacker-controlled".parse().unwrap());
+        assert!(same_origin(&headers, "https"));
+        assert!(!same_origin(&headers, "http"));
         headers.insert(
             axum::http::header::ORIGIN,
             "https://other.test".parse().unwrap(),
         );
-        assert!(!same_origin(&headers));
+        assert!(!same_origin(&headers, "https"));
     }
 }
