@@ -55,3 +55,34 @@ confirmed a final-answer item plus response ID. Workspace-wide `cargo fmt
 --all -- --check` is not green because of pre-existing formatting in
 `crates/harness-demo/src/main.rs`, outside this slice. No cache hit was claimed
 from the live smoke test. Store, agent tree, server, and web remain deferred.
+
+## Wave 1 integration progress (2026-09-23)
+
+The first store, agent-tree, server, and web candidates were merged on master.
+These are foundations, **not yet an accepted end-to-end harness**. The store
+has a reopen-tested SQLite item/request DAG, envelopes, claims, and decisions;
+the tree has path parsing, mailbox rendering, in-memory async jobs/claims, and
+request admission; the server has HTTP commands, SSE, WebSocket snapshot/event
+frames, and static assets; the web has fixture-backed tree/timeline/inbox views
+and a WebSocket adapter. The server and web initially disagreed on transport;
+follow-up commits aligned their frame shapes. The Rust server is exported from
+the crate, but no running driver connects transport, store, scheduler, server
+commands, and a real provider yet.
+
+After integrating the WebSocket and web repairs, `cargo fmt -p harness -- --check`,
+`cargo test -p harness --offline` (27 passed, 1 ignored live test),
+`cargo clippy -p harness --all-targets --offline -- -D warnings`, and
+`cargo check -p harness --offline` passed. With Node from Nix and a locked
+install, the web passed 5 Vitest tests, `npm run check`, `npm run build`, and
+`npm audit --audit-level=moderate` (zero vulnerabilities). The production JS
+bundle reported 50.61 kB gzipped. This does not establish browser accessibility,
+visual quality, full live event handling, or end-to-end operation.
+
+Independent review found that the pre-repair server/web protocol was
+incompatible (now repaired), mixed-source mailbox coalescing reordered
+messages, cancellation raced task-handle registration, and async-job recovery
+was absent. The latter three are assigned to the tree/store owners. The
+review also found command/event routes had no authorization; a server security
+follow-up is pending. The demo provider candidate omitted strict tool schemas
+and trusted model-supplied edit ownership; repair is pending. No wave-1
+live GPT-6 run or restart/recovery acceptance test has yet been completed.
