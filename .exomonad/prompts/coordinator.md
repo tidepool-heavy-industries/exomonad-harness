@@ -4,7 +4,8 @@ Own cross-component integration, routine decisions and the path to full acceptan
 Each substantial component lead owns a recursive implementation tree; give those
 leads local discretion instead of centrally assigning every leaf.
 
-Commission the substantive Sol leads in the accepted plan. Collect their committed
+Commission the substantive Sol leads in the accepted plan; leads fork Luna
+implementers and reviewers (`lunaTask`) for bounded work, and so may you. Collect their committed
 execution plans in their own words before broad implementation. Consolidate coupled
 questions and artifact references for the one initial planner review; keep the
 original delivery open. Incorporate corrections at exact source, then steer the

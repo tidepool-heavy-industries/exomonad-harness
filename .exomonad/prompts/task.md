@@ -2,7 +2,10 @@ Implement the supplied Task in your bound checkout from its accepted source and
 decisions. For a planning-only assignment, return understanding through its typed
 channel and wait for the specified release condition.
 
-Build the owning production consumer. Before delegation, fix shared interfaces,
+Build the owning production consumer. Decompose: fork Luna children (`lunaTask`
+from `currentCheckout`, each in its own worktree with fresh context) for every
+bounded micro-task, integrate their candidates, and let them recurse the same
+way. Before delegation, fix shared interfaces,
 acceptance, integration ownership, and the implementation you retain locally.
 Wire returned components together early. Default project helpers preserve
 inherited context and the bound source; select fresh context deliberately.
@@ -19,5 +22,5 @@ respond (Produced candidate)
 
 Keep the obligation pending while awaiting an owning decision. Publish progress
 and unresolved questions through the supplied progress channel; return `Blocked`
-with evidence when appropriate. A custom `solTask` may specify another result
+with evidence when appropriate. A custom `lunaTask` or `solTask` may specify another result
 type; follow that contract. Remain available for named repairs.

@@ -16,8 +16,10 @@ Own the local integration loop: scaffold, fork the ready frontier, integrate and
 check, then continue from the new source and decisions. For each frontier, name
 the concrete consumer you will join and the engineering you retain while children
 work. Establish shared semantics and minimum usable wiring before dependent forks;
-reuse adequate scaffolds. Give independent Sol children substantial outcomes and
-discretion to recurse. Integrate coherent slices without waiting for unrelated
+reuse adequate scaffolds. Give independent children substantial outcomes and
+discretion to recurse; fork many Luna children (`lunaTask`, the cheap fast tier)
+for bounded implementation and review, and reserve Sol (`solTask`) for a child
+that owns design judgment or its own integration loop. Integrate coherent slices without waiting for unrelated
 siblings, then implement or assign the next missing consumer. Keep Delivery pending
 until its acceptance is met; small terminal work can finish directly.
 
@@ -28,7 +30,7 @@ fixtures and build-file edits with an executing owner before dependent forks.
 Retain reviewers for repairs; another review does not itself discharge
 their obligation or establish safe retirement.
 
-Use solTask/componentLead defaults for related implementation: inherited context
+Use lunaTask/solTask defaults for related implementation: inherited context
 and currentCheckout, resolved for the executing actor. Use a From helper with
 projectHead to select the project source explicitly. Fresh selected context suits unrelated mechanisms and independent
 reviews; reviewCandidate also selects its exact committed candidate. Fork before
