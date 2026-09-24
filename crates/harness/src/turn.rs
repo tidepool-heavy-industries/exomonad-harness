@@ -186,12 +186,12 @@ impl JobScheduler {
         name: String,
         args: Value,
     ) -> Result<JobHandle, JobError> {
-        let mut jobs = self.jobs.lock().await;
-        if jobs.contains_key(&call_id) {
+        let mut registry = self.jobs.lock().await;
+        if registry.contains_key(&call_id) {
             return Err(JobError::DuplicateCall);
         }
         let (settled, _) = tokio::sync::watch::channel(None);
-        jobs.insert(
+        registry.insert(
             call_id.clone(),
             Job {
                 claimants: HashSet::new(),
@@ -202,15 +202,20 @@ impl JobScheduler {
                 task: None,
             },
         );
-        drop(jobs);
-
         let jobs = self.jobs.clone();
         let capacity = self.capacity.clone();
         let events = self.events.clone();
         let task_call_id = call_id.clone();
         let task_agent = agent;
         let is_agent_verb = crate::provider::is_harness_tool(&name);
+        let (launch, launch_gate) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
+            // Do not enter provider code until its JoinHandle is installed in
+            // the registry. Cancellation racing registration can then always
+            // abort the actual work before side effects begin.
+            if launch_gate.await.is_err() {
+                return;
+            }
             let permit = match capacity.acquire_owned().await {
                 Ok(p) => p,
                 Err(_) => return,
@@ -249,12 +254,14 @@ impl JobScheduler {
             settle(&jobs, task_call_id.clone(), JobOutput::Completed(result)).await;
             let _ = events.send(task_call_id);
         });
-        self.jobs
-            .lock()
-            .await
-            .get_mut(&call_id)
-            .expect("registered above")
-            .task = Some(task);
+        if let Some(job) = registry.get_mut(&call_id) {
+            job.task = Some(task);
+        } else {
+            task.abort();
+            return Err(JobError::UnknownCall);
+        }
+        drop(registry);
+        let _ = launch.send(());
         Ok(JobHandle(call_id.0))
     }
 
@@ -517,17 +524,25 @@ async fn settle(
 ) -> JobSettlement {
     let settlement = {
         let mut jobs = jobs.lock().await;
-        let job = jobs
-            .get_mut(&call_id)
-            .expect("job registered before execution");
-        if job.output.is_none() {
-            job.output = Some(output);
-            job.settled_claimants = job.claimants.drain().collect();
-        }
-        JobSettlement {
-            call_id,
-            output: job.output.clone().expect("just settled"),
-            claimants: job.settled_claimants.clone(),
+        if let Some(job) = jobs.get_mut(&call_id) {
+            let final_output = if let Some(existing) = &job.output {
+                existing.clone()
+            } else {
+                job.output = Some(output.clone());
+                job.settled_claimants = job.claimants.drain().collect();
+                output
+            };
+            JobSettlement {
+                call_id,
+                output: final_output,
+                claimants: job.settled_claimants.clone(),
+            }
+        } else {
+            JobSettlement {
+                call_id,
+                output,
+                claimants: Vec::new(),
+            }
         }
     };
     if let Some(job) = jobs.lock().await.get(&settlement.call_id) {
@@ -628,6 +643,74 @@ mod tests {
         assert_eq!(scheduler.settled_claimants(&id).await.unwrap().len(), 2);
         let replay = scheduler.claim(&id, a).await.unwrap();
         assert_eq!(replay, Some(JobOutput::Completed(Ok(json!({"ok": true})))));
+    }
+
+    #[tokio::test]
+    async fn concurrent_start_and_cancel_never_loses_provider_task_handle() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        struct DeferredSideEffect {
+            release: Arc<tokio::sync::Notify>,
+            effects: Arc<AtomicUsize>,
+        }
+        #[async_trait]
+        impl Provider for DeferredSideEffect {
+            async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+                self.release.notified().await;
+                self.effects.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(serde_json::json!({"side_effect":true}))
+            }
+            fn tools(&self) -> Vec<Value> {
+                vec![]
+            }
+        }
+
+        let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+        let call_id = CallId("start-cancel-race".into());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let effects = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(DeferredSideEffect {
+            release: release.clone(),
+            effects: effects.clone(),
+        });
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+        let start_scheduler = scheduler.clone();
+        let start_barrier = barrier.clone();
+        let start_id = call_id.clone();
+        let start = tokio::spawn(async move {
+            start_barrier.wait().await;
+            start_scheduler
+                .start(provider, start_id, "never".into(), serde_json::json!({}))
+                .await
+        });
+
+        let cancel_scheduler = scheduler.clone();
+        let cancel_barrier = barrier.clone();
+        let cancel_id = call_id.clone();
+        let cancel = tokio::spawn(async move {
+            cancel_barrier.wait().await;
+            loop {
+                match cancel_scheduler.cancel(&cancel_id).await {
+                    Err(JobError::UnknownCall) => tokio::task::yield_now().await,
+                    result => return result,
+                }
+            }
+        });
+
+        assert_eq!(start.await.unwrap().unwrap().0, call_id.0);
+        let settlement = cancel.await.unwrap().unwrap().unwrap();
+        assert_eq!(settlement.output, JobOutput::Cancelled);
+        // Releasing provider code after cancellation must never perform the
+        // delayed side effect, whether cancellation caught it at the launch
+        // gate or aborted it while awaiting.
+        release.notify_one();
+        tokio::task::yield_now().await;
+        assert_eq!(effects.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(
+            scheduler.output(&call_id).await.unwrap(),
+            Some(JobOutput::Cancelled)
+        );
     }
 
     #[tokio::test]
