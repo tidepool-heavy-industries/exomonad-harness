@@ -107,7 +107,12 @@ fmt, offline tests (40 harness passed, 1 live ignored; 3 demo passed),
 Clippy and check passed after that change. These are not a live agent tree:
 the concrete `AgentToolService`, transport callback wiring, request lineage,
 and durable job restoration remain open. An independent review's cancellation
-race is still being repaired.
+race was subsequently repaired by registering the task handle behind a
+launch gate before provider execution can begin. A deterministic
+start/cancel test now covers the interleaving. After integration, workspace
+fmt, offline tests (41 harness passed, 1 live ignored; 3 demo passed),
+Clippy, and check passed. Cancellation still cannot undo side effects that
+completed before cancellation.
 
 Server API routes now require an explicit bearer secret and otherwise deny
 access; the repaired version passed its focused authorization tests and
