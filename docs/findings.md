@@ -207,3 +207,11 @@ check. This is storage capability only: the agent runtime and process-resume
 supervisor are not yet integrated. The existing verb schema currently uses
 single-segment child paths despite PRD's doubled-path example; this contract
 is under operator clarification.
+
+An atomic store operation now admits a child agent together with its initial
+NEW_TASK envelope in one SQLite transaction. A forced envelope-insert failure
+rolled back both the agent row and content write in the focused test, closing
+the orphan-child crash window found in runtime review. Integrated fmt, offline
+workspace tests (59 harness passed, 2 live ignored; 7 demo passed), Clippy and
+check passed. The runtime must use this operation; its current candidate is
+not yet integrated.

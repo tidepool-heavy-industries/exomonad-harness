@@ -226,6 +226,65 @@ impl Store {
             created_at,
         })
     }
+    /// Atomically admit an agent and persist its initial task envelope.
+    /// Failure of either insert rolls back both the agent and item/envelope writes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_agent_with_envelope(
+        &self,
+        path: &AgentPath,
+        parent: Option<&AgentPath>,
+        head: Option<&RequestId>,
+        contract: &serde_json::Value,
+        source: &serde_json::Value,
+        sender: &str,
+        recipient: &str,
+        class: &str,
+        item: &Item,
+    ) -> Result<(Agent, i64)> {
+        Self::validate_agent_path(&path.0, parent.map(|p| p.0.as_str()))?;
+        let mut c = self.lock();
+        let tx = c.transaction()?;
+        if let Some(p) = parent {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agents WHERE path=?1)",
+                [&p.0],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(StoreError::MissingAgentParent(p.0.clone()));
+            }
+        }
+        if let Some(h) = head {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
+                [&h.0],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(StoreError::MissingRequest(h.0.clone()));
+            }
+        }
+        let created_at = utc_millis();
+        tx.execute("INSERT INTO agents(path,parent_path,head_request,contract,fork_source,state,created_at) VALUES (?1,?2,?3,?4,?5,'active',?6)",
+            params![path.0,parent.map(|p|p.0.as_str()),head.map(|h|h.0.as_str()),serde_json::to_string(contract)?,serde_json::to_string(source)?,created_at])?;
+        let hash = Self::put_item_tx(&tx, item)?;
+        tx.execute("INSERT INTO envelopes(sender,recipient,class,item_hash,delivered_request,created_at) VALUES (?1,?2,?3,?4,NULL,?5)",
+            params![sender, recipient, class, hash.0, utc_millis()])?;
+        let envelope_id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok((
+            Agent {
+                path: path.clone(),
+                parent: parent.cloned(),
+                head_request: head.cloned(),
+                contract: contract.clone(),
+                fork_source: source.clone(),
+                state: AgentState::Active,
+                created_at,
+            },
+            envelope_id,
+        ))
+    }
     pub fn agent(&self, path: &AgentPath) -> Result<Option<Agent>> {
         self.lock().query_row("SELECT path,parent_path,head_request,contract,fork_source,state,created_at FROM agents WHERE path=?1",[&path.0],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?.map(Self::decode_agent).transpose()
     }
@@ -693,6 +752,99 @@ mod tests {
     }
     fn id(s: &str) -> RequestId {
         RequestId(s.into())
+    }
+    #[test]
+    fn atomic_agent_task_admission_commits_or_rolls_back_as_one_unit() {
+        let store = Store::memory().unwrap();
+        let root = AgentPath("/root".into());
+        store
+            .admit_agent(
+                &root,
+                None,
+                None,
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        let child = AgentPath("/root/worker".into());
+        let task = item(serde_json::json!({"type":"message","content":"new task"}));
+        let (agent, envelope_id) = store
+            .admit_agent_with_envelope(
+                &child,
+                Some(&root),
+                None,
+                &serde_json::json!({"contract":1}),
+                &serde_json::json!({"source":"test"}),
+                "/root",
+                "/root/worker",
+                "NEW_TASK",
+                &task,
+            )
+            .unwrap();
+        assert_eq!(agent.path, child);
+        let inbox = store.inbox("/root/worker").unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].id, envelope_id);
+        assert_eq!(inbox[0].class, "NEW_TASK");
+
+        // Force the second insert to fail after the agent and content write.
+        store.lock().execute_batch(
+            "CREATE TRIGGER reject_task BEFORE INSERT ON envelopes BEGIN SELECT RAISE(ABORT, 'rejected'); END;"
+        ).unwrap();
+        let rollback_path = AgentPath("/root/rejected".into());
+        assert!(
+            store
+                .admit_agent_with_envelope(
+                    &rollback_path,
+                    Some(&root),
+                    None,
+                    &serde_json::json!({}),
+                    &serde_json::json!({}),
+                    "/root",
+                    "/root/rejected",
+                    "NEW_TASK",
+                    &item(serde_json::json!({"rollback":true})),
+                )
+                .is_err()
+        );
+        assert!(store.agent(&rollback_path).unwrap().is_none());
+        let item_count: i64 = store
+            .lock()
+            .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(item_count, 1);
+
+        // A duplicate path is rejected without adding another envelope.
+        assert!(
+            store
+                .admit_agent_with_envelope(
+                    &child,
+                    Some(&root),
+                    None,
+                    &serde_json::json!({}),
+                    &serde_json::json!({}),
+                    "/root",
+                    "/root/worker",
+                    "NEW_TASK",
+                    &task,
+                )
+                .is_err()
+        );
+        assert_eq!(store.inbox("/root/worker").unwrap().len(), 1);
+        assert!(matches!(
+            store.admit_agent_with_envelope(
+                &AgentPath("/root/no_parent/child".into()),
+                Some(&AgentPath("/root/no_parent".into())),
+                None,
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+                "/root",
+                "/root/no_parent/child",
+                "NEW_TASK",
+                &task,
+            ),
+            Err(StoreError::MissingAgentParent(_))
+        ));
     }
     #[test]
     fn durable_dag_content_address_and_queries() {
