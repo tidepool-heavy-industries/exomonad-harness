@@ -5,6 +5,8 @@
 //! replay that output (notably after a fork) without invoking the provider a
 //! second time.
 use crate::{
+    item::Item,
+    mailbox::Envelope,
     model::{AgentPath, CallId, RequestId},
     provider::{CallContext, JobHandle, Provider, ProviderError},
 };
@@ -16,7 +18,7 @@ use std::{
 };
 use thiserror::Error;
 use tokio::{
-    sync::{Mutex, Semaphore},
+    sync::{Mutex, Semaphore, broadcast},
     task::JoinHandle,
 };
 
@@ -43,6 +45,8 @@ pub enum JobError {
     DuplicateCall,
     #[error("unknown call id")]
     UnknownCall,
+    #[error("completed function call item has invalid fields")]
+    InvalidCallItem,
 }
 
 /// Inputs to the deterministic request priority policy: roots first, then
@@ -144,6 +148,7 @@ struct Job {
 pub struct JobScheduler {
     capacity: Arc<Semaphore>,
     jobs: Arc<Mutex<HashMap<CallId, Job>>>,
+    events: broadcast::Sender<CallId>,
 }
 
 impl JobScheduler {
@@ -151,9 +156,11 @@ impl JobScheduler {
         if capacity == 0 {
             return Err(JobError::ZeroCapacity);
         }
+        let (events, _) = broadcast::channel(64);
         Ok(Self {
             capacity: Arc::new(Semaphore::new(capacity)),
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            events,
         })
     }
 
@@ -163,6 +170,18 @@ impl JobScheduler {
     pub async fn start(
         &self,
         provider: Arc<dyn Provider>,
+        call_id: CallId,
+        name: String,
+        args: Value,
+    ) -> Result<JobHandle, JobError> {
+        self.start_for_agent(provider, AgentPath("/root".into()), call_id, name, args)
+            .await
+    }
+
+    pub async fn start_for_agent(
+        &self,
+        provider: Arc<dyn Provider>,
+        agent: AgentPath,
         call_id: CallId,
         name: String,
         args: Value,
@@ -187,7 +206,10 @@ impl JobScheduler {
 
         let jobs = self.jobs.clone();
         let capacity = self.capacity.clone();
+        let events = self.events.clone();
         let task_call_id = call_id.clone();
+        let task_agent = agent;
+        let is_agent_verb = crate::provider::is_harness_tool(&name);
         let task = tokio::spawn(async move {
             let permit = match capacity.acquire_owned().await {
                 Ok(p) => p,
@@ -197,9 +219,14 @@ impl JobScheduler {
             let context = CallContext {
                 handle: JobHandle(task_call_id.0.clone()),
                 call_id: task_call_id.clone(),
+                agent: task_agent,
                 progress,
             };
-            let call = provider.call_with_context(&name, args, context);
+            let call = if is_agent_verb {
+                provider.call_agent_verb(&name, args, context)
+            } else {
+                provider.call_with_context(&name, args, context)
+            };
             tokio::pin!(call);
             let result = loop {
                 tokio::select! {
@@ -219,7 +246,8 @@ impl JobScheduler {
                 }
             }
             drop(permit);
-            settle(&jobs, task_call_id, JobOutput::Completed(result)).await;
+            settle(&jobs, task_call_id.clone(), JobOutput::Completed(result)).await;
+            let _ = events.send(task_call_id);
         });
         self.jobs
             .lock()
@@ -228,6 +256,55 @@ impl JobScheduler {
             .expect("registered above")
             .task = Some(task);
         Ok(JobHandle(call_id.0))
+    }
+
+    /// Admit a tool as soon as a complete streamed `function_call` item is
+    /// observed (e.g. from `response.output_item.done`). Transport readers
+    /// call this from the item-done callback, not after response completion.
+    /// Non-function items return `Ok(None)`.
+    pub async fn start_completed_item(
+        &self,
+        provider: Arc<dyn Provider>,
+        item: &Item,
+    ) -> Result<Option<JobHandle>, JobError> {
+        self.start_completed_item_for_agent(provider, AgentPath("/root".into()), item)
+            .await
+    }
+
+    pub async fn start_completed_item_for_agent(
+        &self,
+        provider: Arc<dyn Provider>,
+        agent: AgentPath,
+        item: &Item,
+    ) -> Result<Option<JobHandle>, JobError> {
+        let value = &item.0;
+        if value.get("type").and_then(Value::as_str) != Some("function_call") {
+            return Ok(None);
+        }
+        let call_id = value
+            .get("call_id")
+            .and_then(Value::as_str)
+            .ok_or(JobError::InvalidCallItem)?;
+        let name = value
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or(JobError::InvalidCallItem)?;
+        let args = match value.get("arguments") {
+            Some(Value::String(raw)) => {
+                serde_json::from_str(raw).map_err(|_| JobError::InvalidCallItem)?
+            }
+            Some(value) => value.clone(),
+            None => return Err(JobError::InvalidCallItem),
+        };
+        self.start_for_agent(
+            provider,
+            agent,
+            CallId(call_id.to_owned()),
+            name.to_owned(),
+            args,
+        )
+        .await
+        .map(Some)
     }
 
     /// Add a conversation's claim. A claim made after settlement replays the
@@ -336,9 +413,100 @@ impl JobScheduler {
         if let Some(task) = task {
             task.abort();
         }
-        Ok(Some(
-            settle(&self.jobs, call_id.clone(), JobOutput::Cancelled).await,
-        ))
+        let settlement = settle(&self.jobs, call_id.clone(), JobOutput::Cancelled).await;
+        let _ = self.events.send(call_id.clone());
+        Ok(Some(settlement))
+    }
+
+    /// Subscribe to job-settlement signals for wait-agent coordination.
+    /// Consumers still read the authoritative retained output by call id.
+    pub fn settlements(&self) -> broadcast::Receiver<CallId> {
+        self.events.subscribe()
+    }
+}
+
+/// Read all settled tool outputs in original call order (pending calls are
+/// omitted). This is the required first phase before a `wait_agent` status
+/// item is appended.
+pub async fn outputs_in_call_order(
+    scheduler: &JobScheduler,
+    calls: &[CallId],
+) -> Result<Vec<(CallId, JobOutput)>, JobError> {
+    let mut outputs = Vec::with_capacity(calls.len());
+    for call in calls {
+        if let Some(output) = scheduler.output(call).await? {
+            outputs.push((call.clone(), output));
+        }
+    }
+    Ok(outputs)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum WaitResume {
+    Job(CallId),
+    Envelope(Envelope),
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WaitAgentResult {
+    /// Must be appended as call outputs before `resumed_by`.
+    pub call_outputs: Vec<(CallId, JobOutput)>,
+    pub resumed_by: WaitResume,
+}
+
+pub async fn wait_agent_and_drain(
+    envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+    jobs: &JobScheduler,
+    cancelled: &mut tokio::sync::watch::Receiver<bool>,
+    outstanding_calls_in_order: &[CallId],
+) -> Result<WaitAgentResult, JobError> {
+    let resumed_by = wait_agent(envelopes, jobs, cancelled, outstanding_calls_in_order).await;
+    let call_outputs = outputs_in_call_order(jobs, outstanding_calls_in_order).await?;
+    Ok(WaitAgentResult {
+        call_outputs,
+        resumed_by,
+    })
+}
+
+/// Wait for the first asynchronous event without consuming its payload from
+/// model history. After it returns, callers append `outputs_in_call_order`
+/// results first and then render the returned resume status/envelope.
+pub async fn wait_agent(
+    envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+    jobs: &JobScheduler,
+    cancelled: &mut tokio::sync::watch::Receiver<bool>,
+    outstanding_calls_in_order: &[CallId],
+) -> WaitResume {
+    if *cancelled.borrow() {
+        return WaitResume::Cancelled;
+    }
+    let mut settlements = jobs.settlements();
+    // Subscribe before checking retained state so a concurrent settlement
+    // cannot fall into the check/await gap.
+    for call_id in outstanding_calls_in_order {
+        if jobs.output(call_id).await.ok().flatten().is_some() {
+            return WaitResume::Job(call_id.clone());
+        }
+    }
+    loop {
+        tokio::select! {
+            envelope = envelopes.recv() => {
+                if let Some(envelope) = envelope {
+                    return WaitResume::Envelope(envelope);
+                }
+            }
+            event = settlements.recv() => match event {
+                Ok(call_id) => return WaitResume::Job(call_id),
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => {}
+            },
+            changed = cancelled.changed() => {
+                if changed.is_err() || *cancelled.borrow() {
+                    return WaitResume::Cancelled;
+                }
+            }
+        }
     }
 }
 
@@ -371,6 +539,7 @@ async fn settle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::{AgentToolService, Contract, dispatch_agent_verb};
     use crate::provider::Provider;
     use async_trait::async_trait;
     use serde_json::json;
@@ -383,6 +552,60 @@ mod tests {
         }
         fn tools(&self) -> Vec<Value> {
             vec![]
+        }
+    }
+
+    struct SpawnOnly;
+    #[async_trait]
+    impl AgentToolService for SpawnOnly {
+        async fn spawn_agent(
+            &self,
+            parent: &AgentPath,
+            task_name: &str,
+            _: crate::agents::SpawnSource,
+            _: Contract,
+        ) -> Result<Value, crate::agents::AgentVerbError> {
+            Ok(json!({"task_name": format!("{}/{}", parent.0, task_name)}))
+        }
+        async fn send_message(
+            &self,
+            _: &AgentPath,
+            _: AgentPath,
+            _: String,
+        ) -> Result<Value, crate::agents::AgentVerbError> {
+            unreachable!()
+        }
+        async fn followup_task(
+            &self,
+            _: &AgentPath,
+            _: AgentPath,
+            _: Contract,
+        ) -> Result<Value, crate::agents::AgentVerbError> {
+            unreachable!()
+        }
+        async fn wait_agent(&self, _: &AgentPath) -> Result<Value, crate::agents::AgentVerbError> {
+            unreachable!()
+        }
+        async fn checkpoint(
+            &self,
+            _: &AgentPath,
+            _: String,
+        ) -> Result<Value, crate::agents::AgentVerbError> {
+            unreachable!()
+        }
+        async fn list_agents(
+            &self,
+            _: &AgentPath,
+            _: Option<AgentPath>,
+        ) -> Result<Value, crate::agents::AgentVerbError> {
+            unreachable!()
+        }
+        async fn interrupt_agent(
+            &self,
+            _: &AgentPath,
+            _: AgentPath,
+        ) -> Result<Value, crate::agents::AgentVerbError> {
+            unreachable!()
         }
     }
     #[tokio::test]
@@ -405,6 +628,117 @@ mod tests {
         assert_eq!(scheduler.settled_claimants(&id).await.unwrap().len(), 2);
         let replay = scheduler.claim(&id, a).await.unwrap();
         assert_eq!(replay, Some(JobOutput::Completed(Ok(json!({"ok": true})))));
+    }
+
+    #[tokio::test]
+    async fn slow_streamed_tool_does_not_block_spawn_in_same_turn() {
+        let scheduler = JobScheduler::new(2).unwrap();
+        let provider: Arc<dyn Provider> = Arc::new(Slow);
+        let item = Item(json!({
+            "type":"function_call",
+            "call_id":"slow-call",
+            "name":"slow",
+            "arguments":"{}"
+        }));
+        let handle = scheduler
+            .start_completed_item(provider, &item)
+            .await
+            .unwrap()
+            .expect("function call item starts a job");
+
+        let contract = json!({
+            "clauses":[], "acceptance":[], "owned":[], "must_not":[],
+            "introduces":[], "consumes":[], "boundaries":[]
+        });
+        let spawned = dispatch_agent_verb(
+            &SpawnOnly,
+            &AgentPath("/root".into()),
+            "spawn_agent",
+            json!({
+                "task_name":"child-one",
+                "from":{"kind":"here","name":null},
+                "task":contract
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(spawned["task_name"], "/root/child_one");
+        assert_eq!(handle.0, "slow-call");
+        assert!(
+            scheduler
+                .output(&CallId("slow-call".into()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            scheduler.wait(&CallId("slow-call".into())).await.unwrap(),
+            JobOutput::Completed(Ok(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn settled_outputs_are_emitted_in_original_call_order() {
+        struct Uneven;
+        #[async_trait]
+        impl Provider for Uneven {
+            async fn call(&self, name: &str, _: Value) -> Result<Value, ProviderError> {
+                if name == "first" {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Ok(json!({"name":name}))
+            }
+            fn tools(&self) -> Vec<Value> {
+                vec![]
+            }
+        }
+        let scheduler = JobScheduler::new(2).unwrap();
+        let provider: Arc<dyn Provider> = Arc::new(Uneven);
+        let first = CallId("call-first".into());
+        let second = CallId("call-second".into());
+        scheduler
+            .start(provider.clone(), first.clone(), "first".into(), json!({}))
+            .await
+            .unwrap();
+        scheduler
+            .start(provider, second.clone(), "second".into(), json!({}))
+            .await
+            .unwrap();
+        let mut events = scheduler.settlements();
+        assert_eq!(events.recv().await.unwrap(), second);
+        let outputs = outputs_in_call_order(&scheduler, &[first.clone(), second.clone()])
+            .await
+            .unwrap();
+        assert_eq!(
+            outputs.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+            vec![&second]
+        );
+        assert_eq!(events.recv().await.unwrap(), first);
+        let outputs = outputs_in_call_order(&scheduler, &[first.clone(), second.clone()])
+            .await
+            .unwrap();
+        assert_eq!(
+            outputs.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+            vec![&first, &second]
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_agent_resumes_on_envelope_and_preserves_envelope_value() {
+        let scheduler = JobScheduler::new(1).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+        let expected = Envelope::final_answer(
+            AgentPath("/root".into()),
+            AgentPath("/root/child".into()),
+            "done".into(),
+            1,
+        );
+        tx.send(expected.clone()).unwrap();
+        assert_eq!(
+            wait_agent(&mut rx, &scheduler, &mut cancel_rx, &[]).await,
+            WaitResume::Envelope(expected)
+        );
     }
 
     #[tokio::test]

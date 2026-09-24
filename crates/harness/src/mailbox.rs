@@ -40,6 +40,49 @@ pub struct Envelope {
 }
 
 impl Envelope {
+    /// Convert a completed assistant final-answer message into a parent
+    /// mailbox envelope. Other assistant items stay in their normal channel.
+    pub fn from_final_answer_item(
+        recipient: AgentPath,
+        sender: AgentPath,
+        item: &serde_json::Value,
+        timestamp_ms: i64,
+    ) -> Option<Self> {
+        if item.get("type").and_then(serde_json::Value::as_str) != Some("message")
+            || item.get("role").and_then(serde_json::Value::as_str) != Some("assistant")
+            || item.get("phase").and_then(serde_json::Value::as_str) != Some("final_answer")
+        {
+            return None;
+        }
+        let payload = item
+            .get("content")?
+            .as_array()?
+            .iter()
+            .filter_map(|part| {
+                (part.get("type")?.as_str()? == "output_text")
+                    .then(|| part.get("text")?.as_str())
+                    .flatten()
+            })
+            .collect::<String>();
+        Some(Self::final_answer(recipient, sender, payload, timestamp_ms))
+    }
+
+    pub fn final_answer(
+        recipient: AgentPath,
+        sender: AgentPath,
+        payload: String,
+        timestamp_ms: i64,
+    ) -> Self {
+        Self {
+            kind: EnvelopeType::FinalAnswer,
+            recipient,
+            sender,
+            payload,
+            class: DeliveryClass::AtBoundary,
+            timestamp_ms,
+        }
+    }
+
     /// The default scheduling class for an envelope's sender.
     ///
     /// A later mailbox hook may change this. The `Steer` restriction to
@@ -80,27 +123,27 @@ impl std::fmt::Display for EnvelopeType {
     }
 }
 
-/// Coalesce envelopes without changing their arrival order.
+/// Render envelopes in arrival order, coalescing adjacent agent envelopes from
+/// the same sender. Non-agent messages are never moved across agent messages:
+/// mailbox order is observable conversation order.
 pub fn render_coalesced(envelopes: &[Envelope]) -> Vec<(MessageChannel, String)> {
-    let mut rendered = Vec::new();
-    let mut agents = Vec::<(&str, String)>::new();
+    let mut rendered: Vec<(MessageChannel, String)> = Vec::new();
     for envelope in envelopes {
         let (channel, body) = envelope.render();
-        if channel == MessageChannel::Assistant {
-            agents.push((&envelope.sender.0, body));
+        if channel == MessageChannel::Assistant
+            && rendered.last().is_some_and(|(prior_channel, prior_body)| {
+                *prior_channel == MessageChannel::Assistant
+                    && prior_body.starts_with(&format!("## from {}\n", envelope.sender.0))
+            })
+        {
+            let (_, prior_body) = rendered.last_mut().expect("checked above");
+            prior_body.push('\n');
+            prior_body.push_str(&body);
+        } else if channel == MessageChannel::Assistant {
+            rendered.push((channel, format!("## from {}\n{}", envelope.sender.0, body)));
         } else {
             rendered.push((channel, body));
         }
-    }
-    if !agents.is_empty() {
-        rendered.push((
-            MessageChannel::Assistant,
-            agents
-                .into_iter()
-                .map(|(sender, body)| format!("## from {sender}\n{body}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ));
     }
     rendered
 }
@@ -145,6 +188,35 @@ mod tests {
     }
 
     #[test]
+    fn final_answer_item_becomes_parent_envelope_not_tool_output() {
+        let item = serde_json::json!({
+            "type":"message",
+            "role":"assistant",
+            "phase":"final_answer",
+            "content":[{"type":"output_text","text":"{\"ok\":"},{"type":"output_text","text":"true}"}]
+        });
+        let envelope = Envelope::from_final_answer_item(
+            AgentPath("/root".into()),
+            AgentPath("/root/worker".into()),
+            &item,
+            55,
+        )
+        .unwrap();
+        assert_eq!(envelope.kind, EnvelopeType::FinalAnswer);
+        assert_eq!(envelope.payload, "{\"ok\":true}");
+        assert_eq!(envelope.class, DeliveryClass::AtBoundary);
+        assert!(
+            Envelope::from_final_answer_item(
+                AgentPath("/root".into()),
+                AgentPath("/root/worker".into()),
+                &serde_json::json!({"type":"function_call","name":"finalize"}),
+                55
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn serde_uses_contract_envelope_names_and_classes() {
         let value = serde_json::to_value(envelope("/root", EnvelopeType::NewTask, "task")).unwrap();
         assert_eq!(value["kind"], "NEW_TASK");
@@ -152,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn coalescing_keeps_agent_arrival_order_and_separates_non_agent_messages() {
+    fn rendering_preserves_arrival_order_across_channels() {
         let inputs = [
             envelope("/a", EnvelopeType::Message, "one"),
             envelope("/operator", EnvelopeType::Message, "user"),
@@ -161,12 +233,38 @@ mod tests {
         assert_eq!(
             render_coalesced(&inputs),
             vec![
+                (
+                    MessageChannel::Assistant,
+                    "## from /a\nMessage Type: MESSAGE\nTask name: /root/worker\nSender: /a\nPayload:\none".into()
+                ),
                 (MessageChannel::User, "user".into()),
                 (
                     MessageChannel::Assistant,
-                    "## from /a\nMessage Type: MESSAGE\nTask name: /root/worker\nSender: /a\nPayload:\none\n## from /b\nMessage Type: MESSAGE\nTask name: /root/worker\nSender: /b\nPayload:\ntwo".into()
+                    "## from /b\nMessage Type: MESSAGE\nTask name: /root/worker\nSender: /b\nPayload:\ntwo".into()
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn adjacent_final_answers_from_one_sender_coalesce_without_changing_payloads() {
+        let inputs = [
+            envelope("/root/worker", EnvelopeType::FinalAnswer, r#"{"ok":true}"#),
+            envelope("/root/worker", EnvelopeType::FinalAnswer, r#"{"ok":false}"#),
+        ];
+        assert_eq!(
+            render_coalesced(&inputs),
+            vec![(
+                MessageChannel::Assistant,
+                concat!(
+                    "## from /root/worker\n",
+                    "Message Type: FINAL_ANSWER\nTask name: /root/worker\n",
+                    "Sender: /root/worker\nPayload:\n{\"ok\":true}\n",
+                    "Message Type: FINAL_ANSWER\nTask name: /root/worker\n",
+                    "Sender: /root/worker\nPayload:\n{\"ok\":false}"
+                )
+                .into()
+            )]
         );
     }
 }
