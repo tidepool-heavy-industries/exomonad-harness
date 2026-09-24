@@ -135,6 +135,10 @@ pub enum ClaimState {
     Interrupted,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+// TODO(wave1): `hook: String` + `decision: Value` is a blob, not the PRD shape.
+// Each of the eleven hooks gets its own closed decision enum; the row keeps the
+// typed decision plus a provider-opaque `evidence` blob. Keep this table's
+// columns; type the values.
 pub struct Decision {
     pub hook: String,
     pub event_refs: Vec<String>,

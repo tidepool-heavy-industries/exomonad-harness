@@ -163,6 +163,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         }
     }
 
+    // TODO(correction-wave a): seven public run* entries below exist because
+    // children were integrated without refactoring. PRD is zero back-compat:
+    // collapse to ONE entry (durable head + new items + mailbox receiver) and
+    // delete the rest, including the "legacy"/"source-compatible" variants.
+    // docs/tree.md "correction wave"; nudge `entry_point_sprawl`.
     /// Run until an assistant final answer or cancellation. `initial` may be
     /// an entire prior transcript; it is never truncated by this engine.
     pub async fn run(
@@ -349,6 +354,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 instructions: self.config.instructions.clone(),
                 tools: self.tools(),
                 model: self.config.model.clone(),
+                // FIXME(correction-wave c): effort is a request-level field only.
+                // PRD `decisions`: effort lives in history as a harness-authored
+                // `configuration_update` item; this field mirrors the FIRST update
+                // in the sent history (cache), never a config value. Needs the
+                // positional settings family in the store, `set_effort`, and the
+                // fork strip list. Acceptance item 13 depends on it.
                 pinned_effort: self.config.effort,
                 session_id: self.config.session_id.clone(),
             };
@@ -622,6 +633,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         tools
     }
 
+    // FIXME(correction-wave b): when the model continues past a pending call,
+    // the next request resends its `function_call` with no output. The API
+    // accepts that only for tools declared `async: true`; no tool or verb
+    // schema sets it yet (see agents.rs `function` and the demo `tools`). This
+    // path has only run against the mock transport. Prove item 2 live.
     async fn dispatch_completed_item(
         &self,
         item: Item,

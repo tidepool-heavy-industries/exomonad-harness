@@ -57,6 +57,9 @@ root (otherwise)  everyone ++ lead ++ root
 - `asks_answered_question` (kind=ask) "the question's answer is stated in PRD.md, tree.md or the scaffold docs?" A: cite the section; don't ask.
 - `ask_shape` (kind=ask) "question lacks `[label]`, `default:` or `blocks:`?" A: tree.md `ask` shape.
 
+- `invented_scope` "building identity, auth, sessions, rate limits, or another subsystem the PRD assigns elsewhere (tailscale identity) or does not name?" A: stop; ask; the PRD reason for the assignment stands until amended.
+- `interview_missing` "final reply without the interview section, or the wave ends with no `docs/interviews.md` entry?" A: the interview is a deliverable.
+
 ## L2 per-file battery (`each` over `paths`; leaf only)
 - `owned` "Is <path> inside the module this label owns per tree.md?" (no → feeds `edits_contract` E)
 - `contract` "Is <path> in the contract list?" (yes → E)
@@ -133,6 +136,10 @@ root (otherwise)  everyone ++ lead ++ root
 - `finalize_prose` "typed reply (`reply` schema present) delivered as prose instead of a `finalize` record?" A: forced strict call.
 - `cancel_no_output` "cancels a job w/o `Cancelled` on its call_id?" A: typed output always.
 - `cancel_race` "job settle and cancel can both produce an output for one call_id?" A: first wins, exactly one.
+- `sync_tool_pending` "a tool whose call can outlive the response lacks `async: true`, yet the loop resends its `function_call` without an output?" A: mark it async; the API rejects a bare call otherwise (wave0 shipped this untested live).
+- `effort_by_field` "effort set by the request-level `reasoning.effort` field with no `configuration_update` item in history?" A: positional item, harness-authored; the field is only the first update's mirror.
+- `entry_point_sprawl` "more than one public run/start entry on the engine, or a doc comment saying legacy/source-compatible?" A: one entry (durable head + new items + mailbox); delete the rest; zero back-compat is a PRD rule.
+- `verbs_via_provider` "agent verbs dispatched through the provider trait instead of owned by the engine?" A: crate-owned verbs; the provider supplies tools and hooks only.
 - `claims_missing` "fork does not copy the parent's pending claims (or offer drop)?" A: PRD claims rule.
 - `claim_settled_not_replayed` "claim on an already-settled job does not deliver the stored output immediately?" A: replay stored output.
 - `deliver_state_wrong` "delivery to a paused claimant does not resume it / to an idle one does not start a request / to a requesting one is not queued for the next?" A: per state.
@@ -285,4 +292,4 @@ root (otherwise)  everyone ++ lead ++ root
 - `edits_contract`, `child_scope_creep`, `destructive_command` (Project.Watchdog), `scaffold_diverged` (lead) "child's commits redefine a type the scaffold defines?" E.
 
 ## counts (approx per call)
-L0 3 · L1 ~15 · L2 4×files (cap `paths` at 6 ⇒ ≤24) · L3 10–35 (web screen leaves are the widest) · L4 2–4 · L5 4 · L6 1 · L7 2–4 ⇒ 40–95. under 100 ! if a packet would exceed, drop L2 rows beyond the first 4 files, then L4 scores already at level 5 last time.
+L0 3 · L1 ~17 · L2 4×files (cap `paths` at 6 ⇒ ≤24) · L3 10–35 (web screen leaves are the widest) · L4 2–4 · L5 4 · L6 1 · L7 2–4 ⇒ 40–95. under 100 ! if a packet would exceed, drop L2 rows beyond the first 4 files, then L4 scores already at level 5 last time.

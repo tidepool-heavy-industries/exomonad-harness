@@ -102,6 +102,11 @@ struct Running {
     seen_inbox_ids: Arc<std::sync::Mutex<HashSet<i64>>>,
 }
 
+// TODO(correction-wave): 1.3k lines is not the "small driver" of PRD
+// `library vs driver`. Whatever here is agent lifecycle, inbox rescan, or
+// wake routing belongs in the library (one future per agent over the store);
+// the driver should only spawn those futures, restart from inbox, and serve.
+// Shrinks naturally once the engine has one entry point.
 /// The runtime is started after constructing the StoreAgentToolService used by
 /// the TreeProvider. Call `shutdown` to cancel and join every admitted task.
 pub struct Driver<F: EngineFactory> {

@@ -56,6 +56,11 @@ pub struct ServerEvent {
     pub payload: serde_json::Value,
 }
 
+// NOTE(frozen): bearer secrets, cookie sessions and the login UI were built in
+// wave0 where the PRD assigns identity to the tailscale interface and
+// `tailscale serve` (PRD `web view`, `secure !`: viewer identity = tailscale
+// header). Do not extend this in the correction wave; decide keep-or-delete
+// at wave1 planning. Nudge `invented_scope`.
 /// A bearer credential, intentionally redacted from Debug output.
 #[derive(Clone)]
 pub struct BearerSecret(Arc<str>);

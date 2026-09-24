@@ -8,6 +8,15 @@ pub enum CompactError {
     Failed(String),
 }
 
+// TODO(correction-wave d): this is a placeholder, not the PRD trait. Target:
+//   trait Compactor { type Summary: JsonSchema+Serialize+DeserializeOwned;
+//     async fn compact(&self, cx: CompactContext<'_>) -> Result<NewWindow, CompactError>; }
+//   CompactContext: items() | usage() | pending_calls() | typed_turn::<T>(..) | server_compact()
+//   NewWindow { items, effort, carried: Vec<CallId> }
+// Ship `Server` (strip updates -> `compaction_trigger` LAST -> returned window
+// -> fresh pin) and run the experiment: does the compacted window keep an
+// unanswered `function_call`? -> docs/findings.md. Invariants the harness
+// enforces regardless of strategy are in PRD `compaction`. No impl exists yet.
 pub struct NewWindow {
     pub items: Vec<Item>,
     pub effort: Effort,

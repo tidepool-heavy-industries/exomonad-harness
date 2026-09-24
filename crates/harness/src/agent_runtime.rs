@@ -192,6 +192,10 @@ fn persist_envelope(store: &Store, envelope: &ModelEnvelope) -> Result<(), Agent
     Ok(())
 }
 
+// TODO(correction-wave c/d): checkpoints are a JSON blob under `session_state`.
+// PRD `checkpoint_split` nudge: one row, four uses (fork point, cache
+// breakpoint, compaction boundary, tree label). Give it a table when settings
+// items land, since `compact{keep_since}` and the breakpoint both key on it.
 fn checkpoints_key(path: &AgentPath) -> String {
     format!("agent-checkpoints:{}", path.0)
 }
@@ -247,6 +251,12 @@ impl AgentToolService for StoreAgentToolService {
                 let parent_agent = Self::stored(&store, &parent_path)?;
                 let (head, source) = match from {
                     SpawnSource::Prompt => (None, json!({"kind":"prompt"})),
+                    // TODO(correction-wave c): a `here` fork must apply the strip
+                    // list (parent's configuration_updates, annotations, dropped
+                    // claims) and re-pin effort with ONE fresh update, and the
+                    // child must inherit the parent's claims on pending calls
+                    // (PRD `agent verbs`, acceptance 11 and 13). Today it only
+                    // points the child at the parent's head request.
                     SpawnSource::Here => (
                         parent_agent.head_request.clone(),
                         json!({"kind":"here","head_request":parent_agent.head_request}),

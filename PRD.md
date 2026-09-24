@@ -31,6 +31,7 @@ fmt: compressed. `→` yields/then. `⊥` no dependency. `!` hard rule. `?` open
 - streaming end to end ! no polling anywhere. transport streams SSE → scheduler emits deltas (text, reasoning summary, function-call args) as they arrive → event stream carries deltas → page renders them live. a job STARTS the moment its complete call item arrives, before the response finishes (API supports this). job progress/state changes stream the same way. store commits completed items only; deltas live on the event stream, never in the store. writer batches ≤ ~50ms so live queries follow within a frame or two.
 
 ## provider trait
+- every provider tool and every crate verb except `wait_agent` is declared `async: true` on the wire ! reason: the loop resends a `function_call` without its output whenever the model continues past a pending call; the API accepts that only for async tools. wave0 shipped tools without the flag and the continue path had only run against the mock transport.
 assoc types:
 - `Tools`: → tool schemas (name, description, typed args, `output_schema`). exomonad derives from protocol; demo writes by hand. output schemas validated at the boundary and the SAME source generates the web view's TS types.
 - `ReplayProvider` (crate, test support): answers model requests from the store and tool calls from recorded outputs ⇒ end-to-end tests w/o API; the same path lets a hook provider answer from stored `decision` evidence.

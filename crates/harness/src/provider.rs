@@ -11,6 +11,13 @@ use tokio::sync::mpsc;
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct JobHandle(pub String);
 
+// TODO(correction-wave, allowed if a-c need it): PRD `provider trait` shape.
+// `CallContext` should carry `cancel: CancellationToken` (tokio-util) and
+// `verbs: JobVerbs`; `progress` must be a BOUNDED channel with an explicit
+// overflow policy (PRD `fast !`). Tool identity by `&str` and JSON in/out is
+// the wire boundary leaking into the trait; typed `Tools` with
+// `output_schema` is the target. Hooks (eleven typed points, one closed
+// Decision enum each) are wave1, not this wave.
 /// Per-call metadata supplied by the harness. Progress is deliberately
 /// out-of-band: it is never appended to the model-visible item list.
 #[derive(Clone, Debug)]
@@ -42,6 +49,11 @@ pub trait Provider: Send + Sync {
         self.call(name, args).await
     }
 
+    // FIXME(correction-wave): agent verbs are crate-owned (PRD `agent verbs`);
+    // routing them through the provider inverts the dependency and forces every
+    // consumer to wire `StoreAgentToolService` by hand. The engine should
+    // dispatch verbs itself; the provider supplies tools and hooks only.
+    // Nudge `verbs_via_provider`.
     /// Runtime hook for crate-provided agent verbs. A provider integrating
     /// durable sessions should route this to `dispatch_agent_verb`.
     async fn call_agent_verb(

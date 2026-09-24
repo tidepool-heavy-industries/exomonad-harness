@@ -53,3 +53,13 @@ a positive hit is not required.
   `.exomonad/nudges/<label>.jsonl` cannot be generated from actual hook
   judgments here. Do not fabricate nudge events; report the absence in the
   wave-0 interviews.
+
+## Q3 — Child path form (asked in findings, answered 2026-09-24)
+
+**Asked:** The verb schema uses single-segment child paths despite the PRD's
+`/root/core/core-store` example; which is the contract?
+
+**Answer:** Single segment, as built. A child path is `/parent/task_name`.
+The `core-` prefix in a label like `core-store` is a naming convention for
+unique nudge sets and branch names; it is not nesting and the harness never
+parses it. `docs/tree.md` labels section now says so.

@@ -29,6 +29,12 @@ pub fn request_body(request: &ResponsesRequest) -> Result<Value, TransportError>
         "instructions": request.instructions,
         "input": request.input,
         "tools": request.tools,
+        // TODO(correction-wave): `tool_choice` should come from the request as
+        // `allowed_tools`/`none` for per-request availability, never by editing
+        // `tools` (cache). Also missing: `prompt_cache_options: {ttl: "30m"}`
+        // and explicit cache breakpoints at checkpoints. Cache counters read 0
+        // on every live call so far; a findings-only probe (docs/tree.md) diffs
+        // our body/headers against codex's before assuming the backend reports none.
         "tool_choice": "auto",
         "parallel_tool_calls": true,
         "reasoning": {"effort": request.pinned_effort},
