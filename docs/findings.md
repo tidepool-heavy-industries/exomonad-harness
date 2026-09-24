@@ -183,3 +183,14 @@ It returned a final-answer item in 3.77 seconds. This verifies one simple
 stateless request through engine, transport and store; it did not exercise
 tool calls, forking, wait/resume, browser delivery, or cache hits. The test
 remains ignored in ordinary CI, and no credential value was emitted.
+
+The optional browser login UI is integrated. It probes `/api/session`, signs in
+with same-origin credentials, holds the operator secret only in React form
+state, and opens the WebSocket only after authentication. The production UI
+starts with no fixture data and remains in a loading state until an
+**authoritative** WebSocket snapshot arrives; fixture state remains available
+only to tests. Integrated web checks passed: 10 Vitest tests, TypeScript check,
+production build, and npm audit (0 vulnerabilities). Rust workspace fmt,
+offline tests (56 harness passed, 2 live ignored; 7 demo passed), and Clippy
+also passed. No live browser-to-server run has been made, and the demo CLI does
+not yet start the server. Browser sessions remain optional and in-memory.
