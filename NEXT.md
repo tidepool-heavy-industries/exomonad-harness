@@ -41,3 +41,18 @@ item-2 and item-13 live traces and the unanswered-call finding in
 `docs/findings.md`, the probe's bodies or its `Blocked`, one interview section
 per node, and `docs/exomonad-friction.md` extended with this run's notes. Then
 rewrite this file for wave 1: what landed, what is open, where to start.
+
+## Prompt trials this run (project-level, promote to core only if they hold)
+
+Rules the last run's friction notes argued for but the engine does not yet
+enforce. Follow them here; the interview at the end says whether each held.
+
+- A reply that incorporates a sibling's or parent's change names the exact
+  commit that did it; "applied" without a commit is not incorporation.
+- A test committed red on purpose names its owner and the slice that turns
+  it green in its commit message; integration status lists it as expected
+  red, never as passing.
+- After two failed check rounds with no candidate, the child pings its owner
+  before a third; the owner answers with a split, a seam, or a stop.
+- An operator note is advice unless it says it is a constraint; a hypothesis
+  is labeled as one in every packet that repeats it.
