@@ -15,6 +15,11 @@ all fall out of: content-addressed items + conversation = path + byte-identical 
 - today's "last n turns as text" becomes queries over the store: items by address, envelopes in/out, `decision` rows w/ evidence, jobs w/ timings, usage + cached fraction per request; a parent gets the same views over its children. crate side needs nothing new beyond the store queries already listed plus a `children_of(path)` view.
 - composition query: for a named helper/tool, which other calls precede or follow it within one cell or one request, ranked. this is what turns "I noticed X is always used with reads" into a number, and is the first step of the helper → helper method → hook → tool pipeline (`~/dev/tidepool/plans/harness-adoption.md`).
 
+## blocking jobs (consumer suggestions; do not preclude in wave1)
+from `~/dev/tidepool/plans/harness-adoption.md` "Blocking in cells". a consumer's job may block on a child, another job, or the operator, and the call settles late. two things the crate should leave room for:
+- **claim-held envelopes released on claim end.** when a job holds a claim on a child, the child's FINAL_ANSWER envelope to the parent path is delivered as Hold; when the claim ends (job settles, fails, or is cancelled) the hold is released, never dropped. the claims rule already covers late outputs; this is the same rule applied to the envelope channel. wave1 need: the Hold class exists and a claim can reference an envelope, nothing more.
+- **cancellation scoped by spawn origin.** a child spawned via `JobVerbs::spawn_agent` from inside a job is owned by that job's token; a child spawned by the model-facing verb is owned by the conversation's token. cancelling the job cancels the former and never the latter. wave1 need: the token hierarchy (run → conversation → request/job) admits a job-owned child; retain-first keeps the cancelled child's rows.
+
 ## other deferred
 - consult forks across families (fork to astra at a checkpoint for one decision, MESSAGE back, stop): a pattern to document, not a primitive.
 - coalescing envelopes from many children into one sectioned envelope per debounce window (code, not summary).
