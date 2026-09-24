@@ -51,6 +51,9 @@ checks = [
 [haskell.flake_sources]
 jev-dsl = ["core"]
 
+[prompts]
+root = "prompts/owner.md"
+
 [prompts.files]
 coordinator = "prompts/coordinator.md"
 planner = "prompts/planner.md"
