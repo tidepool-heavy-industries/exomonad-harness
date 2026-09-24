@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+axum.workspace = true
 blake3.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
