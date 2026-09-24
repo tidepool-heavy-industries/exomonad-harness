@@ -35,6 +35,7 @@ checks = [
   "Project.JevChecks.investigation",
   "Project.JevChecks.review",
   "Project.JevChecks.reflex",
+  "Project.NudgesChecks.replay",
 ]
 
 # jev-dsl is compiled from the revision `flake.nix` pins, not from a copy in
