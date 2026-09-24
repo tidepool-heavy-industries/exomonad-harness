@@ -30,3 +30,12 @@ unobserved?`
 **Default:** Verify history and report zero. **Blocks:** Final acceptance
 verdict for item 13. **Answer:** Verify history and report cache unobserved;
 a positive hit is not required.
+
+## Tooling friction (not operator questions)
+
+- The native `spawn_agent` was offered but its child could not use Bash,
+  Haskell, or status (`hosted tool call is not authorized`); Exomonad
+  `spawnWatched` was the working delegation path.
+- On this subscription SSE endpoint, `response.completed.response.output`
+  was empty while `response.output_item.done` carried the assistant message;
+  a completion-only parser would silently lose the answer.
