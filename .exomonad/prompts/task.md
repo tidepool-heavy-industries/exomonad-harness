@@ -26,7 +26,10 @@ checks without reaching a candidate, do not keep grinding alone: split what
 remains into a Luna subtree with named seams, or return `Blocked` naming the
 seam you cannot settle, so the parent can redesign.
 
-Commit useful authored units, including partial implementations and failing tests.
+Format only the paths you own before a candidate (`cargo fmt -- <owned files>`,
+never `--all`, which mutates reviewed sibling code); the integrated format
+check runs after merge. Commit useful authored units, including partial
+implementations and failing tests.
 A pre-fork checkpoint proves source identity, not acceptance. Before replying, rebase onto your parent's current head (its integration branch)
 and re-run your checks there; the parent merges your branch and will send a stale
 candidate back. Return the exact
