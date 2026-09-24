@@ -96,3 +96,22 @@ the demo's local zero-duration sleep smoke passed. This is a provider-unit
 smoke, **not** a model run. The demo's shell result is truncated to 16 KiB per
 stream after capture, so peak child-process output memory is not yet bounded.
 Its ask/form tools and a real transport-backed driver remain unimplemented.
+
+The next store/tree follow-ups are integrated. Store schema v2 records UTC-ms
+timestamps, per-request usage and session state, migrates v1, and exposes
+additional named queries and pending-claim recovery enumeration. Tree code
+adds model-facing verb schemas/dispatch hooks, streamed-call admission
+primitives, wait/output ordering, and final-answer envelope conversion. The
+integration required adding `agent` to the demo's `CallContext` test. Workspace
+fmt, offline tests (40 harness passed, 1 live ignored; 3 demo passed),
+Clippy and check passed after that change. These are not a live agent tree:
+the concrete `AgentToolService`, transport callback wiring, request lineage,
+and durable job restoration remain open. An independent review's cancellation
+race is still being repaired.
+
+Server API routes now require an explicit bearer secret and otherwise deny
+access; the repaired version passed its focused authorization tests and
+integrated harness tests (30 passed, 1 live ignored), fmt and Clippy. A native
+browser WebSocket cannot set an Authorization header, so the shipped page
+still cannot reach the secured API directly. Operator login/session versus a
+trusted authenticating proxy remains an explicit delivery decision.
