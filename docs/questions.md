@@ -45,3 +45,7 @@ a positive hit is not required.
 - The registered response watch has no incremental progress unless the child
   publishes a progress stream; repeatedly polling `ResponsePending` added no
   information, so root switched to reviewing committed Git evidence.
+- Today's Exomonad coding children receive isolated bound worktrees, not the
+  shared leaf checkout described for the future harness. Root amended
+  tree.md to preserve the ownership reason through contracts and path review;
+  integration must merge leaf commits instead of relying on a shared index.

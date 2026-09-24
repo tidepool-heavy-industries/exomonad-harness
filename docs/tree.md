@@ -23,7 +23,7 @@ scaffold → commit → ⇓ children (inherit ctx) → children repeat or implem
 ```
 1. **scaffold commit** ! before any ⇓. contains: shared types, trait sigs, module boundaries, stub bodies `todo!()` + doc comment stating what body must do + which PRD rule binds it, short spec `docs/<subtree>.md`. MUST compile (`cargo check -p <crate>` / `npm run typecheck`) !
    commit msg: `scaffold(<label>): <one line>` + body listing modules ⇓ and owner label each.
-2. **⇓ spawn** one child per module of the scaffold: `spawn_agent{from: here, task}` (inherited ctx; `from: prompt` only for cheap questions). checkout: LEADS get a worktree + branch `<label>` from the parent's scaffold commit; LEAVES share their lead's checkout, `task.owned` = the leaf's module paths, `task.mustNot` = contract files + sibling modules; edit outside `owned` is vetoed at admission. label per table below !
+2. **⇓ spawn** one child per module of the scaffold: Exomonad `coding currentCheckout` with a typed Response (inherited ctx; fresh context only for cheap questions). Checkout: LEADS and LEAVES receive isolated bound worktrees from the parent's scaffold commit in the current Exomonad runtime. This differs from the future harness's shared-leaf checkout because the runtime controls allocation; the reason—prevent overlapping edits—still holds. `task.owned` = the leaf's module paths, `task.mustNot` = contract files + sibling modules; parent reviews changed paths and refuses out-of-scope work. The future harness must implement admission-time veto for its shared leaves. Label per table below !
 3. **repeat**: child whose module divides ⇒ own scaffold commit → ⇓. leaf ⇒ implements vs inherited stubs.
 4. **integrate**: parent merges children in dep order → tree compiles → focused checks pass → commit `integrate(<label>): <children merged>`; body lists every contract amendment made during the wave.
 5. **review**: one cycle. parent reads each child's result vs scaffold. contract defect found ⇒ ⇑, never sideways.
@@ -67,7 +67,7 @@ contract files (leaf edit ⇒ ⇑, never direct): `crates/harness/src/{item,mode
 
 ## leaves
 - implement vs stubs. own module only (`task.owned`). `cargo check -p <crate>`, `cargo test -p <crate> <name>` only ! no workspace-wide builds !
-- commit by pathspec only ! `git commit -F msg -- <paths>` (leaves share the lead's checkout and index; the harness commits this way on your behalf when you ask it to commit, never `-a`/`-A`).
+- commit by pathspec only ! `git commit -F msg -- <paths>` (the future harness's shared leaves share an index; pathspec discipline remains useful in today's isolated Exomonad worktrees, never `-a`/`-A`).
 - no `todo!()` in delivered module ! unfinished ⇒ say exactly what is left, in report.
 - codex: reference only ! read for pitfalls, close, write own.
 - quality bar (PRD) applies to every commit ! newtypes, closed enums, typed errors, no unwrap in lib, no blocking in async, bounded channels, generated TS types, strict TS. parent review reads for these first.
