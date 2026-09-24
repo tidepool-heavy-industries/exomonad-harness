@@ -186,12 +186,12 @@ impl JobScheduler {
         name: String,
         args: Value,
     ) -> Result<JobHandle, JobError> {
-        let mut jobs = self.jobs.lock().await;
-        if jobs.contains_key(&call_id) {
+        let mut registry = self.jobs.lock().await;
+        if registry.contains_key(&call_id) {
             return Err(JobError::DuplicateCall);
         }
         let (settled, _) = tokio::sync::watch::channel(None);
-        jobs.insert(
+        registry.insert(
             call_id.clone(),
             Job {
                 claimants: HashSet::new(),
@@ -202,15 +202,20 @@ impl JobScheduler {
                 task: None,
             },
         );
-        drop(jobs);
-
         let jobs = self.jobs.clone();
         let capacity = self.capacity.clone();
         let events = self.events.clone();
         let task_call_id = call_id.clone();
         let task_agent = agent;
         let is_agent_verb = crate::provider::is_harness_tool(&name);
+        let (launch, launch_gate) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
+            // Do not enter provider code until its JoinHandle is installed in
+            // the registry. Cancellation racing registration can then always
+            // abort the actual work before side effects begin.
+            if launch_gate.await.is_err() {
+                return;
+            }
             let permit = match capacity.acquire_owned().await {
                 Ok(p) => p,
                 Err(_) => return,
@@ -249,12 +254,9 @@ impl JobScheduler {
             settle(&jobs, task_call_id.clone(), JobOutput::Completed(result)).await;
             let _ = events.send(task_call_id);
         });
-        self.jobs
-            .lock()
-            .await
-            .get_mut(&call_id)
-            .expect("registered above")
-            .task = Some(task);
+        registry.get_mut(&call_id).expect("registered above").task = Some(task);
+        drop(registry);
+        let _ = launch.send(());
         Ok(JobHandle(call_id.0))
     }
 
@@ -628,6 +630,75 @@ mod tests {
         assert_eq!(scheduler.settled_claimants(&id).await.unwrap().len(), 2);
         let replay = scheduler.claim(&id, a).await.unwrap();
         assert_eq!(replay, Some(JobOutput::Completed(Ok(json!({"ok": true})))));
+    }
+
+    #[tokio::test]
+    async fn concurrent_start_and_cancel_never_loses_provider_task_handle() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+
+        struct OnDrop(Arc<AtomicBool>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, AtomicOrdering::SeqCst);
+            }
+        }
+        struct NeverCompletes {
+            invoked: Arc<AtomicUsize>,
+            dropped: Arc<AtomicBool>,
+        }
+        #[async_trait]
+        impl Provider for NeverCompletes {
+            async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+                self.invoked.fetch_add(1, AtomicOrdering::SeqCst);
+                let _guard = OnDrop(self.dropped.clone());
+                std::future::pending().await
+            }
+            fn tools(&self) -> Vec<Value> {
+                vec![]
+            }
+        }
+
+        let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+        let call_id = CallId("start-cancel-race".into());
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let provider: Arc<dyn Provider> = Arc::new(NeverCompletes {
+            invoked: invoked.clone(),
+            dropped: dropped.clone(),
+        });
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+        let start_scheduler = scheduler.clone();
+        let start_barrier = barrier.clone();
+        let start_id = call_id.clone();
+        let start = tokio::spawn(async move {
+            start_barrier.wait().await;
+            start_scheduler
+                .start(provider, start_id, "never".into(), serde_json::json!({}))
+                .await
+        });
+
+        let cancel_scheduler = scheduler.clone();
+        let cancel_barrier = barrier.clone();
+        let cancel_id = call_id.clone();
+        let cancel = tokio::spawn(async move {
+            cancel_barrier.wait().await;
+            loop {
+                match cancel_scheduler.cancel(&cancel_id).await {
+                    Err(JobError::UnknownCall) => tokio::task::yield_now().await,
+                    result => return result,
+                }
+            }
+        });
+
+        assert_eq!(start.await.unwrap().unwrap().0, call_id.0);
+        let settlement = cancel.await.unwrap().unwrap().unwrap();
+        assert_eq!(settlement.output, JobOutput::Cancelled);
+        assert!(invoked.load(AtomicOrdering::SeqCst) == 0 || dropped.load(AtomicOrdering::SeqCst));
+        assert_eq!(
+            scheduler.output(&call_id).await.unwrap(),
+            Some(JobOutput::Cancelled)
+        );
     }
 
     #[tokio::test]
