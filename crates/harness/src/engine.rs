@@ -184,31 +184,56 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         initial: Vec<Item>,
         cancellation: watch::Receiver<bool>,
     ) -> Result<EngineCompletion, EngineError> {
+        self.run_starting_from(None, initial, cancellation, None)
+            .await
+    }
+
+    /// Start a new durable branch request below `head`, supplying only items
+    /// that are new to this run. The persisted parent chain supplies prior
+    /// history; a missing head is an error rather than a fresh-root fallback.
+    pub async fn run_from_head(
+        &self,
+        head: Option<RequestId>,
+        new_items: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+    ) -> Result<EngineCompletion, EngineError> {
+        self.run_starting_from(head, new_items, cancellation, None)
+            .await
+    }
+
+    /// Mailbox-enabled durable branch-start variant.
+    pub async fn run_from_head_with_envelopes(
+        &self,
+        head: Option<RequestId>,
+        new_items: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+        incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+    ) -> Result<EngineCompletion, EngineError> {
+        self.run_starting_from(head, new_items, cancellation, Some(incoming))
+            .await
+    }
+
+    async fn run_starting_from(
+        &self,
+        head: Option<RequestId>,
+        initial: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+        incoming: Option<tokio::sync::mpsc::UnboundedReceiver<Envelope>>,
+    ) -> Result<EngineCompletion, EngineError> {
+        if let Some(incoming) = incoming {
+            return self
+                .run_with_inbox(head, initial, cancellation, incoming)
+                .await;
+        }
         let (keepalive, envelopes) = tokio::sync::mpsc::unbounded_channel();
-        let result = self
-            .run_with_envelopes_and_transcript(initial, cancellation, envelopes)
-            .await;
+        let result = self.run_loop(head, initial, cancellation, envelopes).await;
         drop(keepalive);
         result
     }
 
-    /// Run with the agent's mailbox receiver. This is required for
-    /// `wait_agent` to resume on envelope delivery; `run` remains suitable
-    /// when the host has no mailbox source.
-    pub async fn run_with_envelopes(
+    async fn run_with_inbox(
         &self,
-        initial: Vec<Item>,
-        cancellation: watch::Receiver<bool>,
-        incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
-    ) -> Result<ResponsesTurn, EngineError> {
-        self.run_with_envelopes_and_transcript(initial, cancellation, incoming)
-            .await
-            .map(|completion| completion.turn)
-    }
-
-    /// Mailbox-enabled variant of [`Engine::run_with_transcript`].
-    pub async fn run_with_envelopes_and_transcript(
-        &self,
+        head: Option<RequestId>,
         initial: Vec<Item>,
         cancellation: watch::Receiver<bool>,
         mut incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
@@ -222,24 +247,60 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
             }
         });
-        let result = self.run_loop(initial, cancellation, envelopes).await;
+        let result = self.run_loop(head, initial, cancellation, envelopes).await;
         drop(keepalive);
         forwarder.abort();
         result
     }
 
+    /// Run with the agent's mailbox receiver. This is required for
+    /// `wait_agent` to resume on envelope delivery; `run` remains suitable
+    /// when the host has no mailbox source.
+    pub async fn run_with_envelopes_and_transcript(
+        &self,
+        initial: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+        incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+    ) -> Result<EngineCompletion, EngineError> {
+        self.run_with_inbox(None, initial, cancellation, incoming)
+            .await
+    }
+
+    /// Mailbox-enabled form of the source-compatible `run` API.
+    pub async fn run_with_envelopes(
+        &self,
+        initial: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+        incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+    ) -> Result<ResponsesTurn, EngineError> {
+        self.run_with_envelopes_and_transcript(initial, cancellation, incoming)
+            .await
+            .map(|completion| completion.turn)
+    }
+
     async fn run_loop(
         &self,
+        head: Option<RequestId>,
         initial: Vec<Item>,
         mut cancellation: watch::Receiver<bool>,
         mut envelopes: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
     ) -> Result<EngineCompletion, EngineError> {
+        if let Some(head) = &head {
+            self.read_history(head).await?;
+        }
         let id = RequestId(uuid::Uuid::new_v4().to_string());
         let store = self.store.clone();
         let request = id.clone();
         let branch = self.config.agent.0.clone();
+        let parent = head.clone();
         blocking(move || {
-            store.write_request(&request, None, &branch, &initial, StoredUsage::default())
+            store.write_request(
+                &request,
+                parent.as_ref(),
+                &branch,
+                &initial,
+                StoredUsage::default(),
+            )
         })
         .await?;
         let mut parent = id.clone();
@@ -1122,11 +1183,11 @@ mod tests {
             let output: Value =
                 serde_json::from_str(third[4].0["output"].as_str().unwrap()).unwrap();
             assert_eq!(output, json!({"tool":"echo","args":{"x":2}}));
-            let mut expected_history = third.clone();
-            expected_history.push(Item(json!({
+            let mut history = third.clone();
+            history.push(Item(json!({
                 "type":"message","role":"assistant","phase":"final_answer","content":"done"
             })));
-            expected_history
+            history
         };
         let usage_events: Vec<_> = store
             .events(None)
@@ -1227,6 +1288,190 @@ mod tests {
         assert_eq!(
             load_history(store, completion.head_request).await.unwrap(),
             completion.transcript
+        );
+    }
+
+    #[tokio::test]
+    async fn run_from_head_uses_parent_once_and_chains_sequential_runs() {
+        let path =
+            std::env::temp_dir().join(format!("harness-engine-head-{}.db", uuid::Uuid::new_v4()));
+        let store = Arc::new(Store::open(&path).unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let prefix = Item(json!({"role":"user","content":"old prefix"}));
+        let parent = RequestId("existing-head".into());
+        store
+            .write_request(
+                &parent,
+                None,
+                "/root",
+                std::slice::from_ref(&prefix),
+                StoredUsage::default(),
+            )
+            .unwrap();
+        let first_new = Item(json!({"role":"user","content":"first new"}));
+        let first_answer = Item(json!({
+            "type":"message","role":"assistant","phase":"final_answer","content":"answer one"
+        }));
+        let second_new = Item(json!({"role":"user","content":"second new"}));
+        let second_answer = Item(json!({
+            "type":"message","role":"assistant","phase":"final_answer","content":"answer two"
+        }));
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new(
+                [
+                    turn("head-one", vec![first_answer.clone()]),
+                    turn("head-two", vec![second_answer.clone()]),
+                ]
+                .into(),
+            ),
+        };
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            replay,
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "stable-session".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let first = engine
+            .run_from_head(Some(parent.clone()), vec![first_new.clone()], cancel_rx)
+            .await
+            .unwrap();
+        let first_req = store.request(&first.head_request).unwrap().unwrap();
+        assert_eq!(first_req.parent, Some(parent.clone()));
+        assert_eq!(
+            requests.lock().unwrap()[0].input,
+            vec![prefix.clone(), first_new.clone()]
+        );
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let second = engine
+            .run_from_head(
+                Some(first.head_request.clone()),
+                vec![second_new.clone()],
+                cancel_rx,
+            )
+            .await
+            .unwrap();
+        let second_req = store.request(&second.head_request).unwrap().unwrap();
+        assert_eq!(second_req.parent, Some(first.head_request.clone()));
+        let recorded = requests.lock().unwrap();
+        assert_eq!(
+            recorded[1].input,
+            vec![
+                prefix.clone(),
+                first_new.clone(),
+                first_answer.clone(),
+                second_new.clone(),
+            ]
+        );
+        assert_eq!(recorded[0].session_id, "stable-session");
+        assert_eq!(recorded[1].session_id, "stable-session");
+        assert_eq!(
+            second.transcript,
+            vec![
+                prefix.clone(),
+                first_new,
+                first_answer,
+                second_new,
+                second_answer,
+            ]
+        );
+        assert_eq!(
+            second.transcript.iter().filter(|i| **i == prefix).count(),
+            1
+        );
+        drop(recorded);
+        drop(engine);
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn run_from_none_starts_with_only_new_items() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new(
+                [turn(
+                    "from-none",
+                    vec![Item(json!({
+                        "type":"message","role":"assistant","phase":"final_answer","content":"done"
+                    }))],
+                )]
+                .into(),
+            ),
+        };
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            replay,
+            Arc::new(Store::memory().unwrap()),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "new-session".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let new_item = Item(json!({"role":"user","content":"only this"}));
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        engine
+            .run_from_head(None, vec![new_item.clone()], cancel_rx)
+            .await
+            .unwrap();
+        let recorded = requests.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].input, vec![new_item]);
+        assert_eq!(recorded[0].session_id, "new-session");
+    }
+
+    #[tokio::test]
+    async fn run_from_missing_head_fails_without_creating_a_fresh_root() {
+        let store = Arc::new(Store::memory().unwrap());
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            Replay {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                turns: Mutex::new([].into()),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "session".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        assert!(matches!(
+            engine
+                .run_from_head(
+                    Some(RequestId("no-such-head".into())),
+                    vec![Item(json!({"role":"user","content":"new"}))],
+                    cancel_rx,
+                )
+                .await,
+            Err(EngineError::Store(StoreError::MissingRequest(id))) if id == "no-such-head"
+        ));
+        assert!(
+            store
+                .children_of(&RequestId("no-such-head".into()))
+                .unwrap()
+                .is_empty()
         );
     }
 

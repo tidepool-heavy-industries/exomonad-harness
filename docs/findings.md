@@ -266,3 +266,14 @@ snapshot and command acknowledgement, and a submitted command produced a
 `FINAL_ANSWER` envelope carrying `WS_LIVE_OK`. The server exited cleanly and
 the temporary database was removed. This exercised the server/WebSocket wire
 path, not browser rendering or a supervised child tree.
+
+The engine now has a branch-start API accepting an optional durable request
+head and only new input items. The new request points to that head; replay
+loads the parent chain once, avoiding copied-history duplication. Tests cover
+fresh start, missing head refusal, and two sequential requests with exact
+parent links and stable session key. Root preserved the ignored live smoke test
+that was absent from the child's older branch and ran integrated fmt, offline
+workspace tests (69 harness passed, 2 live ignored; 12 demo passed), Clippy
+and check. This is a necessary driver primitive, not a complete Here or
+checkpoint fork: the host must still choose a committed source boundary and
+route envelopes safely.
