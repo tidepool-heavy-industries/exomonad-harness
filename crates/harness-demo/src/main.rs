@@ -223,6 +223,7 @@ mod tests {
         let ctx = CallContext {
             handle: harness::provider::JobHandle("sleep-1".into()),
             call_id: CallId("c1".into()),
+            agent: harness::model::AgentPath("/root".into()),
             progress: tx,
         };
         let value = provider
