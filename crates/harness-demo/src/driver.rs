@@ -87,7 +87,7 @@ where
         inbox: mpsc::UnboundedReceiver<Envelope>,
     ) -> Result<EngineCompletion, String> {
         engine
-            .run_from_head_with_durable_envelopes(head, initial, cancel, inbox)
+            .run(head, initial, cancel, inbox)
             .await
             .map_err(|e: EngineError| e.to_string())
     }

@@ -220,7 +220,12 @@ impl CliDriver {
         let input = command_input(history, prompt);
         let completion = self
             .engine
-            .run_with_transcript(input, cancel_rx)
+            .run(
+                None,
+                input,
+                cancel_rx,
+                tokio::sync::mpsc::unbounded_channel().1,
+            )
             .await
             .map_err(safe_engine_error)?;
         let text = final_text(&completion.turn.items)
@@ -1209,17 +1214,19 @@ mod tests {
         let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
         let turn = engine
             .run(
+                None,
                 vec![Item(json!({"role":"user","content":"hello"}))],
                 cancel_rx,
+                tokio::sync::mpsc::unbounded_channel().1,
             )
             .await
             .unwrap();
         assert_eq!(
-            final_text(&turn.items).as_deref(),
+            final_text(&turn.turn.items).as_deref(),
             Some("offline engine answer")
         );
-        assert_eq!(turn.usage.input_tokens, 12);
-        assert_eq!(turn.usage.output_tokens, 4);
+        assert_eq!(turn.turn.usage.input_tokens, 12);
+        assert_eq!(turn.turn.usage.output_tokens, 4);
         let _ = std::fs::remove_dir_all(root);
     }
 
