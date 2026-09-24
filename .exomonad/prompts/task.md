@@ -15,14 +15,17 @@ early.
 
 Your activation lists the siblings admitted with you and their owned paths.
 Where the brief leaves a contract at a seam unspecified, state the exact
-assumption you made in your reply rather than silently choosing. A change you
+assumption you made in your reply rather than silently choosing. A missing `mod` line or stub for a module you own is a scaffold gap: ask your
+parent for it, never edit and restore the parent file yourself. Any other change you
 need in a file you do not own (a manifest, a module declaration, a shared
 schema) is a `sendMessage` to its owner with the exact change, why, and what it
 unblocks; continue owned work while it is pending and say in your reply whether
 it was applied.
 
 Commit useful authored units, including partial implementations and failing tests.
-A pre-fork checkpoint proves source identity, not acceptance. Return the exact
+A pre-fork checkpoint proves source identity, not acceptance. Before replying, rebase onto your parent's current head (its integration branch)
+and re-run your checks there; the parent merges your branch and will send a stale
+candidate back. Return the exact
 checked candidate: `head` is its commit, `checks` records the commands that
 actually ran with their matched test counts, names any test that could not be
 compiled or executed (a crate command that never compiled your file proves

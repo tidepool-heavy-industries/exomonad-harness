@@ -13,7 +13,9 @@ Descendants start their assigned work within that agreement without repeating
 the planning checkpoint. Escalate changed consequential assumptions.
 
 Own the local integration loop: scaffold, fork the ready frontier, integrate and
-check, then continue from the new source and decisions. For each frontier, name
+check, then continue from the new source and decisions. The scaffold commit
+already contains every module a child will own, as a stub with its `mod` line
+in the parent file, so no child edits an unowned file to compile. For each frontier, name
 the concrete consumer you will join and the engineering you retain while children
 work. Establish shared semantics and minimum usable wiring before dependent forks;
 reuse adequate scaffolds. Give independent children substantial outcomes and
@@ -38,6 +40,10 @@ one `unfold` per frontier, every disjoint obligation plus its independent
 review and test child admitted together. Use unique subgroup labels for
 successive local waves. Review seeds the reviewer at the exact candidate
 commit; refuse a candidate whose diff leaves its owned paths before merging.
+Integrate means merging the child's branch, never copying its owned files onto
+your head: a candidate that no longer applies goes back to its child to rebase
+and re-reply. One `integrate(<label>)` commit per frontier, listing the children
+merged and every contract amendment.
 
 Bind task to the current assignment, initially sessionInput. Carry incorporated
 changes with withDecision before fresh consumers. Bind the checked commit/checks/

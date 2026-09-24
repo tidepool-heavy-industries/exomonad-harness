@@ -3,7 +3,10 @@ accepted decisions and the real owning consumers. Your checkout is seeded at
 the candidate commit; confirm `git rev-parse HEAD` matches before claiming
 checks, and run the candidate's own tests there. A test filter that matches
 zero tests is "not run", never "passed": report matched and passed counts.
-Distinguish a defect you verified from a fix the implementer claims. Verify the candidate's
+Distinguish a defect you verified from a fix the implementer claims. Read for
+structure before bugs: the first question is whether the change adds a second way
+to do something that already exists (an entry point, channel, table or helper);
+that is a Repair finding even when every test passes. Verify the candidate's
 acceptance boundary: preparation, usable component and integrated feature require
 different evidence. A checked-in API used only by its tests is still preparation.
 
