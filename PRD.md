@@ -183,7 +183,10 @@ Subscription requests use the streaming-only
 `store: false`, SSE), with Codex CLI version, originator, account, and stable
 session headers. A 401 stops the run for operator attention, not a refresh.
 Platform API-key auth (`api.openai.com/v1/responses`) is later behind the same
-trait. Subscription tokens lack `api.responses.write`, so the platform endpoint
+trait.
+Wave2: login (device code + browser) and refresh move INTO this trait so the
+run no longer depends on a codex install; the retired tidepool harness tree has
+a working implementation to read as reference (own code, codex rule applies). Subscription tokens lack `api.responses.write`, so the platform endpoint
 cannot serve as this run's pre-flight or first transport.
 
 ## web view
@@ -216,6 +219,7 @@ web: vite, ts (`strict`, `noUncheckedIndexedAccess`), react. radix primitives + 
 - demo hooks: tool-call-admission (owned/mustNot veto), tool-result (the watchdog nudge ledger), child-reply (pass-through + a `reply` schema check), compaction. all others pass-through.
 - demo children = the same provider at another effort or model; a demo run is a real tree (root → leads → leaves) doing a real multi-file task in a scratch git repo, not a scripted transcript.
 - shell/edit marked dev-only; no haskell in the picture; exomonad-blind !
+- wave2: `run` gains a minimal sandbox (cwd = subtree worktree, rlimits, wall timeout, output cap, network off where the platform allows) and a `read{path}` tool, so the demo is a usable standalone coding agent the operator can drive from the page. the sandbox is the provider's (tool meaning), the veto is the crate's. still exomonad-blind !
 
 ## hooks (crate ⊥ any judgment service ! the crate knows nothing of jev; it knows it must offer MANY well-typed hooks. ∀hook: typed event in → typed decision out; default = pass-through; provider may attach an opaque `evidence` blob to any decision, stored beside it)
 | hook | event (in) | decision (out) |
