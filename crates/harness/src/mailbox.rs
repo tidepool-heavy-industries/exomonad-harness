@@ -40,6 +40,49 @@ pub struct Envelope {
 }
 
 impl Envelope {
+    /// Convert a completed assistant final-answer message into a parent
+    /// mailbox envelope. Other assistant items stay in their normal channel.
+    pub fn from_final_answer_item(
+        recipient: AgentPath,
+        sender: AgentPath,
+        item: &serde_json::Value,
+        timestamp_ms: i64,
+    ) -> Option<Self> {
+        if item.get("type").and_then(serde_json::Value::as_str) != Some("message")
+            || item.get("role").and_then(serde_json::Value::as_str) != Some("assistant")
+            || item.get("phase").and_then(serde_json::Value::as_str) != Some("final_answer")
+        {
+            return None;
+        }
+        let payload = item
+            .get("content")?
+            .as_array()?
+            .iter()
+            .filter_map(|part| {
+                (part.get("type")?.as_str()? == "output_text")
+                    .then(|| part.get("text")?.as_str())
+                    .flatten()
+            })
+            .collect::<String>();
+        Some(Self::final_answer(recipient, sender, payload, timestamp_ms))
+    }
+
+    pub fn final_answer(
+        recipient: AgentPath,
+        sender: AgentPath,
+        payload: String,
+        timestamp_ms: i64,
+    ) -> Self {
+        Self {
+            kind: EnvelopeType::FinalAnswer,
+            recipient,
+            sender,
+            payload,
+            class: DeliveryClass::AtBoundary,
+            timestamp_ms,
+        }
+    }
+
     /// The default scheduling class for an envelope's sender.
     ///
     /// A later mailbox hook may change this. The `Steer` restriction to
@@ -97,10 +140,7 @@ pub fn render_coalesced(envelopes: &[Envelope]) -> Vec<(MessageChannel, String)>
             prior_body.push('\n');
             prior_body.push_str(&body);
         } else if channel == MessageChannel::Assistant {
-            rendered.push((
-                channel,
-                format!("## from {}\n{}", envelope.sender.0, body),
-            ));
+            rendered.push((channel, format!("## from {}\n{}", envelope.sender.0, body)));
         } else {
             rendered.push((channel, body));
         }
@@ -144,6 +184,35 @@ mod tests {
         assert_eq!(
             agent.render().1,
             "Message Type: FINAL_ANSWER\nTask name: /root/worker\nSender: /root/worker\nPayload:\n{}"
+        );
+    }
+
+    #[test]
+    fn final_answer_item_becomes_parent_envelope_not_tool_output() {
+        let item = serde_json::json!({
+            "type":"message",
+            "role":"assistant",
+            "phase":"final_answer",
+            "content":[{"type":"output_text","text":"{\"ok\":"},{"type":"output_text","text":"true}"}]
+        });
+        let envelope = Envelope::from_final_answer_item(
+            AgentPath("/root".into()),
+            AgentPath("/root/worker".into()),
+            &item,
+            55,
+        )
+        .unwrap();
+        assert_eq!(envelope.kind, EnvelopeType::FinalAnswer);
+        assert_eq!(envelope.payload, "{\"ok\":true}");
+        assert_eq!(envelope.class, DeliveryClass::AtBoundary);
+        assert!(
+            Envelope::from_final_answer_item(
+                AgentPath("/root".into()),
+                AgentPath("/root/worker".into()),
+                &serde_json::json!({"type":"function_call","name":"finalize"}),
+                55
+            )
+            .is_none()
         );
     }
 

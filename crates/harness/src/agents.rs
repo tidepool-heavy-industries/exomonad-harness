@@ -1,4 +1,5 @@
 use crate::model::AgentPath;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt, str::FromStr};
 
@@ -72,7 +73,27 @@ impl TryFrom<&str> for AgentPath {
     }
 }
 
+/// Serde boundary wrapper for untrusted model/API path strings. The legacy
+/// `AgentPath` tuple keeps its existing serde representation for compatibility;
+/// new ingress code should deserialize this wrapper instead.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct ValidatedAgentPath(pub AgentPath);
+
+impl<'de> Deserialize<'de> for ValidatedAgentPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        AgentPath::parse(&raw)
+            .map(Self)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Contract {
     pub clauses: Vec<String>,
     pub acceptance: Vec<String>,
@@ -94,6 +115,200 @@ pub enum ForkFrom {
 pub struct Agent {
     pub path: AgentPath,
     pub contract: Contract,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SpawnSource {
+    Prompt,
+    Here,
+    Checkpoint(String),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpawnSourceInput {
+    kind: String,
+    name: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct AgentVerbError(pub String);
+
+/// Execution boundary for harness-owned agent operations. Implementations
+/// bind these operations to conversation storage and the request scheduler.
+#[async_trait]
+pub trait AgentToolService: Send + Sync {
+    async fn spawn_agent(
+        &self,
+        parent: &AgentPath,
+        task_name: &str,
+        from: SpawnSource,
+        contract: Contract,
+    ) -> Result<serde_json::Value, AgentVerbError>;
+    async fn send_message(
+        &self,
+        sender: &AgentPath,
+        target: AgentPath,
+        message: String,
+    ) -> Result<serde_json::Value, AgentVerbError>;
+    async fn followup_task(
+        &self,
+        sender: &AgentPath,
+        target: AgentPath,
+        contract: Contract,
+    ) -> Result<serde_json::Value, AgentVerbError>;
+    async fn wait_agent(&self, agent: &AgentPath) -> Result<serde_json::Value, AgentVerbError>;
+    async fn checkpoint(
+        &self,
+        agent: &AgentPath,
+        name: String,
+    ) -> Result<serde_json::Value, AgentVerbError>;
+    async fn list_agents(
+        &self,
+        agent: &AgentPath,
+        prefix: Option<AgentPath>,
+    ) -> Result<serde_json::Value, AgentVerbError>;
+    async fn interrupt_agent(
+        &self,
+        agent: &AgentPath,
+        target: AgentPath,
+    ) -> Result<serde_json::Value, AgentVerbError>;
+}
+
+pub fn is_agent_verb(name: &str) -> bool {
+    matches!(
+        name,
+        "spawn_agent"
+            | "send_message"
+            | "followup_task"
+            | "wait_agent"
+            | "checkpoint"
+            | "list_agents"
+            | "interrupt_agent"
+    )
+}
+
+/// Validate a model tool call and route it to the runtime owner. Agent paths
+/// enter only through the grammar parser at this boundary.
+pub async fn dispatch_agent_verb(
+    service: &dyn AgentToolService,
+    agent: &AgentPath,
+    name: &str,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, AgentVerbError> {
+    if !agent.is_canonical() {
+        return Err(AgentVerbError("caller agent path is not canonical".into()));
+    }
+    fn parse_path(value: &serde_json::Value, key: &str) -> Result<AgentPath, AgentVerbError> {
+        let raw = value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| AgentVerbError(format!("missing string field `{key}`")))?;
+        AgentPath::parse(raw).map_err(|e| AgentVerbError(e.to_string()))
+    }
+    fn exact_keys(args: &serde_json::Value, allowed: &[&str]) -> Result<(), AgentVerbError> {
+        let object = args
+            .as_object()
+            .ok_or_else(|| AgentVerbError("tool arguments must be an object".into()))?;
+        if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+            return Err(AgentVerbError(
+                "tool arguments contain unknown fields".into(),
+            ));
+        }
+        Ok(())
+    }
+    match name {
+        "spawn_agent" => {
+            exact_keys(&args, &["task_name", "from", "task"])?;
+            let task_name = args
+                .get("task_name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| AgentVerbError("missing string field `task_name`".into()))?;
+            let task_name = AgentPath::normalize_task_name(task_name)
+                .map_err(|e| AgentVerbError(e.to_string()))?;
+            let from: SpawnSourceInput = serde_json::from_value(
+                args.get("from")
+                    .cloned()
+                    .ok_or_else(|| AgentVerbError("missing field `from`".into()))?,
+            )
+            .map_err(|e| AgentVerbError(format!("invalid spawn source: {e}")))?;
+            if args["from"].get("name").is_none() {
+                return Err(AgentVerbError(
+                    "spawn source requires a `name` field (null when unused)".into(),
+                ));
+            }
+            let from = match (from.kind.as_str(), from.name) {
+                ("prompt", None) => SpawnSource::Prompt,
+                ("here", None) => SpawnSource::Here,
+                ("checkpoint", Some(name)) if !name.is_empty() => SpawnSource::Checkpoint(name),
+                ("checkpoint", _) => {
+                    return Err(AgentVerbError(
+                        "checkpoint source requires a non-empty name".into(),
+                    ));
+                }
+                _ => return Err(AgentVerbError("unknown spawn source kind".into())),
+            };
+            let contract: Contract = serde_json::from_value(
+                args.get("task")
+                    .cloned()
+                    .ok_or_else(|| AgentVerbError("missing field `task`".into()))?,
+            )
+            .map_err(|e| AgentVerbError(format!("invalid task contract: {e}")))?;
+            service.spawn_agent(agent, &task_name, from, contract).await
+        }
+        "send_message" => {
+            exact_keys(&args, &["target", "message"])?;
+            let target = parse_path(&args, "target")?;
+            let message = args
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| AgentVerbError("missing string field `message`".into()))?;
+            service
+                .send_message(agent, target, message.to_owned())
+                .await
+        }
+        "followup_task" => {
+            exact_keys(&args, &["target", "task"])?;
+            let target = parse_path(&args, "target")?;
+            let contract: Contract = serde_json::from_value(
+                args.get("task")
+                    .cloned()
+                    .ok_or_else(|| AgentVerbError("missing field `task`".into()))?,
+            )
+            .map_err(|e| AgentVerbError(format!("invalid task contract: {e}")))?;
+            service.followup_task(agent, target, contract).await
+        }
+        "wait_agent" => {
+            exact_keys(&args, &[])?;
+            service.wait_agent(agent).await
+        }
+        "checkpoint" => {
+            exact_keys(&args, &["name"])?;
+            let name = args
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| AgentVerbError("missing string field `name`".into()))?;
+            service.checkpoint(agent, name.to_owned()).await
+        }
+        "list_agents" => {
+            exact_keys(&args, &["path_prefix"])?;
+            let prefix = match args.get("path_prefix") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(raw)) => {
+                    Some(AgentPath::parse(raw).map_err(|e| AgentVerbError(e.to_string()))?)
+                }
+                _ => return Err(AgentVerbError("invalid `path_prefix`".into())),
+            };
+            service.list_agents(agent, prefix).await
+        }
+        "interrupt_agent" => {
+            exact_keys(&args, &["target"])?;
+            let target = parse_path(&args, "target")?;
+            service.interrupt_agent(agent, target).await
+        }
+        _ => Err(AgentVerbError(format!("unknown agent verb `{name}`"))),
+    }
 }
 
 /// OpenAI Responses function-tool schemas for the model-facing agent verbs.
@@ -176,6 +391,11 @@ pub fn verb_tool_schemas() -> Vec<serde_json::Value> {
             object(json!({}), &[]),
         ),
         function(
+            "checkpoint",
+            "Create a named checkpoint at the current completed request boundary.",
+            object(json!({"name":string()}), &["name"]),
+        ),
+        function(
             "list_agents",
             "List live agents in the current root thread tree. Optionally filter by task-path prefix.",
             object(
@@ -197,6 +417,7 @@ mod tests {
 
     #[test]
     fn agent_paths_canonicalize_kebab_components() {
+        assert_eq!(AgentPath::parse("/root").unwrap().0, "/root");
         let path = AgentPath::parse("/root/review-worker_2").unwrap();
         assert_eq!(path.0, "/root/review_worker_2");
         assert!(path.is_canonical());
@@ -244,6 +465,19 @@ mod tests {
     }
 
     #[test]
+    fn validated_serde_path_rejects_non_absolute_and_invalid_paths() {
+        assert_eq!(
+            serde_json::from_str::<ValidatedAgentPath>(r#""/root/worker-1""#)
+                .unwrap()
+                .0
+                .0,
+            "/root/worker_1"
+        );
+        assert!(serde_json::from_str::<ValidatedAgentPath>(r#""root/worker""#).is_err());
+        assert!(serde_json::from_str::<ValidatedAgentPath>(r#""/root//worker""#).is_err());
+    }
+
+    #[test]
     fn agent_verb_schemas_are_strict_and_complete() {
         let schemas = verb_tool_schemas();
         let names: Vec<_> = schemas
@@ -257,6 +491,7 @@ mod tests {
                 "send_message",
                 "followup_task",
                 "wait_agent",
+                "checkpoint",
                 "list_agents",
                 "interrupt_agent"
             ]
