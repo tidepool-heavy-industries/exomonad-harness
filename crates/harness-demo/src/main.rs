@@ -6,10 +6,13 @@ use serde_json::{Value, json};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+const OUTPUT_LIMIT: usize = 16 * 1024;
+
 #[derive(Clone, Debug)]
 pub struct DemoProvider {
     root: PathBuf,
     allow_shell: bool,
+    owned: Vec<PathBuf>,
 }
 
 impl DemoProvider {
@@ -19,7 +22,15 @@ impl DemoProvider {
         Self {
             root: root.into(),
             allow_shell,
+            owned: Vec::new(),
         }
+    }
+
+    /// Authority comes from the host's admitted task contract, never tool
+    /// arguments. An empty list (the default) denies all edits.
+    pub fn with_owned_paths(mut self, owned: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.owned = owned.into_iter().collect();
+        self
     }
 
     async fn run_command(&self, args: &Value) -> Result<Value, ProviderError> {
@@ -36,11 +47,15 @@ impl DemoProvider {
             .output()
             .await
             .map_err(|e| ProviderError::Tool(format!("could not start shell: {e}")))?;
+        let (stdout, stdout_truncated) = capped(&output.stdout);
+        let (stderr, stderr_truncated) = capped(&output.stderr);
         Ok(json!({
             "status": output.status.code(),
             "success": output.status.success(),
-            "stdout": String::from_utf8_lossy(&output.stdout),
-            "stderr": String::from_utf8_lossy(&output.stderr)
+            "stdout": stdout,
+            "stderr": stderr,
+            "output_truncated": stdout_truncated || stderr_truncated,
+            "output_limit_bytes_per_stream": OUTPUT_LIMIT
         }))
     }
 
@@ -51,14 +66,7 @@ impl DemoProvider {
                 "path must be a relative, normalized path".into(),
             ));
         }
-        let owned = args
-            .get("owned")
-            .and_then(Value::as_array)
-            .ok_or_else(|| ProviderError::Tool("owned must declare the permitted paths".into()))?;
-        let declared = owned
-            .iter()
-            .filter_map(Value::as_str)
-            .any(|p| Path::new(p) == rel);
+        let declared = self.owned.iter().any(|p| rel == p || rel.starts_with(p));
         if !declared {
             return Err(ProviderError::Tool("path is not declared owned".into()));
         }
@@ -101,6 +109,14 @@ fn string_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, ProviderError> 
     args.get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| ProviderError::Tool(format!("{key} must be a string")))
+}
+
+fn capped(bytes: &[u8]) -> (String, bool) {
+    let end = bytes.len().min(OUTPUT_LIMIT);
+    (
+        String::from_utf8_lossy(&bytes[..end]).into_owned(),
+        bytes.len() > OUTPUT_LIMIT,
+    )
 }
 
 #[async_trait]
@@ -157,10 +173,10 @@ impl Provider for DemoProvider {
     fn tools(&self) -> Vec<Value> {
         vec![
             json!({"type":"custom","name":"run","description":"DEV ONLY: execute trusted shell script locally"}),
-            json!({"type":"function","name":"sleep","description":"Wait asynchronously","parameters":{"type":"object","properties":{"duration_ms":{"type":"integer","minimum":0}},"required":["duration_ms"]}}),
-            json!({"type":"function","name":"edit","description":"Replace one exact string in an existing owned file","parameters":{"type":"object","properties":{"path":{"type":"string"},"owned":{"type":"array","items":{"type":"string"}},"before":{"type":"string"},"after":{"type":"string"}},"required":["path","owned","before","after"]}}),
-            json!({"type":"function","name":"ask","description":"Request operator input (host integration required)","parameters":{"type":"object","properties":{"question":{"type":"string"}},"required":["question"]}}),
-            json!({"type":"function","name":"form","description":"Request a schema-backed operator form (host integration required)","parameters":{"type":"object","properties":{"title":{"type":"string"},"schema":{"type":"object"}},"required":["title","schema"]}}),
+            json!({"type":"function","name":"sleep","description":"Wait asynchronously","parameters":{"type":"object","properties":{"duration_ms":{"type":"integer","minimum":0}},"required":["duration_ms"],"additionalProperties":false},"strict":true}),
+            json!({"type":"function","name":"edit","description":"Replace one exact string in an existing host-authorized owned file","parameters":{"type":"object","properties":{"path":{"type":"string"},"before":{"type":"string"},"after":{"type":"string"}},"required":["path","before","after"],"additionalProperties":false},"strict":true}),
+            json!({"type":"function","name":"ask","description":"Request operator input (host integration required)","parameters":{"type":"object","properties":{"question":{"type":"string"}},"required":["question"],"additionalProperties":false},"strict":true}),
+            json!({"type":"function","name":"form","description":"Request a schema-backed operator form (host integration required)","parameters":{"type":"object","properties":{"title":{"type":"string"},"schema":{"type":"object"}},"required":["title","schema"],"additionalProperties":false},"strict":true}),
         ]
     }
 }
@@ -224,22 +240,33 @@ mod tests {
         let provider = DemoProvider::development(&root, false);
         let outside = root.parent().unwrap().join("outside-demo.txt");
         std::fs::write(&outside, "safe").unwrap();
+        // Forged `owned` is ignored; only constructor-supplied authority counts.
         assert!(
             provider
                 .call(
                     "edit",
-                    json!({"path":"ok.txt","owned":[],"before":"old","after":"new"})
+                    json!({"path":"ok.txt","owned":["ok.txt"],"before":"old","after":"new"})
                 )
                 .await
                 .is_err()
         );
-        assert!(provider.call("edit", json!({"path":"../outside-demo.txt","owned":["../outside-demo.txt"],"before":"safe","after":"bad"})).await.is_err());
-        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "safe");
-        assert_eq!(
-            provider
+        let authorized =
+            DemoProvider::development(&root, false).with_owned_paths([PathBuf::from("ok.txt")]);
+        assert!(
+            authorized
                 .call(
                     "edit",
-                    json!({"path":"ok.txt","owned":["ok.txt"],"before":"old","after":"new"})
+                    json!({"path":"../outside-demo.txt","before":"safe","after":"bad"})
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "safe");
+        assert_eq!(
+            authorized
+                .call(
+                    "edit",
+                    json!({"path":"ok.txt","before":"old","after":"new"})
                 )
                 .await
                 .unwrap()["edited"],
@@ -248,5 +275,26 @@ mod tests {
         assert_eq!(std::fs::read_to_string(root.join("ok.txt")).unwrap(), "new");
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_file(outside);
+    }
+
+    #[tokio::test]
+    async fn function_tools_are_strict_and_shell_output_is_capped() {
+        let provider = DemoProvider::development(".", true);
+        let functions: Vec<_> = provider
+            .tools()
+            .into_iter()
+            .filter(|t| t["type"] == "function")
+            .collect();
+        assert_eq!(functions.len(), 4);
+        for tool in functions {
+            assert_eq!(tool["strict"], true);
+            assert_eq!(tool["parameters"]["additionalProperties"], false);
+        }
+        let result = provider
+            .call("run", json!({"script":"yes x | head -c 40000"}))
+            .await
+            .unwrap();
+        assert_eq!(result["stdout"].as_str().unwrap().len(), OUTPUT_LIMIT);
+        assert_eq!(result["output_truncated"], true);
     }
 }
