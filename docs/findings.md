@@ -258,3 +258,11 @@ reconstructs forked prefixes or starts idle-agent follow-ups. The stored
 child-path form is immediate single-segment parent/task, pending resolution of
 the PRD's doubled-path notation. The service's generation watch is local to
 its instance and only hints the host to rescan the durable table.
+
+A later live loopback WebSocket smoke also passed with the demo server and
+read-only subscription credential: browser-session login set an HttpOnly
+cookie, the authenticated `/api/ws` connection received an authoritative
+snapshot and command acknowledgement, and a submitted command produced a
+`FINAL_ANSWER` envelope carrying `WS_LIVE_OK`. The server exited cleanly and
+the temporary database was removed. This exercised the server/WebSocket wire
+path, not browser rendering or a supervised child tree.
