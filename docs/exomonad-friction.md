@@ -11,18 +11,29 @@ cost, and a concrete engine improvement; do not fabricate unobserved nudges.
   the selected child effect row before admission, and return a direct
   preflight error rather than deferred startup failure. The temporary
   watchdog fallback is commit `babfb4d`.
-- **Bash output:** An observation can fail after a command committed when
-  output exceeds the observation budget. Cost: uncertain mutation state
-  without a visible result; the operator saw this in a child. Idea: make
-  “effects committed, output retained at handle” a structured receipt with
-  an explicit paging path. Smaller observations are useful advice, not a
-  constraint on assignments.
+- **Bash latency:** The initial output-size diagnosis was wrong. The operator
+  identified shared-checkout contention and a compile-cache miss as the
+  causes of slow calls, and fixed the one failing engine classification
+  step. Cost: tens-of-seconds latency in a wide tree. Idea: batch independent
+  commands and use fewer, larger bounded children while sharing this machine.
 - **Delegation:** I initially sent a Luna to plan and let a structural Luna
   grind without a stop/ping trigger. Cost: expensive time and delayed seam
   decisions. Idea: Sol-owned plans, bounded Luna tasks with a failure/time
   checkpoint that returns `Blocked` or forks a named Luna subtree. Review
   only integration candidates; read findings probes directly. These are
   operator corrections now incorporated into `docs/correction-plan.md`.
+- **Prompt discovery:** The distinction between a single kebab label and a
+  group path had to be rediscovered only after a Luna hit `InvalidKebabName`.
+  Put that short example in the fork/task prompt up front. Likewise, the
+  stop-and-ping threshold for a Luna should be present in every assignment
+  without waiting for a long sequence of failed checks. Record future
+  “I had to look this up but it belonged in my prompt” moments here.
+- **Event-driven waiting:** Today the root repeatedly reads router snapshots
+  to learn that nothing has changed. The intended async-first harness should
+  allow “wait for this result, then resume” as a job, so the model works on
+  independent obligations instead of polling. This matters to the planned
+  Exomonad port and is a design goal, not behavior this correction wave has
+  already verified.
 
 ## core-correction
 

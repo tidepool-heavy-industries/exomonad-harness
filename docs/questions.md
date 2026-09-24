@@ -33,11 +33,11 @@ a positive hit is not required.
 
 ## Tooling friction (not operator questions)
 
-- A roughly 10 KB Bash observation can fail after its command has committed
-  with `observation budget 100000 exhausted`. Operator advice (2026-09-24):
-  keep `max_output_bytes` modest where useful (often ≤8 KB), read large files
-  in slices, and inspect retained jobs rather than replaying an uncertain
-  mutation. This is advice, not an assignment constraint.
+- Bash calls can be slow while a wide tree contends on the shared machine
+  checkout and misses the compile cache. An earlier output-size diagnosis
+  was incorrect; the failing classification step was fixed in the engine.
+  Bound output for readability, batch independent commands and prefer fewer,
+  larger children for the remainder of this wave.
 - The native `spawn_agent` was offered but its child could not use Bash,
   Haskell, or status (`hosted tool call is not authorized`); Exomonad
   `spawnWatched` was the working delegation path.

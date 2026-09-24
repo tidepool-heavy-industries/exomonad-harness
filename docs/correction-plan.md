@@ -35,8 +35,7 @@ structural work, or accumulating repeated failed checks without a candidate,
 must stop and ping root: split into a Luna subtree with named seams, or return
 `Blocked` identifying the seam it cannot settle. Assignments need a stop/ping
 condition. Review integration candidates, not findings-only probes; root reads
-their evidence. Keep output observations modest where useful, but the
-operator's 8 KB suggestion is advice, not a contractual limit.
+their evidence.
 
 While one candidate is under review, root advances independent ready work
 rather than serializing the wave on that notice. The ordered (a)→(d)
@@ -44,6 +43,14 @@ contract still controls shared loop changes and integration dependencies.
 The operator has requested a handoff-ready stopping point after the next
 Exomonad-improvement wave; unfinished live acceptance must stay explicitly
 open rather than being called complete.
+
+Later operator correction: Bash latency came from shared-checkout contention
+and a compile-cache miss, not output size. One failed classification step was
+fixed in the engine. Remove output-size limits from task packets, batch
+independent commands, and prefer fewer, larger bounded children for the
+rest of this wave. Root is pausing polling/integration briefly to read
+planning material and record engine friction; active leaves were asked to
+commit candidates and explain the delay in their own words.
 
 ## Ownership and join
 
