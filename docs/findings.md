@@ -226,3 +226,21 @@ this code; root restored the existing ignored live smoke test, fixed a test
 MutexGuard lifetime, and ran integrated fmt, offline workspace tests (60 harness
 passed, 2 live ignored; 7 demo passed), Clippy and check. The demo server must
 consume this API before claiming multi-command continuity.
+
+The demo binary now has an opt-in loopback-only `--db … --serve
+127.0.0.1:<port>` driver. It requires a separate operator session secret from
+`HARNESS_DEMO_SESSION_SECRET`, serves built `web/dist`, queues one `/root` turn
+at a time, publishes web-contract records, stores the complete successful
+engine transcript, and marks interrupted in-flight records on restart. The
+browser-facing snapshot is a minimal one-agent view, not a full reconstructed
+tree/event log. The driver refuses non-loopback plaintext binds and missing
+web assets. Integrated fmt, offline Rust tests (60 harness passed, 2 live
+ignored; 12 demo passed), Clippy/check, and web tests (10), TypeScript check
+and production build passed. A live local server smoke used read-only
+subscription auth: unauthenticated POST was 401; browser-session login and two
+authenticated command POSTs succeeded, yielding `SERVER_FIRST_OK` then
+`SERVER_SECOND_OK` with four persisted history items. Ctrl-C exited cleanly;
+the temporary SQLite database was removed. This verified HTTP command/session
+and sequential model continuity, **not** a real browser/WebSocket round trip,
+streamed token deltas, or child-agent supervision. Local cookie sessions do
+not survive restart; HTTPS/reverse-proxy serving is not configured.

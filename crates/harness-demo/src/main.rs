@@ -1,14 +1,16 @@
 //! Reference provider for the harness. `run` intentionally invokes a local
 //! shell and is suitable only for trusted, development-time demonstrations.
 use async_trait::async_trait;
-use harness::engine::{Engine, EngineConfig, EngineError};
+use harness::engine::{Engine, EngineCompletion, EngineConfig, EngineError};
 use harness::item::Item;
 use harness::model::{AgentPath, Effort};
 use harness::provider::{CallContext, Provider, ProviderError};
+use harness::server::{self, ClientCommand, QueuedCommand, ServerConfig, SessionSecret, Snapshot};
 use harness::store::Store;
 use harness::transport::{TransportError, auth::CodexFileAuth};
 use harness::turn::JobScheduler;
 use serde_json::{Value, json};
+use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,11 +24,22 @@ struct CliOptions {
     dev_shell: bool,
 }
 
-fn parse_args(args: &[String]) -> Result<Option<CliOptions>, String> {
+#[derive(Debug, PartialEq, Eq)]
+enum Mode {
+    Smoke,
+    Ask(CliOptions),
+    Serve {
+        db: PathBuf,
+        addr: SocketAddr,
+        dev_shell: bool,
+    },
+}
+
+fn parse_args(args: &[String]) -> Result<Mode, String> {
     if args.first().map(String::as_str) == Some("--smoke") {
-        return Ok(None);
+        return Ok(Mode::Smoke);
     }
-    let (mut db, mut ask, mut dev_shell) = (None, None, false);
+    let (mut db, mut ask, mut serve, mut dev_shell) = (None, None, None, false);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -38,6 +51,12 @@ fn parse_args(args: &[String]) -> Result<Option<CliOptions>, String> {
                 i += 1;
                 ask = Some(args.get(i).ok_or("--ask requires text")?.clone());
             }
+            "--serve" => {
+                i += 1;
+                serve = Some(parse_serve_address(
+                    args.get(i).ok_or("--serve requires an address")?,
+                )?);
+            }
             "--dev-shell" => dev_shell = true,
             "--allow-shell" => {
                 return Err("use --dev-shell to opt into development shell execution".into());
@@ -47,11 +66,45 @@ fn parse_args(args: &[String]) -> Result<Option<CliOptions>, String> {
         i += 1;
     }
     let db = db.ok_or("--db <sqlite-path> is required")?;
+    if let Some(addr) = serve {
+        if ask.is_some() {
+            return Err("--serve and --ask are mutually exclusive".into());
+        }
+        return Ok(Mode::Serve {
+            db,
+            addr,
+            dev_shell,
+        });
+    }
     let ask = ask.ok_or("--ask <text> is required")?;
     if ask.trim().is_empty() {
         return Err("--ask text must not be empty".into());
     }
-    Ok(Some(CliOptions { db, ask, dev_shell }))
+    Ok(Mode::Ask(CliOptions { db, ask, dev_shell }))
+}
+
+/// Browser login and its cookie use HTTP in this demo; do not expose them over
+/// a LAN interface. A deliberate HTTPS/reverse-proxy mode can be added later.
+fn parse_serve_address(value: &str) -> Result<SocketAddr, String> {
+    let address = value
+        .parse::<SocketAddr>()
+        .map_err(|_| "--serve requires a valid socket address".to_owned())?;
+    if !address.ip().is_loopback() {
+        return Err(
+            "--serve is loopback-only because browser-session login uses plain HTTP".into(),
+        );
+    }
+    Ok(address)
+}
+
+fn ensure_asset_root(path: &Path) -> Result<(), String> {
+    if !path.is_dir() {
+        return Err(format!(
+            "web assets are missing at {}; build web/dist before starting --serve",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 struct CliProvider(DemoProvider);
@@ -142,22 +195,305 @@ impl CliDriver {
         Ok(Self { engine })
     }
 
-    async fn ask(&self, prompt: &str) -> Result<(String, u64, u64), String> {
-        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-        let turn = self
+    async fn ask(
+        &self,
+        prompt: &str,
+        history: &[Item],
+        cancel_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<(String, EngineCompletion), String> {
+        let input = command_input(history, prompt);
+        let completion = self
             .engine
-            .run(
-                vec![Item(
-                    json!({"type":"message","role":"user","content":prompt}),
-                )],
-                cancel_rx,
-            )
+            .run_with_transcript(input, cancel_rx)
             .await
             .map_err(safe_engine_error)?;
-        let text = final_text(&turn.items)
+        let text = final_text(&completion.turn.items)
             .ok_or_else(|| "engine returned no final assistant text".to_owned())?;
-        Ok((text, turn.usage.input_tokens, turn.usage.output_tokens))
+        Ok((text, completion))
     }
+}
+
+const ROOT_CONVERSATION_ID: &str = "conversation/root";
+const ROOT_PATH: &str = "/root";
+
+fn conversation_record(state: &str) -> Value {
+    json!({"id":ROOT_CONVERSATION_ID,"path":ROOT_PATH,"state":state})
+}
+
+fn request_record(id: &str, state: &str) -> Value {
+    json!({"id":id,"conversationId":ROOT_CONVERSATION_ID,"state":state})
+}
+
+fn job_record(id: &str, state: &str) -> Value {
+    json!({"id":id,"conversationId":ROOT_CONVERSATION_ID,"state":state})
+}
+
+fn final_envelope(id: &str, payload: &str) -> Value {
+    json!({"id":id,"conversationId":ROOT_CONVERSATION_ID,"recipient":ROOT_PATH,
+        "sender":ROOT_PATH,"type":"FINAL_ANSWER","payload":payload})
+}
+
+fn command_input(history: &[Item], prompt: &str) -> Vec<Item> {
+    let mut input = history.to_vec();
+    input.push(Item(
+        json!({"type":"message","role":"user","content":prompt}),
+    ));
+    input
+}
+
+#[derive(Debug)]
+struct PersistedServerState {
+    history: Vec<Item>,
+    jobs: Vec<Value>,
+    requests: Vec<Value>,
+    envelopes: Vec<Value>,
+    conversation: Value,
+}
+
+fn restore_server_state(raw: &str) -> Result<PersistedServerState, String> {
+    let value: Value = serde_json::from_str(raw)
+        .map_err(|_| "persisted demo server state is malformed JSON".to_owned())?;
+    let required = |field: &str| {
+        value
+            .get(field)
+            .ok_or_else(|| format!("persisted demo server state is missing {field}"))
+    };
+    let history = serde_json::from_value::<Vec<Item>>(required("history")?.clone())
+        .map_err(|_| "persisted demo server history is malformed".to_owned())?;
+    let records = |field: &str| -> Result<Vec<Value>, String> {
+        required(field)?
+            .as_array()
+            .cloned()
+            .ok_or_else(|| format!("persisted demo server {field} is malformed"))
+    };
+    let mut conversation = required("conversation")?
+        .as_object()
+        .cloned()
+        .map(Value::Object)
+        .ok_or_else(|| "persisted demo server conversation is malformed".to_owned())?;
+    if conversation["id"] != ROOT_CONVERSATION_ID || conversation["path"] != ROOT_PATH {
+        return Err("persisted demo server conversation does not identify /root".into());
+    }
+    if !matches!(
+        conversation["state"].as_str(),
+        Some("idle" | "requesting" | "paused" | "cancelled")
+    ) {
+        return Err("persisted demo server conversation state is malformed".into());
+    }
+    let mut jobs = records("jobs")?;
+    for job in &mut jobs {
+        if job.get("id").and_then(Value::as_str).is_none()
+            || job.get("conversationId").and_then(Value::as_str) != Some(ROOT_CONVERSATION_ID)
+        {
+            return Err("persisted demo server job is malformed".into());
+        }
+        if !matches!(
+            job.get("state").and_then(Value::as_str),
+            Some("running" | "settled" | "cancelled")
+        ) {
+            return Err("persisted demo server job state is malformed".into());
+        }
+        if job.get("state").and_then(Value::as_str) == Some("running") {
+            job["state"] = json!("cancelled");
+            job["status"] = json!("Interrupted");
+            job["interrupted"] = json!(true);
+        }
+    }
+    let mut requests = records("requests")?;
+    for request in &mut requests {
+        if request.get("id").and_then(Value::as_str).is_none()
+            || request.get("conversationId").and_then(Value::as_str) != Some(ROOT_CONVERSATION_ID)
+            || !matches!(
+                request.get("state").and_then(Value::as_str),
+                Some("running" | "completed" | "failed")
+            )
+        {
+            return Err("persisted demo server request is malformed".into());
+        }
+        if request.get("state").and_then(Value::as_str) == Some("running") {
+            request["state"] = json!("failed");
+        }
+    }
+    let envelopes = records("envelopes")?;
+    for envelope in &envelopes {
+        if envelope.get("id").and_then(Value::as_str).is_none()
+            || envelope.get("conversationId").and_then(Value::as_str) != Some(ROOT_CONVERSATION_ID)
+            || envelope.get("sender").and_then(Value::as_str).is_none()
+            || envelope.get("recipient").and_then(Value::as_str).is_none()
+            || envelope.get("payload").and_then(Value::as_str).is_none()
+            || envelope.get("type").and_then(Value::as_str) != Some("FINAL_ANSWER")
+        {
+            return Err("persisted demo server envelope is malformed".into());
+        }
+    }
+    if conversation["state"] == "requesting" {
+        conversation["state"] = json!("idle");
+    }
+    Ok(PersistedServerState {
+        history,
+        jobs,
+        requests,
+        envelopes,
+        conversation,
+    })
+}
+
+async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), String> {
+    if !addr.ip().is_loopback() {
+        return Err(
+            "--serve is loopback-only because browser-session login uses plain HTTP".into(),
+        );
+    }
+    let asset_root = PathBuf::from("web/dist");
+    ensure_asset_root(&asset_root)?;
+    let secret = std::env::var("HARNESS_DEMO_SESSION_SECRET")
+        .map_err(|_| "HARNESS_DEMO_SESSION_SECRET is required".to_owned())?;
+    let secret = SessionSecret::new(secret)?;
+    let config = ServerConfig::new(asset_root)
+        .with_browser_session(secret, Duration::from_secs(8 * 60 * 60))?;
+    let (app, control, mut commands) = server::server_with_config(config);
+    let status_store =
+        Store::open(&db).map_err(|_| "could not open server status store".to_owned())?;
+    let mut history = Vec::<Item>::new();
+    let mut jobs = Vec::new();
+    let mut requests = Vec::new();
+    let mut envelopes = Vec::new();
+    let mut conversation = conversation_record("idle");
+    if let Some(saved) = status_store
+        .session_state("harness-demo-server:/root")
+        .map_err(|_| "could not read server status".to_owned())?
+    {
+        let restored = restore_server_state(&saved.state)?;
+        history = restored.history;
+        jobs = restored.jobs;
+        requests = restored.requests;
+        envelopes = restored.envelopes;
+        conversation = restored.conversation;
+        status_store
+            .save_session_state(
+                "harness-demo-server:/root",
+                &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
+            )
+            .map_err(|_| "could not persist recovered server status".to_owned())?;
+    }
+    control.set_snapshot(Snapshot {
+        conversations: vec![conversation.clone()],
+        requests: requests.clone(),
+        jobs: jobs.clone(),
+        envelopes: envelopes.clone(),
+        ..Snapshot::default()
+    });
+    let driver = CliDriver::new(&CliOptions {
+        db,
+        ask: String::new(),
+        dev_shell,
+    })?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|_| "could not bind demo server address".to_owned())?;
+    eprintln!(
+        "harness-demo listening on {}",
+        listener
+            .local_addr()
+            .map_err(|_| "could not read bound address")?
+    );
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut server_task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+    let shutdown_signal = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown_signal);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown_signal => break,
+            result = &mut server_task => {
+                return result.map_err(|_| "server task failed".to_owned())?
+                    .map_err(|_| "HTTP server failed".to_owned());
+            }
+            command = commands.recv() => {
+                let Some(QueuedCommand { command_id, command }) = command else { break };
+                match command {
+                    ClientCommand::Submit { command } => {
+                        let request_id = format!("request/{command_id}");
+                        let job_id = command_id.clone();
+                        let queued_job = job_record(&job_id, "running");
+                        let queued_request = request_record(&request_id, "running");
+                        conversation = conversation_record("requesting");
+                        control.publish("conversation.upsert", conversation.clone());
+                        control.publish("request.upsert", queued_request.clone());
+                        control.publish("job.upsert", queued_job.clone());
+                        jobs.push(queued_job);
+                        requests.push(queued_request);
+                        control.set_snapshot(Snapshot { conversations: vec![conversation.clone()], requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+
+                        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+                        let turn_history = history.clone();
+                        let mut turn = Box::pin(driver.ask(&command, &turn_history, cancel_rx));
+                        let (status, request_state, answer, result_items, shutting_down) = tokio::select! {
+                            result = &mut turn => match result {
+                                Ok((answer, completion)) => ("settled", "completed", answer, Some(completion.transcript), false),
+                                Err(error) => ("settled", "failed", error, None, false),
+                            },
+                            _ = &mut shutdown_signal => {
+                                let _ = cancel_tx.send(true);
+                                let result = turn.await;
+                                let (state, request_state, answer, items) = match result {
+                                    Ok((answer, completion)) => ("settled", "completed", answer, Some(completion.transcript)),
+                                    Err(error) => ("cancelled", "failed", error, None),
+                                };
+                                (state, request_state, answer, items, true)
+                            }
+                        };
+                        if let Some(items) = result_items {
+                            history = items;
+                        }
+                        let envelope = (request_state == "completed")
+                            .then(|| final_envelope(&format!("envelope/{command_id}"), &answer));
+                        if let Some(envelope) = &envelope {
+                            envelopes.push(envelope.clone());
+                        }
+                        conversation = conversation_record("idle");
+                        let done_request = request_record(
+                            &request_id,
+                            request_state,
+                        );
+                        let done_job = job_record(&job_id, status);
+                        replace_by_id(&mut requests, done_request.clone());
+                        replace_by_id(&mut jobs, done_job.clone());
+                        control.set_snapshot(Snapshot { conversations: vec![conversation.clone()], requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+                        status_store
+                            .save_session_state(
+                                "harness-demo-server:/root",
+                                &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
+                            )
+                            .map_err(|_| "could not persist server job status".to_owned())?;
+                        control.publish("request.upsert", done_request);
+                        control.publish("job.upsert", done_job);
+                        if let Some(envelope) = envelope {
+                            control.publish("envelope.upsert", envelope);
+                        }
+                        control.publish("conversation.upsert", conversation);
+                        if shutting_down {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let _ = shutdown_tx.send(());
+    let _ = server_task.await;
+    Ok(())
+}
+
+fn replace_by_id(records: &mut Vec<Value>, replacement: Value) {
+    let id = replacement.get("id").cloned();
+    records.retain(|record| record.get("id") != id.as_ref());
+    records.push(replacement);
 }
 
 fn final_text(items: &[Item]) -> Option<String> {
@@ -198,6 +534,7 @@ fn safe_transport_error(error: &TransportError) -> String {
 
 fn safe_engine_error(error: EngineError) -> String {
     match &error {
+        EngineError::Cancelled => "conversation cancelled during shutdown".into(),
         EngineError::Transport(error) => safe_transport_error(error),
         EngineError::Store(_) => "conversation store operation failed".into(),
         EngineError::Job(_) => "provider job failed".into(),
@@ -382,12 +719,12 @@ impl Provider for DemoProvider {
 async fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match parse_args(&args) {
-        Ok(None) => {
+        Ok(Mode::Smoke) => {
             let provider = DemoProvider::development(".", false);
             let result = provider.call("sleep", json!({"duration_ms": 0})).await;
             println!("demo provider smoke: {result:?}");
         }
-        Ok(Some(options)) => {
+        Ok(Mode::Ask(options)) => {
             let driver = match CliDriver::new(&options) {
                 Ok(driver) => driver,
                 Err(error) => {
@@ -395,12 +732,13 @@ async fn main() {
                     std::process::exit(2);
                 }
             };
-            match driver.ask(&options.ask).await {
-                Ok((text, input_tokens, output_tokens)) => {
+            let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+            match driver.ask(&options.ask, &[], cancel_rx).await {
+                Ok((text, completion)) => {
                     println!("{text}");
                     eprintln!(
                         "usage (final response): {} input / {} output tokens",
-                        input_tokens, output_tokens
+                        completion.turn.usage.input_tokens, completion.turn.usage.output_tokens
                     );
                 }
                 Err(error) => {
@@ -409,9 +747,19 @@ async fn main() {
                 }
             }
         }
+        Ok(Mode::Serve {
+            db,
+            addr,
+            dev_shell,
+        }) => {
+            if let Err(error) = serve(db, addr, dev_shell).await {
+                eprintln!("harness-demo: {error}");
+                std::process::exit(1);
+            }
+        }
         Err(error) => {
             eprintln!(
-                "harness-demo: {error}\nusage: harness-demo --db <sqlite-path> --ask <text> [--dev-shell] | --smoke"
+                "harness-demo: {error}\nusage: harness-demo --db <sqlite-path> --ask <text> [--dev-shell] | --db <sqlite-path> --serve <addr> | --smoke"
             );
             std::process::exit(2);
         }
@@ -423,6 +771,7 @@ mod tests {
     use super::*;
     use harness::engine::ResponsesTransport;
     use harness::model::{AgentPath, CallId, Effort};
+    use harness::server::{WsEvent, WsEventPayload, WsServerFrame};
     use harness::store::Store;
     use harness::transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, Usage};
     use harness::turn::JobScheduler;
@@ -489,13 +838,174 @@ mod tests {
         assert!(parse(&["--db", "state.sqlite", "--ask", "hi", "--allow-shell"]).is_err());
         assert_eq!(
             parse(&["--db", "state.sqlite", "--ask", "hi", "--dev-shell"]).unwrap(),
-            Some(CliOptions {
+            Mode::Ask(CliOptions {
                 db: PathBuf::from("state.sqlite"),
                 ask: "hi".into(),
                 dev_shell: true
             })
         );
-        assert_eq!(parse(&["--smoke"]).unwrap(), None);
+        assert!(matches!(parse(&["--smoke"]).unwrap(), Mode::Smoke));
+        assert_eq!(
+            parse(&["--db", "state.sqlite", "--serve", "127.0.0.1:8080"]).unwrap(),
+            Mode::Serve {
+                db: PathBuf::from("state.sqlite"),
+                addr: "127.0.0.1:8080".parse().unwrap(),
+                dev_shell: false,
+            }
+        );
+        assert!(parse(&["--db", "state.sqlite", "--serve", "bad"]).is_err());
+        assert!(
+            parse(&["--db", "state.sqlite", "--serve", "0.0.0.0:8080"])
+                .unwrap_err()
+                .contains("loopback-only")
+        );
+        assert!(parse(&["--db", "state.sqlite", "--serve", "[::]:8080"]).is_err());
+        assert!(parse(&["--db", "state.sqlite", "--serve", "[::1]:8080"]).is_ok());
+        assert!(
+            parse(&[
+                "--db",
+                "state.sqlite",
+                "--serve",
+                "127.0.0.1:8080",
+                "--ask",
+                "x"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn serving_requires_built_web_assets() {
+        let root = temp();
+        assert!(ensure_asset_root(&root).is_ok());
+        let missing = root.join("not-built");
+        assert!(
+            ensure_asset_root(&missing)
+                .unwrap_err()
+                .contains("build web/dist")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn browser_secret_validation_fails_closed() {
+        assert!(SessionSecret::new("short").is_err());
+        assert!(SessionSecret::new("this-is-a-long-enough-test-secret-value").is_ok());
+    }
+
+    #[test]
+    fn server_state_matches_web_contract_and_event_kinds() {
+        let conversation = conversation_record("idle");
+        let request = request_record("r1", "completed");
+        let job = job_record("j1", "settled");
+        let envelope = final_envelope("e1", "final answer");
+        assert_eq!(
+            conversation,
+            json!({"id":"conversation/root","path":"/root","state":"idle"})
+        );
+        assert_eq!(
+            request,
+            json!({"id":"r1","conversationId":"conversation/root","state":"completed"})
+        );
+        assert_eq!(
+            job,
+            json!({"id":"j1","conversationId":"conversation/root","state":"settled"})
+        );
+        assert_eq!(
+            envelope,
+            json!({"id":"e1","conversationId":"conversation/root","recipient":"/root","sender":"/root","type":"FINAL_ANSWER","payload":"final answer"})
+        );
+        let frame = WsServerFrame::Event {
+            event: WsEvent {
+                seq: 1,
+                event: WsEventPayload {
+                    kind: "job.upsert".into(),
+                    value: job,
+                },
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(frame).unwrap(),
+            json!({"type":"event","event":{"seq":1,"event":{"kind":"job.upsert","value":{
+                "id":"j1","conversationId":"conversation/root","state":"settled"
+            }}}})
+        );
+        assert_eq!(envelope["type"], "FINAL_ANSWER");
+        assert_eq!(
+            serde_json::to_value(Snapshot {
+                seq: 5,
+                conversations: vec![conversation],
+                requests: vec![request],
+                jobs: vec![job_record("j1", "settled")],
+                envelopes: vec![envelope],
+            })
+            .unwrap(),
+            json!({
+                "seq":5,
+                "conversations":[{"id":"conversation/root","path":"/root","state":"idle"}],
+                "requests":[{"id":"r1","conversationId":"conversation/root","state":"completed"}],
+                "jobs":[{"id":"j1","conversationId":"conversation/root","state":"settled"}],
+                "envelopes":[{"id":"e1","conversationId":"conversation/root","recipient":"/root","sender":"/root","type":"FINAL_ANSWER","payload":"final answer"}]
+            })
+        );
+    }
+
+    #[test]
+    fn next_server_command_uses_complete_recorded_tool_transcript_once() {
+        let recorded_completion = vec![
+            Item(json!({"type":"message","role":"user","content":"first task"})),
+            Item(json!({"type":"function_call","call_id":"call-1","name":"echo","arguments":"{}"})),
+            Item(json!({"type":"function_call_output","call_id":"call-1","output":"tool result"})),
+            Item(
+                json!({"type":"function_call","call_id":"call-2","name":"echo","arguments":"{\"next\":true}"}),
+            ),
+            Item(
+                json!({"type":"function_call_output","call_id":"call-2","output":"second tool result"}),
+            ),
+            Item(
+                json!({"type":"message","role":"assistant","phase":"final_answer","content":"first answer"}),
+            ),
+        ];
+        let next_input = command_input(&recorded_completion, "follow-up");
+        assert_eq!(next_input.len(), recorded_completion.len() + 1);
+        assert_eq!(
+            &next_input[..recorded_completion.len()],
+            recorded_completion
+        );
+        assert_eq!(
+            next_input
+                .iter()
+                .filter(|item| item.0["type"] == "function_call")
+                .count(),
+            2
+        );
+        assert_eq!(
+            next_input
+                .iter()
+                .filter(|item| item.0["type"] == "function_call_output")
+                .count(),
+            2
+        );
+        assert_eq!(next_input.last().unwrap().0["content"], "follow-up");
+    }
+
+    #[test]
+    fn malformed_persisted_state_fails_and_running_records_are_interrupted() {
+        assert!(restore_server_state("{").is_err());
+        assert!(
+            restore_server_state(r#"{"jobs":[]}"#)
+                .unwrap_err()
+                .contains("history")
+        );
+        let restored = restore_server_state(
+            r#"{"history":[],"jobs":[{"id":"j1","conversationId":"conversation/root","state":"running"}],"requests":[{"id":"r1","conversationId":"conversation/root","state":"running"}],"envelopes":[],"conversation":{"id":"conversation/root","path":"/root","state":"requesting"}}"#,
+        )
+        .unwrap();
+        assert_eq!(restored.jobs[0]["state"], "cancelled");
+        assert_eq!(restored.jobs[0]["status"], "Interrupted");
+        assert_eq!(restored.jobs[0]["interrupted"], true);
+        assert_eq!(restored.requests[0]["state"], "failed");
+        assert_eq!(restored.conversation["state"], "idle");
     }
 
     #[test]
