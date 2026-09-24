@@ -86,3 +86,13 @@ review also found command/event routes had no authorization; a server security
 follow-up is pending. The demo provider candidate omitted strict tool schemas
 and trusted model-supplied edit ownership; repair is pending. No wave-1
 live GPT-6 run or restart/recovery acceptance test has yet been completed.
+
+The demo provider was subsequently merged after repairing strict function
+schemas and moving edit authority from model arguments to host-supplied owned
+paths. A transport test now permits freeform custom tools without the
+function-only `strict` field. Workspace fmt, offline tests (28 harness tests
+passed, 1 live test ignored; 3 demo tests passed), Clippy, and check passed;
+the demo's local zero-duration sleep smoke passed. This is a provider-unit
+smoke, **not** a model run. The demo's shell result is truncated to 16 KiB per
+stream after capture, so peak child-process output memory is not yet bounded.
+Its ask/form tools and a real transport-backed driver remain unimplemented.
