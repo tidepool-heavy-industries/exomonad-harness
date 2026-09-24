@@ -302,3 +302,15 @@ cover all three writes and ensure rejected writes do not notify. Integrated
 fmt, offline workspace tests (73 harness passed, 2 live ignored; 12 demo
 passed), Clippy and check passed. This hint is local to one service instance,
 not a cross-process event log; durable rows remain authoritative.
+
+Durable branch-start Engine runs now accept post-commit mailbox wake hints.
+Before every model request they attach queued unread envelopes transactionally;
+when `wait_agent` wakes, completed function outputs and the wait status are
+committed before unread envelopes. The in-memory hint is not copied into the
+request a second time. Focused replay tests cover ordering and deduplication;
+legacy transient mailbox mode remains and its wait ordering was corrected.
+Root retained the ignored live smoke test from the newer baseline and ran
+integrated fmt, offline workspace tests (75 harness passed, 2 live ignored;
+12 demo passed), Clippy and check. A one-process driver must still persist an
+envelope before signaling and rescan durable inbox on restart; none is wired
+yet for child agents.

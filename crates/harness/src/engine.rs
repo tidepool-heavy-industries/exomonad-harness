@@ -209,6 +209,19 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         cancellation: watch::Receiver<bool>,
         incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
     ) -> Result<EngineCompletion, EngineError> {
+        self.run_from_head_with_durable_envelopes(head, new_items, cancellation, incoming)
+            .await
+    }
+
+    /// Durable branch-start mode. The host must persist each envelope to
+    /// Store before sending its in-memory copy as a wake hint.
+    pub async fn run_from_head_with_durable_envelopes(
+        &self,
+        head: Option<RequestId>,
+        new_items: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+        incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+    ) -> Result<EngineCompletion, EngineError> {
         self.run_starting_from(head, new_items, cancellation, Some(incoming), true)
             .await
     }
@@ -502,7 +515,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
                 }
                 if let Err(error) = self
-                    .persist_wait_result(&mut pending, &parent, Some(&wait_call_id), result)
+                    .persist_wait_result(
+                        &mut pending,
+                        &parent,
+                        Some(&wait_call_id),
+                        result,
+                        admit_inbox,
+                    )
                     .await
                 {
                     return Err(self.cleanup_pending(error, &pending).await);
@@ -519,7 +538,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
                 }
                 if let Err(error) = self
-                    .persist_wait_result(&mut pending, &parent, None, result)
+                    .persist_wait_result(&mut pending, &parent, None, result, admit_inbox)
                     .await
                 {
                     return Err(self.cleanup_pending(error, &pending).await);
@@ -558,6 +577,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             {
                 return Err(self.cleanup_pending(error, &pending).await);
             }
+            if admit_inbox {
+                if let Err(error) = self.append_unread_envelopes(&next_id).await {
+                    return Err(self.cleanup_pending(error, &pending).await);
+                }
+            }
             parent = next_id;
             // Outputs were appended individually as their jobs settled; next
             // iteration sends the full ordered transcript to the model.
@@ -569,6 +593,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let id = id.clone();
         blocking(move || store.append_items(&id, &items)).await?;
         Ok(())
+    }
+
+    async fn append_unread_envelopes(&self, request: &RequestId) -> Result<(), EngineError> {
+        let store = self.store.clone();
+        let recipient = self.config.agent.clone();
+        let request = request.clone();
+        blocking(move || {
+            store
+                .append_unread_envelopes(&recipient, &request)
+                .map(|_| ())
+        })
+        .await
     }
 
     fn tools(&self) -> Vec<serde_json::Value> {
@@ -735,6 +771,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         request: &RequestId,
         wait_call: Option<&CallId>,
         result: WaitAgentResult,
+        durable_mailbox: bool,
     ) -> Result<(), EngineError> {
         for (call_id, output) in result.call_outputs {
             self.persist_output(&call_id, &output, request).await?;
@@ -763,9 +800,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
             WaitResume::Cancelled => return Err(EngineError::Cancelled),
         };
-        if let Some(item) = agent_envelope {
-            self.append(request, vec![item]).await?;
-        }
         if let Some(wait_call) = wait_call {
             self.persist_output(
                 wait_call,
@@ -775,8 +809,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .await?;
             pending.retain(|call| call.call_id != *wait_call);
         }
-        if let Some(item) = user_envelope {
-            self.append(request, vec![item]).await?;
+        if durable_mailbox {
+            // The wake envelope is only a hint. Its persisted inbox row is
+            // attached transactionally after outputs and wait status.
+            self.append_unread_envelopes(request).await?;
+        } else {
+            if let Some(item) = agent_envelope {
+                self.append(request, vec![item]).await?;
+            }
+            if let Some(item) = user_envelope {
+                self.append(request, vec![item]).await?;
+            }
         }
         Ok(())
     }
@@ -1049,6 +1092,63 @@ mod tests {
             Ok(turn(
                 if index == 0 { "wait" } else { "resumed" },
                 vec![item],
+            ))
+        }
+    }
+
+    struct QueueInboxBeforeContinuation {
+        requests: Arc<Mutex<Vec<ResponsesRequest>>>,
+        store: Arc<Store>,
+        recipient: AgentPath,
+        inbox_item: Item,
+    }
+    #[async_trait::async_trait]
+    impl ResponsesTransport for QueueInboxBeforeContinuation {
+        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            unreachable!("streaming path expected")
+        }
+
+        async fn create_streaming(
+            &self,
+            request: ResponsesRequest,
+            sink: tokio::sync::mpsc::Sender<StreamEvent>,
+        ) -> Result<ResponsesTurn, TransportError> {
+            let index = {
+                let mut requests = self.requests.lock().unwrap();
+                let index = requests.len();
+                requests.push(request);
+                index
+            };
+            let items = if index == 0 {
+                self.store
+                    .add_envelope(
+                        "/root/child",
+                        &self.recipient.0,
+                        "AtBoundary",
+                        &self.inbox_item,
+                        None,
+                    )
+                    .map_err(|error| TransportError::Stream(error.to_string()))?;
+                vec![Item(json!({
+                    "type":"function_call","call_id":"queued-continuation","name":"echo","arguments":"{}"
+                }))]
+            } else {
+                vec![Item(json!({
+                    "type":"message","role":"assistant","phase":"final_answer","content":"done"
+                }))]
+            };
+            for item in &items {
+                sink.send(StreamEvent::ItemDone(item.clone()))
+                    .await
+                    .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
+            }
+            Ok(turn(
+                if index == 0 {
+                    "queued-before-next"
+                } else {
+                    "queued-next"
+                },
+                items,
             ))
         }
     }
@@ -2153,14 +2253,151 @@ mod tests {
         assert_eq!(requests.len(), 2);
         let next = &requests[1].input;
         assert_eq!(next[1].0["call_id"], "wait-envelope");
-        assert_eq!(next[2].0["type"], "message");
+        assert_eq!(next[2].0["type"], "function_call_output");
+        assert_eq!(next[2].0["call_id"], "wait-envelope");
+        let output: Value = serde_json::from_str(next[2].0["output"].as_str().unwrap()).unwrap();
+        assert_eq!(output, json!({"resumed_by":{"agent":"/root/worker"}}));
+        assert_eq!(next[3].0["type"], "message");
         assert_eq!(
-            next[2].0["content"],
+            next[3].0["content"],
             "Message Type: MESSAGE\nTask name: /root\nSender: /root/worker\nPayload:\narrived"
         );
-        assert_eq!(next[3].0["call_id"], "wait-envelope");
-        let output: Value = serde_json::from_str(next[3].0["output"].as_str().unwrap()).unwrap();
-        assert_eq!(output, json!({"resumed_by":{"agent":"/root/worker"}}));
+    }
+
+    #[tokio::test]
+    async fn durable_envelope_wake_appends_store_item_after_wait_output_once() {
+        let store = Arc::new(Store::memory().unwrap());
+        let recipient = AgentPath("/root".into());
+        let sender = AgentPath("/root/worker".into());
+        let envelope = Envelope {
+            kind: crate::mailbox::EnvelopeType::Message,
+            recipient: recipient.clone(),
+            sender: sender.clone(),
+            payload: "persisted reply".into(),
+            class: crate::mailbox::DeliveryClass::AtBoundary,
+            timestamp_ms: 5,
+        };
+        let stored_item = Item(json!({
+            "type":"message",
+            "role":"assistant",
+            "content":[{
+                "type":"output_text",
+                "text":"Message Type: MESSAGE\nTask name: /root\nSender: /root/worker\nPayload:\npersisted reply"
+            }]
+        }));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            WaitEnvelopeTransport {
+                requests: requests.clone(),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "durable-session".into(),
+                agent: recipient.clone(),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let (envelope_tx, envelope_rx) = tokio::sync::mpsc::unbounded_channel();
+        let run = tokio::spawn(async move {
+            engine
+                .run_from_head_with_durable_envelopes(None, vec![], cancel_rx, envelope_rx)
+                .await
+        });
+        let wait_call = CallId("wait-envelope".into());
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if !store.claims(&wait_call).unwrap().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("wait call is active before inbox arrival");
+        store
+            .add_envelope(&sender.0, &recipient.0, "AtBoundary", &stored_item, None)
+            .unwrap();
+        envelope_tx.send(envelope).unwrap();
+        let completion = run.await.unwrap().unwrap();
+
+        let recorded = requests.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        let resumed = &recorded[1].input;
+        assert_eq!(resumed.len(), 3);
+        assert_eq!(resumed[0].0["call_id"], "wait-envelope");
+        assert_eq!(resumed[1].0["type"], "function_call_output");
+        assert_eq!(resumed[1].0["call_id"], "wait-envelope");
+        let status: Value = serde_json::from_str(resumed[1].0["output"].as_str().unwrap()).unwrap();
+        assert_eq!(status, json!({"resumed_by":{"agent":"/root/worker"}}));
+        assert_eq!(resumed[2], stored_item);
+        assert_eq!(
+            completion
+                .transcript
+                .iter()
+                .filter(|item| **item == stored_item)
+                .count(),
+            1,
+            "the wake hint must not be rendered/appended a second time"
+        );
+        assert!(store.unread(&recipient.0).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn durable_mode_admits_inbox_arriving_before_next_model_request() {
+        let store = Arc::new(Store::memory().unwrap());
+        let recipient = AgentPath("/root/worker".into());
+        let inbox_item = Item(json!({
+            "type":"message","role":"assistant","content":[{
+                "type":"output_text","text":"queued while model was running"
+            }]
+        }));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            QueueInboxBeforeContinuation {
+                requests: requests.clone(),
+                store: store.clone(),
+                recipient: recipient.clone(),
+                inbox_item: inbox_item.clone(),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "durable-session".into(),
+                agent: recipient.clone(),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let (_envelope_tx, envelope_rx) = tokio::sync::mpsc::unbounded_channel();
+        let completion = engine
+            .run_from_head_with_durable_envelopes(None, vec![], cancel_rx, envelope_rx)
+            .await
+            .unwrap();
+
+        let recorded = requests.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        let next = &recorded[1].input;
+        assert_eq!(next.last(), Some(&inbox_item));
+        assert_eq!(next.iter().filter(|item| **item == inbox_item).count(), 1);
+        assert_eq!(
+            completion
+                .transcript
+                .iter()
+                .filter(|item| **item == inbox_item)
+                .count(),
+            1
+        );
+        assert!(store.unread(&recipient.0).unwrap().is_empty());
     }
 
     /// Explicit subscription smoke: opt in locally, never in ordinary CI.
