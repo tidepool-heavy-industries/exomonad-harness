@@ -72,6 +72,16 @@ pub struct EngineConfig {
     pub agent: AgentPath,
 }
 
+/// Successful engine result, including the durable transcript through the
+/// final model response.
+#[derive(Clone, Debug)]
+pub struct EngineCompletion {
+    pub turn: ResponsesTurn,
+    pub transcript: Vec<Item>,
+    /// Durable request row whose history was supplied to the final response.
+    pub head_request: RequestId,
+}
+
 /// Narrow transport seam: production uses `ResponsesClient`; tests can replay
 /// recorded turns without credentials or live network access.
 #[async_trait::async_trait]
@@ -160,9 +170,23 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         initial: Vec<Item>,
         cancellation: watch::Receiver<bool>,
     ) -> Result<ResponsesTurn, EngineError> {
+        self.run_with_transcript(initial, cancellation)
+            .await
+            .map(|completion| completion.turn)
+    }
+
+    /// Run to completion and return the complete persisted transcript,
+    /// including the supplied initial items, all model turns and tool outputs.
+    /// Cancellation and failures remain errors and never produce a partial
+    /// transcript labeled as complete.
+    pub async fn run_with_transcript(
+        &self,
+        initial: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+    ) -> Result<EngineCompletion, EngineError> {
         let (keepalive, envelopes) = tokio::sync::mpsc::unbounded_channel();
         let result = self
-            .run_with_envelopes(initial, cancellation, envelopes)
+            .run_with_envelopes_and_transcript(initial, cancellation, envelopes)
             .await;
         drop(keepalive);
         result
@@ -175,8 +199,20 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         &self,
         initial: Vec<Item>,
         cancellation: watch::Receiver<bool>,
-        mut incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+        incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
     ) -> Result<ResponsesTurn, EngineError> {
+        self.run_with_envelopes_and_transcript(initial, cancellation, incoming)
+            .await
+            .map(|completion| completion.turn)
+    }
+
+    /// Mailbox-enabled variant of [`Engine::run_with_transcript`].
+    pub async fn run_with_envelopes_and_transcript(
+        &self,
+        initial: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+        mut incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+    ) -> Result<EngineCompletion, EngineError> {
         let (envelope_tx, envelopes) = tokio::sync::mpsc::unbounded_channel();
         let keepalive = envelope_tx.clone();
         let forwarder = tokio::spawn(async move {
@@ -197,7 +233,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         initial: Vec<Item>,
         mut cancellation: watch::Receiver<bool>,
         mut envelopes: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
-    ) -> Result<ResponsesTurn, EngineError> {
+    ) -> Result<EngineCompletion, EngineError> {
         let id = RequestId(uuid::Uuid::new_v4().to_string());
         let store = self.store.clone();
         let request = id.clone();
@@ -410,7 +446,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     return Err(self.cleanup_pending(error, &pending).await);
                 }
             } else if is_final(&turn) && pending.is_empty() {
-                return Ok(turn);
+                // Read the durable parent chain only after every item/output
+                // from this final turn has been persisted.
+                let transcript = match self.read_history(&parent).await {
+                    Ok(history) => history,
+                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                };
+                return Ok(EngineCompletion {
+                    turn,
+                    transcript,
+                    head_request: parent,
+                });
             } else if turn_call_ids.is_empty() && pending.is_empty() {
                 return Err(EngineError::MissingFinal);
             }
@@ -1112,6 +1158,76 @@ mod tests {
         assert_eq!(history, expected_history);
         drop(reopened);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn successful_run_returns_complete_ordered_transcript_once() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let initial = Item(json!({"role":"user","content":"start"}));
+        let call = Item(json!({
+            "type":"function_call","call_id":"transcript-call","name":"echo","arguments":"{\"n\":7}"
+        }));
+        let final_item = Item(json!({
+            "type":"message","role":"assistant","phase":"final_answer","content":"finished"
+        }));
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new(
+                [
+                    turn("transcript-one", vec![call.clone()]),
+                    turn("transcript-two", vec![final_item.clone()]),
+                ]
+                .into(),
+            ),
+        };
+        let store = Arc::new(Store::memory().unwrap());
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            replay,
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "session".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let completion = engine
+            .run_with_transcript(vec![initial.clone()], cancel_rx)
+            .await
+            .unwrap();
+
+        assert_eq!(completion.turn.response_id, "transcript-two");
+        assert_eq!(
+            completion.transcript,
+            vec![
+                initial.clone(),
+                call,
+                items::function_output(
+                    &CallId("transcript-call".into()),
+                    &crate::turn::JobOutput::Completed(Ok(json!({"tool":"echo","args":{"n":7}})))
+                ),
+                final_item,
+            ]
+        );
+        assert_eq!(
+            completion
+                .transcript
+                .iter()
+                .filter(|item| **item == initial)
+                .count(),
+            1,
+            "initial input is included exactly once"
+        );
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        assert_eq!(
+            load_history(store, completion.head_request).await.unwrap(),
+            completion.transcript
+        );
     }
 
     #[tokio::test]

@@ -215,3 +215,14 @@ the orphan-child crash window found in runtime review. Integrated fmt, offline
 workspace tests (59 harness passed, 2 live ignored; 7 demo passed), Clippy and
 check passed. The runtime must use this operation; its current candidate is
 not yet integrated.
+
+The engine now exposes a successful-completion API with the full persisted
+ordered transcript and final request head, while retaining the original
+`run` API. A focused recorded tool-call test verifies the initial input,
+function call, matching output and final item appear once and in order.
+Cancellation/failure still returns an error, not a mislabeled complete history.
+The child branch did not export engine, so its reported checks did not compile
+this code; root restored the existing ignored live smoke test, fixed a test
+MutexGuard lifetime, and ran integrated fmt, offline workspace tests (60 harness
+passed, 2 live ignored; 7 demo passed), Clippy and check. The demo server must
+consume this API before claiming multi-command continuity.
