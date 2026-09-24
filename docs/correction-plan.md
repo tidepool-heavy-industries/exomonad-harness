@@ -91,5 +91,8 @@ their live traces in `docs/findings.md`, master is green, and
 | cache probe | not done: 38 min, five reviewers, a source comparison instead of two live requests | rescoped: ONE node, no children, two live requests shaped like codex's, redacted bodies + counters in findings, or `Blocked` naming the missing capture. nothing else |
 | interviews | root only | one section per node that ran |
 
-Master must not be red at a handoff. Finishing (b) is the fix; an ignored
-test with an owner and expiry is the fallback, never a silent pass.
+A red offline test on master between slices is fine (operator, 2026-09-24);
+it is the contract for the next slice, not a failure. Finish (b) when you
+reach it. Live tests that spend inference stay `#[ignore]` and are run by
+hand, once, with the trace recorded in findings; never automate a test that
+triggers inference.
