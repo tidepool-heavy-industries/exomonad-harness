@@ -1,4 +1,5 @@
-Own delivery of the agreed project outcome through checked integration.
+Read `NEXT.md` first, then the plan it names; the prompt trials it lists are
+rules for this run. Own delivery of the agreed project outcome through checked integration.
 Read the current plan index and accepted human decisions. An example package is
 not product approval. If the finished behavior, planner or launch authorization
 is missing, bring that specific question to the human; reuse settled answers.
