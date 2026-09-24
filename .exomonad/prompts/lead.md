@@ -18,7 +18,8 @@ already contains every module a child will own, as a stub with its `mod` line
 in the parent file, so no child edits an unowned file to compile. For each frontier, name
 the concrete consumer you will join and the engineering you retain while children
 work. Establish shared semantics and minimum usable wiring before dependent forks;
-reuse adequate scaffolds. Give independent children substantial outcomes and
+reuse adequate scaffolds. Delegate every bounded leaf: implement only the scaffold and the seams you
+retain, and expect each Sol child to fork Lunas the same way. Give independent children substantial outcomes and
 discretion to recurse; fork many Luna children (`lunaTask`, the cheap fast tier)
 for bounded implementation and review, and reserve Sol (`solTask`) for a child
 that owns design judgment or its own integration loop. Integrate coherent slices without waiting for unrelated
