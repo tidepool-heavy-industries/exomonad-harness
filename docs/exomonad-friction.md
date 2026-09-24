@@ -80,6 +80,86 @@ evidence that the fix works; test it in another run.
 | The project watchdog often lacks enough evidence on large tool results, so a hook may abstain just when output is complex (reported in Tidepool's next-wave inputs; not independently measured by me). | Select a bounded evidence excerpt or structured summary before judgment; report abstention as coverage, not a successful monitor. |
 | The Tidepool plans already recorded several defects I rediscovered only while working (root review helper, group labels, checkout contention). | Put the tiny actionable rule or example in the relevant prompt/skill, while keeping the full analysis in the plan; do not load every historical card into a child. |
 
+### Bigger experiments: novel improvement and new tools
+
+These are proposals to test, not requests to expand the correction wave.
+Keep the harness generic; Exomonad may implement provider-specific meaning
+behind its adapter and typed hooks.
+
+1. **A friction-to-experiment compiler.** Let an agent mark a tool call or
+   interval as friction, name the failed expectation, and bind it to item,
+   job, checkout, and source addresses. A typed helper produces a small
+   experiment packet: before/after behavior, measurement, safety boundary,
+   and a candidate owner. The agent edits that packet and can turn it into
+   a replay test or a task, not an automatic code change. First trial:
+   “I polled three times and learned nothing” should yield a wait/resume
+   replay and a count of empty model rounds. **Question:** what is the
+   smallest provenance record sufficient for another agent to reproduce
+   the friction without importing the whole conversation?
+2. **A promotion ladder with measured payback.** The current story is
+   ad hoc notebook expression → named project helper → installed hook →
+   tool. Make those transitions explicit and reversible, recording the
+   authored source revision, tests, usage sites, model rounds saved, added
+   latency, and abstention rate. This would help distinguish a genuine
+   reusable habit from a premature abstraction. First trial: automate the
+   repeated candidate path-scope/check/merge evidence packet, compare
+   time and mistakes on two later candidates. **Question:** who owns
+   promotion authority—the operator, a root agent with a scoped grant, or
+   a project policy compiled as code?
+3. **A typed event algebra for work, not a new polling vocabulary.**
+   Expose `settled(handle)`, `progress(handle)`, `message(path)`, and
+   `operatorReply(question)` as composable events with one blocking
+   primitive (`race`/`both` as library composition). `wait_agent` remains
+   the model-facing stop; a cell can await the event it needs. Claims
+   decide whether the same result also appears as a mailbox envelope,
+   avoiding duplicate consumption. First trial: parent with two children
+   and one pending shell job resumes exactly once on whichever matters,
+   then still sees the other later. **Question:** what state survives
+   compaction and host restart for an awaiting event and its claim?
+4. **Behavioral diff and replay for harness changes.** Given recorded
+   items, job settlements and hook decisions, run old and candidate
+   policies against the same addressed evidence and compare *behavior*:
+   tool availability, chosen work, refusals, messages, cost, and
+   continuation points. This is more meaningful than a source diff for
+   self-modifying harness policy. First trial: compare watchdog
+   pass-through versus a bounded-evidence selector on the same large
+   tool outputs, measuring abstention and false nudges. The replay is a
+   test aid, not proof about unseen model behavior.
+5. **A capability and memory continuity inspector.** One view should
+   answer “what can this actor do now, what live typed values does it
+   hold, what is merely serialized, and what will be lost at compaction,
+   fork, or restart?” It should show authority from runtime policy, not
+   infer authority from inherited handles. First trial: explain why the
+   child nudge hook could not access `Journal` before forking, and show
+   which bindings survive `Server` compaction. **Question:** should a
+   proposed memory/harness revision include an explicit loss budget
+   reviewed with the operator?
+6. **A contract-aware delegation preflight.** Before opening child
+   work, compile the proposed ownership graph and actual consumer
+   interfaces: every owned module exists and is in the parent `mod`
+   graph, required effects fit child roles, no siblings own one path,
+   source revision is checked, acceptance has a runnable target, and
+   the packet says when to stop/ping. Return a typed list of blocked
+   seams, not a generic admission error. First trial: it should have
+   caught this wave's `Journal` mismatch and the missing independent
+   demo consumer check.
+7. **An operator-facing uncertainty ledger.** Separate observed,
+   inferred, proposed, and unverified claims in the store, tied to
+   source revisions and evidence addresses. A later result can settle
+   or supersede a claim without rewriting history. First trial: the
+   cache-shape probe must not let a source-level comparison appear as
+   the requested live wire comparison; Q2's “zero is acceptable” must
+   not turn “cached prefix works” into a claim. This could support
+   precise human review without a long status interview.
+
+**Prioritization idea:** prototype (3) with the harness's live slow-tool
+case, (6) against this exact failed first fork, and (1) against the
+polling trace. Those give behavioral evidence quickly. Promotion (2)
+and replay (4) then make repeated improvements cheap; continuity (5)
+and uncertainty (7) keep the loop honest and inspectable. The operator
+should be able to reject a proposed harness change even when the agent
+finds it locally convenient.
+
 - **Experience against the larger goal (in-progress, 2026-09-24):**
   - Tidepool's resident notebook and typed task/progress handles let me
     admit and route real work without rebuilding context in prose each time.
