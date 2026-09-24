@@ -80,27 +80,30 @@ impl std::fmt::Display for EnvelopeType {
     }
 }
 
-/// Coalesce envelopes without changing their arrival order.
+/// Render envelopes in arrival order, coalescing adjacent agent envelopes from
+/// the same sender. Non-agent messages are never moved across agent messages:
+/// mailbox order is observable conversation order.
 pub fn render_coalesced(envelopes: &[Envelope]) -> Vec<(MessageChannel, String)> {
-    let mut rendered = Vec::new();
-    let mut agents = Vec::<(&str, String)>::new();
+    let mut rendered: Vec<(MessageChannel, String)> = Vec::new();
     for envelope in envelopes {
         let (channel, body) = envelope.render();
-        if channel == MessageChannel::Assistant {
-            agents.push((&envelope.sender.0, body));
+        if channel == MessageChannel::Assistant
+            && rendered.last().is_some_and(|(prior_channel, prior_body)| {
+                *prior_channel == MessageChannel::Assistant
+                    && prior_body.starts_with(&format!("## from {}\n", envelope.sender.0))
+            })
+        {
+            let (_, prior_body) = rendered.last_mut().expect("checked above");
+            prior_body.push('\n');
+            prior_body.push_str(&body);
+        } else if channel == MessageChannel::Assistant {
+            rendered.push((
+                channel,
+                format!("## from {}\n{}", envelope.sender.0, body),
+            ));
         } else {
             rendered.push((channel, body));
         }
-    }
-    if !agents.is_empty() {
-        rendered.push((
-            MessageChannel::Assistant,
-            agents
-                .into_iter()
-                .map(|(sender, body)| format!("## from {sender}\n{body}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ));
     }
     rendered
 }
@@ -152,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn coalescing_keeps_agent_arrival_order_and_separates_non_agent_messages() {
+    fn rendering_preserves_arrival_order_across_channels() {
         let inputs = [
             envelope("/a", EnvelopeType::Message, "one"),
             envelope("/operator", EnvelopeType::Message, "user"),
@@ -161,12 +164,38 @@ mod tests {
         assert_eq!(
             render_coalesced(&inputs),
             vec![
+                (
+                    MessageChannel::Assistant,
+                    "## from /a\nMessage Type: MESSAGE\nTask name: /root/worker\nSender: /a\nPayload:\none".into()
+                ),
                 (MessageChannel::User, "user".into()),
                 (
                     MessageChannel::Assistant,
-                    "## from /a\nMessage Type: MESSAGE\nTask name: /root/worker\nSender: /a\nPayload:\none\n## from /b\nMessage Type: MESSAGE\nTask name: /root/worker\nSender: /b\nPayload:\ntwo".into()
+                    "## from /b\nMessage Type: MESSAGE\nTask name: /root/worker\nSender: /b\nPayload:\ntwo".into()
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn adjacent_final_answers_from_one_sender_coalesce_without_changing_payloads() {
+        let inputs = [
+            envelope("/root/worker", EnvelopeType::FinalAnswer, r#"{"ok":true}"#),
+            envelope("/root/worker", EnvelopeType::FinalAnswer, r#"{"ok":false}"#),
+        ];
+        assert_eq!(
+            render_coalesced(&inputs),
+            vec![(
+                MessageChannel::Assistant,
+                concat!(
+                    "## from /root/worker\n",
+                    "Message Type: FINAL_ANSWER\nTask name: /root/worker\n",
+                    "Sender: /root/worker\nPayload:\n{\"ok\":true}\n",
+                    "Message Type: FINAL_ANSWER\nTask name: /root/worker\n",
+                    "Sender: /root/worker\nPayload:\n{\"ok\":false}"
+                )
+                .into()
+            )]
         );
     }
 }
