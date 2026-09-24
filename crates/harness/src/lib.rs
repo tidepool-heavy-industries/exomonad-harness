@@ -1,6 +1,7 @@
 //! Standalone, tree-shaped Responses harness.
 pub mod agents;
 pub mod compaction;
+pub mod engine;
 pub mod item;
 pub mod mailbox;
 pub mod model;
