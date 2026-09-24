@@ -172,7 +172,8 @@ export default function App({ data = emptyData, onCommand }: AppProps) {
       if (event.key === "g") { prefix = "g"; window.clearTimeout(timer); timer = window.setTimeout(() => { prefix = ""; }, 900); return; }
       if (prefix === "g") {
         const target: Record<string, Screen> = { t: "tree", l: "timeline", i: "inbox", c: "command" };
-        if (target[event.key]) { event.preventDefault(); setScreen(target[event.key]); }
+        const nextScreen = target[event.key]
+        if (nextScreen !== undefined) { event.preventDefault(); setScreen(nextScreen); }
         prefix = "";
       }
     };

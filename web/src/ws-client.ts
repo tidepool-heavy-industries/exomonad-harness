@@ -8,7 +8,7 @@ import {
 
 /**
  * Server integration boundary: accepts stable JSON frames
- * {type:"snapshot", snapshot}, {type:"event", event}, and command results.
+ * {type:"snapshot", snapshot} and {type:"event", event:{seq,event}}.
  * A gap is never applied; it requests a fresh snapshot on the same socket.
  */
 export function connectHarness(
@@ -33,7 +33,7 @@ export function connectHarness(
         }
         const result = applyStateEvent(current, frame.event)
         if (result.kind === 'resync') {
-          socket.send(JSON.stringify({ type: 'snapshot.request', expected: result.expected, received: result.received }))
+          socket.send(JSON.stringify({ type: 'snapshot.request' }))
           return
         }
         current = result.state
