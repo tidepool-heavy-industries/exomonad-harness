@@ -87,7 +87,7 @@ pub fn render_coalesced(envelopes: &[Envelope]) -> Vec<(MessageChannel, String)>
     for envelope in envelopes {
         let (channel, body) = envelope.render();
         if channel == MessageChannel::Assistant {
-            agents.push((&envelope.sender.0, envelope.payload.clone()));
+            agents.push((&envelope.sender.0, body));
         } else {
             rendered.push((channel, body));
         }
@@ -97,7 +97,7 @@ pub fn render_coalesced(envelopes: &[Envelope]) -> Vec<(MessageChannel, String)>
             MessageChannel::Assistant,
             agents
                 .into_iter()
-                .map(|(sender, payload)| format!("## from {sender}\n{payload}"))
+                .map(|(sender, body)| format!("## from {sender}\n{body}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
         ));
@@ -164,7 +164,7 @@ mod tests {
                 (MessageChannel::User, "user".into()),
                 (
                     MessageChannel::Assistant,
-                    "## from /a\none\n## from /b\ntwo".into()
+                    "## from /a\nMessage Type: MESSAGE\nTask name: /root/worker\nSender: /a\nPayload:\none\n## from /b\nMessage Type: MESSAGE\nTask name: /root/worker\nSender: /b\nPayload:\ntwo".into()
                 ),
             ]
         );

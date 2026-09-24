@@ -18,7 +18,10 @@ impl AgentPath {
     /// Parse a slash-delimited agent path and normalize kebab-case components
     /// to the canonical lowercase/digit/underscore form.
     pub fn parse(path: &str) -> Result<Self, InvalidAgentPath> {
-        let canonical = path
+        let body = path
+            .strip_prefix('/')
+            .ok_or_else(|| InvalidAgentPath(path.to_owned()))?;
+        let canonical = body
             .split('/')
             .map(|component| {
                 if component.is_empty()
@@ -32,7 +35,7 @@ impl AgentPath {
             })
             .collect::<Result<Vec<_>, _>>()?
             .join("/");
-        Ok(Self(canonical))
+        Ok(Self(format!("/{canonical}")))
     }
 
     /// Whether this value already has canonical slash-delimited syntax.
@@ -87,17 +90,17 @@ mod tests {
 
     #[test]
     fn agent_paths_canonicalize_kebab_components() {
-        let path = AgentPath::parse("root/review-worker_2").unwrap();
-        assert_eq!(path.0, "root/review_worker_2");
+        let path = AgentPath::parse("/root/review-worker_2").unwrap();
+        assert_eq!(path.0, "/root/review_worker_2");
         assert!(path.is_canonical());
-        assert!(!AgentPath("root/review-worker".into()).is_canonical());
+        assert!(!AgentPath("/root/review-worker".into()).is_canonical());
     }
 
     #[test]
     fn agent_paths_reject_invalid_names_and_empty_components() {
         for path in [
             "",
-            "/root",
+            "root",
             "root/",
             "root//child",
             "Root",
