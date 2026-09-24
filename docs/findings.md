@@ -277,3 +277,11 @@ workspace tests (69 harness passed, 2 live ignored; 12 demo passed), Clippy
 and check. This is a necessary driver primitive, not a complete Here or
 checkpoint fork: the host must still choose a committed source boundary and
 route envelopes safely.
+
+The Store can now atomically append one agent's unread envelope items to a
+request for that **same agent** and mark those envelopes delivered. Tests
+verify arrival order, idempotent retry, preservation across reopen, rollback
+on failed insert, refusal of missing requests, and cross-agent branch
+isolation. Integrated fmt, offline workspace tests (71 harness passed, 2 live
+ignored; 12 demo passed), Clippy and check passed. No engine or demo driver
+calls this API yet, so live mailbox delivery/recovery remains unverified.

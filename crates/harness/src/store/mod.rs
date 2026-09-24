@@ -24,6 +24,12 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("request not found: {0}")]
     MissingRequest(String),
+    #[error("request {request} belongs to agent {actual}, not {expected}")]
+    RequestAgentMismatch {
+        request: String,
+        expected: String,
+        actual: String,
+    },
     #[error("claim already exists for call/request")]
     DuplicateClaim,
     #[error("invalid canonical agent path: {0}")]
@@ -565,6 +571,72 @@ impl Store {
         tx.commit()?;
         Ok(hashes)
     }
+    /// Atomically attach every unread envelope for `recipient` to `request` and
+    /// mark those envelopes delivered. A retry after commit returns an empty
+    /// vector; a failed transaction leaves the envelopes unread.
+    pub fn append_unread_envelopes(
+        &self,
+        recipient: &AgentPath,
+        request: &RequestId,
+    ) -> Result<Vec<Item>> {
+        let mut c = self.lock();
+        let tx = c.transaction()?;
+        let branch: Option<String> = tx
+            .query_row(
+                "SELECT branch FROM requests WHERE id=?1",
+                [&request.0],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(branch) = branch else {
+            return Err(StoreError::MissingRequest(request.0.clone()));
+        };
+        if branch != recipient.0 {
+            return Err(StoreError::RequestAgentMismatch {
+                request: request.0.clone(),
+                expected: recipient.0.clone(),
+                actual: branch,
+            });
+        }
+
+        let envelopes = {
+            let mut q = tx.prepare(
+                "SELECT e.id,e.item_hash,i.json FROM envelopes e JOIN items i ON i.hash=e.item_hash \
+                 WHERE e.recipient=?1 AND e.delivered_request IS NULL ORDER BY e.id",
+            )?;
+            q.query_map([&recipient.0], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let mut position: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(position)+1,0) FROM request_items WHERE request_id=?1",
+            [&request.0],
+            |r| r.get(0),
+        )?;
+        let mut items = Vec::with_capacity(envelopes.len());
+        for (_, hash, json) in &envelopes {
+            let item = serde_json::from_str::<Item>(json)?;
+            tx.execute(
+                "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
+                params![request.0, position, hash],
+            )?;
+            position += 1;
+            items.push(item);
+        }
+        for (envelope_id, _, _) in &envelopes {
+            tx.execute(
+                "UPDATE envelopes SET delivered_request=?2 WHERE id=?1 AND delivered_request IS NULL",
+                params![envelope_id, request.0],
+            )?;
+        }
+        tx.commit()?;
+        Ok(items)
+    }
     pub fn items(&self, request: &RequestId) -> Result<Vec<Item>> {
         let c = self.lock();
         let mut q=c.prepare("SELECT i.json FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 ORDER BY ri.position")?;
@@ -893,6 +965,84 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn unread_envelopes_commit_once_in_order_and_survive_reopen() {
+        let path = std::env::temp_dir().join(format!("harness-inbox-{}.db", uuid::Uuid::new_v4()));
+        let first = item(serde_json::json!({"n":1}));
+        let second = item(serde_json::json!({"n":2}));
+        {
+            let s = Store::open(&path).unwrap();
+            s.create_request(&id("request"), None, "/root/worker")
+                .unwrap();
+            s.add_envelope("a", "/root/worker", "message", &first, None)
+                .unwrap();
+            s.add_envelope("b", "/root/worker", "message", &second, None)
+                .unwrap();
+            s.add_envelope("b", "/root/other", "message", &first, None)
+                .unwrap();
+            let recipient = AgentPath("/root/worker".into());
+            assert_eq!(
+                s.append_unread_envelopes(&recipient, &id("request"))
+                    .unwrap(),
+                vec![first.clone(), second.clone()]
+            );
+            assert!(s.unread("/root/worker").unwrap().is_empty());
+            assert_eq!(
+                s.append_unread_envelopes(&recipient, &id("request"))
+                    .unwrap(),
+                Vec::<Item>::new()
+            );
+            assert_eq!(
+                s.items(&id("request")).unwrap(),
+                vec![first.clone(), second.clone()]
+            );
+        }
+        {
+            let s = Store::open(&path).unwrap();
+            assert!(s.unread("/root/worker").unwrap().is_empty());
+            assert_eq!(s.items(&id("request")).unwrap(), vec![first, second]);
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn unread_envelope_delivery_rejects_missing_request_and_rolls_back() {
+        let s = Store::open(":memory:").unwrap();
+        let recipient = AgentPath("/root/worker".into());
+        let payload = item(serde_json::json!({"delivery":"atomic"}));
+        s.add_envelope("a", &recipient.0, "message", &payload, None)
+            .unwrap();
+        assert!(matches!(
+            s.append_unread_envelopes(&recipient, &id("missing")),
+            Err(StoreError::MissingRequest(_))
+        ));
+        assert_eq!(s.unread(&recipient.0).unwrap().len(), 1);
+        s.create_request(&id("wrong-request"), None, "/root/other")
+            .unwrap();
+        assert!(matches!(
+            s.append_unread_envelopes(&recipient, &id("wrong-request")),
+            Err(StoreError::RequestAgentMismatch { .. })
+        ));
+        assert!(s.items(&id("wrong-request")).unwrap().is_empty());
+        assert_eq!(s.unread(&recipient.0).unwrap().len(), 1);
+        s.create_request(&id("request"), None, &recipient.0)
+            .unwrap();
+        s.lock()
+            .execute_batch(
+                "CREATE TRIGGER reject_inbox_append BEFORE INSERT ON request_items \
+                 BEGIN SELECT RAISE(ABORT,'forced append failure'); END;",
+            )
+            .unwrap();
+        assert!(
+            s.append_unread_envelopes(&recipient, &id("request"))
+                .is_err()
+        );
+        assert!(s.items(&id("request")).unwrap().is_empty());
+        assert_eq!(s.unread(&recipient.0).unwrap().len(), 1);
     }
 
     #[test]
