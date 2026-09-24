@@ -798,10 +798,8 @@ impl Provider for DemoProvider {
         self.call(name, args).await
     }
 
-    // FIXME(correction-wave b): `run`, `sleep`, `edit`, `ask`, `form` must all
-    // declare `"async": true`; only `wait_agent` is synchronous (PRD `provider
-    // trait`). `sleep` is the acceptance-item-2 tool and cannot prove the
-    // continue path live without it.
+    // NOTE(correction-wave b): no per-tool `async` flags needed here; the
+    // crate's `Provider::all_tools` stamps them. `sleep` is the item-2 tool.
     fn tools(&self) -> Vec<Value> {
         vec![
             json!({"type":"custom","name":"run","description":"DEV ONLY: execute trusted shell script locally"}),

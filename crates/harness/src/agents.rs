@@ -316,10 +316,8 @@ pub async fn dispatch_agent_verb(
 pub fn verb_tool_schemas() -> Vec<serde_json::Value> {
     use serde_json::{Value, json};
 
-    // FIXME(correction-wave b): every verb except `wait_agent` must carry
-    // `"async": true` (PRD `provider trait`). `spawn_agent`, `followup_task`
-    // and friends settle fast today, but the flag is what lets the model
-    // continue while they are pending.
+    // NOTE(correction-wave b): do not add `"async": true` per schema here;
+    // `Provider::all_tools` stamps it once for every tool but `wait_agent`.
     fn function(name: &str, description: &str, parameters: Value) -> Value {
         json!({
             "type": "function",

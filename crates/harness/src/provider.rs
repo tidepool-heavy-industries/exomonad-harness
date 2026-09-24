@@ -69,6 +69,11 @@ pub trait Provider: Send + Sync {
 
     /// Complete stable model tool list (harness verbs plus provider-owned
     /// tools). The provider's existing `tools` method remains unchanged.
+    // TODO(correction-wave b): this is the ONE place to make
+    // `tests/correction_wave.rs` green: stamp `"async": true` on every tool
+    // here, crate verbs and provider tools alike, except `wait_agent`. a
+    // provider-supplied `async` is overridden, not trusted (PRD `provider
+    // trait`; fix the class, not each schema).
     fn all_tools(&self) -> Vec<Value> {
         let mut tools = verb_tool_schemas();
         tools.extend(self.tools());
