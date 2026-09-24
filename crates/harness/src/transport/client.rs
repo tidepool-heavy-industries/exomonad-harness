@@ -16,11 +16,10 @@ pub fn request_body(request: &ResponsesRequest) -> Result<Value, TransportError>
     if request.model.is_empty() || request.session_id.is_empty() {
         return Err(TransportError::Stream("empty model or session id".into()));
     }
-    if request
-        .tools
-        .iter()
-        .any(|tool| tool.get("strict") != Some(&Value::Bool(true)))
-    {
+    if request.tools.iter().any(|tool| {
+        tool.get("type").and_then(Value::as_str) == Some("function")
+            && tool.get("strict") != Some(&Value::Bool(true))
+    }) {
         return Err(TransportError::Stream(
             "all function tools must be strict".into(),
         ));
@@ -191,6 +190,19 @@ mod tests {
             session_id: "shared".into(),
         };
         assert!(request_body(&request).is_err());
+    }
+
+    #[test]
+    fn accepts_custom_tool_without_function_strict_field() {
+        let request = ResponsesRequest {
+            input: vec![],
+            instructions: String::new(),
+            tools: vec![json!({"type":"custom","name":"run","description":"Freeform script"})],
+            model: "gpt-6-sol".into(),
+            pinned_effort: Effort::Low,
+            session_id: "shared".into(),
+        };
+        assert!(request_body(&request).is_ok());
     }
 
     #[test]
