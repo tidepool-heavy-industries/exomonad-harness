@@ -120,3 +120,19 @@ integrated harness tests (30 passed, 1 live ignored), fmt and Clippy. A native
 browser WebSocket cannot set an Authorization header, so the shipped page
 still cannot reach the secured API directly. Operator login/session versus a
 trusted authenticating proxy remains an explicit delivery decision.
+
+The first request engine is now integrated as `harness::engine`. Its offline
+replay tests cover stateless full-history input, separate durable request
+rows/usage across turns, ordered call/output replay on reopen, dispatch from
+`response.output_item.done` before completion, malformed calls, and cleanup
+on transport error/cancellation. Root integrated **only** the child's engine
+files to avoid reverting newer store/tree/server repairs from its branch.
+Integrated workspace fmt, offline tests (51 harness passed, 1 live ignored;
+3 demo passed), Clippy, and check passed. A local integration fix confined a
+test MutexGuard before an await. There was no live model run.
+
+The engine still waits for all pending jobs at the end of each response rather
+than allowing the model to continue with outstanding async calls or to pause
+through `wait_agent`. That is a PRD acceptance blocker, assigned for a
+follow-up engine revision. It also is not yet connected to the server command
+channel or a concrete tree driver.
