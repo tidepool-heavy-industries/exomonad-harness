@@ -108,4 +108,5 @@ demo provider through server + page (a REAL tree doing a real multi-file task in
 - where API ≠ its docs.
 - what integration cost your parent that a different split avoids.
 - what you'd scaffold differently rerunning your subtree.
+- what the runtime you ran in cost you (waiting, polling, blocked tools, lost progress, effort you could not change) → one row each in `docs/friction.md`, paired with the harness mechanism that removes it or marked `open`.
 - which nudges fired on you; right or wrong. (ledger: `.exomonad/nudges/<label>.jsonl` is a deliverable of the wave; the interview reads it.)

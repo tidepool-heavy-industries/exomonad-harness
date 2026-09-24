@@ -1,0 +1,13 @@
+# friction ledger: what today's runtime cost the builders, and what here removes it
+
+fmt: compressed. one row per observed friction, per wave. run-produced: every node's interview adds rows; root merges. the point of running several waves inside the old runtime is this table: each row is a requirement on the harness stated as a cost someone paid. pair every row with the mechanism, or mark `open`.
+
+| wave | observed (who, what it cost) | harness mechanism that removes it | status |
+|---|---|---|---|
+| 0 | root registered a response watch, got no progress unless the child published a stream, polled `ResponsePending` repeatedly, learned nothing, switched to reading git | children are jobs; a parent blocks in `wait_agent` and is resumed by the settlement or by the child's progress envelope (`JobVerbs::envelope`, class Hold until the wait). no polling anywhere (PRD `streaming end to end !`) | mechanism built for calls; child progress envelopes not yet wired |
+| 0 | native `spawn_agent` children could not use Bash, Haskell, or status ("hosted tool call is not authorized"); `spawnWatched` was the only working delegation | we implement the tree ourselves in the trained shape; children get the provider's tools by contract, not by hosted-mode allow-list (PRD `decisions`: NOT hosted multi-agent) | built (prompt forks live) |
+| 0 | a batched Haskell `lookup` over agent lists failed with a compiler-worker diagnostic; only per-agent lookup worked | `list_agents` is a store query over the agents table; `children_of`, `inbox`, `decisions` are named typed queries (PRD `store`) | `list_agents` built; typed query set partial |
+| 0 | the `afterTool` watchdog hook was not installed for the root actor; no nudge ledger could be produced | hooks are typed points on the provider, installed per conversation, every decision a stored row (PRD `hooks`) | not built (wave1) |
+| 0 | leads and leaves each got isolated worktrees; the parent had to merge leaf commits and could not veto out-of-scope edits before they happened | worktree per subtree, leaves share it with `owned`/`mustNot` from the contract, veto at admission, commit by pathspec on the child's behalf (PRD `decisions`) | not built (wave1, acceptance 14) |
+| 0 | a child's reply arrived only when the parent's next turn happened to observe it; parents ended turns to wait | child FINAL_ANSWER is an envelope that resumes `wait_agent`; late settlement starts a request (nudge `late_no_request`) | built |
+| 0 | effort could not change mid-thread; a hard leaf ran at the effort it was spawned with | `set_effort` / spawn at another effort = one `configuration_update`, cache kept (PRD `decisions`) | not built (correction wave c) |

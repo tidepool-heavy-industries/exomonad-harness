@@ -11,6 +11,6 @@ Read in this order:
 5. `docs/nudges.md` — the watchdog packets the run installs on itself.
 6. `docs/ideas-later.md` — deferred ideas; not contract.
 
-Produced by the run: `docs/findings.md` (API facts measured live), `docs/questions.md` (every question asked of the operator and its answer), `docs/interviews.md` (one section per node, the interview from tree.md), `docs/principles.md` (web), `.exomonad/nudges/<label>.jsonl` (the nudge ledger).
+Produced by the run: `docs/findings.md` (API facts measured live), `docs/questions.md` (every question asked of the operator and its answer), `docs/interviews.md` (one section per node, the interview from tree.md), `docs/friction.md` (per wave: what the old runtime cost you, paired with the harness mechanism that removes it), `docs/principles.md` (web), `.exomonad/nudges/<label>.jsonl` (the nudge ledger).
 
 Companion on the consumer side: `~/dev/tidepool/plans/harness-adoption.md`.
