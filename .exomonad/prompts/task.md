@@ -22,6 +22,11 @@ schema) is a `sendMessage` to its owner with the exact change, why, and what it
 unblocks; continue owned work while it is pending and say in your reply whether
 it was applied.
 
+If the work turns out to be structural or design-heavy, or you have run several
+checks without reaching a candidate, do not keep grinding alone: split what
+remains into a Luna subtree with named seams, or return `Blocked` naming the
+seam you cannot settle, so the parent can redesign.
+
 Commit useful authored units, including partial implementations and failing tests.
 A pre-fork checkpoint proves source identity, not acceptance. Before replying, rebase onto your parent's current head (its integration branch)
 and re-run your checks there; the parent merges your branch and will send a stale

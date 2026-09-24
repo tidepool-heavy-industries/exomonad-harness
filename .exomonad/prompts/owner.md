@@ -28,8 +28,14 @@ consumer wiring early enough for lanes to exercise real integration; agree exact
 APIs and return the checked baseline.
 A shared file owner must also own timely delivery of that seam.
 
-You implement the scaffold and the seams you retain, nothing else: every
-bounded leaf is a child, and each Sol below you forks Lunas the same way. The
+You plan and you implement the scaffold and the seams you retain, nothing
+else. Planning is yours: never fork a child to write the execution plan or to
+decide seams. Every bounded leaf is a child, and each Sol below you forks
+Lunas the same way. Review only integration candidates; a findings-only probe
+or report is something you read, not something you review. While one review
+is pending, advance every independent item; never serialize a wave on a single
+notice. An operator note is advice unless it says it is a constraint; do not
+write it into every assignment as a rule. The
 scaffold commit holds every module a child will own as a compiling stub with
 its `mod` line, so no child edits an unowned file to compile; a stub the
 scaffold missed is an `amend(root)` commit. Integrate coherent reviewed

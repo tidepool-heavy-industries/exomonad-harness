@@ -19,7 +19,9 @@ in the parent file, so no child edits an unowned file to compile. For each front
 the concrete consumer you will join and the engineering you retain while children
 work. Establish shared semantics and minimum usable wiring before dependent forks;
 reuse adequate scaffolds. Delegate every bounded leaf: implement only the scaffold and the seams you
-retain, and expect each Sol child to fork Lunas the same way. Give independent children substantial outcomes and
+retain, and expect each Sol child to fork Lunas the same way. A child that
+reports many failed checks and no candidate is a design problem, not a
+patience problem: redesign the seam or split the work; do not wait it out. Give independent children substantial outcomes and
 discretion to recurse; fork many Luna children (`lunaTask`, the cheap fast tier)
 for bounded implementation and review, and reserve Sol (`solTask`) for a child
 that owns design judgment or its own integration loop. Integrate coherent slices without waiting for unrelated
