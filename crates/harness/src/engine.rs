@@ -6,13 +6,17 @@
 
 use crate::{
     item::Item,
+    mailbox::{Envelope, MessageChannel},
     model::{AgentPath, CallId, Effort, RequestId},
     provider::Provider,
     store::{Store, StoreError, Usage as StoredUsage},
     transport::{
         Auth, ResponsesClient, ResponsesRequest, ResponsesTurn, TransportError, sse::StreamEvent,
     },
-    turn::{JobError, JobScheduler},
+    turn::{
+        JobError, JobScheduler, WaitAgentResult, WaitResume, outputs_in_call_order,
+        wait_agent_and_drain,
+    },
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -21,6 +25,13 @@ use tokio::sync::watch;
 
 #[path = "engine/items.rs"]
 mod items;
+
+#[derive(Clone, Debug)]
+struct PendingCall {
+    call_id: CallId,
+    claim_request: RequestId,
+    is_wait_agent: bool,
+}
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -38,6 +49,8 @@ pub enum EngineError {
     MissingFinal,
     #[error("malformed Responses function_call item")]
     InvalidFunctionCall,
+    #[error("a model response contained more than one wait_agent call")]
+    MultipleWaitAgents,
     #[error(
         "engine operation failed: {primary}; additionally failed to clean up outstanding calls: {cleanup}"
     )]
@@ -145,7 +158,45 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     pub async fn run(
         &self,
         initial: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+    ) -> Result<ResponsesTurn, EngineError> {
+        let (keepalive, envelopes) = tokio::sync::mpsc::unbounded_channel();
+        let result = self
+            .run_with_envelopes(initial, cancellation, envelopes)
+            .await;
+        drop(keepalive);
+        result
+    }
+
+    /// Run with the agent's mailbox receiver. This is required for
+    /// `wait_agent` to resume on envelope delivery; `run` remains suitable
+    /// when the host has no mailbox source.
+    pub async fn run_with_envelopes(
+        &self,
+        initial: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+        mut incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+    ) -> Result<ResponsesTurn, EngineError> {
+        let (envelope_tx, envelopes) = tokio::sync::mpsc::unbounded_channel();
+        let keepalive = envelope_tx.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(envelope) = incoming.recv().await {
+                if envelope_tx.send(envelope).is_err() {
+                    break;
+                }
+            }
+        });
+        let result = self.run_loop(initial, cancellation, envelopes).await;
+        drop(keepalive);
+        forwarder.abort();
+        result
+    }
+
+    async fn run_loop(
+        &self,
+        initial: Vec<Item>,
         mut cancellation: watch::Receiver<bool>,
+        mut envelopes: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
     ) -> Result<ResponsesTurn, EngineError> {
         let id = RequestId(uuid::Uuid::new_v4().to_string());
         let store = self.store.clone();
@@ -156,11 +207,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         })
         .await?;
         let mut parent = id.clone();
+        let mut pending = Vec::<PendingCall>::new();
         loop {
             if *cancellation.borrow() {
-                return Err(EngineError::Cancelled);
+                return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
             }
-            let history = self.read_history(&parent).await?;
+            let history = match self.read_history(&parent).await {
+                Ok(history) => history,
+                Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+            };
             let req = ResponsesRequest {
                 input: history,
                 instructions: self.config.instructions.clone(),
@@ -172,7 +227,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
             let create = self.client.create_streaming(req, event_tx);
             tokio::pin!(create);
-            let mut calls = Vec::<CallId>::new();
+            let mut turn_call_ids = Vec::<CallId>::new();
+            let mut wait_call = None;
             let mut event_stream_open = true;
             let turn = loop {
                 tokio::select! {
@@ -180,21 +236,33 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         Ok(turn) => break turn,
                         Err(error) => {
                             let primary = EngineError::Transport(error);
-                            return Err(self.cleanup_after(primary, &calls, &parent).await);
+                            return Err(self.cleanup_pending(primary, &pending).await);
                         }
                     },
                     changed = cancellation.changed() => {
                         if changed.is_err() || *cancellation.borrow() {
-                            return Err(self.cleanup_after(EngineError::Cancelled, &calls, &parent).await);
+                            return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
                         }
                     }
                     event = event_rx.recv(), if event_stream_open => {
                         match event {
                             Some(StreamEvent::ItemDone(item)) => {
                                 match self.dispatch_completed_item(item, &parent).await {
-                                    Ok(Some(call_id)) if !calls.contains(&call_id) => calls.push(call_id),
-                                    Ok(_) => {}
-                                    Err(error) => return Err(self.cleanup_after(error, &calls, &parent).await),
+                                    Ok(Some(call)) => {
+                                        if !pending.iter().any(|current| current.call_id == call.call_id) {
+                                            if call.is_wait_agent && wait_call.is_some() {
+                                                return Err(self.cleanup_pending(
+                                                    EngineError::MultipleWaitAgents,
+                                                    &pending
+                                                ).await);
+                                            }
+                                            if call.is_wait_agent { wait_call = Some(call.call_id.clone()); }
+                                            turn_call_ids.push(call.call_id.clone());
+                                            pending.push(call);
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
                                 }
                             }
                             Some(StreamEvent::Delta(_)) => {}
@@ -207,10 +275,26 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             while let Ok(event) = event_rx.try_recv() {
                 if let StreamEvent::ItemDone(item) = event {
                     match self.dispatch_completed_item(item, &parent).await {
-                        Ok(Some(call_id)) if !calls.contains(&call_id) => calls.push(call_id),
+                        Ok(Some(call)) => {
+                            if !pending
+                                .iter()
+                                .any(|current| current.call_id == call.call_id)
+                            {
+                                if call.is_wait_agent && wait_call.is_some() {
+                                    return Err(self
+                                        .cleanup_pending(EngineError::MultipleWaitAgents, &pending)
+                                        .await);
+                                }
+                                if call.is_wait_agent {
+                                    wait_call = Some(call.call_id.clone());
+                                }
+                                turn_call_ids.push(call.call_id.clone());
+                                pending.push(call);
+                            }
+                        }
                         Ok(_) => {}
                         Err(error) => {
-                            return Err(self.cleanup_after(error, &calls, &parent).await);
+                            return Err(self.cleanup_pending(error, &pending).await);
                         }
                     }
                 }
@@ -221,31 +305,37 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 if item.0["type"] == "function_call" {
                     let Some((call_id, _, _)) = items::function_call(item) else {
                         return Err(self
-                            .cleanup_after(EngineError::InvalidFunctionCall, &calls, &parent)
+                            .cleanup_pending(EngineError::InvalidFunctionCall, &pending)
                             .await);
                     };
-                    if !calls.contains(&call_id) {
+                    if !pending.iter().any(|current| current.call_id == call_id) {
                         match self.dispatch_completed_item(item.clone(), &parent).await {
-                            Ok(Some(_)) => {}
+                            Ok(Some(call)) => {
+                                if call.is_wait_agent && wait_call.is_some() {
+                                    return Err(self
+                                        .cleanup_pending(EngineError::MultipleWaitAgents, &pending)
+                                        .await);
+                                }
+                                if call.is_wait_agent {
+                                    wait_call = Some(call_id.clone());
+                                }
+                                turn_call_ids.push(call_id.clone());
+                                pending.push(call);
+                            }
                             Ok(None) => {
                                 return Err(self
-                                    .cleanup_after(
-                                        EngineError::InvalidFunctionCall,
-                                        &calls,
-                                        &parent,
-                                    )
+                                    .cleanup_pending(EngineError::InvalidFunctionCall, &pending)
                                     .await);
                             }
                             Err(error) => {
-                                return Err(self.cleanup_after(error, &calls, &parent).await);
+                                return Err(self.cleanup_pending(error, &pending).await);
                             }
                         }
-                        calls.push(call_id);
                     }
                 }
             }
             if let Err(error) = self.append(&parent, turn.items.clone()).await {
-                return Err(self.cleanup_after(error, &calls, &parent).await);
+                return Err(self.cleanup_pending(error, &pending).await);
             }
             let usage_for_store = StoredUsage {
                 input_tokens: i64::try_from(turn.usage.input_tokens).unwrap_or(i64::MAX),
@@ -255,7 +345,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let store = self.store.clone();
             let request = parent.clone();
             if let Err(error) = blocking(move || store.set_usage(&request, usage_for_store)).await {
-                return Err(self.cleanup_after(error, &calls, &parent).await);
+                return Err(self.cleanup_pending(error, &pending).await);
             }
             let usage = json!({
                 "response_id":turn.response_id,
@@ -270,56 +360,67 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 blocking(move || store.record_event(Some(&request), "responses_usage", &usage))
                     .await
             {
-                return Err(self.cleanup_after(error, &calls, &parent).await);
+                return Err(self.cleanup_pending(error, &pending).await);
             }
-            if calls.is_empty() {
-                if turn
-                    .items
-                    .iter()
-                    .any(|item| item.0["phase"] == "final_answer")
-                {
-                    return Ok(turn);
-                }
-                return Err(EngineError::MissingFinal);
-            }
-            for call_id in &calls {
-                let call_id = call_id.clone();
-                let output = loop {
-                    tokio::select! {
-                        output = self.scheduler.wait(&call_id) => match output {
-                            Ok(output) => break output,
-                            Err(error) => return Err(self.cleanup_after(
-                                EngineError::Job(error), &calls, &parent
-                            ).await),
-                        },
-                        changed = cancellation.changed() => {
-                            if changed.is_err() || *cancellation.borrow() {
-                                return Err(self.cleanup_after(EngineError::Cancelled, &calls, &parent).await);
-                            }
-                        }
+
+            let settled_this_turn = match self.persist_settled(&mut pending, &parent).await {
+                Ok(settled) => settled,
+                Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+            };
+
+            if let Some(wait_call_id) = wait_call {
+                let result = if let Some(call_id) = settled_this_turn.first() {
+                    WaitAgentResult {
+                        call_outputs: Vec::new(),
+                        resumed_by: WaitResume::Job(call_id.clone()),
+                    }
+                } else {
+                    match self
+                        .wait_for_resume(&pending, &mut envelopes, &mut cancellation)
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => return Err(self.cleanup_pending(error, &pending).await),
                     }
                 };
-                let item = items::function_output(&call_id, &output);
-                let c = call_id.clone();
-                let request = parent.clone();
-                let saved = item.clone();
-                let store = self.store.clone();
-                let saved_result = blocking(move || {
-                    store.write_output(&c, &saved)?;
-                    store.append_items(&request, &[saved])?;
-                    Ok::<_, StoreError>(())
-                })
-                .await;
-                if let Err(error) = saved_result {
-                    return Err(self.cleanup_after(error, &calls, &parent).await);
+                if matches!(&result.resumed_by, WaitResume::Cancelled) {
+                    return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
                 }
+                if let Err(error) = self
+                    .persist_wait_result(&mut pending, &parent, Some(&wait_call_id), result)
+                    .await
+                {
+                    return Err(self.cleanup_pending(error, &pending).await);
+                }
+            } else if is_final(&turn) && !pending.is_empty() && settled_this_turn.is_empty() {
+                let result = match self
+                    .wait_for_resume(&pending, &mut envelopes, &mut cancellation)
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                };
+                if matches!(&result.resumed_by, WaitResume::Cancelled) {
+                    return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
+                }
+                if let Err(error) = self
+                    .persist_wait_result(&mut pending, &parent, None, result)
+                    .await
+                {
+                    return Err(self.cleanup_pending(error, &pending).await);
+                }
+            } else if is_final(&turn) && pending.is_empty() {
+                return Ok(turn);
+            } else if turn_call_ids.is_empty() && pending.is_empty() {
+                return Err(EngineError::MissingFinal);
             }
+
             let next_id = RequestId(uuid::Uuid::new_v4().to_string());
             let store = self.store.clone();
             let branch = self.config.agent.0.clone();
             let parent_for_write = parent.clone();
             let request = next_id.clone();
-            blocking(move || {
+            if let Err(error) = blocking(move || {
                 store.write_request(
                     &request,
                     Some(&parent_for_write),
@@ -328,7 +429,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     StoredUsage::default(),
                 )
             })
-            .await?;
+            .await
+            {
+                return Err(self.cleanup_pending(error, &pending).await);
+            }
             parent = next_id;
             // Outputs were appended individually as their jobs settled; next
             // iteration sends the full ordered transcript to the model.
@@ -361,75 +465,195 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         &self,
         item: Item,
         request: &RequestId,
-    ) -> Result<Option<CallId>, EngineError> {
+    ) -> Result<Option<PendingCall>, EngineError> {
         if item.0["type"] != "function_call" {
             return Ok(None);
         }
-        if items::function_call(&item).is_none() {
+        let Some((call_id, name, args)) = items::function_call(&item) else {
             return Err(EngineError::InvalidFunctionCall);
+        };
+        let is_wait_agent = name == "wait_agent";
+        if is_wait_agent {
+            let store = self.store.clone();
+            let call = call_id.clone();
+            let request_id = request.clone();
+            blocking(move || store.claim(&call, &request_id)).await?;
+            return Ok(Some(PendingCall {
+                call_id,
+                claim_request: request.clone(),
+                is_wait_agent,
+            }));
         }
         let provider: Arc<dyn Provider> = self.provider.clone();
-        let handle = self
-            .scheduler
-            .start_completed_item_for_agent(provider, self.config.agent.clone(), &item)
+        self.scheduler
+            .start_for_agent(
+                provider,
+                self.config.agent.clone(),
+                call_id.clone(),
+                name,
+                args,
+            )
             .await?;
-        let Some(handle) = handle else {
-            return Ok(None);
-        };
-        let call_id = CallId(handle.0);
         if let Err(error) = self
             .scheduler
             .claim(&call_id, self.config.agent.clone())
             .await
         {
-            return Err(self
-                .cleanup_after(
-                    EngineError::Job(error),
-                    std::slice::from_ref(&call_id),
-                    request,
-                )
-                .await);
+            let _ = self.scheduler.cancel(&call_id).await;
+            return Err(EngineError::Job(error));
         }
         let store = self.store.clone();
         let call = call_id.clone();
         let request_id = request.clone();
         if let Err(error) = blocking(move || store.claim(&call, &request_id)).await {
-            return Err(self
-                .cleanup_after(error, std::slice::from_ref(&call_id), request)
-                .await);
+            let _ = self.scheduler.cancel(&call_id).await;
+            return Err(error);
         }
-        Ok(Some(call_id))
+        Ok(Some(PendingCall {
+            call_id,
+            claim_request: request.clone(),
+            is_wait_agent,
+        }))
     }
 
-    async fn cancel_calls(&self, calls: &[CallId], request: &RequestId) -> Result<(), EngineError> {
+    async fn cancel_pending(&self, pending: &[PendingCall]) -> Result<(), EngineError> {
         let mut first_error = None;
-        for call_id in calls {
-            if let Err(error) = self.scheduler.cancel(call_id).await {
-                first_error.get_or_insert_with(|| EngineError::Job(error));
+        for call in pending {
+            if !call.is_wait_agent {
+                if let Err(error) = self.scheduler.cancel(&call.call_id).await {
+                    first_error.get_or_insert_with(|| EngineError::Job(error));
+                }
             }
             let store = self.store.clone();
-            let call = call_id.clone();
-            let request = request.clone();
-            if let Err(error) = blocking(move || store.interrupt_claim(&call, &request)).await {
+            let call_id = call.call_id.clone();
+            let request = call.claim_request.clone();
+            if let Err(error) = blocking(move || store.interrupt_claim(&call_id, &request)).await {
                 first_error.get_or_insert(error);
             }
         }
         first_error.map_or(Ok(()), Err)
     }
 
-    async fn cleanup_after(
-        &self,
-        primary: EngineError,
-        calls: &[CallId],
-        request: &RequestId,
-    ) -> EngineError {
-        match self.cancel_calls(calls, request).await {
+    async fn cleanup_pending(&self, primary: EngineError, pending: &[PendingCall]) -> EngineError {
+        match self.cancel_pending(pending).await {
             Ok(()) => primary,
             Err(cleanup) => EngineError::Cleanup {
                 primary: Box::new(primary),
                 cleanup: cleanup.to_string(),
             },
         }
+    }
+
+    async fn persist_settled(
+        &self,
+        pending: &mut Vec<PendingCall>,
+        request: &RequestId,
+    ) -> Result<Vec<CallId>, EngineError> {
+        let calls: Vec<_> = pending
+            .iter()
+            .filter(|call| !call.is_wait_agent)
+            .map(|call| call.call_id.clone())
+            .collect();
+        let outputs = outputs_in_call_order(&self.scheduler, &calls).await?;
+        let mut settled = Vec::with_capacity(outputs.len());
+        for (call_id, output) in outputs {
+            self.persist_output(&call_id, &output, request).await?;
+            pending.retain(|call| call.call_id != call_id);
+            settled.push(call_id);
+        }
+        Ok(settled)
+    }
+
+    async fn persist_output(
+        &self,
+        call_id: &CallId,
+        output: &crate::turn::JobOutput,
+        request: &RequestId,
+    ) -> Result<(), EngineError> {
+        let item = items::function_output(call_id, output);
+        let store = self.store.clone();
+        let call = call_id.clone();
+        let request = request.clone();
+        blocking(move || {
+            store.write_output(&call, &item)?;
+            store.append_items(&request, &[item])?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn wait_for_resume(
+        &self,
+        pending: &[PendingCall],
+        envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> Result<WaitAgentResult, EngineError> {
+        let calls: Vec<_> = pending
+            .iter()
+            .filter(|call| !call.is_wait_agent)
+            .map(|call| call.call_id.clone())
+            .collect();
+        loop {
+            let result =
+                wait_agent_and_drain(envelopes, &self.scheduler, cancellation, &calls).await?;
+            match &result.resumed_by {
+                WaitResume::Job(call_id) if calls.contains(call_id) => return Ok(result),
+                WaitResume::Envelope(_) | WaitResume::Cancelled => return Ok(result),
+                WaitResume::Job(_) => continue,
+            }
+        }
+    }
+
+    async fn persist_wait_result(
+        &self,
+        pending: &mut Vec<PendingCall>,
+        request: &RequestId,
+        wait_call: Option<&CallId>,
+        result: WaitAgentResult,
+    ) -> Result<(), EngineError> {
+        for (call_id, output) in result.call_outputs {
+            self.persist_output(&call_id, &output, request).await?;
+            pending.retain(|call| call.call_id != call_id);
+        }
+        let (agent_envelope, user_envelope, output) = match result.resumed_by {
+            WaitResume::Job(call_id) => (None, None, json!({"resumed_by":{"job":call_id.0}})),
+            WaitResume::Envelope(envelope) => {
+                let (channel, content) = envelope.render();
+                let role = match channel {
+                    MessageChannel::Assistant => "assistant",
+                    MessageChannel::User => "user",
+                    MessageChannel::Developer => "developer",
+                };
+                let item = Item(json!({"type":"message","role":role,"content":content}));
+                let resumed = if envelope.sender.0 == "/operator" {
+                    json!({"resumed_by":"user_input"})
+                } else {
+                    json!({"resumed_by":{"agent":envelope.sender.0}})
+                };
+                if channel == MessageChannel::User {
+                    (None, Some(item), resumed)
+                } else {
+                    (Some(item), None, resumed)
+                }
+            }
+            WaitResume::Cancelled => return Err(EngineError::Cancelled),
+        };
+        if let Some(item) = agent_envelope {
+            self.append(request, vec![item]).await?;
+        }
+        if let Some(wait_call) = wait_call {
+            self.persist_output(
+                wait_call,
+                &crate::turn::JobOutput::Completed(Ok(output)),
+                request,
+            )
+            .await?;
+            pending.retain(|call| call.call_id != *wait_call);
+        }
+        if let Some(item) = user_envelope {
+            self.append(request, vec![item]).await?;
+        }
+        Ok(())
     }
 
     async fn read_history(&self, id: &RequestId) -> Result<Vec<Item>, EngineError> {
@@ -452,6 +676,12 @@ async fn load_history(store: Arc<Store>, id: RequestId) -> Result<Vec<Item>, Eng
         Ok(chain.into_iter().flatten().collect())
     })
     .await
+}
+
+fn is_final(turn: &ResponsesTurn) -> bool {
+    turn.items
+        .iter()
+        .any(|item| item.0["phase"] == "final_answer")
 }
 
 async fn blocking<T: Send + 'static>(
@@ -506,6 +736,195 @@ mod tests {
 
         fn tools(&self) -> Vec<Value> {
             Vec::new()
+        }
+    }
+
+    struct SlowProvider {
+        started: Arc<Notify>,
+        release: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        released: Arc<std::sync::atomic::AtomicBool>,
+    }
+    #[async_trait]
+    impl Provider for SlowProvider {
+        async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+            self.started.notify_one();
+            self.release
+                .lock()
+                .await
+                .take()
+                .expect("one slow invocation")
+                .await
+                .expect("test releases job");
+            self.released
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(json!({"slow_done":true}))
+        }
+
+        fn tools(&self) -> Vec<Value> {
+            Vec::new()
+        }
+    }
+
+    struct AsyncContinuation {
+        requests: Arc<Mutex<Vec<ResponsesRequest>>>,
+        started: Arc<Notify>,
+        second_request: Arc<Notify>,
+    }
+    #[async_trait::async_trait]
+    impl ResponsesTransport for AsyncContinuation {
+        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            unreachable!("streaming path expected")
+        }
+
+        async fn create_streaming(
+            &self,
+            request: ResponsesRequest,
+            sink: tokio::sync::mpsc::Sender<StreamEvent>,
+        ) -> Result<ResponsesTurn, TransportError> {
+            let index = {
+                let mut requests = self.requests.lock().unwrap();
+                let index = requests.len();
+                requests.push(request);
+                index
+            };
+            match index {
+                0 => {
+                    let call = Item(json!({
+                        "type":"function_call","call_id":"slow-call","name":"slow","arguments":"{}"
+                    }));
+                    sink.send(StreamEvent::ItemDone(call.clone()))
+                        .await
+                        .map_err(|_| {
+                            TransportError::Stream("engine event receiver closed".into())
+                        })?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        self.started.notified(),
+                    )
+                    .await
+                    .map_err(|_| TransportError::Stream("slow provider never began".into()))?;
+                    Ok(turn("async-one", vec![call]))
+                }
+                1 => {
+                    self.second_request.notify_one();
+                    let wait = Item(json!({
+                        "type":"function_call","call_id":"wait-call","name":"wait_agent","arguments":"{}"
+                    }));
+                    sink.send(StreamEvent::ItemDone(wait.clone()))
+                        .await
+                        .map_err(|_| {
+                            TransportError::Stream("engine event receiver closed".into())
+                        })?;
+                    Ok(turn("async-wait", vec![wait]))
+                }
+                2 => {
+                    let final_item = Item(json!({
+                        "type":"message","role":"assistant","phase":"final_answer","content":"done"
+                    }));
+                    sink.send(StreamEvent::ItemDone(final_item.clone()))
+                        .await
+                        .map_err(|_| {
+                            TransportError::Stream("engine event receiver closed".into())
+                        })?;
+                    Ok(turn("async-final", vec![final_item]))
+                }
+                _ => Err(TransportError::Stream("unexpected replay request".into())),
+            }
+        }
+    }
+
+    struct LateFinal {
+        requests: Arc<Mutex<Vec<ResponsesRequest>>>,
+        started: Arc<Notify>,
+        response_finished: Arc<Notify>,
+        second_request: Arc<Notify>,
+    }
+    #[async_trait::async_trait]
+    impl ResponsesTransport for LateFinal {
+        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            unreachable!("streaming path expected")
+        }
+
+        async fn create_streaming(
+            &self,
+            request: ResponsesRequest,
+            sink: tokio::sync::mpsc::Sender<StreamEvent>,
+        ) -> Result<ResponsesTurn, TransportError> {
+            let index = {
+                let mut requests = self.requests.lock().unwrap();
+                let index = requests.len();
+                requests.push(request);
+                index
+            };
+            if index == 0 {
+                let call = Item(json!({
+                    "type":"function_call","call_id":"late-call","name":"slow","arguments":"{}"
+                }));
+                let final_item = Item(json!({
+                    "type":"message","role":"assistant","phase":"final_answer","content":"provisional"
+                }));
+                sink.send(StreamEvent::ItemDone(call.clone()))
+                    .await
+                    .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
+                sink.send(StreamEvent::ItemDone(final_item.clone()))
+                    .await
+                    .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
+                tokio::time::timeout(std::time::Duration::from_secs(2), self.started.notified())
+                    .await
+                    .map_err(|_| TransportError::Stream("slow provider never began".into()))?;
+                self.response_finished.notify_one();
+                Ok(turn("late-provisional", vec![call, final_item]))
+            } else if index == 1 {
+                self.second_request.notify_one();
+                let final_item = Item(json!({
+                    "type":"message","role":"assistant","phase":"final_answer","content":"continued"
+                }));
+                sink.send(StreamEvent::ItemDone(final_item.clone()))
+                    .await
+                    .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
+                Ok(turn("late-continued", vec![final_item]))
+            } else {
+                Err(TransportError::Stream("unexpected replay request".into()))
+            }
+        }
+    }
+
+    struct WaitEnvelopeTransport {
+        requests: Arc<Mutex<Vec<ResponsesRequest>>>,
+    }
+    #[async_trait::async_trait]
+    impl ResponsesTransport for WaitEnvelopeTransport {
+        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            unreachable!("streaming path expected")
+        }
+
+        async fn create_streaming(
+            &self,
+            request: ResponsesRequest,
+            sink: tokio::sync::mpsc::Sender<StreamEvent>,
+        ) -> Result<ResponsesTurn, TransportError> {
+            let index = {
+                let mut requests = self.requests.lock().unwrap();
+                let index = requests.len();
+                requests.push(request);
+                index
+            };
+            let item = if index == 0 {
+                Item(json!({
+                    "type":"function_call","call_id":"wait-envelope","name":"wait_agent","arguments":"{}"
+                }))
+            } else {
+                Item(json!({
+                    "type":"message","role":"assistant","phase":"final_answer","content":"resumed"
+                }))
+            };
+            sink.send(StreamEvent::ItemDone(item.clone()))
+                .await
+                .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
+            Ok(turn(
+                if index == 0 { "wait" } else { "resumed" },
+                vec![item],
+            ))
         }
     }
 
@@ -1055,5 +1474,198 @@ mod tests {
             Err(EngineError::Store(StoreError::MissingRequest(id))) if id == "missing-parent"
         ));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn slow_job_does_not_block_model_continuation_and_wait_resumes_in_call_order() {
+        let started = Arc::new(Notify::new());
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let store = Arc::new(Store::memory().unwrap());
+        let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+        let second_request = Arc::new(Notify::new());
+        let engine = Engine::<FakeAuth, SlowProvider, _>::with_transport(
+            AsyncContinuation {
+                requests: requests.clone(),
+                started: started.clone(),
+                second_request: second_request.clone(),
+            },
+            store,
+            scheduler,
+            Arc::new(SlowProvider {
+                started,
+                release: tokio::sync::Mutex::new(Some(release_rx)),
+                released: released.clone(),
+            }),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "session".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let run = tokio::spawn(async move {
+            engine
+                .run(vec![Item(json!({"role":"user","content":"go"}))], cancel_rx)
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), second_request.notified())
+            .await
+            .expect("model continued while slow tool remained pending");
+        assert!(!released.load(std::sync::atomic::Ordering::SeqCst));
+        release_tx.send(()).unwrap();
+        let final_result = tokio::time::timeout(std::time::Duration::from_secs(3), run).await;
+        assert_eq!(
+            final_result.unwrap().unwrap().unwrap().response_id,
+            "async-final"
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        let resumed_history = &requests[2].input;
+        assert_eq!(resumed_history[1].0["call_id"], "slow-call");
+        assert_eq!(resumed_history[2].0["call_id"], "wait-call");
+        assert_eq!(resumed_history[3].0["call_id"], "slow-call");
+        assert_eq!(resumed_history[4].0["call_id"], "wait-call");
+        let slow_output: Value =
+            serde_json::from_str(resumed_history[3].0["output"].as_str().unwrap()).unwrap();
+        assert_eq!(slow_output, json!({"slow_done":true}));
+        let wait_output: Value =
+            serde_json::from_str(resumed_history[4].0["output"].as_str().unwrap()).unwrap();
+        assert_eq!(wait_output, json!({"resumed_by":{"job":"slow-call"}}));
+    }
+
+    #[tokio::test]
+    async fn late_settlement_after_final_response_wakes_continuation() {
+        let started = Arc::new(Notify::new());
+        let response_finished = Arc::new(Notify::new());
+        let second_request = Arc::new(Notify::new());
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let store = Arc::new(Store::memory().unwrap());
+        let engine = Engine::<FakeAuth, SlowProvider, _>::with_transport(
+            LateFinal {
+                requests: requests.clone(),
+                started: started.clone(),
+                response_finished: response_finished.clone(),
+                second_request: second_request.clone(),
+            },
+            store,
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(SlowProvider {
+                started,
+                release: tokio::sync::Mutex::new(Some(release_rx)),
+                released: released.clone(),
+            }),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "session".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let run = tokio::spawn(async move {
+            engine
+                .run(vec![Item(json!({"role":"user","content":"go"}))], cancel_rx)
+                .await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            response_finished.notified(),
+        )
+        .await
+        .expect("model produced provisional final");
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                second_request.notified()
+            )
+            .await
+            .is_err(),
+            "engine must pause while job is pending"
+        );
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), second_request.notified())
+            .await
+            .expect("late settlement triggered next model request");
+        assert_eq!(run.await.unwrap().unwrap().response_id, "late-continued");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].input[1].0["call_id"], "late-call");
+        assert_eq!(requests[1].input[3].0["call_id"], "late-call");
+    }
+
+    #[tokio::test]
+    async fn wait_agent_resumes_on_envelope_after_any_ready_job_outputs() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let store = Arc::new(Store::memory().unwrap());
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            WaitEnvelopeTransport {
+                requests: requests.clone(),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "session".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let (envelope_tx, envelope_rx) = tokio::sync::mpsc::unbounded_channel();
+        let run = tokio::spawn(async move {
+            engine
+                .run_with_envelopes(
+                    vec![Item(json!({"role":"user","content":"go"}))],
+                    cancel_rx,
+                    envelope_rx,
+                )
+                .await
+        });
+        let wait_call = CallId("wait-envelope".into());
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if !store.claims(&wait_call).unwrap().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("wait call claim persisted");
+        envelope_tx
+            .send(Envelope {
+                kind: crate::mailbox::EnvelopeType::Message,
+                recipient: AgentPath("/root".into()),
+                sender: AgentPath("/root/worker".into()),
+                payload: "arrived".into(),
+                class: crate::mailbox::DeliveryClass::AtBoundary,
+                timestamp_ms: 1,
+            })
+            .unwrap();
+        assert_eq!(run.await.unwrap().unwrap().response_id, "resumed");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let next = &requests[1].input;
+        assert_eq!(next[1].0["call_id"], "wait-envelope");
+        assert_eq!(next[2].0["type"], "message");
+        assert_eq!(
+            next[2].0["content"],
+            "Message Type: MESSAGE\nTask name: /root\nSender: /root/worker\nPayload:\narrived"
+        );
+        assert_eq!(next[3].0["call_id"], "wait-envelope");
+        let output: Value = serde_json::from_str(next[3].0["output"].as_str().unwrap()).unwrap();
+        assert_eq!(output, json!({"resumed_by":{"agent":"/root/worker"}}));
     }
 }
