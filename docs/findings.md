@@ -136,3 +136,14 @@ than allowing the model to continue with outstanding async calls or to pause
 through `wait_agent`. That is a PRD acceptance blocker, assigned for a
 follow-up engine revision. It also is not yet connected to the server command
 channel or a concrete tree driver.
+
+The async follow-up was integrated after review. It tracks pending calls,
+continues a request without awaiting slow jobs, handles `wait_agent` as a
+withheld call output, appends settled outputs before the wait status, and
+wakes from a late settlement or mailbox envelope. Controlled offline tests
+cover these paths. Integrated workspace fmt, offline tests (54 harness passed,
+1 live ignored; 3 demo passed), Clippy and check passed. This narrows the
+loop gap, but it does not establish a live subscription conversation, durable
+job restoration after process restart, or a running multi-agent driver. The
+agent-runtime implementation and server/browser authentication connection
+are still pending.
