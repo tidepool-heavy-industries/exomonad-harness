@@ -254,7 +254,12 @@ impl JobScheduler {
             settle(&jobs, task_call_id.clone(), JobOutput::Completed(result)).await;
             let _ = events.send(task_call_id);
         });
-        registry.get_mut(&call_id).expect("registered above").task = Some(task);
+        if let Some(job) = registry.get_mut(&call_id) {
+            job.task = Some(task);
+        } else {
+            task.abort();
+            return Err(JobError::UnknownCall);
+        }
         drop(registry);
         let _ = launch.send(());
         Ok(JobHandle(call_id.0))
@@ -519,17 +524,25 @@ async fn settle(
 ) -> JobSettlement {
     let settlement = {
         let mut jobs = jobs.lock().await;
-        let job = jobs
-            .get_mut(&call_id)
-            .expect("job registered before execution");
-        if job.output.is_none() {
-            job.output = Some(output);
-            job.settled_claimants = job.claimants.drain().collect();
-        }
-        JobSettlement {
-            call_id,
-            output: job.output.clone().expect("just settled"),
-            claimants: job.settled_claimants.clone(),
+        if let Some(job) = jobs.get_mut(&call_id) {
+            let final_output = if let Some(existing) = &job.output {
+                existing.clone()
+            } else {
+                job.output = Some(output.clone());
+                job.settled_claimants = job.claimants.drain().collect();
+                output
+            };
+            JobSettlement {
+                call_id,
+                output: final_output,
+                claimants: job.settled_claimants.clone(),
+            }
+        } else {
+            JobSettlement {
+                call_id,
+                output,
+                claimants: Vec::new(),
+            }
         }
     };
     if let Some(job) = jobs.lock().await.get(&settlement.call_id) {
@@ -634,24 +647,18 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_start_and_cancel_never_loses_provider_task_handle() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-        struct OnDrop(Arc<AtomicBool>);
-        impl Drop for OnDrop {
-            fn drop(&mut self) {
-                self.0.store(true, AtomicOrdering::SeqCst);
-            }
-        }
-        struct NeverCompletes {
-            invoked: Arc<AtomicUsize>,
-            dropped: Arc<AtomicBool>,
+        struct DeferredSideEffect {
+            release: Arc<tokio::sync::Notify>,
+            effects: Arc<AtomicUsize>,
         }
         #[async_trait]
-        impl Provider for NeverCompletes {
+        impl Provider for DeferredSideEffect {
             async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
-                self.invoked.fetch_add(1, AtomicOrdering::SeqCst);
-                let _guard = OnDrop(self.dropped.clone());
-                std::future::pending().await
+                self.release.notified().await;
+                self.effects.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(serde_json::json!({"side_effect":true}))
             }
             fn tools(&self) -> Vec<Value> {
                 vec![]
@@ -660,11 +667,11 @@ mod tests {
 
         let scheduler = Arc::new(JobScheduler::new(1).unwrap());
         let call_id = CallId("start-cancel-race".into());
-        let invoked = Arc::new(AtomicUsize::new(0));
-        let dropped = Arc::new(AtomicBool::new(false));
-        let provider: Arc<dyn Provider> = Arc::new(NeverCompletes {
-            invoked: invoked.clone(),
-            dropped: dropped.clone(),
+        let release = Arc::new(tokio::sync::Notify::new());
+        let effects = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(DeferredSideEffect {
+            release: release.clone(),
+            effects: effects.clone(),
         });
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
 
@@ -694,7 +701,12 @@ mod tests {
         assert_eq!(start.await.unwrap().unwrap().0, call_id.0);
         let settlement = cancel.await.unwrap().unwrap().unwrap();
         assert_eq!(settlement.output, JobOutput::Cancelled);
-        assert!(invoked.load(AtomicOrdering::SeqCst) == 0 || dropped.load(AtomicOrdering::SeqCst));
+        // Releasing provider code after cancellation must never perform the
+        // delayed side effect, whether cancellation caught it at the launch
+        // gate or aborted it while awaiting.
+        release.notify_one();
+        tokio::task::yield_now().await;
+        assert_eq!(effects.load(AtomicOrdering::SeqCst), 0);
         assert_eq!(
             scheduler.output(&call_id).await.unwrap(),
             Some(JobOutput::Cancelled)
