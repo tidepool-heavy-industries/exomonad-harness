@@ -163,102 +163,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         }
     }
 
-    // TODO(correction-wave a): seven public run* entries below exist because
-    // children were integrated without refactoring. PRD is zero back-compat:
-    // collapse to ONE entry (durable head + new items + mailbox receiver) and
-    // delete the rest, including the "legacy"/"source-compatible" variants.
-    // docs/tree.md "correction wave"; nudge `entry_point_sprawl`.
-    /// Run until an assistant final answer or cancellation. `initial` may be
-    /// an entire prior transcript; it is never truncated by this engine.
+    /// Run from a durable request head, appending only new items and admitting
+    /// persisted mailbox envelopes before each model request. `incoming` is a
+    /// wake-hint stream; hosts must persist each envelope before signaling it.
     pub async fn run(
         &self,
-        initial: Vec<Item>,
-        cancellation: watch::Receiver<bool>,
-    ) -> Result<ResponsesTurn, EngineError> {
-        self.run_with_transcript(initial, cancellation)
-            .await
-            .map(|completion| completion.turn)
-    }
-
-    /// Run to completion and return the complete persisted transcript,
-    /// including the supplied initial items, all model turns and tool outputs.
-    /// Cancellation and failures remain errors and never produce a partial
-    /// transcript labeled as complete.
-    pub async fn run_with_transcript(
-        &self,
-        initial: Vec<Item>,
-        cancellation: watch::Receiver<bool>,
-    ) -> Result<EngineCompletion, EngineError> {
-        self.run_starting_from(None, initial, cancellation, None, false)
-            .await
-    }
-
-    /// Start a new durable branch request below `head`, supplying only items
-    /// that are new to this run. The persisted parent chain supplies prior
-    /// history; a missing head is an error rather than a fresh-root fallback.
-    pub async fn run_from_head(
-        &self,
         head: Option<RequestId>,
         new_items: Vec<Item>,
-        cancellation: watch::Receiver<bool>,
-    ) -> Result<EngineCompletion, EngineError> {
-        self.run_starting_from(head, new_items, cancellation, None, true)
-            .await
-    }
-
-    /// Mailbox-enabled durable branch-start variant.
-    pub async fn run_from_head_with_envelopes(
-        &self,
-        head: Option<RequestId>,
-        new_items: Vec<Item>,
-        cancellation: watch::Receiver<bool>,
-        incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
-    ) -> Result<EngineCompletion, EngineError> {
-        self.run_from_head_with_durable_envelopes(head, new_items, cancellation, incoming)
-            .await
-    }
-
-    /// Durable branch-start mode. The host must persist each envelope to
-    /// Store before sending its in-memory copy as a wake hint.
-    pub async fn run_from_head_with_durable_envelopes(
-        &self,
-        head: Option<RequestId>,
-        new_items: Vec<Item>,
-        cancellation: watch::Receiver<bool>,
-        incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
-    ) -> Result<EngineCompletion, EngineError> {
-        self.run_starting_from(head, new_items, cancellation, Some(incoming), true)
-            .await
-    }
-
-    async fn run_starting_from(
-        &self,
-        head: Option<RequestId>,
-        initial: Vec<Item>,
-        cancellation: watch::Receiver<bool>,
-        incoming: Option<tokio::sync::mpsc::UnboundedReceiver<Envelope>>,
-        admit_inbox: bool,
-    ) -> Result<EngineCompletion, EngineError> {
-        if let Some(incoming) = incoming {
-            return self
-                .run_with_inbox(head, initial, cancellation, incoming, admit_inbox)
-                .await;
-        }
-        let (keepalive, envelopes) = tokio::sync::mpsc::unbounded_channel();
-        let result = self
-            .run_loop(head, initial, cancellation, envelopes, admit_inbox)
-            .await;
-        drop(keepalive);
-        result
-    }
-
-    async fn run_with_inbox(
-        &self,
-        head: Option<RequestId>,
-        initial: Vec<Item>,
         cancellation: watch::Receiver<bool>,
         mut incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
-        admit_inbox: bool,
     ) -> Result<EngineCompletion, EngineError> {
         let (envelope_tx, envelopes) = tokio::sync::mpsc::unbounded_channel();
         let keepalive = envelope_tx.clone();
@@ -270,36 +183,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
         });
         let result = self
-            .run_loop(head, initial, cancellation, envelopes, admit_inbox)
+            .run_loop(head, new_items, cancellation, envelopes, true)
             .await;
         drop(keepalive);
         forwarder.abort();
         result
-    }
-
-    /// Run with the agent's mailbox receiver. This is required for
-    /// `wait_agent` to resume on envelope delivery; `run` remains suitable
-    /// when the host has no mailbox source.
-    pub async fn run_with_envelopes_and_transcript(
-        &self,
-        initial: Vec<Item>,
-        cancellation: watch::Receiver<bool>,
-        incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
-    ) -> Result<EngineCompletion, EngineError> {
-        self.run_with_inbox(None, initial, cancellation, incoming, false)
-            .await
-    }
-
-    /// Mailbox-enabled form of the source-compatible `run` API.
-    pub async fn run_with_envelopes(
-        &self,
-        initial: Vec<Item>,
-        cancellation: watch::Receiver<bool>,
-        incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
-    ) -> Result<ResponsesTurn, EngineError> {
-        self.run_with_envelopes_and_transcript(initial, cancellation, incoming)
-            .await
-            .map(|completion| completion.turn)
     }
 
     async fn run_loop(
@@ -880,6 +768,11 @@ async fn blocking<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn empty_mailbox() -> tokio::sync::mpsc::UnboundedReceiver<Envelope> {
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        receiver
+    }
     use crate::provider::ProviderError;
     use crate::transport::{TransportError, Usage};
     use async_trait::async_trait;
@@ -1292,10 +1185,15 @@ mod tests {
         );
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let result = engine
-            .run(vec![Item(json!({"role":"user","content":"go"}))], cancel_rx)
+            .run(
+                None,
+                vec![Item(json!({"role":"user","content":"go"}))],
+                cancel_rx,
+                empty_mailbox(),
+            )
             .await
             .unwrap();
-        assert_eq!(result.response_id, "r3");
+        assert_eq!(result.turn.response_id, "r3");
 
         let expected_history = {
             let requests = requests.lock().unwrap();
@@ -1392,7 +1290,7 @@ mod tests {
         );
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let completion = engine
-            .run_with_transcript(vec![initial.clone()], cancel_rx)
+            .run(None, vec![initial.clone()], cancel_rx, empty_mailbox())
             .await
             .unwrap();
 
@@ -1476,7 +1374,12 @@ mod tests {
         );
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let first = engine
-            .run_from_head(Some(parent.clone()), vec![first_new.clone()], cancel_rx)
+            .run(
+                Some(parent.clone()),
+                vec![first_new.clone()],
+                cancel_rx,
+                empty_mailbox(),
+            )
             .await
             .unwrap();
         let first_req = store.request(&first.head_request).unwrap().unwrap();
@@ -1488,10 +1391,11 @@ mod tests {
 
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let second = engine
-            .run_from_head(
+            .run(
                 Some(first.head_request.clone()),
                 vec![second_new.clone()],
                 cancel_rx,
+                empty_mailbox(),
             )
             .await
             .unwrap();
@@ -1561,7 +1465,7 @@ mod tests {
         let new_item = Item(json!({"role":"user","content":"only this"}));
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         engine
-            .run_from_head(None, vec![new_item.clone()], cancel_rx)
+            .run(None, vec![new_item.clone()], cancel_rx, empty_mailbox())
             .await
             .unwrap();
         let recorded = requests.lock().unwrap();
@@ -1593,10 +1497,11 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         assert!(matches!(
             engine
-                .run_from_head(
+                .run(
                     Some(RequestId("no-such-head".into())),
                     vec![Item(json!({"role":"user","content":"new"}))],
                     cancel_rx,
+                    empty_mailbox(),
                 )
                 .await,
             Err(EngineError::Store(StoreError::MissingRequest(id))) if id == "no-such-head"
@@ -1652,7 +1557,10 @@ mod tests {
         );
 
         let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let first = engine.run_from_head(None, vec![], cancel_rx).await.unwrap();
+        let first = engine
+            .run(None, vec![], cancel_rx, empty_mailbox())
+            .await
+            .unwrap();
         assert_eq!(requests.lock().unwrap()[0].input, vec![task_item.clone()]);
         assert_eq!(
             store.items(&first.head_request).unwrap(),
@@ -1662,7 +1570,12 @@ mod tests {
 
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let second = engine
-            .run_from_head(Some(first.head_request.clone()), vec![], cancel_rx)
+            .run(
+                Some(first.head_request.clone()),
+                vec![],
+                cancel_rx,
+                empty_mailbox(),
+            )
             .await
             .unwrap();
         let requests = requests.lock().unwrap();
@@ -1715,7 +1628,7 @@ mod tests {
         let user_item = Item(json!({"type":"message","role":"user","content":"hello"}));
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         engine
-            .run_from_head(None, vec![user_item.clone()], cancel_rx)
+            .run(None, vec![user_item.clone()], cancel_rx, empty_mailbox())
             .await
             .unwrap();
         assert_eq!(
@@ -1758,7 +1671,12 @@ mod tests {
         );
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         engine
-            .run(vec![Item(json!({"role":"user","content":"go"}))], cancel_rx)
+            .run(
+                None,
+                vec![Item(json!({"role":"user","content":"go"}))],
+                cancel_rx,
+                empty_mailbox(),
+            )
             .await
             .unwrap();
         assert!(started_early.load(std::sync::atomic::Ordering::SeqCst));
@@ -1795,7 +1713,12 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         assert!(matches!(
             engine
-                .run(vec![Item(json!({"role":"user","content":"go"}))], cancel_rx)
+                .run(
+                    None,
+                    vec![Item(json!({"role":"user","content":"go"}))],
+                    cancel_rx,
+                    empty_mailbox(),
+                )
                 .await,
             Err(EngineError::InvalidFunctionCall)
         ));
@@ -1930,7 +1853,12 @@ mod tests {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let run = tokio::spawn(async move {
             engine
-                .run(vec![Item(json!({"role":"user","content":"go"}))], cancel_rx)
+                .run(
+                    None,
+                    vec![Item(json!({"role":"user","content":"go"}))],
+                    cancel_rx,
+                    empty_mailbox(),
+                )
                 .await
         });
         let first = CallId("cancel-one".into());
@@ -1996,7 +1924,12 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         assert!(matches!(
             engine
-                .run(vec![Item(json!({"role":"user","content":"go"}))], cancel_rx)
+                .run(
+                    None,
+                    vec![Item(json!({"role":"user","content":"go"}))],
+                    cancel_rx,
+                    empty_mailbox(),
+                )
                 .await,
             Err(EngineError::Transport(TransportError::Stream(_)))
         ));
@@ -2040,7 +1973,12 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         assert!(matches!(
             engine
-                .run(vec![Item(json!({"role":"user","content":"go"}))], cancel_rx)
+                .run(
+                    None,
+                    vec![Item(json!({"role":"user","content":"go"}))],
+                    cancel_rx,
+                    empty_mailbox(),
+                )
                 .await,
             Err(EngineError::InvalidFunctionCall)
         ));
@@ -2120,7 +2058,12 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let run = tokio::spawn(async move {
             engine
-                .run(vec![Item(json!({"role":"user","content":"go"}))], cancel_rx)
+                .run(
+                    None,
+                    vec![Item(json!({"role":"user","content":"go"}))],
+                    cancel_rx,
+                    empty_mailbox(),
+                )
                 .await
         });
         tokio::time::timeout(std::time::Duration::from_secs(2), second_request.notified())
@@ -2130,7 +2073,7 @@ mod tests {
         release_tx.send(()).unwrap();
         let final_result = tokio::time::timeout(std::time::Duration::from_secs(3), run).await;
         assert_eq!(
-            final_result.unwrap().unwrap().unwrap().response_id,
+            final_result.unwrap().unwrap().unwrap().turn.response_id,
             "async-final"
         );
         let requests = requests.lock().unwrap();
@@ -2183,7 +2126,12 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let run = tokio::spawn(async move {
             engine
-                .run(vec![Item(json!({"role":"user","content":"go"}))], cancel_rx)
+                .run(
+                    None,
+                    vec![Item(json!({"role":"user","content":"go"}))],
+                    cancel_rx,
+                    empty_mailbox(),
+                )
                 .await
         });
         tokio::time::timeout(
@@ -2205,7 +2153,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(2), second_request.notified())
             .await
             .expect("late settlement triggered next model request");
-        assert_eq!(run.await.unwrap().unwrap().response_id, "late-continued");
+        assert_eq!(run.await.unwrap().unwrap().turn.response_id, "late-continued");
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[1].input[1].0["call_id"], "late-call");
@@ -2236,7 +2184,8 @@ mod tests {
         let (envelope_tx, envelope_rx) = tokio::sync::mpsc::unbounded_channel();
         let run = tokio::spawn(async move {
             engine
-                .run_with_envelopes(
+                .run(
+                    None,
                     vec![Item(json!({"role":"user","content":"go"}))],
                     cancel_rx,
                     envelope_rx,
@@ -2254,17 +2203,30 @@ mod tests {
         })
         .await
         .expect("wait call claim persisted");
-        envelope_tx
-            .send(Envelope {
+        let envelope = Envelope {
                 kind: crate::mailbox::EnvelopeType::Message,
                 recipient: AgentPath("/root".into()),
                 sender: AgentPath("/root/worker".into()),
                 payload: "arrived".into(),
                 class: crate::mailbox::DeliveryClass::AtBoundary,
                 timestamp_ms: 1,
-            })
+            };
+        let stored_item = Item(json!({
+            "type":"message",
+            "role":"assistant",
+            "content":"Message Type: MESSAGE\nTask name: /root\nSender: /root/worker\nPayload:\narrived"
+        }));
+        store
+            .add_envelope(
+                &envelope.sender.0,
+                &envelope.recipient.0,
+                "AtBoundary",
+                &stored_item,
+                None,
+            )
             .unwrap();
-        assert_eq!(run.await.unwrap().unwrap().response_id, "resumed");
+        envelope_tx.send(envelope).unwrap();
+        assert_eq!(run.await.unwrap().unwrap().turn.response_id, "resumed");
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         let next = &requests[1].input;
@@ -2322,7 +2284,7 @@ mod tests {
         let (envelope_tx, envelope_rx) = tokio::sync::mpsc::unbounded_channel();
         let run = tokio::spawn(async move {
             engine
-                .run_from_head_with_durable_envelopes(None, vec![], cancel_rx, envelope_rx)
+                .run(None, vec![], cancel_rx, envelope_rx)
                 .await
         });
         let wait_call = CallId("wait-envelope".into());
@@ -2396,7 +2358,7 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let (_envelope_tx, envelope_rx) = tokio::sync::mpsc::unbounded_channel();
         let completion = engine
-            .run_from_head_with_durable_envelopes(None, vec![], cancel_rx, envelope_rx)
+            .run(None, vec![], cancel_rx, envelope_rx)
             .await
             .unwrap();
 
@@ -2439,15 +2401,17 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let turn = engine
             .run(
+                None,
                 vec![Item(
                     json!({"role":"user","content":"Reply exactly ENGINE_OK"}),
                 )],
                 cancel_rx,
+                empty_mailbox(),
             )
             .await
             .expect("live engine turn");
         assert!(
-            turn.items
+            turn.turn.items
                 .iter()
                 .any(|item| item.0["phase"] == "final_answer")
         );
