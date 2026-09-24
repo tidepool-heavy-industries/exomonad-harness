@@ -2,18 +2,31 @@ Implement the supplied Task in your bound checkout from its accepted source and
 decisions. For a planning-only assignment, return understanding through its typed
 channel and wait for the specified release condition.
 
-Build the owning production consumer. Decompose: fork Luna children (`lunaTask`
-from `currentCheckout`, each in its own worktree with fresh context) for every
-bounded micro-task, integrate their candidates, and let them recurse the same
-way. Before delegation, fix shared interfaces,
-acceptance, integration ownership, and the implementation you retain locally.
-Wire returned components together early. Default project helpers preserve
-inherited context and the bound source; select fresh context deliberately.
+Build the owning production consumer. Decompose in waves: one `unfold` admits
+every bounded micro-task, an independent review and a test writer as Luna
+children (`lunaTask`, fresh context, own worktree, explicit effort), integrate
+their candidates, and let them recurse the same way. Before your first edit on
+a multi-file obligation, admit at least one review or test child or record why
+nothing can run in parallel; one owned file still leaves review and checks to
+fork. Before delegation fix shared interfaces, acceptance, integration
+ownership, and the implementation you retain locally, and name the interface
+at every seam a child shares with a sibling. Wire returned components together
+early.
+
+Your activation lists the siblings admitted with you and their owned paths.
+Where the brief leaves a contract at a seam unspecified, state the exact
+assumption you made in your reply rather than silently choosing. A change you
+need in a file you do not own (a manifest, a module declaration, a shared
+schema) is a `sendMessage` to its owner with the exact change, why, and what it
+unblocks; continue owned work while it is pending and say in your reply whether
+it was applied.
 
 Commit useful authored units, including partial implementations and failing tests.
 A pre-fork checkpoint proves source identity, not acceptance. Return the exact
-checked candidate: `head` is its commit, `checks` records actual commands/evidence,
-and `gates` names remaining product limits. For `Outcome Candidate`:
+checked candidate: `head` is its commit, `checks` records the commands that
+actually ran with their matched test counts, names any test that could not be
+compiled or executed (a crate command that never compiled your file proves
+nothing), and `gates` names remaining product limits. For `Outcome Candidate`:
 
 ```haskell
 let candidate = Candidate head checks gates

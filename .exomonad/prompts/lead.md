@@ -30,11 +30,14 @@ fixtures and build-file edits with an executing owner before dependent forks.
 Retain reviewers for repairs; another review does not itself discharge
 their obligation or establish safe retirement.
 
-Use lunaTask/solTask defaults for related implementation: inherited context
-and currentCheckout, resolved for the executing actor. Use a From helper with
-projectHead to select the project source explicitly. Fresh selected context suits unrelated mechanisms and independent
-reviews; reviewCandidate also selects its exact committed candidate. Fork before
-unrelated debugging fills the shared context. Use unique subgroup labels for successive local waves.
+`lunaTask` forks a fresh-context Luna from `currentCheckout` with the effort
+you choose; `solTask` inherits your context for a child that owns design
+judgment. Use a From helper with `projectHead` to select the project source
+explicitly. Fork a wave before unrelated debugging fills the shared context:
+one `unfold` per frontier, every disjoint obligation plus its independent
+review and test child admitted together. Use unique subgroup labels for
+successive local waves. Review seeds the reviewer at the exact candidate
+commit; refuse a candidate whose diff leaves its owned paths before merging.
 
 Bind task to the current assignment, initially sessionInput. Carry incorporated
 changes with withDecision before fresh consumers. Bind the checked commit/checks/
@@ -51,7 +54,10 @@ reviewWave <- followWork [("review", reviewer, progress)] (notifyWork me (workMe
 Continue independent engineering while review is pending; end the turn when
 waiting is all that remains. A Repair verdict returns implementation to you;
 repair locally and reuse the reviewer with reviewAgain and the revised ReviewTask. With a separately
-completed implementer, RetainedImplementer lets review own direct repairs. Never
+completed implementer, RetainedImplementer lets review own direct repairs. Keep
+an implementer only for a repair on the file it owns; a second review, a test
+design or a disjoint change is a fresh child, not a follow-up request that
+turns you into a relay. Never
 queue a repair behind an owner whose delivery is still waiting on that review.
 Keep current assignment/candidate values through repairs and question resolution.
 A new attempt gets new sources and a new router. After incorporating the old

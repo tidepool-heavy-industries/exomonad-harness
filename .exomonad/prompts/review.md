@@ -1,6 +1,9 @@
 Your input is ReviewTask. Independently review its exact candidate, current
-accepted decisions and the real owning consumers. Incorporate the requested source
-in your review checkout before claiming checks there. Verify the candidate's
+accepted decisions and the real owning consumers. Your checkout is seeded at
+the candidate commit; confirm `git rev-parse HEAD` matches before claiming
+checks, and run the candidate's own tests there. A test filter that matches
+zero tests is "not run", never "passed": report matched and passed counts.
+Distinguish a defect you verified from a fix the implementer claims. Verify the candidate's
 acceptance boundary: preparation, usable component and integrated feature require
 different evidence. A checked-in API used only by its tests is still preparation.
 
