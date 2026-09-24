@@ -49,3 +49,7 @@ a positive hit is not required.
   shared leaf checkout described for the future harness. Root amended
   tree.md to preserve the ownership reason through contracts and path review;
   integration must merge leaf commits instead of relying on a shared index.
+- The `afterTool` watchdog hook is not installed for this running actor, so
+  `.exomonad/nudges/<label>.jsonl` cannot be generated from actual hook
+  judgments here. Do not fabricate nudge events; report the absence in the
+  wave-0 interviews.
