@@ -5,6 +5,37 @@ cost, and a concrete engine improvement; do not fabricate unobserved nudges.
 
 ## root
 
+- **Experience against the larger goal (in-progress, 2026-09-24):**
+  - Tidepool's resident notebook and typed task/progress handles let me
+    admit and route real work without rebuilding context in prose each time.
+    The `followWork` router retained evidence across turns. I did not yet
+    turn a repeated procedure into an installed tool or hook: most
+    coordination remained model-authored cells and manual Git commands.
+  - The standalone harness did give the intended fast Rust inner loop:
+    the baseline `cargo check -p harness -p harness-demo --offline` finished
+    in seconds after dependency compilation, and the integrated demo's 24
+    tests passed quickly. The host Exomonad machinery around that loop
+    remained slow when many actors shared the machine checkout.
+  - The promised async-first experience is not present in this host. I
+    repeatedly checked a router to learn “pending”; the useful alternative
+    was a child messaging me on a candidate or blocker. The new harness's
+    `wait_agent` plus late results is aimed at deleting precisely this
+    watch/poll/wake pattern, but its live correction-wave proof is still open.
+  - Typed effects did enforce real boundaries, sometimes painfully: a
+    child effect row without `Journal` refused startup, and an unsupported
+    native child had no hosted tools. The right improvement is to check
+    those constraints before admission and surface a direct diagnostic,
+    not to weaken runtime authority.
+  - Recursive delegation helped when the seam was genuinely bounded (the
+    independent async-schema test). It hurt when I delegated the design
+    plan to a Luna or let a findings probe recursively review itself.
+    Sol-owned seam design, explicit stop/ping criteria, and candidate-only
+    review are necessary for the tree to be cheaper than solo work.
+  - The operator could correct these policies mid-run, and I could record
+    them in version-controlled docs and steer active children. That is an
+    early form of harness co-design, though it is still prompt-and-message
+    driven; no installed policy changed for running children.
+
 - **Child startup:** Both initial Luna launches failed because the project
   `AgentSpec` required `Journal` but child effect rows omit it. Cost: two
   failed admissions and a repair/retry. Idea: validate an agent spec against
