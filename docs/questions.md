@@ -39,3 +39,6 @@ a positive hit is not required.
 - On this subscription SSE endpoint, `response.completed.response.output`
   was empty while `response.output_item.done` carried the assistant message;
   a completion-only parser would silently lose the answer.
+- A batched Haskell `lookup` for agent-list APIs failed with a compiler-worker
+  diagnostic rather than returning per-query results; individual lookup or
+  `observeAgent` remains available.
