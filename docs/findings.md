@@ -148,6 +148,14 @@ job restoration after process restart, or a running multi-agent driver. The
 agent-runtime implementation and server/browser authentication connection
 are still pending.
 
+An initial `StoreAgentToolService` candidate was reviewed but not integrated.
+It traversed `requests.parent_id` as if it were agent ancestry; the engine
+uses those rows for each model call, so that conflates two different trees
+and cannot provide a stable current head for `here` forks. Its rendered
+agent envelopes also used a user role rather than the required assistant
+role. A separate durable agents table and API has been assigned before
+runtime integration. The CLI/demo provider still has no process-resume path.
+
 An explicit ignored live smoke test subsequently ran the integrated engine
 against the ChatGPT-subscription SSE endpoint with read-only CodexFileAuth.
 It returned a final-answer item in 3.77 seconds. This verifies one simple
