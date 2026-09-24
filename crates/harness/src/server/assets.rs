@@ -7,7 +7,7 @@ use std::path::{Component, Path};
 
 use axum::{
     body::Body,
-    http::{HeaderValue, StatusCode, header},
+    http::{header, HeaderValue, StatusCode},
     response::Response,
 };
 
