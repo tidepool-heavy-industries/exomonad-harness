@@ -285,3 +285,12 @@ on failed insert, refusal of missing requests, and cross-agent branch
 isolation. Integrated fmt, offline workspace tests (71 harness passed, 2 live
 ignored; 12 demo passed), Clippy and check passed. No engine or demo driver
 calls this API yet, so live mailbox delivery/recovery remains unverified.
+
+The durable branch-start Engine APIs now consume that Store inbox operation
+before their first model request. Replay tests verify a prompt-fresh child sees
+its NEW_TASK once, a subsequent request does not repeat it, and supplied new
+items precede queued inbox items. Legacy `run` APIs retain prior behavior.
+Root preserved the ignored live smoke test from the newer baseline and ran
+integrated fmt, offline workspace tests (73 harness passed, 2 live ignored;
+12 demo passed), Clippy and check. Mid-run mailbox wake still uses an
+in-memory channel and is not yet coupled to durable envelope acknowledgement.

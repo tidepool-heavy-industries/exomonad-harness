@@ -184,7 +184,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         initial: Vec<Item>,
         cancellation: watch::Receiver<bool>,
     ) -> Result<EngineCompletion, EngineError> {
-        self.run_starting_from(None, initial, cancellation, None)
+        self.run_starting_from(None, initial, cancellation, None, false)
             .await
     }
 
@@ -197,7 +197,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         new_items: Vec<Item>,
         cancellation: watch::Receiver<bool>,
     ) -> Result<EngineCompletion, EngineError> {
-        self.run_starting_from(head, new_items, cancellation, None)
+        self.run_starting_from(head, new_items, cancellation, None, true)
             .await
     }
 
@@ -209,7 +209,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         cancellation: watch::Receiver<bool>,
         incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
     ) -> Result<EngineCompletion, EngineError> {
-        self.run_starting_from(head, new_items, cancellation, Some(incoming))
+        self.run_starting_from(head, new_items, cancellation, Some(incoming), true)
             .await
     }
 
@@ -219,14 +219,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         initial: Vec<Item>,
         cancellation: watch::Receiver<bool>,
         incoming: Option<tokio::sync::mpsc::UnboundedReceiver<Envelope>>,
+        admit_inbox: bool,
     ) -> Result<EngineCompletion, EngineError> {
         if let Some(incoming) = incoming {
             return self
-                .run_with_inbox(head, initial, cancellation, incoming)
+                .run_with_inbox(head, initial, cancellation, incoming, admit_inbox)
                 .await;
         }
         let (keepalive, envelopes) = tokio::sync::mpsc::unbounded_channel();
-        let result = self.run_loop(head, initial, cancellation, envelopes).await;
+        let result = self
+            .run_loop(head, initial, cancellation, envelopes, admit_inbox)
+            .await;
         drop(keepalive);
         result
     }
@@ -237,6 +240,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         initial: Vec<Item>,
         cancellation: watch::Receiver<bool>,
         mut incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+        admit_inbox: bool,
     ) -> Result<EngineCompletion, EngineError> {
         let (envelope_tx, envelopes) = tokio::sync::mpsc::unbounded_channel();
         let keepalive = envelope_tx.clone();
@@ -247,7 +251,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
             }
         });
-        let result = self.run_loop(head, initial, cancellation, envelopes).await;
+        let result = self
+            .run_loop(head, initial, cancellation, envelopes, admit_inbox)
+            .await;
         drop(keepalive);
         forwarder.abort();
         result
@@ -262,7 +268,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         cancellation: watch::Receiver<bool>,
         incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
     ) -> Result<EngineCompletion, EngineError> {
-        self.run_with_inbox(None, initial, cancellation, incoming)
+        self.run_with_inbox(None, initial, cancellation, incoming, false)
             .await
     }
 
@@ -284,6 +290,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         initial: Vec<Item>,
         mut cancellation: watch::Receiver<bool>,
         mut envelopes: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+        admit_inbox: bool,
     ) -> Result<EngineCompletion, EngineError> {
         if let Some(head) = &head {
             self.read_history(head).await?;
@@ -303,6 +310,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             )
         })
         .await?;
+        if admit_inbox {
+            let store = self.store.clone();
+            let recipient = self.config.agent.clone();
+            let request = id.clone();
+            blocking(move || {
+                store
+                    .append_unread_envelopes(&recipient, &request)
+                    .map(|_| ())
+            })
+            .await?;
+        }
         let mut parent = id.clone();
         let mut pending = Vec::<PendingCall>::new();
         loop {
@@ -1472,6 +1490,121 @@ mod tests {
                 .children_of(&RequestId("no-such-head".into()))
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn run_from_head_admits_unread_inbox_once_before_first_prompt() {
+        let store = Arc::new(Store::memory().unwrap());
+        let recipient = AgentPath("/root/worker".into());
+        let task_item = Item(json!({
+            "type":"message","role":"user","content":"NEW_TASK: do this"
+        }));
+        store
+            .add_envelope("/root", &recipient.0, "task", &task_item, None)
+            .unwrap();
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let first_answer = Item(json!({
+            "type":"message","role":"assistant","phase":"final_answer","content":"ack"
+        }));
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            Replay {
+                requests: requests.clone(),
+                turns: Mutex::new([
+                    turn("inbox-first", vec![first_answer.clone()]),
+                    turn(
+                        "inbox-second",
+                        vec![Item(json!({
+                            "type":"message","role":"assistant","phase":"final_answer","content":"next"
+                        }))],
+                    ),
+                ]
+                .into()),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "session".into(),
+                agent: recipient.clone(),
+            },
+        );
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let first = engine.run_from_head(None, vec![], cancel_rx).await.unwrap();
+        assert_eq!(requests.lock().unwrap()[0].input, vec![task_item.clone()]);
+        assert_eq!(
+            store.items(&first.head_request).unwrap(),
+            vec![task_item.clone(), first_answer.clone()]
+        );
+        assert!(store.unread(&recipient.0).unwrap().is_empty());
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let second = engine
+            .run_from_head(Some(first.head_request.clone()), vec![], cancel_rx)
+            .await
+            .unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].input, vec![task_item.clone(), first_answer]);
+        assert_eq!(
+            second
+                .transcript
+                .iter()
+                .filter(|item| **item == task_item)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn run_from_head_orders_new_input_before_inbox_items() {
+        let store = Arc::new(Store::memory().unwrap());
+        let recipient = AgentPath("/root/worker".into());
+        let inbox_item = Item(json!({
+            "type":"message","role":"user","content":"NEW_TASK: queued"
+        }));
+        store
+            .add_envelope("/root", &recipient.0, "task", &inbox_item, None)
+            .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            Replay {
+                requests: requests.clone(),
+                turns: Mutex::new([turn(
+                    "input-before-inbox",
+                    vec![Item(json!({
+                        "type":"message","role":"assistant","phase":"final_answer","content":"done"
+                    }))],
+                )]
+                .into()),
+            },
+            store,
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "session".into(),
+                agent: recipient,
+            },
+        );
+        let user_item = Item(json!({"type":"message","role":"user","content":"hello"}));
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        engine
+            .run_from_head(None, vec![user_item.clone()], cancel_rx)
+            .await
+            .unwrap();
+        assert_eq!(
+            requests.lock().unwrap()[0].input,
+            vec![user_item, inbox_item]
         );
     }
 
