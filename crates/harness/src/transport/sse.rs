@@ -96,12 +96,16 @@ mod tests {
         let mut a = ResponseAssembly::default();
         let done = r#"{"type":"response.output_item.done","item":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"ok"}]}}"#;
         assert!(matches!(a.accept(done), Ok(Some(StreamEvent::ItemDone(_)))));
-        let completed = r#"{"type":"response.completed","response":{"id":"resp_1","output":[],"usage":{"input_tokens":12,"output_tokens":2,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}}}}"#;
+        let completed = r#"{"type":"response.completed","response":{"id":"resp_1","output":[],"usage":{"input_tokens":12,"output_tokens":2,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":4}}}}"#;
         assert!(matches!(a.accept(completed), Ok(None)));
         let turn = a.finish().expect("complete");
         assert_eq!(turn.items.len(), 1);
         assert_eq!(turn.items[0].0["phase"], "final_answer");
+        assert_eq!(turn.response_id, "resp_1");
         assert_eq!(turn.usage.input_tokens, 12);
+        assert_eq!(turn.usage.output_tokens, 2);
+        assert_eq!(turn.usage.cached_tokens, 3);
+        assert_eq!(turn.usage.cache_write_tokens, 4);
     }
 
     #[test]

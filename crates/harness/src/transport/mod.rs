@@ -64,4 +64,14 @@ impl<A: Auth + Clone + 'static> ResponsesClient<A> {
     pub async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         client::execute(self.auth.clone(), request, None).await
     }
+
+    /// Sends completed items as they arrive; text deltas are best-effort.
+    /// The returned turn remains authoritative even if the receiver closes.
+    pub async fn create_streaming(
+        &self,
+        request: ResponsesRequest,
+        sink: tokio::sync::mpsc::Sender<sse::StreamEvent>,
+    ) -> Result<ResponsesTurn, TransportError> {
+        client::execute(self.auth.clone(), request, Some(sink)).await
+    }
 }

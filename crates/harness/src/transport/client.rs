@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn request_is_stateless_and_pins_effort() {
         let request = ResponsesRequest {
-            input: vec![],
+            input: vec![Item(json!({"role":"user","content":"hello"}))],
             instructions: "fixed".into(),
             tools: vec![],
             model: "gpt-6-sol".into(),
@@ -175,6 +175,8 @@ mod tests {
         assert_eq!(body["store"], false);
         assert_eq!(body["reasoning"]["effort"], "low");
         assert_eq!(body["prompt_cache_key"], "shared");
+        assert_eq!(body["instructions"], "fixed");
+        assert_eq!(body["input"][0]["content"], "hello");
         assert!(body.get("previous_response_id").is_none());
     }
 
