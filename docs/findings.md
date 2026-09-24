@@ -323,3 +323,23 @@ leave no Store mutation. The adapter explicitly refuses those fork sources;
 it is not yet wired to a supervising tree driver. Integrated fmt, offline
 workspace tests (75 harness passed, 2 live ignored; 15 demo passed), Clippy,
 and check passed.
+
+The opt-in `--tree` CLI now composes the Store-backed agent verbs with a
+one-process prompt-fork driver. A deterministic offline replay executes the
+real Engine, TreeProvider, Store, and ResponsesTransport seam through
+root spawn → root wait → child FINAL_ANSWER → root final answer. Tests assert
+one durable child NEW_TASK, post-commit parent wake, wait-status-before-inbox
+ordering, exact branch heads, no spurious request, task reaping, cancellation
+drain, and fail-closed no-replay on a stored head. The default CLI/server remain
+single-agent. Tree CLI requires a fresh database; process restart/resume,
+Here/checkpoint, agent worktree isolation, and browser tree state are not
+implemented. The adapter exposes `run` only with the explicit development
+shell opt-in; it is not a multi-file task harness with per-agent checkout
+ownership.
+
+An opt-in live subscription SSE smoke, using read-only `~/.codex/auth.json`,
+returned `TREE_VERIFIED_BLUE`. Inspection of its temporary SQLite database
+before removal found `/root` and `/root/helper` agent heads, three root
+requests and one child request, a delivered child NEW_TASK, and a delivered
+child FINAL_ANSWER to root. This verifies a live prompt-fork/wait/answer path,
+not crash recovery or worktree isolation.

@@ -1,21 +1,25 @@
 //! Reference provider for the harness. `run` intentionally invokes a local
 //! shell and is suitable only for trusted, development-time demonstrations.
+pub mod driver;
 pub mod tree;
 
 use async_trait::async_trait;
+use driver::{Driver, HarnessEngineFactory};
+use harness::agent_runtime::StoreAgentToolService;
 use harness::engine::{Engine, EngineCompletion, EngineConfig, EngineError};
 use harness::item::Item;
 use harness::model::{AgentPath, Effort};
 use harness::provider::{CallContext, Provider, ProviderError};
 use harness::server::{self, ClientCommand, QueuedCommand, ServerConfig, SessionSecret, Snapshot};
 use harness::store::Store;
-use harness::transport::{TransportError, auth::CodexFileAuth};
+use harness::transport::{ResponsesClient, TransportError, auth::CodexFileAuth};
 use harness::turn::JobScheduler;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tree::TreeProvider;
 
 const OUTPUT_LIMIT: usize = 16 * 1024;
 
@@ -24,6 +28,7 @@ struct CliOptions {
     db: PathBuf,
     ask: String,
     dev_shell: bool,
+    tree: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -41,7 +46,7 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
     if args.first().map(String::as_str) == Some("--smoke") {
         return Ok(Mode::Smoke);
     }
-    let (mut db, mut ask, mut serve, mut dev_shell) = (None, None, None, false);
+    let (mut db, mut ask, mut serve, mut dev_shell, mut tree) = (None, None, None, false, false);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -60,6 +65,7 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
                 )?);
             }
             "--dev-shell" => dev_shell = true,
+            "--tree" => tree = true,
             "--allow-shell" => {
                 return Err("use --dev-shell to opt into development shell execution".into());
             }
@@ -72,6 +78,9 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
         if ask.is_some() {
             return Err("--serve and --ask are mutually exclusive".into());
         }
+        if tree {
+            return Err("--tree is currently supported with --ask only".into());
+        }
         return Ok(Mode::Serve {
             db,
             addr,
@@ -82,7 +91,12 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
     if ask.trim().is_empty() {
         return Err("--ask text must not be empty".into());
     }
-    Ok(Mode::Ask(CliOptions { db, ask, dev_shell }))
+    Ok(Mode::Ask(CliOptions {
+        db,
+        ask,
+        dev_shell,
+        tree,
+    }))
 }
 
 /// Browser login and its cookie use HTTP in this demo; do not expose them over
@@ -213,6 +227,78 @@ impl CliDriver {
             .ok_or_else(|| "engine returned no final assistant text".to_owned())?;
         Ok((text, completion))
     }
+}
+
+/// Opt-in, prompt-fork tree demonstration. Restart/recovery is deliberately
+/// refused here until the driver can distinguish interrupted from settled
+/// model calls across a process boundary.
+async fn tree_ask(options: &CliOptions) -> Result<(String, EngineCompletion), String> {
+    let auth_path = CodexFileAuth::default_path()
+        .map_err(|_| "Codex credentials unavailable; check ~/.codex/auth.json".to_owned())?;
+    let auth = CodexFileAuth::new(auth_path);
+    let store =
+        Arc::new(Store::open(&options.db).map_err(|_| "could not open SQLite store".to_owned())?);
+    if store
+        .agent(&AgentPath("/root".into()))
+        .map_err(|_| "could not inspect tree root".to_owned())?
+        .is_some()
+    {
+        return Err(
+            "tree CLI restart is not yet supported; use a new --db path for each tree run".into(),
+        );
+    }
+    let service = Arc::new(StoreAgentToolService::new(
+        store.clone(),
+        AgentPath("/root".into()),
+    ));
+    let provider = Arc::new(TreeProvider::new(
+        CliProvider(DemoProvider::development(".", options.dev_shell)),
+        service.clone(),
+    ));
+    let jobs = Arc::new(
+        JobScheduler::new(4).map_err(|_| "could not initialize tool scheduler".to_owned())?,
+    );
+    let factory = Arc::new(HarnessEngineFactory {
+        auth: Arc::new(auth.clone()),
+        store: store.clone(),
+        scheduler: jobs,
+        provider,
+        config: move |_agent: &AgentPath| Ok(ResponsesClient::new(auth.clone())),
+        transport: std::marker::PhantomData,
+    });
+    let driver = Driver::new(store, service, factory);
+    let mut failure = driver.failure_receiver();
+    if let Err(error) = driver.start(command_input(&[], &options.ask)).await {
+        let _ = driver.shutdown().await;
+        return Err(format!("could not start tree driver: {error}"));
+    }
+    let mut root_result = Box::pin(driver.wait_root_completion());
+    let result = loop {
+        tokio::select! {
+            settled = &mut root_result => break settled,
+            changed = failure.changed() => {
+                if changed.is_err() {
+                    break Err("tree supervisor closed unexpectedly".into());
+                }
+                if let Some(error) = failure.borrow().clone() {
+                    break Err(format!("tree agent failed: {error}"));
+                }
+            }
+            signal = tokio::signal::ctrl_c() => {
+                if signal.is_err() {
+                    break Err("could not listen for shutdown".into());
+                }
+                break Err("tree run cancelled by operator".into());
+            }
+        }
+    };
+    drop(root_result);
+    let shutdown = driver.shutdown().await;
+    let completion = result?;
+    shutdown.map_err(|_| "could not fully stop tree agents".to_owned())?;
+    let text = final_text(&completion.turn.items)
+        .ok_or_else(|| "engine returned no final assistant text".to_owned())?;
+    Ok((text, completion))
 }
 
 const ROOT_CONVERSATION_ID: &str = "conversation/root";
@@ -389,6 +475,7 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
         db,
         ask: String::new(),
         dev_shell,
+        tree: false,
     })?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -727,6 +814,22 @@ async fn main() {
             println!("demo provider smoke: {result:?}");
         }
         Ok(Mode::Ask(options)) => {
+            if options.tree {
+                match tree_ask(&options).await {
+                    Ok((text, completion)) => {
+                        println!("{text}");
+                        eprintln!(
+                            "usage (final response): {} input / {} output tokens",
+                            completion.turn.usage.input_tokens, completion.turn.usage.output_tokens
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("harness-demo: {error}");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
             let driver = match CliDriver::new(&options) {
                 Ok(driver) => driver,
                 Err(error) => {
@@ -761,7 +864,7 @@ async fn main() {
         }
         Err(error) => {
             eprintln!(
-                "harness-demo: {error}\nusage: harness-demo --db <sqlite-path> --ask <text> [--dev-shell] | --db <sqlite-path> --serve <addr> | --smoke"
+                "harness-demo: {error}\nusage: harness-demo --db <sqlite-path> --ask <text> [--tree] [--dev-shell] | --db <sqlite-path> --serve <addr> | --smoke"
             );
             std::process::exit(2);
         }
@@ -843,8 +946,23 @@ mod tests {
             Mode::Ask(CliOptions {
                 db: PathBuf::from("state.sqlite"),
                 ask: "hi".into(),
-                dev_shell: true
+                dev_shell: true,
+                tree: false,
             })
+        );
+        assert!(matches!(
+            parse(&["--db", "state.sqlite", "--ask", "hi", "--tree"]).unwrap(),
+            Mode::Ask(CliOptions { tree: true, .. })
+        ));
+        assert!(
+            parse(&[
+                "--db",
+                "state.sqlite",
+                "--serve",
+                "127.0.0.1:8080",
+                "--tree"
+            ])
+            .is_err()
         );
         assert!(matches!(parse(&["--smoke"]).unwrap(), Mode::Smoke));
         assert_eq!(
@@ -1017,6 +1135,7 @@ mod tests {
             db: root.join("state.sqlite"),
             ask: "hello".into(),
             dev_shell: false,
+            tree: false,
         };
         let _driver = CliDriver::new(&options).unwrap();
         let provider = CliProvider(DemoProvider::development(".", false));
