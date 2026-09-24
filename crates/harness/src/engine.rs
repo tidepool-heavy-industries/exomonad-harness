@@ -1668,4 +1668,41 @@ mod tests {
         let output: Value = serde_json::from_str(next[3].0["output"].as_str().unwrap()).unwrap();
         assert_eq!(output, json!({"resumed_by":{"agent":"/root/worker"}}));
     }
+
+    /// Explicit subscription smoke: opt in locally, never in ordinary CI.
+    #[tokio::test]
+    #[ignore]
+    async fn live_subscription_engine_final_answer() {
+        use crate::transport::auth::CodexFileAuth;
+        let auth = CodexFileAuth::new(CodexFileAuth::default_path().expect("auth path"));
+        let engine = Engine::new(
+            auth,
+            Arc::new(Store::memory().expect("store")),
+            Arc::new(JobScheduler::new(2).expect("jobs")),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "Reply briefly and do not call tools.".into(),
+                tools: Vec::new(),
+                model: "gpt-6-sol".into(),
+                effort: Effort::Low,
+                session_id: format!("harness-engine-smoke-{}", uuid::Uuid::new_v4()),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let turn = engine
+            .run(
+                vec![Item(
+                    json!({"role":"user","content":"Reply exactly ENGINE_OK"}),
+                )],
+                cancel_rx,
+            )
+            .await
+            .expect("live engine turn");
+        assert!(
+            turn.items
+                .iter()
+                .any(|item| item.0["phase"] == "final_answer")
+        );
+    }
 }

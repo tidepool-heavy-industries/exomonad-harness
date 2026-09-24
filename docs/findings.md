@@ -147,3 +147,10 @@ loop gap, but it does not establish a live subscription conversation, durable
 job restoration after process restart, or a running multi-agent driver. The
 agent-runtime implementation and server/browser authentication connection
 are still pending.
+
+An explicit ignored live smoke test subsequently ran the integrated engine
+against the ChatGPT-subscription SSE endpoint with read-only CodexFileAuth.
+It returned a final-answer item in 3.77 seconds. This verifies one simple
+stateless request through engine, transport and store; it did not exercise
+tool calls, forking, wait/resume, browser delivery, or cache hits. The test
+remains ignored in ordinary CI, and no credential value was emitted.
