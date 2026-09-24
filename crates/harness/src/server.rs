@@ -22,7 +22,13 @@ use axum::{
 };
 use futures_util::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
-use std::{convert::Infallible, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::{broadcast, mpsc};
 
 const COMMAND_CAPACITY: usize = 128;
@@ -74,10 +80,37 @@ impl BearerSecret {
     }
 }
 
-/// Explicit server configuration. No bearer secret means API routes fail closed.
+/// Separate operator password for the optional local browser-login flow.
+#[derive(Clone)]
+pub struct SessionSecret(Arc<str>);
+
+impl std::fmt::Debug for SessionSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SessionSecret([REDACTED])")
+    }
+}
+
+impl SessionSecret {
+    /// Construct an operator secret. At least 32 UTF-8 bytes are required.
+    pub fn new(secret: impl Into<String>) -> Result<Self, &'static str> {
+        let secret = secret.into();
+        if secret.len() < 32 {
+            return Err("browser session secret must be at least 32 bytes");
+        }
+        if secret.bytes().any(|b| b.is_ascii_control()) {
+            return Err("browser session secret must not contain control bytes");
+        }
+        Ok(Self(Arc::from(secret)))
+    }
+}
+
+/// Explicit server configuration. Without a bearer secret or optional browser
+/// session, protected API routes fail closed.
 pub struct ServerConfig {
     pub asset_root: PathBuf,
     bearer_secret: Option<BearerSecret>,
+    session_secret: Option<SessionSecret>,
+    session_lifetime: Duration,
     public_origin_scheme: String,
 }
 
@@ -86,6 +119,8 @@ impl ServerConfig {
         Self {
             asset_root,
             bearer_secret: None,
+            session_secret: None,
+            session_lifetime: Duration::from_secs(8 * 60 * 60),
             public_origin_scheme: "http".into(),
         }
     }
@@ -93,6 +128,21 @@ impl ServerConfig {
     pub fn with_bearer_secret(mut self, secret: BearerSecret) -> Self {
         self.bearer_secret = Some(secret);
         self
+    }
+
+    /// Enable the optional local browser login using an independent operator
+    /// secret. The cookie lifetime must be positive.
+    pub fn with_browser_session(
+        mut self,
+        secret: SessionSecret,
+        lifetime: Duration,
+    ) -> Result<Self, &'static str> {
+        if lifetime.is_zero() {
+            return Err("browser session lifetime must be positive");
+        }
+        self.session_secret = Some(secret);
+        self.session_lifetime = lifetime;
+        Ok(self)
     }
 
     /// Set the browser-facing scheme used by the WebSocket same-origin check.
@@ -117,11 +167,24 @@ struct AppState {
     asset_root: Arc<PathBuf>,
     snapshot: Arc<std::sync::RwLock<Snapshot>>,
     public_origin_scheme: Arc<str>,
+    auth: Arc<ApiAuthPolicy>,
 }
 
 #[derive(Clone)]
 struct ApiAuth {
+    policy: Arc<ApiAuthPolicy>,
+    public_origin_scheme: Arc<str>,
+}
+
+struct ApiAuthPolicy {
     bearer_secret: Option<BearerSecret>,
+    browser_session: Option<BrowserSessions>,
+}
+
+struct BrowserSessions {
+    secret: SessionSecret,
+    lifetime: Duration,
+    tokens: std::sync::Mutex<HashMap<String, Instant>>,
 }
 
 /// Command delivered to the owning scheduler.
@@ -173,8 +236,8 @@ impl ServerControl {
     }
 }
 
-/// Build a fail-closed server: public static assets work, but all `/api/*`
-/// routes return 401 until explicit bearer authentication is configured.
+/// Build a fail-closed server: public static assets work, but protected `/api/*`
+/// routes return 401 until explicit authentication is configured.
 ///
 /// `asset_root` points at a future web build directory. `/` and `/assets/*`
 /// are served from it; the helper rejects traversal and falls back to index.
@@ -189,6 +252,8 @@ pub fn server_with_config(
     let ServerConfig {
         asset_root,
         bearer_secret,
+        session_secret,
+        session_lifetime,
         public_origin_scheme,
     } = config;
     let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
@@ -199,6 +264,14 @@ pub fn server_with_config(
         asset_root: Arc::new(asset_root),
         snapshot: Arc::new(std::sync::RwLock::new(Snapshot::default())),
         public_origin_scheme: Arc::from(public_origin_scheme),
+        auth: Arc::new(ApiAuthPolicy {
+            bearer_secret: bearer_secret.clone(),
+            browser_session: session_secret.map(|secret| BrowserSessions {
+                secret,
+                lifetime: session_lifetime,
+                tokens: std::sync::Mutex::new(HashMap::new()),
+            }),
+        }),
     };
     let snapshot = state.snapshot.clone();
     let control = ServerControl {
@@ -206,13 +279,25 @@ pub fn server_with_config(
         next_sequence: Arc::new(std::sync::Mutex::new(1)),
         snapshot,
     };
-    let auth = ApiAuth { bearer_secret };
-    let api = Router::new()
+    let auth = ApiAuth {
+        policy: state.auth.clone(),
+        public_origin_scheme: state.public_origin_scheme.clone(),
+    };
+    let protected_api = Router::new()
         .route("/commands", post(submit_command))
         .route("/events", get(event_stream))
         .route("/ws", get(websocket))
         .route_layer(middleware::from_fn_with_state(auth, authorize))
         .with_state(state.clone());
+    let session_api = Router::new()
+        .route(
+            "/session",
+            get(session_status)
+                .post(session_login)
+                .delete(session_logout),
+        )
+        .with_state(state.clone());
+    let api = protected_api.merge(session_api);
     let router = Router::new()
         .nest("/api", api)
         .route("/", get(index_asset))
@@ -222,15 +307,9 @@ pub fn server_with_config(
 }
 
 async fn authorize(State(auth): State<ApiAuth>, request: Request, next: Next) -> Response {
-    let is_authorized = auth.bearer_secret.as_ref().is_some_and(|secret| {
-        request
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .is_some_and(|provided| constant_time_eq(provided.as_bytes(), secret.0.as_bytes()))
-    });
-    if !is_authorized {
+    let session_id = valid_session_from_headers(request.headers(), &auth.policy);
+    let bearer = bearer_authorized(request.headers(), &auth.policy);
+    if !bearer && session_id.is_none() {
         return (
             StatusCode::UNAUTHORIZED,
             [(header::WWW_AUTHENTICATE, "Bearer")],
@@ -238,7 +317,45 @@ async fn authorize(State(auth): State<ApiAuth>, request: Request, next: Next) ->
         )
             .into_response();
     }
+    if request.method() == axum::http::Method::POST
+        && request.uri().path() == "/commands"
+        && session_id.is_some()
+        && !same_origin(request.headers(), &auth.public_origin_scheme)
+    {
+        return (StatusCode::FORBIDDEN, "same-origin request required").into_response();
+    }
     next.run(request).await
+}
+
+fn bearer_authorized(headers: &HeaderMap, policy: &ApiAuthPolicy) -> bool {
+    policy.bearer_secret.as_ref().is_some_and(|secret| {
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .is_some_and(|provided| constant_time_eq(provided.as_bytes(), secret.0.as_bytes()))
+    })
+}
+
+fn valid_session_from_headers(headers: &HeaderMap, policy: &ApiAuthPolicy) -> Option<String> {
+    let sessions = policy.browser_session.as_ref()?;
+    let session_id = headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|cookies| cookies.split(';'))
+        .find_map(|cookie| {
+            let (name, value) = cookie.trim().split_once('=')?;
+            (name == "harness_session" && !value.is_empty()).then(|| value.to_owned())
+        })?;
+    let mut active = sessions.tokens.lock().ok()?;
+    match active.get(&session_id) {
+        Some(expiry) if *expiry > Instant::now() => Some(session_id),
+        _ => {
+            active.remove(&session_id);
+            None
+        }
+    }
 }
 
 fn constant_time_eq(provided: &[u8], expected: &[u8]) -> bool {
@@ -267,8 +384,7 @@ async fn websocket(
 
 fn same_origin(headers: &HeaderMap, expected_scheme: &str) -> bool {
     let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
-        // Native clients commonly omit Origin. Browser requests always include it.
-        return true;
+        return false;
     };
     let Ok(origin) = origin.to_str() else {
         return false;
@@ -391,6 +507,135 @@ async fn submit_command(
     Ok((StatusCode::ACCEPTED, Json(CommandAccepted { command_id })))
 }
 
+#[derive(Deserialize)]
+struct SessionLoginRequest {
+    secret: String,
+}
+
+#[derive(Serialize)]
+struct SessionStatus {
+    authenticated: bool,
+}
+
+async fn session_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let authenticated = bearer_authorized(&headers, &state.auth)
+        || valid_session_from_headers(&headers, &state.auth).is_some();
+    let mut response = Json(SessionStatus { authenticated }).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    response
+}
+
+async fn session_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SessionLoginRequest>,
+) -> Result<Response, StatusCode> {
+    if !same_origin(&headers, &state.public_origin_scheme) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let sessions = state
+        .auth
+        .browser_session
+        .as_ref()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if !constant_time_eq(input.secret.as_bytes(), sessions.secret.0.as_bytes()) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    // Two v4 UUIDs provide a 244-bit unpredictable opaque session id. It is
+    // held only in memory and the HttpOnly cookie, never in a URL or response
+    // body.
+    let token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let now = Instant::now();
+    let expires_at = now + sessions.lifetime;
+    let mut active = sessions
+        .tokens
+        .lock()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    active.retain(|_, expiry| *expiry > now);
+    active.insert(token.clone(), expires_at);
+    drop(active);
+
+    let max_age = sessions.lifetime.as_secs().max(1);
+    let secure = if state.public_origin_scheme.as_ref() == "https" {
+        "; Secure"
+    } else {
+        ""
+    };
+    let cookie = format!(
+        "harness_session={token}; Path=/api; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}"
+    );
+    let mut response = Json(SessionStatus {
+        authenticated: true,
+    })
+    .into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        cookie
+            .parse()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    Ok(response)
+}
+
+async fn session_logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    if !same_origin(&headers, &state.public_origin_scheme) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let sessions = state
+        .auth
+        .browser_session
+        .as_ref()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if let Some(session_id) = session_id_from_cookie(&headers) {
+        sessions
+            .tokens
+            .lock()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .remove(&session_id);
+    }
+    let secure = if state.public_origin_scheme.as_ref() == "https" {
+        "; Secure"
+    } else {
+        ""
+    };
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        format!("harness_session=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0{secure}")
+            .parse()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    Ok(response)
+}
+
+fn session_id_from_cookie(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|cookies| cookies.split(';'))
+        .find_map(|cookie| {
+            let (name, value) = cookie.trim().split_once('=')?;
+            (name == "harness_session" && !value.is_empty()).then(|| value.to_owned())
+        })
+}
+
 async fn event_stream(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
@@ -435,6 +680,7 @@ mod tests {
     };
 
     const TEST_SECRET: &str = "test-only-secret-for-server-auth-checks";
+    const TEST_SESSION_SECRET: &str = "distinct-operator-secret-for-tests-only";
 
     fn authorized_server(
         asset_root: PathBuf,
@@ -448,10 +694,33 @@ mod tests {
         )
     }
 
+    fn browser_session_server(
+        asset_root: PathBuf,
+        lifetime: Duration,
+        public_scheme: &str,
+    ) -> (Router, ServerControl, mpsc::Receiver<QueuedCommand>) {
+        let secret = SessionSecret::new(TEST_SESSION_SECRET).unwrap();
+        let config = ServerConfig::new(asset_root)
+            .with_browser_session(secret, lifetime)
+            .unwrap()
+            .with_public_origin_scheme(public_scheme)
+            .unwrap();
+        server_with_config(config)
+    }
+
     fn websocket(
         address: std::net::SocketAddr,
         origin: Option<&str>,
         authorization: Option<&str>,
+    ) -> (TcpStream, String) {
+        websocket_with_cookie(address, origin, authorization, None)
+    }
+
+    fn websocket_with_cookie(
+        address: std::net::SocketAddr,
+        origin: Option<&str>,
+        authorization: Option<&str>,
+        cookie: Option<&str>,
     ) -> (TcpStream, String) {
         let mut socket = TcpStream::connect(address).unwrap();
         socket
@@ -463,7 +732,10 @@ mod tests {
         let origin = origin
             .map(|origin| format!("Origin: {origin}\r\n"))
             .unwrap_or_default();
-        write!(socket, "GET /api/ws HTTP/1.1\r\nHost: {address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{origin}{authorization}\r\n").unwrap();
+        let cookie = cookie
+            .map(|cookie| format!("Cookie: {cookie}\r\n"))
+            .unwrap_or_default();
+        write!(socket, "GET /api/ws HTTP/1.1\r\nHost: {address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{origin}{authorization}{cookie}\r\n").unwrap();
         let mut response = Vec::new();
         loop {
             let mut byte = [0; 1];
@@ -543,6 +815,14 @@ mod tests {
         assert!(BearerSecret::new("short").is_err());
         let secret = BearerSecret::new(TEST_SECRET).unwrap();
         assert_eq!(format!("{secret:?}"), "BearerSecret([REDACTED])");
+        assert!(SessionSecret::new("short").is_err());
+        let operator = SessionSecret::new(TEST_SESSION_SECRET).unwrap();
+        assert_eq!(format!("{operator:?}"), "SessionSecret([REDACTED])");
+        assert!(
+            ServerConfig::new(PathBuf::from("."))
+                .with_browser_session(operator, Duration::ZERO)
+                .is_err()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -576,6 +856,197 @@ mod tests {
 
         let (_socket, response) = websocket(address, None, Some("incorrect-bearer-secret"));
         assert!(response.starts_with("HTTP/1.1 401"), "{response}");
+        server_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_session_login_cookie_command_ws_and_logout() {
+        let (app, _, mut commands) =
+            browser_session_server(PathBuf::from("."), Duration::from_secs(60), "http");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let origin = format!("http://{address}");
+        let client = reqwest::Client::new();
+
+        let bad_origin = client
+            .post(format!("http://{address}/api/session"))
+            .header(header::ORIGIN, "http://attacker.invalid")
+            .json(&serde_json::json!({"secret":TEST_SESSION_SECRET}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_origin.status(), StatusCode::FORBIDDEN);
+        let bad_secret = client
+            .post(format!("http://{address}/api/session"))
+            .header(header::ORIGIN, &origin)
+            .json(&serde_json::json!({"secret":"wrong"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_secret.status(), StatusCode::UNAUTHORIZED);
+
+        let login = client
+            .post(format!("http://{address}/api/session"))
+            .header(header::ORIGIN, &origin)
+            .json(&serde_json::json!({"secret":TEST_SESSION_SECRET}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+        let set_cookie = login
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            login.json::<serde_json::Value>().await.unwrap(),
+            serde_json::json!({"authenticated":true})
+        );
+        assert!(set_cookie.contains("Path=/api"));
+        assert!(set_cookie.contains("HttpOnly"));
+        assert!(set_cookie.contains("SameSite=Strict"));
+        assert!(!set_cookie.contains("Secure"));
+        let cookie = set_cookie.split(';').next().unwrap().to_owned();
+        assert!(cookie.starts_with("harness_session="));
+        let status = client
+            .get(format!("http://{address}/api/session"))
+            .header(header::COOKIE, &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(status, serde_json::json!({"authenticated":true}));
+
+        let csrf = client
+            .post(format!("http://{address}/api/commands"))
+            .header(header::COOKIE, &cookie)
+            .header(header::ORIGIN, "http://attacker.invalid")
+            .json(&ClientCommand::Submit {
+                command: "csrf".into(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(csrf.status(), StatusCode::FORBIDDEN);
+        let logout_csrf = client
+            .delete(format!("http://{address}/api/session"))
+            .header(header::COOKIE, &cookie)
+            .header(header::ORIGIN, "http://attacker.invalid")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(logout_csrf.status(), StatusCode::FORBIDDEN);
+
+        let accepted = client
+            .post(format!("http://{address}/api/commands"))
+            .header(header::COOKIE, &cookie)
+            .header(header::ORIGIN, &origin)
+            .json(&ClientCommand::Submit {
+                command: "browser-command".into(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            commands.recv().await.unwrap().command,
+            ClientCommand::Submit {
+                command: "browser-command".into()
+            }
+        );
+
+        let (mut ws, handshake) =
+            websocket_with_cookie(address, Some(&origin), None, Some(&cookie));
+        assert!(handshake.starts_with("HTTP/1.1 101"), "{handshake}");
+        assert_eq!(read_ws_text(&mut ws)["type"], "snapshot");
+        drop(ws);
+
+        let logged_out = client
+            .delete(format!("http://{address}/api/session"))
+            .header(header::COOKIE, &cookie)
+            .header(header::ORIGIN, &origin)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(logged_out.status(), StatusCode::NO_CONTENT);
+        assert!(
+            logged_out
+                .headers()
+                .get(header::SET_COOKIE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("Max-Age=0")
+        );
+        let rejected = client
+            .post(format!("http://{address}/api/commands"))
+            .header(header::COOKIE, &cookie)
+            .header(header::ORIGIN, &origin)
+            .json(&ClientCommand::Submit {
+                command: "after-logout".into(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        server_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_session_expiry_and_https_cookie_flags() {
+        let (app, _, _) =
+            browser_session_server(PathBuf::from("."), Duration::from_millis(50), "https");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let origin = format!("https://{address}");
+        let client = reqwest::Client::new();
+
+        let login = client
+            .post(format!("http://{address}/api/session"))
+            .header(header::ORIGIN, &origin)
+            .json(&serde_json::json!({"secret":TEST_SESSION_SECRET}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+        let set_cookie = login
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(set_cookie.contains("; Secure"));
+        let cookie = set_cookie.split(';').next().unwrap().to_owned();
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let expired = client
+            .post(format!("http://{address}/api/commands"))
+            .header(header::COOKIE, &cookie)
+            .header(header::ORIGIN, &origin)
+            .json(&ClientCommand::Submit {
+                command: "expired".into(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(expired.status(), StatusCode::UNAUTHORIZED);
+        let status = client
+            .get(format!("http://{address}/api/session"))
+            .header(header::COOKIE, &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(status, serde_json::json!({"authenticated":false}));
         server_task.abort();
     }
 
@@ -696,13 +1167,11 @@ mod tests {
                 "seq":4,"conversations":[{"id":"root"}],"requests":[],"jobs":[],"envelopes":[]
             }})
         );
-        let (mut originless_socket, originless_handshake) =
-            websocket(address, None, Some(TEST_SECRET));
+        let (originless_socket, originless_handshake) = websocket(address, None, Some(TEST_SECRET));
         assert!(
-            originless_handshake.starts_with("HTTP/1.1 101"),
+            originless_handshake.starts_with("HTTP/1.1 403"),
             "{originless_handshake}"
         );
-        assert_eq!(read_ws_text(&mut originless_socket)["type"], "snapshot");
         drop(originless_socket);
 
         control.set_snapshot(Snapshot {
