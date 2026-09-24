@@ -1,5 +1,7 @@
 //! Reference provider for the harness. `run` intentionally invokes a local
 //! shell and is suitable only for trusted, development-time demonstrations.
+pub mod tree;
+
 use async_trait::async_trait;
 use harness::engine::{Engine, EngineCompletion, EngineConfig, EngineError};
 use harness::item::Item;
@@ -107,7 +109,7 @@ fn ensure_asset_root(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-struct CliProvider(DemoProvider);
+pub struct CliProvider(DemoProvider);
 
 #[async_trait]
 impl Provider for CliProvider {

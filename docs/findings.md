@@ -314,3 +314,12 @@ integrated fmt, offline workspace tests (75 harness passed, 2 live ignored;
 12 demo passed), Clippy and check. A one-process driver must still persist an
 envelope before signaling and rescan durable inbox on restart; none is wired
 yet for child agents.
+
+The demo now contains a tree-provider adapter exposing Store-backed agent
+verbs alongside development-gated ordinary tools. Focused tests verify
+prompt spawn persists a child and NEW_TASK, messaging persists an envelope,
+unrelated agent context is refused, and uncommitted Here/checkpoint forks
+leave no Store mutation. The adapter explicitly refuses those fork sources;
+it is not yet wired to a supervising tree driver. Integrated fmt, offline
+workspace tests (75 harness passed, 2 live ignored; 15 demo passed), Clippy,
+and check passed.
