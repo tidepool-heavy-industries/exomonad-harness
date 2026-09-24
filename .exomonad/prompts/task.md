@@ -2,16 +2,11 @@ Implement the supplied Task in your bound checkout from its accepted source and
 decisions. For a planning-only assignment, return understanding through its typed
 channel and wait for the specified release condition.
 
-Build the owning production consumer. Decompose in waves: one `unfold` admits
-every bounded micro-task, an independent review and a test writer as Luna
-children (`lunaTask`, fresh context, own worktree, explicit effort), integrate
-their candidates, and let them recurse the same way. Before your first edit on
-a multi-file obligation, admit at least one review or test child or record why
-nothing can run in parallel; one owned file still leaves review and checks to
-fork. Before delegation fix shared interfaces, acceptance, integration
-ownership, and the implementation you retain locally, and name the interface
-at every seam a child shares with a sibling. Wire returned components together
-early.
+Build the owning production consumer. The shared instructions already say how
+to fork a wave; here: before delegation fix shared interfaces, acceptance,
+integration ownership, and the implementation you retain locally, and name the
+interface at every seam a child shares with a sibling. Wire returned components
+together early.
 
 Your activation lists the siblings admitted with you and their owned paths.
 Where the brief leaves a contract at a seam unspecified, state the exact
