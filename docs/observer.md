@@ -1,4 +1,4 @@
-# Wave-5 observer checklist
+# Observer checklist
 
 Observe whether the prompt trials in `NEXT.md` change decisions. Keep four
 trial opportunity/outcome counts and three wrong-path counts. Use existing
@@ -91,28 +91,7 @@ is `pending`.
 2. What did you send your owner before the next attempt, and what changed after
    the answer? Give the message/candidate reference or say it was not sent.
 
-### 2. Source change received → reply names the incorporated commit
-
-**Opportunity:** an assignment update or message asking a recipient to use a
-specific parent/sibling source revision, with evidence it reached that actor's
-input or was acknowledged in its work. A send-only trace is a delivery lead;
-recipient exposure remains unknown until supported.
-
-**Outcome:** the subsequent reply identifies the exact incorporation commit,
-and the candidate contains the required change. Inspect the graph/diff and
-relevant checks at that candidate. A rebase can change commit IDs: retain both
-the supplied revision and the recipient's resulting revision. A correct claim
-that incorporation remains blocked is honest but does not close incorporation;
-keep it pending. “Applied” without a commit fails the trial once the reply is
-made. Merely naming a commit without its change in the candidate also fails.
-
-**If the trace is silent, ask:**
-1. Which exact source revision were you asked to incorporate, and when did you
-   receive that request?
-2. Which commit in your delivered candidate contains it, and where did your
-   reply name that commit and the checks performed afterward?
-
-### 3. Expected-red contract → accurately reported integration state
+### 2. Expected-red contract → accurately reported integration state
 
 **Opportunity:** an intentionally failing offline test is committed or integrated
 before its implementation slice. The commit message names the owner and slice
@@ -131,25 +110,37 @@ live tests and compile-only checks are separate states, not expected-red passes.
 2. How did the integration report describe it, and what execution evidence
    justified any later change to green?
 
-### 4. Hypothesis forwarded → label preserved; correction reaches children
+### 3. Fenced child → parent stops steering and hands off
 
-**Opportunity:** an operator/owner note explicitly identifies a hypothesis,
-measurement, advice or constraint and is forwarded into a task, message or doc.
-Compare the original with each affected forwarding edge. A later correction
-creates a second opportunity for each affected recipient. Advice remains advice
-unless the operator explicitly changes its authority.
+**Opportunity:** a child's delivery line in `status` shows `inbox=fenced(reason,
+since)` while its parent is live. Record the log line or status output, the
+fence reason and time, and the parent's calls after it saw the line.
 
-**Outcome:** the forwarded packet preserves the original class and uncertainty.
-A correction names the superseded claim and reaches affected active children;
-their next relevant action or acknowledgment establishes incorporation. A send
-alone proves only attempted delivery. Score label preservation and correction
-delivery separately; “no correction occurred” is not exercised for the latter.
+**Outcome:** the parent sends no further steering to the fenced child. If the
+fence is still there at the parent's next checkpoint, the parent forks a fresh
+child for the remaining work within one turn and says so in that checkpoint.
+A fence the host clears (`next=resubmitting`, then `inbox=open`) before the
+next checkpoint needs no handoff; the outcome is then stop-steering only.
+Steering sent after the fenced line was visible is `missed`.
 
 **If the trace is silent, ask:**
-1. What was the original note's class, and where did you preserve it when
-   forwarding the note?
-2. If it was corrected, which children were affected and what proves they
-   received and acted on the correction? Name any still unconfirmed.
+1. When did you first see the fenced line, and what did you send that child after?
+2. What did you do at your next checkpoint, and which child owns the work now?
+
+### 4. Fork cell settles → admission checkpoint
+
+**Opportunity:** a lead's fork cell settles with at least one admitted child.
+
+**Outcome:** before its next fork or wait, the lead sends its parent one message
+naming the children admitted, the base commit, each child's owned paths and the
+first expected reply, without being asked. A later checkpoint prompted by the
+parent is `missed`. Score per-settlement checkpoints separately: each child
+settlement is an opportunity for one message saying what settled, what changed
+at which commit, and what is next.
+
+**If the trace is silent, ask:**
+1. Which message was your admission checkpoint, and what base did it name?
+2. Which child settlements did you report, and which did you not?
 
 ## Three wrong-path counts
 
