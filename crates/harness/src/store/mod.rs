@@ -546,14 +546,9 @@ impl Store {
             .transpose()
     }
     /// Append is atomic; identical item bytes share storage, while positions remain request-local.
-    // TODO(correction-wave c): settings provenance is DECIDED (PRD `settings items`
-    // line "harness-authored only"), not an open seam. The rule is one sentence:
-    // a `configuration_update` reaches the store only through `set_effort`, a
-    // `here` fork's re-pin, or a compaction's fresh pin. Any `configuration_update`
-    // arriving in `new_items` from the model or a client is dropped here, at
-    // append. No SQL migration; at most a `harness_authored` flag if the drop
-    // rule alone cannot be tested. The previous lead returned `Blocked` on this;
-    // do not reopen it.
+    // Configuration updates are a harness-only settings item (PRD § settings
+    // items). The general append path is fed by model/client output, so reject
+    // those items at this boundary rather than persisting forgeable settings.
     pub fn append_items(&self, request: &RequestId, items: &[Item]) -> Result<Vec<ItemHash>> {
         let mut c = self.lock();
         let tx = c.transaction()?;
@@ -572,6 +567,11 @@ impl Store {
         )?;
         let mut hashes = Vec::new();
         for item in items {
+            if item.0.get("type").and_then(serde_json::Value::as_str)
+                == Some("configuration_update")
+            {
+                continue;
+            }
             let h = Self::put_item_tx(&tx, item)?;
             tx.execute(
                 "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
@@ -836,6 +836,18 @@ mod tests {
     }
     fn id(s: &str) -> RequestId {
         RequestId(s.into())
+    }
+    #[test]
+    fn drops_foreign_configuration_update() {
+        let store = Store::memory().unwrap();
+        store.create_request(&id("root"), None, "root").unwrap();
+        let forged = item(serde_json::json!({
+            "type":"configuration_update",
+            "effort":"high"
+        }));
+        let hashes = store.append_items(&id("root"), &[forged]).unwrap();
+        assert!(hashes.is_empty());
+        assert!(store.items(&id("root")).unwrap().is_empty());
     }
     #[test]
     fn atomic_agent_task_admission_commits_or_rolls_back_as_one_unit() {
