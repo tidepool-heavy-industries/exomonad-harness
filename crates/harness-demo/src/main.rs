@@ -1354,6 +1354,7 @@ mod tests {
             handle: harness::provider::JobHandle("sleep-1".into()),
             call_id: CallId("c1".into()),
             agent: harness::model::AgentPath("/root".into()),
+            request: None,
             progress: tx,
         };
         let value = provider
@@ -1375,6 +1376,7 @@ mod tests {
             handle: harness::provider::JobHandle("private-handle".into()),
             call_id: CallId("private-call-id".into()),
             agent: harness::model::AgentPath("/root".into()),
+            request: None,
             progress,
         };
         assert_eq!(

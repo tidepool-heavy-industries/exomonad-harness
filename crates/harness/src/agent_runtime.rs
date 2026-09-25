@@ -790,6 +790,7 @@ mod tests {
         crate::agents::dispatch_agent_verb(
             &service,
             &root,
+            None,
             "send_message",
             json!({"target":child.0,"message":"status please"}),
         )
@@ -800,6 +801,7 @@ mod tests {
         let followup = crate::agents::dispatch_agent_verb(
             &service,
             &root,
+            None,
             "followup_task",
             json!({"target":child.0,"task":contract()}),
         )

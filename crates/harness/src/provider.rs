@@ -25,6 +25,8 @@ pub struct CallContext {
     pub handle: JobHandle,
     pub call_id: CallId,
     pub agent: AgentPath,
+    /// Durable request that emitted this call, when dispatched by Engine.
+    pub request: Option<crate::model::RequestId>,
     pub progress: mpsc::UnboundedSender<Value>,
 }
 

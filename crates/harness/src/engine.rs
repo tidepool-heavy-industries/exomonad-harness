@@ -623,6 +623,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .start_for_agent(
                 provider,
                 self.config.agent.clone(),
+                Some(request.clone()),
                 call_id.clone(),
                 name,
                 args,

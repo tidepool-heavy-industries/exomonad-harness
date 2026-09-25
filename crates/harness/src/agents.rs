@@ -1,4 +1,4 @@
-use crate::model::{AgentPath, Effort};
+use crate::model::{AgentPath, CallId, Effort, RequestId};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt, str::FromStr};
@@ -135,6 +135,14 @@ struct SpawnSourceInput {
 #[error("{0}")]
 pub struct AgentVerbError(pub String);
 
+/// Harness-owned identity of the model call invoking an agent verb.
+/// A `here` fork must not substitute the last completed agent head.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentInvocation {
+    pub request: RequestId,
+    pub call_id: CallId,
+}
+
 /// Execution boundary for harness-owned agent operations. Implementations
 /// bind these operations to conversation storage and the request scheduler.
 #[async_trait]
@@ -146,6 +154,19 @@ pub trait AgentToolService: Send + Sync {
         from: SpawnSource,
         contract: Contract,
     ) -> Result<serde_json::Value, AgentVerbError>;
+    /// Defaults to the stored-head behavior for non-model callers. The
+    /// durable runtime overrides this to snapshot the active request and
+    /// gate a `here` child's first turn until its call output is persisted.
+    async fn spawn_agent_from_invocation(
+        &self,
+        parent: &AgentPath,
+        task_name: &str,
+        from: SpawnSource,
+        contract: Contract,
+        _invocation: Option<&AgentInvocation>,
+    ) -> Result<serde_json::Value, AgentVerbError> {
+        self.spawn_agent(parent, task_name, from, contract).await
+    }
     async fn send_message(
         &self,
         sender: &AgentPath,
@@ -202,6 +223,7 @@ pub fn is_agent_verb(name: &str) -> bool {
 pub async fn dispatch_agent_verb(
     service: &dyn AgentToolService,
     agent: &AgentPath,
+    invocation: Option<&AgentInvocation>,
     name: &str,
     args: serde_json::Value,
 ) -> Result<serde_json::Value, AgentVerbError> {
@@ -263,7 +285,9 @@ pub async fn dispatch_agent_verb(
                     .ok_or_else(|| AgentVerbError("missing field `task`".into()))?,
             )
             .map_err(|e| AgentVerbError(format!("invalid task contract: {e}")))?;
-            service.spawn_agent(agent, &task_name, from, contract).await
+            service
+                .spawn_agent_from_invocation(agent, &task_name, from, contract, invocation)
+                .await
         }
         "send_message" => {
             exact_keys(&args, &["target", "message"])?;

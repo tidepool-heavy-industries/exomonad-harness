@@ -58,9 +58,21 @@ impl Provider for TreeProvider {
                 ));
             }
         }
-        dispatch_agent_verb(self.agents.as_ref(), &context.agent, name, args)
-            .await
-            .map_err(|error| ProviderError::Tool(error.to_string()))
+        let invocation = context
+            .request
+            .map(|request| harness::agents::AgentInvocation {
+                request,
+                call_id: context.call_id,
+            });
+        dispatch_agent_verb(
+            self.agents.as_ref(),
+            &context.agent,
+            invocation.as_ref(),
+            name,
+            args,
+        )
+        .await
+        .map_err(|error| ProviderError::Tool(error.to_string()))
     }
 
     fn tools(&self) -> Vec<Value> {
@@ -123,6 +135,7 @@ mod tests {
             handle: harness::provider::JobHandle("test".into()),
             call_id: harness::model::CallId("call".into()),
             agent: AgentPath(agent.into()),
+            request: None,
             progress: tokio::sync::mpsc::unbounded_channel().0,
         }
     }

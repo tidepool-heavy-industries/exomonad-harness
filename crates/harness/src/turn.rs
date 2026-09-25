@@ -174,14 +174,22 @@ impl JobScheduler {
         name: String,
         args: Value,
     ) -> Result<JobHandle, JobError> {
-        self.start_for_agent(provider, AgentPath("/root".into()), call_id, name, args)
-            .await
+        self.start_for_agent(
+            provider,
+            AgentPath("/root".into()),
+            None,
+            call_id,
+            name,
+            args,
+        )
+        .await
     }
 
     pub async fn start_for_agent(
         &self,
         provider: Arc<dyn Provider>,
         agent: AgentPath,
+        request: Option<crate::model::RequestId>,
         call_id: CallId,
         name: String,
         args: Value,
@@ -207,6 +215,7 @@ impl JobScheduler {
         let events = self.events.clone();
         let task_call_id = call_id.clone();
         let task_agent = agent;
+        let task_request = request;
         let is_agent_verb = crate::provider::is_harness_tool(&name);
         let (launch, launch_gate) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
@@ -225,6 +234,7 @@ impl JobScheduler {
                 handle: JobHandle(task_call_id.0.clone()),
                 call_id: task_call_id.clone(),
                 agent: task_agent,
+                request: task_request,
                 progress,
             };
             let call = if is_agent_verb {
@@ -306,6 +316,7 @@ impl JobScheduler {
         self.start_for_agent(
             provider,
             agent,
+            None,
             CallId(call_id.to_owned()),
             name.to_owned(),
             args,
@@ -554,7 +565,7 @@ async fn settle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::{AgentToolService, Contract, dispatch_agent_verb};
+    use crate::agents::{AgentInvocation, AgentToolService, Contract, dispatch_agent_verb};
     use crate::provider::Provider;
     use async_trait::async_trait;
     use serde_json::json;
@@ -581,6 +592,20 @@ mod tests {
             _: Contract,
         ) -> Result<Value, crate::agents::AgentVerbError> {
             Ok(json!({"task_name": format!("{}/{}", parent.0, task_name)}))
+        }
+        async fn spawn_agent_from_invocation(
+            &self,
+            parent: &AgentPath,
+            task_name: &str,
+            _: crate::agents::SpawnSource,
+            _: Contract,
+            invocation: Option<&AgentInvocation>,
+        ) -> Result<Value, crate::agents::AgentVerbError> {
+            Ok(json!({
+                "task_name": format!("{}/{}", parent.0, task_name),
+                "request": invocation.map(|value| value.request.0.as_str()),
+                "call_id": invocation.map(|value| value.call_id.0.as_str())
+            }))
         }
         async fn send_message(
             &self,
@@ -736,6 +761,7 @@ mod tests {
         let spawned = dispatch_agent_verb(
             &SpawnOnly,
             &AgentPath("/root".into()),
+            None,
             "spawn_agent",
             json!({
                 "task_name":"child-one",
@@ -746,6 +772,26 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(spawned["task_name"], "/root/child_one");
+        assert!(spawned["request"].is_null());
+        let invocation = AgentInvocation {
+            request: crate::model::RequestId("active-request".into()),
+            call_id: CallId("spawn-call".into()),
+        };
+        let from_active = dispatch_agent_verb(
+            &SpawnOnly,
+            &AgentPath("/root".into()),
+            Some(&invocation),
+            "spawn_agent",
+            json!({
+                "task_name":"child-two",
+                "from":{"kind":"here","name":null},
+                "task":contract
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(from_active["request"], "active-request");
+        assert_eq!(from_active["call_id"], "spawn-call");
         assert_eq!(handle.0, "slow-call");
         assert!(
             scheduler
