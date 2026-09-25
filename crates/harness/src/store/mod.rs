@@ -3,6 +3,7 @@ pub mod schema;
 
 use crate::{
     item::{Item, ItemHash},
+    lifecycle::CompletionProvenance,
     model::{AgentPath, CallId, Effort, RequestId},
     transport::{ResponsesRequest, ResponsesTurn},
 };
@@ -1296,6 +1297,86 @@ impl Store {
     pub fn unread(&self, path: &str) -> Result<Vec<Envelope>> {
         self.envelopes(path, true)
     }
+    /// Resolve a stable envelope reference, including its persisted delivery
+    /// request. The reference is the SQLite envelope ID returned at admission.
+    pub fn envelope(&self, id: i64) -> Result<Option<Envelope>> {
+        let c = self.lock();
+        c.query_row(
+            "SELECT id,sender,recipient,class,item_hash,delivered_request,created_at \
+             FROM envelopes WHERE id=?1",
+            [id],
+            |r| {
+                Ok(Envelope {
+                    id: r.get(0)?,
+                    sender: r.get(1)?,
+                    recipient: r.get(2)?,
+                    class: r.get(3)?,
+                    item_hash: ItemHash(r.get(4)?),
+                    delivered_request: r.get::<_, Option<String>>(5)?.map(RequestId),
+                    created_at: r.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+    /// Snapshot final input provenance under one serialized connection read.
+    /// "Seen" records presentation on the final request's ancestry only, not
+    /// acknowledgement or incorporation by the model.
+    pub fn completion_provenance(
+        &self,
+        recipient: &AgentPath,
+        final_request: &RequestId,
+    ) -> Result<CompletionProvenance> {
+        let c = self.lock();
+        let branch: Option<String> = c
+            .query_row(
+                "SELECT branch FROM requests WHERE id=?1",
+                [&final_request.0],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(branch) = branch else {
+            return Err(StoreError::MissingRequest(final_request.0.clone()));
+        };
+        if branch != recipient.0 {
+            return Err(StoreError::RequestAgentMismatch {
+                request: final_request.0.clone(),
+                expected: recipient.0.clone(),
+                actual: branch,
+            });
+        }
+        let mut stmt = c.prepare(
+            "WITH RECURSIVE ancestry(id) AS (
+                SELECT ?2
+                UNION ALL
+                SELECT r.parent_id FROM requests r JOIN ancestry a ON r.id=a.id
+                WHERE r.parent_id IS NOT NULL
+             )
+             SELECT e.id, e.delivered_request IS NULL FROM envelopes e
+             WHERE e.recipient=?1 AND
+               (e.delivered_request IS NULL OR
+                e.delivered_request IN (SELECT id FROM ancestry))
+             ORDER BY e.id",
+        )?;
+        let mut seen_envelopes = Vec::new();
+        let mut unseen_envelopes = Vec::new();
+        for row in stmt.query_map(params![recipient.0, final_request.0], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?))
+        })? {
+            let (id, unread) = row?;
+            if unread {
+                unseen_envelopes.push(id);
+            } else {
+                seen_envelopes.push(id);
+            }
+        }
+        Ok(CompletionProvenance {
+            final_request: final_request.clone(),
+            seen_envelopes,
+            unseen_envelopes,
+        })
+    }
     pub fn decisions(&self, request: Option<&RequestId>) -> Result<Vec<StoredDecision>> {
         let c = self.lock();
         let mut q=c.prepare("SELECT id,request_id,hook,event_refs,decision,evidence,latency_ms,created_at FROM decisions WHERE (?1 IS NULL OR request_id=?1) ORDER BY id")?;
@@ -1688,6 +1769,84 @@ mod tests {
             assert_eq!(turns[0].model_response.response_id, "recorded-call");
             assert_eq!(turns[0].model_response.items, vec![call_item]);
             assert_eq!(s.replay_output(&call).unwrap(), Some(output));
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn completion_provenance_uses_ancestry_and_reopen() {
+        let path = std::env::temp_dir().join(format!(
+            "harness-completion-provenance-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let recipient = AgentPath("/root/child".into());
+        let first = id("first");
+        let final_request = id("final");
+        let message = item(serde_json::json!({"type":"message","content":"update"}));
+        let (seen, unseen, late);
+        {
+            let store = Store::open(&path).unwrap();
+            store.create_request(&first, None, &recipient.0).unwrap();
+            seen = store
+                .add_envelope("/root", &recipient.0, "AtBoundary", &message, None)
+                .unwrap();
+            store.append_unread_envelopes(&recipient, &first).unwrap();
+            store
+                .create_request(&final_request, Some(&first), &recipient.0)
+                .unwrap();
+            unseen = store
+                .add_envelope("/root", &recipient.0, "AtBoundary", &message, None)
+                .unwrap();
+            let snapshot = store
+                .completion_provenance(&recipient, &final_request)
+                .unwrap();
+            assert_eq!(snapshot.final_request, final_request);
+            assert_eq!(snapshot.seen_envelopes, vec![seen]);
+            assert_eq!(snapshot.unseen_envelopes, vec![unseen]);
+            late = store
+                .add_envelope("/root", &recipient.0, "AtBoundary", &message, None)
+                .unwrap();
+            assert_eq!(
+                store.envelope(seen).unwrap().unwrap().delivered_request,
+                Some(first.clone())
+            );
+        }
+        {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(
+                store
+                    .completion_provenance(&recipient, &final_request)
+                    .unwrap()
+                    .seen_envelopes,
+                vec![seen]
+            );
+            assert_eq!(
+                store
+                    .completion_provenance(&recipient, &final_request)
+                    .unwrap()
+                    .unseen_envelopes,
+                vec![unseen, late]
+            );
+            let next = id("next");
+            store
+                .create_request(&next, Some(&final_request), &recipient.0)
+                .unwrap();
+            assert_eq!(
+                store
+                    .append_unread_envelopes(&recipient, &next)
+                    .unwrap()
+                    .len(),
+                2
+            );
+            let snapshot = store.completion_provenance(&recipient, &next).unwrap();
+            assert_eq!(snapshot.seen_envelopes, vec![seen, unseen, late]);
+            assert!(snapshot.unseen_envelopes.is_empty());
+            assert_eq!(
+                store.envelope(unseen).unwrap().unwrap().delivered_request,
+                Some(next)
+            );
         }
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));

@@ -229,7 +229,7 @@ fn envelope(
     }
 }
 
-fn persist_envelope(store: &Store, envelope: &ModelEnvelope) -> Result<(), AgentVerbError> {
+fn persist_envelope(store: &Store, envelope: &ModelEnvelope) -> Result<i64, AgentVerbError> {
     store
         .add_envelope(
             &envelope.sender.0,
@@ -238,8 +238,7 @@ fn persist_envelope(store: &Store, envelope: &ModelEnvelope) -> Result<(), Agent
             &envelope_item(envelope),
             None,
         )
-        .map_err(err)?;
-    Ok(())
+        .map_err(err)
 }
 
 // TODO(correction-wave c/d): checkpoints are a JSON blob under `session_state`.
@@ -446,12 +445,13 @@ impl AgentToolService for StoreAgentToolService {
                     ));
                 }
                 let payload = serde_json::to_string(&contract).map_err(err)?;
-                persist_envelope(
+                let envelope_id = persist_envelope(
                     &store,
                     &envelope(EnvelopeType::NewTask, sender, target, payload),
                 )?;
                 Ok(json!({
                     "status":"queued",
+                    "envelope_id":envelope_id,
                     "delivery":"at_boundary",
                     "host_scheduling_needed":true
                 }))
@@ -1043,6 +1043,12 @@ mod tests {
         assert_eq!(followup["status"], "queued");
         assert_eq!(followup["delivery"], "at_boundary");
         assert_eq!(followup["host_scheduling_needed"], true);
+        let envelope_id = followup["envelope_id"]
+            .as_i64()
+            .expect("follow-up has a stable envelope reference");
+        let linked = store.envelope(envelope_id).unwrap().unwrap();
+        assert_eq!(linked.recipient, child.0);
+        assert_eq!(linked.delivered_request, None);
         mailbox_changes.changed().await.unwrap();
         assert_eq!(*mailbox_changes.borrow_and_update(), 3);
 
