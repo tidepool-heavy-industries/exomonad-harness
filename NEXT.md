@@ -1,4 +1,38 @@
-# NEXT: wave 10 / RSI iteration 2
+# NEXT: wave 10 / RSI iteration 2 — offline outcome delivered
+
+## Completed handoff — 2026-09-25
+
+Integrated source before this handoff note:
+`a1c8cd997d9ec6306a46479523c959e8e6af1d5e`.
+The real Driver now publishes strict typed answers with final-request
+seen/unseen envelope IDs, runs pending follow-ups at the next request
+boundary, and couples child-head advancement and parent answer
+publication in one Store transaction. The shared contracts, Store,
+Engine, and Driver slices were independently reviewed at exact tips,
+repaired where needed, merged, and checked on combined source.
+
+Final integrated commands on `a1c8cd9`, all executed with matching
+tests: `cargo test -q -p harness-demo followup_lifecycle` 2/2;
+`malformed_publication_does_not_advance_child_head_or_publish` 1/1;
+`shutdown_` 2/2; `reaper_joins_all_finished_handles_after_first_failure`
+1/1; `cargo test -q -p harness --test first_request_delivery` 1/1;
+`--test adapter_readiness` 1/1;
+`cargo test -q -p harness complete_agent_with_publication` 2/2;
+`dynamic_reply_schema` 2/2;
+`strict_contract_tool_carries_nullable_encoded_reply_schema` 1/1.
+`cargo fmt --all -- --check` and `git diff --check` passed.
+Total: 13 matched and passed across those focused test commands.
+No broad workspace battery, live adapter inference, credentialed
+item-2 retry or item-13 trace ran; those holds remain.
+
+Reviewed/passing wave-10 branches not merged: **none**. The
+Store `5b2741a`/`5b7272b`, Engine `2d5218f`, and Driver `cb2620d`
+candidate content is merged in `a1c8cd9` through the integration
+commits listed below. All six wave-10 workers/reviewers were retired;
+cleanup receipts marked their groups complete (some actors had
+two-phase `StoppedReleasing` acknowledgements). Next owner: the
+operator or next root, only for newly authorized work beyond this
+offline scope or the pre-existing live holds. Wave 10 itself stops.
 
 Read docs/rsi-iteration-2.md and implement its authorized outcome: the complete
 offline follow-up/finalization lifecycle with typed parent answers and durable
@@ -16,11 +50,11 @@ outside the wave. Resolve full source OIDs from Git.
 
 | Obligation | Owner | State / next evidence |
 |---|---|---|
-| Shared lifecycle/provenance contract and scaffold | root | `lifecycle.rs` defines envelope-ID provenance and structured parent answer; optional `Contract.reply` is the strict result schema; compile and commit before forks |
-| Stable follow-up identity and durable provenance | store child | exact-tip review accepted; integrated as `176a271`; provenance focused test 1/1 on integrated source |
-| Typed completion | engine child | repaired exact candidate `2d5218f` re-review accepted; integrated as `c445c5d`; root-focused checks running |
-| Driver publication/continuation and integrated release gate | driver child | repaired candidate `cb2620d` reports combined lifecycle 2/2 and malformed-publication 1/1; same-reviewer exact-tip re-review pending, not merged |
-| Independent review, integration, interview and stop | root | exact-source verdict, executed integrated checks, handoff |
+| Shared lifecycle/provenance contract and scaffold | root | complete: `f9ab1a9`, wire codec `41c48b6`, strict tool reply `e47a958`, atomic seam `04fdf30` |
+| Stable follow-up identity and durable provenance | store child | complete: `176a271`; atomic completion `850fa83` |
+| Typed completion | engine child | complete: `c445c5d` |
+| Driver publication/continuation and integrated release gate | driver child | complete: `a1c8cd9`, combined focused gate green |
+| Independent review, integration, interview and stop | root | complete: exact-tip verdicts, combined checks, docs/interviews.md and docs/exomonad-friction.md, retired groups |
 
 Keep this table current as assignments settle; ordinary idle turn ends need no
 commit. Preserve one implementation owner per shared file and record amendments.
@@ -258,6 +292,13 @@ adapter-readiness 1/1, fmt and diff checks. Root assigned one
 same-reviewer exact-tip re-review focused on the previous
 head-before-answer failure and production cleanup. Candidate
 passing checks are not integrated acceptance.
+Same Driver reviewer accepted exact `cb2620d` after
+matching/passing lifecycle 2/2, malformed-publication 1/1,
+shutdown 2/2, reaper 1/1, first-request 1/1 and adapter-readiness
+1/1. It verified the atomic head+answer path and no duplicate
+publication, but did not run live inference. Root merged the
+candidate as `a1c8cd997d9ec6306a46479523c959e8e6af1d5e`
+and started final combined boundaries on that integrated source.
 Driver atomic repair checkpoint committed
 `552a21d1c1972ba3e8ef36157cf59254b774ba9f` on `04fdf30`,
 owned diff only driver.rs. It prepares publication before the single
@@ -270,26 +311,8 @@ zero compiled/matched tests, not a failing or passing gate. Root must
 reassign the retained Driver owner immediately after reviewed Store
 merge with that integration OID.
 
-## Where the last run stopped (live wave 10 checkpoint)
+## Where the last run stopped
 
-- `exomonad/wave10/implementation/branches/wave10-engine`:
-  candidate `2d5218f881b5cfa4e055471548152b99ee63157c` is no
-  longer unmerged: exact-tip re-review accepted and root integrated it
-  as `c445c5d`. Prior reviewed `2d12a4a` received Repair.
-- `exomonad/wave10/implementation/branches/wave10-driver`:
-  `cb2620d70b77a477af062f75b11aebb5b0ad487b`;
-  atomic repair and malformed-publication test checked on `850fa83`,
-  same-reviewer exact-tip re-review pending, not integrated.
-  Prior `ddce261` gate passed 2/2 but review returned Repair.
-- Store atomic-publication repair request is pending on shared
-  contract source `04fdf305bc9ca9b78cf871e3b43ca802297e26d2`;
-  candidate `5b7272bac92296d7112b19e628f9e84e8302c7ee`
-  is no longer unmerged: same-reviewer re-review accepted and root
-  integrated it as `850fa83`, with focused Store gate 2/2 on source.
-- Store branch `5b2741a` is not unmerged: it is integrated as
-  `176a271`. Root's wire-safe codec amendment is `41c48b6`.
-Driver progress reported uncommitted owned changes for strict factory,
-`PublishedAnswer` publication, and an explicit-barrier real-driver gate.
-It still mentioned `typed_result`, so root corrected it to parse the
-strict finalize call from `EngineCompletion.turn` at the intended engine
-tip. Its gate has not compiled or executed yet.
+No reviewed or passing wave-10 work remains unmerged. Final
+integrated code source: `a1c8cd997d9ec6306a46479523c959e8e6af1d5e`.
+The handoff documentation commit follows this source.

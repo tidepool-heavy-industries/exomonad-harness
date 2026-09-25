@@ -362,7 +362,14 @@ was rebased as `1513e95` and merged by root at `06148a1`.
   answer-envelope insertion, so an insertion failure could strand
   the parent answer. It also reported a zero-match
   adapter-readiness filter, not an executed adapter check.
-  Interview after the repair verdict remains to be collected.
+  On exact re-review `cb2620d` it found no redundant
+  scheduling/publication path. It again named test waits and
+  check accounting as codifiable, atomic head+answer commit as
+  the hard contract change, and task/watcher/notifier/reaper
+  cleanup as the cost of the tree. The corrected tests matched:
+  lifecycle 2/2, malformed-publication 1/1, shutdown 2/2,
+  reaper 1/1, first-request 1/1, adapter-readiness 1/1.
+  This is review evidence, not a live-provider claim.
 - **Root:** `ReviewBasis::ExactScope` kept base/candidate/owned paths
   explicit across the Store and Engine reviews, including the
   Engine rebase over the integrated Store slice. It avoided
@@ -372,4 +379,11 @@ was rebased as `1513e95` and merged by root at `06148a1`.
   exposed is source-aware dependency routing to a retained consumer,
   plus a typed, wire-safe publication codec checked at the API
   boundary. Root held the driver gate as unverified rather than
-  equating a written test with an executed one.
+  equating a written test with an executed one. In the final
+  integration, the first Driver review caught a real lost-answer
+  path that its 2/2 lifecycle test did not cover. The tree cost a
+  second Store contract/amendment, Store review/correction, Driver
+  rebase and Driver re-review; the precise repair was a single
+  Store transaction for head CAS and answer insertion. At
+  `a1c8cd9`, root ran the combined focused boundaries (13 matched,
+  13 passed), not a broad workspace or live test.
