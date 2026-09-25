@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Run one Cargo test target and reject filters with no runnable tests."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+from typing import Sequence
+
+
+TEST_LINE = re.compile(r"^(.+): test$")
+
+
+def test_names(output: str) -> set[str]:
+    """Read names from libtest's `--list` format, ignoring benchmarks."""
+    return {
+        match.group(1)
+        for line in output.splitlines()
+        if (match := TEST_LINE.fullmatch(line.strip())) is not None
+    }
+
+
+def exit_with(returncode: int) -> None:
+    """Preserve subprocess exit codes, including signal termination."""
+    if returncode < 0:
+        os.kill(os.getpid(), -returncode)
+    raise SystemExit(returncode)
+
+
+def cargo_command(package: str, target: str, filter_text: str) -> list[str]:
+    target_args = ["--lib"] if target == "lib" else ["--test", target.removeprefix("test:")]
+    return ["cargo", "test", "-p", package, *target_args, filter_text]
+
+
+def run(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        description="Run a focused package test after checking its libtest match count."
+    )
+    parser.add_argument("--package", required=True, help="Cargo package name")
+    parser.add_argument(
+        "--target", required=True, help="`lib` or `test:INTEGRATION_TARGET`"
+    )
+    parser.add_argument("--filter", required=True, help="Nonempty Cargo test filter")
+    args = parser.parse_args(argv)
+
+    if args.target != "lib" and not args.target.startswith("test:"):
+        parser.error("--target must be `lib` or `test:NAME`")
+    if args.target.startswith("test:") and not args.target.removeprefix("test:"):
+        parser.error("integration test target name must not be empty")
+    if not args.filter.strip():
+        parser.error("--filter must not be empty")
+
+    command = cargo_command(args.package, args.target, args.filter)
+    all_list = subprocess.run(
+        [*command, "--", "--list"], text=True, capture_output=True, check=False
+    )
+    if all_list.returncode != 0:
+        sys.stderr.write(all_list.stdout)
+        sys.stderr.write(all_list.stderr)
+        return all_list.returncode
+
+    ignored_list = subprocess.run(
+        [*command, "--", "--list", "--ignored"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if ignored_list.returncode != 0:
+        sys.stderr.write(ignored_list.stdout)
+        sys.stderr.write(ignored_list.stderr)
+        return ignored_list.returncode
+
+    matched = test_names(all_list.stdout)
+    ignored = test_names(ignored_list.stdout)
+    runnable = matched - ignored
+    if not runnable:
+        print(
+            f"focused test rejected: {len(matched)} matched, "
+            f"0 runnable, {len(ignored & matched)} ignored",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(
+        f"focused test selection: {len(matched)} matched, {len(runnable)} runnable, "
+        f"{len(ignored & matched)} ignored",
+        file=sys.stderr,
+    )
+    completed = subprocess.run(command, check=False)
+    return completed.returncode
+
+
+if __name__ == "__main__":
+    exit_with(run(sys.argv[1:]))
