@@ -35,7 +35,12 @@ def exit_with(returncode: int) -> None:
 
 
 def cargo_command(package: str, target: str, filter_text: str) -> list[str]:
-    target_args = ["--lib"] if target == "lib" else ["--test", target.removeprefix("test:")]
+    if target == "lib":
+        target_args = ["--lib"]
+    elif target.startswith("test:"):
+        target_args = ["--test", target.removeprefix("test:")]
+    else:
+        target_args = ["--bin", target.removeprefix("bin:")]
     return ["cargo", "test", "-p", package, *target_args, filter_text]
 
 
@@ -45,15 +50,17 @@ def run(argv: Sequence[str]) -> int:
     )
     parser.add_argument("--package", required=True, help="Cargo package name")
     parser.add_argument(
-        "--target", required=True, help="`lib` or `test:INTEGRATION_TARGET`"
+        "--target",
+        required=True,
+        help="`lib`, `test:INTEGRATION_TARGET`, or `bin:NAME`",
     )
     parser.add_argument("--filter", required=True, help="Nonempty Cargo test filter")
     args = parser.parse_args(argv)
 
-    if args.target != "lib" and not args.target.startswith("test:"):
-        parser.error("--target must be `lib` or `test:NAME`")
-    if args.target.startswith("test:") and not args.target.removeprefix("test:"):
-        parser.error("integration test target name must not be empty")
+    if args.target != "lib" and not args.target.startswith(("test:", "bin:")):
+        parser.error("--target must be `lib`, `test:NAME`, or `bin:NAME`")
+    if args.target.startswith(("test:", "bin:")) and not args.target.split(":", 1)[1]:
+        parser.error("Cargo test target name must not be empty")
     if not args.filter.strip():
         parser.error("--filter must not be empty")
     if args.filter.startswith("-"):

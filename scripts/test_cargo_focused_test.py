@@ -21,6 +21,8 @@ class FocusedTestRunnerTests(unittest.TestCase):
             "#!/usr/bin/env python3\n"
             "import os, sys\n"
             "args = sys.argv[1:]\n"
+            "if '--bin' in args and args[args.index('--bin') + 1] == 'harness-demo':\n"
+            "    print('BIN_TARGET_SELECTED')\n"
             "if '--list' in args:\n"
             "    mode = os.environ['STUB_MODE']\n"
             "    if '--ignored' in args:\n"
@@ -45,7 +47,9 @@ class FocusedTestRunnerTests(unittest.TestCase):
         )
         self.stub.chmod(0o755)
 
-    def invoke(self, mode: str, exit_code: int = 0) -> subprocess.CompletedProcess[str]:
+    def invoke(
+        self, mode: str, exit_code: int = 0, target: str = "lib"
+    ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env['PATH']}"
         env["STUB_MODE"] = mode
@@ -57,7 +61,7 @@ class FocusedTestRunnerTests(unittest.TestCase):
                 "--package",
                 "harness",
                 "--target",
-                "lib",
+                target,
                 "--filter",
                 "focused_case",
             ],
@@ -123,6 +127,12 @@ class FocusedTestRunnerTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 2)
         self.assertIn("must not start with `-`", result.stderr)
+
+    def test_binary_target_is_forwarded_explicitly(self) -> None:
+        result = self.invoke("pass", target="bin:harness-demo")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("BIN_TARGET_SELECTED", result.stdout)
+        self.assertIn("1 executed, 1 passed", result.stderr)
 
 
 if __name__ == "__main__":
