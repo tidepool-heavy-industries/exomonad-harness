@@ -76,18 +76,23 @@ gate and did not claim real provider or Engine pending-claim recovery.
 
 ## Wave 11 Engine component owner — 2026-09-25
 
-No separate own-words interview or typed Delivery settled before root
-retired the prolonged review loop. Its checkpoints establish the tree
-cost: production and boundary-test children were disjoint, and an
-exact-source reviewer caught the zero-row interruption race and required
-two direct recovery tests beyond the 2/2 schema baseline. That was useful
-review depth. The later `70412ae` Unsupported contract drift, stale test
-candidate, revert at `65bace1`, and repeated review relays were not useful
-product work. The lead reported `65bace1` with recovery 2/2 and schema
-2/2, while root independently reviewed the code-equivalent `6988d51`,
-integrated it and passed the combined focused gate. The next run should
-stop at one current contract and one exact candidate/reviewer loop, with
-no duplicate review after identical source has already been accepted.
+The owner's own-words interview arrived asynchronously after root retired
+the prolonged review loop; no typed Delivery settled. It said splitting
+production implementation from independent boundary tests gave parallel
+code and adversarial coverage, while a later test verifier quickly
+confirmed the correct integrated behavior. The cost was repeated
+exact-source review and corrections relayed across stale candidate tips;
+one production branch was briefly blocked by putting EngineError mapping
+inside a StoreError-only blocking closure. It traced the source confusion
+to applying f7's ambiguous empty-inbox agent-head rule to a distinct
+inherited Pending non-`wait_agent` claim with scheduler UnknownCall, then
+propagating an intermediate fail-closed experiment despite tests still
+expecting typed Interrupted replay. Root's clarification restored the
+guarded version. The owner reported `65bace1` with `engine_recovery_`
+2 matched/executed/passed and `dynamic_reply_schema` 2/2; root
+independently reviewed code-equivalent `6988d51`, integrated it and passed
+the combined focused gate. The useful depth was disjoint test ownership
+plus one reviewer, not multiple candidate/review relays.
 
 ## Wave 11 root process-gate reviewer — 2026-09-25
 

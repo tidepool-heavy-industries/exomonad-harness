@@ -61,6 +61,12 @@
   convergence message, stopped the prolonged lead before typed Delivery,
   and retired the component group. This is a coordination shortfall, not
   an unreviewed code gap.
+- `friction:` Engine lead's late interview reported a production branch
+  briefly blocked by mapping EngineError inside a StoreError-only blocking
+  closure, plus stale-tip correction relays. Its coherent `65bace1`
+  candidate passed `engine_recovery_` 2 matched/executed/passed and
+  `dynamic_reply_schema` 2/2; root's exact-reviewed `6988d51` tree is
+  identical. The late note did not reopen the retired repair requests.
 
 Version-controlled field notes, not an engine bug tracker. “Fixed” below means
 the local prompt or workflow changed; it does not imply an engine fix. Earlier
