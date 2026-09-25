@@ -30,6 +30,7 @@ dependency amendment is `c427057`.
 | interviews | every node | `docs/interviews.md` | root, probe, core present | later nodes | one section per node that runs |
 | wave-7 admission | root | base `763764d389763df6ab3ac0cc65b990c4b82fe1b7` | store-drop-v7 owns `crates/harness/src/store/mod.rs`; core-preflight-v7 owns no files | replies pending | first replies: drop candidate; lead quotes `violet-lantern-763764d` before receiving compaction work |
 | core-compaction-v7 follow-up | preflighted Sol lead | base `763764d389763df6ab3ac0cc65b990c4b82fe1b7` | owns `crates/harness/src/compaction.rs` | pending | first reply: admission checkpoint after first child fork; then checked component Delivery |
+| store-drop review | reviewer | candidate `46a5496e38e8493a4de63eeedd007997b0084e3b`, base `763764d389763df6ab3ac0cc65b990c4b82fe1b7` | read-only review of `crates/harness/src/store/mod.rs` | pending | first reply: exact-commit ReviewDecision and focused matched/passed counts |
 
 Expected-red tests: none recorded. One committed red gets a row here with its
 owner and closing slice.
