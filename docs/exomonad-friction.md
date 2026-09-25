@@ -66,8 +66,13 @@ detail remains in Git history. Do not fabricate watchdog or nudge events.
 - **Core lead:** Own-words plan received: (b), then (c), then (d), with
   focused checks and manual live traces. At its later checkpoint, (b) had
   a committed leaf but no review/merge, and (c)/(d) had not started. Core
-  reported an inbox fence, so it planned to continue inline without
-  further forks. Its final interview and source delivery are pending.
+  reported an inbox fence, continued inline without further forks, delivered
+  (b) and a findings note, then returned `Blocked` on the structural (c)/(d)
+  seam. Its own-words account (retained source `6667ddc`) says child replies
+  were still readable through typed `pollResponse`, while host
+  notifications were not. TUI relay restored facts manually but not normal
+  routing. An explicit fence drain/replay is a candidate recovery mechanism,
+  not something tested here. Its interview is in `docs/interviews.md`.
 - **Cache-probe leaf:** Its own account is in `docs/interviews.md`. It
   found no byte-for-byte Codex reference capture, made no live calls, and
   repaired an out-of-scope branch ancestor before integration. The blocker

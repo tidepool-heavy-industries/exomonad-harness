@@ -40,3 +40,55 @@ incorporating it into the shared `docs/findings.md`.
 
 No code or tests were changed or run. The detailed blocker is recorded in
 `docs/cache-probe-evidence.md`.
+
+## Correction core lead — 2026-09-24
+
+Root incorporated this node's own-words interview from its retained commit
+`6667ddc`. That commit was excluded from the delivered branch because these
+documentation paths are root-owned. Its old local findings commit `b765e9b`
+was rebased as `1513e95` and merged by root at `06148a1`.
+
+- **Plan and tree cost:** I planned three ordered slices. The (b) Luna
+  produced `a1f976f`, and an independent settings-contract reader found
+  the provenance and pinning seams. The host notification inbox then
+  became fenced, so later child replies and ordinary review waves could
+  not be received normally. I inspected the (b) diff inline, merged it
+  in `ffe20e5`, and ran the focused offline acceptance test (1 passed)
+  and workspace format check. Root incorporated that branch at `d8097c3`.
+  The notification failure made this an exceptional manual review.
+- **Missing interface:** Generic `Item(Value)`/Store replay preserves JSON
+  but does not identify which `configuration_update` was harness-authored.
+  The settings slice needs a provenance decision before pinning effort,
+  replacing adjacent updates and stripping/re-pinning child histories.
+  No SQL migration is inherently required.
+- **Next scaffold:** Represent settings provenance at append time, not by
+  trusting wire JSON. Define the initial update and child fork prefix
+  once; then separate store/engine and runtime/verb changes behind that
+  seam.
+- **Prompt trials:** I named exact commits for incorporation. No red test
+  was committed by my node. There were no two failed check rounds. The
+  operator's inbox report was treated as a run constraint, not silently
+  generalized to the project. No nudge events were observed or invented.
+- **Result:** I returned `Blocked` for (c)/(d), not a feature completion.
+  The live item-2/item-13 and unanswered-call experiments were not run.
+
+## Root continuation — 2026-09-24
+
+- **Tree structure cost:** The probe initially changed a shared findings
+  file outside its ownership; checking the cumulative branch diff caught
+  the earlier commit even though its tip was in scope. Repair and rebase
+  produced `cdbbd367`, merged at `b99337e`. The probe still lacked the
+  reference capture, so no live call was justified.
+- **Stalled lead:** A notification delivery receipt did not wake core's
+  fenced inbox. Operator TUI relay supplied the missing checkpoint. Core
+  continued long enough to deliver (b) and findings, but could not safely
+  start a new child wave; a `Working` request was not evidence of progress.
+- **Different scaffold next time:** Make provenance an explicit
+  harness-owned property at append time and fix the initial settings pin
+  and fork-prefix contract before splitting (c)/(d). Preflight notification
+  routing before admitting that next lead.
+- **Prompt trials:** Exact incorporation commits were recorded; the
+  intentionally red offline test was treated as a contract and turned
+  green by (b), not mislabeled passing early. No repeated failing-check
+  loop was observed. The inbox fence was an operator constraint for this
+  run; no conjecture about its mechanism was promoted to an engine fact.

@@ -12,14 +12,22 @@ serves.
 - (b) provider tool schemas integrated on master at `d8097c3`.
   `cargo test -p harness --offline --test correction_wave` ran 1/1 passing
   test; `cargo fmt --all --check` passed. The live item-2 trace is **open**.
-- (c) and (d) remain open on the core lead's branch. Core reported its inbox
-  fenced and is continuing inline; a notification receipt must not be treated
-  as proof it resumed or incorporated a change.
+- (c) and (d) remain open. Core returned `Blocked` on the
+  provenance/initial-pin/fork seam after reporting its notification inbox
+  fenced. The operator's no-more-forks constraint remains in force this run.
+  A delivery receipt is not proof of resumption or incorporation.
 - The cache probe's `Blocked` evidence was merged at `b99337e`. It sent no
   live requests; an exact redacted Codex wire capture is missing. Q4 is
-  pending in `docs/questions.md`.
+  pending in `docs/questions.md`. Core's findings note was integrated at
+  `06148a1`.
 - All four items are **not** complete. The remainder of this file records
   the previous run's handoff and still-open acceptance criteria.
+
+**Next authorized step:** preflight a routable core lead, then scaffold
+harness-authored settings provenance at append time, one initial effort
+update, and the child fork strip/re-pin seam. Follow
+`docs/correction-plan.md` for the remaining (c)/(d) work and live gates.
+Do not start wave1 or call this preparation feature completion.
 
 ## Where the last run stopped (2026-09-24)
 

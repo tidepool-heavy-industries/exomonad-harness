@@ -86,13 +86,33 @@ their live traces in `docs/findings.md`, master is green, and
 |---|---|---|
 | (a) one entry | **done** (`9da6efe`, `a9f7a12`) | nothing |
 | (b) async tools | provider stamp integrated on master (`d8097c3`); offline correction-wave test 1/1 passed, fmt passed | live item-2 trace (slow `sleep`, model continues, `wait_agent` resumed) with redacted request bodies in findings remains open |
-| (c) settings items | not started | `configuration_update` as a store item, `set_effort`, fork strip list, effort pinned via the item; live item-13 trace with cache counters |
+| (c) settings items | blocked at provenance/initial-pin/fork seam; no implementation | `configuration_update` as a store item, `set_effort`, fork strip list, effort pinned via the item; live item-13 trace with cache counters |
 | (d) Compactor | not started | PRD shape, `Server` only, unanswered-call experiment → findings |
-| cache probe | not done: 38 min, five reviewers, a source comparison instead of two live requests | rescoped: ONE node, no children, two live requests shaped like codex's, redacted bodies + counters in findings, or `Blocked` naming the missing capture. nothing else |
-| interviews | root only | one section per node that ran |
+| cache probe | `Blocked` evidence and findings merged (`b99337e`, `06148a1`); no live calls | exact redacted Codex wire capture or approved alternative criterion before two-request comparison |
+| interviews | root, probe and core sections present | bounded nodes' own-word sections not yet delivered |
 
-A red offline test on master between slices is fine (operator, 2026-09-24);
-it is the contract for the next slice, not a failure. Finish (b) when you
-reach it. Live tests that spend inference stay `#[ignore]` and are run by
+The red offline test on master was accepted between slices and became green
+with (b). Live tests that spend inference stay `#[ignore]` and are run by
 hand, once, with the trace recorded in findings; never automate a test that
 triggers inference.
+
+## Current-run handoff (2026-09-24)
+
+The root integrated (b) at `d8097c3` and the probe's blocked finding at
+`06148a1`. On integrated source, `correction_wave` ran 1/1 passing and
+workspace fmt passed. This establishes the provider schema flag, **not**
+live async continuation. Item-2 live acceptance is still open.
+
+Core returned `Blocked` on the structural (c)/(d) seam after reporting that
+its notification inbox was fenced. The operator's no-more-forks constraint
+remains in force for this run. The next authorized lead must first establish
+harness-authored settings provenance at append time, a single initial effort
+pin and the child fork-prefix/strip contract; then split bounded store/engine
+and runtime/verb changes, review, and integrate. The core contract reader
+reported that wire-faithful Item/Store replay does not inherently need a SQL
+schema migration. This is a design lead, not implementation evidence.
+
+Still open: (c), (d), live item-2 and item-13 traces, unanswered-call
+experiment, cache probe reference capture/Q4, interviews from bounded nodes
+whose own words were not delivered, and final combined checks. Do not
+call this correction wave complete or launch wave1 from it.

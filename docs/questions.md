@@ -80,3 +80,15 @@ wire bytes from prose or spend inference on a comparison without a reference.
 No live requests were sent. Evidence: `docs/cache-probe-evidence.md` on the
 probe branch; root will incorporate it after an owned-path-clean revision.
 **Answer:** Pending.
+
+## Q5 — Resume authority after fenced core inbox (asked 2026-09-24)
+
+**Asked:** With the no-more-forks hold still in force and core `Blocked` on
+the structural (c)/(d) seam, may a fresh core lead be admitted in the next
+run after notification routing is preflighted, or should the wave remain
+on hold?
+
+**Recommendation:** Authorize a fresh routable lead after the preflight;
+scaffold harness-authored settings provenance and the initial-pin/fork
+contract before bounded implementation. Do not lift the current-run
+no-more-forks constraint by inference. **Answer:** Pending.
