@@ -21,6 +21,9 @@ pub struct NewWindow {
     pub carried: Vec<CallId>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolName(pub String);
+
 pub struct CompactContext<'a> {
     pub items: &'a [Item],
     pub usage: &'a Usage,
@@ -32,7 +35,7 @@ pub struct CompactContext<'a> {
     /// Caller-provided typed-turn capability: the caller applies the forced
     /// tool choice and returns the decoded JSON value for that tool call.
     pub typed_turn:
-        &'a (dyn Fn(String, String, serde_json::Value) -> TypedTurnFuture<'a> + Send + Sync),
+        &'a (dyn Fn(String, ToolName, serde_json::Value) -> TypedTurnFuture<'a> + Send + Sync),
 }
 
 pub type ServerCompactFuture<'a> = std::pin::Pin<
@@ -57,14 +60,14 @@ impl CompactContext<'_> {
         (self.server_compact)(items).await
     }
 
-    pub async fn typed_turn<T>(&self, instructions: &str, tool: &str) -> Result<T, CompactError>
+    pub async fn typed_turn<T>(&self, instructions: &str, tool: ToolName) -> Result<T, CompactError>
     where
         T: JsonSchema + Serialize + DeserializeOwned,
     {
         let schema = serde_json::to_value(schemars::schema_for!(T)).map_err(|error| {
             CompactError::Failed(format!("serialize typed-turn schema: {error}"))
         })?;
-        let value = (self.typed_turn)(instructions.to_owned(), tool.to_owned(), schema).await?;
+        let value = (self.typed_turn)(instructions.to_owned(), tool, schema).await?;
         serde_json::from_value(value)
             .map_err(|error| CompactError::Failed(format!("decode typed-turn result: {error}")))
     }
@@ -86,18 +89,14 @@ impl Compactor for Server {
         let mut input: Vec<Item> = cx
             .items()
             .iter()
-            .filter(|item| {
-                item.0.get("type").and_then(|v| v.as_str()) != Some("configuration_update")
-            })
+            .filter(|item| !is_setting(item))
             .cloned()
             .collect();
         input.push(Item(json!({"type":"compaction_trigger"})));
         let server_items = cx.server_compact(input).await?;
         let mut items: Vec<Item> = server_items
             .into_iter()
-            .filter(|item| {
-                item.0.get("type").and_then(|v| v.as_str()) != Some("configuration_update")
-            })
+            .filter(|item| !is_setting(item))
             .collect();
         // Preserve user-authored input verbatim if server compaction omitted it.
         for item in cx.items().iter().filter(|item| is_user_message(item)) {
@@ -139,6 +138,13 @@ fn is_user_message(item: &Item) -> bool {
         && item.0.get("role").and_then(|v| v.as_str()) == Some("user")
 }
 
+fn is_setting(item: &Item) -> bool {
+    matches!(
+        item.0.get("type").and_then(|v| v.as_str()),
+        Some("configuration_update" | "additional_tools" | "compaction_trigger")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,21 +155,23 @@ mod tests {
         let source = vec![
             call.clone(),
             Item(json!({"type":"configuration_update","reasoning_effort":"low"})),
+            Item(json!({"type":"additional_tools","tools":[]})),
+            Item(json!({"type":"compaction_trigger"})),
         ];
         let usage = Usage::default();
         let compact = |input: Vec<Item>| -> ServerCompactFuture<'_> {
             assert_eq!(input.last().unwrap().0["type"], "compaction_trigger");
-            assert!(!input.iter().any(|item| {
-                item.0.get("type").and_then(|v| v.as_str()) == Some("configuration_update")
-            }));
+            assert!(!input[..input.len() - 1].iter().any(is_setting));
             Box::pin(async {
                 Ok(vec![
                     Item(json!({"type":"message","content":"summary"})),
                     Item(json!({"type":"configuration_update","reasoning":{"effort":"low"}})),
+                    Item(json!({"type":"additional_tools","tools":[]})),
+                    Item(json!({"type":"compaction_trigger"})),
                 ])
             })
         };
-        let typed_turn = |_instructions: String, _tool: String, _schema: serde_json::Value| {
+        let typed_turn = |_instructions: String, _tool: ToolName, _schema: serde_json::Value| {
             Box::pin(async { Ok(json!({"note":"typed"})) }) as TypedTurnFuture<'_>
         };
         let user = Item(json!({"type":"message","role":"user","content":"keep me"}));
@@ -182,13 +190,7 @@ mod tests {
         assert_eq!(window.carried, vec![CallId("call-7".into())]);
         assert_eq!(window.items[0].0["role"], "developer");
         assert_eq!(
-            window
-                .items
-                .iter()
-                .filter(|item| {
-                    item.0.get("type").and_then(|v| v.as_str()) == Some("configuration_update")
-                })
-                .count(),
+            window.items.iter().filter(|item| is_setting(item)).count(),
             1
         );
         assert_eq!(
@@ -212,10 +214,10 @@ mod tests {
         let usage = Usage::default();
         let compact =
             |_input: Vec<Item>| -> ServerCompactFuture<'_> { Box::pin(async { Ok(vec![]) }) };
-        let typed_turn = |instructions: String, tool: String, schema: serde_json::Value| {
+        let typed_turn = |instructions: String, tool: ToolName, schema: serde_json::Value| {
             Box::pin(async move {
                 assert_eq!(instructions, "handoff");
-                assert_eq!(tool, "finish");
+                assert_eq!(tool, ToolName("finish".into()));
                 assert!(schema["properties"]["note"].is_object());
                 Ok(json!({"note":"done"}))
             }) as TypedTurnFuture<'_>
@@ -229,7 +231,9 @@ mod tests {
             typed_turn: &typed_turn,
         };
         assert_eq!(
-            cx.typed_turn::<Handoff>("handoff", "finish").await.unwrap(),
+            cx.typed_turn::<Handoff>("handoff", ToolName("finish".into()))
+                .await
+                .unwrap(),
             Handoff {
                 note: "done".into()
             }
