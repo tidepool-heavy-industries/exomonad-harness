@@ -104,9 +104,6 @@ pub struct EngineCompletion {
     pub transcript: Vec<Item>,
     /// Durable request row whose history was supplied to the final response.
     pub head_request: RequestId,
-    /// Strict finalize result, when a reply schema was supplied. No prose
-    /// rendering or parent publication has occurred at this boundary.
-    pub typed_result: Option<serde_json::Value>,
 }
 
 /// Narrow transport seam: production uses `ResponsesClient`; tests can replay
@@ -241,8 +238,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
 
     /// Run an agent whose stored contract supplies a strict result schema.
     /// `result_schema` describes the value inside finalize's `result` field.
-    /// Unlike `run_finalized<T>`, the result stays as JSON for durable routing
-    /// by a host that does not know the contract's Rust type.
+    /// Unlike `run_finalized<T>`, the result remains in `completion.turn` for
+    /// the host to parse and route using its contract.
     pub async fn run_with_reply_schema(
         &self,
         head: Option<RequestId>,
@@ -720,7 +717,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     return Err(self.cleanup_pending(error, &pending).await);
                 }
             } else if is_final(&turn, finalize_schema.is_some()) && pending.is_empty() {
-                let typed_result = if let Some(schema) = finalize_schema {
+                if let Some(schema) = finalize_schema {
                     let calls: Vec<_> = turn
                         .items
                         .iter()
@@ -729,13 +726,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     if calls.len() != 1 {
                         return Err(EngineError::InvalidFinalizeCount);
                     }
-                    Some(FinalizeParser::new().parse_completed_with_result_schema(
+                    FinalizeParser::new().parse_completed_with_result_schema(
                         calls[0],
                         &schema["parameters"]["properties"]["result"],
-                    )?)
-                } else {
-                    None
-                };
+                    )?;
+                }
                 // Read the durable parent chain only after every item/output
                 // from this final turn has been persisted.
                 let transcript = match self.read_history(&parent).await {
@@ -746,7 +741,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     turn,
                     transcript,
                     head_request: parent,
-                    typed_result,
                 });
             } else if turn_call_ids.is_empty() && pending.is_empty() {
                 return Err(EngineError::MissingFinal);
@@ -4325,7 +4319,14 @@ mod tests {
                 answer: "ready".into()
             }
         );
-        assert_eq!(completion.typed_result, Some(json!({"answer":"ready"})));
+        assert_eq!(
+            FinalizeParser::new()
+                .parse_completed::<FinalReply>(&completion.turn.items[0])
+                .unwrap(),
+            FinalReply {
+                answer: "ready".into()
+            }
+        );
         assert!(completion.transcript.contains(&final_call));
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
@@ -4390,7 +4391,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(completion.typed_result, Some(json!({"answer":"ready"})));
+        assert_eq!(
+            FinalizeParser::new()
+                .parse_completed::<serde_json::Value>(&completion.turn.items[0])
+                .unwrap(),
+            json!({"answer":"ready"})
+        );
         assert!(completion.transcript.contains(&final_call));
         assert!(
             store
