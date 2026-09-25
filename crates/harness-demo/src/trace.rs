@@ -97,26 +97,7 @@ impl TraceSink {
 
     /// Record sleep start/settle metadata with a sink-generated timestamp.
     pub async fn record_job(&self, event: JobEvent) -> Result<(), TraceError> {
-        let value = match event {
-            JobEvent::SleepStarted { call_id, handle } => json!({
-                "event": "sleep_started",
-                "timestamp_ms": timestamp_ms(),
-                "call_id_hash": hash_id(&call_id),
-                "handle_hash": hash_id(&handle),
-            }),
-            JobEvent::SleepSettled {
-                call_id,
-                handle,
-                duration_ms,
-            } => json!({
-                "event": "sleep_settled",
-                "timestamp_ms": timestamp_ms(),
-                "call_id_hash": hash_id(&call_id),
-                "handle_hash": hash_id(&handle),
-                "duration_ms": duration_ms,
-            }),
-        };
-        self.send_event(value).await
+        self.send_event(job_projection(event)).await
     }
 
     /// Wait until queued events are durable and surface any prior writer error.
@@ -177,12 +158,20 @@ fn writer_loop(mut file: File, rx: &mut mpsc::Receiver<Message>) {
 /// Opt-in wrapper around the actual production Responses transport.
 pub struct TraceTransport<T> {
     inner: T,
-    sink: TraceSink,
+    sink: Option<TraceSink>,
 }
 
 impl<T> TraceTransport<T> {
     pub fn new(inner: T, sink: TraceSink) -> Self {
-        Self { inner, sink }
+        Self {
+            inner,
+            sink: Some(sink),
+        }
+    }
+
+    /// Preserve the same concrete transport type when tracing is disabled.
+    pub fn disabled(inner: T) -> Self {
+        Self { inner, sink: None }
     }
 }
 
@@ -210,28 +199,32 @@ impl<T: ResponsesTransport + 'static> ResponsesTransport for TraceTransport<T> {
 
 impl<T> TraceTransport<T> {
     async fn record_request(&self, request: &ResponsesRequest) -> Result<(), TransportError> {
+        let Some(sink) = &self.sink else {
+            return Ok(());
+        };
         let body = request_body(request)?;
-        self.sink
-            .send_event(request_projection(&body))
+        sink.send_event(request_projection(&body))
             .await
             .map_err(trace_transport_error)
     }
 
     async fn record_turn(&self, turn: &ResponsesTurn) -> Result<(), TransportError> {
-        self.sink
-            .send_event(json!({
-                "event": "turn_complete",
-                "timestamp_ms": timestamp_ms(),
-                "item_count": turn.items.len(),
-                "usage": {
-                    "input_tokens": turn.usage.input_tokens,
-                    "output_tokens": turn.usage.output_tokens,
-                    "cached_tokens": turn.usage.cached_tokens,
-                    "cache_write_tokens": turn.usage.cache_write_tokens,
-                }
-            }))
-            .await
-            .map_err(trace_transport_error)
+        let Some(sink) = &self.sink else {
+            return Ok(());
+        };
+        sink.send_event(json!({
+            "event": "turn_complete",
+            "timestamp_ms": timestamp_ms(),
+            "item_count": turn.items.len(),
+            "usage": {
+                "input_tokens": turn.usage.input_tokens,
+                "output_tokens": turn.usage.output_tokens,
+                "cached_tokens": turn.usage.cached_tokens,
+                "cache_write_tokens": turn.usage.cache_write_tokens,
+            }
+        }))
+        .await
+        .map_err(trace_transport_error)
     }
 }
 
@@ -272,6 +265,11 @@ fn request_projection(body: &Value) -> Value {
                     structural.insert("status".into(), Value::String(status.into()));
                 }
             }
+            if safe_item_type(item.get("type").and_then(Value::as_str).unwrap_or(""))
+                == "function_call_output"
+            {
+                structural.insert("resumed_by".into(), resume_projection(item.get("output")));
+            }
             Value::Object(structural)
         })
         .collect::<Vec<_>>();
@@ -284,6 +282,60 @@ fn request_projection(body: &Value) -> Value {
         "tools": tools,
         "input": input,
     })
+}
+
+fn resume_projection(output: Option<&Value>) -> Value {
+    let Some(output) = output else {
+        return json!({"kind":"unknown"});
+    };
+    let parsed;
+    let payload = match output {
+        Value::String(text) => {
+            parsed = match serde_json::from_str::<Value>(text) {
+                Ok(value) => value,
+                Err(_) => return json!({"kind":"unknown"}),
+            };
+            &parsed
+        }
+        Value::Object(_) => output,
+        _ => return json!({"kind":"unknown"}),
+    };
+    match payload.get("resumed_by") {
+        Some(Value::String(value)) if value == "user_input" => json!({"kind":"user_input"}),
+        Some(Value::String(value)) if value == "cancelled" => json!({"kind":"cancelled"}),
+        Some(Value::Object(resumer)) if resumer.len() == 1 => {
+            if let Some(Value::String(handle)) = resumer.get("job") {
+                json!({"kind":"job","handle_hash":hash_id(handle)})
+            } else if resumer.get("agent").is_some() {
+                json!({"kind":"agent"})
+            } else {
+                json!({"kind":"unknown"})
+            }
+        }
+        _ => json!({"kind":"unknown"}),
+    }
+}
+
+fn job_projection(event: JobEvent) -> Value {
+    match event {
+        JobEvent::SleepStarted { call_id, handle } => json!({
+            "event": "sleep_started",
+            "timestamp_ms": timestamp_ms(),
+            "call_id_hash": hash_id(&call_id),
+            "handle_hash": hash_id(&handle),
+        }),
+        JobEvent::SleepSettled {
+            call_id,
+            handle,
+            duration_ms,
+        } => json!({
+            "event": "sleep_settled",
+            "timestamp_ms": timestamp_ms(),
+            "call_id_hash": hash_id(&call_id),
+            "handle_hash": hash_id(&handle),
+            "duration_ms": duration_ms,
+        }),
+    }
 }
 
 fn safe_tool_name(name: Option<&str>) -> &'static str {
@@ -375,6 +427,19 @@ mod tests {
                 .map_err(|_| TransportError::Stream("receiver closed".into()))?;
             Ok(ResponsesTurn {
                 response_id: "not traced".into(),
+                items: vec![],
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    struct AcceptAny;
+
+    #[async_trait]
+    impl ResponsesTransport for AcceptAny {
+        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            Ok(ResponsesTurn {
+                response_id: "response".into(),
                 items: vec![],
                 usage: Usage::default(),
             })
@@ -505,6 +570,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disabled_transport_has_same_concrete_type_and_bypasses_trace_builder() {
+        let transport = TraceTransport::disabled(AcceptAny);
+        let request = ResponsesRequest {
+            input: vec![],
+            instructions: String::new(),
+            tools: vec![],
+            model: String::new(),
+            pinned_effort: harness::model::Effort::Low,
+            session_id: String::new(),
+        };
+        assert!(transport.create(request).await.is_ok());
+    }
+
+    #[tokio::test]
     async fn job_events_include_hashed_correlations_and_sink_timestamps() {
         let path = std::env::temp_dir().join(format!(
             "harness-trace-jobs-{}-{}.jsonl",
@@ -594,5 +673,52 @@ mod tests {
                 .to_string()
                 .contains("SENTINEL_PRIVATE_OUTPUT")
         );
+    }
+
+    #[test]
+    fn wait_agent_resume_kinds_are_redacted_and_job_matches_sleep_settlement() {
+        let raw_handle = "SENTINEL_SLEEP_HANDLE";
+        let sleep_settled = job_projection(JobEvent::SleepSettled {
+            call_id: "SENTINEL_CALL_ID".into(),
+            handle: raw_handle.into(),
+            duration_ms: 37,
+        });
+        let wait_output = json!({
+            "type":"function_call_output",
+            "call_id":"SENTINEL_WAIT_CALL_ID",
+            "output":json!({"resumed_by":{"job":raw_handle}}).to_string()
+        });
+        let projected = request_projection(&json!({
+            "model":"gpt-6-sol",
+            "reasoning":{"effort":"low"},
+            "tools":[{"name":"wait_agent","async":true}],
+            "input":[wait_output]
+        }));
+        let resume = &projected["input"][0]["resumed_by"];
+        assert_eq!(resume["kind"], "job");
+        assert_eq!(resume["handle_hash"], sleep_settled["handle_hash"]);
+        assert_eq!(resume["handle_hash"], hash_id(raw_handle));
+
+        let cases = [
+            (json!({"resumed_by":{"agent":"/secret/agent"}}), "agent"),
+            (json!({"resumed_by":"user_input"}), "user_input"),
+            (json!({"resumed_by":"cancelled"}), "cancelled"),
+            (
+                json!({"resumed_by":{"mystery":"SENTINEL_UNKNOWN"}}),
+                "unknown",
+            ),
+        ];
+        for (value, expected) in cases {
+            let projection = resume_projection(Some(&value));
+            assert_eq!(projection["kind"], expected);
+            assert!(!projection.to_string().contains("/secret/agent"));
+            assert!(!projection.to_string().contains("SENTINEL_UNKNOWN"));
+        }
+        assert_eq!(
+            resume_projection(Some(&json!("malformed")))["kind"],
+            "unknown"
+        );
+        assert!(!projected.to_string().contains(raw_handle));
+        assert!(!projected.to_string().contains("SENTINEL_WAIT_CALL_ID"));
     }
 }
