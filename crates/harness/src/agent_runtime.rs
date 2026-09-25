@@ -4,7 +4,7 @@
 //! table. Request rows are model-call history and are never walked to infer the
 //! agent tree.
 use crate::{
-    agents::{AgentToolService, AgentVerbError, Contract, SpawnSource},
+    agents::{AgentInvocation, AgentToolService, AgentVerbError, Contract, SpawnSource},
     item::Item,
     mailbox::{DeliveryClass, Envelope as ModelEnvelope, EnvelopeType},
     model::{AgentPath, RequestId},
@@ -66,6 +66,56 @@ impl StoreAgentToolService {
         tokio::task::spawn_blocking(move || f(store))
             .await
             .map_err(|e| AgentVerbError(format!("store worker failed: {e}")))?
+    }
+
+    async fn spawn_here_from_invocation(
+        &self,
+        parent: &AgentPath,
+        task_name: &str,
+        contract: Contract,
+        invocation: &AgentInvocation,
+    ) -> Result<Value, AgentVerbError> {
+        let name = AgentPath::normalize_task_name(task_name).map_err(err)?;
+        Self::require_within_root(&self.root, parent)?;
+        let path = AgentPath(format!("{}/{}", parent.0, name));
+        Self::require_within_root(&self.root, &path)?;
+        let parent_path = parent.clone();
+        let invocation_request = invocation.request.clone();
+        let invocation_call_id = invocation.call_id.clone();
+        let created_path = self
+            .blocking(move |store| {
+                Self::stored(&store, &parent_path)?;
+                let contract_value = serde_json::to_value(&contract).map_err(err)?;
+                let task_payload = serde_json::to_string(&contract_value).map_err(err)?;
+                let task_envelope = envelope(
+                    EnvelopeType::NewTask,
+                    parent_path.clone(),
+                    path.clone(),
+                    task_payload,
+                );
+                let snapshot_request = RequestId(uuid::Uuid::new_v4().to_string());
+                let (admitted, _envelope_id) = store
+                    .admit_here_agent_from_invocation(
+                        &path,
+                        &parent_path,
+                        &snapshot_request,
+                        &invocation_request,
+                        &invocation_call_id,
+                        &contract_value,
+                        &parent_path.0,
+                        &path.0,
+                        "AtBoundary",
+                        &envelope_item(&task_envelope),
+                    )
+                    .map_err(err)?;
+                Ok(admitted.path)
+            })
+            .await?;
+        self.child_generation.send_modify(|generation| {
+            *generation = generation.wrapping_add(1);
+        });
+        self.notify_mailbox_changed();
+        Ok(json!({"task_name":created_path.0}))
     }
 
     fn stored(store: &Store, path: &AgentPath) -> Result<StoredAgent, AgentVerbError> {
@@ -317,6 +367,24 @@ impl AgentToolService for StoreAgentToolService {
         });
         self.notify_mailbox_changed();
         Ok(json!({"task_name":created_path.0}))
+    }
+
+    async fn spawn_agent_from_invocation(
+        &self,
+        parent: &AgentPath,
+        task_name: &str,
+        from: SpawnSource,
+        contract: Contract,
+        invocation: Option<&AgentInvocation>,
+    ) -> Result<Value, AgentVerbError> {
+        if matches!(&from, SpawnSource::Here) {
+            if let Some(invocation) = invocation {
+                return self
+                    .spawn_here_from_invocation(parent, task_name, contract, invocation)
+                    .await;
+            }
+        }
+        self.spawn_agent(parent, task_name, from, contract).await
     }
 
     async fn send_message(

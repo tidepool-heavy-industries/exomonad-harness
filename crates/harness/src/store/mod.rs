@@ -36,6 +36,8 @@ pub enum StoreError {
     InvalidAgentPath(String),
     #[error("agent parent does not exist: {0}")]
     MissingAgentParent(String),
+    #[error("active spawn call {call_id} is not persisted in request {request}")]
+    MissingActiveSpawnCall { request: String, call_id: String },
     #[error("session state key uses the reserved harness namespace: {0}")]
     ReservedSessionStateNamespace(String),
 }
@@ -313,6 +315,66 @@ impl Store {
         class: &str,
         task_item: &Item,
     ) -> Result<(Agent, i64)> {
+        self.admit_here_agent_from_source(
+            path,
+            parent,
+            snapshot_request,
+            None,
+            None,
+            contract,
+            sender,
+            recipient,
+            class,
+            task_item,
+        )
+    }
+
+    /// Atomically fork from an in-flight spawn invocation. The request must
+    /// already contain the actual `spawn_agent` call item; its output is added
+    /// by the child Engine only after that output is durable in the parent's
+    /// request history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_here_agent_from_invocation(
+        &self,
+        path: &AgentPath,
+        parent: &AgentPath,
+        snapshot_request: &RequestId,
+        invocation_request: &RequestId,
+        invocation_call_id: &CallId,
+        contract: &serde_json::Value,
+        sender: &str,
+        recipient: &str,
+        class: &str,
+        task_item: &Item,
+    ) -> Result<(Agent, i64)> {
+        self.admit_here_agent_from_source(
+            path,
+            parent,
+            snapshot_request,
+            Some(invocation_request),
+            Some(invocation_call_id),
+            contract,
+            sender,
+            recipient,
+            class,
+            task_item,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn admit_here_agent_from_source(
+        &self,
+        path: &AgentPath,
+        parent: &AgentPath,
+        snapshot_request: &RequestId,
+        invocation_request: Option<&RequestId>,
+        invocation_call_id: Option<&CallId>,
+        contract: &serde_json::Value,
+        sender: &str,
+        recipient: &str,
+        class: &str,
+        task_item: &Item,
+    ) -> Result<(Agent, i64)> {
         Self::validate_agent_path(&path.0, Some(&parent.0))?;
         let mut c = self.lock();
         let tx = c.transaction()?;
@@ -325,12 +387,33 @@ impl Store {
             return Err(StoreError::MissingAgentParent(parent.0.clone()));
         }
 
-        let source_head: Option<RequestId> = tx.query_row(
-            "SELECT head_request FROM agents WHERE path=?1",
-            [&parent.0],
-            |row| Ok(row.get::<_, Option<String>>(0)?.map(RequestId)),
-        )?;
-        let history = if let Some(head) = source_head.as_ref() {
+        let source_head = if let Some(request) = invocation_request {
+            let branch: Option<String> = tx
+                .query_row(
+                    "SELECT branch FROM requests WHERE id=?1",
+                    [&request.0],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(branch) = branch else {
+                return Err(StoreError::MissingRequest(request.0.clone()));
+            };
+            if branch != parent.0 {
+                return Err(StoreError::RequestAgentMismatch {
+                    request: request.0.clone(),
+                    expected: parent.0.clone(),
+                    actual: branch,
+                });
+            }
+            Some(request.clone())
+        } else {
+            tx.query_row(
+                "SELECT head_request FROM agents WHERE path=?1",
+                [&parent.0],
+                |row| Ok(row.get::<_, Option<String>>(0)?.map(RequestId)),
+            )?
+        };
+        let stored_history: Vec<(RequestId, Item)> = if let Some(head) = source_head.as_ref() {
             let exists: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
                 [&head.0],
@@ -345,18 +428,49 @@ impl Store {
                      UNION ALL
                      SELECT r.id,r.parent_id,lineage.depth+1
                      FROM requests r JOIN lineage ON r.id=lineage.parent_id
+                     WHERE NOT EXISTS(
+                         SELECT 1 FROM session_state s
+                         WHERE s.session_id='harness:compaction:' || lineage.id
+                     )
                  )
-                 SELECT i.json FROM lineage
+                 SELECT lineage.id,i.json FROM lineage
                  JOIN request_items ri ON ri.request_id=lineage.id
                  JOIN items i ON i.hash=ri.item_hash
                  ORDER BY lineage.depth DESC,ri.position",
             )?;
-            q.query_map([&head.0], |row| row.get::<_, String>(0))?
-                .map(|raw| Ok(serde_json::from_str::<Item>(&raw?)?))
-                .collect::<Result<Vec<_>>>()?
+            q.query_map([&head.0], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .map(|row| {
+                let (request, raw) = row?;
+                Ok((RequestId(request), serde_json::from_str::<Item>(&raw)?))
+            })
+            .collect::<Result<Vec<_>>>()?
         } else {
             Vec::new()
         };
+        let history: Vec<Item> =
+            if let (Some(request), Some(call_id)) = (invocation_request, invocation_call_id) {
+                let end = stored_history.iter().position(|(item_request, item)| {
+                    item_request == request
+                        && item.0["type"] == "function_call"
+                        && item.0["call_id"].as_str() == Some(&call_id.0)
+                        && item.0["name"].as_str() == Some("spawn_agent")
+                });
+                let Some(end) = end else {
+                    return Err(StoreError::MissingActiveSpawnCall {
+                        request: request.0.clone(),
+                        call_id: call_id.0.clone(),
+                    });
+                };
+                stored_history
+                    .into_iter()
+                    .take(end + 1)
+                    .map(|(_, item)| item)
+                    .collect()
+            } else {
+                stored_history.into_iter().map(|(_, item)| item).collect()
+            };
         let inherited_calls = if let Some(head) = source_head.as_ref() {
             let mut q = tx.prepare(
                 "WITH RECURSIVE lineage(id,parent_id) AS (
@@ -385,7 +499,9 @@ impl Store {
         let source = serde_json::json!({
             "kind":"here",
             "source_head_request":source_head,
-            "snapshot_request":snapshot_request
+            "snapshot_request":snapshot_request,
+            "invocation_request":invocation_request,
+            "invocation_call_id":invocation_call_id
         });
 
         tx.execute(
@@ -971,6 +1087,57 @@ impl Store {
         q.query_map([&request.0], |r| r.get::<_, String>(0))?
             .map(|x| Ok(serde_json::from_str(&x?)?))
             .collect()
+    }
+    /// Copy a spawn tool's actual durable output from its parent request into
+    /// the Here snapshot. Claim settlement alone is insufficient: this returns
+    /// `false` until the function_call_output Item is in request history.
+    pub(crate) fn copy_call_output_if_persisted(
+        &self,
+        source: &RequestId,
+        target: &RequestId,
+        call_id: &CallId,
+    ) -> Result<bool> {
+        let mut c = self.lock();
+        let tx = c.transaction()?;
+        let source_items = {
+            let mut q = tx.prepare(
+                "SELECT i.json FROM request_items ri JOIN items i ON i.hash=ri.item_hash
+                 WHERE ri.request_id=?1 ORDER BY ri.position",
+            )?;
+            q.query_map([&source.0], |row| row.get::<_, String>(0))?
+                .map(|raw| Ok(serde_json::from_str::<Item>(&raw?)?))
+                .collect::<Result<Vec<_>>>()?
+        };
+        let Some(output) = source_items.into_iter().find(|item| {
+            item.0["type"] == "function_call_output"
+                && item.0["call_id"].as_str() == Some(&call_id.0)
+        }) else {
+            return Ok(false);
+        };
+        let target_items = {
+            let mut q = tx.prepare(
+                "SELECT i.json FROM request_items ri JOIN items i ON i.hash=ri.item_hash
+                 WHERE ri.request_id=?1 ORDER BY ri.position",
+            )?;
+            q.query_map([&target.0], |row| row.get::<_, String>(0))?
+                .map(|raw| Ok(serde_json::from_str::<Item>(&raw?)?))
+                .collect::<Result<Vec<_>>>()?
+        };
+        if target_items.iter().any(|item| {
+            item.0["type"] == "function_call_output"
+                && item.0["call_id"].as_str() == Some(&call_id.0)
+        }) {
+            tx.commit()?;
+            return Ok(true);
+        }
+        let hash = Self::put_item_tx(&tx, &output)?;
+        let position = target_items.len() as i64;
+        tx.execute(
+            "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
+            params![target.0, position, hash.0],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
     pub fn seen_by(&self, request: &RequestId) -> Result<Vec<ItemHash>> {
         let c = self.lock();

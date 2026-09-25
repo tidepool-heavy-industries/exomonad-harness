@@ -65,6 +65,8 @@ pub enum EngineError {
     UnresumableForkedWaitAgent,
     #[error("inherited settled call {0} has no durable output item")]
     MissingInheritedOutput(String),
+    #[error("Here child has no durable snapshot request")]
+    MissingHereSnapshot,
     #[error(
         "engine operation failed: {primary}; additionally failed to clean up outstanding calls: {cleanup}"
     )]
@@ -221,6 +223,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         mut envelopes: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
         admit_inbox: bool,
     ) -> Result<EngineCompletion, EngineError> {
+        self.await_here_invocation_output(&head, &mut cancellation)
+            .await?;
         let inherited_history = match &head {
             Some(head) => self.read_history(head).await?,
             None => Vec::new(),
@@ -387,6 +391,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             tokio::pin!(create);
             let mut turn_call_ids = Vec::<CallId>::new();
             let mut wait_call = None;
+            let mut persisted_items = Vec::<Item>::new();
             let mut event_stream_open = true;
             let turn = loop {
                 tokio::select! {
@@ -405,6 +410,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     event = event_rx.recv(), if event_stream_open => {
                         match event {
                             Some(StreamEvent::ItemDone(item)) => {
+                                if let Err(error) = self.append(&parent, vec![item.clone()]).await {
+                                    return Err(self.cleanup_pending(error, &pending).await);
+                                }
+                                persisted_items.push(item.clone());
                                 match self.dispatch_completed_item(item, &parent).await {
                                     Ok(Some(call)) => {
                                         if !pending.iter().any(|current| current.call_id == call.call_id) {
@@ -432,6 +441,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             // A completed response can race the buffered final item events.
             while let Ok(event) = event_rx.try_recv() {
                 if let StreamEvent::ItemDone(item) = event {
+                    if let Err(error) = self.append(&parent, vec![item.clone()]).await {
+                        return Err(self.cleanup_pending(error, &pending).await);
+                    }
+                    persisted_items.push(item.clone());
                     match self.dispatch_completed_item(item, &parent).await {
                         Ok(Some(call)) => {
                             if !pending
@@ -460,6 +473,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             // Some injected transports may only return a turn, without emitting
             // item events. The production client emits every completed item.
             for item in &turn.items {
+                if !remove_matching_item(&mut persisted_items, item) {
+                    if let Err(error) = self.append(&parent, vec![item.clone()]).await {
+                        return Err(self.cleanup_pending(error, &pending).await);
+                    }
+                }
                 if item.0["type"] == "function_call" {
                     let Some((call_id, _, _)) = items::function_call(item) else {
                         return Err(self
@@ -491,9 +509,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         }
                     }
                 }
-            }
-            if let Err(error) = self.append(&parent, turn.items.clone()).await {
-                return Err(self.cleanup_pending(error, &pending).await);
             }
             let usage_for_store = StoredUsage {
                 input_tokens: i64::try_from(turn.usage.input_tokens).unwrap_or(i64::MAX),
@@ -880,6 +895,55 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         load_history(self.store.clone(), id.clone()).await
     }
 
+    /// A model-facing Here child is admitted before its spawn tool returns.
+    /// Do not send the child's first model request until the parent's actual
+    /// function_call_output Item is durable in request history, then copy that
+    /// exact Item (not the earlier claim-settlement record) into the snapshot.
+    async fn await_here_invocation_output(
+        &self,
+        snapshot: &Option<RequestId>,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> Result<(), EngineError> {
+        let agent_path = self.config.agent.clone();
+        let store = self.store.clone();
+        let Some(agent) = blocking(move || store.agent(&agent_path)).await? else {
+            return Ok(());
+        };
+        if agent.fork_source["kind"] != "here" {
+            return Ok(());
+        }
+        let Some(source_request) = agent.fork_source["invocation_request"].as_str() else {
+            return Ok(());
+        };
+        let Some(call_id) = agent.fork_source["invocation_call_id"].as_str() else {
+            return Ok(());
+        };
+        let Some(snapshot) = snapshot.clone().or(agent.head_request) else {
+            return Err(EngineError::MissingHereSnapshot);
+        };
+        let source_request = RequestId(source_request.to_owned());
+        let call_id = CallId(call_id.to_owned());
+        loop {
+            let store = self.store.clone();
+            let source = source_request.clone();
+            let target = snapshot.clone();
+            let call = call_id.clone();
+            if blocking(move || store.copy_call_output_if_persisted(&source, &target, &call))
+                .await?
+            {
+                return Ok(());
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
+                changed = cancellation.changed() => {
+                    if changed.is_err() || *cancellation.borrow() {
+                        return Err(EngineError::Cancelled);
+                    }
+                }
+            }
+        }
+    }
+
     async fn compact_window(
         &self,
         source: &RequestId,
@@ -984,6 +1048,14 @@ async fn load_history(store: Arc<Store>, id: RequestId) -> Result<Vec<Item>, Eng
     .await
 }
 
+fn remove_matching_item(persisted: &mut Vec<Item>, item: &Item) -> bool {
+    let Some(index) = persisted.iter().position(|candidate| candidate == item) else {
+        return false;
+    };
+    persisted.remove(index);
+    true
+}
+
 fn is_final(turn: &ResponsesTurn) -> bool {
     turn.items
         .iter()
@@ -1002,7 +1074,7 @@ async fn blocking<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::AgentToolService;
+    use crate::agents::{AgentInvocation, AgentToolService, dispatch_agent_verb};
 
     fn empty_mailbox() -> tokio::sync::mpsc::UnboundedReceiver<Envelope> {
         let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -1141,6 +1213,53 @@ mod tests {
         }
     }
 
+    struct BlockingHereProvider {
+        service: crate::agent_runtime::StoreAgentToolService,
+        admitted: Arc<Notify>,
+        release: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+    #[async_trait]
+    impl Provider for BlockingHereProvider {
+        async fn call(&self, name: &str, _args: Value) -> Result<Value, ProviderError> {
+            Err(ProviderError::Tool(format!(
+                "unexpected provider tool: {name}"
+            )))
+        }
+
+        async fn call_agent_verb(
+            &self,
+            name: &str,
+            args: Value,
+            context: crate::provider::CallContext,
+        ) -> Result<Value, ProviderError> {
+            let request = context
+                .request
+                .clone()
+                .ok_or_else(|| ProviderError::Tool("active request is absent".into()))?;
+            let invocation = AgentInvocation {
+                request,
+                call_id: context.call_id,
+            };
+            let result =
+                dispatch_agent_verb(&self.service, &context.agent, Some(&invocation), name, args)
+                    .await
+                    .map_err(|error| ProviderError::Tool(error.to_string()))?;
+            self.admitted.notify_one();
+            self.release
+                .lock()
+                .await
+                .take()
+                .expect("active Here result is released once")
+                .await
+                .map_err(|_| ProviderError::Tool("active Here release dropped".into()))?;
+            Ok(result)
+        }
+
+        fn tools(&self) -> Vec<Value> {
+            Vec::new()
+        }
+    }
+
     struct SlowProvider {
         started: Arc<Notify>,
         release: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
@@ -1185,6 +1304,7 @@ mod tests {
             .start_for_agent(
                 provider.clone(),
                 AgentPath("/root".into()),
+                None,
                 call_id.clone(),
                 "slow".into(),
                 json!({}),
@@ -1308,6 +1428,264 @@ mod tests {
         let settled = scheduler.settled_claimants(&call_id).await.unwrap();
         assert!(settled.contains(&AgentPath("/root".into())));
         assert!(settled.contains(&AgentPath("/root/child".into())));
+    }
+
+    #[tokio::test]
+    async fn model_facing_here_spawn_waits_for_active_call_output_before_child_first_request() {
+        let store = Arc::new(Store::memory().unwrap());
+        let root = AgentPath("/root".into());
+        let stale_head = RequestId("active-here-stale-head".into());
+        store
+            .write_request(
+                &stale_head,
+                None,
+                &root.0,
+                &[
+                    Item(json!({"type":"message","role":"user","content":"old prefix"})),
+                    Item(json!({"type":"annotation","text":"strip me"})),
+                    Item(json!({"type":"dropped_claim","call_id":"old-drop"})),
+                ],
+                StoredUsage::default(),
+            )
+            .unwrap();
+        let compacted_head = RequestId("active-here-compacted-head".into());
+        store
+            .write_compaction_request(
+                &compacted_head,
+                &stale_head,
+                &root.0,
+                &[
+                    Item(json!({
+                        "type":"message",
+                        "role":"developer",
+                        "content":"compacted prefix"
+                    })),
+                    Item(json!({"type":"annotation","text":"strip after compaction"})),
+                    Item(json!({"type":"dropped_claim","call_id":"compact-drop"})),
+                    Item::configuration_update(Effort::High),
+                ],
+            )
+            .unwrap();
+        store
+            .admit_agent(
+                &root,
+                None,
+                Some(&stale_head),
+                &json!({}),
+                &json!({"kind":"root"}),
+            )
+            .unwrap();
+
+        let service = crate::agent_runtime::StoreAgentToolService::new(store.clone(), root.clone());
+        let admitted = Arc::new(Notify::new());
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let provider = Arc::new(BlockingHereProvider {
+            service,
+            admitted: admitted.clone(),
+            release: tokio::sync::Mutex::new(Some(release_rx)),
+        });
+        let spawn_call_id = "active-spawn-call";
+        let contract = json!({
+            "clauses":[],
+            "acceptance":[],
+            "owned":[],
+            "must_not":[],
+            "introduces":[],
+            "consumes":[],
+            "boundaries":[]
+        });
+        let spawn_item = Item(json!({
+            "type":"function_call",
+            "call_id":spawn_call_id,
+            "name":"spawn_agent",
+            "arguments":serde_json::to_string(&json!({
+                "task_name":"active-child",
+                "from":{"kind":"here","name":null},
+                "task":contract
+            })).unwrap()
+        }));
+        let parent_transport = Replay {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            turns: Mutex::new(
+                [
+                    turn("active-here-spawn", vec![spawn_item.clone()]),
+                    turn(
+                        "active-here-parent-final",
+                        vec![Item(json!({
+                            "type":"message",
+                            "role":"assistant",
+                            "phase":"final_answer",
+                            "content":"spawned"
+                        }))],
+                    ),
+                ]
+                .into(),
+            ),
+        };
+        let parent_engine = Engine::<FakeAuth, BlockingHereProvider, _>::with_transport(
+            parent_transport,
+            store.clone(),
+            Arc::new(JobScheduler::new(2).unwrap()),
+            provider,
+            EngineConfig {
+                instructions: "parent".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Medium,
+                session_id: "parent-session".into(),
+                agent: root.clone(),
+            },
+        );
+        let (_parent_cancel_tx, parent_cancel_rx) = watch::channel(false);
+        let parent_run = tokio::spawn(async move {
+            parent_engine
+                .run(
+                    Some(compacted_head),
+                    vec![Item(json!({
+                        "type":"message",
+                        "role":"user",
+                        "content":"active request"
+                    }))],
+                    parent_cancel_rx,
+                    empty_mailbox(),
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), admitted.notified())
+            .await
+            .expect("model-facing Here admission");
+
+        let child_path = AgentPath("/root/active_child".into());
+        let child = store.agent(&child_path).unwrap().unwrap();
+        let snapshot = child.head_request.clone().unwrap();
+        let invocation_request = RequestId(
+            child.fork_source["invocation_request"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+        let invocation_call = CallId(
+            child.fork_source["invocation_call_id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+        assert_ne!(invocation_request.0, "active-here-stale-head");
+        assert_eq!(invocation_call.0, spawn_call_id);
+        assert_eq!(
+            store
+                .items(&invocation_request)
+                .unwrap()
+                .iter()
+                .filter(|item| item.0["type"] == "function_call")
+                .count(),
+            1,
+            "Engine persists the active call before routing its model-facing verb"
+        );
+
+        let child_requests = Arc::new(Mutex::new(Vec::new()));
+        let child_transport = Replay {
+            requests: child_requests.clone(),
+            turns: Mutex::new(
+                [turn(
+                    "active-here-child-final",
+                    vec![Item(json!({
+                        "type":"message",
+                        "role":"assistant",
+                        "phase":"final_answer",
+                        "content":"child ready"
+                    }))],
+                )]
+                .into(),
+            ),
+        };
+        let child_engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            child_transport,
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "child".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "child-session".into(),
+                agent: child_path,
+            },
+        );
+        let (_child_cancel_tx, child_cancel_rx) = watch::channel(false);
+        let child_run = tokio::spawn(async move {
+            child_engine
+                .run(Some(snapshot), vec![], child_cancel_rx, empty_mailbox())
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            child_requests.lock().unwrap().is_empty(),
+            "child must not issue its first model request before spawn output is durable"
+        );
+
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), parent_run)
+            .await
+            .expect("parent Engine run")
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), child_run)
+            .await
+            .expect("child Engine run")
+            .unwrap()
+            .unwrap();
+
+        let parent_items = store.items(&invocation_request).unwrap();
+        let actual_output = parent_items
+            .iter()
+            .find(|item| {
+                item.0["type"] == "function_call_output"
+                    && item.0["call_id"].as_str() == Some(&invocation_call.0)
+            })
+            .unwrap()
+            .clone();
+        let child_requests = child_requests.lock().unwrap();
+        let child_input = &child_requests[0].input;
+        assert!(child_input.contains(&spawn_item));
+        assert!(child_input.contains(&actual_output));
+        assert_eq!(
+            child_input
+                .iter()
+                .filter(|item| item.is_configuration_update())
+                .count(),
+            1
+        );
+        assert_eq!(
+            child_input.iter().find_map(Item::configuration_effort),
+            Some(Effort::High)
+        );
+        assert!(!child_input.iter().any(|item| {
+            matches!(
+                item.0["type"].as_str(),
+                Some("annotation" | "watchdog_annotation" | "dropped_claim")
+            )
+        }));
+        assert!(child_input.iter().any(|item| {
+            item.0["role"] == "developer" && item.0["content"] == "compacted prefix"
+        }));
+        assert!(
+            !child_input
+                .iter()
+                .any(|item| item.0["content"] == "old prefix")
+        );
+        assert_eq!(
+            parent_items
+                .iter()
+                .filter(|item| {
+                    item.0["type"] == "function_call"
+                        && item.0["call_id"].as_str() == Some(spawn_call_id)
+                })
+                .count(),
+            1,
+            "streamed function_call is not duplicated after response completion"
+        );
     }
 
     #[tokio::test]
@@ -1467,6 +1845,7 @@ mod tests {
             .start_for_agent(
                 provider.clone(),
                 AgentPath("/root".into()),
+                None,
                 call_id.clone(),
                 "slow".into(),
                 json!({}),
