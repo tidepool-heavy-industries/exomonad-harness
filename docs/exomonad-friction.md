@@ -100,3 +100,101 @@ detail remains in Git history. Do not fabricate watchdog or nudge events.
   is in `docs/cache-probe-evidence.md`.
 - **Other leaves:** Interviews remain due from nodes that ran. Do not infer
   their experience from root observations.
+
+## Wave 6 root interview — 2026-09-24, mid-run
+
+These are my own observations, not a claim that the correction wave is done.
+
+1. **First turn.** My first tool call read `NEXT.md` alone. The second read
+   `README.md`, `docs/correction-plan.md`, `docs/tree.md` and
+   `docs/questions.md` in that order. I then searched PRD/code annotations,
+   read the relevant PRD and coordination skills, and looked up the typed
+   task/delegation constructors. The first action that advanced the plan was
+   the Haskell cell admitting the preflight lead, after those reads and
+   lookups (the seventh tool call in my initial sequence). One paragraph in
+   `NEXT.md` could have shortened this: “At exact head `d0245b3`, Q4/Q5 are
+   settled and the fork hold is lifted; first preflight a new core lead by
+   sending a nonce and waiting for its echo, then assign (c) settings
+   drop→set_effort→Here snapshot→first-update mirror and (d) Server
+   Compactor. Root owns demo wiring, live runs and integration; existing
+   modules compile, no new module without a root scaffold. The remaining
+   acceptance is item-2/item-13 live traces, unanswered-call evidence,
+   cache-counter probe, interviews and final combined checks.” That would
+   not replace the PRD, but would make the first *action* clear.
+
+2. **Children's first turns.** I cannot measure how many minutes each child
+   spent orienting from checkpoints alone, so I will not invent a duration.
+   The cache probe checked its reference inputs and builder before two live
+   requests; the item-2 probe inspected CLI/transport visibility before
+   declining inference; the trace-design leaf read the builder and demo
+   call/sleep/wait paths; the Compactor leaf discovered an unowned dependency
+   need. Those were useful reads, but the last could have been preflighted by
+   root. A first-call-ready brief should name the exact source commit,
+   owned file(s), one production consumer, the first file/line to inspect,
+   one focused command and expected test count, the precise acceptance and
+   stop/ping condition, plus who owns any shared manifest or module line.
+   It should not require a child to rediscover a settled PRD rule.
+
+3. **Operator notes and reload.** The numbered note was actionable: I called
+   `reload_agent_spec` once, then handled review guidance and the dependency
+   ownership issue separately. Reload **did not succeed**: it reported
+   `prepared engine: missing imported value Project.Shell.presentSelected`.
+   It did publish the new workspace source layer, while the previous typed
+   tool record remained active. I can use Haskell cells, but I cannot infer
+   that the new agent spec is installed. The note's three numbered actions
+   helped; the awkward part is that “reload” was not atomic, so “after the
+   reload” became ambiguous. I relayed that exact refusal and asked the
+   lead to re-run both exact-commit reviews under the updated prompt; their
+   new verdicts are still evidence to collect.
+
+4. **Checkpoints.** Core sent an admission checkpoint immediately after its
+   settings fork and another after its compaction fork, naming children,
+   base, owned paths and first expected reply. It also sent settlement
+   checkpoints. As root I reported admissions to the operator, but I did
+   **not** send one explicit protocol-form checkpoint after each of my own
+   fork cells (especially the preflight/probe and trace waves); I have no
+   parent `sendMessage` target, but my brief updates still omitted parts of
+   that template. That is a prompting gap, not evidence that the rule fired.
+
+5. **Fence and status.** I looked at per-child delivery lines repeatedly,
+   primarily at preflight and after steering. One line was
+   `inbox=open; last_message=ref2 submitted/not-presented; source=d0245b3; next=await-event`
+   for the preflight child; it told me the nonce receipt was not readback.
+   Later an `inbox=open`/`presented` line for core made a new fence less
+   likely. The line was useful when deciding whether to steer, but full
+   roster dumps were mostly noise once the state was unchanged.
+
+6. **Blocked replies.** The two reviewers were right not to fabricate an
+   `Accepted` value from a mismatched `CommitReview` input; the tool/prompt
+   API was wrong, not the expected-red test. It cost two review cycles,
+   an acceptance-packet correction and a pending re-review. The Compactor
+   implementer was also right not to edit `Cargo.toml`/`Cargo.lock` outside
+   ownership. It cost a dependency scaffold amendment and a rebase/reassign;
+   I added `schemars` on master at `c427057` and checked `cargo check -p
+   harness`. Neither Blocked reply is completion evidence.
+
+7. **Most annoying unasked friction.** A source advance has several
+   partially independent identities—operator checkout, child source head,
+   assignment base, child branch tip, review seed, and installed workspace
+   tool layer. A successful `git rebase master` can still make a candidate
+   invalid against its assignment base, and a refused spec reload can still
+   publish half of a source-layer change. I want one concise “what revision
+   am I actually using, and what would this action publish?” view.
+
+8. **What went well.** I refused to call preparation done: Q4's two-request
+   measurement was integrated as a finding, while item 2 spent no inference
+   because it lacked an auditable trace. Exact base-to-tip path review also
+   kept an unowned settings tip out of integration. The one-run inference
+   rule, child ownership rule, typed replies, and Git merge-parent evidence
+   made those distinctions possible.
+
+9. **One-page next-run entry.** Put exact integrated head; accepted operator
+   decisions and holds; one row per obligation with owner, source/candidate
+   OID, checks with matched counts, unverified behavior and next action;
+   active child/request references and any inbox fence; the current owner
+   map and consumer seams; the one permitted live-run commands and trace
+   locations; expected-red test owner/closing slice; and the five
+   non-negotiable rules (no inference automation, cumulative ownership diff,
+   exact-commit review, branch merge not file copy, no completion claim
+   before final integrated checks). Link full PRD/plan; do not paste every
+   prior conversation or status dump onto that page.
