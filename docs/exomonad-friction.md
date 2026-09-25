@@ -16,6 +16,7 @@ detail remains in Git history. Do not fabricate watchdog or nudge events.
 | The root checked a router snapshot on status questions and found only `pending`. | Keep event-driven continuations: notify once on actionable change, and distinguish a meaningful wait from polling or an idle actor. |
 | A message asked core to incorporate probe evidence into `docs/findings.md`. Delivery alone does not show that it did so. | Require an incorporation receipt tied to the exact commit and focused check. This run's prompt trial uses that rule manually. |
 | The cache blocker required an operator question. The answer may never arrive. | Keep the recommendation and unanswered question in `docs/questions.md`; allow reversible work to proceed while the irreversible live comparison remains blocked. |
+| The watchdog classified core's `sendMessage` checkpoint as `destructive_command` (0.9) even though the call only sent text and returned a `NotificationReceipt`. Root had already incorporated the message. This is an observed false positive for that call, not evidence of a destructive tool execution. | Classify the invoked tool and effects before scanning quoted message text for command verbs; retain the original call reference for audit. |
 
 ## Local workflow corrections already applied
 
