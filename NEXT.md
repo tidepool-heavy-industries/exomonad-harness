@@ -25,7 +25,7 @@ dependency amendment is `c427057`.
 | (a) one entry | done | `9da6efe`, `a9f7a12` | integrated | nothing | nothing |
 | (b) async tools | root | `d8097c3`; trace leaf `fb80016`; consumer `a42920f`; tree schema repair under review | offline demo 35/35; manual attempt: HTTP 400 on request 2 | live `wait_agent` continuation | no retry without operator authority; review tree fix and retain redacted attempt |
 | (c) settings items | settings-preflight-v8, with retained prior candidates | store drop `46a5496` merged at `eabf47b`; prior stack `5876336` (unmerged) | drop 1/1 integrated | set_effort, here fork, live trace | verify/rebase prior candidates; implement remaining wiring |
-| (d) `Compactor` | Compactor lead `compaction.rs`, with retained prior candidate | prior stack `caddc4c` (unmerged); scaffold `c427057` | `cargo check -p harness` on scaffold | integration, unanswered-call experiment | inspect prior candidate before rebuilding; wait settings prerequisite |
+| (d) `Compactor` | root Engine seam; component lead delivered | Server component `03beea9` merged at `c3f29d0` | integrated compaction 2/2, cargo check | Engine::run consumer, unanswered-call experiment | wire production consumer after settings ownership releases engine.rs; live experiment last |
 | cache probe | done | `d0245b3` | 0 then 20,736 cached tokens | general cache behavior | nothing |
 | interviews | every node | `docs/interviews.md` | root, probe, core present | later nodes | one section per node that runs |
 | wave-7 admission | root | base `763764d389763df6ab3ac0cc65b990c4b82fe1b7` | store-drop-v7 owns `crates/harness/src/store/mod.rs`; core-preflight-v7 owns no files | drop integrated; preflight passed | no next action |
@@ -33,7 +33,7 @@ dependency amendment is `c427057`.
 | store-drop review | reviewer | candidate `46a5496e38e8493a4de63eeedd007997b0084e3b`, base `763764d389763df6ab3ac0cc65b990c4b82fe1b7` | read-only review of `crates/harness/src/store/mod.rs` | accepted, merged at `eabf47b`, integrated check 1/1 | no next action |
 | settings-preflight-v8 admission | root | base `eabf47b6b8b49e501a39960e02f989b8f4e89625` | no files | passed | quoted `amber-orbit-eabf47b`; follow-up sent |
 | settings-recovery-v8 follow-up | preflighted Sol lead | base `5c2c8bc89b310d0b77b3e484a2a7f0811f32ec1b` | owns `crates/harness/src/{engine,agent_runtime}.rs`, `store/mod.rs`, `crates/harness/tests/correction_wave.rs`; root owns contracts; wave-1 settings-pin-v8 (Luna Medium, engine/store) and here-candidate-probe-v8 (read-only) | admission checkpoint received; local `26f8634` 2/2 and `a243d1f` 1/1 reported reviewed, but root found public trusted-write API; neither merged | repair visibility and reviewAgain; set_effort uses durable pending value atomically applied at next request (not stale agent head); then exact integrate commit |
-| compaction-component-v9 follow-up | retained Sol lead | base `48807d3a4fc25b692975329f4e0219be60c6a783` | `crates/harness/src/compaction.rs` | pending | first reply: request-18 final exact commit/checks; review and integrate component without waiting for settings; deliver remaining Engine/live gates explicitly |
+| compaction-component-v9 follow-up | retained Sol lead | base `48807d3a4fc25b692975329f4e0219be60c6a783` | `crates/harness/src/compaction.rs` | reviewed repair `0d8efbd`, integrated by lead `03beea9`, merged root `c3f29d0`; integrated 2/2, cargo check | Engine::run and live experiment remain |
 
 Expected-red tests: none recorded. One committed red gets a row here with its
 owner and closing slice.
@@ -233,8 +233,13 @@ section per node that ran.
   appends the positional item → `here` fork strips by item type and re-pins
   with one fresh update → request-level effort mirrors the first update in the
   sent history → live item-13 trace with cache counters last.
-- (d) `Compactor`: the current lead is inspecting retained prior work before
-  rebuilding. `exomonad/correction-second-half/preflight/core-preflight-20260924/compaction-fresh/branches/core-compactor-fresh-20260924`
+- (d) `Compactor`: a new `Server` component from reviewed `0d8efbd` was
+  integrated by lead `03beea9` and merged into root at `c3f29d0`;
+  focused compaction 2/2 and cargo check passed on root.
+  This is **component preparation, not finished compaction**:
+  `Engine::run` production wiring, failure/cleanup checks, and the live
+  unanswered-call experiment remain. The retained prior stack
+  `exomonad/correction-second-half/preflight/core-preflight-20260924/compaction-fresh/branches/core-compactor-fresh-20260924`
   at `caddc4c231f3cb21f2dbefd57c9b2c2f2e845d89`: stacked settings plus
   Compactor; sibling `.../compaction-fresh/branches/review-1` is
   `75ab173cecac0493fcbb2157ab4aada58a0d008a`, **two commits behind**
