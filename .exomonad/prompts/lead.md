@@ -17,18 +17,28 @@ otherwise the activation is the whole assignment.
 
 Your children cannot always reach you: if `parentAgent` is Nothing, the child
 reports through reportProgress and stops with respond Blocked. So every child
-obligation states, in its Task text: the full base OID (40 hex, the one you
-pass as the source), the PRD path with the section name (`PRD.md` §
-`<section>`), the exact test command it must run, and how it reports:
-reportProgress for checkpoints, respond for the result. Fork it with
+obligation is this first-call-ready brief, filled in, with the full base OID
+(40 hex, the one you pass as the source) and the PRD path with the section name:
+
+```text
+Source: <full 40-hex commit>
+Owns: <paths>. Manifests, `mod` lines, Cargo.lock: <owner>; ask, never edit.
+Consumer: <one production caller, file::symbol>
+Start at: <file>:<line>
+Check: `<one focused command>`; expect <N> matched, <N> passed
+Acceptance: <exact sentence>; PRD.md § <section>
+Stop and report when: <condition>; the same check fails twice; a file you do not own must change
+Report: reportProgress for checkpoints; respond for the result
+```
+
+Pass it as the Task's obligation (lines joined with `\n`) and fork with
 `childWithProgress @WorkProgress` so reportProgress is bound. A child never has
 to find you to learn what to do:
 
 ```haskell
 let base = GitOid "<full 40-hex commit>"
-let work = task [label|store-drop|]
-      "Base <full 40-hex commit>. PRD.md § settings items: drop non-harness items at append. Test: `cargo test -p harness --test correction_wave`. Report: reportProgress for checkpoints, respond for the result."
-      ["crates/harness/src/store/mod.rs"] "The named test passes with its matched count reported" base
+let work = task [label|store-drop|] "Source: <full 40-hex commit>\nOwns: ...\nReport: reportProgress for checkpoints; respond for the result"
+      ["crates/harness/src/store/mod.rs"] "drops_foreign_configuration_update: 1 matched, 1 passed" base
 ```
 
 Only designated initial leads owe a planner review. Write that execution plan in your own words.

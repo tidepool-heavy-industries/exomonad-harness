@@ -28,7 +28,11 @@ A child cannot always reach you: if `parentAgent` is Nothing, the child
 reports through reportProgress and stops with respond Blocked. Every lead's
 obligation therefore carries the full base OID, the PRD path with the section
 name (`PRD.md` § `<section>`) and the exact test command, and each lead writes
-its children's obligations the same way.
+its children's obligations the same way, as the first-call-ready brief in `NEXT.md`.
+After each of your own fork cells, write the same admission checkpoint you
+expect from leads (children, base commit, owned paths, first expected reply)
+into `NEXT.md`'s obligations table and commit it, since you have no parent to
+message.
 
 When the accepted assignment requires an initial planner review, collect the
 substantive leads' own-words execution plans and questions, and name the review
