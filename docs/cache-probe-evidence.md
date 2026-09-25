@@ -1,20 +1,31 @@
-# Cache-shape probe evidence — 2026-09-24
+# Cache-counter probe evidence — 2026-09-24
 
-## Outcome: Blocked
+## Outcome: second request reported cached input tokens
 
-No live requests were sent. The required reference capture is missing: this
-checkout contains the harness request builder and a prior narrative of Codex's
-headers/body, but not an exact Codex wire capture establishing ordered header
-values and serialized body bytes. The builder in
-`crates/harness/src/transport/client.rs` establishes only the harness shape;
-reconstructing Codex's shape from prose would not satisfy byte-for-byte
-acceptance.
+Ran exactly two consecutive live requests through this checkout's production
+`ResponsesClient::create` / `client::execute` builder, sequentially. Both used
+model `gpt-6-sol`, low effort, no tools, identical instructions and identical
+user-prefix input (a stable repeated text prefix; each response reported
+20,923 input tokens), and the same `prompt_cache_key` value
+`cache-counter-probe-20260924`. The prefix is well above 1,024 tokens. No
+credential, authorization header, or request body was printed or recorded.
+The read-only `CodexFileAuth` source was `~/.codex/auth.json`.
 
-Accordingly, there are no new request bodies or cache counters to report. The
-previous live observations recorded in `docs/findings.md` belong to different
-requests and are not evidence for this probe. To unblock, supply an
-appropriately redacted Codex wire capture with ordered header values and body
-bytes, or authorize a different comparison criterion. See `NEXT.md` and
-`docs/correction-plan.md` for the probe scope and acceptance.
+Redacted usage blocks, as returned by the transport:
 
-No code was changed, and no tests were run.
+```json
+{"input_tokens":20923,"output_tokens":5,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}}
+```
+
+```json
+{"input_tokens":20923,"output_tokens":5,"input_tokens_details":{"cached_tokens":20736,"cache_write_tokens":0}}
+```
+
+Conclusion: **yes** — the second request's `cached_tokens` was greater than
+zero (20,736). Per Q4, no field/header-order comparison against the retired
+Codex builder was needed or performed. This is a measurement only, not product
+approval or a general cache-behavior guarantee.
+
+Probe source revision: `d0245b3177afa21556c041ce05296a96b50b209a`.
+No repository code was changed and no broad live tests were run. The temporary
+runner compiled against the harness crate and executed these two requests.
