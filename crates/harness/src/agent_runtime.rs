@@ -425,6 +425,21 @@ impl AgentToolService for StoreAgentToolService {
         .await
     }
 
+    async fn set_effort(
+        &self,
+        agent: &AgentPath,
+        effort: crate::model::Effort,
+    ) -> Result<Value, AgentVerbError> {
+        Self::require_within_root(&self.root, agent)?;
+        let agent = agent.clone();
+        self.blocking(move |store| {
+            Self::stored(&store, &agent)?;
+            store.save_pending_effort(&agent, effort).map_err(err)?;
+            Ok(json!({"effective":effort}))
+        })
+        .await
+    }
+
     async fn list_agents(
         &self,
         agent: &AgentPath,
@@ -595,6 +610,38 @@ mod tests {
         assert_eq!(checkpoint.head_request, here.head_request);
         assert_eq!(checkpoint.fork_source["kind"], "checkpoint");
         assert_eq!(store.unread("/root/checkpoint_worker").unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn set_effort_returns_and_persists_the_effective_value_without_moving_head() {
+        let (service, store, root_head) = service().await;
+        let result = service
+            .set_effort(&AgentPath("/root".into()), crate::model::Effort::High)
+            .await
+            .unwrap();
+        assert_eq!(result, json!({"effective":"high"}));
+        assert_eq!(
+            store
+                .agent(&AgentPath("/root".into()))
+                .unwrap()
+                .unwrap()
+                .head_request,
+            Some(root_head)
+        );
+        let next = RequestId("next-effort-request".into());
+        store
+            .write_request(&next, None, "/root", &[], Default::default())
+            .unwrap();
+        assert!(
+            store
+                .apply_pending_effort(&AgentPath("/root".into()), &next)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            store.items(&next).unwrap()[0].configuration_effort(),
+            Some(crate::model::Effort::High)
+        );
     }
 
     #[tokio::test]

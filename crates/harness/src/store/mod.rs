@@ -3,7 +3,7 @@ pub mod schema;
 
 use crate::{
     item::{Item, ItemHash},
-    model::{AgentPath, CallId, RequestId},
+    model::{AgentPath, CallId, Effort, RequestId},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,8 @@ pub enum StoreError {
     InvalidAgentPath(String),
     #[error("agent parent does not exist: {0}")]
     MissingAgentParent(String),
+    #[error("session state key uses the reserved harness namespace: {0}")]
+    ReservedSessionStateNamespace(String),
 }
 pub type Result<T> = std::result::Result<T, StoreError>;
 
@@ -408,7 +410,11 @@ impl Store {
         let tx = c.transaction()?;
         tx.execute("INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros) VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![request.0,parent.map(|p|p.0.as_str()),branch,utc_millis(),usage.input_tokens,usage.output_tokens,usage.cost_micros])?;
-        for (position, item) in items.iter().enumerate() {
+        for (position, item) in items
+            .iter()
+            .filter(|item| !item.is_configuration_update())
+            .enumerate()
+        {
             let hash = Self::put_item_tx(&tx, item)?;
             tx.execute(
                 "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
@@ -484,6 +490,15 @@ impl Store {
         .map_err(Into::into)
     }
     pub fn save_session_state(&self, session_id: &str, state: &serde_json::Value) -> Result<()> {
+        if session_id.starts_with("harness:") {
+            return Err(StoreError::ReservedSessionStateNamespace(
+                session_id.to_owned(),
+            ));
+        }
+        self.save_session_state_inner(session_id, state)
+    }
+
+    fn save_session_state_inner(&self, session_id: &str, state: &serde_json::Value) -> Result<()> {
         self.lock().execute("INSERT INTO session_state(session_id,state,updated_at) VALUES (?1,?2,?3) ON CONFLICT(session_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at",params![session_id,serde_json::to_string(state)?,utc_millis()])?;
         Ok(())
     }
@@ -546,10 +561,16 @@ impl Store {
             .transpose()
     }
     /// Append is atomic; identical item bytes share storage, while positions remain request-local.
-    // Configuration updates are a harness-only settings item (PRD § settings
-    // items). The general append path is fed by model/client output, so reject
-    // those items at this boundary rather than persisting forgeable settings.
+    // Model/client input cannot author settings. Trusted settings enter only
+    // through set_effort (also used by fork and compaction re-pins).
     pub fn append_items(&self, request: &RequestId, items: &[Item]) -> Result<Vec<ItemHash>> {
+        let items: Vec<_> = items
+            .iter()
+            .filter(|item| !item.is_configuration_update())
+            .collect();
+        self.append_items_inner(request, &items)
+    }
+    fn append_items_inner(&self, request: &RequestId, items: &[&Item]) -> Result<Vec<ItemHash>> {
         let mut c = self.lock();
         let tx = c.transaction()?;
         let exists: bool = tx.query_row(
@@ -567,11 +588,6 @@ impl Store {
         )?;
         let mut hashes = Vec::new();
         for item in items {
-            if item.0.get("type").and_then(serde_json::Value::as_str)
-                == Some("configuration_update")
-            {
-                continue;
-            }
             let h = Self::put_item_tx(&tx, item)?;
             tx.execute(
                 "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
@@ -583,6 +599,109 @@ impl Store {
         tx.commit()?;
         Ok(hashes)
     }
+
+    /// Append the harness-owned effort item, replacing an immediately adjacent
+    /// update so a second change before the next response does not grow history.
+    pub(crate) fn set_effort(&self, request: &RequestId, effort: Effort) -> Result<ItemHash> {
+        let mut c = self.lock();
+        let tx = c.transaction()?;
+        let hash = Self::set_effort_tx(&tx, request, effort)?;
+        tx.commit()?;
+        Ok(hash)
+    }
+
+    // The single trusted positional-setting writer. Both the ordinary
+    // Store::set_effort API and atomic pending-setting consumption route here;
+    // model-authored items still cannot reach it through append_items.
+    fn set_effort_tx(
+        tx: &Transaction<'_>,
+        request: &RequestId,
+        effort: Effort,
+    ) -> Result<ItemHash> {
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
+            [&request.0],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(StoreError::MissingRequest(request.0.clone()));
+        }
+        let last: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT ri.position,i.json FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 ORDER BY ri.position DESC LIMIT 1",
+                [&request.0],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (position, replace) = match last {
+            Some((position, raw)) => {
+                let previous: Item = serde_json::from_str(&raw)?;
+                (position, previous.is_configuration_update())
+            }
+            None => (0, false),
+        };
+        let position = if replace {
+            tx.execute(
+                "DELETE FROM request_items WHERE request_id=?1 AND position=?2",
+                params![request.0, position],
+            )?;
+            position
+        } else {
+            position
+                + i64::from(tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM request_items WHERE request_id=?1)",
+                    [&request.0],
+                    |r| r.get::<_, bool>(0),
+                )?)
+        };
+        let hash = Self::put_item_tx(tx, &Item::configuration_update(effort))?;
+        tx.execute(
+            "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
+            params![request.0, position, hash.0],
+        )?;
+        Ok(hash)
+    }
+
+    fn pending_effort_key(agent: &AgentPath) -> String {
+        format!("harness:pending_effort:{}", agent.0)
+    }
+
+    /// Persist the latest model-facing effort change until the agent's next
+    /// request boundary.
+    pub(crate) fn save_pending_effort(&self, agent: &AgentPath, effort: Effort) -> Result<()> {
+        self.save_session_state_inner(
+            &Self::pending_effort_key(agent),
+            &serde_json::to_value(effort)?,
+        )
+    }
+
+    /// Atomically consume a pending effort into the new request. A failure
+    /// rolls back both its deletion and the positional setting item.
+    pub(crate) fn apply_pending_effort(
+        &self,
+        agent: &AgentPath,
+        request: &RequestId,
+    ) -> Result<Option<ItemHash>> {
+        let key = Self::pending_effort_key(agent);
+        let mut c = self.lock();
+        let tx = c.transaction()?;
+        let pending: Option<String> = tx
+            .query_row(
+                "SELECT state FROM session_state WHERE session_id=?1",
+                [&key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(pending) = pending else {
+            return Ok(None);
+        };
+        let effort: Effort = serde_json::from_str(&pending)?;
+        let hash = Self::set_effort_tx(&tx, request, effort)?;
+        tx.execute("DELETE FROM session_state WHERE session_id=?1", [&key])?;
+        tx.commit()?;
+        Ok(Some(hash))
+    }
+
     /// Atomically attach every unread envelope for `recipient` to `request` and
     /// mark those envelopes delivered. A retry after commit returns an empty
     /// vector; a failed transaction leaves the envelopes unread.
@@ -633,6 +752,12 @@ impl Store {
         let mut items = Vec::with_capacity(envelopes.len());
         for (_, hash, json) in &envelopes {
             let item = serde_json::from_str::<Item>(json)?;
+            // Envelopes are untrusted ingress, not a trusted settings writer.
+            // Mark configuration updates delivered below, but never attach
+            // them to model history through this path.
+            if item.is_configuration_update() {
+                continue;
+            }
             tx.execute(
                 "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
                 params![request.0, position, hash],
@@ -838,17 +963,104 @@ mod tests {
         RequestId(s.into())
     }
     #[test]
-    fn drops_foreign_configuration_update() {
+    fn untrusted_configuration_updates_are_dropped_and_effort_updates_replace_adjacently() {
         let store = Store::memory().unwrap();
-        store.create_request(&id("root"), None, "root").unwrap();
-        let forged = item(serde_json::json!({
-            "type":"configuration_update",
-            "effort":"high"
-        }));
-        let hashes = store.append_items(&id("root"), &[forged]).unwrap();
-        assert!(hashes.is_empty());
-        assert!(store.items(&id("root")).unwrap().is_empty());
+        let request = id("settings");
+        store
+            .write_request(&request, None, "/root", &[], Usage::default())
+            .unwrap();
+        let forged = Item::configuration_update(Effort::High);
+        assert!(store.append_items(&request, &[forged]).unwrap().is_empty());
+        assert!(store.items(&request).unwrap().is_empty());
+
+        store.set_effort(&request, Effort::Low).unwrap();
+        store.set_effort(&request, Effort::Medium).unwrap();
+        let history = store.items(&request).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].configuration_effort(), Some(Effort::Medium));
+
+        store
+            .append_items(&request, &[item(serde_json::json!({"type":"message"}))])
+            .unwrap();
+        store.set_effort(&request, Effort::High).unwrap();
+        let history = store.items(&request).unwrap();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].configuration_effort(), Some(Effort::Medium));
+        assert_eq!(history[2].configuration_effort(), Some(Effort::High));
     }
+
+    #[test]
+    fn set_effort_is_pending_until_next_request_and_applied_once() {
+        let store = Store::memory().unwrap();
+        let agent = AgentPath("/root".into());
+        let current = id("current-settings");
+        let next = id("next-settings");
+        store
+            .write_request(&current, None, "/root", &[], Usage::default())
+            .unwrap();
+        store
+            .write_request(&next, Some(&current), "/root", &[], Usage::default())
+            .unwrap();
+
+        store.save_pending_effort(&agent, Effort::Low).unwrap();
+        store.save_pending_effort(&agent, Effort::High).unwrap();
+        assert!(store.items(&current).unwrap().is_empty());
+        assert!(store.apply_pending_effort(&agent, &next).unwrap().is_some());
+        assert_eq!(
+            store.items(&next).unwrap()[0].configuration_effort(),
+            Some(Effort::High)
+        );
+        assert!(store.apply_pending_effort(&agent, &next).unwrap().is_none());
+    }
+
+    #[test]
+    fn public_session_state_reserves_harness_namespace_but_accepts_demo_key() {
+        let store = Store::memory().unwrap();
+        let demo_key = "harness-demo-server:/root";
+        let state = serde_json::json!({"cursor":7});
+        store.save_session_state(demo_key, &state).unwrap();
+        assert_eq!(
+            store.session_state(demo_key).unwrap().unwrap().state,
+            state.to_string()
+        );
+        assert!(matches!(
+            store.save_session_state("harness:pending_effort:/root", &state),
+            Err(StoreError::ReservedSessionStateNamespace(_))
+        ));
+
+        let agent = AgentPath("/root".into());
+        store.save_pending_effort(&agent, Effort::High).unwrap();
+        assert_eq!(
+            store
+                .session_state("harness:pending_effort:/root")
+                .unwrap()
+                .unwrap()
+                .state,
+            "\"high\""
+        );
+    }
+
+    #[test]
+    fn initial_request_input_cannot_forge_configuration_updates() {
+        let store = Store::memory().unwrap();
+        let request = id("initial-settings");
+        store
+            .write_request(
+                &request,
+                None,
+                "/root",
+                &[
+                    item(serde_json::json!({"type":"message","content":"keep"})),
+                    Item::configuration_update(Effort::High),
+                ],
+                Usage::default(),
+            )
+            .unwrap();
+        let history = store.items(&request).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].0["type"], "message");
+    }
+
     #[test]
     fn atomic_agent_task_admission_commits_or_rolls_back_as_one_unit() {
         let store = Store::memory().unwrap();
@@ -1031,6 +1243,29 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn untrusted_envelope_configuration_update_is_dropped_at_append_boundary() {
+        let store = Store::memory().unwrap();
+        let recipient = AgentPath("/root/worker".into());
+        let request = id("envelope-settings");
+        let ordinary = item(serde_json::json!({"type":"message","content":"hello"}));
+        let forged_setting = Item::configuration_update(Effort::High);
+        store.create_request(&request, None, &recipient.0).unwrap();
+        store
+            .add_envelope("sender", &recipient.0, "message", &ordinary, None)
+            .unwrap();
+        store
+            .add_envelope("sender", &recipient.0, "message", &forged_setting, None)
+            .unwrap();
+
+        assert_eq!(
+            store.append_unread_envelopes(&recipient, &request).unwrap(),
+            vec![ordinary.clone()]
+        );
+        assert_eq!(store.items(&request).unwrap(), vec![ordinary]);
+        assert!(store.unread(&recipient.0).unwrap().is_empty());
     }
 
     #[test]
