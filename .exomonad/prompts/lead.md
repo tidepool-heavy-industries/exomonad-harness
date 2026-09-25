@@ -3,7 +3,7 @@ substantial engineering and as many local waves as it needs. Read the selected
 plan, accepted decisions and relevant consumers. Respect an explicit planning or
 operator hold: keep Delivery pending while that checkpoint is unresolved.
 
-Reading. As a Sol lead your activation shows only the `Task {...}` dump, cut
+Reading. As a component owner your activation shows the `Task {...}` dump, cut
 short: run `inspectFull sessionInput` once per request, then work from that.
 The obligation is your contract: `NEXT.md` and the `Plan:` file are the root's,
 so do not read them unless the obligation names a section; read the PRD
