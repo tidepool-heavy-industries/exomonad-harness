@@ -165,3 +165,42 @@ async fn boundary_replay_keeps_typed_answer_and_classifies_interrupted_claim_onc
         "new input is visible in descendant ancestry"
     );
 }
+
+#[tokio::test]
+async fn missing_in_flight_job_is_classified_without_unsafe_replay() {
+    let store = Arc::new(Store::memory().unwrap());
+    let head = RequestId("missing-job-head".into());
+    let agent = AgentPath("/root".into());
+    let call = CallId("durable-pending-call".into());
+    let call_item = Item(json!({
+        "type":"function_call", "call_id":call.0, "name":"slow", "arguments":"{}"
+    }));
+    store
+        .write_request(&head, None, &agent.0, &[call_item], StoredUsage::default())
+        .unwrap();
+    store.set_effort(&head, Effort::Low).unwrap();
+    store.claim(&call, &head).unwrap();
+
+    // Simulate restart: the durable claim remains, but the fresh scheduler has
+    // no corresponding job. Replaying it could duplicate the in-flight work.
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let engine = engine(store.clone(), requests.clone());
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    let error = engine
+        .run(Some(head.clone()), vec![], cancel_rx, empty_mailbox())
+        .await
+        .expect_err("a durable claim without its scheduler job must fail closed");
+
+    assert!(matches!(
+        error,
+        EngineError::Job(crate::turn::JobError::UnknownCall)
+    ));
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "must not submit a model request or replay unknown in-flight work"
+    );
+    let claims = store.claims(&call).unwrap();
+    assert_eq!(claims.len(), 1, "must not create duplicate durable claims");
+    assert_eq!(claims[0].state, crate::store::ClaimState::Pending);
+    assert_eq!(claims[0].request, head);
+}
