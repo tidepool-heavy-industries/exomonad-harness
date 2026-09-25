@@ -591,7 +591,7 @@ impl Store {
 
     /// Append the harness-owned effort item, replacing an immediately adjacent
     /// update so a second change before the next response does not grow history.
-    pub fn set_effort(&self, request: &RequestId, effort: Effort) -> Result<ItemHash> {
+    pub(crate) fn set_effort(&self, request: &RequestId, effort: Effort) -> Result<ItemHash> {
         let item = Item::configuration_update(effort);
         let mut c = self.lock();
         let tx = c.transaction()?;
