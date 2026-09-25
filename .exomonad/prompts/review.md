@@ -62,3 +62,28 @@ Blocked with evidence if review cannot continue. A host rejection of a reply,
 such as `ReplyUpdatePending`, is not a finding: wait one turn, then send the
 same reply unchanged. Remain available for repairs
 without requiring a fresh reviewer for every attempt.
+
+## Exact-commit reviews (input is CommitReview, not ReviewTask)
+
+A reviewer forked by `reviewCommit` receives `sessionInput :: CommitReview`:
+the exact commit, the acceptance text, the owned paths, and the repair owner.
+There is no owning Task. Review exactly as above. To accept, build the Task
+yourself with the `task` defaults constructor and return the same
+`Produced (Accepted reviewed)` shape:
+
+```haskell
+let ci = sessionInput :: CommitReview
+let assignment = task [label|commit-review|] (commitReviewAcceptance ci)
+      (commitReviewOwnedPaths ci) (commitReviewAcceptance ci) (commitReviewCommit ci)
+let reviewed = ReviewedCandidate
+      { acceptedAssignment = assignment
+      , reviewedCandidate = Candidate (commitReviewCommit ci) checks gates
+      , reviewChecks = checks
+      , reviewRationale = rationale
+      }
+respond (Produced (Accepted reviewed))
+```
+
+For defects, `Produced (Repair (Candidate (commitReviewCommit ci) checks gates) findings)`.
+Do not return Blocked because the input is CommitReview; that is the intended
+shape for a root or lead reviewing one exact commit.
