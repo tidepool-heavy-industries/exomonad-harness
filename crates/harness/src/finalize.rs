@@ -76,7 +76,7 @@ fn normalize_schema(schema: Value, path: &str) -> Result<Value, FinalizeError> {
         "object" => &["type", "properties", "required", "additionalProperties"],
         "array" => &["type", "items", "minItems", "maxItems", "uniqueItems"],
         "string" => &["type", "minLength", "maxLength", "pattern", "enum", "const"],
-        "boolean" | "null" => &["type", "enum", "const"],
+        "boolean" => &["type", "enum", "const"],
         "integer" | "number" => {
             return Err(unsupported(path, format!("unsupported type {schema_type}")));
         }
@@ -338,6 +338,10 @@ mod tests {
         ));
         assert!(matches!(
             tool_schema::<FormattedReply>(),
+            Err(FinalizeError::UnsupportedSchema { .. })
+        ));
+        assert!(matches!(
+            normalize_schema(json!({"type":"null"}), "$"),
             Err(FinalizeError::UnsupportedSchema { .. })
         ));
     }
