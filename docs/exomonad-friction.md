@@ -198,3 +198,21 @@ These are my own observations, not a claim that the correction wave is done.
    exact-commit review, branch merge not file copy, no completion claim
    before final integrated checks). Link full PRD/plan; do not paste every
    prior conversation or status dump onto that page.
+
+10. **Background commands versus streaming output.** I would use a
+    `--background` command for a long compile, focused test, or one-shot
+    live/manual trace while I review a disjoint candidate or answer a child.
+    A completion notice must carry the job handle, exact command and
+    working/source revision, authoritative exit code or signal, whether the
+    process and cleanup are terminal, whether output is complete, a bounded
+    diagnostic tail or focus match, and a durable full-output reference
+    (OID/job output handle) with a no-rerun read path. The handle must be
+    registered for a wake before I leave it unattended. Streaming the last
+    lines (proposal a) helps diagnose a blocked wait, but alone still pins
+    the model turn and can flood attention; it does not let independent work
+    advance. Background work has a real risk: a lead may merge, rebase, or
+    report success while a check on the older source is still running.
+    Tie the job to its source OID and dependent gate, visibly mark it
+    `running` until terminal, and refuse to count it as passing or to mutate
+    its checkout concurrently. A notice is evidence of command completion,
+    not evidence that the integrated revision was checked.
