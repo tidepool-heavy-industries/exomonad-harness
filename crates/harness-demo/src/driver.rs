@@ -572,8 +572,8 @@ fn final_answer(items: &[Item]) -> Option<String> {
 }
 
 /// Publish only the completion that the Engine actually accepted. For a
-/// strict finalize, preserve the result and Store input-provenance as data;
-/// prose is a presentation rendering, not the source of truth.
+/// strict finalize, preserve the result and Store input-provenance through
+/// the shared wire-safe JSON message codec.
 fn published_final_answer(
     store: &Store,
     sender: &AgentPath,
@@ -586,7 +586,7 @@ fn published_final_answer(
         .iter()
         .filter(|item| item.0["type"] == "function_call" && item.0["name"] == "finalize")
         .collect::<Vec<_>>();
-    let (rendered, structured) = if let [finalize] = finalize_calls.as_slice() {
+    if let [finalize] = finalize_calls.as_slice() {
         // The Engine has already enforced strict schema and exactly one call.
         // Decode here only to carry that same typed JSON into publication.
         let result: Value = FinalizeParser::new()
@@ -600,17 +600,16 @@ fn published_final_answer(
             result,
             provenance,
         };
-        (
-            serde_json::to_string(&answer).map_err(|error| error.to_string())?,
-            Some(serde_json::to_value(answer).map_err(|error| error.to_string())?),
-        )
-    } else if finalize_calls.is_empty() {
-        let Some(text) = final_answer(&completion.turn.items) else {
-            return Ok(None);
-        };
-        (text, None)
-    } else {
+        return answer
+            .to_message_item()
+            .map(Some)
+            .map_err(|error| error.to_string());
+    }
+    if !finalize_calls.is_empty() {
         return Err("multiple finalize calls in accepted completion".into());
+    }
+    let Some(text) = final_answer(&completion.turn.items) else {
+        return Ok(None);
     };
     Ok(Some(Item(json!({
         "type": "message",
@@ -619,10 +618,9 @@ fn published_final_answer(
             "type": "output_text",
             "text": format!(
                 "Message Type: FINAL_ANSWER\nTask name: {}\nSender: {}\nPayload:\n{}",
-                parent.0, sender.0, rendered
+                parent.0, sender.0, text
             )
-        }],
-        "structured": structured,
+        }]
     }))))
 }
 
@@ -931,7 +929,7 @@ mod tests {
             .iter()
             .map(|envelope| {
                 let item = store.get_item(&envelope.item_hash).unwrap().unwrap();
-                serde_json::from_value::<PublishedAnswer>(item.0["structured"].clone()).unwrap()
+                PublishedAnswer::from_message_item(&item).unwrap()
             })
             .collect::<Vec<_>>();
         assert_eq!(answers.len(), 2);
@@ -985,7 +983,7 @@ mod tests {
             .iter()
             .map(|envelope| {
                 let item = reopened.get_item(&envelope.item_hash).unwrap().unwrap();
-                serde_json::from_value::<PublishedAnswer>(item.0["structured"].clone()).unwrap()
+                PublishedAnswer::from_message_item(&item).unwrap()
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -1101,8 +1099,7 @@ mod tests {
         .expect("first answer published before late arrival");
         let first_envelope = &store.inbox(&root.0).unwrap()[0];
         let first_item = store.get_item(&first_envelope.item_hash).unwrap().unwrap();
-        let first: PublishedAnswer =
-            serde_json::from_value(first_item.0["structured"].clone()).unwrap();
+        let first = PublishedAnswer::from_message_item(&first_item).unwrap();
         assert_eq!(first.result, json!({"answer":"saw before"}));
         assert!(first.provenance.seen_envelopes.contains(&before_id));
         assert!(first.provenance.unseen_envelopes.is_empty());
@@ -1122,8 +1119,7 @@ mod tests {
         .expect("arrival after snapshot triggers second child run");
         let second_envelope = &store.inbox(&root.0).unwrap()[1];
         let second_item = store.get_item(&second_envelope.item_hash).unwrap().unwrap();
-        let second: PublishedAnswer =
-            serde_json::from_value(second_item.0["structured"].clone()).unwrap();
+        let second = PublishedAnswer::from_message_item(&second_item).unwrap();
         assert_eq!(second.result, json!({"answer":"saw late"}));
         assert!(!first.provenance.unseen_envelopes.contains(&late_id));
         assert!(second.provenance.seen_envelopes.contains(&late_id));
