@@ -127,3 +127,21 @@ was rebased as `1513e95` and merged by root at `06148a1`.
   assigning the credentialed acceptance experiment.
 - **Nudges and trials:** No intentional red test or repeated failing-check
   round occurred; no nudge event was reported. No inference was spent.
+
+## Item-2 trace-design leaf — correction second half, 2026-09-24
+
+- **Scaffold change:** None. At `8779c47`, root added a compiling `trace.rs`
+  boundary; this leaf provided findings only, with no edits, tests or inference.
+- **Sibling interface:** A transport wrapper can inspect the production-built
+  request body via `request_body`, but cannot observe sleep lifecycle. Root's
+  `main.rs` provider hook must emit sleep start/settle into the same sink.
+  Correlation requires call IDs and a narrowly redacted `wait_agent` result.
+- **API versus docs:** The trace plan's combined wording hid that
+  `CallContext.progress` is consumed by `JobScheduler`, not the transport.
+- **Tree cost:** Separating request logging from root-owned provider timing
+  adds one shared sink contract; root then has to wire and verify both sides
+  before the single manual live run.
+- **Different scaffold next time:** State the sink signature and the minimal
+  redacted request/job fields before parallel trace work.
+- **Nudges and trials:** No nudge event, expected-red test or repeated failing
+  check was reported.
