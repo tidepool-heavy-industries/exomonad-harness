@@ -24,8 +24,8 @@ dependency amendment is `c427057`.
 |---|---|---|---|---|---|
 | (a) one entry | done | `9da6efe`, `a9f7a12` | integrated | nothing | nothing |
 | (b) async tools | root | `d8097c3`; trace leaf `fb80016`; consumer `a42920f`; tree schema repair under review | offline demo 35/35; manual attempt: HTTP 400 on request 2 | live `wait_agent` continuation | no retry without operator authority; review tree fix and retain redacted attempt |
-| (c) settings items | settings-preflight-v8; root integrated core settings | reviewed settings stack `b0e1480` merged at `f1334bec8487aa710b8ba584fe14ce7d40ef5b2a` | integrated set_effort 3/3, three Store tests 1/1 each, correction_wave settings 1/1, cargo check | Here fork, live item-13 trace | rebase/review Here onto exact root source; trace last |
-| (d) `Compactor` | root Engine seam; component lead delivered | Server component `03beea9` merged at `c3f29d0`; root Engine/store seam candidate `2b5e1522d4378c3ab7dc56c70f5f85a710160d6c` on master, exact review pending | Engine compaction 3/3, component 2/2, cargo check harness-demo | review Engine seam, live unanswered-call experiment | close review defects, integrated gate, then live experiment |
+| (c) settings items | settings-preflight-v8; root integrated core settings | reviewed settings stack `b0e1480` merged at `f1334bec8487aa710b8ba584fe14ce7d40ef5b2a`; root active-invocation contract `e28126e` | integrated set_effort 3/3, three Store tests 1/1 each, correction_wave settings 1/1, cargo check; invocation dispatch 1/1 | Here active-call gate, live item-13 trace | retained lead request43 rebases Here onto `e28126e`; demo Here gate remains closed |
+| (d) `Compactor` | root Engine seam; component lead delivered | Server component `03beea9` merged at `c3f29d0`; Engine/store `2b5e152` and production demo consumer `5c17907` on master, same-reviewer repair review pending | Engine compaction 3/3, component 2/2, production factory 1/1, CLI parser 1/1, cargo check harness-demo | review repaired consumer, live unanswered-call experiment | close review, integrated gate, then live experiment |
 | cache probe | done | `d0245b3` | 0 then 20,736 cached tokens | general cache behavior | nothing |
 | interviews | every node | `docs/interviews.md` | root, probe, core present | later nodes | one section per node that runs |
 | wave-7 admission | root | base `763764d389763df6ab3ac0cc65b990c4b82fe1b7` | store-drop-v7 owns `crates/harness/src/store/mod.rs`; core-preflight-v7 owns no files | drop integrated; preflight passed | no next action |
@@ -220,7 +220,14 @@ section per node that ran.
   `set_effort` 3/3, three Store tests 1/1 each, correction_wave settings
   1/1 and cargo check. The old `drops_foreign_configuration_update` filter
   matched zero after renaming and is not pass evidence. Here-fork integration
-  and the live item-13 trace are still open.
+  and the live item-13 trace are still open. The prior settings lead settled
+  Blocked on active-invocation Here semantics: stored agent.head_request is
+  stale while Engine::run is handling a spawn call. Root added the typed
+  AgentInvocation {request,call_id} dispatch contract at
+  `e28126e8ec1884607af63aeffa0eb843a48fcd83` and reassigned the retained
+  lead as request43. A child must wait for the actual spawn output item to
+  persist before sending its first request; claim-settled alone is too early.
+  Demo TreeProvider still blocks model-facing Here until that gate is wired.
   Operator reported retained settings work from the previous run, not yet
   integrated; verify it against current master, do not assume correctness:
   - `exomonad/correction-second-half/preflight/branches/core-preflight-20260924`
@@ -248,7 +255,11 @@ section per node that ran.
   Root Engine/store consumer candidate `2b5e1522d4378c3ab7dc56c70f5f85a710160d6c`
   invokes `Server` from `Engine::run` at an opt-in input-token threshold;
   three focused Engine tests matched/passed, component tests 2/2 and
-  `cargo check -p harness-demo` passed. Exact review is pending.
+  `cargo check -p harness-demo` passed. Exact review returned Repair because
+  no production caller enabled the threshold. Root repaired the consumer at
+  `5c17907e959b06c2b4214ccfe24de6ab7d269c3c`: the demo exposes
+  `--compact-at-input-tokens`, and an offline factory test proves invocation
+  (1/1); CLI parser test is 1/1. Same reviewer is checking that exact repair.
   Broad `cargo test -p harness --lib` ran 78 passed, 9 failed, 2 ignored:
   failures assert pre-settings history shapes, not yet compared on base.
   This is **not finished compaction**: review/integration gate and the
