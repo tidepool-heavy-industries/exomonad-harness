@@ -3,7 +3,7 @@ pub mod schema;
 
 use crate::{
     item::{Item, ItemHash},
-    model::{AgentPath, CallId, RequestId},
+    model::{AgentPath, CallId, Effort, RequestId},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -408,7 +408,11 @@ impl Store {
         let tx = c.transaction()?;
         tx.execute("INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros) VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![request.0,parent.map(|p|p.0.as_str()),branch,utc_millis(),usage.input_tokens,usage.output_tokens,usage.cost_micros])?;
-        for (position, item) in items.iter().enumerate() {
+        for (position, item) in items
+            .iter()
+            .filter(|item| !item.is_configuration_update())
+            .enumerate()
+        {
             let hash = Self::put_item_tx(&tx, item)?;
             tx.execute(
                 "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
@@ -546,10 +550,16 @@ impl Store {
             .transpose()
     }
     /// Append is atomic; identical item bytes share storage, while positions remain request-local.
-    // Configuration updates are a harness-only settings item (PRD § settings
-    // items). The general append path is fed by model/client output, so reject
-    // those items at this boundary rather than persisting forgeable settings.
+    // Model/client input cannot author settings. Trusted settings enter only
+    // through set_effort (also used by fork and compaction re-pins).
     pub fn append_items(&self, request: &RequestId, items: &[Item]) -> Result<Vec<ItemHash>> {
+        let items: Vec<_> = items
+            .iter()
+            .filter(|item| !item.is_configuration_update())
+            .collect();
+        self.append_items_inner(request, &items)
+    }
+    fn append_items_inner(&self, request: &RequestId, items: &[&Item]) -> Result<Vec<ItemHash>> {
         let mut c = self.lock();
         let tx = c.transaction()?;
         let exists: bool = tx.query_row(
@@ -567,11 +577,6 @@ impl Store {
         )?;
         let mut hashes = Vec::new();
         for item in items {
-            if item.0.get("type").and_then(serde_json::Value::as_str)
-                == Some("configuration_update")
-            {
-                continue;
-            }
             let h = Self::put_item_tx(&tx, item)?;
             tx.execute(
                 "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
@@ -582,6 +587,57 @@ impl Store {
         }
         tx.commit()?;
         Ok(hashes)
+    }
+
+    /// Append the harness-owned effort item, replacing an immediately adjacent
+    /// update so a second change before the next response does not grow history.
+    pub fn set_effort(&self, request: &RequestId, effort: Effort) -> Result<ItemHash> {
+        let item = Item::configuration_update(effort);
+        let mut c = self.lock();
+        let tx = c.transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
+            [&request.0],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(StoreError::MissingRequest(request.0.clone()));
+        }
+        let last: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT ri.position,i.json FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 ORDER BY ri.position DESC LIMIT 1",
+                [&request.0],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (position, replace) = match last {
+            Some((position, raw)) => {
+                let previous: Item = serde_json::from_str(&raw)?;
+                (position, previous.is_configuration_update())
+            }
+            None => (0, false),
+        };
+        let position = if replace {
+            tx.execute(
+                "DELETE FROM request_items WHERE request_id=?1 AND position=?2",
+                params![request.0, position],
+            )?;
+            position
+        } else {
+            position
+                + i64::from(tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM request_items WHERE request_id=?1)",
+                    [&request.0],
+                    |r| r.get::<_, bool>(0),
+                )?)
+        };
+        let hash = Self::put_item_tx(&tx, &item)?;
+        tx.execute(
+            "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
+            params![request.0, position, hash.0],
+        )?;
+        tx.commit()?;
+        Ok(hash)
     }
     /// Atomically attach every unread envelope for `recipient` to `request` and
     /// mark those envelopes delivered. A retry after commit returns an empty
@@ -838,17 +894,53 @@ mod tests {
         RequestId(s.into())
     }
     #[test]
-    fn drops_foreign_configuration_update() {
+    fn untrusted_configuration_updates_are_dropped_and_effort_updates_replace_adjacently() {
         let store = Store::memory().unwrap();
-        store.create_request(&id("root"), None, "root").unwrap();
-        let forged = item(serde_json::json!({
-            "type":"configuration_update",
-            "effort":"high"
-        }));
-        let hashes = store.append_items(&id("root"), &[forged]).unwrap();
-        assert!(hashes.is_empty());
-        assert!(store.items(&id("root")).unwrap().is_empty());
+        let request = id("settings");
+        store
+            .write_request(&request, None, "/root", &[], Usage::default())
+            .unwrap();
+        let forged = Item::configuration_update(Effort::High);
+        assert!(store.append_items(&request, &[forged]).unwrap().is_empty());
+        assert!(store.items(&request).unwrap().is_empty());
+
+        store.set_effort(&request, Effort::Low).unwrap();
+        store.set_effort(&request, Effort::Medium).unwrap();
+        let history = store.items(&request).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].configuration_effort(), Some(Effort::Medium));
+
+        store
+            .append_items(&request, &[item(serde_json::json!({"type":"message"}))])
+            .unwrap();
+        store.set_effort(&request, Effort::High).unwrap();
+        let history = store.items(&request).unwrap();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].configuration_effort(), Some(Effort::Medium));
+        assert_eq!(history[2].configuration_effort(), Some(Effort::High));
     }
+
+    #[test]
+    fn initial_request_input_cannot_forge_configuration_updates() {
+        let store = Store::memory().unwrap();
+        let request = id("initial-settings");
+        store
+            .write_request(
+                &request,
+                None,
+                "/root",
+                &[
+                    item(serde_json::json!({"type":"message","content":"keep"})),
+                    Item::configuration_update(Effort::High),
+                ],
+                Usage::default(),
+            )
+            .unwrap();
+        let history = store.items(&request).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].0["type"], "message");
+    }
+
     #[test]
     fn atomic_agent_task_admission_commits_or_rolls_back_as_one_unit() {
         let store = Store::memory().unwrap();
