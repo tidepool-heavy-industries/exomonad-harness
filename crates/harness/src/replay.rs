@@ -29,13 +29,30 @@ use tokio::sync::Notify;
 pub struct ReplayTransport {
     turns: Mutex<VecDeque<ResponsesTurn>>,
     requests: Mutex<Vec<ResponsesRequest>>,
+    gated: bool,
+    response_permits: Mutex<usize>,
+    changed: Notify,
 }
 
 impl ReplayTransport {
     pub fn new(turns: impl IntoIterator<Item = ResponsesTurn>) -> Self {
+        Self::with_gate(turns, false)
+    }
+
+    /// Create a replay transport which pauses before returning each queued
+    /// turn. Tests coordinate boundaries using `wait_requested` and
+    /// `release_next`, without sleeps or polling.
+    pub fn gated(turns: impl IntoIterator<Item = ResponsesTurn>) -> Self {
+        Self::with_gate(turns, true)
+    }
+
+    fn with_gate(turns: impl IntoIterator<Item = ResponsesTurn>, gated: bool) -> Self {
         Self {
             turns: Mutex::new(turns.into_iter().collect()),
             requests: Mutex::new(Vec::new()),
+            gated,
+            response_permits: Mutex::new(0),
+            changed: Notify::new(),
         }
     }
 
@@ -47,15 +64,53 @@ impl ReplayTransport {
     pub fn queue_remaining(&self) -> usize {
         lock(&self.turns).len()
     }
+
+    /// Wait until at least `count` model requests have crossed the transport
+    /// boundary and been recorded.
+    pub async fn wait_requested(&self, count: usize) {
+        loop {
+            let changed = self.changed.notified();
+            if self.recorded_requests().len() >= count {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    /// Permit exactly one gated model response to return to the caller.
+    pub fn release_next(&self) {
+        *lock(&self.response_permits) += 1;
+        self.changed.notify_waiters();
+    }
+
+    async fn wait_for_response_release(&self) {
+        if !self.gated {
+            return;
+        }
+        loop {
+            let changed = self.changed.notified();
+            {
+                let mut permits = lock(&self.response_permits);
+                if *permits > 0 {
+                    *permits -= 1;
+                    return;
+                }
+            }
+            changed.await;
+        }
+    }
 }
 
 #[async_trait]
 impl ResponsesTransport for ReplayTransport {
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         lock(&self.requests).push(request);
-        lock(&self.turns)
+        self.changed.notify_waiters();
+        let turn = lock(&self.turns)
             .pop_front()
-            .ok_or_else(|| TransportError::Stream("replay turn queue exhausted".into()))
+            .ok_or_else(|| TransportError::Stream("replay turn queue exhausted".into()))?;
+        self.wait_for_response_release().await;
+        Ok(turn)
     }
 
     async fn create_streaming(
@@ -288,6 +343,33 @@ mod tests {
         );
         assert!(replay.create(request("s3")).await.is_err());
         assert_eq!(replay.recorded_requests().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn gated_transport_waits_for_each_boundary_release() {
+        let replay = Arc::new(ReplayTransport::gated([turn("r1"), turn("r2"), turn("r3")]));
+        let running = {
+            let replay = replay.clone();
+            tokio::spawn(async move {
+                let mut ids = Vec::new();
+                for index in 1..=3 {
+                    let turn = replay
+                        .create(request(&format!("session-{index}")))
+                        .await
+                        .unwrap();
+                    ids.push(turn.response_id);
+                }
+                ids
+            })
+        };
+
+        for boundary in 1..=3 {
+            replay.wait_requested(boundary).await;
+            assert_eq!(replay.recorded_requests().len(), boundary);
+            assert!(!running.is_finished(), "response {boundary} must be gated");
+            replay.release_next();
+        }
+        assert_eq!(running.await.unwrap(), ["r1", "r2", "r3"]);
     }
 
     #[tokio::test]
