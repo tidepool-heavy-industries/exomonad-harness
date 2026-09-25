@@ -36,8 +36,11 @@ dependency amendment is `c427057`.
 | Here rescue request43 | retained settings lead; bounded owner34 and read-only audit35 | root base `f504dd062d2383a801462cbdb7cd304bfd54f316`; stopped prior worker's preserved branch `exomonad/settings-recovery-v8/wave-6-here-replacement/branches/here-recovery-fresh-v8` at `f7a766e71b4bcefd2db0562c23df2e296ede4ca2` | `f7` cumulative diff from `e28126e` touches only `agent_runtime.rs`, `engine.rs`, `store/mod.rs`; old `here` 4/4 does not establish active-call behavior | `f7` unreviewed/unintegrated; actor28 forcibly stopped after >133-call turn, custody retained | owner34 rebase/repair on `f504`, output-readiness race and full harness-lib checks, one exact review; root demo gate afterward |
 | compaction-component-v9 follow-up | retained Sol lead | base `48807d3a4fc25b692975329f4e0219be60c6a783` | `crates/harness/src/compaction.rs` | reviewed repair `0d8efbd`, integrated by lead `03beea9`, merged root `c3f29d0`; integrated 2/2, cargo check | root Engine candidate `2b5e152` review, then live experiment |
 
-Expected-red tests: none recorded. One committed red gets a row here with its
-owner and closing slice.
+Expected-red tests on unmerged candidate branches (not pass evidence):
+
+| test | red evidence | owner | closing slice |
+|---|---|---|---|
+| `engine::tests::model_facing_here_spawn_waits_for_active_call_output_before_child_first_request` on preserved unmerged `f7a766e` | actor28 compiled and ran it before its final commit; it failed at engine.rs:1633 with parent Replay `Transport(Stream("replay exhausted"))`; two attempts, 0 passed; final `f7` contains that test, but was not separately re-run after commit | rescue owner34; determine fixture versus product defect | reviewed Here rescue on post-Compactor base, named active test passing with count and full harness-lib green |
 
 **Active refs and fences.** Children and requests live in `status`, one
 delivery line per child. A retained `exomonad/...` branch is a candidate when

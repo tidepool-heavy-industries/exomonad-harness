@@ -248,3 +248,8 @@ These are my own observations, not a claim that the correction wave is done.
   harness library run compiled 89 tests, passed 78, failed 9, ignored 2;
   the nine stale settings-pin assertions were assigned to the `engine.rs`
   owner rather than silently counted under focused green tests.
+- The stopped Here worker's active model-facing test compiled but failed
+  twice with a parent Replay `replay exhausted` error before its final
+  `f7a766e` commit. It is an unmerged red test, not a green Here proof;
+  the rescue owner received the exact failure and must distinguish a
+  missing replay response from a production output-readiness defect.
