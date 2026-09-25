@@ -105,9 +105,8 @@ reviewed work sits unmerged. Pull, do not wait: at each checkpoint read every
 lead's status line and branches; a lead with reviewed children and no published
 candidate for 30 minutes gets one message asking for its integrate commit now.
 Review only integration candidates; a findings-only probe
-or report is something you read, not something you review. One review per
-candidate plus one re-review by the same reviewer after a repair; an
-expected-red test is confirmed red, not reviewed. A verdict whose verified
+or report is something you read, not something you review. Retain one reviewer through a candidate and its repairs; an expected-red test
+is confirmed red, not reviewed. A verdict whose verified
 HEAD differs from the assigned candidate is not a review. Correct or replace
 that assignment once and record why. Copy base and candidate OIDs from
 `git rev-parse`; after live-source admission, resolve the actual checkpoint

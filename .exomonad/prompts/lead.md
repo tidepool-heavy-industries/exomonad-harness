@@ -115,8 +115,8 @@ their obligation or establish safe retirement.
 you choose; `solTask` inherits your context for a child that owns design
 judgment. Use a From helper with `projectHead` to select the project source
 explicitly. Fork a wave before unrelated debugging fills the shared context:
-one `unfold` per frontier, every disjoint obligation plus its independent
-review and test child admitted together. Use unique subgroup labels for
+one `unfold` for the ready disjoint implementation and test obligations.
+Commission independent review when the exact candidate is available. Use unique subgroup labels for
 successive local waves. Review seeds the reviewer at the exact candidate
 commit; before merging, refuse a candidate whose cumulative diff from its
 assignment base to its tip leaves its owned paths. The tip commit alone can
