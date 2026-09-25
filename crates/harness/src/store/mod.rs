@@ -36,6 +36,8 @@ pub enum StoreError {
     InvalidAgentPath(String),
     #[error("agent parent does not exist: {0}")]
     MissingAgentParent(String),
+    #[error("session state key uses the reserved harness namespace: {0}")]
+    ReservedSessionStateNamespace(String),
 }
 pub type Result<T> = std::result::Result<T, StoreError>;
 
@@ -488,6 +490,15 @@ impl Store {
         .map_err(Into::into)
     }
     pub fn save_session_state(&self, session_id: &str, state: &serde_json::Value) -> Result<()> {
+        if session_id.starts_with("harness:") {
+            return Err(StoreError::ReservedSessionStateNamespace(
+                session_id.to_owned(),
+            ));
+        }
+        self.save_session_state_inner(session_id, state)
+    }
+
+    fn save_session_state_inner(&self, session_id: &str, state: &serde_json::Value) -> Result<()> {
         self.lock().execute("INSERT INTO session_state(session_id,state,updated_at) VALUES (?1,?2,?3) ON CONFLICT(session_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at",params![session_id,serde_json::to_string(state)?,utc_millis()])?;
         Ok(())
     }
@@ -657,8 +668,8 @@ impl Store {
 
     /// Persist the latest model-facing effort change until the agent's next
     /// request boundary.
-    pub fn save_pending_effort(&self, agent: &AgentPath, effort: Effort) -> Result<()> {
-        self.save_session_state(
+    pub(crate) fn save_pending_effort(&self, agent: &AgentPath, effort: Effort) -> Result<()> {
+        self.save_session_state_inner(
             &Self::pending_effort_key(agent),
             &serde_json::to_value(effort)?,
         )
@@ -666,7 +677,7 @@ impl Store {
 
     /// Atomically consume a pending effort into the new request. A failure
     /// rolls back both its deletion and the positional setting item.
-    pub fn apply_pending_effort(
+    pub(crate) fn apply_pending_effort(
         &self,
         agent: &AgentPath,
         request: &RequestId,
@@ -994,6 +1005,33 @@ mod tests {
             Some(Effort::High)
         );
         assert!(store.apply_pending_effort(&agent, &next).unwrap().is_none());
+    }
+
+    #[test]
+    fn public_session_state_reserves_harness_namespace_but_accepts_demo_key() {
+        let store = Store::memory().unwrap();
+        let demo_key = "harness-demo-server:/root";
+        let state = serde_json::json!({"cursor":7});
+        store.save_session_state(demo_key, &state).unwrap();
+        assert_eq!(
+            store.session_state(demo_key).unwrap().unwrap().state,
+            state.to_string()
+        );
+        assert!(matches!(
+            store.save_session_state("harness:pending_effort:/root", &state),
+            Err(StoreError::ReservedSessionStateNamespace(_))
+        ));
+
+        let agent = AgentPath("/root".into());
+        store.save_pending_effort(&agent, Effort::High).unwrap();
+        assert_eq!(
+            store
+                .session_state("harness:pending_effort:/root")
+                .unwrap()
+                .unwrap()
+                .state,
+            "\"high\""
+        );
     }
 
     #[test]
