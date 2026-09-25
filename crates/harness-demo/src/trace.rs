@@ -78,15 +78,15 @@ impl TraceSink {
     pub async fn open(path: impl Into<PathBuf>) -> Result<Self, TraceError> {
         let path = path.into();
         let file = tokio::task::spawn_blocking(move || {
-            OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .open(path)
+            OpenOptions::new().create_new(true).write(true).open(path)
         })
         .await
         .map_err(|_| TraceError::WriterStopped)?
         .map_err(TraceError::Io)?;
+        Self::with_file(file)
+    }
+
+    fn with_file(file: File) -> Result<Self, TraceError> {
         let (tx, mut rx) = mpsc::channel::<Message>(QUEUE_CAPACITY);
         thread::Builder::new()
             .name("harness-trace-writer".into())
@@ -521,10 +521,11 @@ mod tests {
 
     #[tokio::test]
     async fn trace_write_failure_prevents_transport_dispatch() {
-        let Ok(sink) = TraceSink::open("/dev/full").await else {
+        let Ok(file) = OpenOptions::new().write(true).open("/dev/full") else {
             // Some non-Unix test hosts do not provide /dev/full.
             return;
         };
+        let sink = TraceSink::with_file(file).unwrap();
         let transport = TraceTransport::new(MustNotDispatch(AtomicBool::new(false)), sink);
         let request = ResponsesRequest {
             input: vec![],
@@ -536,6 +537,20 @@ mod tests {
         };
         assert!(transport.create(request).await.is_err());
         assert!(!transport.inner.0.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn opening_existing_path_fails_without_overwriting_contents() {
+        let path = std::env::temp_dir().join(format!(
+            "harness-trace-existing-{}-{}.jsonl",
+            std::process::id(),
+            timestamp_ms()
+        ));
+        let sentinel = b"existing user evidence";
+        std::fs::write(&path, sentinel).unwrap();
+        assert!(TraceSink::open(path.clone()).await.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), sentinel);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
