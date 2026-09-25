@@ -17,6 +17,12 @@ detail remains in Git history. Do not fabricate watchdog or nudge events.
 | A message asked core to incorporate probe evidence into `docs/findings.md`. Delivery alone does not show that it did so. | Require an incorporation receipt tied to the exact commit and focused check. This run's prompt trial uses that rule manually. |
 | The cache blocker required an operator question. The answer may never arrive. | Keep the recommendation and unanswered question in `docs/questions.md`; allow reversible work to proceed while the irreversible live comparison remains blocked. |
 | The watchdog classified core's `sendMessage` checkpoint as `destructive_command` (0.9) even though the call only sent text and returned a `NotificationReceipt`. Root had already incorporated the message. This is an observed false positive for that call, not evidence of a destructive tool execution. | Classify the invoked tool and effects before scanning quoted message text for command verbs; retain the original call reference for audit. |
+| In this run, the preflight nonce message was submitted but not initially presented. The lead explicitly reported that state, then later quoted the nonce. This prevented a receipt from being mistaken for readback, but required another operator-visible turn. | Make submitted, presented, quoted/answered, and incorporated distinct first-class message states. Notify the owner on presentation failure or `inbox=fenced`, not on repeated pending snapshots. |
+| A settings implementation rebased onto root `master` rather than its lead's integration branch. Its three-file work passed focused checks, but the cumulative assignment-base diff contained root docs/demo changes, so the lead correctly refused it. | Give assignments a typed integration target and an `owned-diff` preflight before candidate submission. A safe rebase helper should target the owning lead's checked branch, then validate the cumulative diff before replying. |
+| Two exact-commit reviews of an intentionally red settings test returned `Blocked` because the reviewer had `CommitReview` input but the reply recipe required a `Task`. The reviewer had actually matched one offline test and observed the expected failure. The operator updated `.exomonad/prompts/review.md`; re-review is pending, not yet acceptance. | Construct the review `Task` from `CommitReview` in the review helper/prompt, and make an expected-red verdict name owner, closing slice, matched count, and failure cause without implying production passed. |
+| On 2026-09-24 `reload_agent_spec` refused after publishing the updated workspace source layer: `prepared engine: missing imported value Project.Shell.presentSelected`. The source file contains that function; the prior typed tool record stayed active while notebook cells saw the new layer. The cause is not yet diagnosed. | Make source-layer publication and spec reload atomic, or expose a one-step rollback/rebuild with the exact stale symbol identity. A refusal should leave both the record and imported source layer at one coherent revision. |
+| The Compactor leaf needed `schemars` but owned only `compaction.rs`, not `Cargo.toml`/`Cargo.lock`, and correctly blocked instead of editing outside ownership. | Preflight dependency additions at scaffold time. Give a manifest/lock owner or root-amend those files before assigning a module leaf; show dependency needs in the admission checklist. |
+| The item-2 live probe found no supported way to correlate redacted actual request bodies with slow-tool start/settle and `wait_agent` resumption. It spent no inference. Root had to scaffold a demo trace seam before the single manual run. | Treat observability as part of acceptance scaffolding: opt-in, redacted request/job correlation with fail-closed trace writes; never spend a one-shot live run without a trace path. |
 
 ## Local workflow corrections already applied
 
@@ -40,6 +46,12 @@ detail remains in Git history. Do not fabricate watchdog or nudge events.
   `batch`/`subgroup` examples, and the root review recipe now uses an
   absolute group path. These reduce prompt-discovery friction; whether
   diagnostics themselves improved is unverified.
+- **This run's prompt trials:** The lead sent admission and settlement
+  checkpoints; the settings implementer escalated after two failed engine
+  history rounds rather than grinding a third. A test was deliberately
+  expected-red under settings (c), with an owner and closing slice, and was
+  not called green or merged on root. The old inbox fence has not recurred
+  on the current lead; this does not establish a runtime fix.
 
 ## Remaining design experiments
 
@@ -61,6 +73,14 @@ detail remains in Git history. Do not fabricate watchdog or nudge events.
 5. **Measured promotion:** Promote a repeated notebook routine to a
    workspace helper or hook only after comparing rounds saved, added
    latency and error rate on later candidates.
+6. **Integrated candidate transaction:** Represent source base, owned paths,
+   checks with matched counts, exact review, merge and post-merge verification
+   as typed stages. Trial: intentionally rebase a clean three-file candidate
+   onto the wrong parent and refuse it before commissioning review.
+7. **Actionable swarm view:** One concise frontier view should show only
+   newly presented messages, child settlements, expected-red ownership, fences
+   and source advances. Keep a detailed audit trail available on demand
+   without making every status turn replay the whole actor roster.
 
 ## Node notes
 
