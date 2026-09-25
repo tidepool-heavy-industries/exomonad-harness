@@ -629,6 +629,7 @@ mod tests {
         responses: Arc<StdMutex<HashMap<String, VecDeque<Vec<Item>>>>>,
         request_counts: Arc<StdMutex<HashMap<String, usize>>>,
         inputs: Arc<StdMutex<HashMap<String, Vec<Vec<Item>>>>>,
+        compact_once: bool,
     }
 
     #[async_trait]
@@ -649,13 +650,17 @@ mod tests {
                 .get_mut(&key)
                 .and_then(VecDeque::pop_front)
                 .ok_or_else(|| TransportError::Stream(format!("no replay response for {key}")))?;
-            *self
-                .request_counts
-                .lock()
-                .unwrap()
-                .entry(key.clone())
-                .or_default() += 1;
-            let input_tokens = request.input.len() as u64;
+            let mut counts = self.request_counts.lock().unwrap();
+            let count = counts.entry(key.clone()).or_default();
+            *count += 1;
+            // The compacting replay exercises one usage trigger. A pending
+            // tool can settle before or after the first final response, so
+            // later requests must not spuriously trigger another compaction.
+            let input_tokens = if self.compact_once && *count > 1 {
+                0
+            } else {
+                request.input.len() as u64
+            };
             Ok(ResponsesTurn {
                 response_id: format!("replay-{key}"),
                 items,
@@ -696,6 +701,7 @@ mod tests {
                     json!({"type":"compaction","encrypted_content":"opaque"}),
                 )],
                 vec![final_answer("after compaction")],
+                vec![final_answer("after compaction")],
             ]),
         )])));
         let request_counts = Arc::new(StdMutex::new(HashMap::new()));
@@ -718,6 +724,7 @@ mod tests {
                         responses: responses.clone(),
                         request_counts: request_counts.clone(),
                         inputs: inputs.clone(),
+                        compact_once: true,
                     })
                 }
             },
@@ -743,16 +750,26 @@ mod tests {
         );
         let sent = inputs.lock().unwrap();
         let sent = &sent["/root"];
-        assert_eq!(sent.len(), 3);
+        assert!(
+            (3..=4).contains(&sent.len()),
+            "a pending tool may require one more model turn: {sent:?}"
+        );
         assert_eq!(sent[1].last().unwrap().0["type"], "compaction_trigger");
         assert_eq!(sent[2][0].0["role"], "developer");
-        assert!(
-            store
-                .events(Some(&completion.head_request))
+        let mut cursor = Some(completion.head_request);
+        let mut compaction_edges = 0;
+        while let Some(id) = cursor {
+            if store
+                .events(Some(&id))
                 .unwrap()
                 .iter()
                 .any(|event| event.kind == "compaction")
-        );
+            {
+                compaction_edges += 1;
+            }
+            cursor = store.request(&id).unwrap().unwrap().parent;
+        }
+        assert_eq!(compaction_edges, 1);
     }
 
     struct JoinFailureFactory {
@@ -907,6 +924,7 @@ mod tests {
                         responses: responses.clone(),
                         request_counts: request_counts.clone(),
                         inputs: inputs.clone(),
+                        compact_once: false,
                     })
                 }
             },
@@ -1092,6 +1110,7 @@ mod tests {
                         responses: responses.clone(),
                         request_counts: request_counts.clone(),
                         inputs: inputs.clone(),
+                        compact_once: false,
                     })
                 }
             },
