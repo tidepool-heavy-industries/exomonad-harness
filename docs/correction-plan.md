@@ -85,7 +85,7 @@ their live traces in `docs/findings.md`, master is green, and
 | item | state | what remains |
 |---|---|---|
 | (a) one entry | **done** (`9da6efe`, `a9f7a12`) | nothing |
-| (b) async tools | red acceptance test on master (`crates/harness/tests/correction_wave.rs`) | make it green in ONE place: `Provider::all_tools` stamps `"async": true` on every tool except `wait_agent`, provider-supplied flags are overridden, not trusted. then the live item-2 trace (slow `sleep`, model continues, `wait_agent` resumed) with redacted request bodies in findings |
+| (b) async tools | provider stamp integrated on master (`d8097c3`); offline correction-wave test 1/1 passed, fmt passed | live item-2 trace (slow `sleep`, model continues, `wait_agent` resumed) with redacted request bodies in findings remains open |
 | (c) settings items | not started | `configuration_update` as a store item, `set_effort`, fork strip list, effort pinned via the item; live item-13 trace with cache counters |
 | (d) Compactor | not started | PRD shape, `Server` only, unanswered-call experiment → findings |
 | cache probe | not done: 38 min, five reviewers, a source comparison instead of two live requests | rescoped: ONE node, no children, two live requests shaped like codex's, redacted bodies + counters in findings, or `Blocked` naming the missing capture. nothing else |

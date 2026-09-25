@@ -7,6 +7,20 @@ node protocol. The `TODO(correction-wave …)` and `FIXME(correction-wave …)`
 comments in `crates/` are the map into the code; each names the PRD rule it
 serves.
 
+## Current run checkpoint (2026-09-24)
+
+- (b) provider tool schemas integrated on master at `d8097c3`.
+  `cargo test -p harness --offline --test correction_wave` ran 1/1 passing
+  test; `cargo fmt --all --check` passed. The live item-2 trace is **open**.
+- (c) and (d) remain open on the core lead's branch. Core reported its inbox
+  fenced and is continuing inline; a notification receipt must not be treated
+  as proof it resumed or incorporated a change.
+- The cache probe's `Blocked` evidence was merged at `b99337e`. It sent no
+  live requests; an exact redacted Codex wire capture is missing. Q4 is
+  pending in `docs/questions.md`.
+- All four items are **not** complete. The remainder of this file records
+  the previous run's handoff and still-open acceptance criteria.
+
 ## Where the last run stopped (2026-09-24)
 
 - (a) one engine entry: done and integrated (`9da6efe`, `a9f7a12`).
