@@ -453,6 +453,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 pinned_effort,
                 session_id: self.config.session_id.clone(),
             };
+            let replay_request = req.clone();
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
             let create = self.client.create_streaming(req, event_tx);
             tokio::pin!(create);
@@ -590,9 +591,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 let store = self.store.clone();
                 let request = parent.clone();
                 let recorded = turn.clone();
-                if let Err(error) =
-                    blocking(move || store.record_replay_turn(&request, &recorded).map(|_| ()))
-                        .await
+                if let Err(error) = blocking(move || {
+                    store
+                        .record_replay_turn(&request, &replay_request, &recorded)
+                        .map(|_| ())
+                })
+                .await
                 {
                     return Err(self.cleanup_pending(error, &pending).await);
                 }
