@@ -74,7 +74,7 @@ fn normalize_schema(schema: Value, path: &str) -> Result<Value, FinalizeError> {
     ];
     let allowed: &[&str] = match schema_type {
         "object" => &["type", "properties", "required", "additionalProperties"],
-        "array" => &["type", "items", "minItems", "maxItems", "uniqueItems"],
+        "array" => &["type", "items", "minItems", "maxItems"],
         "string" => &["type", "minLength", "maxLength", "pattern", "enum", "const"],
         "boolean" => &["type", "enum", "const"],
         "integer" | "number" => {
@@ -122,11 +122,7 @@ fn normalize_schema(schema: Value, path: &str) -> Result<Value, FinalizeError> {
                 "items".into(),
                 normalize_schema(items.clone(), &format!("{path}.items"))?,
             );
-            copy_constraints(
-                object,
-                &mut normalized,
-                &["minItems", "maxItems", "uniqueItems"],
-            );
+            copy_constraints(object, &mut normalized, &["minItems", "maxItems"]);
         }
         "string" => copy_constraints(
             object,
@@ -223,6 +219,8 @@ impl FinalizeParser {
 mod tests {
     use super::*;
     use serde::Deserialize;
+    use std::collections::HashSet;
+    type StringSet = HashSet<String>;
 
     #[derive(Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
     struct Reply {
@@ -338,6 +336,12 @@ mod tests {
         ));
         assert!(matches!(
             tool_schema::<FormattedReply>(),
+            Err(FinalizeError::UnsupportedSchema { .. })
+        ));
+        let hash_set_schema = serde_json::to_value(schemars::schema_for!(StringSet)).unwrap();
+        assert_eq!(hash_set_schema["uniqueItems"], true);
+        assert!(matches!(
+            tool_schema::<HashSet<String>>(),
             Err(FinalizeError::UnsupportedSchema { .. })
         ));
         assert!(matches!(
