@@ -347,6 +347,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             if *cancellation.borrow() {
                 return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
             }
+            // AtBoundary is a property of *every* model request, not of a
+            // completed turn. Admission is a Store transaction and neither
+            // polls nor cancels an in-flight provider Job.
+            if admit_inbox {
+                if let Err(error) = self.append_unread_envelopes(&parent).await {
+                    return Err(self.cleanup_pending(error, &pending).await);
+                }
+            }
             let history = match self.read_history(&parent).await {
                 Ok(history) => history,
                 Err(error) => return Err(self.cleanup_pending(error, &pending).await),
@@ -367,6 +375,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     Ok(request) => request,
                     Err(error) => return Err(self.cleanup_pending(error, &pending).await),
                 };
+            }
+            if did_compact && admit_inbox {
+                if let Err(error) = self.append_unread_envelopes(&parent).await {
+                    return Err(self.cleanup_pending(error, &pending).await);
+                }
             }
             let history = if did_compact {
                 self.read_history(&parent).await?

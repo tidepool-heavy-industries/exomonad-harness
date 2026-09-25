@@ -186,8 +186,13 @@ impl Store {
         ),
     ) -> Result<Agent> {
         Ok(Agent {
-            path: AgentPath(r.0),
-            parent: r.1.map(AgentPath),
+            path: AgentPath(r.0.clone()),
+            // `/operator` is a virtual parent: it is the human mailbox, not a
+            // schedulable agent row. Keep old SQLite roots readable.
+            parent: r
+                .1
+                .map(AgentPath)
+                .or_else(|| (r.0 == "/root").then(|| AgentPath("/operator".into()))),
             head_request: r.2.map(RequestId),
             contract: serde_json::from_str(&r.3)?,
             fork_source: serde_json::from_str(&r.4)?,
@@ -568,6 +573,11 @@ impl Store {
         self.lock().query_row("SELECT path,parent_path,head_request,contract,fork_source,state,created_at FROM agents WHERE path=?1",[&path.0],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?.map(Self::decode_agent).transpose()
     }
     pub fn children_agents(&self, path: &AgentPath) -> Result<Vec<Agent>> {
+        if path.0 == "/operator" {
+            return self
+                .agent(&AgentPath("/root".into()))
+                .map(|root| root.into_iter().collect());
+        }
         self.query_agents("SELECT path,parent_path,head_request,contract,fork_source,state,created_at FROM agents WHERE parent_path=?1 ORDER BY path",Some(&path.0))
     }
     pub fn list_agents(&self) -> Result<Vec<Agent>> {
@@ -1637,6 +1647,46 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn at_boundary_drains_every_unread_envelope_on_each_request() {
+        let store = Store::memory().unwrap();
+        let recipient = AgentPath("/root".into());
+        let mut parent: Option<RequestId> = None;
+        for boundary in 0..3 {
+            let request = RequestId(format!("boundary-{boundary}"));
+            store
+                .create_request(&request, parent.as_ref(), &recipient.0)
+                .unwrap();
+            let expected: Vec<_> = (0..=boundary)
+                .map(|index| {
+                    Item(serde_json::json!({
+                        "type":"message",
+                        "role":"user",
+                        "content":format!("envelope-{boundary}-{index}")
+                    }))
+                })
+                .collect();
+            for item in &expected {
+                store
+                    .add_envelope("/operator", &recipient.0, "AtBoundary", item, None)
+                    .unwrap();
+            }
+            assert_eq!(
+                store.append_unread_envelopes(&recipient, &request).unwrap(),
+                expected
+            );
+            assert!(store.unread(&recipient.0).unwrap().is_empty());
+            assert!(
+                store
+                    .append_unread_envelopes(&recipient, &request)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(store.items(&request).unwrap(), expected);
+            parent = Some(request);
+        }
     }
 
     #[test]

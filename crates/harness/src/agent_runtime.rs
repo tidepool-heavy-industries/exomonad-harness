@@ -394,13 +394,18 @@ impl AgentToolService for StoreAgentToolService {
         message: String,
     ) -> Result<Value, AgentVerbError> {
         Self::require_within_root(&self.root, sender)?;
-        Self::require_within_root(&self.root, &target)?;
+        let operator_parent = sender == &self.root && target.0 == "/operator";
+        if !operator_parent {
+            Self::require_within_root(&self.root, &target)?;
+        }
         let sender = sender.clone();
         let result = self
             .blocking(move |store| {
                 Self::stored(&store, &sender)?;
-                Self::stored(&store, &target)?;
-                if !Self::direct_relation(&sender, &target) {
+                if !operator_parent {
+                    Self::stored(&store, &target)?;
+                }
+                if !operator_parent && !Self::direct_relation(&sender, &target) {
                     return Err(AgentVerbError(
                         "messages are restricted to parent/child agents".into(),
                     ));
@@ -639,6 +644,14 @@ mod tests {
         assert_eq!(prompt_inbox[0].class, "AtBoundary");
         let task_item = store.get_item(&prompt_inbox[0].item_hash).unwrap().unwrap();
         assert_eq!(task_item.0["role"], "assistant");
+        let rendered = task_item.0["content"][0]["text"].as_str().unwrap();
+        let payload = rendered.split_once("Payload:\n").unwrap().1;
+        let whole_contract: Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(
+            whole_contract,
+            serde_json::to_value(contract()).unwrap(),
+            "NEW_TASK must contain the entire, untruncated contract"
+        );
         assert!(
             task_item.0["content"][0]["text"]
                 .as_str()
@@ -689,6 +702,26 @@ mod tests {
         assert_eq!(checkpoint.head_request, Some(root_head));
         assert_eq!(checkpoint.fork_source["kind"], "checkpoint");
         assert_eq!(store.unread("/root/checkpoint_worker").unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn operator_is_virtual_root_parent_and_root_can_message_it() {
+        let (service, store, _) = service().await;
+        let root = AgentPath("/root".into());
+        let operator = AgentPath("/operator".into());
+        assert_eq!(
+            store.agent(&root).unwrap().unwrap().parent,
+            Some(operator.clone())
+        );
+        assert_eq!(store.children_agents(&operator).unwrap()[0].path, root);
+        service
+            .send_message(&root, operator.clone(), "checkpoint".into())
+            .await
+            .unwrap();
+        let unread = store.unread(&operator.0).unwrap();
+        assert_eq!(unread.len(), 1);
+        let item = store.get_item(&unread[0].item_hash).unwrap().unwrap();
+        assert!(item.0.to_string().contains("checkpoint"));
     }
 
     #[tokio::test]
