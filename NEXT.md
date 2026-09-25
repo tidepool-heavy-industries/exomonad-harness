@@ -1,11 +1,13 @@
 # NEXT: finish the correction wave, second half
 
 You are the root. This file is where the last run stopped and where you start.
-Read it, then `README.md` for the reading order, then `docs/correction-plan.md`
-for the status table and `docs/tree.md` for the correction-wave bullet and the
-node protocol. The `TODO(correction-wave …)` and `FIXME(correction-wave …)`
-comments in `crates/` are the map into the code; each names the PRD rule it
-serves. `docs/questions.md` Q4 and Q5 are answered; read them before planning.
+For planning it replaces `README.md`, `docs/correction-plan.md`, `docs/tree.md`
+and `docs/questions.md`: what you need from them is quoted below (the one page,
+"Settled answers", "Correction items", "Node protocol"), so do not read them
+before planning. Open one only to edit it; append a question to
+`docs/questions.md` without reading it first. The `TODO(correction-wave …)` and
+`FIXME(correction-wave …)` comments in `crates/` are the map into the code;
+each names the PRD rule it serves.
 
 ## One page (read this first; everything after it is reference)
 
@@ -97,15 +99,89 @@ let leadTask = task [label|core|]
       ["crates/harness/src/compaction.rs"] "Compactor per the PRD shape, focused tests green, one integrate(core) commit" base
 ((leaf, leafProgress), (lead, leadProgress)) <- unfold (batch "correction" "wave-7") $ (,)
   <$> childWithProgress @WorkProgress @(Outcome Candidate) (withReport Silent (lunaTaskFrom [label|store-drop|] Medium currentCheckout leafTask))
-  <*> childWithProgress @WorkProgress @Delivery (withReport Silent (solTaskFrom [label|core|] High currentCheckout leadTask))
+  <*> childWithProgress @WorkProgress @Delivery (withReport Silent (withInstructions (projectPrompt "lead") (solTaskFrom [label|core|] High currentCheckout leadTask)))
 ```
 
+`solTaskFrom` carries the task prompt; the outer `withInstructions (projectPrompt
+"lead")` replaces it with the lead prompt, so a lead knows it owes a Delivery.
 End that cell. In the next, one router per result type:
 
 ```haskell
 leafRouter <- followWork [("store-drop", leaf, leafProgress)] (notifyWork me (withCheckpoints (workMessage candidateSummary)))
 leadRouter <- followWork [("core", lead, leadProgress)] (notifyWork me (workMessage deliverySummary))
 ```
+
+## Settled answers (quoted from `docs/questions.md`)
+
+- Q1 auth: use the subscription login in `~/.codex/auth.json` read-only
+  (`tokens.access_token`, `tokens.account_id`) against the streaming Codex
+  Responses endpoint. Never write, copy, refresh, print, log, commit or store
+  the token. On 401, stop and ask rather than refresh.
+- Q2 cache: "Verify history and report cache unobserved; a positive hit is not
+  required."
+- Q3 paths: "Single segment, as built. A child path is `/parent/task_name`."
+  The `core-` prefix is a naming convention, not nesting.
+- Q4 probe: "No capture exists and none is required. Byte-for-byte parity was
+  never the question; the question is whether `cached_tokens` reads above zero
+  on the second of two identical-prefix requests through our own builder."
+  Only if no, diff headers and body field order against Codex's builder in
+  source, as a field list. Answered yes on `d0245b3` (0 then 20,736).
+- Q5 authority: "The hold was a constraint on that run only and is lifted.
+  Admit a fresh core lead; preflight that it receives a message before giving
+  it work." "There is no provenance seam to scaffold first. PRD `settings
+  items` decides it (harness-authored only, forged ones dropped) and the
+  annotation at `Store::append_items` states the rule in one sentence. (c)
+  starts as implementation, not design."
+
+## Correction items (quoted from `docs/correction-plan.md`)
+
+1. One entry: `Engine::run(head: Option<RequestId>, new_items: Vec<Item>,
+   cancellation, incoming)` is the sole public run entry. No shims.
+2. Async jobs: every provider tool and crate verb except `wait_agent`
+   advertises `async: true`. Prove a live slow `sleep`: the model continues
+   with the call pending, then `wait_agent` resumes when the original call
+   settles. Record redacted request bodies in `docs/findings.md`.
+3. Positional settings: store `configuration_update` as an item; implement
+   `set_effort`, adjacency replacement and the fork strip list. Effort is
+   pinned through the item; any request-level field only mirrors its first
+   update. Prove live child history = filtered parent prefix + one update,
+   recording cache counters. A `configuration_update` enters the store only
+   via `set_effort`, a `here` fork's re-pin, or a compaction's fresh pin; any
+   other one is dropped at append. No SQL migration.
+4. Compaction: PRD `Compactor`, `CompactContext`, `Summary` and
+   `NewWindow { carried }` with `Server` only. Preserve the pending-call
+   invariant and record the unanswered-call experiment in findings.
+
+Hooks and provider-trait redesign beyond what (a)–(c) require are not in this
+wave. The wave ends when all four are integrated on master with their live
+traces in `docs/findings.md`, master is green, and `docs/interviews.md` has one
+section per node that ran.
+
+## Node protocol (quoted from `docs/tree.md`)
+
+`scaffold → commit → children → children repeat or implement → integrate → review(1 cycle) → report`
+
+- Scaffold commit `scaffold(<label>): <one line>`, body listing modules and
+  owner label each; every child module exists as a compiling stub with its
+  `mod` line. Must pass `cargo check -p <crate>`.
+- Integrate commit `integrate(<label>): <children merged>`, body listing every
+  contract amendment. A contract change is a new `amend(<label>): <what>`
+  commit that every child merges.
+- Contract files (a leaf never edits them; it asks):
+  `crates/harness/src/{item,model,provider,hooks,agents,mailbox,compaction/trait,protocol}.rs`,
+  `crates/harness/src/store/schema.sql`, `web/src/protocol.ts`,
+  `crates/harness/src/text/`.
+- Leaves: `cargo check -p <crate>` and `cargo test -p <crate> <name>` only, no
+  workspace-wide builds; commit by pathspec (`git commit -F msg -- <paths>`);
+  no `todo!()` in a delivered module.
+- Operator question shape: `[<label>] <question>` + `default: <what you do if
+  no answer>` + `blocks: <what waits>`, appended to `docs/questions.md`.
+- Interview (every node, in its reply, then one section per node in
+  `docs/interviews.md`): which scaffold item changed under you, who, how you
+  learned; what you needed from a sibling that the scaffold did not give;
+  where an API differs from its docs; what integration cost your parent that
+  a different split avoids; what you would scaffold differently; which nudges
+  fired on you, right or wrong.
 
 ## Where the last run stopped (2026-09-24, one hour, two runs into this wave)
 
@@ -117,10 +193,8 @@ leadRouter <- followWork [("core", lead, leadProgress)] (notifyWork me (workMess
   result, redacted request bodies in `docs/findings.md`. The bounded probe
   spent no inference: `docs/item2-live.md` identifies the missing auditable
   request-body/job-timing trace surface. Add that seam before one manual run.
-- (c) settings items: not started. The last lead returned `Blocked` on a
-  "provenance seam". That seam is decided, not open: PRD `settings items` says
-  harness-authored only; the TODO at `Store::append_items` states the drop
-  rule in one sentence. Order inside (c): drop rule at append → `set_effort`
+- (c) settings items: not started; the provenance seam is decided (Q5 above).
+  Order inside (c): drop rule at append → `set_effort`
   appends the positional item → `here` fork strips by item type and re-pins
   with one fresh update → request-level effort mirrors the first update in the
   sent history → live item-13 trace with cache counters last.

@@ -1,17 +1,30 @@
-Read `NEXT.md` first, then the plan it names; the prompt trials it lists are
-rules for this run. Own delivery of the agreed project outcome through checked integration.
-Read the current plan index and accepted human decisions. An example package is
+Read `NEXT.md` first; the prompt trials it lists are rules for this run. Own
+delivery of the agreed project outcome through checked integration. NEXT.md's
+one page quotes the plan status, the accepted human decisions and the rules
+from the other project docs; open those only to edit them. An example package is
 not product approval. Ask about missing finished behavior or authority needed
 for the next action; reuse settled answers. An operator hold stays in force
 until explicitly lifted.
 
-Vocabulary (Project.Types, Project.Work, Project.Routing, Project.Observe and the library; `(...)` elides a constraint list; no lookup needed):
+You need not read `.exomonad/prompts/review.md` or the exomonad-review,
+exomonad-cleanup or exomonad-workbench skills: the Reference below carries what
+they add for you. A reviewer is told to check the seeded HEAD, read the
+cumulative diff from the assignment base (for `reviewCommit`, the base you
+state in the acceptance text, since CommitReview carries none), report matched
+and passed counts, read for a second way to do an existing thing before bugs,
+and reply `Outcome ReviewDecision`. `Tidepool.Command` has no job list: a `Job`
+is the value `Cmd.start` returned, or `Cmd.job` of a `RunResult`; bind it, and
+after a restart re-run the command or read its output file instead.
+
+Reference (Project.Types, Project.Work, Project.Routing, Project.Observe and the library; `(...)` elides a constraint list; no lookup needed):
 - `data GitOid = GitOid Text` -- `GitOid "<full 40-hex commit>"`.
+- `data Task = Task { taskGroup :: ForkGroupPath, planPath :: Text, taskSource :: GitOid, obligation :: Text, rationale :: Text, ownedPaths :: [Text], acceptance :: Text, acceptedDecisions :: [AcceptedDecision] }` -- record updates override `task`'s defaults.
 - `task :: Label -> Text -> [Text] -> Text -> GitOid -> Task` -- label, obligation, owned paths, acceptance, source.
 - `taskSource :: Task -> GitOid` -- the commit a child's Task starts from.
 - `withDecision :: AcceptedDecision -> Task -> Task` -- adds a decision and replaces taskSource with its incorporated source.
 - `lunaTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result` -- fresh-context Luna child.
-- `solTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result` -- Sol child inheriting your context.
+- `solTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result` -- Sol child inheriting your context; it carries the task prompt, so a lead gets `withInstructions (projectPrompt "lead") (solTaskFrom ...)`.
+- `withInstructions :: Text -> Branch child input result -> Branch child input result` -- the outermost call wins; `projectPrompt :: Text -> Text` reads `.exomonad/prompts/<name>.md` by its config key.
 - `childWithProgress :: forall progress result child input parent . (...) => Branch child input result -> Unfold parent (Response result, Progress progress)` -- child with a progress stream.
 - `unfold :: forall parent result . (...) => ForkGroupPath -> Unfold parent result -> Eff parent result` -- one admission cell per wave.
 - `withReport :: SettlementReporting -> Branch child input result -> Branch child input result` -- `data SettlementReporting = NotifyOwner | Silent`; Silent when a router follows the child.
@@ -21,6 +34,16 @@ Vocabulary (Project.Types, Project.Work, Project.Routing, Project.Observe and th
 - `workMessage :: (value -> Text) -> WorkEvent value -> Maybe Text` -- renders questions and results.
 - `candidateSummary :: Outcome Candidate -> Text` -- also `deliverySummary :: Delivery -> Text`.
 - `request :: forall result input effs . Member Replies effs => AgentRef -> Assignment input -> Eff effs (Response result)` -- new work for a retained actor; `assignment :: Label -> input -> Assignment input`.
+- `requestWithProgress :: forall progress result input effs . Member Replies effs => AgentRef -> Assignment input -> Eff effs (Response result, Progress progress)` -- the same with a progress stream, e.g. `requestWithProgress @WorkProgress @Delivery`.
+- `data WorkProgress = WorkProgress { workEvidence :: [Candidate], workQuestions :: Attention }` -- what a child's reportProgress publishes.
+- `responseActor :: Response result -> AgentRef` -- the child behind a response, for `sendMessage` and `request`.
+- `sendMessage :: Member Notifications effs => AgentRef -> Text -> Eff effs (Either NotificationError NotificationReceipt)` -- a receipt proves transport, not reading.
+- `updateRequest :: Member Replies effs => Response result -> Text -> Eff effs (Either ReplyError RequestUpdate)` and `pollRequestUpdate :: Member Replies effs => RequestUpdate -> Eff effs (Either ReplyError RequestUpdateState)` -- steer a pending request; `data RequestUpdateState = UpdateQueued | UpdatePresented | UpdateTooLate | UpdateUnconfirmed Text | UpdateNotPresented Text`.
+- `pollResponse :: Member Replies effs => Response result -> Eff effs (ResponseState result)` -- `ResponsePending PendingProgress | ResponseCancellationPending CancellationReason | ResponseReady (ResponseResult result) | ResponseUnavailable ResponseFailure | ResponseStarting Text`; `ResponseResult { responseValue, responseExecution, responseWorktree }`.
+- `reviewCommit :: (...) => Label -> GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- label, commit, acceptance, owned paths, repair owner; `data RepairOwner = OwnerRepairs | RetainedImplementer AgentRef`.
+- `data ReviewDecision = Accepted ReviewedCandidate | Repair Candidate [Text]`; `data ReviewedCandidate = ReviewedCandidate { acceptedAssignment :: Task, reviewedCandidate :: Candidate, reviewChecks :: [Text], reviewRationale :: Text }`.
+- `planCleanupFor :: Member AgentInspection effs => Response result -> Eff effs CleanupPlan`, `executeCleanup :: Member AgentControl effs => CleanupPlan -> Eff effs CleanupReceipt` -- retire a settled child's fork group: `executeCleanup =<< planCleanupFor child`; nothing is deleted.
+- `stopAgent :: Member AgentControl effs => AgentRef -> Eff effs StopOutcome` -- for a stuck child; `StoppedNow` and `StoppedRetaining Text` are final, `StoppedReleasing` sends one later notice: do not re-issue.
 
 `NEXT.md` carries the fork recipe for one Luna child and one Sol lead.
 

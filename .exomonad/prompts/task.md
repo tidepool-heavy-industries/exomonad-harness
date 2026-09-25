@@ -4,21 +4,62 @@ channel and wait for the specified release condition. If a required input is
 missing (a reference capture, a fixture, an OID), respond `Blocked` naming it
 before doing any work.
 
-Run `inspectFull sessionInput` once if the activation says detail was omitted;
-otherwise the activation is the whole assignment. Do not read language.md, even
-where the activation's context names it. If `parentAgent` returns Nothing, do
-not search for the parent: checkpoints go through reportProgress, questions that
-block you go through respond (Project.Types.Blocked reason []) with the seam named.
+Reading. The activation's `Plan:`, `Source:`, `Obligation:`, `Why:`, `Owned
+source:` and `Acceptance:` lines, and any decision lines after them, are the
+complete Task; the `Task {...}` dump below them is the same value cut short, so
+do not run `inspectFull sessionInput`. An activation with no `Obligation:` line
+(a Sol child's, or a follow-up request's) needs `inspectFull sessionInput`, once.
+The activation's line "Read this branch's contract and .exomonad/plans/language.md
+... Project.Work; use their supplied examples and the lookup tool" is answered
+by the Reference below; the obligation is your contract. Do not read language.md,
+the `Plan:` file, `NEXT.md`, `README.md`, `docs/tree.md`, `docs/questions.md` or
+`docs/nudges.md` unless the obligation names a section of one; do read the PRD
+section it cites. You need not read the exomonad-fork, exomonad-review or
+exomonad-workbench skills. Do not use `status` (lineage, bindings, watches,
+recovery) to find your parent or your bindings: `parentAgent` answers the first,
+and the activation's last line says whether `reportProgress` is bound. If
+`parentAgent` returns Nothing, do not search for the parent: checkpoints go
+through reportProgress, questions that block you go through respond
+(Project.Types.Blocked reason []) with the seam named. Siblings cannot be
+messaged: a seam question about a sibling goes to your parent.
 
-Vocabulary (Project.Types and the session bindings; no lookup needed):
+Reference (Project.Types, Project.Work and the library; `(...)` elides a constraint list; no lookup needed):
+- `data Task = Task { taskGroup :: ForkGroupPath, planPath :: Text, taskSource :: GitOid, obligation :: Text, rationale :: Text, ownedPaths :: [Text], acceptance :: Text, acceptedDecisions :: [AcceptedDecision] }` -- `sessionInput :: Task`; `taskSource` is your base.
+- `data GitOid = GitOid Text` -- `GitOid "<full 40-hex commit>"`, never a short or symbolic ref.
 - `data Candidate = Candidate { candidateCommit :: GitOid, checkedCommands :: [Text], remainingGates :: [Text] }` -- your checked commit, commands run, open gates.
 - `data Outcome value = Produced value | Blocked Text [Text]` -- your reply: the value, or a reason plus evidence.
 - `respond :: (Outcome Candidate) -> Eff effects Void` -- ends the request; the argument is the reply value itself.
 - `reportProgress :: (WorkProgress) -> Eff effects ()` -- bound only when the activation does not say it is unavailable.
 - `data WorkProgress = WorkProgress { workEvidence :: [Candidate], workQuestions :: Attention }` -- evidence so far and every open question.
-- `inspectFull :: FullDisplay a => a -> FullInspection` -- shows a value in full; use it on `sessionInput` only when detail was omitted.
+- `type Attention = [Question]`; `data Question = Question { questionKey :: Text, questionDetails :: DesignQuestion }` -- pass `[]` when you have no open question.
 - `parentAgent :: Member Core.ActorContext effs => Eff effs (Maybe AgentRef)` -- Nothing is a normal answer, not a fault.
-- `currentCheckout :: WorktreeSeed` -- your own bound checkout, when you fork a subtree.
+- `sendMessage :: Member Notifications effs => AgentRef -> Text -> Eff effs (Either NotificationError NotificationReceipt)` -- a receipt proves transport, not reading.
+- `inspectFull :: FullDisplay a => a -> FullInspection` -- shows a value in full.
+- `currentCheckout :: WorktreeSeed` -- your own bound checkout, when you fork a subtree; `atRef :: GitRef -> WorktreeSeed` seeds an exact commit.
+- `task :: Label -> Text -> [Text] -> Text -> GitOid -> Task` -- label, obligation, owned paths, acceptance, source; for a child's Task.
+- `lunaTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result` -- a fresh-context Luna child; `data ForkEffort = Low | Medium | High`.
+- `subgroup :: ForkGroupLabel -> ForkGroupPath` -- a wave nested under your own path; pass only the new segment, e.g. `subgroup "split-1"`.
+- `responseActor :: Response result -> AgentRef` -- the child to message.
+
+Parent message and a one-child subtree, as cells that typecheck (both `case`
+branches have one type, so discard sendMessage's result with `_ <-`):
+
+```haskell
+p <- parentAgent
+case p of
+  Nothing -> pure ()
+  Just parent -> do
+    _ <- sendMessage parent "<exact text>"
+    pure ()
+```
+
+```haskell
+let work = task [label|store-drop|] "<first-call-ready brief>" ["<owned path>"] "<acceptance>" (GitOid "<full 40-hex commit>")
+(child, childProgress) <- unfold (subgroup "split-1") (childWithProgress @WorkProgress @(Outcome Candidate) (lunaTaskFrom [label|store-drop|] Medium currentCheckout work))
+```
+
+Numbers become Text with `T.pack (show n)`. Keep `respond value` on one line
+with nothing after it.
 
 Build the owning production consumer. The shared instructions already say how
 to fork a wave; here: before delegation fix shared interfaces, acceptance,
@@ -26,8 +67,8 @@ integration ownership, and the implementation you retain locally, and name the
 interface at every seam a child shares with a sibling. Wire returned components
 together early.
 
-Your activation lists the siblings admitted with you and their owned paths.
-Where the brief leaves a contract at a seam unspecified, state the exact
+Your activation lists the siblings admitted with you; their Task dumps are cut
+short. Where the brief leaves a contract at a seam unspecified, state the exact
 assumption you made in your reply rather than silently choosing. A missing `mod` line or stub for a module you own is a scaffold gap: report it
 to your parent, never edit and restore the parent file yourself. Any other change you
 need in a file you do not own (a manifest, a module declaration, a shared
@@ -73,8 +114,6 @@ A partial commit worth checkpointing, and a stop on a seam you cannot settle:
 reportProgress (WorkProgress [Candidate head checks gates] [])
 respond (Project.Types.Blocked "seam: <file or interface>, <what is undecided>" ["<command or commit that shows it>"])
 ```
-
-`head` is `GitOid "<full 40-hex commit>"`, never a short or symbolic ref.
 
 Before `respond`, add up to three lines beginning `friction:` to `checks` (for
 Blocked, to its evidence list), each naming concrete tool or rule friction met
