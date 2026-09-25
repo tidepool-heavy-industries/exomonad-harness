@@ -36,6 +36,7 @@ struct PendingCall {
     call_id: CallId,
     claim_request: RequestId,
     is_wait_agent: bool,
+    persist_here_invocation_output: bool,
     cancel_job_on_cleanup: bool,
 }
 
@@ -290,6 +291,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     call_id: claim.call_id,
                     claim_request: claim.request,
                     is_wait_agent: false,
+                    persist_here_invocation_output: false,
                     cancel_job_on_cleanup: false,
                 }),
             }
@@ -339,7 +341,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .await?;
         }
         let mut parent = id.clone();
-        let mut pending = Vec::<PendingCall>::new();
         let mut compact_due = false;
         let mut previous_usage = Usage::default();
         loop {
@@ -698,6 +699,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             return Err(EngineError::InvalidFunctionCall);
         };
         let is_wait_agent = name == "wait_agent";
+        let is_here_spawn = name == "spawn_agent" && args["from"]["kind"].as_str() == Some("here");
         if is_wait_agent {
             let store = self.store.clone();
             let call = call_id.clone();
@@ -707,6 +709,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 call_id,
                 claim_request: request.clone(),
                 is_wait_agent,
+                persist_here_invocation_output: false,
                 cancel_job_on_cleanup: false,
             }));
         }
@@ -740,6 +743,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             call_id,
             claim_request: request.clone(),
             is_wait_agent,
+            persist_here_invocation_output: is_here_spawn,
             cancel_job_on_cleanup: true,
         }))
     }
@@ -785,7 +789,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let outputs = outputs_in_call_order(&self.scheduler, &calls).await?;
         let mut settled = Vec::with_capacity(outputs.len());
         for (call_id, output) in outputs {
-            self.persist_output(&call_id, &output, request).await?;
+            let output_request = pending
+                .iter()
+                .find(|call| call.call_id == call_id)
+                .filter(|call| call.persist_here_invocation_output)
+                .map(|call| call.claim_request.clone())
+                .unwrap_or_else(|| request.clone());
+            self.persist_output(&call_id, &output, &output_request)
+                .await?;
             pending.retain(|call| call.call_id != call_id);
             settled.push(call_id);
         }
@@ -841,7 +852,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         durable_mailbox: bool,
     ) -> Result<(), EngineError> {
         for (call_id, output) in result.call_outputs {
-            self.persist_output(&call_id, &output, request).await?;
+            let output_request = pending
+                .iter()
+                .find(|call| call.call_id == call_id)
+                .filter(|call| call.persist_here_invocation_output)
+                .map(|call| call.claim_request.clone())
+                .unwrap_or_else(|| request.clone());
+            self.persist_output(&call_id, &output, &output_request)
+                .await?;
             pending.retain(|call| call.call_id != call_id);
         }
         let (agent_envelope, user_envelope, output) = match result.resumed_by {
@@ -1516,6 +1534,15 @@ mod tests {
                             "role":"assistant",
                             "phase":"final_answer",
                             "content":"spawned"
+                        }))],
+                    ),
+                    turn(
+                        "active-here-parent-after-spawn",
+                        vec![Item(json!({
+                            "type":"message",
+                            "role":"assistant",
+                            "phase":"final_answer",
+                            "content":"spawn output persisted"
                         }))],
                     ),
                 ]
