@@ -12,7 +12,7 @@ detail remains in Git history. Do not fabricate watchdog or nudge events.
 | A completed leaf commit was visible in Git before its parent published a candidate. Commit, typed delivery, review, merge and verified integration were easy to confuse. | Show these as separate source-bound states; let a parent ask for the exact candidate rather than infer acceptance from a branch head. |
 | A probe's latest commit touched only owned paths, but an earlier commit in its branch still changed `docs/findings.md`. Root caught this by comparing the *cumulative* diff, sent it back, and merged only the repaired branch (`cdbbd367` via `b99337e`). | Make the cumulative base-to-candidate owned-path gate first-class. A clean tip commit is not sufficient. |
 | The cache probe had no exact Codex wire capture, so it sent no live requests and returned a documented blocker. It had initially edited the shared findings file before root corrected ownership. | Preflight reference evidence and shared-file ownership before inference spend. Preserve `Blocked` as a real outcome, not a passing probe. |
-| `sendMessage` to the core lead returned a delivery receipt, but the operator observed no active tmux work and root saw no progress or reply. The runtime showed the request as `Working` while its workbench was idle. This is a suspected wake/resume defect, **not yet diagnosed**; a receipt proves neither presentation nor action. | Trace notification receipt → actor wake → provider turn → progress/reply. Surface a “stalled despite pending request” state and an explicit recovery action. |
+| `sendMessage` to the core lead returned a delivery receipt, but the operator observed no active tmux work and root saw no progress or reply. The runtime showed the request as `Working` while its workbench was idle. Core later reported its inbox was fenced and it could not receive further host notifications this run. The mechanism remains **undiagnosed**; a receipt proved neither presentation nor action. | Trace notification receipt → inbox fence → actor wake → provider turn → progress/reply. Surface a “stalled despite pending request” state and an explicit recovery action. |
 | The root checked a router snapshot on status questions and found only `pending`. | Keep event-driven continuations: notify once on actionable change, and distinguish a meaningful wait from polling or an idle actor. |
 | A message asked core to incorporate probe evidence into `docs/findings.md`. Delivery alone does not show that it did so. | Require an incorporation receipt tied to the exact commit and focused check. This run's prompt trial uses that rule manually. |
 | The cache blocker required an operator question. The answer may never arrive. | Keep the recommendation and unanswered question in `docs/questions.md`; allow reversible work to proceed while the irreversible live comparison remains blocked. |
@@ -64,9 +64,10 @@ detail remains in Git history. Do not fabricate watchdog or nudge events.
 ## Node notes
 
 - **Core lead:** Own-words plan received: (b), then (c), then (d), with
-  focused checks and manual live traces. Its final interview and source
-  delivery are pending. The suspected idle/wake issue above is a root
-  observation, not a diagnosis from core.
+  focused checks and manual live traces. At its later checkpoint, (b) had
+  a committed leaf but no review/merge, and (c)/(d) had not started. Core
+  reported an inbox fence, so it planned to continue inline without
+  further forks. Its final interview and source delivery are pending.
 - **Cache-probe leaf:** Its own account is in `docs/interviews.md`. It
   found no byte-for-byte Codex reference capture, made no live calls, and
   repaired an out-of-scope branch ancestor before integration. The blocker
