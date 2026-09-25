@@ -343,3 +343,14 @@ before removal found `/root` and `/root/helper` agent heads, three root
 requests and one child request, a delivered child NEW_TASK, and a delivered
 child FINAL_ANSWER to root. This verifies a live prompt-fork/wait/answer path,
 not crash recovery or worktree isolation.
+
+## Correction-wave cache-shape probe
+
+The bounded probe was **Blocked**, not accepted: no new live requests were
+sent, no redacted request bodies were captured, and no new cache counters
+were measured. The exact reference capture of Codex's ordered headers and
+serialized body bytes was unavailable; reconstructing it from a narrative
+would not establish byte-for-byte parity. Root incorporated the probe's
+evidence as `cdbbd367` (`docs/cache-probe-evidence.md`), then integrated it
+on master in `b99337e`. Prior counters above are from different requests and
+must not be counted toward this probe.
