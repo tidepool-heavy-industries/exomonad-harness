@@ -30,6 +30,7 @@ struct CliOptions {
     ask: String,
     dev_shell: bool,
     tree: bool,
+    trace_jsonl: Option<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -47,7 +48,8 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
     if args.first().map(String::as_str) == Some("--smoke") {
         return Ok(Mode::Smoke);
     }
-    let (mut db, mut ask, mut serve, mut dev_shell, mut tree) = (None, None, None, false, false);
+    let (mut db, mut ask, mut serve, mut dev_shell, mut tree, mut trace_jsonl) =
+        (None, None, None, false, false, None);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -67,6 +69,12 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
             }
             "--dev-shell" => dev_shell = true,
             "--tree" => tree = true,
+            "--trace-jsonl" => {
+                i += 1;
+                trace_jsonl = Some(PathBuf::from(
+                    args.get(i).ok_or("--trace-jsonl requires a path")?,
+                ));
+            }
             "--allow-shell" => {
                 return Err("use --dev-shell to opt into development shell execution".into());
             }
@@ -75,6 +83,9 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
         i += 1;
     }
     let db = db.ok_or("--db <sqlite-path> is required")?;
+    if trace_jsonl.is_some() && (!tree || serve.is_some()) {
+        return Err("--trace-jsonl requires --tree --ask".into());
+    }
     if let Some(addr) = serve {
         if ask.is_some() {
             return Err("--serve and --ask are mutually exclusive".into());
@@ -97,6 +108,7 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
         ask,
         dev_shell,
         tree,
+        trace_jsonl,
     }))
 }
 
@@ -482,6 +494,7 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
         ask: String::new(),
         dev_shell,
         tree: false,
+        trace_jsonl: None,
     })?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -956,11 +969,51 @@ mod tests {
                 ask: "hi".into(),
                 dev_shell: true,
                 tree: false,
+                trace_jsonl: None,
             })
         );
         assert!(matches!(
             parse(&["--db", "state.sqlite", "--ask", "hi", "--tree"]).unwrap(),
             Mode::Ask(CliOptions { tree: true, .. })
+        ));
+        assert!(
+            parse(&[
+                "--db",
+                "state.sqlite",
+                "--ask",
+                "hi",
+                "--trace-jsonl",
+                "trace.jsonl"
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "--db",
+                "state.sqlite",
+                "--serve",
+                "127.0.0.1:8000",
+                "--tree",
+                "--trace-jsonl",
+                "trace.jsonl"
+            ])
+            .is_err()
+        );
+        assert!(matches!(
+            parse(&[
+                "--db",
+                "state.sqlite",
+                "--ask",
+                "hi",
+                "--tree",
+                "--trace-jsonl",
+                "trace.jsonl"
+            ])
+            .unwrap(),
+            Mode::Ask(CliOptions {
+                trace_jsonl: Some(_),
+                ..
+            })
         ));
         assert!(
             parse(&[
@@ -1144,6 +1197,7 @@ mod tests {
             ask: "hello".into(),
             dev_shell: false,
             tree: false,
+            trace_jsonl: None,
         };
         let _driver = CliDriver::new(&options).unwrap();
         let provider = CliProvider(DemoProvider::development(".", false));
