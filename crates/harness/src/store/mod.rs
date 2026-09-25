@@ -592,9 +592,21 @@ impl Store {
     /// Append the harness-owned effort item, replacing an immediately adjacent
     /// update so a second change before the next response does not grow history.
     pub(crate) fn set_effort(&self, request: &RequestId, effort: Effort) -> Result<ItemHash> {
-        let item = Item::configuration_update(effort);
         let mut c = self.lock();
         let tx = c.transaction()?;
+        let hash = Self::set_effort_tx(&tx, request, effort)?;
+        tx.commit()?;
+        Ok(hash)
+    }
+
+    // The single trusted positional-setting writer. Both the ordinary
+    // Store::set_effort API and atomic pending-setting consumption route here;
+    // model-authored items still cannot reach it through append_items.
+    fn set_effort_tx(
+        tx: &Transaction<'_>,
+        request: &RequestId,
+        effort: Effort,
+    ) -> Result<ItemHash> {
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
             [&request.0],
@@ -631,12 +643,11 @@ impl Store {
                     |r| r.get::<_, bool>(0),
                 )?)
         };
-        let hash = Self::put_item_tx(&tx, &item)?;
+        let hash = Self::put_item_tx(tx, &Item::configuration_update(effort))?;
         tx.execute(
             "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
             params![request.0, position, hash.0],
         )?;
-        tx.commit()?;
         Ok(hash)
     }
 
@@ -674,47 +685,7 @@ impl Store {
             return Ok(None);
         };
         let effort: Effort = serde_json::from_str(&pending)?;
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
-            [&request.0],
-            |r| r.get(0),
-        )?;
-        if !exists {
-            return Err(StoreError::MissingRequest(request.0.clone()));
-        }
-        let last: Option<(i64, String)> = tx
-            .query_row(
-                "SELECT ri.position,i.json FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 ORDER BY ri.position DESC LIMIT 1",
-                [&request.0],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let (position, replace) = match last {
-            Some((position, raw)) => {
-                let previous: Item = serde_json::from_str(&raw)?;
-                (position, previous.is_configuration_update())
-            }
-            None => (0, false),
-        };
-        let position = if replace {
-            tx.execute(
-                "DELETE FROM request_items WHERE request_id=?1 AND position=?2",
-                params![request.0, position],
-            )?;
-            position
-        } else {
-            position
-                + i64::from(tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM request_items WHERE request_id=?1)",
-                    [&request.0],
-                    |r| r.get::<_, bool>(0),
-                )?)
-        };
-        let hash = Self::put_item_tx(&tx, &Item::configuration_update(effort))?;
-        tx.execute(
-            "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
-            params![request.0, position, hash.0],
-        )?;
+        let hash = Self::set_effort_tx(&tx, request, effort)?;
         tx.execute("DELETE FROM session_state WHERE session_id=?1", [&key])?;
         tx.commit()?;
         Ok(Some(hash))
