@@ -748,6 +748,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     fn tools(&self, finalize_schema: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
         let mut tools = self.config.tools.clone();
         if let Some(schema) = finalize_schema {
+            // Typed completion owns this name for this run. A caller may have
+            // supplied a non-strict or differently-shaped finalize tool;
+            // advertising both would make the reply contract ambiguous.
+            tools.retain(|tool| {
+                tool.get("name").and_then(serde_json::Value::as_str) != Some(FINALIZE_TOOL_NAME)
+            });
             tools.push(schema.clone());
         }
         for tool in self.provider.all_tools() {
@@ -4219,7 +4225,10 @@ mod tests {
             Arc::new(Echo),
             EngineConfig {
                 instructions: "finalize".into(),
-                tools: vec![],
+                tools: vec![json!({
+                    "type":"function", "name":"finalize", "strict":false,
+                    "parameters":{"type":"object","properties":{}}
+                })],
                 model: "test".into(),
                 effort: Effort::Low,
                 session_id: "typed-session".into(),
