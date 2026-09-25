@@ -17,13 +17,47 @@ wrapper or turn this wave into its compiler repair.
 
 ## First checkpoint
 
-Resolve the actual committed HEAD as the launch baseline. Root inspects current
-production owners, commits the minimum compiling contract/fixture and assigns
-separate files for production, tests and process-barrier support before dependent
-forks. Exercise a real serialization/input boundary and a consequential failure
-case; expected-red is allowed when executed and named accurately. Keep the current
-API here canonical. Corrections replace obsolete signatures rather than appending
-contradictory instructions to this section.
+Launch baseline: `3788fd25ff7b081ac123b66aadf1dab25c0f021a`.
+Root scaffold: existing `Store::complete_agent_with_publication` in
+`crates/harness/src/store/mod.rs` atomically advances the child head and inserts
+the typed parent answer; `CompletionCommit` in `lifecycle.rs` reports CAS loss or
+committed envelope ID. `Driver::start` subscribes before durable `scan`, and
+`scan` admits active agents with unread inbox; Engine claims unread envelopes
+when creating a request. Wake channels are hints, never persisted evidence.
+This is the sole current contract; no second journal/scheduler is authorized.
+An active head with no unread inbox is unsupported interrupted execution and
+must be classified explicitly, not silently replayed. A committed head/answer
+followed by lost wake must be discovered by Store-backed restart scanning.
+
+Owners after scaffold: durable lead owns `store/mod.rs`,
+`agent_runtime.rs`, `store/recovery_tests.rs`; Engine lead owns `engine.rs`,
+`engine/recovery_tests.rs`; Driver lead owns `driver.rs`,
+`driver/recovery_tests.rs`, `main.rs`. Root owns `lifecycle.rs`, all module
+declarations, `NEXT.md`, and a separate cross-component process-crash gate.
+Leads must split production and test files between at least two Luna children.
+All briefs cite PRD.md § `store (sqlite, one file, one process)` and
+docs/rsi-iteration-3.md § `Acceptance matrix`.
+
+Initial boundary check: `scripts/cargo-focused-test --package harness --target
+lib --filter complete_agent_with_publication_` expects 2 matched and passed;
+it exercises rollback on envelope insertion failure. `scripts/cargo-focused-test
+--package harness-demo --target bin:harness-demo --filter followup_lifecycle`
+expects 2 matched and passed; it exercises the wire-safe typed answer and
+seen/unseen reference through Store reopen (not process crash).
+The process-crash gate must use a child process and explicit barriers, not
+task abort or graceful shutdown. Publication count and durable IDs are checked
+after restart; no exactly-once external execution promise follows.
+
+Admission checkpoint expected from each Luna lead: nested children, exact
+scaffold base OID, disjoint owned paths, first expected reply and focused
+target/filter/count. Report local integration OID and incorporation checks.
+
+| Obligation | Owner | Current evidence | Gate |
+| --- | --- | --- | --- |
+| Durable discovery and atomic publication | durable lead | pending scaffold checks | reviewed Delivery |
+| Request-boundary replay/provenance | Engine lead | pending scaffold checks | reviewed Delivery |
+| Restart admission/shutdown | Driver lead | pending scaffold checks | reviewed Delivery |
+| Abrupt process-loss cross-boundary gate | root | not implemented | executed process test |
 
 Candidate domains: durable recovery, Engine request-boundary recovery, and Driver
 restart/admission. Root finalizes exact ownership and retains the cross-component

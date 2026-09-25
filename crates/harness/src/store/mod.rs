@@ -43,6 +43,10 @@ pub enum StoreError {
     #[error("session state key uses the reserved harness namespace: {0}")]
     ReservedSessionStateNamespace(String),
 }
+
+#[cfg(test)]
+#[path = "recovery_tests.rs"]
+mod recovery_tests;
 pub type Result<T> = std::result::Result<T, StoreError>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

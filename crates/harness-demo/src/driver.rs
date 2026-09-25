@@ -43,6 +43,10 @@ pub trait EngineFactory: Send + Sync + 'static {
     ) -> Result<EngineCompletion, String>;
 }
 
+#[cfg(test)]
+#[path = "driver/recovery_tests.rs"]
+mod recovery_tests;
+
 /// Generic bridge for production and replay engine construction.
 pub struct HarnessEngineFactory<A, P, C, F> {
     pub auth: Arc<A>,

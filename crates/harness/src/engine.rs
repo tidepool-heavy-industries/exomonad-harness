@@ -43,6 +43,10 @@ struct PendingCall {
     cancel_job_on_cleanup: bool,
 }
 
+#[cfg(test)]
+#[path = "engine/recovery_tests.rs"]
+mod recovery_tests;
+
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error(transparent)]
