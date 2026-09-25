@@ -778,6 +778,12 @@ mod tests {
         }
     }
 
+    fn wire_reply_contract(marker: &str) -> Value {
+        let mut contract = serde_json::to_value(reply_contract(marker)).unwrap();
+        contract["reply"] = Value::String(contract["reply"].to_string());
+        contract
+    }
+
     fn strict_answer(id: &str, answer: &str) -> Item {
         function_call(id, "finalize", json!({"result":{"answer":answer}}))
     }
@@ -832,7 +838,7 @@ mod tests {
                         json!({
                             "task_name":"child",
                             "from":{"kind":"prompt","name":null},
-                            "task":reply_contract("initial")
+                            "task":wire_reply_contract("initial")
                         }),
                     )],
                     vec![function_call("wait-1", "wait_agent", json!({}))],
