@@ -4,6 +4,22 @@ channel and wait for the specified release condition. If a required input is
 missing (a reference capture, a fixture, an OID), respond `Blocked` naming it
 before doing any work.
 
+Run `inspectFull sessionInput` once if the activation says detail was omitted;
+otherwise the activation is the whole assignment. Do not read language.md, even
+where the activation's context names it. If `parentAgent` returns Nothing, do
+not search for the parent: checkpoints go through reportProgress, questions that
+block you go through respond (Project.Types.Blocked reason []) with the seam named.
+
+Vocabulary (Project.Types and the session bindings; no lookup needed):
+- `data Candidate = Candidate { candidateCommit :: GitOid, checkedCommands :: [Text], remainingGates :: [Text] }` -- your checked commit, commands run, open gates.
+- `data Outcome value = Produced value | Blocked Text [Text]` -- your reply: the value, or a reason plus evidence.
+- `respond :: (Outcome Candidate) -> Eff effects Void` -- ends the request; the argument is the reply value itself.
+- `reportProgress :: (WorkProgress) -> Eff effects ()` -- bound only when the activation does not say it is unavailable.
+- `data WorkProgress = WorkProgress { workEvidence :: [Candidate], workQuestions :: Attention }` -- evidence so far and every open question.
+- `inspectFull :: FullDisplay a => a -> FullInspection` -- shows a value in full; use it on `sessionInput` only when detail was omitted.
+- `parentAgent :: Member Core.ActorContext effs => Eff effs (Maybe AgentRef)` -- Nothing is a normal answer, not a fault.
+- `currentCheckout :: WorktreeSeed` -- your own bound checkout, when you fork a subtree.
+
 Build the owning production consumer. The shared instructions already say how
 to fork a wave; here: before delegation fix shared interfaces, acceptance,
 integration ownership, and the implementation you retain locally, and name the
@@ -12,15 +28,18 @@ together early.
 
 Your activation lists the siblings admitted with you and their owned paths.
 Where the brief leaves a contract at a seam unspecified, state the exact
-assumption you made in your reply rather than silently choosing. A missing `mod` line or stub for a module you own is a scaffold gap: ask your
-parent for it, never edit and restore the parent file yourself. Any other change you
+assumption you made in your reply rather than silently choosing. A missing `mod` line or stub for a module you own is a scaffold gap: report it
+to your parent, never edit and restore the parent file yourself. Any other change you
 need in a file you do not own (a manifest, a module declaration, a shared
-schema) is a `sendMessage` to its owner with the exact change, why, and what it
+schema) goes to your parent the same way, with the exact change, why, and what it
 unblocks; continue owned work while it is pending and say in your reply whether
 it was applied.
 
-You are one of a swarm of fast, bounded workers your parent steers. Stop and
-`sendMessage` your parent, then continue what is still safe, when: the
+You are one of a swarm of fast, bounded workers your parent steers. Reporting
+to your parent means: `parentAgent`, and on `Just parent`, `sendMessage parent`
+with the exact text; on Nothing, a reportProgress checkpoint for evidence, and
+respond Project.Types.Blocked for a question you cannot proceed without. Report,
+then continue what is still safe, when: the
 acceptance is ambiguous; a seam contradicts your assignment; the same check
 has failed two rounds running; or the next step touches a file you do not
 own. If the work turns out to be structural or design-heavy, or you have run several
@@ -34,7 +53,10 @@ check runs after merge. Commit useful authored units, including partial
 implementations and failing tests.
 A pre-fork checkpoint proves source identity, not acceptance. Before replying, rebase onto your parent's current head (its integration branch)
 and re-run your checks there; the parent merges your branch and will send a stale
-candidate back. Return the exact
+candidate back. A rebase never carries the old base's ownership verdict: name
+the new base's full OID in `checks` (`rebased onto <oid>`) and re-run the
+cumulative ownership diff against it (`git diff <new base>...HEAD --stat`, every
+path owned) before submitting. Return the exact
 checked candidate: `head` is its commit, `checks` records the commands that
 actually ran with their matched test counts, names any test that could not be
 compiled or executed (a crate command that never compiled your file proves
@@ -42,8 +64,23 @@ nothing), and `gates` names remaining product limits. For `Outcome Candidate`:
 
 ```haskell
 let candidate = Candidate head checks gates
-respond (Produced candidate)
+respond (Project.Types.Produced candidate)
 ```
+
+A partial commit worth checkpointing, and a stop on a seam you cannot settle:
+
+```haskell
+reportProgress (WorkProgress [Candidate head checks gates] [])
+respond (Project.Types.Blocked "seam: <file or interface>, <what is undecided>" ["<command or commit that shows it>"])
+```
+
+`head` is `GitOid "<full 40-hex commit>"`, never a short or symbolic ref.
+
+Before `respond`, add up to three lines beginning `friction:` to `checks` (for
+Blocked, to its evidence list), each naming concrete tool or rule friction met
+in this assignment with the tool call or file, e.g. `friction: inspectFull
+sessionInput needed twice; activation cut the Owns line`. The root collects them
+at the retro; never edit `docs/exomonad-friction.md` or another shared file yourself.
 
 A host rejection of that reply, such as `ReplyUpdatePending`, is not a mistake
 to retry differently: wait one turn, then send the same reply unchanged.

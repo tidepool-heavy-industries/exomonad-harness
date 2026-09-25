@@ -7,6 +7,106 @@ node protocol. The `TODO(correction-wave …)` and `FIXME(correction-wave …)`
 comments in `crates/` are the map into the code; each names the PRD rule it
 serves. `docs/questions.md` Q4 and Q5 are answered; read them before planning.
 
+## One page (read this first; everything after it is reference)
+
+**Integrated head.** `master`. Resolve it with `git rev-parse master` before any
+fork and pass that full OID as every child's base. When this page was last
+edited: master `260b6942fde610e3b2d63f8d24bb1548790f88f0`; last integration
+`ee27b86201e817b42953b0c84d585650de98a054` (item2-live-gap); root scaffolds
+since: `8779c475019ed6f65fd780ff1fc04301b289caad` (item2-trace),
+`c427057f041de4e89dfbdaf19475278d499c55f6` (compaction dependency).
+
+**Obligations.** Detail per row under "Where the last run stopped".
+
+| item | owner | source / candidate | checks | unverified | next |
+|---|---|---|---|---|---|
+| (a) one entry | done | `9da6efe`, `a9f7a12` | integrated | nothing | nothing |
+| (b) async tools | trace leaf `trace.rs`; root `main.rs`/`driver.rs` | `d8097c3`; scaffold `8779c47` | `correction_wave` 1/1 passed | live item-2 continuation | trace seam (`docs/item2-trace-plan.md`), then one manual run |
+| (c) settings items | unassigned | none | none | all | drop rule at append, then the order in the detail |
+| (d) `Compactor` | Compactor leaf `compaction.rs` | scaffold `c427057` | `cargo check -p harness` | all | PRD shape, `Server` only, unanswered-call experiment |
+| cache probe | done | `d0245b3` | 0 then 20,736 cached tokens | general cache behavior | nothing |
+| interviews | every node | `docs/interviews.md` | root, probe, core present | later nodes | one section per node that runs |
+
+Expected-red tests: none recorded. One committed red gets a row here with its
+owner and closing slice.
+
+**Active refs and fences.** Children and requests live in `status`, one
+delivery line per child; this file does not list them. A retained
+`exomonad/...` branch is a candidate only when a child's reply names its
+commit. Fences are recorded in `docs/exomonad-friction.md`; an `inbox=fenced`
+line means stop steering that child (rule below).
+
+**Owner map.** Root: this file, `docs/correction-plan.md`, workspace and crate
+manifests and `Cargo.lock`, `crates/harness-demo/src/{main,driver}.rs`
+consumer wiring, integration commits, interviews, final checks. Contract files
+(list in `docs/tree.md`) change only by a root `amend(<label>)` commit. Each
+leaf owns the paths in its Task. Server, auth and web are frozen this wave;
+hooks are wave1.
+
+**Permitted live-run commands.** By hand, once each, trace in
+`docs/findings.md`; nothing else spends inference:
+`cargo test -p harness --lib live_subscription_response -- --ignored`,
+`cargo test -p harness --lib live_subscription_engine_final_answer -- --ignored`,
+and the item-2 and item-13 manual runs once their trace seams are integrated.
+
+**Five non-negotiable rules.**
+
+1. Never automate a test that spends inference. Live tests stay `#[ignore]`,
+   run by hand once, trace in findings (PRD `inference spend !`). A red offline
+   test on master between slices is fine and names its owner.
+2. Check the cumulative base-to-candidate diff for owned paths
+   (`git diff <base>...<tip> --stat`), not the tip commit; an ancestor can
+   carry an unowned edit.
+3. Review and incorporation name the exact commit. "Applied" without a commit
+   is nothing.
+4. Integrate = merge the child's branch at its exact commit, or send it back.
+   Never extract files from a stale candidate. Scaffold owns every `mod` line.
+5. Do not call preparation complete: nothing closes before the final checks on
+   integrated source (standing objective below).
+
+## Fork recipe
+
+The PRD is `PRD.md` at the repo root; cite it by heading (`PRD.md` § settings
+items). You need not re-read the fork or coordinate skills to write this.
+`base` is the full OID of your checked integration head, the commit your
+checkout is at when you fork. A child whose `parentAgent` is Nothing cannot
+message you, so each obligation carries base, PRD section, test command and
+how the child reports. Every obligation is this first-call-ready brief, filled in:
+
+```text
+Source: <full 40-hex commit>
+Owns: <paths>. Manifests, `mod` lines, Cargo.lock: <owner, root by default>; ask, never edit.
+Consumer: <one production caller, file::symbol>
+Start at: <file>:<line>
+Check: `<one focused command>`; expect <N> matched, <N> passed
+Acceptance: <exact sentence>; PRD.md § <section>
+Stop and report when: <condition>; the same check fails twice; a file you do not own must change
+Report: reportProgress for checkpoints; respond for the result
+```
+
+One Luna leaf and one Sol lead in one admission cell, with a fresh group label
+per wave:
+
+```haskell
+let base = GitOid "<full 40-hex integration head>"
+let leafTask = task [label|store-drop|]
+      "Source: <full 40-hex integration head>\nOwns: crates/harness/src/store/mod.rs. Manifests, mod lines, Cargo.lock: root; ask, never edit.\nConsumer: crates/harness/src/engine.rs, the store.append_items calls\nStart at: crates/harness/src/store/mod.rs:549 (the TODO above Store::append_items)\nCheck: `cargo test -p harness --lib drops_foreign_configuration_update`; expect 1 matched, 1 passed\nAcceptance: a configuration_update not authored by the harness is dropped at append; PRD.md § settings items\nStop and report when: the drop rule needs a schema change; the same check fails twice; a file you do not own must change\nReport: reportProgress for checkpoints; respond for the result"
+      ["crates/harness/src/store/mod.rs"] "drops_foreign_configuration_update: 1 matched, 1 passed" base
+let leadTask = task [label|core|]
+      "Source: <full 40-hex integration head>\nOwns: crates/harness/src/compaction.rs. Manifests, mod lines, Cargo.lock: root; ask, never edit.\nConsumer: <engine.rs call site; none exists yet, name it before forking>\nStart at: crates/harness/src/compaction.rs:11 (TODO(correction-wave d), the target trait)\nCheck: `cargo test -p harness --lib compaction`; report matched and passed counts\nAcceptance: Compactor, CompactContext, Summary, NewWindow { carried } with Server only; PRD.md § compaction (pluggable)\nStop and report when: the pending-call invariant cannot hold; the same check fails twice; a file you do not own must change\nReport: checkpoints to parentAgent, else reportProgress; respond with the Delivery"
+      ["crates/harness/src/compaction.rs"] "Compactor per the PRD shape, focused tests green, one integrate(core) commit" base
+((leaf, leafProgress), (lead, leadProgress)) <- unfold (batch "correction" "wave-7") $ (,)
+  <$> childWithProgress @WorkProgress @(Outcome Candidate) (withReport Silent (lunaTaskFrom [label|store-drop|] Medium currentCheckout leafTask))
+  <*> childWithProgress @WorkProgress @Delivery (withReport Silent (solTaskFrom [label|core|] High currentCheckout leadTask))
+```
+
+End that cell. In the next, one router per result type:
+
+```haskell
+leafRouter <- followWork [("store-drop", leaf, leafProgress)] (notifyWork me (withCheckpoints (workMessage candidateSummary)))
+leadRouter <- followWork [("core", lead, leadProgress)] (notifyWork me (workMessage deliverySummary))
+```
+
 ## Where the last run stopped (2026-09-24, one hour, two runs into this wave)
 
 - (a) one engine entry: done (`9da6efe`, `a9f7a12`).
@@ -33,8 +133,8 @@ serves. `docs/questions.md` Q4 and Q5 are answered; read them before planning.
 - Interviews: root, probe, core sections exist in `docs/interviews.md`. Every
   node that runs this time adds its own.
 
-When a slice lands, update its bullet here in the same commit, so this section
-never shows finished work as open.
+When a slice lands, update its row on the one page and its bullet here in the
+same commit, so neither shows finished work as open.
 
 ## What went wrong last run, so you avoid it
 
@@ -49,18 +149,10 @@ never shows finished work as open.
 - The probe blocked on a criterion (byte-for-byte parity) nobody needed. Read
   the acceptance sentence as written in `docs/tree.md`; it is now a measurement.
 
-## Rules in force
+## Rules in force (besides the five above)
 
-- Never automate a test that spends inference. Live tests stay `#[ignore]`,
-  run by hand once, trace in findings (PRD `inference spend !`). A red offline
-  test on master between slices is fine and names its owner.
-- Integrate = merge the child's branch at its exact commit, or send it back.
-  Never extract files from a stale candidate. Scaffold owns every `mod` line.
-  Review reads structure before bugs. Root implements only scaffold and seams;
-  every bounded leaf is a child. Check the cumulative base-to-candidate diff
-  for owned paths (`git diff <base>...<tip> --stat`), not the tip commit; an
-  ancestor can carry an unowned edit.
-- Incorporation names the exact commit. "Applied" without a commit is nothing.
+- Review reads structure before bugs. Root implements only scaffold and seams;
+  every bounded leaf is a child.
 - Server, auth and web are frozen this wave. Hooks are wave1.
 - Operator notes are advice unless they say constraint. The no-more-forks hold
   from the last run is lifted (Q5).
@@ -75,7 +167,8 @@ never shows finished work as open.
   its reference is `Blocked` before it starts.
 - Every lead sends its parent an admission checkpoint right after a fork cell
   (children, base commit, owned paths, first expected reply) and one checkpoint
-  per child settlement.
+  per child settlement: `sendMessage` through `parentAgent`, or reportProgress
+  when `parentAgent` is Nothing.
 
 ## Standing objective (re-read before any final answer)
 

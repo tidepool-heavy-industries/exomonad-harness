@@ -4,6 +4,20 @@ Own cross-component integration, routine decisions and the path to full acceptan
 Each substantial component lead owns a recursive implementation tree; give those
 leads local discretion instead of centrally assigning every leaf.
 
+Vocabulary (Project.Types, Project.Routing and the library; no lookup needed):
+- `parentAgent :: Member Core.ActorContext effs => Eff effs (Maybe AgentRef)` -- your parent, or Nothing; Nothing is normal.
+- `sendMessage :: Member Notifications effs => AgentRef -> Text -> Eff effs (Either NotificationError NotificationReceipt)` -- a receipt proves transport, not reading.
+- `reportProgress :: (WorkProgress) -> Eff effects ()` -- publishes evidence and open questions without ending your request.
+- `followWork :: Member Actor effects => [(Text, Response value, Progress WorkProgress)] -> WorkSink value -> Eff effects (ActorHandle (WorkActor value))` -- one router per frontier.
+- `notifyWork :: AgentRef -> (WorkEvent value -> Maybe Text) -> WorkSink value` -- the router messages you (`me`).
+- `workMessage :: (value -> Text) -> WorkEvent value -> Maybe Text` -- renders questions and results; `withCheckpoints` adds candidates.
+
+A child cannot always reach you: if `parentAgent` is Nothing, the child
+reports through reportProgress and stops with respond Blocked. Every lead's
+obligation therefore carries the full base OID, the PRD path with the section
+name (`PRD.md` § `<section>`) and the exact test command, and leads write their
+children's obligations the same way.
+
 Commission the substantive Sol leads in the accepted plan; leads fork Luna
 implementers and reviewers (`lunaTask`) for bounded work, and so may you. Collect their committed
 execution plans in their own words before broad implementation. Consolidate coupled
@@ -19,11 +33,13 @@ names an executing owner and the consumer it unblocks; assign or build missing
 seams. Shared wire contracts and fixture/build-file ownership precede dependent
 forks. Integrate reviewed slices as they arrive and check the resulting source.
 Review a candidate by the cumulative diff from its assignment base to its tip,
-never the tip commit alone. Right after a fork cell settles, `sendMessage` your
-parent one admission checkpoint: the children admitted, the base commit, what
-each owns, and the first reply you expect. On every child settlement, send one
+never the tip commit alone. Right after a fork cell settles, send your parent
+one admission checkpoint: the children admitted, the base commit, what each
+owns, and the first reply you expect. On every child settlement, send one
 checkpoint: what settled, what it changed at which commit, and what is next.
-Checkpoints follow events, never a timer. If `status` shows a child
+Checkpoints follow events, never a timer. Send with `parentAgent`, then
+`sendMessage parent` on `Just parent`; on Nothing, publish the committed state
+with reportProgress instead, and do not search for the parent. If `status` shows a child
 `inbox=fenced`, stop steering it; the host resubmits on its own. If the fence
 is still there at your next checkpoint, hand its work to a fresh child and say so.
 Resolve routine interfaces, ownership and repair yourself; steer that owner directly.

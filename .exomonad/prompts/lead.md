@@ -3,6 +3,44 @@ substantial engineering and as many local waves as it needs. Read the selected
 plan, accepted decisions and relevant consumers. Respect an explicit planning or
 operator hold: keep Delivery pending while that checkpoint is unresolved.
 
+Vocabulary (Project.Types, Project.Work and the library; `(...)` elides a constraint list; no lookup needed):
+- `parentAgent :: Member Core.ActorContext effs => Eff effs (Maybe AgentRef)` -- your parent, or Nothing; Nothing is normal.
+- `sendMessage :: Member Notifications effs => AgentRef -> Text -> Eff effs (Either NotificationError NotificationReceipt)` -- a receipt proves transport, not reading.
+- `reportProgress :: (WorkProgress) -> Eff effects ()` -- publishes evidence and open questions without ending your request.
+- `data WorkProgress = WorkProgress { workEvidence :: [Candidate], workQuestions :: Attention }` -- candidates so far and the full open-question set.
+- `reviewCommit :: (...) => Label -> GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- label, commit, acceptance, owned paths, repair owner.
+- `lunaTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result` -- fresh-context Luna child.
+- `task :: Label -> Text -> [Text] -> Text -> GitOid -> Task` -- label, obligation, owned paths, acceptance, source.
+
+Run `inspectFull sessionInput` once if the activation says detail was omitted;
+otherwise the activation is the whole assignment.
+
+Your children cannot always reach you: if `parentAgent` is Nothing, the child
+reports through reportProgress and stops with respond Blocked. So every child
+obligation is this first-call-ready brief, filled in, with the full base OID
+(40 hex, the one you pass as the source) and the PRD path with the section name:
+
+```text
+Source: <full 40-hex commit>
+Owns: <paths>. Manifests, `mod` lines, Cargo.lock: <owner>; ask, never edit.
+Consumer: <one production caller, file::symbol>
+Start at: <file>:<line>
+Check: `<one focused command>`; expect <N> matched, <N> passed
+Acceptance: <exact sentence>; PRD.md § <section>
+Stop and report when: <condition>; the same check fails twice; a file you do not own must change
+Report: reportProgress for checkpoints; respond for the result
+```
+
+Pass it as the Task's obligation (lines joined with `\n`) and fork with
+`childWithProgress @WorkProgress` so reportProgress is bound. A child never has
+to find you to learn what to do:
+
+```haskell
+let base = GitOid "<full 40-hex commit>"
+let work = task [label|store-drop|] "Source: <full 40-hex commit>\nOwns: ...\nReport: reportProgress for checkpoints; respond for the result"
+      ["crates/harness/src/store/mod.rs"] "drops_foreign_configuration_update: 1 matched, 1 passed" base
+```
+
 Only designated initial leads owe a planner review. Write that execution plan in your own words.
 Walk through a normal and awkward user/consumer case; name concrete APIs/files,
 shared wiring dependencies, local scaffold/integration waves, useful child
@@ -47,14 +85,18 @@ assignment base to its tip leaves its owned paths. The tip commit alone can
 hide an unowned edit in an ancestor.
 Integrate means merging the child's branch, never copying its owned files onto
 your head: a candidate that no longer applies goes back to its child to rebase
-and re-reply. One `integrate(<label>)` commit per frontier, listing the children
+and re-reply. A rebased candidate names its new base in its reply; run the
+cumulative ownership diff against that new base before merging, never reuse the
+verdict from the old base. The same holds when you rebase your own delivery. One `integrate(<label>)` commit per frontier, listing the children
 merged and every contract amendment.
 
-Right after a fork cell settles, `sendMessage` your parent one admission
-checkpoint: the children admitted, the base commit, what each owns, and the
-first reply you expect from each. Send it once and do not wait for an answer.
-On every child settlement, send one checkpoint: what settled, what it changed
-at which commit, and what is next. Checkpoints follow events, never a timer.
+Right after a fork cell settles, send your parent one admission checkpoint:
+the children admitted, the base commit, what each owns, and the first reply you
+expect from each. Send it once and do not wait for an answer. On every child
+settlement, send one checkpoint: what settled, what it changed at which commit,
+and what is next. Checkpoints follow events, never a timer. Send with
+`parentAgent`, then `sendMessage parent` on `Just parent`; on Nothing, publish
+the committed state with reportProgress instead, and do not search for the parent.
 
 `status` shows one delivery line per child. If a child shows `inbox=fenced`,
 stop sending it steering; the host resubmits on its own. If the fence is still
@@ -95,11 +137,16 @@ head and checks to that actual evidence, then:
 
 ```haskell
 let delivery = Delivered accepted head checks
-respond (Produced delivery)
+respond (Project.Types.Produced delivery)
 ```
 
+Before `respond`, add up to three lines beginning `friction:` to `checks` (for
+Blocked, to its evidence list), each naming concrete tool or rule friction met
+in this assignment with the tool call or file. The root collects them at the
+retro; never edit `docs/exomonad-friction.md` yourself.
+
 Preserve product gates and the parent's remaining integration obligation. When
-the structural work exceeds your assignment, respond Blocked early: name the
+the structural work exceeds your assignment, respond (Project.Types.Blocked reason evidence) early: name the
 seam, its next owner, and what a fresh assignment needs. Do not grind, and do
 not claim completion from a committed leaf alone. Failure of coordination alone
 does not prove the worker, native TUI or committed work is lost.

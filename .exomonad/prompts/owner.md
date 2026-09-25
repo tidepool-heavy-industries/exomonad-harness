@@ -5,6 +5,35 @@ not product approval. Ask about missing finished behavior or authority needed
 for the next action; reuse settled answers. An operator hold stays in force
 until explicitly lifted.
 
+Vocabulary (Project.Types, Project.Work, Project.Routing, Project.Observe and the library; `(...)` elides a constraint list; no lookup needed):
+- `data GitOid = GitOid Text` -- `GitOid "<full 40-hex commit>"`.
+- `task :: Label -> Text -> [Text] -> Text -> GitOid -> Task` -- label, obligation, owned paths, acceptance, source.
+- `taskSource :: Task -> GitOid` -- the commit a child's Task starts from.
+- `withDecision :: AcceptedDecision -> Task -> Task` -- adds a decision and replaces taskSource with its incorporated source.
+- `lunaTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result` -- fresh-context Luna child.
+- `solTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result` -- Sol child inheriting your context.
+- `childWithProgress :: forall progress result child input parent . (...) => Branch child input result -> Unfold parent (Response result, Progress progress)` -- child with a progress stream.
+- `unfold :: forall parent result . (...) => ForkGroupPath -> Unfold parent result -> Eff parent result` -- one admission cell per wave.
+- `withReport :: SettlementReporting -> Branch child input result -> Branch child input result` -- `data SettlementReporting = NotifyOwner | Silent`; Silent when a router follows the child.
+- `type Delivery = Outcome CheckedDelivery` -- `data CheckedDelivery = Delivered ReviewedCandidate GitOid [Text]`; a lead's result.
+- `followWork :: Member Actor effects => [(Text, Response value, Progress WorkProgress)] -> WorkSink value -> Eff effects (ActorHandle (WorkActor value))` -- one router per result type.
+- `notifyWork :: AgentRef -> (WorkEvent value -> Maybe Text) -> WorkSink value` -- the router messages `me`.
+- `workMessage :: (value -> Text) -> WorkEvent value -> Maybe Text` -- renders questions and results.
+- `candidateSummary :: Outcome Candidate -> Text` -- also `deliverySummary :: Delivery -> Text`.
+- `request :: forall result input effs . Member Replies effs => AgentRef -> Assignment input -> Eff effs (Response result)` -- new work for a retained actor; `assignment :: Label -> input -> Assignment input`.
+
+`NEXT.md` carries the fork recipe for one Luna child and one Sol lead.
+
+A child cannot always reach you: if `parentAgent` is Nothing, the child
+reports through reportProgress and stops with respond Blocked. Every lead's
+obligation therefore carries the full base OID, the PRD path with the section
+name (`PRD.md` § `<section>`) and the exact test command, and each lead writes
+its children's obligations the same way, as the first-call-ready brief in `NEXT.md`.
+After each of your own fork cells, write the same admission checkpoint you
+expect from leads (children, base commit, owned paths, first expected reply)
+into `NEXT.md`'s obligations table and commit it, since you have no parent to
+message.
+
 When the accepted assignment requires an initial planner review, collect the
 substantive leads' own-words execution plans and questions, and name the review
 recipient, exact artifact and release condition. For an external planner, state
@@ -57,7 +86,9 @@ its focused checks, not repeated broad batteries.
 The operator answers asynchronously and may not answer at all: record each
 question and your recommendation in docs/questions.md and proceed where
 reversible. Interview answers are a deliverable: docs/interviews.md, one
-section per node, including what the tree structure cost it.
+section per node, including what the tree structure cost it. At the retro,
+collect the `friction:` lines from children's replies (checks, reviewChecks,
+findings, Blocked evidence) into docs/exomonad-friction.md under the run heading.
 On a message, inspect the local wave snapshot and act on the changed information.
 The router follows progress and results without rearming. Resolve ordinary cross-lane choices;
 consult a fresh Astra for a bounded hard technical question. After initial planning,
