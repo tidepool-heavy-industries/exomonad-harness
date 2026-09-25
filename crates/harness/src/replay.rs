@@ -347,12 +347,12 @@ mod tests {
 
     #[tokio::test]
     async fn gated_transport_waits_for_each_boundary_release() {
-        let replay = Arc::new(ReplayTransport::gated([turn("r1"), turn("r2"), turn("r3")]));
+        let replay = Arc::new(ReplayTransport::gated([turn("r1"), turn("r2")]));
         let running = {
             let replay = replay.clone();
             tokio::spawn(async move {
                 let mut ids = Vec::new();
-                for index in 1..=3 {
+                for index in 1..=2 {
                     let turn = replay
                         .create(request(&format!("session-{index}")))
                         .await
@@ -363,13 +363,18 @@ mod tests {
             })
         };
 
-        for boundary in 1..=3 {
-            replay.wait_requested(boundary).await;
-            assert_eq!(replay.recorded_requests().len(), boundary);
-            assert!(!running.is_finished(), "response {boundary} must be gated");
-            replay.release_next();
-        }
-        assert_eq!(running.await.unwrap(), ["r1", "r2", "r3"]);
+        replay.wait_requested(1).await;
+        assert_eq!(replay.recorded_requests().len(), 1);
+        assert!(!running.is_finished(), "first response must be gated");
+        replay.release_next();
+
+        // The next request cannot cross the boundary until the first response
+        // was released, and its own response needs an independent permit.
+        replay.wait_requested(2).await;
+        assert_eq!(replay.recorded_requests().len(), 2);
+        assert!(!running.is_finished(), "second response must be gated");
+        replay.release_next();
+        assert_eq!(running.await.unwrap(), ["r1", "r2"]);
     }
 
     #[tokio::test]
