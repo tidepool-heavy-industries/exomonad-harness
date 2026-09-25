@@ -117,3 +117,85 @@ async fn recovery_discovers_durable_inbox_without_a_live_wake() {
     drop(driver);
     let _ = std::fs::remove_file(path);
 }
+
+struct UnexpectedRecoveryRun {
+    created: tokio::sync::mpsc::UnboundedSender<String>,
+}
+
+#[async_trait]
+impl EngineFactory for UnexpectedRecoveryRun {
+    type Engine = AgentPath;
+
+    async fn create(&self, agent: AgentPath) -> Result<Self::Engine, String> {
+        self.created
+            .send(agent.0.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(agent)
+    }
+
+    async fn run(
+        &self,
+        _engine: &Self::Engine,
+        _head: Option<RequestId>,
+        _initial: Vec<Item>,
+        _cancel: watch::Receiver<bool>,
+        _inbox: mpsc::UnboundedReceiver<Envelope>,
+    ) -> Result<EngineCompletion, String> {
+        panic!("ambiguous active head must not be blindly replayed")
+    }
+}
+
+#[tokio::test]
+async fn recovery_does_not_replay_active_head_when_inbox_is_empty() {
+    let path = std::env::temp_dir().join(format!(
+        "harness-driver-no-blind-replay-{}.sqlite",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let root = AgentPath("/root".into());
+    let head = RequestId("persisted-active-head".into());
+    {
+        let store = Store::open(&path).unwrap();
+        store
+            .admit_agent(&root, None, None, &json!({}), &json!({}))
+            .unwrap();
+        store
+            .write_request(&head, None, &root.0, &[], harness::store::Usage::default())
+            .unwrap();
+        assert!(store.advance_agent_head(&root, None, Some(&head)).unwrap());
+        assert!(store.unread(&root.0).unwrap().is_empty());
+    }
+
+    // Reopening and confirming the durable head is the synchronization
+    // barrier: Driver starts against precisely the ambiguous persisted state.
+    let store = Arc::new(Store::open(&path).unwrap());
+    assert_eq!(
+        store.agent(&root).unwrap().unwrap().head_request,
+        Some(head.clone())
+    );
+    assert!(store.unread(&root.0).unwrap().is_empty());
+    let service = Arc::new(StoreAgentToolService::new(store.clone(), root.clone()));
+    let (created_tx, mut created_rx) = mpsc::unbounded_channel();
+    let driver = Driver::new(
+        store.clone(),
+        service,
+        Arc::new(UnexpectedRecoveryRun {
+            created: created_tx,
+        }),
+    );
+    driver.start(Vec::new()).await.unwrap();
+    assert!(
+        created_rx.try_recv().is_err(),
+        "head with empty unread remains ambiguous; do not replay it"
+    );
+    assert_eq!(
+        store.agent(&root).unwrap().unwrap().head_request,
+        Some(head),
+        "startup preserves the durable head"
+    );
+    driver.shutdown().await.unwrap();
+    drop(driver);
+    let _ = std::fs::remove_file(path);
+}
