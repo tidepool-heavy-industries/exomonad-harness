@@ -9,7 +9,7 @@ use harness::{
     engine::{Engine, EngineCompletion, EngineError, ResponsesTransport},
     finalize::FinalizeParser,
     item::Item,
-    lifecycle::PublishedAnswer,
+    lifecycle::{CompletionCommit, PublishedAnswer},
     mailbox::{DeliveryClass, Envelope, EnvelopeType},
     model::{AgentPath, Effort, RequestId},
     provider::Provider,
@@ -353,45 +353,52 @@ impl<F: EngineFactory> Driver<F> {
                     )
                     .await?;
                 let completed_head = completion.head_request.clone();
-                if !store
-                    .advance_agent_head(
+                // Prepare the typed answer and its provenance before changing
+                // the durable head. A failed preparation must not consume a
+                // completion that the parent can never receive.
+                let publication = match record.parent.as_ref() {
+                    Some(parent) => {
+                        published_final_answer(&store, &task_path, parent, &completion)?
+                    }
+                    None => None,
+                };
+                let publication_target = record.parent.as_ref().zip(publication.as_ref());
+                let committed = store
+                    .complete_agent_with_publication(
                         &task_path,
                         record.head_request.as_ref(),
-                        Some(&completed_head),
+                        &completed_head,
+                        publication_target,
                     )
-                    .map_err(|e| e.to_string())?
-                {
-                    return Err(format!("head CAS lost for {}", task_path.0));
-                }
-                if let Some(parent) = record.parent {
-                    if let Some(item) =
-                        published_final_answer(&store, &task_path, &parent, &completion)?
-                    {
-                        let parent_running = running_tasks.lock().await;
-                        let parent_task = parent_running.get(&parent);
-                        let mut seen = parent_task.map(|task| {
-                            task.seen_inbox_ids
-                                .lock()
-                                .unwrap_or_else(|poison| poison.into_inner())
+                    .map_err(|error| error.to_string())?;
+                let envelope_id = match committed {
+                    CompletionCommit::HeadMismatch => {
+                        return Err(format!("head CAS lost for {}", task_path.0));
+                    }
+                    CompletionCommit::Committed { envelope_id } => envelope_id,
+                };
+                if let (Some(parent), Some(envelope_id)) = (record.parent, envelope_id) {
+                    let parent_running = running_tasks.lock().await;
+                    let parent_task = parent_running.get(&parent);
+                    let mut seen = parent_task.map(|task| {
+                        task.seen_inbox_ids
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner())
+                    });
+                    if let Some(parent_task) = parent_task {
+                        seen.as_mut()
+                            .expect("parent seen set acquired")
+                            .insert(envelope_id);
+                        // One local post-commit wake; durable payload remains in Store.
+                        wake.send_modify(|n| *n = n.wrapping_add(1));
+                        let _ = parent_task.inbox.send(Envelope {
+                            kind: EnvelopeType::Message,
+                            recipient: parent,
+                            sender: task_path,
+                            payload: String::new(),
+                            class: DeliveryClass::AtBoundary,
+                            timestamp_ms: 0,
                         });
-                        let envelope_id = store
-                            .add_envelope(&task_path.0, &parent.0, "AtBoundary", &item, None)
-                            .map_err(|e| e.to_string())?;
-                        if let Some(parent_task) = parent_task {
-                            seen.as_mut()
-                                .expect("parent seen set acquired")
-                                .insert(envelope_id);
-                            // One local post-commit wake; durable payload remains in Store.
-                            wake.send_modify(|n| *n = n.wrapping_add(1));
-                            let _ = parent_task.inbox.send(Envelope {
-                                kind: EnvelopeType::Message,
-                                recipient: parent,
-                                sender: task_path,
-                                payload: String::new(),
-                                class: DeliveryClass::AtBoundary,
-                                timestamp_ms: 0,
-                            });
-                        }
                     }
                 }
                 Ok::<EngineCompletion, String>(completion)
@@ -1328,6 +1335,74 @@ mod tests {
             self.0.fetch_add(1, Ordering::SeqCst);
             Err(format!("failure at {}", engine.0))
         }
+    }
+
+    struct MalformedAnswerFactory(Arc<Store>);
+
+    #[async_trait]
+    impl EngineFactory for MalformedAnswerFactory {
+        type Engine = AgentPath;
+
+        async fn create(&self, agent: AgentPath) -> Result<Self::Engine, String> {
+            Ok(agent)
+        }
+
+        async fn run(
+            &self,
+            engine: &Self::Engine,
+            head: Option<RequestId>,
+            _initial: Vec<Item>,
+            _cancel: watch::Receiver<bool>,
+            _inbox: mpsc::UnboundedReceiver<Envelope>,
+        ) -> Result<EngineCompletion, String> {
+            let id = RequestId(format!("malformed-final-{}", engine.0.replace('/', "_")));
+            self.0
+                .write_request(&id, head.as_ref(), &engine.0, &[], StoredUsage::default())
+                .map_err(|error| error.to_string())?;
+            Ok(EngineCompletion {
+                turn: ResponsesTurn {
+                    response_id: id.0.clone(),
+                    items: (engine.0 != "/root")
+                        .then(|| vec![function_call("bad-final", "finalize", json!({}))])
+                        .unwrap_or_default(),
+                    usage: TurnUsage::default(),
+                },
+                transcript: vec![],
+                head_request: id,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_publication_does_not_advance_child_head_or_publish() {
+        let store = Arc::new(Store::memory().unwrap());
+        let root = AgentPath("/root".into());
+        let child = AgentPath("/root/child".into());
+        store
+            .admit_agent(&root, None, None, &json!({}), &json!({}))
+            .unwrap();
+        store
+            .admit_agent(&child, Some(&root), None, &json!({}), &json!({}))
+            .unwrap();
+        let service = Arc::new(StoreAgentToolService::new(store.clone(), root));
+        let driver = Driver::new(
+            store.clone(),
+            service,
+            Arc::new(MalformedAnswerFactory(store.clone())),
+        );
+        let mut failure = driver.failure_receiver();
+        driver.start(Vec::new()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), failure.changed())
+            .await
+            .expect("malformed publication must surface")
+            .unwrap();
+        assert!(
+            failure.borrow().as_deref().unwrap().contains("finalize"),
+            "typed publication failure is reported"
+        );
+        assert_eq!(store.agent(&child).unwrap().unwrap().head_request, None);
+        assert!(store.inbox("/root").unwrap().is_empty());
+        driver.shutdown().await.unwrap();
     }
 
     #[tokio::test]
