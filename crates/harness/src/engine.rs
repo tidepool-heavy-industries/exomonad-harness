@@ -1175,6 +1175,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_set_effort_follows_tool_output_before_next_model_request() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new(
+                [turn(
+                    "effort-final",
+                    vec![Item(json!({
+                        "type":"message","role":"assistant","phase":"final_answer","content":"done"
+                    }))],
+                )]
+                .into(),
+            ),
+        };
+        let store = Arc::new(Store::memory().unwrap());
+        let head = RequestId("effort-tool-output-head".into());
+        store
+            .write_request(&head, None, "/root", &[], StoredUsage::default())
+            .unwrap();
+        store.set_effort(&head, Effort::Low).unwrap();
+        let output = items::function_output(
+            &CallId("set-effort-call".into()),
+            &crate::turn::JobOutput::Completed(Ok(json!({"effective":"high"}))),
+        );
+        store.append_items(&head, &[output]).unwrap();
+        store
+            .save_pending_effort(&AgentPath("/root".into()), Effort::High)
+            .unwrap();
+
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            replay,
+            store,
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "session".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        engine
+            .run(Some(head), vec![], cancel_rx, empty_mailbox())
+            .await
+            .unwrap();
+
+        let sent = requests.lock().unwrap();
+        let history = &sent[0].input;
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].configuration_effort(), Some(Effort::Low));
+        assert_eq!(history[1].0["type"], "function_call_output");
+        assert_eq!(history[1].0["output"], "{\"effective\":\"high\"}");
+        assert_eq!(history[2].configuration_effort(), Some(Effort::High));
+        assert_eq!(sent[0].pinned_effort, Effort::Low);
+    }
+
+    #[tokio::test]
     async fn replay_sends_full_history_after_immediate_tool_dispatch() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let replay = Replay {
