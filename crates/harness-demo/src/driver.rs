@@ -77,7 +77,7 @@ where
                 model: "gpt-6-sol".into(),
                 effort: Effort::Low,
                 session_id: format!("harness-tree-{}", agent.0),
-                agent,
+                agent: agent.clone(),
             },
         );
         let reply_schema = self
