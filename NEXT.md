@@ -1,7 +1,13 @@
 # NEXT: finish the correction wave, second half
 
 You are the root. This file is where the last run stopped and where you start.
-## Active obligation: adapter readiness, harness-side vertical slice
+## Completed obligation: adapter readiness, harness-side vertical slice
+
+The offline release gate is merged at `703005f`. The Tidepool adapter belongs
+in `~/dev/tidepool`; this harness file does not authorize a live model run.
+The next harness candidate is the file-Store follow-up-before-first-request
+gate described in `docs/exomonad-friction.md` under "Next harness milestone and
+first slice". Its scope and release condition should be set before a new run.
 
 Source: `7bf6d295640c49afee93004b0b226cc51ee70f0d` (resolve current master before forks).
 Operator-approved scope: amendment 1 (`AtBoundary` on **every** request, all unread
