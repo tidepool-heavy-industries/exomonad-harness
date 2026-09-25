@@ -145,3 +145,32 @@ was rebased as `1513e95` and merged by root at `06148a1`.
   redacted request/job fields before parallel trace work.
 - **Nudges and trials:** No nudge event, expected-red test or repeated failing
   check was reported.
+
+## Item-2 trace implementer — correction second half, 2026-09-25
+
+- **Scaffold change:** I replaced the compiling `trace.rs` TODO stub from
+  `8779c47`. Root advanced the base through prompt/docs and consumer commits;
+  I learned of the changing contract through the trace-design finding and
+  root messages, then checked each pinned rebase and cumulative diff.
+- **Sibling/root seam:** Root needed a clonable `TraceSink`, async
+  `open`/`record_job`/`flush`, `JobEvent` sleep start/settle, and a
+  `TraceTransport` with enabled and disabled constructors of one concrete
+  type. My first proposed `Trace::new`/`record_correlation`/
+  `TracedTransport` API was superseded. The plan specified behavior but not
+  constructor signatures or the exact `wait_agent` output projection.
+- **API versus docs:** The root factory could not select traced and ordinary
+  transports with the first constructor shape. Review also showed that
+  dropping every output prevented redacted `resumed_by` evidence. Existing
+  trace-path truncation needed a later create-new correction.
+- **Tree cost:** API churn delayed root consumer wiring, and repeated
+  rebases were needed while root advanced. An early shared sink/transport
+  contract would have avoided this cross-owner repair loop.
+- **Different scaffold next time:** Include production-built request and
+  `wait_agent` fixtures, redaction/correlation tests, disabled-mode typing,
+  and no-clobber trace-path semantics from the start.
+- **Nudges and trials:** Exact-API, ownership, builder and rebase nudges were
+  useful; one stale assignment repeated the superseded API. Early compile
+  failures in error chaining/lifetimes and a later stale raw-call-ID test
+  were corrected and rerun. Final owned candidate `fb80016` had 9 matched,
+  9 passed trace tests plus check/format/diff-check; it did not establish
+  root consumer behavior or the credentialed live trace.
