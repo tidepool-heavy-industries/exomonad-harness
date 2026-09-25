@@ -68,3 +68,15 @@ a positive hit is not required.
 The `core-` prefix in a label like `core-store` is a naming convention for
 unique nudge sets and branch names; it is not nesting and the harness never
 parses it. `docs/tree.md` labels section now says so.
+
+## Q4 — Cache probe reference capture (asked 2026-09-24)
+
+**Asked:** Can the operator provide an appropriately redacted Codex request
+capture with ordered headers and serialized body bytes for the two-request
+byte-for-byte cache probe, or should that probe remain blocked?
+
+**Recommendation:** Keep the probe `Blocked` and defer it rather than infer
+wire bytes from prose or spend inference on a comparison without a reference.
+No live requests were sent. Evidence: `docs/cache-probe-evidence.md` on the
+probe branch; root will incorporate it after an owned-path-clean revision.
+**Answer:** Pending.
