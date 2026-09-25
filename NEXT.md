@@ -24,22 +24,24 @@ dependency amendment is `c427057`.
 |---|---|---|---|---|---|
 | (a) one entry | done | `9da6efe`, `a9f7a12` | integrated | nothing | nothing |
 | (b) async tools | root | `d8097c3`; trace leaf `fb80016`; consumer `a42920f`; tree schema repair under review | offline demo 35/35; manual attempt: HTTP 400 on request 2 | live `wait_agent` continuation | no retry without operator authority; review tree fix and retain redacted attempt |
-| (c) settings items | unassigned | none | none | all | drop rule at append, then the order in the detail |
-| (d) `Compactor` | Compactor leaf `compaction.rs` | scaffold `c427057` | `cargo check -p harness` | all | PRD shape, `Server` only, unanswered-call experiment |
+| (c) settings items | settings-preflight-v8, with retained prior candidates | store drop `46a5496` merged at `eabf47b`; prior stack `5876336` (unmerged) | drop 1/1 integrated | set_effort, here fork, live trace | verify/rebase prior candidates; implement remaining wiring |
+| (d) `Compactor` | Compactor lead `compaction.rs`, with retained prior candidate | prior stack `caddc4c` (unmerged); scaffold `c427057` | `cargo check -p harness` on scaffold | integration, unanswered-call experiment | inspect prior candidate before rebuilding; wait settings prerequisite |
 | cache probe | done | `d0245b3` | 0 then 20,736 cached tokens | general cache behavior | nothing |
 | interviews | every node | `docs/interviews.md` | root, probe, core present | later nodes | one section per node that runs |
 | wave-7 admission | root | base `763764d389763df6ab3ac0cc65b990c4b82fe1b7` | store-drop-v7 owns `crates/harness/src/store/mod.rs`; core-preflight-v7 owns no files | replies pending | first replies: drop candidate; lead quotes `violet-lantern-763764d` before receiving compaction work |
 | core-compaction-v7 follow-up | preflighted Sol lead | base `763764d389763df6ab3ac0cc65b990c4b82fe1b7` | owns `crates/harness/src/compaction.rs` | pending | first reply: admission checkpoint after first child fork; then checked component Delivery |
 | store-drop review | reviewer | candidate `46a5496e38e8493a4de63eeedd007997b0084e3b`, base `763764d389763df6ab3ac0cc65b990c4b82fe1b7` | read-only review of `crates/harness/src/store/mod.rs` | pending | first reply: exact-commit ReviewDecision and focused matched/passed counts |
+| settings-preflight-v8 admission | root | base `eabf47b6b8b49e501a39960e02f989b8f4e89625` | no files | pending | first reply: quotes `amber-orbit-eabf47b` before settings work |
 
 Expected-red tests: none recorded. One committed red gets a row here with its
 owner and closing slice.
 
 **Active refs and fences.** Children and requests live in `status`, one
-delivery line per child; this file does not list them. A retained
-`exomonad/...` branch is a candidate only when a child's reply names its
-commit. Fences are recorded in `docs/exomonad-friction.md`; an `inbox=fenced`
-line means stop steering that child (rule below).
+delivery line per child. A retained `exomonad/...` branch is a candidate when
+a child's reply names its commit **or when the branch, last commit, contents,
+and review state are listed under "Where the last run stopped" below**.
+Fences are recorded in `docs/exomonad-friction.md`; an `inbox=fenced` line
+means stop steering that child (rule below).
 
 **Owner map.** Root: this file, `docs/correction-plan.md`, workspace and crate
 manifests and `Cargo.lock`, `crates/harness-demo/src/{main,driver,tree}.rs`
@@ -206,13 +208,36 @@ section per node that ran.
   its offline repair is in progress. The 400's server-side cause is unknown.
   Do not make another credentialed item-2 run unless the operator explicitly
   grants one additional attempt (question in `docs/questions.md`).
-- (c) settings items: not started; the provenance seam is decided (Q5 above).
+- (c) settings items: the append drop rule is reviewed and integrated at
+  `eabf47b6b8b49e501a39960e02f989b8f4e89625` (focused 1/1, cargo check).
+  Operator reported retained settings work from the previous run, not yet
+  integrated; verify it against current master, do not assume correctness:
+  - `exomonad/correction-second-half/preflight/branches/core-preflight-20260924`
+    at `58763365674fd5db63c013f6aebc02386d707617`: stacked settings append
+    and test integration; prior lead reported integration; not reviewed here.
+  - `exomonad/correction-second-half/preflight/core-preflight-20260924/settings-wave/branches/core-settings-impl-20260924`
+    at `c0932bb571c3406a296a69087e11e76cee016719`: positional effort
+    settings implementation; review state not independently verified here.
+  - `exomonad/correction-second-half/preflight/core-preflight-20260924/settings-wave/branches/core-settings-tests-20260924`
+    at `922442781597750fb75b49721a0fae2c70a9b047`: settings append test;
+    operator reports reviewed green in `.../settings-test-green/branches/review`,
+    not independently verified here.
+  - `exomonad/correction-second-half/preflight/core-preflight-20260924/here-wave/branches/core-here-snapshot-20260924`
+    at `b7b3f294c64ee292c34053be1d0b2735fe99cae8`: Here-fork pending
+    claims; operator reports review in sibling `.../here-wave/branches/review`,
+    not independently verified here.
+  The provenance seam is decided (Q5 above).
   Order inside (c): drop rule at append → `set_effort`
   appends the positional item → `here` fork strips by item type and re-pins
   with one fresh update → request-level effort mirrors the first update in the
   sent history → live item-13 trace with cache counters last.
-- (d) `Compactor`: not started. Annotation at `compaction.rs` has the target
-  trait shape. `Server` only; unanswered-call experiment → findings.
+- (d) `Compactor`: the current lead is inspecting retained prior work before
+  rebuilding. `exomonad/correction-second-half/preflight/core-preflight-20260924/compaction-fresh/branches/core-compactor-fresh-20260924`
+  at `caddc4c231f3cb21f2dbefd57c9b2c2f2e845d89`: stacked settings plus
+  Compactor; operator reports review at sibling `.../compaction-fresh/branches/review-1`
+  ("Preserve user and claimed calls in server compaction"), not independently
+  verified here. It also changes unowned settings paths, so await the settings
+  integration/rebase. `Server` only; unanswered-call experiment → findings.
 - Cache probe: measured on source `d0245b3` by the bounded probe. Two requests
   through our builder with one key returned `cached_tokens` 0 then 20,736;
   redacted usage blocks are in `docs/cache-probe-evidence.md`. This answers
