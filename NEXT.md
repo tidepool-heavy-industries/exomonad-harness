@@ -1,80 +1,70 @@
-# NEXT: finish the correction wave
+# NEXT: finish the correction wave, second half
 
 You are the root. This file is where the last run stopped and where you start.
 Read it, then `README.md` for the reading order, then `docs/correction-plan.md`
 for the status table and `docs/tree.md` for the correction-wave bullet and the
 node protocol. The `TODO(correction-wave …)` and `FIXME(correction-wave …)`
 comments in `crates/` are the map into the code; each names the PRD rule it
-serves.
+serves. `docs/questions.md` Q4 and Q5 are answered; read them before planning.
 
-## Current run checkpoint (2026-09-24)
+## Where the last run stopped (2026-09-24, one hour, two runs into this wave)
 
-- (b) provider tool schemas integrated on master at `d8097c3`.
-  `cargo test -p harness --offline --test correction_wave` ran 1/1 passing
-  test; `cargo fmt --all --check` passed. The live item-2 trace is **open**.
-- (c) and (d) remain open. Core returned `Blocked` on the
-  provenance/initial-pin/fork seam after reporting its notification inbox
-  fenced. The operator's no-more-forks constraint remains in force this run.
-  A delivery receipt is not proof of resumption or incorporation.
-- The cache probe's `Blocked` evidence was merged at `b99337e`. It sent no
-  live requests; an exact redacted Codex wire capture is missing. Q4 is
-  pending in `docs/questions.md`. Core's findings note was integrated at
-  `06148a1`.
-- All four items are **not** complete. The remainder of this file records
-  the previous run's handoff and still-open acceptance criteria.
+- (a) one engine entry: done (`9da6efe`, `a9f7a12`).
+- (b) async tools: done on master (`a1f976f` via `d8097c3`). `Provider::all_tools`
+  stamps `async: true` on everything but `wait_agent`; the offline test in
+  `crates/harness/tests/correction_wave.rs` is green. The LIVE item-2 trace is
+  still open: slow `sleep` tool, model continues, `wait_agent` resumed by the
+  result, redacted request bodies in `docs/findings.md`. One node, one run,
+  by hand.
+- (c) settings items: not started. The last lead returned `Blocked` on a
+  "provenance seam". That seam is decided, not open: PRD `settings items` says
+  harness-authored only; the TODO at `Store::append_items` states the drop
+  rule in one sentence. Order inside (c): drop rule at append → `set_effort`
+  appends the positional item → `here` fork strips by item type and re-pins
+  with one fresh update → request-level effort mirrors the first update in the
+  sent history → live item-13 trace with cache counters last.
+- (d) `Compactor`: not started. Annotation at `compaction.rs` has the target
+  trait shape. `Server` only; unanswered-call experiment → findings.
+- Cache probe: unblocked and rescoped (Q4). Two requests through our builder,
+  same `prompt_cache_key`, record both redacted `usage` blocks. The question is
+  whether `cached_tokens` > 0 on the second, yes or no. No wire capture is
+  needed; field-diff against Codex's builder in source only if the answer is no.
+- Interviews: root, probe, core sections exist in `docs/interviews.md`. Every
+  node that runs this time adds its own.
 
-**Next authorized step:** preflight a routable core lead, then scaffold
-harness-authored settings provenance at append time, one initial effort
-update, and the child fork strip/re-pin seam. Follow
-`docs/correction-plan.md` for the remaining (c)/(d) work and live gates.
-Do not start wave1 or call this preparation feature completion.
+## What went wrong last run, so you avoid it
 
-## Where the last run stopped (2026-09-24)
+- The core lead's message inbox stopped delivering (an Exomonad-side fault,
+  carded there). Root spent 27 min reading delivery receipts as progress.
+  Rule: **preflight the lead**. Send the new lead one message and require a
+  reply that quotes it before giving it work. A receipt proves transport, not
+  reading.
+- The lead blocked on a rule the PRD already states. New nudge
+  `settled_rule_as_blocker` in `docs/nudges.md`. If a PRD `!` rule seems
+  impossible, the reply quotes the code that makes it so; otherwise implement it.
+- The probe blocked on a criterion (byte-for-byte parity) nobody needed. Read
+  the acceptance sentence as written in `docs/tree.md`; it is now a measurement.
 
-- (a) one engine entry: done and integrated (`9da6efe`, `a9f7a12`).
-- (b) async tools: a red offline test on master, `crates/harness/tests/correction_wave.rs`.
-  It is the contract for this slice, not a failure. The fix is one place:
-  `Provider::all_tools` stamps `"async": true` on every tool except `wait_agent`
-  (TODO at that function). Then the live item-2 trace.
-- (c) settings items and (d) `Compactor`: not started. Annotations sit at
-  `engine.rs` (effort as a request field), `agent_runtime.rs` (`here` fork strip
-  list, checkpoints as a blob), `compaction.rs` (target trait shape inline).
-- Cache probe: rescoped to one node, no children, two live requests, redacted
-  bodies and counters in `docs/findings.md`, or `Blocked` naming the missing capture.
-- Interviews: root only. Every node that runs adds a section to `docs/interviews.md`.
-- `cargo fmt --all --check` fails in `engine.rs` test code and the new test file,
-  from the last run's commits. Format those two files first, as their own commit.
+## Rules in force
 
-## Rules that changed since the run started
-
-- A red OFFLINE test on master between slices is fine. Never automate a test
-  that spends inference: live tests stay `#[ignore]`, run by hand once, trace in
-  findings (PRD `inference spend !`).
-- Integrate means merge the child's branch or send it back; never extract files
-  from a stale candidate. Scaffold owns every `mod` line. Review reads structure
-  before bugs. Root implements only scaffold and seams; every bounded leaf is a
-  child (`docs/tree.md`).
-- Server, auth and web are frozen this wave.
+- Never automate a test that spends inference. Live tests stay `#[ignore]`,
+  run by hand once, trace in findings (PRD `inference spend !`). A red offline
+  test on master between slices is fine and names its owner.
+- Integrate = merge the child's branch at its exact commit, or send it back.
+  Never extract files from a stale candidate. Scaffold owns every `mod` line.
+  Review reads structure before bugs. Root implements only scaffold and seams;
+  every bounded leaf is a child. Check the cumulative base-to-candidate diff
+  for owned paths, not the tip commit.
+- Incorporation names the exact commit. "Applied" without a commit is nothing.
+- Server, auth and web are frozen this wave. Hooks are wave1.
+- Operator notes are advice unless they say constraint. The no-more-forks hold
+  from the last run is lifted (Q5).
 
 ## Done means
 
-All four items integrated on master with `integrate(<label>)` commits, the
+All four items integrated on master with `integrate(<label>)` commits; the
 item-2 and item-13 live traces and the unanswered-call finding in
-`docs/findings.md`, the probe's bodies or its `Blocked`, one interview section
-per node, and `docs/exomonad-friction.md` extended with this run's notes. Then
-rewrite this file for wave 1: what landed, what is open, where to start.
-
-## Prompt trials this run (project-level, promote to core only if they hold)
-
-Rules the last run's friction notes argued for but the engine does not yet
-enforce. Follow them here; the interview at the end says whether each held.
-
-- A reply that incorporates a sibling's or parent's change names the exact
-  commit that did it; "applied" without a commit is not incorporation.
-- A test committed red on purpose names its owner and the slice that turns
-  it green in its commit message; integration status lists it as expected
-  red, never as passing.
-- After two failed check rounds with no candidate, the child pings its owner
-  before a third; the owner answers with a split, a seam, or a stop.
-- An operator note is advice unless it says it is a constraint; a hypothesis
-  is labeled as one in every packet that repeats it.
+`docs/findings.md`; the probe's two `usage` blocks; one interview section per
+node; `docs/exomonad-friction.md` extended with this run's rows (observed,
+with cost, no invented nudges). Then rewrite this file for wave 1: what
+landed, what is open, where to start. Do not start wave1 from a partial wave.

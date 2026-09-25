@@ -248,6 +248,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 // in the sent history (cache), never a config value. Needs the
                 // positional settings family in the store, `set_effort`, and the
                 // fork strip list. Acceptance item 13 depends on it.
+                // Provenance is settled: see the TODO at `Store::append_items`.
                 pinned_effort: self.config.effort,
                 session_id: self.config.session_id.clone(),
             };

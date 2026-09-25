@@ -57,6 +57,7 @@ root (otherwise)  everyone ++ lead ++ root
 - `asks_answered_question` (kind=ask) "the question's answer is stated in PRD.md, tree.md or the scaffold docs?" A: cite the section; don't ask.
 - `ask_shape` (kind=ask) "question lacks `[label]`, `default:` or `blocks:`?" A: tree.md `ask` shape.
 
+- `settled_rule_as_blocker` (kind=reply, phase=blocked) "reply returns `Blocked` or asks for a 'design decision' on a point PRD.md decides with a `!` rule or the annotations name as decided (e.g. settings provenance: harness-authored only)?" A: cite the rule; implement it; a PRD rule is a blocker only if the code shows it cannot hold, and then the reply quotes the code.
 - `invented_scope` "building identity, auth, sessions, rate limits, or another subsystem the PRD assigns elsewhere (tailscale identity) or does not name?" A: stop; ask; the PRD reason for the assignment stands until amended.
 - `interview_missing` "final reply without the interview section, or the wave ends with no `docs/interviews.md` entry?" A: the interview is a deliverable.
 

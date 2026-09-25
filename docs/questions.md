@@ -79,7 +79,15 @@ byte-for-byte cache probe, or should that probe remain blocked?
 wire bytes from prose or spend inference on a comparison without a reference.
 No live requests were sent. Evidence: `docs/cache-probe-evidence.md` on the
 probe branch; root will incorporate it after an owned-path-clean revision.
-**Answer:** Pending.
+**Answer (operator, 2026-09-24):** No capture exists and none is required.
+Byte-for-byte parity was never the question; the question is whether
+`cached_tokens` reads above zero on the second of two identical-prefix
+requests through our own builder. Run that, record both redacted `usage`
+blocks. Only if the answer is no, diff our headers and body field order
+against Codex's request builder in source (the retired
+`~/dev/tidepool/exomonad/harness/src/provider/` tree and the vendored Codex
+client), as a field list, and record the diff. The probe is unblocked and
+re-scoped in `docs/tree.md`.
 
 ## Q5 — Resume authority after fenced core inbox (asked 2026-09-24)
 
@@ -91,4 +99,10 @@ on hold?
 **Recommendation:** Authorize a fresh routable lead after the preflight;
 scaffold harness-authored settings provenance and the initial-pin/fork
 contract before bounded implementation. Do not lift the current-run
-no-more-forks constraint by inference. **Answer:** Pending.
+no-more-forks constraint by inference. **Answer (operator, 2026-09-24):**
+Yes. The hold was a constraint on that run only and is lifted. Admit a
+fresh core lead; preflight that it receives a message before giving it
+work. One correction to the recommendation: there is no provenance seam to
+scaffold first. PRD `settings items` decides it (harness-authored only,
+forged ones dropped) and the annotation at `Store::append_items` states the
+rule in one sentence. (c) starts as implementation, not design.

@@ -256,7 +256,10 @@ impl AgentToolService for StoreAgentToolService {
                     // claims) and re-pin effort with ONE fresh update, and the
                     // child must inherit the parent's claims on pending calls
                     // (PRD `agent verbs`, acceptance 11 and 13). Today it only
-                    // points the child at the parent's head request.
+                    // points the child at the parent's head request. The strip
+                    // list needs no provenance lookup: every configuration_update
+                    // in a stored history is harness-authored by construction
+                    // (see `Store::append_items`), so strip = drop by item type.
                     SpawnSource::Here => (
                         parent_agent.head_request.clone(),
                         json!({"kind":"here","head_request":parent_agent.head_request}),

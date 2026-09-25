@@ -546,6 +546,14 @@ impl Store {
             .transpose()
     }
     /// Append is atomic; identical item bytes share storage, while positions remain request-local.
+    // TODO(correction-wave c): settings provenance is DECIDED (PRD `settings items`
+    // line "harness-authored only"), not an open seam. The rule is one sentence:
+    // a `configuration_update` reaches the store only through `set_effort`, a
+    // `here` fork's re-pin, or a compaction's fresh pin. Any `configuration_update`
+    // arriving in `new_items` from the model or a client is dropped here, at
+    // append. No SQL migration; at most a `harness_authored` flag if the drop
+    // rule alone cannot be tested. The previous lead returned `Blocked` on this;
+    // do not reopen it.
     pub fn append_items(&self, request: &RequestId, items: &[Item]) -> Result<Vec<ItemHash>> {
         let mut c = self.lock();
         let tx = c.transaction()?;
