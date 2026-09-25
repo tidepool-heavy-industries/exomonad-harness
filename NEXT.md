@@ -18,8 +18,8 @@ outside the wave. Resolve full source OIDs from Git.
 |---|---|---|
 | Shared lifecycle/provenance contract and scaffold | root | `lifecycle.rs` defines envelope-ID provenance and structured parent answer; optional `Contract.reply` is the strict result schema; compile and commit before forks |
 | Stable follow-up identity and durable provenance | store child | exact-tip review accepted; integrated as `176a271`; provenance focused test 1/1 on integrated source |
-| Typed completion | engine child | exact-tip review of `2d12a4a` returned Repair; retained owner assigned parser-consumption and pattern enforcement fixes |
-| Driver publication/continuation and integrated release gate | driver child | owned driver edit and explicit-barrier test in progress; sibling APIs not integrated, no compiled gate yet |
+| Typed completion | engine child | repaired exact candidate `2d5218f` checked 5 focused cases 1/1 each; same-reviewer re-review pending; no merge |
+| Driver publication/continuation and integrated release gate | driver child | wire-safe codec source supplied, retained driver re-assigned to implement and run integrated gate once Engine merges |
 | Independent review, integration, interview and stop | root | exact-source verdict, executed integrated checks, handoff |
 
 Keep this table current as assignments settle; ordinary idle turn ends need no
@@ -66,6 +66,14 @@ is the single codec. This amends the earlier proposed extra top-level
 `structured` field, which had no wire projection and could be rejected
 when Engine sends stored history unchanged. No new durable log or schema migration: existing envelope IDs,
 `delivered_request`, request ancestry, and item content are authoritative.
+Additional root-owned tool-schema amendment: the model-facing strict
+`spawn_agent` and `followup_task` contract schema must carry required
+nullable `reply` as a JSON-encoded schema string (`type:
+["string","null"]`). Strict tool schemas cannot express arbitrary
+schema property names while keeping `additionalProperties:false`.
+`Contract` deserializes the encoded string to its internal `Value`;
+null is no reply. Store serialization retains parsed JSON. This
+closes a production-wire gap the offline ReplayTransport would bypass.
 
 First admission checkpoint: three Sol Medium candidates admitted from
 `f9ab1a9da48e0f119fdad48052e896f57d117bd2` in `wave10/implementation`.
@@ -142,6 +150,12 @@ would flow unchanged into Responses input (`engine.rs` builds request
 from stored history). Root decided on a standard-message JSON-text
 codec with strict `PublishedAnswer` decode and a roundtrip test in
 `lifecycle.rs`; driver was instructed to use it, not ad-hoc text/prose.
+Driver later identified that `verb_tool_schemas()` omitted
+`Contract.reply` even though the Rust Contract accepted it; strict
+tool input would reject typed reply at production ingress. Root
+amended agents.rs with required nullable encoded `reply` and a
+focused strict-schema/roundtrip test; check and commit were pending
+at this checkpoint.
 Exact Engine review at `2d12a4a` confirmed shared-loop exactly-one
 validation but returned Repair for two `finalize.rs` bugs:
 schema-invalid dynamic result consumes `FinalizeParser`, contrary to
@@ -152,6 +166,31 @@ job); its matched count is 0/0. Root assigned repair to retained
 Engine owner, then one re-review by same reviewer. Driver was told
 Engine is not integrated; its branch reported rebase onto Store
 integration and an uncommitted borrow fix.
+Engine repair candidate `2d5218f881b5cfa4e055471548152b99ee63157c`
+was submitted with five focused cases each reported 1/1, fmt and diff
+checks; diff from incorporated Store base `176a271` touches only
+engine.rs/finalize.rs and merge-tree shows no conflict with root codec
+amendment `41c48b6`. Root assigned one re-review to the same reviewer,
+seeded at exact tip with review base `176a271`. The driver prior request
+settled Blocked on the now-resolved Engine/publication seams (it had
+not compiled its gate). Root supplied codec commit `41c48b6` and
+reassigned retained driver to rebase its owned file, use the codec,
+and run the gate after Engine integration.
+
+## Where the last run stopped (live wave 10 checkpoint)
+
+- `exomonad/wave10/implementation/branches/wave10-engine`:
+  candidate `2d5218f881b5cfa4e055471548152b99ee63157c` (the
+  root-visible branch ref still showed `669ba8b` at this checkpoint);
+  repair for parser recovery and unchecked patterns, re-review pending,
+  not integrated. Prior reviewed `2d12a4a` received Repair.
+- `exomonad/wave10/implementation/branches/wave10-driver`:
+  `dda39fa222bfb9ee3326aedb6d533433c60148d8` (branch ref snapshot);
+  wire-safe codec and driver lifecycle gate/reopened assertions in
+  progress; not yet compiled/passed as an integrated gate,
+  not reviewed or integrated.
+- Store branch `5b2741a` is not unmerged: it is integrated as
+  `176a271`. Root's wire-safe codec amendment is `41c48b6`.
 Driver progress reported uncommitted owned changes for strict factory,
 `PublishedAnswer` publication, and an explicit-barrier real-driver gate.
 It still mentioned `typed_result`, so root corrected it to parse the

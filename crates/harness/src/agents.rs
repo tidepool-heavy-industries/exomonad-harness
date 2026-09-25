@@ -103,8 +103,29 @@ pub struct Contract {
     pub consumes: Vec<String>,
     pub boundaries: Vec<String>,
     /// Optional strict JSON Schema for a follow-up's structured result.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Model-facing strict tools carry a JSON-encoded schema string because
+    /// arbitrary property names cannot be expressed in a strict tool object.
+    /// Stored contracts retain the parsed JSON value.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_reply_schema"
+    )]
     pub reply: Option<serde_json::Value>,
+}
+
+fn deserialize_reply_schema<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(encoded) => serde_json::from_str(&encoded)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+        stored => Ok(Some(stored)),
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -388,7 +409,11 @@ pub fn verb_tool_schemas() -> Vec<serde_json::Value> {
         json!({
             "clauses": strings, "acceptance": strings, "owned": strings,
             "must_not": strings, "introduces": strings, "consumes": strings,
-            "boundaries": strings
+            "boundaries": strings,
+            // A strict tool cannot admit arbitrary nested schema property
+            // names. The JSON schema is encoded as a string at this wire
+            // boundary and parsed back into Contract.reply.
+            "reply": {"type":["string","null"]}
         }),
         &[
             "clauses",
@@ -398,6 +423,7 @@ pub fn verb_tool_schemas() -> Vec<serde_json::Value> {
             "introduces",
             "consumes",
             "boundaries",
+            "reply",
         ],
     );
     vec![
@@ -566,5 +592,50 @@ mod tests {
                     .all(|key| properties.contains_key(key.as_str().unwrap()))
             );
         }
+    }
+
+    #[test]
+    fn strict_contract_tool_carries_nullable_encoded_reply_schema() {
+        let schemas = verb_tool_schemas();
+        let result_schema = serde_json::json!({
+            "type":"object",
+            "properties":{"answer":{"type":"string"}},
+            "required":["answer"],
+            "additionalProperties":false
+        });
+        for name in ["spawn_agent", "followup_task"] {
+            let tool = schemas
+                .iter()
+                .find(|schema| schema["name"] == name)
+                .unwrap();
+            let contract = &tool["parameters"]["properties"]["task"];
+            assert_eq!(
+                contract["properties"]["reply"],
+                serde_json::json!({"type":["string","null"]})
+            );
+            assert!(
+                contract["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("reply"))
+            );
+            assert_eq!(contract["additionalProperties"], false);
+        }
+        let mut wire = serde_json::json!({
+            "clauses":[],"acceptance":[],"owned":[],"must_not":[],
+            "introduces":[],"consumes":[],"boundaries":[],
+            "reply": serde_json::to_string(&result_schema).unwrap()
+        });
+        let decoded: Contract = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(decoded.reply, Some(result_schema.clone()));
+        wire["reply"] = serde_json::Value::Null;
+        assert!(
+            serde_json::from_value::<Contract>(wire.clone())
+                .unwrap()
+                .reply
+                .is_none()
+        );
+        wire["reply"] = serde_json::json!("{");
+        assert!(serde_json::from_value::<Contract>(wire).is_err());
     }
 }
