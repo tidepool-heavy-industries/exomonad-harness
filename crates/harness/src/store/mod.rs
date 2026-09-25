@@ -3,7 +3,7 @@ pub mod schema;
 
 use crate::{
     item::{Item, ItemHash},
-    lifecycle::CompletionProvenance,
+    lifecycle::{CompletionCommit, CompletionProvenance},
     model::{AgentPath, CallId, Effort, RequestId},
     transport::{ResponsesRequest, ResponsesTurn},
 };
@@ -646,6 +646,39 @@ impl Store {
             "UPDATE agents SET head_request=?3 WHERE path=?1 AND head_request IS ?2",
             params![path.0, expected.map(|x| &x.0), current.map(|x| &x.0)],
         )? == 1)
+    }
+    /// Atomically persist a successful agent completion and its optional
+    /// parent answer. A lost head CAS cannot publish, and publication failure
+    /// rolls the head update back with the transaction.
+    pub fn complete_agent_with_publication(
+        &self,
+        path: &AgentPath,
+        expected: Option<&RequestId>,
+        current: &RequestId,
+        parent_answer: Option<(&AgentPath, &Item)>,
+    ) -> Result<CompletionCommit> {
+        let mut c = self.lock();
+        let tx = c.transaction()?;
+        let changed = tx.execute(
+            "UPDATE agents SET head_request=?3 WHERE path=?1 AND head_request IS ?2",
+            params![path.0, expected.map(|x| x.0.as_str()), current.0],
+        )?;
+        if changed != 1 {
+            return Ok(CompletionCommit::HeadMismatch);
+        }
+        let envelope_id = if let Some((parent, answer)) = parent_answer {
+            let hash = Self::put_item_tx(&tx, answer)?;
+            tx.execute(
+                "INSERT INTO envelopes(sender,recipient,class,item_hash,delivered_request,created_at) \
+                 VALUES (?1,?2,'AtBoundary',?3,NULL,?4)",
+                params![path.0, parent.0, hash.0, utc_millis()],
+            )?;
+            Some(tx.last_insert_rowid())
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(CompletionCommit::Committed { envelope_id })
     }
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -2226,6 +2259,157 @@ mod tests {
         assert!(store.claims_on(&snapshot).unwrap().is_empty());
         assert!(store.unread(&child.0).unwrap().is_empty());
         assert_eq!(store.claims(&call).unwrap()[0].state, ClaimState::Pending);
+    }
+
+    #[test]
+    fn complete_agent_with_publication_is_atomic_and_idempotent() {
+        let store = Store::memory().unwrap();
+        let root = AgentPath("/root".into());
+        let child = AgentPath("/root/child".into());
+        store
+            .admit_agent(
+                &root,
+                None,
+                None,
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        store
+            .admit_agent(
+                &child,
+                Some(&root),
+                None,
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        let first = id("first-completed");
+        let second = id("second-completed");
+        store.create_request(&first, None, &child.0).unwrap();
+        store
+            .create_request(&second, Some(&first), &child.0)
+            .unwrap();
+        let answer =
+            item(serde_json::json!({"type":"message","role":"assistant","content":"typed"}));
+        let outcome = store
+            .complete_agent_with_publication(&child, None, &first, Some((&root, &answer)))
+            .unwrap();
+        let envelope_id = match outcome {
+            CompletionCommit::Committed {
+                envelope_id: Some(id),
+            } => id,
+            other => panic!("expected published completion, got {other:?}"),
+        };
+        assert_eq!(
+            store.agent(&child).unwrap().unwrap().head_request,
+            Some(first.clone())
+        );
+        let envelope = store.envelope(envelope_id).unwrap().unwrap();
+        assert_eq!(envelope.sender, child.0);
+        assert_eq!(envelope.recipient, root.0);
+        assert_eq!(envelope.delivered_request, None);
+        assert_eq!(
+            store.get_item(&envelope.item_hash).unwrap(),
+            Some(answer.clone())
+        );
+        let items_before_retry: i64 = store
+            .lock()
+            .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
+            .unwrap();
+        let rejected_answer =
+            item(serde_json::json!({"type":"message","content":"must-not-publish"}));
+        assert_eq!(
+            store
+                .complete_agent_with_publication(
+                    &child,
+                    None,
+                    &first,
+                    Some((&root, &rejected_answer))
+                )
+                .unwrap(),
+            CompletionCommit::HeadMismatch
+        );
+        assert_eq!(store.inbox(&root.0).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .lock()
+                .query_row("SELECT COUNT(*) FROM items", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            items_before_retry
+        );
+        assert_eq!(
+            store
+                .complete_agent_with_publication(&child, Some(&first), &second, None)
+                .unwrap(),
+            CompletionCommit::Committed { envelope_id: None }
+        );
+        assert_eq!(
+            store.agent(&child).unwrap().unwrap().head_request,
+            Some(second)
+        );
+        assert_eq!(store.inbox(&root.0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn complete_agent_with_publication_rolls_back_head_on_envelope_failure() {
+        let store = Store::memory().unwrap();
+        let root = AgentPath("/root".into());
+        let child = AgentPath("/root/child".into());
+        store
+            .admit_agent(
+                &root,
+                None,
+                None,
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        store
+            .admit_agent(
+                &child,
+                Some(&root),
+                None,
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        let current = id("final");
+        store.create_request(&current, None, &child.0).unwrap();
+        store
+            .lock()
+            .execute_batch(
+                "CREATE TRIGGER reject_completion_answer BEFORE INSERT ON envelopes \
+                 BEGIN SELECT RAISE(ABORT, 'injected envelope failure'); END;",
+            )
+            .unwrap();
+        let answer = item(serde_json::json!({"type":"message","content":"answer"}));
+        assert!(
+            store
+                .complete_agent_with_publication(&child, None, &current, Some((&root, &answer)))
+                .is_err()
+        );
+        assert_eq!(store.agent(&child).unwrap().unwrap().head_request, None);
+        assert!(store.inbox(&root.0).unwrap().is_empty());
+        assert_eq!(
+            store
+                .lock()
+                .query_row("SELECT COUNT(*) FROM items", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        store
+            .lock()
+            .execute_batch("DROP TRIGGER reject_completion_answer")
+            .unwrap();
+        assert!(matches!(
+            store
+                .complete_agent_with_publication(&child, None, &current, Some((&root, &answer)))
+                .unwrap(),
+            CompletionCommit::Committed {
+                envelope_id: Some(_)
+            }
+        ));
     }
 
     #[test]
