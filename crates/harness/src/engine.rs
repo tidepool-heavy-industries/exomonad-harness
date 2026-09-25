@@ -5,13 +5,18 @@
 //! their original call ids before the next request.
 
 use crate::{
+    compaction::{
+        CompactContext, CompactError, Compactor, Server, ServerCompactFuture, ToolName,
+        TypedTurnFuture,
+    },
     item::Item,
     mailbox::{Envelope, MessageChannel},
     model::{AgentPath, CallId, Effort, RequestId},
     provider::Provider,
     store::{Store, StoreError, Usage as StoredUsage},
     transport::{
-        Auth, ResponsesClient, ResponsesRequest, ResponsesTurn, TransportError, sse::StreamEvent,
+        Auth, ResponsesClient, ResponsesRequest, ResponsesTurn, TransportError, Usage,
+        sse::StreamEvent,
     },
     turn::{
         JobError, JobScheduler, WaitAgentResult, WaitResume, outputs_in_call_order,
@@ -53,6 +58,8 @@ pub enum EngineError {
     MissingEffortPin,
     #[error("a model response contained more than one wait_agent call")]
     MultipleWaitAgents,
+    #[error(transparent)]
+    Compact(#[from] CompactError),
     #[error(
         "engine operation failed: {primary}; additionally failed to clean up outstanding calls: {cleanup}"
     )]
@@ -125,6 +132,7 @@ pub struct Engine<A: Auth, P: Provider, C: ResponsesTransport = ResponsesClient<
     scheduler: Arc<JobScheduler>,
     provider: Arc<P>,
     config: EngineConfig,
+    compact_at_input_tokens: Option<u64>,
     _auth: std::marker::PhantomData<fn() -> A>,
 }
 
@@ -161,8 +169,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             scheduler,
             provider,
             config,
+            compact_at_input_tokens: None,
             _auth: std::marker::PhantomData,
         }
+    }
+
+    /// Opt into explicit server compaction after a turn whose input usage
+    /// reaches this threshold. No automatic API compaction is enabled.
+    pub fn with_compaction_threshold(mut self, input_tokens: u64) -> Self {
+        self.compact_at_input_tokens = (input_tokens > 0).then_some(input_tokens);
+        self
     }
 
     /// Run from a durable request head, appending only new items and admitting
@@ -244,6 +260,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         }
         let mut parent = id.clone();
         let mut pending = Vec::<PendingCall>::new();
+        let mut compact_due = false;
+        let mut previous_usage = Usage::default();
         loop {
             if *cancellation.borrow() {
                 return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
@@ -251,6 +269,28 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let history = match self.read_history(&parent).await {
                 Ok(history) => history,
                 Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+            };
+            let did_compact = compact_due;
+            if did_compact {
+                let compact = self.compact_window(&parent, &history, &pending, &previous_usage);
+                parent = match tokio::select! {
+                    result = compact => result,
+                    changed = cancellation.changed() => {
+                        if changed.is_err() || *cancellation.borrow() {
+                            Err(EngineError::Cancelled)
+                        } else {
+                            continue;
+                        }
+                    }
+                } {
+                    Ok(request) => request,
+                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                };
+            }
+            let history = if did_compact {
+                self.read_history(&parent).await?
+            } else {
+                history
             };
             let pinned_effort = history
                 .iter()
@@ -404,6 +444,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             {
                 return Err(self.cleanup_pending(error, &pending).await);
             }
+            previous_usage = turn.usage.clone();
+            compact_due = self
+                .compact_at_input_tokens
+                .is_some_and(|threshold| turn.usage.input_tokens >= threshold);
 
             let settled_this_turn = match self.persist_settled(&mut pending, &parent).await {
                 Ok(settled) => settled,
@@ -756,6 +800,89 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     async fn read_history(&self, id: &RequestId) -> Result<Vec<Item>, EngineError> {
         load_history(self.store.clone(), id.clone()).await
     }
+
+    async fn compact_window(
+        &self,
+        source: &RequestId,
+        history: &[Item],
+        pending: &[PendingCall],
+        usage: &Usage,
+    ) -> Result<RequestId, EngineError> {
+        let pending_items: Vec<Item> = pending
+            .iter()
+            .map(|call| {
+                history
+                    .iter()
+                    .find(|item| {
+                        item.0["type"] == "function_call"
+                            && item.0["call_id"].as_str() == Some(call.call_id.0.as_str())
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        CompactError::Failed(format!("missing pending call {}", call.call_id.0))
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+        let effective_effort = history
+            .iter()
+            .rev()
+            .find_map(Item::configuration_effort)
+            .ok_or(EngineError::MissingEffortPin)?;
+        let server_compact = |items: Vec<Item>| -> ServerCompactFuture<'_> {
+            Box::pin(async move {
+                let turn = self
+                    .client
+                    .create(ResponsesRequest {
+                        input: items,
+                        instructions: self.config.instructions.clone(),
+                        tools: self.tools(),
+                        model: self.config.model.clone(),
+                        pinned_effort: effective_effort,
+                        session_id: self.config.session_id.clone(),
+                    })
+                    .await
+                    .map_err(|error| CompactError::Failed(error.to_string()))?;
+                if !turn.items.iter().any(|item| item.0["type"] == "compaction") {
+                    return Err(CompactError::Failed(
+                        "server response lacks compaction item".into(),
+                    ));
+                }
+                Ok(turn.items)
+            })
+        };
+        // Server does not request typed turns; the capability is reserved for
+        // other strategies and must not silently call an unforced model turn.
+        let typed_turn = |_instructions: String,
+                          _tool: ToolName,
+                          _schema: serde_json::Value|
+         -> TypedTurnFuture<'_> {
+            Box::pin(async {
+                Err(CompactError::Failed(
+                    "typed turn requires a forced-tool transport".into(),
+                ))
+            })
+        };
+        let window = Server
+            .compact(CompactContext {
+                items: history,
+                usage,
+                pending_calls: &pending_items,
+                effort: effective_effort,
+                server_compact: &server_compact,
+                typed_turn: &typed_turn,
+            })
+            .await?;
+        let request = RequestId(uuid::Uuid::new_v4().to_string());
+        let store = self.store.clone();
+        let source = source.clone();
+        let successor = request.clone();
+        let branch = self.config.agent.0.clone();
+        blocking(move || {
+            store.write_compaction_request(&successor, &source, &branch, &window.items)
+        })
+        .await?;
+        Ok(request)
+    }
 }
 
 async fn load_history(store: Arc<Store>, id: RequestId) -> Result<Vec<Item>, EngineError> {
@@ -767,6 +894,9 @@ async fn load_history(store: Arc<Store>, id: RequestId) -> Result<Vec<Item>, Eng
                 return Err(StoreError::MissingRequest(request_id.0));
             };
             chain.push(store.items(&request_id)?);
+            if store.is_compaction_boundary(&request_id)? {
+                break;
+            }
             cursor = request.parent;
         }
         chain.reverse();
@@ -1210,6 +1340,253 @@ mod tests {
                 cache_write_tokens: 0,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn engine_compaction_installs_new_window_before_next_response() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let call = Item(json!({
+            "type":"function_call","call_id":"compact-call","name":"echo","arguments":"{}"
+        }));
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new(
+                [
+                    turn("before-compact", vec![call]),
+                    turn(
+                        "server-compact",
+                        vec![Item(json!({"type":"compaction","encrypted_content":"opaque"}))],
+                    ),
+                    turn(
+                        "after-compact",
+                        vec![Item(json!({
+                            "type":"message","role":"assistant","phase":"final_answer","content":"done"
+                        }))],
+                    ),
+                ]
+                .into(),
+            ),
+        };
+        let store = Arc::new(Store::memory().unwrap());
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            replay,
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Medium,
+                session_id: "session".into(),
+                agent: AgentPath("/root".into()),
+            },
+        )
+        .with_compaction_threshold(3);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let completion = engine
+            .run(
+                None,
+                vec![Item(
+                    json!({"type":"message","role":"user","content":"keep"}),
+                )],
+                cancel_rx,
+                empty_mailbox(),
+            )
+            .await
+            .unwrap();
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 3);
+        assert_eq!(
+            sent[1].input.last().unwrap().0["type"],
+            "compaction_trigger"
+        );
+        assert!(!sent[1].input.iter().any(Item::is_configuration_update));
+        assert_eq!(sent[2].input[0].0["role"], "developer");
+        assert!(
+            sent[2]
+                .input
+                .iter()
+                .any(|item| item.0["type"] == "compaction")
+        );
+        assert_eq!(
+            sent[2].input.last().unwrap().configuration_effort(),
+            Some(Effort::Medium)
+        );
+        assert!(
+            sent[2]
+                .input
+                .iter()
+                .any(|item| item.0["role"] == "user" && item.0["content"] == "keep")
+        );
+        assert!(
+            !sent[2]
+                .input
+                .iter()
+                .any(|item| item.0["call_id"] == "compact-call")
+        );
+        assert_eq!(
+            completion.transcript,
+            sent[2]
+                .input
+                .iter()
+                .cloned()
+                .chain(completion.turn.items)
+                .collect::<Vec<_>>()
+        );
+        let compact_request = completion.head_request;
+        assert!(store.is_compaction_boundary(&compact_request).unwrap());
+        assert!(
+            store
+                .request(&compact_request)
+                .unwrap()
+                .unwrap()
+                .parent
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_compaction_carries_unanswered_call_and_late_output() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let provider = Arc::new(SlowProvider {
+            started: Arc::new(Notify::new()),
+            release: tokio::sync::Mutex::new(Some(release_rx)),
+            released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        let call = Item(json!({
+            "type":"function_call","call_id":"carried-slow","name":"slow","arguments":"{}"
+        }));
+        let mut provisional = turn(
+            "provisional",
+            vec![Item(json!({
+                "type":"message","role":"assistant","phase":"final_answer","content":"before output"
+            }))],
+        );
+        provisional.usage.input_tokens = 0;
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new(
+                [
+                    turn("pending", vec![call.clone()]),
+                    turn(
+                        "compact",
+                        vec![Item(json!({"type":"compaction","encrypted_content":"opaque"}))],
+                    ),
+                    provisional,
+                    turn(
+                        "final",
+                        vec![Item(json!({
+                            "type":"message","role":"assistant","phase":"final_answer","content":"after output"
+                        }))],
+                    ),
+                ]
+                .into(),
+            ),
+        };
+        let store = Arc::new(Store::memory().unwrap());
+        let engine = Engine::<FakeAuth, SlowProvider, _>::with_transport(
+            replay,
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            provider,
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "session".into(),
+                agent: AgentPath("/root".into()),
+            },
+        )
+        .with_compaction_threshold(3);
+        let release_requests = requests.clone();
+        tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    if release_requests.lock().unwrap().len() >= 3 {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("successor request after compaction");
+            release_tx.send(()).expect("slow job still pending");
+        });
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let completion = engine
+            .run(None, vec![], cancel_rx, empty_mailbox())
+            .await
+            .unwrap();
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 3);
+        assert!(sent[2].input.iter().any(|item| item == &call));
+        assert!(completion.transcript.iter().any(|item| {
+            item.0["type"] == "function_call_output" && item.0["call_id"] == "carried-slow"
+        }));
+        assert!(completion.transcript.iter().any(|item| item == &call));
+        assert_eq!(store.pending_at(&completion.head_request).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn engine_compaction_failure_cleans_pending_claim_without_installing_window() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (_release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let provider = Arc::new(SlowProvider {
+            started: Arc::new(Notify::new()),
+            release: tokio::sync::Mutex::new(Some(release_rx)),
+            released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new(
+                [
+                    turn(
+                        "pending",
+                        vec![Item(json!({
+                            "type":"function_call","call_id":"failed-compact","name":"slow","arguments":"{}"
+                        }))],
+                    ),
+                    turn(
+                        "not-a-compaction",
+                        vec![Item(json!({"type":"message","role":"assistant","content":"wrong"}))],
+                    ),
+                ]
+                .into(),
+            ),
+        };
+        let store = Arc::new(Store::memory().unwrap());
+        let engine = Engine::<FakeAuth, SlowProvider, _>::with_transport(
+            replay,
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            provider,
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "session".into(),
+                agent: AgentPath("/root".into()),
+            },
+        )
+        .with_compaction_threshold(3);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            engine.run(None, vec![], cancel_rx, empty_mailbox()),
+        )
+        .await
+        .expect("compaction failure must not wait on job")
+        .unwrap_err();
+        assert!(matches!(error, EngineError::Compact(_)));
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        assert!(store.recover_pending().unwrap().is_empty());
+        let claims = store.claims(&CallId("failed-compact".into())).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].state, crate::store::ClaimState::Interrupted);
     }
 
     #[tokio::test]

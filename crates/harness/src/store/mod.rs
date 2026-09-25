@@ -428,6 +428,48 @@ impl Store {
             branch: branch.into(),
         })
     }
+    /// Install a trusted compacted window atomically. The parent edge keeps the
+    /// source request and its claims queryable; history replay stops here.
+    pub(crate) fn write_compaction_request(
+        &self,
+        request: &RequestId,
+        parent: &RequestId,
+        branch: &str,
+        items: &[Item],
+    ) -> Result<()> {
+        let mut c = self.lock();
+        let tx = c.transaction()?;
+        tx.execute(
+            "INSERT INTO requests(id,parent_id,branch,created_at) VALUES (?1,?2,?3,?4)",
+            params![request.0, parent.0, branch, utc_millis()],
+        )?;
+        for (position, item) in items.iter().enumerate() {
+            let hash = Self::put_item_tx(&tx, item)?;
+            tx.execute(
+                "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
+                params![request.0, position as i64, hash.0],
+            )?;
+        }
+        let key = format!("harness:compaction:{}", request.0);
+        tx.execute(
+            "INSERT INTO session_state(session_id,state,updated_at) VALUES (?1,'true',?2)",
+            params![key, utc_millis()],
+        )?;
+        tx.execute(
+            "INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,'compaction',?2,?3)",
+            params![
+                request.0,
+                serde_json::json!({"source":parent.0}).to_string(),
+                utc_millis()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub(crate) fn is_compaction_boundary(&self, request: &RequestId) -> Result<bool> {
+        let key = format!("harness:compaction:{}", request.0);
+        Ok(self.session_state(&key)?.is_some())
+    }
     /// Store a completed output and settle all claimants atomically.
     pub fn write_output(&self, call: &CallId, output: &Item) -> Result<usize> {
         self.settle_claims(call, output)
