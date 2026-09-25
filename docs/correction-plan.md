@@ -113,6 +113,6 @@ next lead implements (c) as store drop rule + `set_effort` + strip list +
 pin-from-history, in that order, with the live item-13 trace last.
 
 Still open: (c), (d), live item-2 and item-13 traces, unanswered-call
-experiment, cache probe reference capture/Q4, interviews from bounded nodes
-whose own words were not delivered, and final combined checks. Do not
+experiment, the Q4-scoped two-request cache measurement, interviews from
+bounded nodes whose own words were not delivered, and final combined checks. Do not
 call this correction wave complete or launch wave1 from it.
