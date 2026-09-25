@@ -85,7 +85,9 @@ assignment base to its tip leaves its owned paths. The tip commit alone can
 hide an unowned edit in an ancestor.
 Integrate means merging the child's branch, never copying its owned files onto
 your head: a candidate that no longer applies goes back to its child to rebase
-and re-reply. One `integrate(<label>)` commit per frontier, listing the children
+and re-reply. A rebased candidate names its new base in its reply; run the
+cumulative ownership diff against that new base before merging, never reuse the
+verdict from the old base. The same holds when you rebase your own delivery. One `integrate(<label>)` commit per frontier, listing the children
 merged and every contract amendment.
 
 Right after a fork cell settles, send your parent one admission checkpoint:
@@ -137,6 +139,11 @@ head and checks to that actual evidence, then:
 let delivery = Delivered accepted head checks
 respond (Project.Types.Produced delivery)
 ```
+
+Before `respond`, add up to three lines beginning `friction:` to `checks` (for
+Blocked, to its evidence list), each naming concrete tool or rule friction met
+in this assignment with the tool call or file. The root collects them at the
+retro; never edit `docs/exomonad-friction.md` yourself.
 
 Preserve product gates and the parent's remaining integration obligation. When
 the structural work exceeds your assignment, respond (Project.Types.Blocked reason evidence) early: name the

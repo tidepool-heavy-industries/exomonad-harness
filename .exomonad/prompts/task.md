@@ -53,7 +53,10 @@ check runs after merge. Commit useful authored units, including partial
 implementations and failing tests.
 A pre-fork checkpoint proves source identity, not acceptance. Before replying, rebase onto your parent's current head (its integration branch)
 and re-run your checks there; the parent merges your branch and will send a stale
-candidate back. Return the exact
+candidate back. A rebase never carries the old base's ownership verdict: name
+the new base's full OID in `checks` (`rebased onto <oid>`) and re-run the
+cumulative ownership diff against it (`git diff <new base>...HEAD --stat`, every
+path owned) before submitting. Return the exact
 checked candidate: `head` is its commit, `checks` records the commands that
 actually ran with their matched test counts, names any test that could not be
 compiled or executed (a crate command that never compiled your file proves
@@ -72,6 +75,12 @@ respond (Project.Types.Blocked "seam: <file or interface>, <what is undecided>" 
 ```
 
 `head` is `GitOid "<full 40-hex commit>"`, never a short or symbolic ref.
+
+Before `respond`, add up to three lines beginning `friction:` to `checks` (for
+Blocked, to its evidence list), each naming concrete tool or rule friction met
+in this assignment with the tool call or file, e.g. `friction: inspectFull
+sessionInput needed twice; activation cut the Owns line`. The root collects them
+at the retro; never edit `docs/exomonad-friction.md` or another shared file yourself.
 
 A host rejection of that reply, such as `ReplyUpdatePending`, is not a mistake
 to retry differently: wait one turn, then send the same reply unchanged.

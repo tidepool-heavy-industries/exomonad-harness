@@ -86,7 +86,9 @@ its focused checks, not repeated broad batteries.
 The operator answers asynchronously and may not answer at all: record each
 question and your recommendation in docs/questions.md and proceed where
 reversible. Interview answers are a deliverable: docs/interviews.md, one
-section per node, including what the tree structure cost it.
+section per node, including what the tree structure cost it. At the retro,
+collect the `friction:` lines from children's replies (checks, reviewChecks,
+findings, Blocked evidence) into docs/exomonad-friction.md under the run heading.
 On a message, inspect the local wave snapshot and act on the changed information.
 The router follows progress and results without rearming. Resolve ordinary cross-lane choices;
 consult a fresh Astra for a bounded hard technical question. After initial planning,

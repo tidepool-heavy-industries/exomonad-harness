@@ -75,6 +75,13 @@ let reviewed = ReviewedCandidate assignment latest checks conclusion
 respond (Project.Types.Produced (Project.Types.Accepted reviewed))
 ```
 
+Before `respond`, add up to three lines beginning `friction:` naming concrete
+tool or rule friction met in this review with the tool call or file: in
+`reviewChecks` for Accepted, after the findings for Repair, in the evidence list
+for Blocked. The root collects them at the retro; never edit
+`docs/exomonad-friction.md` yourself. A rebased candidate is reviewed against the
+new base its reply names; never carry the old base's ownership verdict.
+
 The reviewed candidate is the single source of its reviewed revision. Keep source
 check limits accurate; do not launder earlier checks into a later head. Return
 `Project.Types.Blocked reason evidence` if review cannot continue. A host rejection of a reply,
