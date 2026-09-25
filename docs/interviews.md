@@ -273,3 +273,97 @@ was rebased as `1513e95` and merged by root at `06148a1`.
   manual packet relay. The generated automatic-review wrapper failing to
   compile is a missing capability; an established wave-9 authored-flow
   example would help usage but would not fix that wrapper.
+
+## RSI iteration 2 / wave 10 — 2026-09-25 (in progress)
+
+- **Store/service owner:** A zero-match `cargo test` filter for the service
+  test cost a manual name lookup and rerun; it then reported exact
+  ancestry/reopen, service, first-request and adapter-readiness tests
+  matched/passed 1/1 each. A runner could reject filters matching zero
+  tests. The shared `CompletionProvenance` and optional `Contract.reply`
+  on its base made compilation straightforward; the semantic care was
+  keeping ancestral delivery as *seen*, not incorporated. Its tree
+  cost an API relay and correction acknowledgement through root to
+  Driver, not a schema migration. It did not claim the Driver gate.
+  Root integrated its candidate `5b2741a` at `176a271`.
+  On the later atomic-publication slice `5b7272b`, it found the
+  hardest seam was coupling head CAS and durable parent envelope
+  within one SQLite transaction, not two calls. It repeated a
+  compile after strengthening an assertion; a matched-count-aware
+  focused runner could rerun only affected cases. The tree cost an
+  API checkpoint and another candidate-ready relay through root
+  before Driver could exercise the integrated transaction. Its
+  two focused Store tests reportedly matched/passed 2/2; this
+  slice remains under independent review.
+- **Engine/finalize owner:** Manual tracing of finalize parser and wire
+  schema and repeatedly relaying the path and focused evidence across
+  rebased tips cost work; a trace from public entry to terminal check,
+  exact checked-OID validation, and matched-count checking could be
+  automated. The
+  hardest contract change was exposing a dynamic strict JSON result
+  while preserving untyped `Engine::run` and avoiding a second answer
+  channel. A reviewer found parser-consumption and unchecked-pattern
+  bugs in `2d12a4a`, requiring one repair candidate and re-review.
+  The tree cost an additional checked revision, but caught behavior
+  the first focused tests did not. A further rebase to `669ba8b`
+  required fresh checks but has identical Engine/finalize content to
+  the repaired `2d5218f`, which was accepted and integrated at
+  `c445c5d`. The owner did not claim the Driver gate.
+- **Store exact-source reviewer:** It found no redundant Store
+  scheduler/inbox path in `5b2741a`. It reported no demonstrably
+  needless code operation; an automated pre-review step could pin
+  exact HEAD, cumulative ownership, and nonzero matched tests.
+  The hardest seam was treating ancestral `delivered_request` as
+  *presentation*, not acknowledgement/incorporation. The tree cost
+  an extra checkout/test evidence handoff; compiler chatter obscured
+  the second filter's matched count. It counted only
+  `completion_provenance_uses_ancestry_and_reopen` (1/1), not the
+  service test whose exit was 0 but match count unavailable.
+- **Driver owner (request 3 checkpoint):** Repeated manual source/status
+  relays and stale Store notices cost time; routing an accepted
+  dependency commit/API to consumers and validating wire shape before
+  adapter-readiness could be coded. The earlier `typed_result` field
+  requirement was superseded by strict turn parsing, forcing a driver
+  correction commit. The tree cost a period where two written
+  lifecycle tests could not compile against root until Engine review
+  and integration; the owner did not claim either test ran then.
+  Its second dependency was a real root contract gap: an extra
+  `structured` field would be forwarded to Responses, and strict
+  agent tools omitted `reply`. Root amended both at `41c48b6` and
+  `e47a958`. Final driver gate evidence remains pending.
+- **Exact-source reviewer:** Switching from its initial `2d12a4a`
+  checkout to assigned `2d5218f`, then re-running focused checks,
+  cost needless work. A repeatable schema audit could require every
+  normalized constraint to be locally enforced or rejected, and
+  require failed dynamic parsing to leave `FinalizeParser` reusable.
+  The hardest seam was strict dynamic completion without a second
+  answer channel: the result stays in `completion.turn` and old
+  `run`/`run_finalized` behavior remains. The tree cost an additional
+  activation/evidence relay; the reviewer also reported a later
+  mismatch between an operator request-state notice and its workbench
+  state, so it could not resubmit a result that was already settled.
+  Artifact facts: Repair at `2d12a4a`, Accepted at `2d5218f`;
+  the first review completed no counted tests, the re-review reported
+  five focused filters matching/passing 1/1 each. It did not claim
+  broader integration or live gates.
+- **Driver exact-source reviewer (first verdict):** It reported test
+  polling loops as needless work and suggested codifying
+  candidate/base/check accounting. The hardest seam was plumbing
+  strict typed completion and provenance through Engine, Store and
+  parent publication. The tree cost came from reasoning across the
+  Driver's async task, watch, notifier and reaper cleanup paths.
+  Its exact `ddce261` review returned Repair: head CAS preceded
+  answer-envelope insertion, so an insertion failure could strand
+  the parent answer. It also reported a zero-match
+  adapter-readiness filter, not an executed adapter check.
+  Interview after the repair verdict remains to be collected.
+- **Root:** `ReviewBasis::ExactScope` kept base/candidate/owned paths
+  explicit across the Store and Engine reviews, including the
+  Engine rebase over the integrated Store slice. It avoided
+  fabricating a `Task`, but did not prevent a stale candidate
+  submission (`5e8d58e`) or initial stale reviewer checkout:
+  exact-tip checks were still essential. The next capability
+  exposed is source-aware dependency routing to a retained consumer,
+  plus a typed, wire-safe publication codec checked at the API
+  boundary. Root held the driver gate as unverified rather than
+  equating a written test with an executed one.

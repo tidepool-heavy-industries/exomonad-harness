@@ -220,6 +220,38 @@ it sends a wake hint. Crash/retry after commit cannot duplicate the
 envelope because head CAS will fail. Store owner must prove rollback
 with an envelope-insert failure injection (e.g. a test-only SQLite
 abort trigger). No schema migration or second scheduler.
+Store request 16 reported the exact atomic API implemented on its
+branch rebased to `04fdf30`, with HeadMismatch and trigger-failure
+rollback tests written but not yet run. Root relayed the API to
+Driver as an unintegrated owner report. Root-visible branch ref
+still showed `04fdf30` before a Store commit.
+Store submitted exact candidate
+`5b7272bac92296d7112b19e628f9e84e8302c7ee`, cumulative diff
+only store/mod.rs from `04fdf30`. It reported
+`cargo test -p harness complete_agent_with_publication` 2/2,
+covering success/idempotence and SQLite trigger-injected insert
+failure rolling back head and item. Root commissioned independent
+exact-tip review through retained Store reviewer; not merged yet.
+Store atomic reviewer first returned Repair claiming no production
+caller because `agent_runtime.rs:789` still used
+`advance_agent_head`; root verified that occurrence is inside a
+unit test, while disjoint committed Driver repair `552a21d` calls
+`complete_agent_with_publication` in production at driver.rs ~367.
+Root supplied this precise consumer evidence in one same-reviewer
+re-review request. No Store code defect has been identified, but
+Store slice remains unmerged pending the corrected verdict and
+integrated gate.
+Driver atomic repair checkpoint committed
+`552a21d1c1972ba3e8ef36157cf59254b774ba9f` on `04fdf30`,
+owned diff only driver.rs. It prepares publication before the single
+atomic Store call, handles HeadMismatch/Committed and wakes parent
+after commit. A malformed-publication failure test is written;
+no driver test has compiled against the unmerged Store method yet.
+Driver repair request 17 settled Blocked on the same unresolved Store
+integration dependency at exact tip `552a21d`; it correctly reported
+zero compiled/matched tests, not a failing or passing gate. Root must
+reassign the retained Driver owner immediately after reviewed Store
+merge with that integration OID.
 
 ## Where the last run stopped (live wave 10 checkpoint)
 
@@ -228,9 +260,15 @@ abort trigger). No schema migration or second scheduler.
   longer unmerged: exact-tip re-review accepted and root integrated it
   as `c445c5d`. Prior reviewed `2d12a4a` received Repair.
 - `exomonad/wave10/implementation/branches/wave10-driver`:
-  `ddce261673a7f5fed964609a355b4d22d4003957`;
-  wire-safe codec and driver lifecycle gate/reopened assertions;
-  candidate checks reported passing, exact-tip review pending and
+  `552a21d1c1972ba3e8ef36157cf59254b774ba9f`
+  (owner checkpoint, root ref may lag); atomic repair and
+  malformed-publication test written, not compiled against Store
+  method, not re-reviewed or integrated. Prior `ddce261` gate
+  passed 2/2 but review returned Repair.
+- Store atomic-publication repair request is pending on shared
+  contract source `04fdf305bc9ca9b78cf871e3b43ca802297e26d2`;
+  candidate `5b7272bac92296d7112b19e628f9e84e8302c7ee`
+  has reported 2/2 focused tests, exact-tip review pending;
   not integrated.
 - Store branch `5b2741a` is not unmerged: it is integrated as
   `176a271`. Root's wire-safe codec amendment is `41c48b6`.
