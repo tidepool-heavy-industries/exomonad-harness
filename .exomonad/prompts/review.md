@@ -16,7 +16,7 @@ different evidence. A checked-in API used only by its tests is still preparation
 This prompt is the recipe; you need not re-read the exomonad-review skill.
 Reading. The activation's lines above the `Assignment` dump are the complete
 input: `Plan:` through `Acceptance:` plus `Candidate:`, `Claimed checks:`,
-`Remaining product gates:` and `Repair owner:` for a ReviewTask; `Candidate:`,
+`Remaining product gates:` and `Repair owner:` for a ReviewTask; `Base:`, `Candidate:`,
 `Owned source:`, `Acceptance:` and `Repair owner:` for a CommitReview. The dump
 is the same value cut short, so do not run `inspectFull sessionInput`; only a
 follow-up request with no `Candidate:` line needs it, once. A ReviewTask activation's
@@ -30,7 +30,7 @@ and a question that stops the review goes through respond
 
 Reference (Project.Types, Project.Work and the session bindings; `(...)` elides a constraint list; no lookup needed):
 - `data ReviewTask = ReviewTask { reviewAssignment :: Task, reviewInput :: Candidate, repairOwner :: RepairOwner }` -- input from reviewCandidate.
-- `data CommitReview = CommitReview { commitReviewCommit :: GitOid, commitReviewAcceptance :: Text, commitReviewOwnedPaths :: [Text], commitReviewOwner :: RepairOwner }` -- input from reviewCommit; it carries no base.
+- `data CommitReview = CommitReview { commitReviewBase :: GitOid, commitReviewCommit :: GitOid, commitReviewAcceptance :: Text, commitReviewOwnedPaths :: [Text], commitReviewOwner :: RepairOwner }` -- exact cumulative base and candidate from reviewCommit.
 - `data Task = Task { taskGroup :: ForkGroupPath, planPath :: Text, taskSource :: GitOid, obligation :: Text, rationale :: Text, ownedPaths :: [Text], acceptance :: Text, acceptedDecisions :: [AcceptedDecision] }` -- the reviewed assignment; `taskSource` is the base.
 - `task :: Label -> Text -> [Text] -> Text -> GitOid -> Task` -- label, objective, owned paths, acceptance, source; fills `taskGroup` and `planPath` for you, so never build a ForkGroupPath; builds a Task for a CommitReview acceptance.
 - `data Candidate = Candidate { candidateCommit :: GitOid, checkedCommands :: [Text], remainingGates :: [Text] }` -- the reviewed commit, its checks and open gates.
@@ -42,7 +42,7 @@ Reference (Project.Types, Project.Work and the session bindings; `(...)` elides 
 - `data AcceptedDecision = AcceptedDecision { decisionQuestion :: Question, decisionSource :: GitOid, decisionSummary :: Text, decisionEvidence :: [Text] }` -- a decision the Task already carries; its activation line starts with the question key.
 - `respond :: (Outcome ReviewDecision) -> Eff effects Void` -- ends the review; the argument is the reply value itself.
 - `repair :: Member Replies effects => Label -> ReviewTask -> Candidate -> [Text] -> Eff effects (Either ReviewDecision (Response (Outcome Candidate)))` -- Left is your Repair verdict; Right is a request to a retained implementer.
-- `reviewCandidate :: (...) => Task -> RepairOwner -> Candidate -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` and `reviewCommit :: (...) => Label -> GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- how your requester admitted you; both seed your checkout at the candidate commit.
+- `reviewCandidate :: (...) => Task -> RepairOwner -> Candidate -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` and `reviewCommit :: (...) => Label -> GitOid -> GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- how your requester admitted you; both seed your checkout at the candidate commit.
 
 Trace a representative successful user flow and consequential awkward/failure
 cases. Validate claims at the actual boundary; consumer representations can omit
@@ -105,17 +105,16 @@ without requiring a fresh reviewer for every attempt.
 ## Exact-commit reviews (input is CommitReview, not ReviewTask)
 
 A reviewer forked by `reviewCommit` receives `sessionInput :: CommitReview`:
-the exact commit, the acceptance text, the owned paths, and the repair owner.
-There is no owning Task and no base. The base for the cumulative diff is the
-commit's parent as the requester gave it: take it from the acceptance text, or
-ask the requester. Never derive it with `git merge-base` against master. Review
+the cumulative base, exact candidate, acceptance text, owned paths and repair owner.
+Use commitReviewBase for the cumulative diff and verify HEAD equals
+commitReviewCommit before checks. Never infer the base from prose or master. Review
 exactly as above. To accept, build the Task yourself with the `task` defaults
 constructor and return the same `Project.Types.Produced (Project.Types.Accepted reviewed)` shape:
 
 ```haskell
 let ci = sessionInput :: CommitReview
 let assignment = task [label|commit-review|] (commitReviewAcceptance ci)
-      (commitReviewOwnedPaths ci) (commitReviewAcceptance ci) (commitReviewCommit ci)
+      (commitReviewOwnedPaths ci) (commitReviewAcceptance ci) (commitReviewBase ci)
 let reviewed = ReviewedCandidate
       { acceptedAssignment = assignment
       , reviewedCandidate = Candidate (commitReviewCommit ci) checks gates

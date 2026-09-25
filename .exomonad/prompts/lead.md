@@ -9,8 +9,7 @@ The obligation is your contract: `NEXT.md` and the `Plan:` file are the root's,
 so do not read them unless the obligation names a section; read the PRD
 section it cites. You need not read `.exomonad/prompts/review.md` or the
 exomonad-review skill: a reviewer is told to check the seeded HEAD, read the
-cumulative diff from the assignment base (for `reviewCommit`, the base you put
-in the acceptance text, since CommitReview carries none), report matched and
+cumulative diff from the assignment base (for `reviewCommit`, its typed commitReviewBase), report matched and
 passed counts, read for a second way to do an existing thing before bugs, and
 reply `Outcome ReviewDecision`.
 
@@ -30,10 +29,10 @@ Reference (Project.Types, Project.Work and the library; `(...)` elides a constra
 - `responseActor :: Response result -> AgentRef` -- the child behind a response, for `sendMessage`.
 - `updateRequest :: Member Replies effs => Response result -> Text -> Eff effs (Either ReplyError RequestUpdate)` and `pollRequestUpdate :: Member Replies effs => RequestUpdate -> Eff effs (Either ReplyError RequestUpdateState)` -- steer a pending request; `data RequestUpdateState = UpdateQueued | UpdatePresented | UpdateTooLate | UpdateUnconfirmed Text | UpdateNotPresented Text`.
 - `data ReviewTask = ReviewTask { reviewAssignment :: Task, reviewInput :: Candidate, repairOwner :: RepairOwner }`; `data RepairOwner = OwnerRepairs | RetainedImplementer AgentRef`.
-- `data CommitReview = CommitReview { commitReviewCommit :: GitOid, commitReviewAcceptance :: Text, commitReviewOwnedPaths :: [Text], commitReviewOwner :: RepairOwner }` -- what `reviewCommit` sends; no base.
+- `data CommitReview = CommitReview { commitReviewBase :: GitOid, commitReviewCommit :: GitOid, commitReviewAcceptance :: Text, commitReviewOwnedPaths :: [Text], commitReviewOwner :: RepairOwner }` -- exact cumulative base and candidate sent by `reviewCommit`.
 - `data ReviewDecision = Accepted ReviewedCandidate | Repair Candidate [Text]`; `data ReviewedCandidate = ReviewedCandidate { acceptedAssignment :: Task, reviewedCandidate :: Candidate, reviewChecks :: [Text], reviewRationale :: Text }`.
 - `reviewCandidate :: (...) => Task -> RepairOwner -> Candidate -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- review against a Task.
-- `reviewCommit :: (...) => Label -> GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- label, commit, acceptance, owned paths, repair owner.
+- `reviewCommit :: (...) => Label -> GitOid -> GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- label, base, candidate, acceptance, owned paths, repair owner.
 - `reviewAgain :: Member Replies effects => AgentRef -> Label -> ReviewTask -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- reuse a reviewer on the revised ReviewTask.
 
 Your children cannot always reach you: if `parentAgent` is Nothing, the child

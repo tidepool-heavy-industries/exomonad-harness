@@ -1,16 +1,13 @@
-Read `NEXT.md` first; the prompt trials it lists are rules for this run. Own
-delivery of the agreed project outcome through checked integration. NEXT.md's
-one page quotes the plan status, the accepted human decisions and the rules
-from the other project docs; open those only to edit them. An example package is
-not product approval. Ask about missing finished behavior or authority needed
-for the next action; reuse settled answers. An operator hold stays in force
-until explicitly lifted.
+Read `NEXT.md` first. It names the current assignment, accepted constraints and
+required reading. Own delivery of that outcome through checked integration.
+An example package is not product approval. Ask about missing finished behavior
+or authority needed for the next action; reuse settled answers. An operator hold
+stays in force until explicitly lifted.
 
 You need not read `.exomonad/prompts/review.md` or the exomonad-review,
 exomonad-cleanup or exomonad-workbench skills: the Reference below carries what
 they add for you. A reviewer is told to check the seeded HEAD, read the
-cumulative diff from the assignment base (for `reviewCommit`, the base you
-state in the acceptance text, since CommitReview carries none), report matched
+cumulative diff from the assignment base (for `reviewCommit`, its typed commitReviewBase), report matched
 and passed counts, read for a second way to do an existing thing before bugs,
 and reply `Outcome ReviewDecision`. `Tidepool.Command` has no job list: a `Job`
 is the value `Cmd.start` returned, or `Cmd.job` of a `RunResult`; bind it, and
@@ -40,12 +37,13 @@ Reference (Project.Types, Project.Work, Project.Routing, Project.Observe and the
 - `sendMessage :: Member Notifications effs => AgentRef -> Text -> Eff effs (Either NotificationError NotificationReceipt)` -- a receipt proves transport, not reading.
 - `updateRequest :: Member Replies effs => Response result -> Text -> Eff effs (Either ReplyError RequestUpdate)` and `pollRequestUpdate :: Member Replies effs => RequestUpdate -> Eff effs (Either ReplyError RequestUpdateState)` -- steer a pending request; `data RequestUpdateState = UpdateQueued | UpdatePresented | UpdateTooLate | UpdateUnconfirmed Text | UpdateNotPresented Text`.
 - `pollResponse :: Member Replies effs => Response result -> Eff effs (ResponseState result)` -- `ResponsePending PendingProgress | ResponseCancellationPending CancellationReason | ResponseReady (ResponseResult result) | ResponseUnavailable ResponseFailure | ResponseStarting Text`; `ResponseResult { responseValue, responseExecution, responseWorktree }`.
-- `reviewCommit :: (...) => Label -> GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- label, commit, acceptance, owned paths, repair owner; `data RepairOwner = OwnerRepairs | RetainedImplementer AgentRef`.
+- `reviewCommit :: (...) => Label -> GitOid -> GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- label, base, candidate, acceptance, owned paths, repair owner; `data RepairOwner = OwnerRepairs | RetainedImplementer AgentRef`.
 - `data ReviewDecision = Accepted ReviewedCandidate | Repair Candidate [Text]`; `data ReviewedCandidate = ReviewedCandidate { acceptedAssignment :: Task, reviewedCandidate :: Candidate, reviewChecks :: [Text], reviewRationale :: Text }`.
 - `planCleanupFor :: Member AgentInspection effs => Response result -> Eff effs CleanupPlan`, `executeCleanup :: Member AgentControl effs => CleanupPlan -> Eff effs CleanupReceipt` -- retire a settled child's fork group: `executeCleanup =<< planCleanupFor child`; nothing is deleted.
 - `stopAgent :: Member AgentControl effs => AgentRef -> Eff effs StopOutcome` -- for a stuck child; `StoppedNow` and `StoppedRetaining Text` are final, `StoppedReleasing` sends one later notice: do not re-issue.
 
-`NEXT.md` carries the fork recipe for one Luna child and one Sol lead.
+Use the task constructors above; the current assignment chooses the worker model
+and decomposition. The exomonad-fork skill supplies admission syntax if needed.
 
 A child cannot always reach you: if `parentAgent` is Nothing, the child
 reports through reportProgress and stops with respond Blocked. Every lead's
