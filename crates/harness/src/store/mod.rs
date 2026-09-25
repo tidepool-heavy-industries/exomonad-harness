@@ -4,7 +4,7 @@ pub mod schema;
 use crate::{
     item::{Item, ItemHash},
     model::{AgentPath, CallId, Effort, RequestId},
-    transport::ResponsesTurn,
+    transport::{ResponsesRequest, ResponsesTurn},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -115,6 +115,14 @@ pub struct Event {
     pub kind: String,
     pub payload: String,
     pub created_at: i64,
+}
+/// The exact model boundary: input and response are captured together before
+/// later provider outputs can be appended to request history.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RecordedReplayTurn {
+    pub request: RequestId,
+    pub model_request: ResponsesRequest,
+    pub model_response: ResponsesTurn,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Envelope {
@@ -1215,13 +1223,23 @@ impl Store {
     /// Persist the completed model batch separately from later tool outputs
     /// appended to the same request. The event is written only after Engine
     /// has persisted all completed response items.
-    pub fn record_replay_turn(&self, request: &RequestId, turn: &ResponsesTurn) -> Result<i64> {
-        self.record_event(Some(request), "model_turn", &serde_json::to_value(turn)?)
+    pub fn record_replay_turn(
+        &self,
+        request: &RequestId,
+        model_request: &ResponsesRequest,
+        model_response: &ResponsesTurn,
+    ) -> Result<i64> {
+        let record = RecordedReplayTurn {
+            request: request.clone(),
+            model_request: model_request.clone(),
+            model_response: model_response.clone(),
+        };
+        self.record_event(Some(request), "model_turn", &serde_json::to_value(record)?)
     }
 
     /// Completed model turns on this request's branch, from `root` forward.
     /// Fork branches are excluded even when they inherit `root` as an ancestor.
-    pub fn replay_turns(&self, root: &RequestId) -> Result<Vec<(RequestId, ResponsesTurn)>> {
+    pub fn replay_turns(&self, root: &RequestId) -> Result<Vec<RecordedReplayTurn>> {
         let c = self.lock();
         let mut q = c.prepare(
             "WITH RECURSIVE chain(id, branch) AS (
@@ -1230,16 +1248,14 @@ impl Store {
                 SELECT child.id, child.branch FROM requests child
                 JOIN chain parent ON child.parent_id=parent.id AND child.branch=parent.branch
             )
-            SELECT e.request_id, e.payload FROM events e
+            SELECT e.payload FROM events e
             JOIN chain ON chain.id=e.request_id
             WHERE e.kind='model_turn' ORDER BY e.id",
         )?;
-        let rows = q.query_map([&root.0], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
+        let rows = q.query_map([&root.0], |r| r.get::<_, String>(0))?;
         rows.map(|row| {
-            let (request, payload) = row?;
-            Ok((RequestId(request), serde_json::from_str(&payload)?))
+            let payload = row?;
+            Ok(serde_json::from_str(&payload)?)
         })
         .collect()
     }
@@ -1618,6 +1634,16 @@ mod tests {
         let output = item(serde_json::json!({
             "type":"function_call_output","call_id":call.0,"output":"{\"value\":\"done\"}"
         }));
+        let model_request = ResponsesRequest {
+            input: vec![item(
+                serde_json::json!({"role":"user","content":"run cell"}),
+            )],
+            instructions: "reply by tool".into(),
+            tools: vec![serde_json::json!({"type":"function","name":"cell"})],
+            model: "offline-recording".into(),
+            pinned_effort: Effort::Low,
+            session_id: "recorded-session".into(),
+        };
         {
             let s = Store::open(&path).unwrap();
             s.create_request(&root, None, "/root").unwrap();
@@ -1627,6 +1653,7 @@ mod tests {
                 .unwrap();
             s.record_replay_turn(
                 &root,
+                &model_request,
                 &ResponsesTurn {
                     response_id: "recorded-call".into(),
                     items: vec![call_item.clone()],
@@ -1640,6 +1667,7 @@ mod tests {
                 .unwrap();
             s.record_replay_turn(
                 &fork,
+                &model_request,
                 &ResponsesTurn {
                     response_id: "fork-only".into(),
                     items: vec![],
@@ -1652,9 +1680,13 @@ mod tests {
             let s = Store::open(&path).unwrap();
             let turns = s.replay_turns(&root).unwrap();
             assert_eq!(turns.len(), 1);
-            assert_eq!(turns[0].0, root);
-            assert_eq!(turns[0].1.response_id, "recorded-call");
-            assert_eq!(turns[0].1.items, vec![call_item]);
+            assert_eq!(turns[0].request, root);
+            assert_eq!(
+                serde_json::to_value(&turns[0].model_request).unwrap(),
+                serde_json::to_value(&model_request).unwrap()
+            );
+            assert_eq!(turns[0].model_response.response_id, "recorded-call");
+            assert_eq!(turns[0].model_response.items, vec![call_item]);
             assert_eq!(s.replay_output(&call).unwrap(), Some(output));
         }
         let _ = std::fs::remove_file(&path);
