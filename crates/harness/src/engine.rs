@@ -1677,6 +1677,17 @@ mod tests {
         let child_input = &child_requests[0].input;
         assert!(child_input.contains(&spawn_item));
         assert!(child_input.contains(&actual_output));
+        let spawn_position = child_input
+            .iter()
+            .position(|item| item == &spawn_item)
+            .unwrap();
+        assert_eq!(child_input[spawn_position + 1], actual_output);
+        assert_eq!(
+            child_input[spawn_position + 2].configuration_effort(),
+            Some(Effort::High),
+            "fresh effort pin follows the actual spawn output"
+        );
+        assert_eq!(child_requests[0].pinned_effort, Effort::High);
         assert_eq!(
             child_input
                 .iter()
@@ -1712,6 +1723,236 @@ mod tests {
                 .count(),
             1,
             "streamed function_call is not duplicated after response completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn here_child_waits_between_claim_settlement_and_persisted_spawn_output() {
+        let store = Arc::new(Store::memory().unwrap());
+        let parent = AgentPath("/root".into());
+        let child = AgentPath("/root/race_child".into());
+        let invocation_request = RequestId("here-output-race-parent".into());
+        let snapshot = RequestId("here-output-race-snapshot".into());
+        let call_id = CallId("here-output-race-call".into());
+        let other_call_id = CallId("here-output-race-other-call".into());
+        let other_call_item = Item(json!({
+            "type":"function_call",
+            "call_id":other_call_id.0,
+            "name":"slow",
+            "arguments":"{}"
+        }));
+        let spawn_item = Item(json!({
+            "type":"function_call",
+            "call_id":call_id.0,
+            "name":"spawn_agent",
+            "arguments":"{}"
+        }));
+        store
+            .create_request(&invocation_request, None, &parent.0)
+            .unwrap();
+        store.set_effort(&invocation_request, Effort::High).unwrap();
+        store
+            .append_items(
+                &invocation_request,
+                &[other_call_item.clone(), spawn_item.clone()],
+            )
+            .unwrap();
+        store
+            .admit_agent(
+                &parent,
+                None,
+                Some(&invocation_request),
+                &json!({}),
+                &json!({"kind":"root"}),
+            )
+            .unwrap();
+        store.claim(&other_call_id, &invocation_request).unwrap();
+        store.claim(&call_id, &invocation_request).unwrap();
+        store
+            .admit_here_agent_from_invocation(
+                &child,
+                &parent,
+                &snapshot,
+                &invocation_request,
+                &call_id,
+                &json!({}),
+                &parent.0,
+                &child.0,
+                "AtBoundary",
+                &Item(json!({"type":"message","role":"assistant","content":"NEW_TASK"})),
+            )
+            .unwrap();
+
+        let started = Arc::new(Notify::new());
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+        scheduler
+            .start_for_agent(
+                Arc::new(SlowProvider {
+                    started: started.clone(),
+                    release: tokio::sync::Mutex::new(Some(release_rx)),
+                    released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                }),
+                parent.clone(),
+                Some(invocation_request.clone()),
+                other_call_id.clone(),
+                "slow".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        scheduler
+            .claim(&other_call_id, parent.clone())
+            .await
+            .unwrap();
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new(
+                [
+                    turn(
+                        "here-output-race-provisional",
+                        vec![Item(json!({
+                            "type":"message",
+                            "role":"assistant",
+                            "phase":"final_answer",
+                            "content":"waiting for other pending call"
+                        }))],
+                    ),
+                    turn(
+                        "here-output-race-final",
+                        vec![Item(json!({
+                            "type":"message",
+                            "role":"assistant",
+                            "phase":"final_answer",
+                            "content":"ready"
+                        }))],
+                    ),
+                ]
+                .into(),
+            ),
+        };
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            replay,
+            store.clone(),
+            scheduler,
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "child".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "here-output-race-child".into(),
+                agent: child,
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let child_snapshot = snapshot.clone();
+        let child_run = tokio::spawn(async move {
+            engine
+                .run(Some(child_snapshot), vec![], cancel_rx, empty_mailbox())
+                .await
+        });
+
+        let output = Item(json!({
+            "type":"function_call_output",
+            "call_id":call_id.0,
+            "output":"{\"spawned\":true}"
+        }));
+        assert_eq!(store.write_output(&call_id, &output).unwrap(), 2);
+        let claims = store.claims(&call_id).unwrap();
+        assert_eq!(claims.len(), 2, "parent and child claims both settle");
+        assert!(
+            claims
+                .iter()
+                .all(|claim| claim.state == crate::store::ClaimState::Settled)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "settled claim alone must not release the child before its output Item is persisted"
+        );
+
+        store
+            .append_items(&invocation_request, &[output.clone()])
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .expect("second inherited call starts");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if requests.lock().unwrap().len() == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Here child starts while the second call remains pending");
+        let first_input = requests.lock().unwrap()[0].input.clone();
+        assert!(first_input.contains(&other_call_item));
+        assert!(!first_input.iter().any(|item| {
+            item.0["type"] == "function_call_output"
+                && item.0["call_id"].as_str() == Some(&other_call_id.0)
+        }));
+        assert!(
+            store
+                .claims(&other_call_id)
+                .unwrap()
+                .iter()
+                .all(|claim| claim.state == crate::store::ClaimState::Pending),
+            "the second active-call claim remains pending at the child's first request"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            !child_run.is_finished(),
+            "child waits for the second pending call after its first final response"
+        );
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), child_run)
+            .await
+            .expect("child wakes after invocation output persistence")
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .copy_call_output_if_persisted(&invocation_request, &snapshot, &call_id)
+                .unwrap()
+        );
+        let child_requests = requests.lock().unwrap();
+        let child_input = &child_requests[0].input;
+        assert_eq!(child_requests.len(), 2);
+        assert_eq!(
+            child_requests[1]
+                .input
+                .iter()
+                .filter(|item| {
+                    item.0["type"] == "function_call_output" && item.0["call_id"] == other_call_id.0
+                })
+                .count(),
+            1,
+            "the second active call's output arrives on the resumed request"
+        );
+        let spawn_position = child_input
+            .iter()
+            .position(|item| item == &spawn_item)
+            .unwrap();
+        assert_eq!(child_input[spawn_position + 1], output);
+        assert_eq!(
+            child_input[spawn_position + 2].configuration_effort(),
+            Some(Effort::High)
+        );
+        assert_eq!(child_requests[0].pinned_effort, Effort::High);
+        assert_eq!(
+            child_input
+                .iter()
+                .filter(|item| {
+                    item.0["type"] == "function_call_output" && item.0["call_id"] == call_id.0
+                })
+                .count(),
+            1,
+            "retrying the copy does not duplicate the output"
         );
     }
 

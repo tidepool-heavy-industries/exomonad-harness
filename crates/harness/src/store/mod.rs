@@ -1130,12 +1130,23 @@ impl Store {
             tx.commit()?;
             return Ok(true);
         }
-        let hash = Self::put_item_tx(&tx, &output)?;
-        let position = target_items.len() as i64;
-        tx.execute(
-            "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
-            params![target.0, position, hash.0],
-        )?;
+        let Some(spawn_position) = target_items.iter().position(|item| {
+            item.0["type"] == "function_call"
+                && item.0["call_id"].as_str() == Some(&call_id.0)
+                && item.0["name"].as_str() == Some("spawn_agent")
+        }) else {
+            return Ok(false);
+        };
+        let mut ordered = target_items;
+        ordered.insert(spawn_position + 1, output);
+        tx.execute("DELETE FROM request_items WHERE request_id=?1", [&target.0])?;
+        for (position, item) in ordered.iter().enumerate() {
+            let hash = Self::put_item_tx(&tx, item)?;
+            tx.execute(
+                "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
+                params![target.0, position as i64, hash.0],
+            )?;
+        }
         tx.commit()?;
         Ok(true)
     }
