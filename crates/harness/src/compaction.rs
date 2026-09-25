@@ -94,23 +94,31 @@ impl Compactor for Server {
             .collect();
         input.push(Item(json!({"type":"compaction_trigger"})));
         let server_items = cx.server_compact(input).await?;
+        let pending_ids: Vec<&str> = cx
+            .pending_calls()
+            .iter()
+            .filter_map(function_call_id)
+            .collect();
         let mut items: Vec<Item> = server_items
             .into_iter()
-            .filter(|item| !is_setting(item))
+            .filter(|item| {
+                !is_setting(item)
+                    && !is_user_message(item)
+                    && function_call_id(item).is_none_or(|id| !pending_ids.contains(&id))
+            })
             .collect();
-        // Preserve user-authored input verbatim if server compaction omitted it.
-        for item in cx.items().iter().filter(|item| is_user_message(item)) {
-            if !items.contains(item) {
-                items.push(item.clone());
-            }
-        }
+        // Replace endpoint user messages with the original sequence. This
+        // preserves duplicates, byte-faithful values, and source ordering even
+        // if server compaction omitted or reordered them.
+        items.extend(
+            cx.items()
+                .iter()
+                .filter(|item| is_user_message(item))
+                .cloned(),
+        );
         // Pending function calls must remain valid for late call_id outputs,
-        // independent of whether the endpoint happens to preserve them.
-        for call in cx.pending_calls() {
-            if !items.contains(call) {
-                items.push(call.clone());
-            }
-        }
+        // independent of whether the endpoint omits or rewrites them.
+        items.extend(cx.pending_calls().iter().cloned());
         let mut carried = Vec::new();
         for item in cx.pending_calls() {
             if let Some(id) = item.0.get("call_id").and_then(|v| v.as_str()) {
@@ -124,7 +132,7 @@ impl Compactor for Server {
             0,
             Item(json!({"type":"message","role":"developer","content":"[compaction-context-v1] Context was compacted; you are the successor. Summary follows; live state (bindings, worktrees, children) is listed after it."})),
         );
-        items.push(Item(json!({"type":"configuration_update","reasoning":{"effort":format!("{:?}", cx.effort).to_lowercase()}})));
+        items.push(Item::configuration_update(cx.effort));
         Ok(NewWindow {
             items,
             effort: cx.effort,
@@ -136,6 +144,12 @@ impl Compactor for Server {
 fn is_user_message(item: &Item) -> bool {
     item.0.get("type").and_then(|v| v.as_str()) == Some("message")
         && item.0.get("role").and_then(|v| v.as_str()) == Some("user")
+}
+
+fn function_call_id(item: &Item) -> Option<&str> {
+    (item.0.get("type").and_then(|v| v.as_str()) == Some("function_call"))
+        .then(|| item.0.get("call_id").and_then(|v| v.as_str()))
+        .flatten()
 }
 
 fn is_setting(item: &Item) -> bool {
@@ -164,7 +178,10 @@ mod tests {
             assert!(!input[..input.len() - 1].iter().any(is_setting));
             Box::pin(async {
                 Ok(vec![
+                    Item(json!({"type":"message","role":"user","content":"later"})),
+                    Item(json!({"type":"function_call","call_id":"call-7","name":"changed"})),
                     Item(json!({"type":"message","content":"summary"})),
+                    Item(json!({"type":"message","role":"user","content":"keep me"})),
                     Item(json!({"type":"configuration_update","reasoning":{"effort":"low"}})),
                     Item(json!({"type":"additional_tools","tools":[]})),
                     Item(json!({"type":"compaction_trigger"})),
@@ -175,7 +192,8 @@ mod tests {
             Box::pin(async { Ok(json!({"note":"typed"})) }) as TypedTurnFuture<'_>
         };
         let user = Item(json!({"type":"message","role":"user","content":"keep me"}));
-        let source = [source, vec![user.clone()]].concat();
+        let user_later = Item(json!({"type":"message","role":"user","content":"later"}));
+        let source = [source, vec![user.clone(), user.clone(), user_later.clone()]].concat();
         let cx = CompactContext {
             items: &source,
             usage: &usage,
@@ -185,8 +203,18 @@ mod tests {
             typed_turn: &typed_turn,
         };
         let window = Server.compact(cx).await.unwrap();
-        assert!(window.items.contains(&call));
-        assert!(window.items.contains(&user));
+        let calls: Vec<_> = window
+            .items
+            .iter()
+            .filter(|item| item.0.get("type").and_then(|v| v.as_str()) == Some("function_call"))
+            .collect();
+        assert_eq!(calls, vec![&call]);
+        let users: Vec<_> = window
+            .items
+            .iter()
+            .filter(|item| is_user_message(item))
+            .collect();
+        assert_eq!(users, vec![&user, &user, &user_later]);
         assert_eq!(window.carried, vec![CallId("call-7".into())]);
         assert_eq!(window.items[0].0["role"], "developer");
         assert!(
@@ -206,6 +234,10 @@ mod tests {
         assert_eq!(
             window.items.last().unwrap().0["reasoning"]["effort"],
             "medium"
+        );
+        assert_eq!(
+            window.items.last().unwrap(),
+            &Item::configuration_update(Effort::Medium)
         );
     }
 
