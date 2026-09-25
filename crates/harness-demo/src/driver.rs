@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use harness::{
     agent_runtime::StoreAgentToolService,
     engine::{Engine, EngineCompletion, EngineError, ResponsesTransport},
+    finalize::FinalizeParser,
     item::Item,
     lifecycle::PublishedAnswer,
     mailbox::{DeliveryClass, Envelope, EnvelopeType},
@@ -579,24 +580,37 @@ fn published_final_answer(
     parent: &AgentPath,
     completion: &EngineCompletion,
 ) -> Result<Option<Item>, String> {
-    let (rendered, structured) = if let Some(result) = &completion.typed_result {
+    let finalize_calls = completion
+        .turn
+        .items
+        .iter()
+        .filter(|item| item.0["type"] == "function_call" && item.0["name"] == "finalize")
+        .collect::<Vec<_>>();
+    let (rendered, structured) = if let [finalize] = finalize_calls.as_slice() {
+        // The Engine has already enforced strict schema and exactly one call.
+        // Decode here only to carry that same typed JSON into publication.
+        let result: Value = FinalizeParser::new()
+            .parse_completed(finalize)
+            .map_err(|error| error.to_string())?;
         let provenance = store
             .completion_provenance(sender, &completion.head_request)
             .map_err(|error| error.to_string())?;
         let answer = PublishedAnswer {
             sender: sender.0.clone(),
-            result: result.clone(),
+            result,
             provenance,
         };
         (
             serde_json::to_string(&answer).map_err(|error| error.to_string())?,
             Some(serde_json::to_value(answer).map_err(|error| error.to_string())?),
         )
-    } else {
+    } else if finalize_calls.is_empty() {
         let Some(text) = final_answer(&completion.turn.items) else {
             return Ok(None);
         };
         (text, None)
+    } else {
+        return Err("multiple finalize calls in accepted completion".into());
     };
     Ok(Some(Item(json!({
         "type": "message",
@@ -1255,7 +1269,6 @@ mod tests {
                 },
                 transcript: vec![],
                 head_request: id,
-                typed_result: None,
             })
         }
     }
