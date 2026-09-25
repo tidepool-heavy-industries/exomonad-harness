@@ -910,6 +910,7 @@ mod tests {
             .unwrap();
         assert_eq!(queued["status"], "queued");
         let queued_id = store.unread(&child.0).unwrap()[0].id;
+        assert_eq!(queued["envelope_id"], queued_id);
         release_tx.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             loop {
@@ -1081,6 +1082,7 @@ mod tests {
             .unwrap();
         assert_eq!(queued["status"], "queued");
         let late_id = store.unread(&child.0).unwrap()[0].id;
+        assert_eq!(queued["envelope_id"], late_id);
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             while store.inbox(&root.0).unwrap().len() != 2 {
                 tokio::task::yield_now().await;
