@@ -53,7 +53,7 @@ root (otherwise)  everyone ++ lead ++ root
 - `helper_shipped` (0.75) "adds a public fn in `crates/harness` whose body only chains two+ of wait_agent/cancel/spawn_agent/checkpoint/set-effort/store queries, under a name not on the PRD primitives line?" A: primitives not helpers; delete.
 - `noncanonical_json` "hashes or sends JSON w/o canonical key order?" A: canonical serializer for every hashed/cached byte.
 - `reinvents_library` (0.7) "hand-writes something nontrivial that a well-tested crate/package already provides (SSE parsing, backoff+jitter, JSON schema derivation, canonical JSON, blake3, SQL migrations, WS framing, virtualized lists, JSON-schema forms) with no stated, specific reason in the code or commit?" A: use the library from the PRD stack; if a reason exists, write it in a doc comment; if not, delete the hand version.
-- `repeating_itself`, `ignoring_a_failure` (Project.Watchdog wording).
+- `repeating_itself`, `ignoring_a_failure` (Project.Watchdog wording). exempt: retrying the same call after a host-side rejection (a held lock, `ReplyUpdatePending`) is the correct move, not a repeat; never advise on it.
 - `asks_answered_question` (kind=ask) "the question's answer is stated in PRD.md, tree.md or the scaffold docs?" A: cite the section; don't ask.
 - `ask_shape` (kind=ask) "question lacks `[label]`, `default:` or `blocks:`?" A: tree.md `ask` shape.
 
@@ -284,7 +284,7 @@ root (otherwise)  everyone ++ lead ++ root
 - S: `progress` 1 churn on same lines · 2 exploring w/o edits (fine in orient) · 3 edits landing · 4 edits + checks · 5 edits + checks + commit. advise ≤1: name what's churning.
 - S: `evidence_before_edit` 1 edits w/o reading target · 3 reads then edits · 5 reads scaffold doc + target. advise ≤1.
 - S: `check_gap` (calls since last passing check) 1 ≥8 · 3 4–7 · 5 ≤3. advise ≤1.
-- N: `blocked_silent` (phase=blocked) "same failure ≥3 times in `recent_calls` w/o an `ask`?" A: ask ⇑ w/ default + blocks.
+- N: `blocked_silent` (phase=blocked) "same failure ≥3 times in `recent_calls` w/o an `ask`?" A: ask ⇑ w/ default + blocks. host-side rejections (held lock, `ReplyUpdatePending`) are not failures here.
 
 ## L6 selection
 - C: `show` "Which single advice, if given now, would most change the quality of the child's next call?" alts = every advice key in this packet (as authored, wording = its condition) + `nothing`. handler uses the pick only if that candidate tripped.

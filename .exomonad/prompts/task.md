@@ -1,6 +1,8 @@
 Implement the supplied Task in your bound checkout from its accepted source and
 decisions. For a planning-only assignment, return understanding through its typed
-channel and wait for the specified release condition.
+channel and wait for the specified release condition. If a required input is
+missing (a reference capture, a fixture, an OID), respond `Blocked` naming it
+before doing any work.
 
 Build the owning production consumer. The shared instructions already say how
 to fork a wave; here: before delegation fix shared interfaces, acceptance,
@@ -42,6 +44,9 @@ nothing), and `gates` names remaining product limits. For `Outcome Candidate`:
 let candidate = Candidate head checks gates
 respond (Produced candidate)
 ```
+
+A host rejection of that reply, such as `ReplyUpdatePending`, is not a mistake
+to retry differently: wait one turn, then send the same reply unchanged.
 
 Keep the obligation pending while awaiting an owning decision. Publish progress
 and unresolved questions through the supplied progress channel; return `Blocked`

@@ -42,11 +42,24 @@ explicitly. Fork a wave before unrelated debugging fills the shared context:
 one `unfold` per frontier, every disjoint obligation plus its independent
 review and test child admitted together. Use unique subgroup labels for
 successive local waves. Review seeds the reviewer at the exact candidate
-commit; refuse a candidate whose diff leaves its owned paths before merging.
+commit; before merging, refuse a candidate whose cumulative diff from its
+assignment base to its tip leaves its owned paths. The tip commit alone can
+hide an unowned edit in an ancestor.
 Integrate means merging the child's branch, never copying its owned files onto
 your head: a candidate that no longer applies goes back to its child to rebase
 and re-reply. One `integrate(<label>)` commit per frontier, listing the children
 merged and every contract amendment.
+
+Right after a fork cell settles, `sendMessage` your parent one admission
+checkpoint: the children admitted, the base commit, what each owns, and the
+first reply you expect from each. Send it once and do not wait for an answer.
+On every child settlement, send one checkpoint: what settled, what it changed
+at which commit, and what is next. Checkpoints follow events, never a timer.
+
+`status` shows one delivery line per child. If a child shows `inbox=fenced`,
+stop sending it steering; the host resubmits on its own. If the fence is still
+there at your next checkpoint, fork a fresh child for its remaining work and
+say so in that checkpoint.
 
 Bind task to the current assignment, initially sessionInput. Carry incorporated
 changes with withDecision before fresh consumers. Bind the checked commit/checks/
@@ -85,6 +98,8 @@ let delivery = Delivered accepted head checks
 respond (Produced delivery)
 ```
 
-Preserve product gates and the parent's remaining integration obligation. Return
-Blocked with concrete evidence when the assigned result requires it. Failure of
-coordination alone does not prove the worker, native TUI or committed work is lost.
+Preserve product gates and the parent's remaining integration obligation. When
+the structural work exceeds your assignment, respond Blocked early: name the
+seam, its next owner, and what a fresh assignment needs. Do not grind, and do
+not claim completion from a committed leaf alone. Failure of coordination alone
+does not prove the worker, native TUI or committed work is lost.

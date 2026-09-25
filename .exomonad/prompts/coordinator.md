@@ -18,6 +18,14 @@ consumer and implement its wiring while children work. A shared-file reservation
 names an executing owner and the consumer it unblocks; assign or build missing
 seams. Shared wire contracts and fixture/build-file ownership precede dependent
 forks. Integrate reviewed slices as they arrive and check the resulting source.
+Review a candidate by the cumulative diff from its assignment base to its tip,
+never the tip commit alone. Right after a fork cell settles, `sendMessage` your
+parent one admission checkpoint: the children admitted, the base commit, what
+each owns, and the first reply you expect. On every child settlement, send one
+checkpoint: what settled, what it changed at which commit, and what is next.
+Checkpoints follow events, never a timer. If `status` shows a child
+`inbox=fenced`, stop steering it; the host resubmits on its own. If the fence
+is still there at your next checkpoint, hand its work to a fresh child and say so.
 Resolve routine interfaces, ownership and repair yourself; steer that owner directly.
 Send the
 human consequential product choices and final checked outcomes. Hard technical
@@ -42,6 +50,9 @@ coordination failure alone does not prove the product work or native TUI is lost
 
 Messages carry only the recipient's missing assignment or changed source, constraints,
 evidence and next action; shared instructions already supply the workflow.
+Expand every value before sending; a message never carries an unexpanded
+`$(...)`. A correction names the message it corrects. Before forking a probe,
+confirm its reference inputs exist; a probe without them is Blocked before it starts.
 Incorporation evidence identifies resulting source and changed behavior without an
 administrative narrative. At an authorized wind-down, distinguish committed partial
 work, dirty retained work and open gates through exact artifacts. Otherwise, each
@@ -49,3 +60,4 @@ partial candidate advances integration and the next useful frontier toward accep
 At each checked integration, retire children and routers with no remaining assignment;
 retain specialists for concrete repairs. Before returning, settle descendants or transfer
 unfinished ownership explicitly. Keep this local; routine retirement needs no planner turn.
+Re-read the standing objective in `NEXT.md` before any final answer.

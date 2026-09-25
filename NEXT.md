@@ -32,6 +32,9 @@ serves. `docs/questions.md` Q4 and Q5 are answered; read them before planning.
 - Interviews: root, probe, core sections exist in `docs/interviews.md`. Every
   node that runs this time adds its own.
 
+When a slice lands, update its bullet here in the same commit, so this section
+never shows finished work as open.
+
 ## What went wrong last run, so you avoid it
 
 - The core lead's message inbox stopped delivering (an Exomonad-side fault,
@@ -54,17 +57,38 @@ serves. `docs/questions.md` Q4 and Q5 are answered; read them before planning.
   Never extract files from a stale candidate. Scaffold owns every `mod` line.
   Review reads structure before bugs. Root implements only scaffold and seams;
   every bounded leaf is a child. Check the cumulative base-to-candidate diff
-  for owned paths, not the tip commit.
+  for owned paths (`git diff <base>...<tip> --stat`), not the tip commit; an
+  ancestor can carry an unowned edit.
 - Incorporation names the exact commit. "Applied" without a commit is nothing.
 - Server, auth and web are frozen this wave. Hooks are wave1.
 - Operator notes are advice unless they say constraint. The no-more-forks hold
   from the last run is lifted (Q5).
+- `status` shows one delivery line per child. If a lead's line shows
+  `inbox=fenced`, stop steering it; receipts do not prove presentation. Record
+  the fence and its source in `docs/exomonad-friction.md`. The host resubmits
+  on its own (`next=resubmitting`); if the fence is still there at the next
+  checkpoint, hand the work to a fresh preflighted lead.
+- Expand every value before sending a message. A correction names the message
+  it corrects; do not rely on the child reading only the latest one.
+- Before forking a probe, confirm its reference inputs exist. A probe without
+  its reference is `Blocked` before it starts.
+- Every lead sends its parent an admission checkpoint right after a fork cell
+  (children, base commit, owned paths, first expected reply) and one checkpoint
+  per child settlement.
 
-## Done means
+## Standing objective (re-read before any final answer)
 
-All four items integrated on master with `integrate(<label>)` commits; the
-item-2 and item-13 live traces and the unanswered-call finding in
-`docs/findings.md`; the probe's two `usage` blocks; one interview section per
-node; `docs/exomonad-friction.md` extended with this run's rows (observed,
-with cost, no invented nudges). Then rewrite this file for wave 1: what
-landed, what is open, where to start. Do not start wave1 from a partial wave.
+Finish the correction wave on reviewed, merged source: (a) to (d) plus the live
+item-2 and item-13 traces and the unanswered-call evidence. Do not call
+preparation complete. Do not fork under an operator hold. Record interviews and
+unresolved gates honestly.
+
+## Prompt trials this run
+
+Project-level rules; the observer (`docs/observer.md`) scores each one from the
+log or transcripts.
+
+- After two failed check rounds with no candidate, does the child ping its owner before a third?
+- Is a test committed red on purpose named as expected-red, with owner and closing slice, in every integration status?
+- When a child's status line shows fenced, does the parent stop steering and hand off within one turn (once the fence outlasts a checkpoint)?
+- Does every lead send the admission checkpoint unprompted?
