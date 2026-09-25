@@ -139,13 +139,16 @@ async fn active_cell_survives_three_boundary_envelopes_and_finalizes_durably() {
         "name": "finalize",
         "arguments": "{\"result\":{\"answer\":\"three boundaries observed\"}}"
     }));
-    // The three wait turns let an arriving envelope resume the wait job and
-    // force a fresh model request, where that envelope must be visible.
+    // Each wait turn lets an arriving envelope resume the wait job and forces
+    // a fresh model request, where that envelope must be visible. The fifth
+    // response also waits so the resident cell can be released only after its
+    // third envelope-bearing request was captured.
     let replay = Arc::new(ReplayTransport::gated([
         turn("cell-admitted", vec![cell_call]),
         turn("wait-for-first", vec![wait_call("wait-one")]),
         turn("wait-for-second", vec![wait_call("wait-two")]),
         turn("wait-for-third", vec![wait_call("wait-three")]),
+        turn("wait-for-cell", vec![wait_call("wait-cell")]),
         turn("finalized", vec![final_call.clone()]),
     ]));
     let engine = Engine::<OfflineAuth, CellJobProvider<SharedCell>, _>::with_transport(
@@ -176,6 +179,7 @@ async fn active_cell_survives_three_boundary_envelopes_and_finalizes_durably() {
 
     cell.wait_started(1).await;
     replay.wait_requested(2).await;
+    assert_request_lacks(&replay.recorded_requests()[1], "boundary-one");
     assert_eq!(cell.start_count(), 1);
     assert_eq!(cell.cancel_count(), 0);
     assert!(!running.is_finished());
@@ -196,6 +200,7 @@ async fn active_cell_survives_three_boundary_envelopes_and_finalizes_durably() {
 
     replay.wait_requested(3).await;
     assert_request_contains(&replay.recorded_requests()[2], "boundary-one");
+    assert_request_lacks(&replay.recorded_requests()[2], "boundary-two");
     assert_eq!(cell.start_count(), 1);
     assert_eq!(cell.cancel_count(), 0);
     let second = envelope("/root/sender-two", "boundary-two", 2);
@@ -215,6 +220,7 @@ async fn active_cell_survives_three_boundary_envelopes_and_finalizes_durably() {
 
     replay.wait_requested(4).await;
     assert_request_contains(&replay.recorded_requests()[3], "boundary-two");
+    assert_request_lacks(&replay.recorded_requests()[3], "boundary-three");
     assert_eq!(cell.start_count(), 1);
     assert_eq!(cell.cancel_count(), 0);
     let third = envelope("/root/sender-three", "boundary-three", 3);
@@ -239,9 +245,31 @@ async fn active_cell_survives_three_boundary_envelopes_and_finalizes_durably() {
     assert_eq!(cell.cancel_count(), 0);
     assert!(
         !running.is_finished(),
-        "cell must still hold final completion"
+        "cell must remain pending through the third-envelope request"
     );
+    // Request 5 is already captured with the third envelope but its replay
+    // response is still gated. Completing the cell now must not finish the
+    // run until response 5 is released and request 6 strict-finalizes.
     cell.release(cell_output.clone());
+    replay.release_next();
+
+    replay.wait_requested(6).await;
+    let requests = replay.recorded_requests();
+    assert_request_contains(&requests[5], "boundary-one");
+    assert_request_contains(&requests[5], "boundary-two");
+    assert_request_contains(&requests[5], "boundary-three");
+    assert_tool_flags(&requests[5], "cell", true, true);
+    assert_tool_strict(&requests[5], "finalize");
+    assert!(
+        requests[5]
+            .input
+            .iter()
+            .any(|item| item.0["call_id"] == "long-cell-call"
+                && stored_cell_output_matches(item, &cell_output)),
+        "finalize request must include the complete cell output"
+    );
+    assert_eq!(cell.start_count(), 1);
+    assert_eq!(cell.cancel_count(), 0);
     replay.release_next();
 
     let (completion, reply) = running
@@ -287,8 +315,8 @@ async fn active_cell_survives_three_boundary_envelopes_and_finalizes_durably() {
     let stored_turns = reopened
         .replay_turns(root)
         .expect("load durable turn history");
-    assert_eq!(stored_turns.len(), 5);
-    assert!(stored_turns[4].model_response.items.contains(&final_call));
+    assert_eq!(stored_turns.len(), 6);
+    assert!(stored_turns[5].model_response.items.contains(&final_call));
     let durable_items: Vec<_> = request_chain
         .iter()
         .flat_map(|request| reopened.items(request).expect("load request items"))
@@ -311,6 +339,34 @@ fn assert_request_contains(request: &ResponsesRequest, expected: &str) {
         }),
         "request did not include envelope {expected:?}"
     );
+}
+
+fn assert_request_lacks(request: &ResponsesRequest, unexpected: &str) {
+    assert!(
+        !request.input.iter().any(|item| {
+            item.0["type"] == "message" && item.0["content"].to_string().contains(unexpected)
+        }),
+        "request unexpectedly contained envelope {unexpected:?}"
+    );
+}
+
+fn assert_tool_flags(request: &ResponsesRequest, name: &str, asynchronous: bool, strict: bool) {
+    let tool = request
+        .tools
+        .iter()
+        .find(|tool| tool["name"] == name)
+        .unwrap_or_else(|| panic!("request has no {name:?} tool schema"));
+    assert_eq!(tool["async"], json!(asynchronous), "{name} async flag");
+    assert_eq!(tool["strict"], json!(strict), "{name} strict flag");
+}
+
+fn assert_tool_strict(request: &ResponsesRequest, name: &str) {
+    let tool = request
+        .tools
+        .iter()
+        .find(|tool| tool["name"] == name)
+        .unwrap_or_else(|| panic!("request has no {name:?} tool schema"));
+    assert_eq!(tool["strict"], json!(true), "{name} strict flag");
 }
 
 fn stored_cell_output_matches(item: &Item, expected: &CellOutput) -> bool {
