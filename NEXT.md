@@ -23,7 +23,7 @@ dependency amendment is `c427057`.
 | item | owner | source / candidate | checks | unverified | next |
 |---|---|---|---|---|---|
 | (a) one entry | done | `9da6efe`, `a9f7a12` | integrated | nothing | nothing |
-| (b) async tools | root | `d8097c3`; trace leaf `fb80016`; consumer `a42920f`; tree schema repair under review | offline demo 35/35; manual attempt: HTTP 400 on request 2 | live `wait_agent` continuation | no retry without operator authority; review tree fix and retain redacted attempt |
+| (b) async tools | root | `d8097c3`; trace leaf `fb80016`; consumer `a42920f`; tree schema repair `e4466b3` on master | tree schema 1/1, correction_wave async 1/1; manual attempt: HTTP 400 on request 2 | live `wait_agent` continuation | no retry without operator authority; redacted attempt retained |
 | (c) settings items | settings-preflight-v8; root integrated core settings | reviewed settings stack `b0e1480` merged at `f1334bec8487aa710b8ba584fe14ce7d40ef5b2a`; root active-invocation contract `e28126e` | integrated set_effort 3/3, three Store tests 1/1 each, correction_wave settings 1/1, cargo check; invocation dispatch 1/1 | Here active-call gate, live item-13 trace | retained lead request43 rebases Here onto `e28126e`; demo Here gate remains closed |
 | (d) `Compactor` | root Engine seam; component lead delivered | Server component `03beea9` merged at `c3f29d0`; Engine/store `2b5e152`, demo consumer `5c17907`, replay repair `c8c7fef` on master; same reviewer Accepted exact `c8c7fef` | Engine compaction 3/3 incl. offline unanswered-call experiment; component 2/2; replay factory 20 runs each 1/1; CLI parser 1/1; cargo check harness-demo | live unanswered-call behavior unverified; operator authorization asked | retain offline findings; no unauthorized inference |
 | cache probe | done | `d0245b3` | 0 then 20,736 cached tokens | general cache behavior | nothing |
@@ -207,7 +207,9 @@ section per node that ran.
   `wait_agent` continuation. Four redacted events are retained in
   `docs/item2-live-attempt.jsonl`; analysis is in `docs/findings.md`. Root
   found that `TreeProvider::all_tools` bypassed the crate's async stamping;
-  its offline repair is in progress. The 400's server-side cause is unknown.
+  its offline repair `e4466b3` is on master. Integrated-focused tree schema
+  and correction_wave async tests each matched/passed 1. The 400's
+  server-side cause is unknown.
   Do not make another credentialed item-2 run unless the operator explicitly
   grants one additional attempt (question in `docs/questions.md`).
 - (c) settings items: the append drop rule is reviewed and integrated at
