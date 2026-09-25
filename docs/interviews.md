@@ -174,3 +174,40 @@ was rebased as `1513e95` and merged by root at `06148a1`.
   were corrected and rerun. Final owned candidate `fb80016` had 9 matched,
   9 passed trace tests plus check/format/diff-check; it did not establish
   root consumer behavior or the credentialed live trace.
+
+## Root continuation — correction second half, 2026-09-25
+
+- **Plan and outcome so far:** I recovered previously reviewed settings and
+  Compactor candidates rather than rebuilding them. The settings stack
+  reached master at `f1334bec`; the Compactor component and production
+  consumer reached master by `f504dd0`. Here and the live item-2/item-13
+  gates remain open; I do not call the wave complete.
+- **Shared seams:** The Compactor component alone could pass while no
+  production Engine selected it. I retained Engine/store and demo wiring,
+  then added a production-factory replay test. Here exposed a different
+  missing seam: stored `agent.head_request` is stale during an active spawn
+  call. I added `AgentInvocation { request, call_id }` at `e28126e` for the
+  retained Here owner; the actual output-readiness gate remains its work.
+- **Tree structure cost:** Stacked old branches carried settings ancestors
+  into Compactor review, making a component-only diff hard to distinguish
+  from an integration candidate. The exact new Compactor component was
+  reviewed and merged instead. The original settings-pin reviewer was
+  retired before a visibility defect was discovered, requiring an explicit
+  reviewer exception and a full cumulative review. A later Here leaf stayed
+  in one turn beyond the 15-minute/30-call constraint, delaying presentation
+  of the new root contract despite a separate-worktree branch.
+- **Checks versus behavior:** A replay test passed once and failed when the
+  same reviewer repeated it; the test assumed a 1 ms job had settled before
+  the final response. Repair allowed either three or four requests while
+  asserting one Compactor boundary, and it passed 20 repetitions in root
+  and review. A broad harness library run still has nine failing stale
+  settings-pin assertions; focused green tests did not prove master green.
+- **Different scaffold next time:** Put a production caller and an
+  active-request identity in the initial compiling scaffold, name the
+  pending-output persistence barrier, and use a replay fixture that controls
+  job completion rather than relying on elapsed milliseconds. Keep one
+  reviewer retained until the slice is integrated and its consumers checked.
+- **Prompt trials:** No test was committed intentionally red in this
+  continuation. I reported zero-match filters as zero, not as passing
+  evidence. I have not spent inference beyond the single item-2 manual
+  attempt already recorded; the operator hold on its retry remains.

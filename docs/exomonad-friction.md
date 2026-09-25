@@ -216,3 +216,35 @@ These are my own observations, not a claim that the correction wave is done.
     `running` until terminal, and refuse to count it as passing or to mutate
     its checkout concurrently. A notice is evidence of command completion,
     not evidence that the integrated revision was checked.
+
+## Correction second half — 2026-09-25, root-collected `friction:` lines
+
+- The store-drop implementer could not narrowly rebase onto a divergent
+  integration branch: a plain rebase conflicted in unowned `provider.rs`,
+  while guarded `--onto` refused to drop 59 commits without `DiscardIntent`.
+  Root instead selected an exact source and merged the reviewed slice.
+- The settings-pin reviewer was retired before a later public-visibility
+  defect was found. The isolated visibility repair review found another
+  envelope ingress. Root explicitly authorized the retained independent
+  reviewer to inspect the full repaired cumulative tip; the narrower Repair
+  was never treated as approval.
+- A Compactor component candidate passed its focused test but review found
+  three invariant gaps: duplicate user messages, conflicting pending
+  call IDs, and a second effort-pin constructor. The same reviewer accepted
+  the repaired exact component. A later Engine consumer passed focused
+  tests but review found no production caller.
+- The production factory replay passed once, then failed when the reviewer
+  repeated it because a 1 ms job could remain pending across the final
+  response. Root repaired the fixture and ancestry assertion; the same
+  reviewer observed 20/20 successful repetitions. Test timing was not
+  product evidence until that repair.
+- The Here replacement worker kept one active turn beyond the operator's
+  15-minute/30-call bound. Its root-contract steering remained submitted
+  rather than presented, so the lead was asked to obtain a committed
+  checkpoint or preserve the work and replace the leaf. No old Here branch
+  was merged on that basis.
+- A read-only Here test-design attempt to list tests did not compile and
+  was reported as **no pass evidence**. On integrated master a broad
+  harness library run compiled 89 tests, passed 78, failed 9, ignored 2;
+  the nine stale settings-pin assertions were assigned to the `engine.rs`
+  owner rather than silently counted under focused green tests.
