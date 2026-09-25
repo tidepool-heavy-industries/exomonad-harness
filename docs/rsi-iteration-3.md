@@ -27,10 +27,12 @@ Candidate decomposition, finalized against current source by root:
 
 - **Durable recovery:** Store recovery observations/transaction behavior and
   service pending-work discovery. Separate production and failure-test ownership.
-- **Driver restart:** startup scan, task/reaper lifecycle and continuation after
-  restart. Separate production changes and Driver recovery/cancellation tests.
-- **Crash acceptance:** reusable process/barrier fixture and the end-to-end
-  recovery matrix. Separate fixture construction and scenario assertions.
+- **Engine recovery:** request-boundary replay, strict-result/provenance retention
+  and interrupted-work classification. Separate production and boundary-test
+  ownership; preserve existing behavior where evidence already meets the contract.
+- **Driver restart:** startup scan, supported CLI admission, task/reaper lifecycle
+  and continuation after restart. Separate production changes and Driver
+  recovery/cancellation tests. Root retains the cross-component crash gate.
 
 Use Luna Medium for these component owners and their bounded children; retain
 Luna reviewers for exact candidates and repairs. Component owners return Delivery
