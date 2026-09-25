@@ -19,6 +19,14 @@ durable state. Live gates for correction item (b) remain on operator hold.
 This obligation is committed with the first adapter integration, not in a
 per-admission documentation commit.
 
+| adapter slice | owner | exact source / owned paths | first expected reply |
+|---|---|---|---|
+| shared contract | root | `3a634ae` CellJob/AtBoundary/operator, `264b5a9` compiling stubs | root focused cases 1/1 each; full harness lib 98 passed, 2 ignored; demo check |
+| strict finalize | adapter-finalize actor38; reviewer actor40 | exact `6d78cc5` accepted as component-only, cumulative diff from `264b5a9` touches only `crates/harness/src/finalize.rs`; merged into master in `integrate(adapter-finalize)` | focused finalize tests 6/6 reported; root integrated check pending; production Engine wiring and vertical release remain open |
+| offline replay + fake resident | adapter-replay actor39; same reviewer actor41; root demo consumer | combined branch `adapter-replay-consumer` at `7c6dcca` (child `357b877` replay.rs + root demo driver.rs); prior `1cceb48` Repair duplicate | 8/8 replay and three demo consumers each 1/1, demo check on combined branch; same-reviewer exact `7c6dcca` recheck pending, not merged |
+| independent contract review | adapter-contract-review actor40 | exact `264b5a9`, cumulative from `7bf6d29`, no edits | Accepted; 100 matched: 98 passed, 0 failed, 2 ignored; demo check and diff check passed |
+| release integration | root after first wave | Engine/Store/fixture/finalize integrated source | long cell + 3 successive envelopes; one strict final; restart query; no live inference |
+
 For planning it replaces `README.md`, `docs/correction-plan.md`, `docs/tree.md`
 and `docs/questions.md`: what you need from them is quoted below (the one page,
 "Settled answers", "Correction items", "Node protocol"), so do not read them
