@@ -236,9 +236,10 @@ section per node that ran.
 - (d) `Compactor`: the current lead is inspecting retained prior work before
   rebuilding. `exomonad/correction-second-half/preflight/core-preflight-20260924/compaction-fresh/branches/core-compactor-fresh-20260924`
   at `caddc4c231f3cb21f2dbefd57c9b2c2f2e845d89`: stacked settings plus
-  Compactor; operator reports review at sibling `.../compaction-fresh/branches/review-1`
-  ("Preserve user and claimed calls in server compaction"), not independently
-  verified here. It also changes unowned settings paths, so await the settings
+  Compactor; sibling `.../compaction-fresh/branches/review-1` is
+  `75ab173cecac0493fcbb2157ab4aada58a0d008a`, **two commits behind**
+  candidate tip (`fcc626d`, `caddc4c`), so final tip is not covered by that
+  review. Current lead requested exact-tip review. It also changes unowned settings paths, so await the settings
   integration/rebase. `Server` only; unanswered-call experiment → findings.
 - Cache probe: measured on source `d0245b3` by the bounded probe. Two requests
   through our builder with one key returned `cached_tokens` 0 then 20,736;
