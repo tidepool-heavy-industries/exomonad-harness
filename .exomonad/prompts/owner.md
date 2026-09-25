@@ -7,7 +7,7 @@ stays in force until explicitly lifted.
 You need not read `.exomonad/prompts/review.md` or the exomonad-review,
 exomonad-cleanup or exomonad-workbench skills: the Reference below carries what
 they add for you. A reviewer is told to check the seeded HEAD, read the
-cumulative diff from the assignment base (for `reviewCommit`, its typed commitReviewBase), report matched
+cumulative diff from `reviewBase (reviewBasis sessionInput)`, report matched
 and passed counts, read for a second way to do an existing thing before bugs,
 and reply `Outcome ReviewDecision`. `Tidepool.Command` has no job list: a `Job`
 is the value `Cmd.start` returned, or `Cmd.job` of a `RunResult`; bind it, and
@@ -37,8 +37,10 @@ Reference (Project.Types, Project.Work, Project.Routing, Project.Observe and the
 - `sendMessage :: Member Notifications effs => AgentRef -> Text -> Eff effs (Either NotificationError NotificationReceipt)` -- a receipt proves transport, not reading.
 - `updateRequest :: Member Replies effs => Response result -> Text -> Eff effs (Either ReplyError RequestUpdate)` and `pollRequestUpdate :: Member Replies effs => RequestUpdate -> Eff effs (Either ReplyError RequestUpdateState)` -- steer a pending request; `data RequestUpdateState = UpdateQueued | UpdatePresented | UpdateTooLate | UpdateUnconfirmed Text | UpdateNotPresented Text`.
 - `pollResponse :: Member Replies effs => Response result -> Eff effs (ResponseState result)` -- `ResponsePending PendingProgress | ResponseCancellationPending CancellationReason | ResponseReady (ResponseResult result) | ResponseUnavailable ResponseFailure | ResponseStarting Text`; `ResponseResult { responseValue, responseExecution, responseWorktree }`.
-- `reviewCommit :: (...) => Label -> GitOid -> GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- label, base, candidate, acceptance, owned paths, repair owner; `data RepairOwner = OwnerRepairs | RetainedImplementer AgentRef`.
-- `data ReviewDecision = Accepted ReviewedCandidate | Repair Candidate [Text]`; `data ReviewedCandidate = ReviewedCandidate { acceptedAssignment :: Task, reviewedCandidate :: Candidate, reviewChecks :: [Text], reviewRationale :: Text }`.
+- `reviewCommit :: (...) => Label -> GitOid -> GitOid -> Text -> [Text] -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- label, base, candidate, acceptance and owned paths. Exact-scope findings return to the requester because there is no Task to delegate for repair.
+- `data ReviewBasis = AssignedTask Task | ExactScope GitOid [Text] Text`; `reviewBase`, `reviewOwnedPaths`, `reviewAcceptance` inspect either basis.
+- `data ReviewRequest = ReviewRequest { reviewBasis :: ReviewBasis, reviewInput :: Candidate, repairOwner :: RepairOwner }`; `data RepairOwner = OwnerRepairs | RetainedImplementer AgentRef`.
+- `data ReviewDecision = Accepted ReviewedCandidate | Repair Candidate [Text]`; `data ReviewedCandidate = ReviewedCandidate { reviewedBasis :: ReviewBasis, reviewedCandidate :: Candidate, reviewChecks :: [Text], reviewRationale :: Text }`.
 - `planCleanupFor :: Member AgentInspection effs => Response result -> Eff effs CleanupPlan`, `executeCleanup :: Member AgentControl effs => CleanupPlan -> Eff effs CleanupReceipt` -- retire a settled child's fork group: `executeCleanup =<< planCleanupFor child`; nothing is deleted.
 - `stopAgent :: Member AgentControl effs => AgentRef -> Eff effs StopOutcome` -- for a stuck child; `StoppedNow` and `StoppedRetaining Text` are final, `StoppedReleasing` sends one later notice: do not re-issue.
 

@@ -9,7 +9,7 @@ The obligation is your contract: `NEXT.md` and the `Plan:` file are the root's,
 so do not read them unless the obligation names a section; read the PRD
 section it cites. You need not read `.exomonad/prompts/review.md` or the
 exomonad-review skill: a reviewer is told to check the seeded HEAD, read the
-cumulative diff from the assignment base (for `reviewCommit`, its typed commitReviewBase), report matched and
+cumulative diff from `reviewBase (reviewBasis sessionInput)`, report matched and
 passed counts, read for a second way to do an existing thing before bugs, and
 reply `Outcome ReviewDecision`.
 
@@ -28,12 +28,12 @@ Reference (Project.Types, Project.Work and the library; `(...)` elides a constra
 - `currentCheckout :: WorktreeSeed` -- your checkout; `atRef :: GitRef -> WorktreeSeed` -- an exact commit, `atRef (GitRef "<full 40-hex commit>")`.
 - `responseActor :: Response result -> AgentRef` -- the child behind a response, for `sendMessage`.
 - `updateRequest :: Member Replies effs => Response result -> Text -> Eff effs (Either ReplyError RequestUpdate)` and `pollRequestUpdate :: Member Replies effs => RequestUpdate -> Eff effs (Either ReplyError RequestUpdateState)` -- steer a pending request; `data RequestUpdateState = UpdateQueued | UpdatePresented | UpdateTooLate | UpdateUnconfirmed Text | UpdateNotPresented Text`.
-- `data ReviewTask = ReviewTask { reviewAssignment :: Task, reviewInput :: Candidate, repairOwner :: RepairOwner }`; `data RepairOwner = OwnerRepairs | RetainedImplementer AgentRef`.
-- `data CommitReview = CommitReview { commitReviewBase :: GitOid, commitReviewCommit :: GitOid, commitReviewAcceptance :: Text, commitReviewOwnedPaths :: [Text], commitReviewOwner :: RepairOwner }` -- exact cumulative base and candidate sent by `reviewCommit`.
-- `data ReviewDecision = Accepted ReviewedCandidate | Repair Candidate [Text]`; `data ReviewedCandidate = ReviewedCandidate { acceptedAssignment :: Task, reviewedCandidate :: Candidate, reviewChecks :: [Text], reviewRationale :: Text }`.
+- `data ReviewBasis = AssignedTask Task | ExactScope GitOid [Text] Text`; `reviewBase`, `reviewOwnedPaths`, `reviewAcceptance` inspect either basis.
+- `data ReviewRequest = ReviewRequest { reviewBasis :: ReviewBasis, reviewInput :: Candidate, repairOwner :: RepairOwner }`; `data RepairOwner = OwnerRepairs | RetainedImplementer AgentRef`.
+- `data ReviewDecision = Accepted ReviewedCandidate | Repair Candidate [Text]`; `data ReviewedCandidate = ReviewedCandidate { reviewedBasis :: ReviewBasis, reviewedCandidate :: Candidate, reviewChecks :: [Text], reviewRationale :: Text }`.
 - `reviewCandidate :: (...) => Task -> RepairOwner -> Candidate -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- review against a Task.
-- `reviewCommit :: (...) => Label -> GitOid -> GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- label, base, candidate, acceptance, owned paths, repair owner.
-- `reviewAgain :: Member Replies effects => AgentRef -> Label -> ReviewTask -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- reuse a reviewer on the revised ReviewTask.
+- `reviewCommit :: (...) => Label -> GitOid -> GitOid -> Text -> [Text] -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- label, base, candidate, acceptance and owned paths. An exact scope has no Task to delegate for repair.
+- `reviewAgain :: Member Replies effects => AgentRef -> Label -> ReviewRequest -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- reuse a reviewer with the same basis and revised candidate.
 
 Your children cannot always reach you: if `parentAgent` is Nothing, the child
 reports through reportProgress and stops with respond Blocked. So every child
@@ -141,7 +141,8 @@ reviewWave <- followWork [("review", reviewer, progress)] (notifyWork me (workMe
 
 Continue independent engineering while review is pending; end the turn when
 waiting is all that remains. A Repair verdict returns implementation to you;
-repair locally and reuse the reviewer with reviewAgain and the revised ReviewTask. One review per candidate; a repaired candidate goes back to the same reviewer
+repair locally and reuse the reviewer with reviewAgain and a revised ReviewRequest
+that preserves its basis. One review per candidate; a repaired candidate goes back to the same reviewer
 with reviewAgain, never to a new reviewer. An expected-red test is confirmed by
 running it (matched count, fails for the stated reason) and named expected-red in
 your checkpoint; it is not reviewed. A third review round on one slice means the
@@ -159,7 +160,7 @@ retire it and finished implementation children. Before returning, settle descend
 or explicitly transfer unfinished ownership. A reply does not release their processes
 or workspace storage.
 
-Accepted contains the reviewed task, candidate, checks and rationale. Verify your
+Accepted contains the reviewed basis, candidate, checks and rationale. Verify your
 resulting integration head; review semantic integration changes. Bind accepted,
 head and checks to that actual evidence, then:
 
