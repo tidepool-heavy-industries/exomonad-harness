@@ -88,7 +88,7 @@ fn engine(
 }
 
 #[tokio::test]
-async fn boundary_replay_keeps_typed_answer_and_classifies_interrupted_claim_once() {
+async fn engine_recovery_pending_claim_becomes_interrupted_and_completes_typed_reply() {
     let store = Arc::new(Store::memory().unwrap());
     let head = RequestId("boundary-head".into());
     let agent = AgentPath("/root".into());
@@ -107,7 +107,6 @@ async fn boundary_replay_keeps_typed_answer_and_classifies_interrupted_claim_onc
         .unwrap();
     store.set_effort(&head, Effort::Low).unwrap();
     store.claim(&call, &head).unwrap();
-    assert_eq!(store.interrupt_claim(&call, &head).unwrap(), 1);
     let resumed_prompt = Item(json!({"role":"user","content":"continue"}));
     let resumed_hash = store.put_item(&resumed_prompt).unwrap();
 
@@ -151,6 +150,13 @@ async fn boundary_replay_keeps_typed_answer_and_classifies_interrupted_claim_onc
     let claims = store.claims(&call).unwrap();
     assert_eq!(claims.len(), 1, "recovery must not add a second claim");
     assert_eq!(claims[0].state, crate::store::ClaimState::Interrupted);
+    assert!(
+        store
+            .claims_on(&completion.head_request)
+            .unwrap()
+            .is_empty(),
+        "recovery must not attach a new claim to the descendant request"
+    );
 
     let child_seen = store.seen_by(&completion.head_request).unwrap();
     let head_seen = store.seen_by(&head).unwrap();
@@ -167,7 +173,7 @@ async fn boundary_replay_keeps_typed_answer_and_classifies_interrupted_claim_onc
 }
 
 #[tokio::test]
-async fn missing_in_flight_job_is_classified_without_unsafe_replay() {
+async fn engine_recovery_zero_row_interrupt_uses_durable_settlement_output() {
     let store = Arc::new(Store::memory().unwrap());
     let head = RequestId("missing-job-head".into());
     let agent = AgentPath("/root".into());
@@ -180,27 +186,30 @@ async fn missing_in_flight_job_is_classified_without_unsafe_replay() {
         .unwrap();
     store.set_effort(&head, Effort::Low).unwrap();
     store.claim(&call, &head).unwrap();
+    let stale_pending_claim = store.claims(&call).unwrap().remove(0);
+    let actual_output = Item(json!({
+        "type":"function_call_output",
+        "call_id":call.0,
+        "output":"{\"result\":\"already settled\"}"
+    }));
+    assert_eq!(store.settle_claims(&call, &actual_output).unwrap(), 1);
 
-    // Simulate restart: the durable claim remains, but the fresh scheduler has
-    // no corresponding job. Replaying it could duplicate the in-flight work.
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let engine = engine(store.clone(), requests.clone());
-    let (_cancel_tx, cancel_rx) = watch::channel(false);
-    let error = engine
-        .run(Some(head.clone()), vec![], cancel_rx, empty_mailbox())
+    let engine = engine(store.clone(), Arc::new(Mutex::new(Vec::new())));
+    let recovered = engine
+        .recover_missing_job(&stale_pending_claim)
         .await
-        .expect_err("a durable claim without its scheduler job must fail closed");
-
-    assert!(matches!(
-        error,
-        EngineError::Job(crate::turn::JobError::UnknownCall)
-    ));
-    assert!(
-        requests.lock().unwrap().is_empty(),
-        "must not submit a model request or replay unknown in-flight work"
-    );
+        .unwrap();
+    assert_eq!(recovered, actual_output);
     let claims = store.claims(&call).unwrap();
-    assert_eq!(claims.len(), 1, "must not create duplicate durable claims");
-    assert_eq!(claims[0].state, crate::store::ClaimState::Pending);
-    assert_eq!(claims[0].request, head);
+    assert_eq!(
+        claims.len(),
+        1,
+        "reconciliation must not create another claim"
+    );
+    assert_eq!(claims[0].state, crate::store::ClaimState::Settled);
+    assert_ne!(
+        recovered.0["output"].as_str(),
+        Some("{\"error\":\"job interrupted\"}"),
+        "durable settlement output must not be replaced with Interrupted"
+    );
 }
