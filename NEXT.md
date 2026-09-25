@@ -25,7 +25,7 @@ dependency amendment is `c427057`.
 | (a) one entry | done | `9da6efe`, `a9f7a12` | integrated | nothing | nothing |
 | (b) async tools | root | `d8097c3`; trace leaf `fb80016`; consumer `a42920f`; tree schema repair under review | offline demo 35/35; manual attempt: HTTP 400 on request 2 | live `wait_agent` continuation | no retry without operator authority; review tree fix and retain redacted attempt |
 | (c) settings items | settings-preflight-v8; root integrated core settings | reviewed settings stack `b0e1480` merged at `f1334bec8487aa710b8ba584fe14ce7d40ef5b2a`; root active-invocation contract `e28126e` | integrated set_effort 3/3, three Store tests 1/1 each, correction_wave settings 1/1, cargo check; invocation dispatch 1/1 | Here active-call gate, live item-13 trace | retained lead request43 rebases Here onto `e28126e`; demo Here gate remains closed |
-| (d) `Compactor` | root Engine seam; component lead delivered | Server component `03beea9` merged at `c3f29d0`; Engine/store `2b5e152`, demo consumer `5c17907`, replay repair `c8c7fef` on master; same reviewer Accepted exact `c8c7fef` | Engine compaction 3/3, component 2/2, replay factory 20 runs each 1/1, CLI parser 1/1, cargo check harness-demo | live unanswered-call experiment | integrated gate, then live experiment |
+| (d) `Compactor` | root Engine seam; component lead delivered | Server component `03beea9` merged at `c3f29d0`; Engine/store `2b5e152`, demo consumer `5c17907`, replay repair `c8c7fef` on master; same reviewer Accepted exact `c8c7fef` | Engine compaction 3/3 incl. offline unanswered-call experiment; component 2/2; replay factory 20 runs each 1/1; CLI parser 1/1; cargo check harness-demo | live unanswered-call behavior unverified; operator authorization asked | retain offline findings; no unauthorized inference |
 | cache probe | done | `d0245b3` | 0 then 20,736 cached tokens | general cache behavior | nothing |
 | interviews | every node | `docs/interviews.md` | root, probe, core present | later nodes | one section per node that runs |
 | wave-7 admission | root | base `763764d389763df6ab3ac0cc65b990c4b82fe1b7` | store-drop-v7 owns `crates/harness/src/store/mod.rs`; core-preflight-v7 owns no files | drop integrated; preflight passed | no next action |
@@ -276,8 +276,12 @@ section per node that ran.
   an output as though the new configuration pin were absent. They are not
   green or base-compared. Here lead owns `engine.rs` and received the exact
   failure list for an assertion repair in its reviewed slice.
-  This is **not finished compaction**: review/integration gate and the
-  live unanswered-call experiment remain. The retained prior stack
+  The deterministic unanswered-call experiment is now recorded in
+  `docs/findings.md`: original pending function_call carried into the next
+  request, late output settled with the same call_id, no final pending claim.
+  This does not claim a live server experiment; no such run is authorized by
+  NEXT.md's named live-run list. Root asked for explicit authority once.
+  The retained prior stack
   `exomonad/correction-second-half/preflight/core-preflight-20260924/compaction-fresh/branches/core-compactor-fresh-20260924`
   at `caddc4c231f3cb21f2dbefd57c9b2c2f2e845d89`: stacked settings plus
   Compactor; sibling `.../compaction-fresh/branches/review-1` is

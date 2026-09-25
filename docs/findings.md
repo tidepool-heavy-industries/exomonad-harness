@@ -405,3 +405,26 @@ the server's response body. Root is repairing that override offline. The
 single-run rule bars a retry without explicit operator authority. Live
 item-2 acceptance remains **open**; neither the pending second request nor
 offline tests prove a resumed `wait_agent`.
+
+## Correction-wave Compactor unanswered-call experiment — offline, 2026-09-25
+
+On integrated master `f504dd062d2383a801462cbdb7cd304bfd54f316`,
+`cargo test -p harness --lib engine_compaction_` compiled and ran three
+tests: **3 matched, 3 passed**. In
+`engine_compaction_carries_unanswered_call_and_late_output`, a deterministic
+Responses replay returned a `function_call` while its `SlowProvider` job was
+blocked. The replay then returned a server `compaction` item. The test held
+the job until the successor model request was issued and asserted that this
+request contained the *original* `function_call` item; after release, the
+completion transcript contained the output with the same `call_id`, and no
+pending claim remained at the final head. The component test
+`pending_function_call_is_carried_verbatim` also passed (1 matched, 1 passed
+within the 2/2 compaction component run). The production-factory replay
+passed (1/1), emitted `compaction_trigger`, and found exactly one durable
+compaction edge in the final request ancestry. The same reviewer accepted
+exact consumer repair `c8c7fef` before root recorded this integration.
+
+This is **offline deterministic evidence**, not a credentialed server run.
+NEXT.md permits only its named live inference runs; no live Compactor
+request or item-2 retry was made. Live unanswered-call behavior remains
+unverified pending operator authorization.
