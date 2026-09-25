@@ -19,7 +19,7 @@ outside the wave. Resolve full source OIDs from Git.
 | Shared lifecycle/provenance contract and scaffold | root | `lifecycle.rs` defines envelope-ID provenance and structured parent answer; optional `Contract.reply` is the strict result schema; compile and commit before forks |
 | Stable follow-up identity and durable provenance | store child | exact-tip review accepted; integrated as `176a271`; provenance focused test 1/1 on integrated source |
 | Typed completion | engine child | repaired exact candidate `2d5218f` re-review accepted; integrated as `c445c5d`; root-focused checks running |
-| Driver publication/continuation and integrated release gate | driver child | candidate `ddce261` gate 2/2 but review returned Repair: head CAS before publication can lose answer on publication failure; atomic Store seam and driver repair required |
+| Driver publication/continuation and integrated release gate | driver child | repaired candidate `cb2620d` reports combined lifecycle 2/2 and malformed-publication 1/1; same-reviewer exact-tip re-review pending, not merged |
 | Independent review, integration, interview and stop | root | exact-source verdict, executed integrated checks, handoff |
 
 Keep this table current as assignments settle; ordinary idle turn ends need no
@@ -241,6 +241,23 @@ Root supplied this precise consumer evidence in one same-reviewer
 re-review request. No Store code defect has been identified, but
 Store slice remains unmerged pending the corrected verdict and
 integrated gate.
+Same reviewer accepted exact Store atomic candidate `5b7272b` after
+correcting the production-consumer evidence. It verified 2/2 Store
+focused tests and explicitly left the integrated Driver gate open.
+Root merged Store as `850fa8393e776cdd67261137acd4876e2714e864`
+and ran `cargo test -q -p harness complete_agent_with_publication`
+on integrated source: 2 matched, 2 passed. Root immediately
+reassigned retained Driver owner with that exact source for rebase,
+atomic repair and combined gate.
+Driver repair candidate
+`cb2620d70b77a477af062f75b11aebb5b0ad487b` was then
+checked on Store integration base `850fa83`; cumulative diff only
+driver.rs. Owner reported lifecycle 2/2, malformed-publication
+1/1, shutdown 2/2, reaper 1/1, first-request 1/1,
+adapter-readiness 1/1, fmt and diff checks. Root assigned one
+same-reviewer exact-tip re-review focused on the previous
+head-before-answer failure and production cleanup. Candidate
+passing checks are not integrated acceptance.
 Driver atomic repair checkpoint committed
 `552a21d1c1972ba3e8ef36157cf59254b774ba9f` on `04fdf30`,
 owned diff only driver.rs. It prepares publication before the single
@@ -260,16 +277,15 @@ merge with that integration OID.
   longer unmerged: exact-tip re-review accepted and root integrated it
   as `c445c5d`. Prior reviewed `2d12a4a` received Repair.
 - `exomonad/wave10/implementation/branches/wave10-driver`:
-  `552a21d1c1972ba3e8ef36157cf59254b774ba9f`
-  (owner checkpoint, root ref may lag); atomic repair and
-  malformed-publication test written, not compiled against Store
-  method, not re-reviewed or integrated. Prior `ddce261` gate
-  passed 2/2 but review returned Repair.
+  `cb2620d70b77a477af062f75b11aebb5b0ad487b`;
+  atomic repair and malformed-publication test checked on `850fa83`,
+  same-reviewer exact-tip re-review pending, not integrated.
+  Prior `ddce261` gate passed 2/2 but review returned Repair.
 - Store atomic-publication repair request is pending on shared
   contract source `04fdf305bc9ca9b78cf871e3b43ca802297e26d2`;
   candidate `5b7272bac92296d7112b19e628f9e84e8302c7ee`
-  has reported 2/2 focused tests, exact-tip review pending;
-  not integrated.
+  is no longer unmerged: same-reviewer re-review accepted and root
+  integrated it as `850fa83`, with focused Store gate 2/2 on source.
 - Store branch `5b2741a` is not unmerged: it is integrated as
   `176a271`. Root's wire-safe codec amendment is `41c48b6`.
 Driver progress reported uncommitted owned changes for strict factory,

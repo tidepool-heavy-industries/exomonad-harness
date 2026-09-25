@@ -331,6 +331,12 @@ was rebased as `1513e95` and merged by root at `06148a1`.
   `structured` field would be forwarded to Responses, and strict
   agent tools omitted `reply`. Root amended both at `41c48b6` and
   `e47a958`. Final driver gate evidence remains pending.
+  In its later atomic-repair reply it named a second shared
+  contract/review/integration cycle as the tree cost. It proposed a
+  checked dependency-commit wake followed by the focused gate,
+  rather than repeated manual source/status relays. Replacing
+  separate head/envelope calls with one transaction while keeping
+  Store and Driver ownership disjoint was the hardest correction.
 - **Exact-source reviewer:** Switching from its initial `2d12a4a`
   checkout to assigned `2d5218f`, then re-running focused checks,
   cost needless work. A repeatable schema audit could require every

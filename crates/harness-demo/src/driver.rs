@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use harness::{
     agent_runtime::StoreAgentToolService,
     engine::{Engine, EngineCompletion, EngineError, ResponsesTransport},
+    finalize::FinalizeParser,
     item::Item,
+    lifecycle::{CompletionCommit, PublishedAnswer},
     mailbox::{DeliveryClass, Envelope, EnvelopeType},
     model::{AgentPath, Effort, RequestId},
     provider::Provider,
@@ -15,6 +17,7 @@ use harness::{
     transport::Auth,
     turn::JobScheduler,
 };
+use serde_json::Value;
 use serde_json::json;
 use std::{
     collections::{HashMap, HashSet},
@@ -59,7 +62,7 @@ where
     C: ResponsesTransport + 'static,
     F: Fn(&AgentPath) -> Result<C, String> + Send + Sync + 'static,
 {
-    type Engine = Engine<A, P, C>;
+    type Engine = (Engine<A, P, C>, Option<Value>);
 
     async fn create(&self, agent: AgentPath) -> Result<Self::Engine, String> {
         let transport = (self.config)(&agent)?;
@@ -74,13 +77,20 @@ where
                 model: "gpt-6-sol".into(),
                 effort: Effort::Low,
                 session_id: format!("harness-tree-{}", agent.0),
-                agent,
+                agent: agent.clone(),
             },
         );
-        Ok(match self.compact_at_input_tokens {
+        let reply_schema = self
+            .store
+            .agent(&agent)
+            .map_err(|error| error.to_string())?
+            .and_then(|record| record.contract.get("reply").cloned())
+            .filter(|schema| !schema.is_null());
+        let engine = match self.compact_at_input_tokens {
             Some(threshold) => engine.with_compaction_threshold(threshold),
             None => engine,
-        })
+        };
+        Ok((engine, reply_schema))
     }
 
     async fn run(
@@ -91,10 +101,16 @@ where
         cancel: watch::Receiver<bool>,
         inbox: mpsc::UnboundedReceiver<Envelope>,
     ) -> Result<EngineCompletion, String> {
-        engine
-            .run(head, initial, cancel, inbox)
-            .await
-            .map_err(|e: EngineError| e.to_string())
+        let (engine, reply_schema) = engine;
+        match reply_schema {
+            Some(schema) => {
+                engine
+                    .run_with_reply_schema(head, initial, cancel, inbox, schema.clone())
+                    .await
+            }
+            None => engine.run(head, initial, cancel, inbox).await,
+        }
+        .map_err(|e: EngineError| e.to_string())
     }
 }
 
@@ -327,31 +343,41 @@ impl<F: EngineFactory> Driver<F> {
             // A durable scan supplies wake hints; Engine claims inbox entries
             // transactionally when it creates the next request.
             let result = async {
-            let completion = task_factory
-                .run(
-                    &engine,
-                    record.head_request.clone(),
-                    initial,
-                    cancel_rx,
-                    inbox_rx,
-                )
-                .await?;
-            let completed_head = completion.head_request.clone();
-            if !store
-                .advance_agent_head(
-                    &task_path,
-                    record.head_request.as_ref(),
-                    Some(&completed_head),
-                )
-                .map_err(|e| e.to_string())?
-            {
-                return Err(format!("head CAS lost for {}", task_path.0));
-            }
-            if let Some(parent) = record.parent {
-                if let Some(text) = final_answer(&completion.turn.items) {
-                    let item = Item(json!({"type":"message","role":"assistant","content":[{
-                        "type":"output_text","text":format!("Message Type: FINAL_ANSWER\nTask name: {}\nSender: {}\nPayload:\n{}", parent.0, task_path.0, text)
-                    }]}));
+                let completion = task_factory
+                    .run(
+                        &engine,
+                        record.head_request.clone(),
+                        initial,
+                        cancel_rx,
+                        inbox_rx,
+                    )
+                    .await?;
+                let completed_head = completion.head_request.clone();
+                // Prepare the typed answer and its provenance before changing
+                // the durable head. A failed preparation must not consume a
+                // completion that the parent can never receive.
+                let publication = match record.parent.as_ref() {
+                    Some(parent) => {
+                        published_final_answer(&store, &task_path, parent, &completion)?
+                    }
+                    None => None,
+                };
+                let publication_target = record.parent.as_ref().zip(publication.as_ref());
+                let committed = store
+                    .complete_agent_with_publication(
+                        &task_path,
+                        record.head_request.as_ref(),
+                        &completed_head,
+                        publication_target,
+                    )
+                    .map_err(|error| error.to_string())?;
+                let envelope_id = match committed {
+                    CompletionCommit::HeadMismatch => {
+                        return Err(format!("head CAS lost for {}", task_path.0));
+                    }
+                    CompletionCommit::Committed { envelope_id } => envelope_id,
+                };
+                if let (Some(parent), Some(envelope_id)) = (record.parent, envelope_id) {
                     let parent_running = running_tasks.lock().await;
                     let parent_task = parent_running.get(&parent);
                     let mut seen = parent_task.map(|task| {
@@ -359,11 +385,10 @@ impl<F: EngineFactory> Driver<F> {
                             .lock()
                             .unwrap_or_else(|poison| poison.into_inner())
                     });
-                    let envelope_id = store
-                        .add_envelope(&task_path.0, &parent.0, "AtBoundary", &item, None)
-                        .map_err(|e| e.to_string())?;
                     if let Some(parent_task) = parent_task {
-                        seen.as_mut().expect("parent seen set acquired").insert(envelope_id);
+                        seen.as_mut()
+                            .expect("parent seen set acquired")
+                            .insert(envelope_id);
                         // One local post-commit wake; durable payload remains in Store.
                         wake.send_modify(|n| *n = n.wrapping_add(1));
                         let _ = parent_task.inbox.send(Envelope {
@@ -376,9 +401,9 @@ impl<F: EngineFactory> Driver<F> {
                         });
                     }
                 }
+                Ok::<EngineCompletion, String>(completion)
             }
-            Ok::<EngineCompletion, String>(completion)
-            }.await;
+            .await;
             let _ = done_tx.send(true);
             result
         });
@@ -553,6 +578,59 @@ fn final_answer(items: &[Item]) -> Option<String> {
     })
 }
 
+/// Publish only the completion that the Engine actually accepted. For a
+/// strict finalize, preserve the result and Store input-provenance through
+/// the shared wire-safe JSON message codec.
+fn published_final_answer(
+    store: &Store,
+    sender: &AgentPath,
+    parent: &AgentPath,
+    completion: &EngineCompletion,
+) -> Result<Option<Item>, String> {
+    let finalize_calls = completion
+        .turn
+        .items
+        .iter()
+        .filter(|item| item.0["type"] == "function_call" && item.0["name"] == "finalize")
+        .collect::<Vec<_>>();
+    if let [finalize] = finalize_calls.as_slice() {
+        // The Engine has already enforced strict schema and exactly one call.
+        // Decode here only to carry that same typed JSON into publication.
+        let result: Value = FinalizeParser::new()
+            .parse_completed(finalize)
+            .map_err(|error| error.to_string())?;
+        let provenance = store
+            .completion_provenance(sender, &completion.head_request)
+            .map_err(|error| error.to_string())?;
+        let answer = PublishedAnswer {
+            sender: sender.0.clone(),
+            result,
+            provenance,
+        };
+        return answer
+            .to_message_item()
+            .map(Some)
+            .map_err(|error| error.to_string());
+    }
+    if !finalize_calls.is_empty() {
+        return Err("multiple finalize calls in accepted completion".into());
+    }
+    let Some(text) = final_answer(&completion.turn.items) else {
+        return Ok(None);
+    };
+    Ok(Some(Item(json!({
+        "type": "message",
+        "role": "assistant",
+        "content": [{
+            "type": "output_text",
+            "text": format!(
+                "Message Type: FINAL_ANSWER\nTask name: {}\nSender: {}\nPayload:\n{}",
+                parent.0, sender.0, text
+            )
+        }]
+    }))))
+}
+
 fn scan_inbox(
     store: &Store,
     path: &AgentPath,
@@ -601,7 +679,9 @@ fn scan_inbox(
 mod tests {
     use super::*;
     use harness::{
+        agents::{AgentToolService, Contract},
         engine::ResponsesTransport,
+        lifecycle::PublishedAnswer,
         mailbox::EnvelopeType,
         store::Usage as StoredUsage,
         transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, Usage as TurnUsage},
@@ -614,6 +694,7 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         },
     };
+    use tokio::sync::oneshot;
 
     #[derive(Clone)]
     struct ReplayAuth;
@@ -684,6 +765,390 @@ mod tests {
             "type":"message","role":"assistant","phase":"final_answer",
             "content":[{"type":"output_text","text":text}]
         }))
+    }
+
+    fn reply_contract(marker: &str) -> Contract {
+        Contract {
+            clauses: vec![marker.into()],
+            acceptance: vec!["structured answer".into()],
+            owned: vec![],
+            must_not: vec![],
+            introduces: vec![],
+            consumes: vec![],
+            boundaries: vec![],
+            reply: Some(json!({
+                "type":"object",
+                "properties":{"answer":{"type":"string"}},
+                "required":["answer"],
+                "additionalProperties":false
+            })),
+        }
+    }
+
+    fn wire_reply_contract(marker: &str) -> Value {
+        let mut contract = serde_json::to_value(reply_contract(marker)).unwrap();
+        contract["reply"] = Value::String(contract["reply"].to_string());
+        contract
+    }
+
+    fn strict_answer(id: &str, answer: &str) -> Item {
+        function_call(id, "finalize", json!({"result":{"answer":answer}}))
+    }
+
+    struct FirstRequestBarrier {
+        arrival: mpsc::UnboundedSender<Vec<Item>>,
+        release: StdMutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    #[derive(Clone)]
+    struct BarrierReplayTransport {
+        replay: ReplayTransport,
+        barrier: Option<Arc<FirstRequestBarrier>>,
+    }
+
+    #[async_trait]
+    impl ResponsesTransport for BarrierReplayTransport {
+        async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            if let Some(barrier) = &self.barrier {
+                let release = barrier.release.lock().unwrap().take();
+                if let Some(release) = release {
+                    barrier.arrival.send(request.input.clone()).unwrap();
+                    release
+                        .await
+                        .map_err(|_| TransportError::Stream("barrier dropped".into()))?;
+                }
+            }
+            self.replay.create(request).await
+        }
+    }
+
+    #[tokio::test]
+    async fn followup_lifecycle_held_final_is_unseen_then_delivered_once() {
+        let path = std::env::temp_dir().join(format!(
+            "harness-followup-lifecycle-{}.sqlite",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = Arc::new(Store::open(&path).unwrap());
+        let root = AgentPath("/root".into());
+        let child = AgentPath("/root/child".into());
+        let service = Arc::new(StoreAgentToolService::new(store.clone(), root.clone()));
+        let responses = Arc::new(StdMutex::new(HashMap::from([
+            (
+                root.0.clone(),
+                VecDeque::from([
+                    vec![function_call(
+                        "spawn-child",
+                        "spawn_agent",
+                        json!({
+                            "task_name":"child",
+                            "from":{"kind":"prompt","name":null},
+                            "task":wire_reply_contract("initial")
+                        }),
+                    )],
+                    vec![function_call("wait-1", "wait_agent", json!({}))],
+                    vec![function_call("wait-2", "wait_agent", json!({}))],
+                    vec![final_answer("root done")],
+                ]),
+            ),
+            (
+                child.0.clone(),
+                VecDeque::from([
+                    vec![strict_answer("final-1", "first")],
+                    vec![strict_answer("final-2", "second")],
+                ]),
+            ),
+        ])));
+        let counts = Arc::new(StdMutex::new(HashMap::new()));
+        let inputs = Arc::new(StdMutex::new(HashMap::new()));
+        let (arrival_tx, mut arrival_rx) = mpsc::unbounded_channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let barrier = Arc::new(FirstRequestBarrier {
+            arrival: arrival_tx,
+            release: StdMutex::new(Some(release_rx)),
+        });
+        let factory = Arc::new(HarnessEngineFactory {
+            auth: Arc::new(ReplayAuth),
+            store: store.clone(),
+            scheduler: Arc::new(JobScheduler::new(2).unwrap()),
+            provider: Arc::new(crate::tree::TreeProvider::new(
+                crate::CliProvider(crate::DemoProvider::development(".", false)),
+                service.clone(),
+            )),
+            compact_at_input_tokens: None,
+            config: {
+                let responses = responses.clone();
+                let counts = counts.clone();
+                let inputs = inputs.clone();
+                let barrier = barrier.clone();
+                move |agent: &AgentPath| {
+                    Ok(BarrierReplayTransport {
+                        replay: ReplayTransport {
+                            agent: agent.0.clone(),
+                            responses: responses.clone(),
+                            request_counts: counts.clone(),
+                            inputs: inputs.clone(),
+                            compact_once: false,
+                        },
+                        barrier: (agent.0 == "/root/child").then(|| barrier.clone()),
+                    })
+                }
+            },
+            transport: std::marker::PhantomData,
+        });
+        let driver = Driver::new(store.clone(), service.clone(), factory);
+        driver
+            .start(vec![Item(
+                json!({"type":"message","role":"user","content":"start"}),
+            )])
+            .await
+            .unwrap();
+        let first_input =
+            tokio::time::timeout(std::time::Duration::from_secs(2), arrival_rx.recv())
+                .await
+                .expect("first child request reaches explicit barrier")
+                .expect("barrier source remains live");
+        assert!(
+            first_input
+                .iter()
+                .any(|item| item.0.to_string().contains("initial"))
+        );
+        let queued = service
+            .followup_task(&root, child.clone(), reply_contract("followup-2"))
+            .await
+            .unwrap();
+        assert_eq!(queued["status"], "queued");
+        let queued_id = store.unread(&child.0).unwrap()[0].id;
+        assert_eq!(queued["envelope_id"], queued_id);
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if store.inbox(&root.0).unwrap().len() == 2
+                    && store.agent(&child).unwrap().unwrap().head_request.is_some()
+                    && driver.running.lock().await.is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("two child answers publish and driver reaps");
+        let answers = store
+            .inbox(&root.0)
+            .unwrap()
+            .iter()
+            .map(|envelope| {
+                let item = store.get_item(&envelope.item_hash).unwrap().unwrap();
+                PublishedAnswer::from_message_item(&item).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[0].result, json!({"answer":"first"}));
+        assert_eq!(answers[1].result, json!({"answer":"second"}));
+        assert_eq!(answers[0].provenance.unseen_envelopes, vec![queued_id]);
+        assert!(!answers[0].provenance.seen_envelopes.contains(&queued_id));
+        assert!(answers[1].provenance.seen_envelopes.contains(&queued_id));
+        assert!(!answers[1].provenance.unseen_envelopes.contains(&queued_id));
+        let input_guard = inputs.lock().unwrap();
+        let child_inputs = &input_guard[&child.0];
+        assert_eq!(child_inputs.len(), 2, "no duplicate concurrent child run");
+        assert!(
+            !first_input
+                .iter()
+                .any(|item| item.0.to_string().contains("followup-2"))
+        );
+        assert_eq!(
+            child_inputs[1]
+                .iter()
+                .filter(|item| item.0.to_string().contains("followup-2"))
+                .count(),
+            1,
+            "the next child request sees the follow-up exactly once"
+        );
+        assert_eq!(
+            store
+                .inbox(&child.0)
+                .unwrap()
+                .iter()
+                .find(|envelope| envelope.id == queued_id)
+                .unwrap()
+                .delivered_request
+                .as_ref(),
+            Some(&answers[1].provenance.final_request)
+        );
+        let child_head = store.agent(&child).unwrap().unwrap().head_request.unwrap();
+        assert_eq!(child_head, answers[1].provenance.final_request);
+        assert_eq!(
+            store.request(&child_head).unwrap().unwrap().parent,
+            Some(answers[0].provenance.final_request.clone())
+        );
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened.agent(&child).unwrap().unwrap().head_request,
+            Some(child_head)
+        );
+        let reopened_answers = reopened
+            .inbox(&root.0)
+            .unwrap()
+            .iter()
+            .map(|envelope| {
+                let item = reopened.get_item(&envelope.item_hash).unwrap().unwrap();
+                PublishedAnswer::from_message_item(&item).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reopened_answers, answers,
+            "stored typed answers survive reopen"
+        );
+        let reopened_child_inbox = reopened.inbox(&child.0).unwrap();
+        assert_eq!(reopened_child_inbox.len(), 2);
+        assert_eq!(
+            reopened_child_inbox
+                .iter()
+                .find(|envelope| envelope.id == queued_id)
+                .unwrap()
+                .delivered_request,
+            Some(reopened_answers[1].provenance.final_request.clone())
+        );
+        assert_eq!(
+            reopened
+                .request(&reopened_answers[1].provenance.final_request)
+                .unwrap()
+                .unwrap()
+                .parent,
+            Some(reopened_answers[0].provenance.final_request.clone())
+        );
+        driver.shutdown().await.unwrap();
+        drop(reopened);
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn followup_lifecycle_before_boundary_is_seen_and_later_arrival_runs() {
+        let store = Arc::new(Store::memory().unwrap());
+        let root = AgentPath("/root".into());
+        let child = AgentPath("/root/child".into());
+        store
+            .admit_agent(&root, None, None, &json!({}), &json!({"kind":"root"}))
+            .unwrap();
+        store
+            .admit_agent(
+                &child,
+                Some(&root),
+                None,
+                &serde_json::to_value(reply_contract("original")).unwrap(),
+                &json!({"kind":"prompt"}),
+            )
+            .unwrap();
+        let service = Arc::new(StoreAgentToolService::new(store.clone(), root.clone()));
+        service
+            .followup_task(&root, child.clone(), reply_contract("before-boundary"))
+            .await
+            .unwrap();
+        let before_id = store.unread(&child.0).unwrap()[0].id;
+        let responses = Arc::new(StdMutex::new(HashMap::from([
+            (
+                root.0.clone(),
+                VecDeque::from([
+                    vec![function_call("wait-before", "wait_agent", json!({}))],
+                    vec![function_call("wait-late", "wait_agent", json!({}))],
+                    vec![final_answer("root done")],
+                ]),
+            ),
+            (
+                child.0.clone(),
+                VecDeque::from([
+                    vec![strict_answer("seen-final", "saw before")],
+                    vec![strict_answer("late-final", "saw late")],
+                ]),
+            ),
+        ])));
+        let counts = Arc::new(StdMutex::new(HashMap::new()));
+        let inputs = Arc::new(StdMutex::new(HashMap::new()));
+        let factory = Arc::new(HarnessEngineFactory {
+            auth: Arc::new(ReplayAuth),
+            store: store.clone(),
+            scheduler: Arc::new(JobScheduler::new(2).unwrap()),
+            provider: Arc::new(crate::tree::TreeProvider::new(
+                crate::CliProvider(crate::DemoProvider::development(".", false)),
+                service.clone(),
+            )),
+            compact_at_input_tokens: None,
+            config: {
+                let responses = responses.clone();
+                let counts = counts.clone();
+                let inputs = inputs.clone();
+                move |agent: &AgentPath| {
+                    Ok(ReplayTransport {
+                        agent: agent.0.clone(),
+                        responses: responses.clone(),
+                        request_counts: counts.clone(),
+                        inputs: inputs.clone(),
+                        compact_once: false,
+                    })
+                }
+            },
+            transport: std::marker::PhantomData,
+        });
+        let driver = Driver::new(store.clone(), service.clone(), factory);
+        driver
+            .start(vec![Item(
+                json!({"type":"message","role":"user","content":"start"}),
+            )])
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while store.inbox(&root.0).unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first answer published before late arrival");
+        let first_envelope = &store.inbox(&root.0).unwrap()[0];
+        let first_item = store.get_item(&first_envelope.item_hash).unwrap().unwrap();
+        let first = PublishedAnswer::from_message_item(&first_item).unwrap();
+        assert_eq!(first.result, json!({"answer":"saw before"}));
+        assert!(first.provenance.seen_envelopes.contains(&before_id));
+        assert!(first.provenance.unseen_envelopes.is_empty());
+        let queued = service
+            .followup_task(&root, child.clone(), reply_contract("after-snapshot"))
+            .await
+            .unwrap();
+        assert_eq!(queued["status"], "queued");
+        let late_id = store.unread(&child.0).unwrap()[0].id;
+        assert_eq!(queued["envelope_id"], late_id);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while store.inbox(&root.0).unwrap().len() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("arrival after snapshot triggers second child run");
+        let second_envelope = &store.inbox(&root.0).unwrap()[1];
+        let second_item = store.get_item(&second_envelope.item_hash).unwrap().unwrap();
+        let second = PublishedAnswer::from_message_item(&second_item).unwrap();
+        assert_eq!(second.result, json!({"answer":"saw late"}));
+        assert!(!first.provenance.unseen_envelopes.contains(&late_id));
+        assert!(second.provenance.seen_envelopes.contains(&late_id));
+        assert_eq!(
+            inputs.lock().unwrap()[&child.0]
+                .iter()
+                .filter(|request| {
+                    request
+                        .iter()
+                        .any(|item| item.0.to_string().contains("after-snapshot"))
+                })
+                .count(),
+            1
+        );
+        assert_eq!(*driver.failure_receiver().borrow(), None);
+        driver.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -870,6 +1335,74 @@ mod tests {
             self.0.fetch_add(1, Ordering::SeqCst);
             Err(format!("failure at {}", engine.0))
         }
+    }
+
+    struct MalformedAnswerFactory(Arc<Store>);
+
+    #[async_trait]
+    impl EngineFactory for MalformedAnswerFactory {
+        type Engine = AgentPath;
+
+        async fn create(&self, agent: AgentPath) -> Result<Self::Engine, String> {
+            Ok(agent)
+        }
+
+        async fn run(
+            &self,
+            engine: &Self::Engine,
+            head: Option<RequestId>,
+            _initial: Vec<Item>,
+            _cancel: watch::Receiver<bool>,
+            _inbox: mpsc::UnboundedReceiver<Envelope>,
+        ) -> Result<EngineCompletion, String> {
+            let id = RequestId(format!("malformed-final-{}", engine.0.replace('/', "_")));
+            self.0
+                .write_request(&id, head.as_ref(), &engine.0, &[], StoredUsage::default())
+                .map_err(|error| error.to_string())?;
+            Ok(EngineCompletion {
+                turn: ResponsesTurn {
+                    response_id: id.0.clone(),
+                    items: (engine.0 != "/root")
+                        .then(|| vec![function_call("bad-final", "finalize", json!({}))])
+                        .unwrap_or_default(),
+                    usage: TurnUsage::default(),
+                },
+                transcript: vec![],
+                head_request: id,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_publication_does_not_advance_child_head_or_publish() {
+        let store = Arc::new(Store::memory().unwrap());
+        let root = AgentPath("/root".into());
+        let child = AgentPath("/root/child".into());
+        store
+            .admit_agent(&root, None, None, &json!({}), &json!({}))
+            .unwrap();
+        store
+            .admit_agent(&child, Some(&root), None, &json!({}), &json!({}))
+            .unwrap();
+        let service = Arc::new(StoreAgentToolService::new(store.clone(), root));
+        let driver = Driver::new(
+            store.clone(),
+            service,
+            Arc::new(MalformedAnswerFactory(store.clone())),
+        );
+        let mut failure = driver.failure_receiver();
+        driver.start(Vec::new()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), failure.changed())
+            .await
+            .expect("malformed publication must surface")
+            .unwrap();
+        assert!(
+            failure.borrow().as_deref().unwrap().contains("finalize"),
+            "typed publication failure is reported"
+        );
+        assert_eq!(store.agent(&child).unwrap().unwrap().head_request, None);
+        assert!(store.inbox("/root").unwrap().is_empty());
+        driver.shutdown().await.unwrap();
     }
 
     #[tokio::test]
