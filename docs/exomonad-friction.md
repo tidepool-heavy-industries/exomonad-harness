@@ -253,3 +253,190 @@ These are my own observations, not a claim that the correction wave is done.
   `f7a766e` commit. It is an unmerged red test, not a green Here proof;
   the rescue owner received the exact failure and must distinguish a
   missing replay response from a production output-readiness defect.
+
+## wave 7 root interview — 2026-09-25
+
+These are my observations as root, not an inference that the remaining live
+acceptance gates passed. Times below are PDT commit times unless marked
+approximate; commit-to-commit windows include work, review, and integration,
+so they are not pure model latency.
+
+### 1. Fastest path
+
+The fastest *reviewed handoff to root merge* was the Server Compactor
+component: lead commit `03beea9` at 02:02:09, root `integrate(compaction-component)`
+`c3f29d0` at 02:03:38, about 89 seconds. It was possible because the operator's
+**integrate first** rule made that reviewed slice my next action, and the
+lead prompt says, “Each integrated slice reaches your requester the same
+turn.” Earlier, the focused store drop went from implementation `46a5496`
+(01:17) to root merge `eabf47b` (01:23), about six minutes. The operator's
+stranded-branches note also prevented rebuilding settings/Compactor work
+that already existed: I treated those branches as candidates to verify, not
+as completed features. The exact branch/commit, cumulative ownership diff,
+and matched test count made these short integrations possible.
+
+### 2. Where I waited
+
+- **Children's engineering:** Settings was not one wait: pin `26f8634`
+  landed at 01:37, test `a243d1f` at 01:45, and the visibility/effort/
+  provenance stack did not reach root until `f1334be` at 02:49. Here was
+  the long dependency. From the provisional settings-based Here work around
+  02:00 to reviewed root merge `2e456e3` at 04:43 was roughly 2 h 40 m.
+  Root's active-invocation contract `e28126e` arrived at 03:14. Actor25
+  stalled about 30 minutes; actor28's later active-seam interval was roughly
+  03:14–03:47, ending with preserved `f7a766e` and a stop after more than
+  133 responses in one turn. Actor34's rescue interval was roughly
+  03:47–04:39; it preserved repaired `b4257da` at 04:30 but was stopped
+  after roughly 120 responses in its later turn. These are actor-work/
+  turn-boundary windows, not compile times.
+- **Independent reviews:** The Compactor component reviewer required repair
+  of three invariants before `03beea9`. The Engine consumer went from
+  `2b5e152` at 03:08 through a missing-production-caller Repair,
+  `5c17907` at 03:19 through a flaky-replay Repair, and exact accepted
+  `c8c7fef` before `f504dd0` at 03:38. That is a roughly 30-minute
+  review/repair/integration window, not 30 minutes idle waiting. Here's
+  final candidate `b4257da` at 04:30 reached accepted review and merge
+  `2e456e3` at 04:43, about 13 minutes including my dispatch and tests.
+  The original settings-pin reviewer was retired before the visibility
+  defect; that cost a separate explicitly authorized full-cumulative
+  review by actor21 rather than `reviewAgain`.
+- **Delivery to a busy child:** Messages to actor25 were not confirmed
+  presented during its approximate 30-minute stall. Actor28's contract
+  and active-test corrections remained submitted/not-presented inside
+  its >133-response turn. Actor34 repeated the failure at >120 responses;
+  the short-turn note and the operator relay into the Here owner's pane
+  improved visibility, but I did not see proof that the relayed correction
+  was incorporated before those turns ended. I treated transport acceptance
+  as transport only, stopped/preserved the two workers through their lead,
+  and reviewed only `b4257da` after a fresh bounded owner had repaired it.
+- **Machine/cells:** I saw no comparable long machine stall. The integrated
+  Here full-library build reported about 10.57 seconds to compile, followed
+  by a demo check around 1.61 seconds; focused runs generally took seconds.
+  Some large diff/test output was truncated and recovered via retained
+  output reads. I cannot assign the hours above to CPU time or to a
+  specific slow Haskell cell without a recorded duration.
+
+### 3. Operator notes and rules: effect, disagreement, my miss
+
+The stranded-branches correction changed the starting point: NEXT.md had
+said (c) unassigned, but I verified retained settings work, used the prior
+Compactor as a reference, and did not mistake either for master integration.
+The seven rules changed routing: same-turn slice publication (`26f8634`,
+`a243d1f`, `03beea9`→`c3f29d0`), one reviewer per candidate and same
+reviewer for repairs (Compactor and Engine), integrate-first, Luna Medium
+by default, immediate root dependency supply (`e28126e` and exact
+`f504dd0` to the Here lead), and branch handoff in NEXT.md. “Do the
+Engine::run seam now” moved me from waiting on the Compactor lane to
+root-owned Engine/store code `2b5e152`; the reviewer then correctly
+refused that component without a production caller, prompting
+`5c17907` and replay repair `c8c7fef`. I respected the item-2 retry hold:
+the one manual attempt returned HTTP 400, and I made no retry.
+
+I did not follow the stale NEXT.md “unassigned” claim, or treat older
+`caddc4c` component review as PRD-wide acceptance: its forced typed-turn
+capability and successor/settings invariants were not the final contract.
+I also declined a *mechanical rebase just because master moved* when
+`b4257da`'s owned code paths were disjoint from only NEXT/docs changes
+after base `38e3e14`. A cumulative path diff, `merge-tree` conflict check,
+exact review, actual merge `2e456e3`, and post-merge tests gave stronger
+evidence with less risk than another rebase of a stopped owner's branch.
+
+My own clear miss was NEXT.md churn. After commit `5045fdc` put the
+“commit only with integration or at turn end” rule into the prompt, I
+still made **17 `docs:` commits** through this interview's starting
+HEAD, many at successive turn ends (`a3cd2ac`, `9f6ada4`, `5cde20e`
+and later). The owner prompt also requires the table to stay current
+and an admission checkpoint after forks. Frequent asynchronous operator
+messages created frequent turn ends; I treated the *allowed* end-of-turn
+commit as required and let bookkeeping consume tool rounds. I should
+have kept NEXT.md modified across ordinary turns and committed it with
+the next integration or a real stop handoff. The short-turn rule did not
+fully work either: I noticed and escalated actor28/34's overlong turns,
+but only after they had already exceeded the bound by a large margin.
+
+### 4. Making Here one owner and one review
+
+Before assigning the first Here owner, I would have landed the root
+contract that active model-facing dispatch carries
+`AgentInvocation { request, call_id }` (`e28126e`, 03:14), plus an
+explicit persistence barrier: *claim settled is not output appended*.
+I would have named one owned `engine.rs`/`agent_runtime.rs`/`store/mod.rs`
+slice, one root-owned later `tree.rs` gate, and these acceptance cases in
+the first child packet: stale stored head during an active spawn, exact
+call→actual output→one pin ordering, a deterministic gap after
+`Store::write_output` and before `append_items`, inherited pending
+claims, and a full-library run that updates old pin-index assertions.
+Actor25 would not have waited for an unstated root seam, and actor28's
+`f7a766e` would not have reached a red active fixture and wrong pin
+order before handoff. A fixture with explicit channels/barriers rather
+than timing would have caught both. At the runtime level, a 15-minute/
+30-call turn budget must *force a checkpoint/wake*; text alone failed
+twice, with actors28 and 34. One bounded owner could then produce the
+equivalent of `b4257da`, receive actor37's one exact review, and merge.
+
+### 5. Prompt edits I would make (proposals, not edits made here)
+
+- **`owner.md`:** Replace the existing line “Keep `NEXT.md`'s obligations
+  table current, but commit it only with an `integrate(...)` commit or
+  when your turn ends” with:
+  > Keep NEXT.md current in the working tree; leave routine checkpoint edits uncommitted across turn ends. Commit them with the next integrate(...) or an explicit stop handoff, not merely because a turn ended.
+  I would also add:
+  > A code candidate need not rebase over disjoint documentation-only commits: prove cumulative ownership, no merge conflict, exact-tip review, and post-merge checks; otherwise return it to its owner.
+- **`lead.md`:** Add immediately after the current short-turn rule:
+  > If a child exceeds 15 minutes or 30 tool calls without a turn boundary, request an immediate committed checkpoint; if the correction remains unpresented at the next checkpoint, stop while retaining its branch and reassign once. Do not relay new repair requests into that still-busy turn.
+  This is deliberately stronger than a reminder; the actor28/34 notes
+  were transported but not timely incorporated.
+- **`task.md`:** Replace “Before replying, rebase onto your parent's
+  current head (its integration branch) and re-run your checks there”
+  with:
+  > Before replying, compare the current integration head with your base. Rebase and rerun checks if code overlaps or the candidate will not merge; if only disjoint paths advanced, publish the exact checked tip, base OID, cumulative owned-path diff, and merge preflight so the parent can merge then verify.
+  Add:
+  > On the 15-minute/30-call limit, commit a safe checkpoint and end the turn even if a test or repair is unfinished; name it pending, never green.
+  The old unconditional rebase line pulled actor34 into another long,
+  unnecessary turn over docs-only commits.
+
+### 6. First adapter-readiness slice
+
+I would not start by implementing all ten proposed amendments in
+`docs/dogfood-requirements.md`. The first vertical slice is **one root
+actor, one resident Haskell cell Job, one request-boundary operator
+envelope, and one strict typed `finalize` result**, exercised only with
+deterministic replay. No fork/unfold, browser, or live inference is
+needed to prove that slice. Its critical path is ranked amendment 1
+(*AtBoundary* means each request, all unread envelopes included, never
+cancel a computing cell), the minimal part of amendment 8 that gives
+`/root` a `/operator` parent and a whole first-task contract, and the
+resident evaluator protocol. Otherwise the delivery fence, parent-hunting,
+and 3.5–51 minute steering delays simply reappear in the adapter.
+The exomonad adapter must make the resident cell an async cancellable
+Job with retained output, map `respond` to forced-schema `finalize`,
+and keep a computing job alive while operator input waits for the next
+request. Amendment 2's envelope reference states make that behavior
+auditable; amendment 4 (never refuse a reply for an unseen followup)
+is the next multi-request gate, before adding children.
+
+As root I would first pin the `CellJob`/request-boundary envelope interface
+and an offline `ReplayProvider` fixture. Then one applicative wave of
+disjoint bounded leaves: (1) mailbox amendment-1 implementation and
+the three-envelopes/three-request replay, (2) resident-Haskell async
+Job/typed-finalize adapter, and (3) an independent read-only contract/test
+check. I would retain the Engine consumer and integrated replay myself.
+The release test is not “tools compile”: start a long cell, deliver three
+envelopes at successive request boundaries without canceling/restarting
+it, get one strict final result, and restart/query its durable state.
+
+### 7. Unasked observations
+
+The item-13 read-only audit proposed new trace correlation tooling
+because JSONL events lack a Store request ID. Code inspection of
+`Engine::run_loop` at `engine.rs:432–442` found an existing
+request-correlated `responses_usage` Store event with `cached_tokens`.
+That avoided another trace-building detour; no live item-13 result is
+claimed. A zero-match filtered test can exit 0, and a focused green
+crate run can coexist with nine failing library tests; I had to keep
+matched counts and compiled-file scope explicit until the integrated
+95-pass run at `2e456e3`. Finally, the Compactor's offline
+unanswered-call experiment is recorded, but no credentialed live
+Compactor call was authorized; item-2 retry and item-13 live trace are
+also separate from the (c)/(d) code integrations. The operator's
+interview hold means I am stopping here, not opening those gates now.
