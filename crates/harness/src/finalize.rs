@@ -26,12 +26,20 @@ pub enum FinalizeError {
     SerializeResult(String),
     #[error("unsupported JSON schema at {path}: {keyword}")]
     UnsupportedSchema { path: String, keyword: String },
+    #[error("finalize result does not match schema at {0}")]
+    ResultSchemaMismatch(String),
 }
 
 /// Make the strict Responses function-tool schema for a typed reply.
 pub fn tool_schema<T: JsonSchema>() -> Result<Value, FinalizeError> {
     let result_schema =
         serde_json::to_value(schemars::schema_for!(T)).expect("JsonSchema serializes to JSON");
+    tool_schema_from_result_schema(result_schema)
+}
+
+/// Build the strict tool from a persisted contract's result JSON Schema.
+/// This uses the same conservative validation as a Rust `JsonSchema` type.
+pub fn tool_schema_from_result_schema(result_schema: Value) -> Result<Value, FinalizeError> {
     let result_schema = normalize_schema(result_schema, "$")?;
     Ok(json!({
         "type": "function",
@@ -213,11 +221,103 @@ impl FinalizeParser {
         self.finalized = true;
         Ok(decoded)
     }
+
+    /// Decode a dynamic contract reply and verify the conservative structural
+    /// schema subset locally. A replay transport does not itself enforce the
+    /// provider's strict tool schema.
+    pub fn parse_completed_with_result_schema(
+        &mut self,
+        item: &Item,
+        result_schema: &Value,
+    ) -> Result<Value, FinalizeError> {
+        let result: Value = self.parse_completed(item)?;
+        validate_result(&result, result_schema, "$")?;
+        Ok(result)
+    }
+}
+
+fn validate_result(value: &Value, schema: &Value, path: &str) -> Result<(), FinalizeError> {
+    let matches_type = match schema["type"].as_str() {
+        Some("object") => value.is_object(),
+        Some("array") => value.is_array(),
+        Some("string") => value.is_string(),
+        Some("boolean") => value.is_boolean(),
+        _ => false,
+    };
+    if !matches_type
+        || schema
+            .get("const")
+            .is_some_and(|expected| expected != value)
+        || schema["enum"]
+            .as_array()
+            .is_some_and(|choices| !choices.contains(value))
+    {
+        return Err(FinalizeError::ResultSchemaMismatch(path.into()));
+    }
+    if let Some(object) = value.as_object() {
+        let properties = schema["properties"]
+            .as_object()
+            .ok_or_else(|| FinalizeError::ResultSchemaMismatch(path.into()))?;
+        if object.len() != properties.len() {
+            return Err(FinalizeError::ResultSchemaMismatch(path.into()));
+        }
+        for (key, property_schema) in properties {
+            let child = object
+                .get(key)
+                .ok_or_else(|| FinalizeError::ResultSchemaMismatch(format!("{path}.{key}")))?;
+            validate_result(child, property_schema, &format!("{path}.{key}"))?;
+        }
+    } else if let Some(array) = value.as_array() {
+        let min = schema["minItems"].as_u64().unwrap_or(0) as usize;
+        let max = schema["maxItems"].as_u64().unwrap_or(u64::MAX) as usize;
+        if array.len() < min || array.len() > max {
+            return Err(FinalizeError::ResultSchemaMismatch(path.into()));
+        }
+        for (index, child) in array.iter().enumerate() {
+            validate_result(child, &schema["items"], &format!("{path}[{index}]"))?;
+        }
+    } else if let Some(text) = value.as_str() {
+        let length = text.chars().count();
+        let min = schema["minLength"].as_u64().unwrap_or(0) as usize;
+        let max = schema["maxLength"].as_u64().unwrap_or(u64::MAX) as usize;
+        if length < min || length > max {
+            return Err(FinalizeError::ResultSchemaMismatch(path.into()));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_result_rejects_wrong_shape_and_preserves_json() {
+        let schema = tool_schema_from_result_schema(json!({
+            "type":"object", "properties":{"answer":{"type":"string"}},
+            "required":["answer"],"additionalProperties":false
+        }))
+        .unwrap();
+        let result_schema = &schema["parameters"]["properties"]["result"];
+        let good = call("finalize", json!({"result":{"answer":"ready"}}));
+        assert_eq!(
+            FinalizeParser::new()
+                .parse_completed_with_result_schema(&good, result_schema)
+                .unwrap(),
+            json!({"answer":"ready"})
+        );
+        for bad in [
+            json!({"result":{"answer":7}}),
+            json!({"result":{"answer":"ready","extra":true}}),
+            json!({"result":{}}),
+        ] {
+            assert!(matches!(
+                FinalizeParser::new()
+                    .parse_completed_with_result_schema(&call("finalize", bad), result_schema),
+                Err(FinalizeError::ResultSchemaMismatch(_))
+            ));
+        }
+    }
     use serde::Deserialize;
     use std::collections::HashSet;
     type StringSet = HashSet<String>;

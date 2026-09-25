@@ -104,6 +104,9 @@ pub struct EngineCompletion {
     pub transcript: Vec<Item>,
     /// Durable request row whose history was supplied to the final response.
     pub head_request: RequestId,
+    /// Strict finalize result, when a reply schema was supplied. No prose
+    /// rendering or parent publication has occurred at this boundary.
+    pub typed_result: Option<serde_json::Value>,
 }
 
 /// Narrow transport seam: production uses `ResponsesClient`; tests can replay
@@ -234,6 +237,23 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         }
         let reply = FinalizeParser::new().parse_completed(calls[0])?;
         Ok((completion, reply))
+    }
+
+    /// Run an agent whose stored contract supplies a strict result schema.
+    /// `result_schema` describes the value inside finalize's `result` field.
+    /// Unlike `run_finalized<T>`, the result stays as JSON for durable routing
+    /// by a host that does not know the contract's Rust type.
+    pub async fn run_with_reply_schema(
+        &self,
+        head: Option<RequestId>,
+        new_items: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+        incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+        result_schema: serde_json::Value,
+    ) -> Result<EngineCompletion, EngineError> {
+        let schema = crate::finalize::tool_schema_from_result_schema(result_schema)?;
+        self.run_with_finalize(head, new_items, cancellation, incoming, Some(schema))
+            .await
     }
 
     async fn run_with_finalize(
@@ -700,6 +720,22 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     return Err(self.cleanup_pending(error, &pending).await);
                 }
             } else if is_final(&turn, finalize_schema.is_some()) && pending.is_empty() {
+                let typed_result = if let Some(schema) = finalize_schema {
+                    let calls: Vec<_> = turn
+                        .items
+                        .iter()
+                        .filter(|item| is_finalize_call(item))
+                        .collect();
+                    if calls.len() != 1 {
+                        return Err(EngineError::InvalidFinalizeCount);
+                    }
+                    Some(FinalizeParser::new().parse_completed_with_result_schema(
+                        calls[0],
+                        &schema["parameters"]["properties"]["result"],
+                    )?)
+                } else {
+                    None
+                };
                 // Read the durable parent chain only after every item/output
                 // from this final turn has been persisted.
                 let transcript = match self.read_history(&parent).await {
@@ -710,6 +746,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     turn,
                     transcript,
                     head_request: parent,
+                    typed_result,
                 });
             } else if turn_call_ids.is_empty() && pending.is_empty() {
                 return Err(EngineError::MissingFinal);
@@ -4288,6 +4325,7 @@ mod tests {
                 answer: "ready".into()
             }
         );
+        assert_eq!(completion.typed_result, Some(json!({"answer":"ready"})));
         assert!(completion.transcript.contains(&final_call));
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
@@ -4312,6 +4350,71 @@ mod tests {
                 .claims_on(&completion.head_request)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_reply_schema_preserves_strict_result_without_job() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let final_call = Item(json!({
+            "type":"function_call", "call_id":"final-dynamic", "name":"finalize",
+            "arguments":{"result":{"answer":"ready"}}
+        }));
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new([turn("dynamic-final", vec![final_call.clone()])].into()),
+        };
+        let store = Arc::new(Store::memory().unwrap());
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            replay,
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "finalize".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "dynamic-session".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let completion = engine
+            .run_with_reply_schema(
+                None,
+                vec![Item(json!({"role":"user","content":"go"}))],
+                cancel_rx,
+                empty_mailbox(),
+                json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(completion.typed_result, Some(json!({"answer":"ready"})));
+        assert!(completion.transcript.contains(&final_call));
+        assert!(
+            store
+                .claims_on(&completion.head_request)
+                .unwrap()
+                .is_empty()
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .tools
+                .iter()
+                .filter(|t| t["name"] == "finalize")
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests[0]
+                .tools
+                .iter()
+                .find(|t| t["name"] == "finalize")
+                .unwrap()["strict"],
+            true
         );
     }
 
