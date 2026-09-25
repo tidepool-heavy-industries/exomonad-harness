@@ -14,8 +14,9 @@ serves. `docs/questions.md` Q4 and Q5 are answered; read them before planning.
   stamps `async: true` on everything but `wait_agent`; the offline test in
   `crates/harness/tests/correction_wave.rs` is green. The LIVE item-2 trace is
   still open: slow `sleep` tool, model continues, `wait_agent` resumed by the
-  result, redacted request bodies in `docs/findings.md`. One node, one run,
-  by hand.
+  result, redacted request bodies in `docs/findings.md`. The bounded probe
+  spent no inference: `docs/item2-live.md` identifies the missing auditable
+  request-body/job-timing trace surface. Add that seam before one manual run.
 - (c) settings items: not started. The last lead returned `Blocked` on a
   "provenance seam". That seam is decided, not open: PRD `settings items` says
   harness-authored only; the TODO at `Store::append_items` states the drop

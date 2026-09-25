@@ -85,7 +85,7 @@ their live traces in `docs/findings.md`, master is green, and
 | item | state | what remains |
 |---|---|---|
 | (a) one entry | **done** (`9da6efe`, `a9f7a12`) | nothing |
-| (b) async tools | provider stamp integrated on master (`d8097c3`); offline correction-wave test 1/1 passed, fmt passed | live item-2 trace (slow `sleep`, model continues, `wait_agent` resumed) with redacted request bodies in findings remains open |
+| (b) async tools | provider stamp integrated on master (`d8097c3`); offline correction-wave test 1/1 passed, fmt passed; findings-only gap in `docs/item2-live.md` | live item-2 trace remains open: first add auditable redacted request-body and sleep/job-timing surface, then run once manually |
 | (c) settings items | not started; the "provenance seam" the last lead blocked on is decided (Q5, TODO at `Store::append_items`) | `configuration_update` as a store item, drop rule at append, `set_effort`, fork strip list, effort pinned via the item; live item-13 trace with cache counters |
 | (d) Compactor | not started | PRD shape, `Server` only, unanswered-call experiment → findings |
 | cache probe | measured on `d0245b3`: second request `cached_tokens` = 20,736; redacted blocks in `docs/cache-probe-evidence.md` | findings-only measurement; not product approval; no field diff needed under Q4 |

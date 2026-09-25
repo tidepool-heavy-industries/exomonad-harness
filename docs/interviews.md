@@ -110,3 +110,20 @@ was rebased as `1513e95` and merged by root at `06148a1`.
   inputs in the task before admission, as Q4 now does.
 - **Nudges and trials:** No sibling change, intentional red test, or repeated
   failed-check escalation occurred. No nudge firing was reported.
+
+## Item-2 live probe leaf — correction second half, 2026-09-24
+
+- **Scaffold change:** None. I read the integrated async-tool schema and demo
+  slow `sleep` path at `d0245b3`.
+- **Sibling interface:** The existing CLI can drive the scenario, but it does
+  not expose the actual redacted request bodies or correlate them with sleep
+  progress and `wait_agent` result. Root owns a trace seam before a live run.
+- **API versus docs:** The code has the ingredients, not the auditable trace
+  required by item 2. I did not infer continuation from a prompt or mock test.
+- **Tree cost:** Root must merge this findings-only document and add tracing
+  before spending the single manual live run. My initial document needed a
+  rebase onto root's intervening cache-probe integration.
+- **Different scaffold next time:** Require a redacted trace surface before
+  assigning the credentialed acceptance experiment.
+- **Nudges and trials:** No intentional red test or repeated failing-check
+  round occurred; no nudge event was reported. No inference was spent.

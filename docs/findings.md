@@ -365,3 +365,12 @@ cached input tokens. The exact blocks and method are in
 `docs/cache-probe-evidence.md`. This is a finding for that pair, not a general
 cache guarantee or product approval; per Q4 no Codex field-order diff was
 required. No code or broad tests changed.
+
+## Correction-wave item-2 live trace gap
+
+The bounded item-2 probe sent **no** inference request. Inspection at
+`d0245b3` found the slow demo `sleep` and async tool schema but no supported
+surface to retain redacted outbound request bodies correlated with sleep-job
+timing and `wait_agent` resumption. A prompt-driven run without that evidence
+would spend inference without proving the acceptance. Details:
+`docs/item2-live.md`. Live item 2 is still open; this is not a passing trace.
