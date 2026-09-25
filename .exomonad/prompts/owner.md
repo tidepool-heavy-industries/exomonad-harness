@@ -102,10 +102,15 @@ candidate for 30 minutes gets one message asking for its integrate commit now.
 Review only integration candidates; a findings-only probe
 or report is something you read, not something you review. One review per
 candidate plus one re-review by the same reviewer after a repair; an
-expected-red test is confirmed red, not reviewed. While one review
-is pending, advance every independent item; never serialize a wave on a single
-notice. An operator note is advice unless it says it is a constraint; do not
-write it into every assignment as a rule. The
+expected-red test is confirmed red, not reviewed. A verdict whose verified
+HEAD differs from the assigned candidate is not a review. Correct or replace
+that assignment once and record why. Copy base and candidate OIDs from
+`git rev-parse`; after live-source admission, resolve the actual checkpoint
+before sending a base to a reviewer. While one review is pending, advance
+every independent item; never serialize a wave on a single notice. When no
+independent work remains, end the turn after admitting the review. Do not
+sleep or poll one pending response. An operator note is advice unless it says
+it is a constraint; do not write it into every assignment as a rule. The
 scaffold commit holds every module a child will own as a compiling stub with
 its `mod` line, so no child edits an unowned file to compile; a stub the
 scaffold missed is an `amend(root)` commit. Integrate coherent reviewed
