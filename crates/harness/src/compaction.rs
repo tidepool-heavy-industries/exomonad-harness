@@ -122,7 +122,7 @@ impl Compactor for Server {
         }
         items.insert(
             0,
-            Item(json!({"type":"message","role":"developer","content":"Context was compacted; you are the successor; summary follows; live state (bindings, worktrees, children) is listed after it."})),
+            Item(json!({"type":"message","role":"developer","content":"[compaction-context-v1] Context was compacted; you are the successor. Summary follows; live state (bindings, worktrees, children) is listed after it."})),
         );
         items.push(Item(json!({"type":"configuration_update","reasoning":{"effort":format!("{:?}", cx.effort).to_lowercase()}})));
         Ok(NewWindow {
@@ -189,6 +189,12 @@ mod tests {
         assert!(window.items.contains(&user));
         assert_eq!(window.carried, vec![CallId("call-7".into())]);
         assert_eq!(window.items[0].0["role"], "developer");
+        assert!(
+            window.items[0].0["content"]
+                .as_str()
+                .unwrap()
+                .contains("[compaction-context-v1]")
+        );
         assert_eq!(
             window.items.iter().filter(|item| is_setting(item)).count(),
             1
