@@ -18,8 +18,8 @@ outside the wave. Resolve full source OIDs from Git.
 |---|---|---|
 | Shared lifecycle/provenance contract and scaffold | root | `lifecycle.rs` defines envelope-ID provenance and structured parent answer; optional `Contract.reply` is the strict result schema; compile and commit before forks |
 | Stable follow-up identity and durable provenance | store child | exact-tip review accepted; integrated as `176a271`; provenance focused test 1/1 on integrated source |
-| Typed completion | engine child | repaired exact candidate `2d5218f` checked 5 focused cases 1/1 each; same-reviewer re-review pending; no merge |
-| Driver publication/continuation and integrated release gate | driver child | wire-safe codec source supplied, retained driver re-assigned to implement and run integrated gate once Engine merges |
+| Typed completion | engine child | repaired exact candidate `2d5218f` re-review accepted; integrated as `c445c5d`; root-focused checks running |
+| Driver publication/continuation and integrated release gate | driver child | candidate `ddce261` gate 2/2 but review returned Repair: head CAS before publication can lose answer on publication failure; atomic Store seam and driver repair required |
 | Independent review, integration, interview and stop | root | exact-source verdict, executed integrated checks, handoff |
 
 Keep this table current as assignments settle; ordinary idle turn ends need no
@@ -176,19 +176,62 @@ settled Blocked on the now-resolved Engine/publication seams (it had
 not compiled its gate). Root supplied codec commit `41c48b6` and
 reassigned retained driver to rebase its owned file, use the codec,
 and run the gate after Engine integration.
+Same reviewer accepted exact Engine candidate `2d5218f` after five
+focused matched/passed 1/1 checks, noting integrated failure/cancel
+and Driver gate remained. Root merged its engine.rs/finalize.rs-only
+delta into `c445c5d3370e6beb2127cc4a2e0197ddf121df3f` with
+no conflict against codec/tool-schema amendments, informed Driver,
+and started integrated focused checks. This is not overall wave
+acceptance.
+Integrated checks on `c445c5d`: `cargo test -q -p harness
+dynamic_reply_schema` matched/passed 2/2;
+`dynamic_schema_invalid_call_does_not_consume_finalize_parser` 1/1;
+`rejects_pattern_schema_instead_of_advertising_unchecked_constraint`
+1/1; `--test first_request_delivery` 1/1;
+`--test adapter_readiness` 1/1; cargo fmt and git diff --check passed.
+The real Driver `followup_lifecycle` gate has not yet run.
+Driver's prior release-gate request settled Blocked on its stale view
+that master was `41c48b6`; it reported codec use and two written
+barrier tests but 0 compiled/matched tests. Root supplied the missing
+checked integration source `c445c5d` and immediately reassigned the
+retained driver to rebase and execute the focused gate. No driver
+candidate is accepted yet.
+Driver then submitted exact candidate
+`ddce261673a7f5fed964609a355b4d22d4003957` rebased on
+`c445c5d`, cumulative diff only driver.rs. It reported
+`cargo test -p harness-demo followup_lifecycle` 2/2,
+`shutdown_` 2/2, `reaper_joins_all_finished_handles_after_first_failure`
+1/1, first_request_delivery 1/1, adapter_readiness 1/1,
+fmt and diff checks. Root commissioned exact-tip independent review;
+these are candidate reports, not integrated gate evidence.
+Driver review of exact `ddce261` returned Repair: it advances
+the child head before adding the parent answer envelope; if
+publication fails, restart sees a completed head with no parent
+answer, so the answer is lost. The reviewer reported no counted
+adapter-readiness test (its filter matched 0), despite the owner's
+candidate report of 1/1; retain the discrepancy until root reruns
+on integrated source. Root contract amendment: one Store transaction
+must CAS the child's head and insert the optional parent answer
+envelope. `lifecycle::CompletionCommit` is the shared result:
+`HeadMismatch` (no envelope inserted) or `Committed { envelope_id }`
+(both effects durable). Driver constructs its publication item and
+snapshot before calling the atomic method; on committed publication
+it sends a wake hint. Crash/retry after commit cannot duplicate the
+envelope because head CAS will fail. Store owner must prove rollback
+with an envelope-insert failure injection (e.g. a test-only SQLite
+abort trigger). No schema migration or second scheduler.
 
 ## Where the last run stopped (live wave 10 checkpoint)
 
 - `exomonad/wave10/implementation/branches/wave10-engine`:
-  candidate `2d5218f881b5cfa4e055471548152b99ee63157c` (the
-  root-visible branch ref still showed `669ba8b` at this checkpoint);
-  repair for parser recovery and unchecked patterns, re-review pending,
-  not integrated. Prior reviewed `2d12a4a` received Repair.
+  candidate `2d5218f881b5cfa4e055471548152b99ee63157c` is no
+  longer unmerged: exact-tip re-review accepted and root integrated it
+  as `c445c5d`. Prior reviewed `2d12a4a` received Repair.
 - `exomonad/wave10/implementation/branches/wave10-driver`:
-  `dda39fa222bfb9ee3326aedb6d533433c60148d8` (branch ref snapshot);
-  wire-safe codec and driver lifecycle gate/reopened assertions in
-  progress; not yet compiled/passed as an integrated gate,
-  not reviewed or integrated.
+  `ddce261673a7f5fed964609a355b4d22d4003957`;
+  wire-safe codec and driver lifecycle gate/reopened assertions;
+  candidate checks reported passing, exact-tip review pending and
+  not integrated.
 - Store branch `5b2741a` is not unmerged: it is integrated as
   `176a271`. Root's wire-safe codec amendment is `41c48b6`.
 Driver progress reported uncommitted owned changes for strict factory,

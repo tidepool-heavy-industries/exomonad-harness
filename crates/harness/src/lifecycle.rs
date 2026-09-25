@@ -26,6 +26,15 @@ pub struct PublishedAnswer {
     pub provenance: CompletionProvenance,
 }
 
+/// Result of the Store's atomic head-advance plus optional parent publication.
+/// A losing compare-and-swap must publish no envelope. A committed result
+/// persists both effects before the driver emits a wake hint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompletionCommit {
+    HeadMismatch,
+    Committed { envelope_id: Option<i64> },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PublishedAnswerError {
     #[error("published answer is not a standard single-text assistant message")]
