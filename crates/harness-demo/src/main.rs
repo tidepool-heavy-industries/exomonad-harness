@@ -20,6 +20,7 @@ use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use trace::{JobEvent, TraceSink, TraceTransport};
 use tree::TreeProvider;
 
 const OUTPUT_LIMIT: usize = 16 * 1024;
@@ -265,23 +266,42 @@ async fn tree_ask(options: &CliOptions) -> Result<(String, EngineCompletion), St
             "tree CLI restart is not yet supported; use a new --db path for each tree run".into(),
         );
     }
+    let trace_sink = match &options.trace_jsonl {
+        Some(path) => Some(
+            TraceSink::open(path.clone())
+                .await
+                .map_err(|_| "could not create a new trace file".to_owned())?,
+        ),
+        None => None,
+    };
     let service = Arc::new(StoreAgentToolService::new(
         store.clone(),
         AgentPath("/root".into()),
     ));
+    let mut demo_provider = DemoProvider::development(".", options.dev_shell);
+    if let Some(sink) = trace_sink.clone() {
+        demo_provider = demo_provider.with_trace(sink);
+    }
     let provider = Arc::new(TreeProvider::new(
-        CliProvider(DemoProvider::development(".", options.dev_shell)),
+        CliProvider(demo_provider),
         service.clone(),
     ));
     let jobs = Arc::new(
         JobScheduler::new(4).map_err(|_| "could not initialize tool scheduler".to_owned())?,
     );
+    let transport_trace = trace_sink.clone();
     let factory = Arc::new(HarnessEngineFactory {
         auth: Arc::new(auth.clone()),
         store: store.clone(),
         scheduler: jobs,
         provider,
-        config: move |_agent: &AgentPath| Ok(ResponsesClient::new(auth.clone())),
+        config: move |_agent: &AgentPath| {
+            let client = ResponsesClient::new(auth.clone());
+            Ok(match &transport_trace {
+                Some(sink) => TraceTransport::new(client, sink.clone()),
+                None => TraceTransport::disabled(client),
+            })
+        },
         transport: std::marker::PhantomData,
     });
     let driver = Driver::new(store, service, factory);
@@ -312,8 +332,16 @@ async fn tree_ask(options: &CliOptions) -> Result<(String, EngineCompletion), St
     };
     drop(root_result);
     let shutdown = driver.shutdown().await;
+    let trace_flush = match &trace_sink {
+        Some(sink) => sink
+            .flush()
+            .await
+            .map_err(|_| "could not flush trace file".to_owned()),
+        None => Ok(()),
+    };
     let completion = result?;
     shutdown.map_err(|_| "could not fully stop tree agents".to_owned())?;
+    trace_flush?;
     let text = final_text(&completion.turn.items)
         .ok_or_else(|| "engine returned no final assistant text".to_owned())?;
     Ok((text, completion))
@@ -650,11 +678,12 @@ fn safe_engine_error(error: EngineError) -> String {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DemoProvider {
     root: PathBuf,
     allow_shell: bool,
     owned: Vec<PathBuf>,
+    trace_sink: Option<TraceSink>,
 }
 
 impl DemoProvider {
@@ -665,7 +694,14 @@ impl DemoProvider {
             root: root.into(),
             allow_shell,
             owned: Vec::new(),
+            trace_sink: None,
         }
+    }
+
+    /// Enable the opt-in, redacted job lifecycle trace for a manual tree run.
+    pub fn with_trace(mut self, sink: TraceSink) -> Self {
+        self.trace_sink = Some(sink);
+        self
     }
 
     /// Authority comes from the host's admitted task contract, never tool
@@ -803,10 +839,27 @@ impl Provider for DemoProvider {
                 .ok_or_else(|| {
                     ProviderError::Tool("duration_ms must be a nonnegative integer".into())
                 })?;
-            let _ = context
-                .progress
-                .send(json!({"event":"sleep_started","handle":context.handle.0,"duration_ms":ms}));
+            if let Some(sink) = &self.trace_sink {
+                sink.record_job(JobEvent::SleepStarted {
+                    call_id: context.call_id.0.clone(),
+                    handle: context.handle.0.clone(),
+                })
+                .await
+                .map_err(|_| ProviderError::Tool("trace recording failed".into()))?;
+            }
+            let _ = context.progress.send(
+                json!({"event":"sleep_started","handle":context.handle.0.clone(),"duration_ms":ms}),
+            );
             tokio::time::sleep(Duration::from_millis(ms)).await;
+            if let Some(sink) = &self.trace_sink {
+                sink.record_job(JobEvent::SleepSettled {
+                    call_id: context.call_id.0,
+                    handle: context.handle.0,
+                    duration_ms: ms,
+                })
+                .await
+                .map_err(|_| ProviderError::Tool("trace recording failed".into()))?;
+            }
             return Ok(json!({"slept_ms":ms}));
         }
         self.call(name, args).await
@@ -1299,6 +1352,42 @@ mod tests {
             .unwrap();
         assert_eq!(value, json!({"slept_ms":2}));
         assert_eq!(rx.recv().await.unwrap()["event"], "sleep_started");
+    }
+
+    #[tokio::test]
+    async fn traced_sleep_records_start_and_settlement_without_raw_ids() {
+        let root = temp();
+        let path = root.join("sleep.jsonl");
+        let sink = TraceSink::open(path.clone()).await.unwrap();
+        let provider = DemoProvider::development(".", false).with_trace(sink.clone());
+        let (progress, _) = mpsc::unbounded_channel();
+        let context = CallContext {
+            handle: harness::provider::JobHandle("private-handle".into()),
+            call_id: CallId("private-call-id".into()),
+            agent: harness::model::AgentPath("/root".into()),
+            progress,
+        };
+        assert_eq!(
+            provider
+                .call_with_context("sleep", json!({"duration_ms": 1}), context)
+                .await
+                .unwrap(),
+            json!({"slept_ms": 1})
+        );
+        sink.flush().await.unwrap();
+        let raw = std::fs::read_to_string(path).unwrap();
+        assert!(!raw.contains("private-handle"));
+        assert!(!raw.contains("private-call-id"));
+        let events = raw
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["event"], "sleep_started");
+        assert_eq!(events[1]["event"], "sleep_settled");
+        assert_eq!(events[0]["handle_hash"], events[1]["handle_hash"]);
+        assert_eq!(events[0]["call_id_hash"], events[1]["call_id_hash"]);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

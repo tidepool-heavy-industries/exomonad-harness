@@ -12,18 +12,18 @@ each names the PRD rule it serves.
 ## One page (read this first; everything after it is reference)
 
 **Integrated head.** `master`. Resolve it with `git rev-parse master` before any
-fork and pass that full OID as every child's base. When this page was last
-edited: master `260b6942fde610e3b2d63f8d24bb1548790f88f0`; last integration
-`ee27b86201e817b42953b0c84d585650de98a054` (item2-live-gap); root scaffolds
-since: `8779c475019ed6f65fd780ff1fc04301b289caad` (item2-trace),
-`c427057f041de4e89dfbdaf19475278d499c55f6` (compaction dependency).
+fork and pass that full OID as every child's base. This page is updated in
+`integrate(item2-trace)`; use that commit's resolved OID, not the earlier
+`859258f` parent. The previous findings integration is `ee27b86`
+(item2-live-gap); the trace scaffold is `8779c47` and the Compactor
+dependency amendment is `c427057`.
 
 **Obligations.** Detail per row under "Where the last run stopped".
 
 | item | owner | source / candidate | checks | unverified | next |
 |---|---|---|---|---|---|
 | (a) one entry | done | `9da6efe`, `a9f7a12` | integrated | nothing | nothing |
-| (b) async tools | trace leaf `trace.rs`; root `main.rs`/`driver.rs` | `d8097c3`; scaffold `8779c47` | `correction_wave` 1/1 passed | live item-2 continuation | trace seam (`docs/item2-trace-plan.md`), then one manual run |
+| (b) async tools | root manual trace | `d8097c3`; trace leaf `fb80016` merged with root `main.rs` in `integrate(item2-trace)` | `correction_wave` 1/1; trace 9/9; root trace/CLI 1/1 each | live item-2 continuation | one manual credentialed tree run, redacted findings |
 | (c) settings items | unassigned | none | none | all | drop rule at append, then the order in the detail |
 | (d) `Compactor` | Compactor leaf `compaction.rs` | scaffold `c427057` | `cargo check -p harness` | all | PRD shape, `Server` only, unanswered-call experiment |
 | cache probe | done | `d0245b3` | 0 then 20,736 cached tokens | general cache behavior | nothing |
@@ -186,13 +186,18 @@ section per node that ran.
 ## Where the last run stopped (2026-09-24, one hour, two runs into this wave)
 
 - (a) one engine entry: done (`9da6efe`, `a9f7a12`).
-- (b) async tools: done on master (`a1f976f` via `d8097c3`). `Provider::all_tools`
-  stamps `async: true` on everything but `wait_agent`; the offline test in
-  `crates/harness/tests/correction_wave.rs` is green. The LIVE item-2 trace is
-  still open: slow `sleep` tool, model continues, `wait_agent` resumed by the
-  result, redacted request bodies in `docs/findings.md`. The bounded probe
-  spent no inference: `docs/item2-live.md` identifies the missing auditable
-  request-body/job-timing trace surface. Add that seam before one manual run.
+- (b) async tools: schema done on master (`a1f976f` via `d8097c3`).
+  `Provider::all_tools` stamps `async: true` on everything but `wait_agent`;
+  the offline correction-wave test is green. The trace seam is integrated in
+  `integrate(item2-trace)` from reviewed `fb80016` plus root-owned `main.rs`:
+  deliberate tree-only `--trace-jsonl`, production-built redacted request
+  structure, allowlisted `wait_agent` resume status, and correlated sleep
+  start/settle events. On the combined source, trace tests compiled/matched
+  9/9 passed, provider/CLI focused tests 1/1 each, `cargo check -p
+  harness-demo`, format and diff checks passed. **LIVE item-2 remains open**:
+  one manual credentialed slow-sleep/continued-request/`wait_agent` scenario,
+  recording redacted evidence in `docs/findings.md`. No inference has been
+  spent on item 2 in this run.
 - (c) settings items: not started; the provenance seam is decided (Q5 above).
   Order inside (c): drop rule at append → `set_effort`
   appends the positional item → `here` fork strips by item type and re-pins
