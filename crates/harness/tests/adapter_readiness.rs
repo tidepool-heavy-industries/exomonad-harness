@@ -14,7 +14,7 @@ use harness::{
     replay::{FakeResidentCell, ReplayCellState, ReplaySessionKey, ReplayTransport},
     store::Store,
     transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, sse::StreamEvent},
-    turn::JobScheduler,
+    turn::{JobOutput, JobScheduler},
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -252,10 +252,17 @@ async fn active_cell_survives_three_boundary_envelopes_and_finalizes_durably() {
     // response is still gated. Completing the cell now must not finish the
     // run until response 5 is released and request 6 strict-finalizes.
     cell.release(cell_output.clone());
-    scheduler
+    let retained_cell_output = scheduler
         .wait(&CallId("long-cell-call".into()))
         .await
         .expect("cell Job settles before releasing gated response 5");
+    assert_eq!(
+        retained_cell_output,
+        JobOutput::Completed(Ok(
+            serde_json::to_value(&cell_output).expect("encode CellOutput")
+        )),
+        "scheduler.wait observes settlement without consuming its retained output"
+    );
     replay.release_next();
 
     replay.wait_requested(6).await;
