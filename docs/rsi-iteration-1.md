@@ -131,3 +131,32 @@ notifyWork routing remains the event-waiting mechanism.
 The supervisor stopped unused previous hosts and compiler daemons with operator
 authorization. Wave 9 launches a fresh one-worker compiler. Source, worktrees and
 prior run artifacts were preserved.
+
+## Wave 9 result — 2026-09-25
+
+- Source: scaffold/base `aa0c82e3bf47a0a26bbad21c7f507da5f9078269`;
+  implementation `6d3b39efdb630fbb523d5a8dddb9ae3d0f7cccad`, only
+  `crates/harness/tests/first_request_delivery.rs`; merged as
+  `4230179d467e852d94384e45b40e9bfd6893cbca`.
+- Review request 2 / actor 4 accepted that exact HEAD and cumulative
+  base-to-tip owned diff. It executed the focused target: 1 matched, 1
+  passed, 0 ignored. It found no repair and explicitly limited the
+  `advance_agent_head` assertion: the test advances the completed head
+  itself, so reopen proves durable state, **not** automatic runner head
+  advancement.
+- Root's integrated checks at `4230179`: first-request target 1/1,
+  adapter-readiness target 1/1, `cargo fmt --all -- --check` and
+  `git diff --check` passed. No production file changed, so the
+  production-consumer cargo check condition did not arise. No live
+  inference occurred.
+- Owner request 1 / actor 2 returned `Blocked` despite producing the
+  candidate through WorkProgress: the root had incorrectly assigned
+  `Delivery` instead of `Outcome Candidate` to a bounded implementer.
+  The router delivered the actionable candidate and settlement; no empty
+  polling round was used. The selected automatic-review recipe was not
+  exercised because its generated wrapper fails before assertions.
+- Product boundary: the gate calls production `followup_task` before
+  Engine's first request, observes that request at a ReplayTransport
+  barrier, strictly finalizes, then reopens file Store and checks exact
+  delivered envelope identity. It does **not** close amendment 4's
+  follow-up arriving during finalization or final-answer provenance.

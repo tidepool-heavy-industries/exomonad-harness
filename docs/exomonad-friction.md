@@ -4,6 +4,24 @@ Version-controlled field notes, not an engine bug tracker. “Fixed” below mea
 the local prompt or workflow changed; it does not imply an engine fix. Earlier
 detail remains in Git history. Do not fabricate watchdog or nudge events.
 
+## RSI iteration 1 / wave 9 — 2026-09-25
+
+- `friction:` The root assigned `Delivery = Outcome CheckedDelivery` to a
+  bounded implementer, although review and integration are root-owned.
+  Candidate `6d3b39e` passed its reported focused 1/1 gate but could not
+  truthfully settle that type. Root took the WorkProgress candidate and
+  instructed the owner to wait for reviewed/integrated evidence. This added
+  an avoidable result-routing handshake; a candidate-typed leaf reply would
+  match the ownership boundary.
+- `friction:` The selected automatic-review recipe is blocked before
+  assertions by generated wrapper references to unexported
+  `Project.Routing.WorkEffects` and unimported `State`. Ordinary typed
+  exact-source review is used; automatic coordination was not exercised.
+- `friction:` The reviewer manually reconstructed and submitted the
+  accepted typed `Task` from `CommitReview` for exact candidate `6d3b39e`.
+  Its interview says a typed review continuation should preserve base and
+  candidate without that constructor step.
+
 ## Adapter readiness — 2026-09-25
 
 - `friction:` The original FIFO replay fixture had no durable request/response

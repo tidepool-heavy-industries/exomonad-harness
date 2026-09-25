@@ -240,3 +240,36 @@ was rebased as `1513e95` and merged by root at `06148a1`.
   recheck also reviewed stale HEAD despite being assigned the new commit.
   The tree exposed a source-binding failure: a verdict is not usable unless
   the reviewed HEAD equals the candidate OID.
+
+## RSI iteration 1 / wave 9 — 2026-09-25
+
+- **First-request gate owner (request 1, candidate `6d3b39e`; reported):**
+  The bounded leaf was assigned `Delivery = Outcome CheckedDelivery` even
+  though root owns independent review and integration. After its reported
+  1/1 focused gate, it inspected constructors and sent candidate/progress
+  separately rather than settling `Outcome Candidate`. The tree cost one
+  avoidable result-routing handshake. It expected a candidate-typed leaf
+  reply. Assignment-role/result-stage validation or a typed
+  candidate→review→integration flow could let a passing leaf settle while
+  preserving exact base/tip; the automatic-review wrapper's generated
+  `Project.Routing.WorkEffects` / `State` imports currently block that flow.
+  It reports no production repair needed and has paused changes for review.
+- **Root:** The typed review base helped: reviewer request 2 preserved
+  `aa0c82e` distinctly from exact candidate `6d3b39e`, and its accepted
+  verdict was usable without reconstructing a merge base. Event waiting
+  routed the owner's candidate and later settlement; the result-type
+  mismatch caused an unnecessary relay but no empty polling round. Human
+  judgment was still needed to scope manual `advance_agent_head`: the
+  file-Store reopen proves persistence after the test's explicit advancement,
+  not automatic runner advancement. Root merged at `4230179` and ran the
+  integrated first-request and adapter-readiness targets (1/1 each). The
+  next product gate remains amendment 4's unseen-follow-up/final-answer
+  provenance, separate from the blocked automatic-review wrapper capability.
+- **Exact-source reviewer (request 2; reported in interview request 3):**
+  Reconstructing a `Task` from `CommitReview` to return acceptance required
+  a manual constructor step for `6d3b39e`; it expected the typed review
+  helper to preserve base and candidate in the accepted result. A typed
+  exact-source review continuation could route candidate delivery without
+  manual packet relay. The generated automatic-review wrapper failing to
+  compile is a missing capability; an established wave-9 authored-flow
+  example would help usage but would not fix that wrapper.
