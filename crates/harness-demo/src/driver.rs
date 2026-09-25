@@ -941,7 +941,8 @@ mod tests {
         assert!(!answers[0].provenance.seen_envelopes.contains(&queued_id));
         assert!(answers[1].provenance.seen_envelopes.contains(&queued_id));
         assert!(!answers[1].provenance.unseen_envelopes.contains(&queued_id));
-        let child_inputs = &inputs.lock().unwrap()[&child.0];
+        let input_guard = inputs.lock().unwrap();
+        let child_inputs = &input_guard[&child.0];
         assert_eq!(child_inputs.len(), 2, "no duplicate concurrent child run");
         assert!(
             !first_input
@@ -978,8 +979,37 @@ mod tests {
             reopened.agent(&child).unwrap().unwrap().head_request,
             Some(child_head)
         );
-        assert_eq!(reopened.inbox(&root.0).unwrap().len(), 2);
-        assert_eq!(reopened.inbox(&child.0).unwrap().len(), 2);
+        let reopened_answers = reopened
+            .inbox(&root.0)
+            .unwrap()
+            .iter()
+            .map(|envelope| {
+                let item = reopened.get_item(&envelope.item_hash).unwrap().unwrap();
+                serde_json::from_value::<PublishedAnswer>(item.0["structured"].clone()).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reopened_answers, answers,
+            "stored typed answers survive reopen"
+        );
+        let reopened_child_inbox = reopened.inbox(&child.0).unwrap();
+        assert_eq!(reopened_child_inbox.len(), 2);
+        assert_eq!(
+            reopened_child_inbox
+                .iter()
+                .find(|envelope| envelope.id == queued_id)
+                .unwrap()
+                .delivered_request,
+            Some(reopened_answers[1].provenance.final_request.clone())
+        );
+        assert_eq!(
+            reopened
+                .request(&reopened_answers[1].provenance.final_request)
+                .unwrap()
+                .unwrap()
+                .parent,
+            Some(reopened_answers[0].provenance.final_request.clone())
+        );
         driver.shutdown().await.unwrap();
         drop(reopened);
         drop(store);
