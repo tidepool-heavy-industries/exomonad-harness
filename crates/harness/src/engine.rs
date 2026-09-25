@@ -461,6 +461,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let mut wait_call = None;
             let mut persisted_items = Vec::<Item>::new();
             let mut event_stream_open = true;
+            let mut deferred_dispatch_error = None;
             let turn = loop {
                 tokio::select! {
                     result = &mut create => match result {
@@ -482,6 +483,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                     return Err(self.cleanup_pending(error, &pending).await);
                                 }
                                 persisted_items.push(item.clone());
+                                if deferred_dispatch_error.is_some() {
+                                    continue;
+                                }
                                 if finalize_schema.is_some() && is_finalize_call(&item) {
                                     continue;
                                 }
@@ -489,10 +493,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                     Ok(Some(call)) => {
                                         if !pending.iter().any(|current| current.call_id == call.call_id) {
                                             if call.is_wait_agent && wait_call.is_some() {
-                                                return Err(self.cleanup_pending(
-                                                    EngineError::MultipleWaitAgents,
-                                                    &pending
-                                                ).await);
+                                                deferred_dispatch_error = Some(EngineError::MultipleWaitAgents);
+                                                continue;
                                             }
                                             if call.is_wait_agent { wait_call = Some(call.call_id.clone()); }
                                             turn_call_ids.push(call.call_id.clone());
@@ -500,7 +502,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                         }
                                     }
                                     Ok(None) => {}
-                                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                                    Err(error) => deferred_dispatch_error = Some(error),
                                 }
                             }
                             Some(StreamEvent::Delta(_)) => {}
@@ -509,6 +511,22 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                 }
             };
+            // Once transport completed, its exact request/response pair is
+            // durable even if a subsequent dispatch or output step fails.
+            {
+                let store = self.store.clone();
+                let request = parent.clone();
+                let recorded = turn.clone();
+                if let Err(error) = blocking(move || {
+                    store
+                        .record_replay_turn(&request, &replay_request, &recorded)
+                        .map(|_| ())
+                })
+                .await
+                {
+                    return Err(self.cleanup_pending(error, &pending).await);
+                }
+            }
             // A completed response can race the buffered final item events.
             while let Ok(event) = event_rx.try_recv() {
                 if let StreamEvent::ItemDone(item) = event {
@@ -516,6 +534,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         return Err(self.cleanup_pending(error, &pending).await);
                     }
                     persisted_items.push(item.clone());
+                    if deferred_dispatch_error.is_some() {
+                        continue;
+                    }
                     if finalize_schema.is_some() && is_finalize_call(&item) {
                         continue;
                     }
@@ -552,6 +573,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         return Err(self.cleanup_pending(error, &pending).await);
                     }
                 }
+                if deferred_dispatch_error.is_some() {
+                    continue;
+                }
                 if item.0["type"] == "function_call" {
                     if finalize_schema.is_some() && is_finalize_call(item) {
                         continue;
@@ -587,19 +611,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                 }
             }
-            {
-                let store = self.store.clone();
-                let request = parent.clone();
-                let recorded = turn.clone();
-                if let Err(error) = blocking(move || {
-                    store
-                        .record_replay_turn(&request, &replay_request, &recorded)
-                        .map(|_| ())
-                })
-                .await
-                {
-                    return Err(self.cleanup_pending(error, &pending).await);
-                }
+            if let Some(error) = deferred_dispatch_error {
+                return Err(self.cleanup_pending(error, &pending).await);
             }
             let usage_for_store = StoredUsage {
                 input_tokens: i64::try_from(turn.usage.input_tokens).unwrap_or(i64::MAX),
@@ -3827,6 +3840,15 @@ mod tests {
             store.claims(&call).unwrap()[0].state,
             ClaimState::Interrupted
         );
+        let request = store.claims(&call).unwrap()[0].request.clone();
+        let recorded = store.replay_turns(&request).unwrap();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "completed model turn survives dispatch failure"
+        );
+        assert_eq!(recorded[0].request, request);
+        assert_eq!(recorded[0].model_response.items.len(), 2);
     }
 
     #[tokio::test]
