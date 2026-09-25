@@ -57,7 +57,16 @@ target/filter/count. Report local integration OID and incorporation checks.
 | Durable discovery and atomic publication | durable lead | pending scaffold checks | reviewed Delivery |
 | Request-boundary replay/provenance | Engine lead | pending scaffold checks | reviewed Delivery |
 | Restart admission/shutdown | Driver lead | pending scaffold checks | reviewed Delivery |
-| Abrupt process-loss cross-boundary gate | root | not implemented | executed process test |
+| Abrupt process-loss Store commit/wake gate | root | `test:process_recovery --filter process_loss_`: 2 expected/matched/executed/passed; child process killed at explicit stdout barrier | combined Driver restart gate still open |
+
+The root's process test kills a separate helper before completion commit and
+after Store commit but before any wake, then opens the file in the parent
+process. It checks head/answer atomicity, typed serialization, provenance and
+CAS idempotence. It does **not** exercise Driver restart or prove power-loss
+durability. Durable lead's admission checkpoint: production child owns
+`store/mod.rs` and `agent_runtime.rs`; test child owns
+`store/recovery_tests.rs`; both start at scaffold `55d2cce...`, with first
+reply expected as Outcome Candidate and focused counts.
 
 Candidate domains: durable recovery, Engine request-boundary recovery, and Driver
 restart/admission. Root finalizes exact ownership and retains the cross-component
