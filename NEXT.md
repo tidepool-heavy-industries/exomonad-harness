@@ -1,6 +1,24 @@
 # NEXT: finish the correction wave, second half
 
 You are the root. This file is where the last run stopped and where you start.
+## Active obligation: adapter readiness, harness-side vertical slice
+
+Source: `7bf6d295640c49afee93004b0b226cc51ee70f0d` (resolve current master before forks).
+Operator-approved scope: amendment 1 (`AtBoundary` on **every** request, all unread
+envelopes, delivery independent of an in-flight computing job); the minimal
+amendment 8 (`/operator` is `/root`'s parent and the initial task contract is
+rendered whole); a resident-evaluator `CellJob` using the async cancellable
+Job lane with retained output; `respond` through strict typed `finalize`; and
+an offline `ReplayProvider` with a fake resident evaluator. The adapter crate
+itself belongs in the tidepool repo, not here. Root lands the shared CellJob
+and envelope contract plus acceptance cases before one applicative wave of
+disjoint bounded leaves. Release only after an offline long cell survives
+three envelopes at successive request boundaries without cancellation or
+restart, yields one strict final result, and a restarted Store query sees its
+durable state. Live gates for correction item (b) remain on operator hold.
+This obligation is committed with the first adapter integration, not in a
+per-admission documentation commit.
+
 For planning it replaces `README.md`, `docs/correction-plan.md`, `docs/tree.md`
 and `docs/questions.md`: what you need from them is quoted below (the one page,
 "Settled answers", "Correction items", "Node protocol"), so do not read them
