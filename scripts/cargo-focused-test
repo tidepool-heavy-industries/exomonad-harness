@@ -4,6 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import tempfile
 import os
 import re
 import subprocess
@@ -55,7 +60,10 @@ def run(argv: Sequence[str]) -> int:
         help="`lib`, `test:INTEGRATION_TARGET`, or `bin:NAME`",
     )
     parser.add_argument("--filter", required=True, help="Nonempty Cargo test filter")
+    parser.add_argument("--expect", type=int, help="Required runnable and executed test count")
     args = parser.parse_args(argv)
+    if args.expect is not None and args.expect < 1:
+        parser.error("--expect must be positive")
 
     if args.target != "lib" and not args.target.startswith(("test:", "bin:")):
         parser.error("--target must be `lib`, `test:NAME`, or `bin:NAME`")
@@ -66,9 +74,83 @@ def run(argv: Sequence[str]) -> int:
     if args.filter.startswith("-"):
         parser.error("--filter must not start with `-`")
 
-    command = cargo_command(args.package, args.target, args.filter)
+    build = cargo_command(args.package, args.target, args.filter)[:-1]
+    build.extend(["--no-run", "--message-format=json"])
+    metadata = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version=1"],
+        text=True, capture_output=True, check=False,
+    )
+    if metadata.returncode:
+        sys.stderr.write(metadata.stderr)
+        return metadata.returncode
+    packages = [p for p in json.loads(metadata.stdout)["packages"] if p["name"] == args.package]
+    if len(packages) != 1:
+        parser.error("--package must name exactly one workspace package")
+    package = packages[0]
+    cwd = Path(package["manifest_path"]).parent
+    built = subprocess.run(build, text=True, capture_output=True, check=False)
+    sys.stderr.write(built.stderr)
+    artifacts = []
+    library_paths = []
+    for line in built.stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            sys.stderr.write(line + "\n")
+            continue
+        if event.get("reason") == "compiler-message":
+            sys.stderr.write(event["message"].get("rendered") or event["message"]["message"])
+        if event.get("reason") == "build-script-executed":
+            library_paths.append(event["out_dir"])
+        if (event.get("reason") == "compiler-artifact"
+                and event.get("package_id") == package["id"]
+                and event.get("executable") and event.get("profile", {}).get("test")):
+            target = event["target"]
+            if args.target == "lib":
+                selected = "lib" in target["kind"]
+            else:
+                kind, name = args.target.split(":", 1)
+                selected = kind in target["kind"] and name == target["name"]
+            if selected:
+                artifacts.append(event["executable"])
+    if built.returncode:
+        return built.returncode
+    if len(set(artifacts)) != 1:
+        print("focused test rejected: expected exactly one libtest artifact", file=sys.stderr)
+        return 1
+    original = Path(artifacts[0]).resolve()
+    # Keep the executable for self-spawning crash tests and later inspection.
+    evidence = Path(tempfile.mkdtemp(prefix="focused-", dir=original.parent))
+    executable = evidence / original.name
+    shutil.copy2(original, executable)
+    digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+    env = os.environ.copy()
+    library_paths.extend([str(original.parent), str(original.parent.parent)])
+    sysroot = subprocess.run(["rustc", "--print", "target-libdir"], text=True, capture_output=True, check=False)
+    if sysroot.returncode:
+        sys.stderr.write(sysroot.stderr)
+        return sysroot.returncode
+    library_paths.append(sysroot.stdout.strip())
+    library_key = "DYLD_FALLBACK_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
+    if env.get(library_key):
+        library_paths.append(env[library_key])
+    env[library_key] = os.pathsep.join(library_paths)
+    env["CARGO_MANIFEST_DIR"] = str(cwd)
+    env["CARGO_MANIFEST_PATH"] = package["manifest_path"]
+    env["CARGO_PKG_NAME"] = package["name"]
+    env["CARGO_PKG_VERSION"] = package["version"]
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd, text=True, capture_output=True, check=False)
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=cwd, text=True, capture_output=True, check=False)
+    record = {"build_command": build, "package": args.package, "target": args.target,
+              "filter": args.filter, "expected": args.expect, "executable": str(executable),
+              "sha256": digest, "source": head.stdout.strip() if head.returncode == 0 else None,
+              "working_tree_status": status.stdout if status.returncode == 0 else None,
+              "output": str(evidence / "output.log")}
+    (evidence / "evidence.json").write_text(json.dumps(record, indent=2) + "\n")
+    print(f"focused test evidence: {evidence / 'evidence.json'}", file=sys.stderr)
+    command = [str(executable), args.filter]
     all_list = subprocess.run(
-        [*command, "--", "--list"], text=True, capture_output=True, check=False
+        [*command, "--list"], cwd=cwd, env=env, text=True, capture_output=True, check=False
     )
     if all_list.returncode != 0:
         sys.stderr.write(all_list.stdout)
@@ -76,7 +158,7 @@ def run(argv: Sequence[str]) -> int:
         return all_list.returncode
 
     ignored_list = subprocess.run(
-        [*command, "--", "--list", "--ignored"],
+        [*command, "--list", "--ignored"], cwd=cwd, env=env,
         text=True,
         capture_output=True,
         check=False,
@@ -86,9 +168,13 @@ def run(argv: Sequence[str]) -> int:
         sys.stderr.write(ignored_list.stderr)
         return ignored_list.returncode
 
+    (evidence / "listed.log").write_text(all_list.stdout + all_list.stderr)
+    (evidence / "ignored.log").write_text(ignored_list.stdout + ignored_list.stderr)
     matched = test_names(all_list.stdout)
     ignored = test_names(ignored_list.stdout)
     runnable = matched - ignored
+    record.update(matched=sorted(matched), runnable=sorted(runnable), ignored=sorted(ignored))
+    (evidence / "evidence.json").write_text(json.dumps(record, indent=2) + "\n")
     if not runnable:
         print(
             f"focused test rejected: {len(matched)} matched, "
@@ -102,16 +188,24 @@ def run(argv: Sequence[str]) -> int:
         f"{len(ignored & matched)} ignored",
         file=sys.stderr,
     )
-    completed = subprocess.Popen(command, stdout=subprocess.PIPE, text=True, bufsize=1)
+    if args.expect is not None and len(runnable) != args.expect:
+        print(f"focused test rejected: expected {args.expect} runnable, selected {len(runnable)}", file=sys.stderr)
+        return 1
+    completed = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True, bufsize=1)
+    output = (evidence / "output.log").open("w")
     summaries = []
     assert completed.stdout is not None
     for line in completed.stdout:
+        output.write(line)
+        output.flush()
         sys.stdout.write(line)
         sys.stdout.flush()
         match = TEST_RESULT.fullmatch(line.rstrip("\r\n"))
         if match is not None:
             summaries.append(tuple(int(value) for value in match.groups()))
     returncode = completed.wait()
+    output.close()
     if summaries:
         passed = sum(summary[0] for summary in summaries)
         failed = sum(summary[1] for summary in summaries)
@@ -122,12 +216,20 @@ def run(argv: Sequence[str]) -> int:
             f"{failed} failed, {ignored_run} ignored",
             file=sys.stderr,
         )
+    record.update(exit_code=returncode, summaries=summaries)
+    (evidence / "evidence.json").write_text(json.dumps(record, indent=2) + "\n")
     if returncode != 0:
         return returncode
     if not summaries:
         print("focused test rejected: successful Cargo exit without a libtest result", file=sys.stderr)
         return 1
 
+    if len(summaries) != 1:
+        print("focused test rejected: multiple libtest summaries", file=sys.stderr)
+        return 1
+    if executed != len(runnable):
+        print(f"focused test rejected: selected {len(runnable)} runnable but executed {executed}", file=sys.stderr)
+        return 1
     if executed == 0:
         print("focused test rejected: successful Cargo exit ran zero tests", file=sys.stderr)
         return 1

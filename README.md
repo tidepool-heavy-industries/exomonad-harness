@@ -31,4 +31,16 @@ scripts/cargo-focused-test --package harness-demo --target bin:harness-demo --fi
 
 The filter is a libtest substring. Name the expected count in the assignment and
 compare it with the actual result; compilation or listing alone is not a pass.
-The guard supports ordinary Rust libtest targets, not custom test harnesses.
+The guard supports native Rust libtest targets, not custom test harnesses or
+cross-target runners. Add `--expect N` to require exactly N runnable and executed
+tests. It builds once, freezes the selected executable, and lists and runs that
+same artifact from the package directory. Self-spawning tests keep a stable
+executable path.
+
+Each invocation prints an `evidence.json` path beside retained `output.log`,
+selection logs and the frozen executable in the Cargo target directory. The
+record includes package, target, filter, source HEAD/working-tree status,
+executable SHA-256, selection, exit status and libtest summaries. Source metadata
+is an observation, not a guarantee against concurrent source edits; run acceptance
+checks from a stable checkout. These artifacts can be removed with that target
+cache after their evidence is no longer needed.
