@@ -387,3 +387,147 @@ was rebased as `1513e95` and merged by root at `06148a1`.
   Store transaction for head CAS and answer insertion. At
   `a1c8cd9`, root ran the combined focused boundaries (13 matched,
   13 passed), not a broad workspace or live test.
+
+## Post-wave RSI interview — Inanna and supervisor, 2026-09-25
+
+Wave 10 is closed. These are my judgments about the recorded run, not
+new test results.
+
+### Three largest avoidable costs and one change
+
+1. **The atomic completion seam arrived a review cycle late.**
+   `ddce261` passed both lifecycle cases, but its reviewer found that
+   Driver advanced the child head before inserting the parent answer.
+   An insert failure could lose the answer permanently. Root then
+   scaffolded `CompletionCommit`, sent Store and Driver through another
+   implementation/review/integration cycle, and added an injected
+   failure check. This was the largest avoidable *product* risk and
+   rework, not just orchestration overhead.
+2. **The producer/consumer contract changed after forks.** The
+   `typed_result` field was requested then superseded by parsing the
+   strict `completion.turn`; Driver made a correction commit. Its
+   proposed top-level `structured` field would have reached Responses
+   unchanged, while the strict model-facing agent verb schema omitted
+   `reply`; root landed separate codec and schema amendments
+   (`41c48b6`, `e47a958`). These were observed interface gaps.
+3. **Source and check evidence needed repeated manual reconciliation.**
+   An Engine reply named `5e8d58e` after its branch advanced, reviewers
+   initially saw older checkouts, Driver repeatedly reported older root
+   heads, and zero-match filters plus lost command-job observation
+   obscured whether tests ran. The exact-tip checks avoided incorrect
+   integration, but spent reviewer/root turns. This cost was smaller
+   than the two product seams above.
+
+**One highest-leverage change:** before forking, root should land a
+*compiling vertical boundary contract* through the real service,
+Store, Engine and Driver: one strict tool argument crossing the
+production schema, a typed publication projected to wire-safe input,
+and one transaction-level failure case that aborts envelope insertion
+after the proposed head CAS. It should name the exact source OID,
+consumer path and matched acceptance command in a short canonical
+brief. A brief alone would not catch the atomic bug; the executable
+failure boundary is the essential part. This is a recommendation,
+not a claim that every later race would disappear.
+
+### Assessment of the three proposals
+
+1. **Typed review submission alongside Haskell:** Useful *if* it binds
+   current `ReviewRequest`/`ReviewBasis`, exact candidate HEAD and
+   ownership diff, exposes a terminal submission receipt, and rejects
+   a verdict on another tip. It might have shortened stale-checkout
+   and OID reconciliation. Merely adding a second `respond` button
+   duplicates the typed `respond`, `ReviewRequest`/`ReviewBasis`,
+   `reviewCommit`, `pollResponse`, and notebook exploration/pagination
+   that already worked. It would not have found the head/publication
+   bug or wire-schema gap. I would not replace the notebook with it
+   or prioritize a wrapper that still cannot compile.
+2. **One canonical API brief plus compiled producer/consumer example:**
+   Highest product value, provided it is a single source-pinned
+   *executable* contract, not another prose copy of `NEXT.md`.
+   An example crossing actual `spawn_agent`/`followup_task` strict
+   arguments, `Contract.reply`, Store publication, Driver and
+   Responses request projection could have exposed the
+   `typed_result` disagreement, extra `structured` field and missing
+   strict-schema `reply` before the owners split. Including the
+   abort-insert case could also have exposed the atomicity requirement
+   cheaply. A happy-path example alone would have repeated the
+   `ddce261` blind spot.
+3. **Exact package/target/filter and expected matched counts:** Worth
+   adding to existing gate packets or runner. The Store owner's
+   `service_validates` filter exited 0 with zero matches; Engine's
+   `--exact` and the Driver reviewer's first adapter command had
+   similar evidence problems. A nonzero-match guard would have
+   prevented those false starts, not the product repairs. Some wave
+   packets already named commands, and root ultimately recorded
+   counts; the missing piece is execution-time enforcement, not a
+   new test scheduler or broad battery.
+
+**Priority order:** executable vertical contract/failure seam first;
+source-bound candidate/review submission with unambiguous terminal
+state second; a small zero-match guard in the existing command path
+third. The last two can be incremental and should not displace the
+first.
+
+### Reviewer reply confusion and scaffold miss
+
+**Observed:** the Engine reviewer reported submitting its `2d5218f`
+Accepted reply, then seeing an operator notice that request 8 was
+still open while its workbench showed `current_request=None` and
+`respond` unavailable. Root's `pollResponse` showed Ready and used
+that verdict; there is no evidence here that the accepted reply
+failed. The review prompt also says to retry unchanged after a
+genuine `ReplyUpdatePending` rejection, but the recorded interview
+does not establish that such a rejection caused these later attempts.
+**Inference:** a stale/asynchronous request-state notice, combined
+with a “Reply submitted” receipt that did not make terminal state
+obvious to the reviewer, best explains the repeated attempts.
+The fix is to distinguish submitted, accepted/settled and
+unavailable authoritatively and suppress stale “open” steering
+after settlement; a second submission surface alone does not fix
+conflicting notices. I cannot reconstruct every attempted call from
+the interview.
+
+I initially scaffolded types for provenance and publication, but not
+the persistence barrier between them. I treated Store's existing
+transactional `add_envelope` and Driver's existing head CAS as
+separately sufficient, and the two explicit-barrier lifecycle tests
+exercised successful delivery, not an envelope-insert failure after
+CAS. The first exact Driver review, not the gate, found the gap.
+A cheap pre-fork contract would have named “no child head without its
+parent answer” and compiled a Store transaction stub or red
+trigger-injected rollback test. It needed no live call, timing guess
+or additional scheduler.
+
+### Next milestone and experiment
+
+**Proposed next harness milestone (not authorized by this interview):**
+offline crash/restart recovery of the completed lifecycle, especially
+the boundary after the atomic head+answer commit but before its wake
+hint. A new Driver instance over the file Store should discover the
+durable parent answer and pending child follow-up once, preserving
+strict reply schema and provenance. Wave 10 proved *clean reopen*,
+not process-crash recovery. Keep message acknowledgement/
+incorporation states, contract versioning and live adapter inference
+as distinct later scopes; the item-2 retry, item-13 trace and live
+adapter holds remain.
+
+**Wave experiment:** root first lands one source-pinned compiling
+service→Store→Engine→Driver fixture and an injected failure/restart
+barrier as the shared contract, then admits disjoint Store recovery
+and Driver restart owners plus independent exact-source review.
+Specify package/target/filter and expected matches at admission;
+replay the real strict tool/wire representations, kill or restart at
+an explicit barrier rather than sleeping, integrate coherent reviewed
+slices, and run the combined focused gate once on the resulting
+source. Measure avoided contract amendments, candidate/source
+mismatches, zero-match commands and actual product defects, not
+elapsed time alone. No credentialed inference is part of this
+proposal.
+
+The review prompt's `let repairLabel = "repair-candidate" :: Label`
+is a stale example for the current label API; a compile-checked
+`[label|repair-candidate|]` (or `labelFromText` for dynamic input)
+should replace it next iteration. I saw no evidence it caused wave-10
+rework, and I did not edit the prompt. Notebook indentation
+auto-repair is deferred as requested; the supervisor reports a
+valid multiline placement fix already implemented.
