@@ -32,6 +32,7 @@ dependency amendment is `c427057`.
 | core-compaction-v7 follow-up | preflighted Sol lead | base `763764d389763df6ab3ac0cc65b990c4b82fe1b7` | owns `crates/harness/src/compaction.rs` | pending | first reply: admission checkpoint after first child fork; then checked component Delivery |
 | store-drop review | reviewer | candidate `46a5496e38e8493a4de63eeedd007997b0084e3b`, base `763764d389763df6ab3ac0cc65b990c4b82fe1b7` | read-only review of `crates/harness/src/store/mod.rs` | pending | first reply: exact-commit ReviewDecision and focused matched/passed counts |
 | settings-preflight-v8 admission | root | base `eabf47b6b8b49e501a39960e02f989b8f4e89625` | no files | pending | first reply: quotes `amber-orbit-eabf47b` before settings work |
+| settings-recovery-v8 follow-up | preflighted Sol lead | base `5c2c8bc89b310d0b77b3e484a2a7f0811f32ec1b` | owns `crates/harness/src/{engine,agent_runtime}.rs`, `store/mod.rs`, `crates/harness/tests/correction_wave.rs`; root owns contracts | pending | first reply: admission checkpoint, then each reviewed slice's integrate commit through progress |
 
 Expected-red tests: none recorded. One committed red gets a row here with its
 owner and closing slice.
