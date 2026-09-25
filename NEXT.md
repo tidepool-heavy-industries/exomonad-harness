@@ -270,7 +270,10 @@ section per node that ran.
   the demo consumer after that amendment without treating the Here code as
   Compactor acceptance.
   Broad `cargo test -p harness --lib` ran 78 passed, 9 failed, 2 ignored:
-  failures assert pre-settings history shapes, not yet compared on base.
+  all nine `engine.rs` failures assert pre-settings history shapes or index
+  an output as though the new configuration pin were absent. They are not
+  green or base-compared. Here lead owns `engine.rs` and received the exact
+  failure list for an assertion repair in its reviewed slice.
   This is **not finished compaction**: review/integration gate and the
   live unanswered-call experiment remain. The retained prior stack
   `exomonad/correction-second-half/preflight/core-preflight-20260924/compaction-fresh/branches/core-compactor-fresh-20260924`
