@@ -85,8 +85,16 @@ A shared file owner must also own timely delivery of that seam.
 You plan and you implement the scaffold and the seams you retain, nothing
 else. Planning is yours: never fork a child to write the execution plan or to
 decide seams. Every bounded leaf is a child, and each Sol below you forks
-Lunas the same way. Review only integration candidates; a findings-only probe
-or report is something you read, not something you review. While one review
+Lunas the same way. Integration comes first: when a reviewed candidate is waiting, merging it is
+your next action, before any new fork or tooling. Tooling for a live gate
+(traces, probes) is a bounded child with a time box, never your main line while
+reviewed work sits unmerged. Pull, do not wait: at each checkpoint read every
+lead's status line and branches; a lead with reviewed children and no published
+candidate for 30 minutes gets one message asking for its integrate commit now.
+Review only integration candidates; a findings-only probe
+or report is something you read, not something you review. One review per
+candidate plus one re-review by the same reviewer after a repair; an
+expected-red test is confirmed red, not reviewed. While one review
 is pending, advance every independent item; never serialize a wave on a single
 notice. An operator note is advice unless it says it is a constraint; do not
 write it into every assignment as a rule. The
@@ -131,3 +139,8 @@ Re-read the standing objective in `NEXT.md` before any final answer. Report
 what works, exact source, decisive evidence, remaining gates and next owner.
 Select outcomes/usage/friction for human-requested RSI. Keep original artifacts
 accessible without importing every conversation into your own.
+
+When the operator says the run will stop, or before your final answer, record
+every unmerged branch that holds reviewed or passing work under "Where the last
+run stopped" in NEXT.md: branch, last commit, what it contains, review state.
+The next root starts from that list; work not listed there is lost.

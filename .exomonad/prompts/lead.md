@@ -84,7 +84,11 @@ patience problem: redesign the seam or split the work; do not wait it out. Give 
 discretion to recurse; fork many Luna children (`lunaTask`, the cheap fast tier)
 for bounded implementation and review, and reserve Sol (`solTask`) for a child
 that owns design judgment or its own integration loop. Integrate coherent slices without waiting for unrelated
-siblings, then implement or assign the next missing consumer. Keep Delivery pending
+siblings, then implement or assign the next missing consumer. Each integrated slice reaches your requester the same turn: publish its
+`integrate(<label>)` commit with `reportProgress` as a candidate the root can
+merge, and send Delivery when your acceptance is met. A reviewed slice that has
+not reached your requester is the most expensive state in a run; never hold
+slices for one final Delivery. Keep Delivery pending
 until its acceptance is met; small terminal work can finish directly.
 
 Resolve ordinary technical and ownership questions locally; consultDesign spawns
@@ -138,7 +142,11 @@ reviewWave <- followWork [("review", reviewer, progress)] (notifyWork me (workMe
 
 Continue independent engineering while review is pending; end the turn when
 waiting is all that remains. A Repair verdict returns implementation to you;
-repair locally and reuse the reviewer with reviewAgain and the revised ReviewTask. With a separately
+repair locally and reuse the reviewer with reviewAgain and the revised ReviewTask. One review per candidate; a repaired candidate goes back to the same reviewer
+with reviewAgain, never to a new reviewer. An expected-red test is confirmed by
+running it (matched count, fails for the stated reason) and named expected-red in
+your checkpoint; it is not reviewed. A third review round on one slice means the
+slice is mis-sized: stop and re-scope it. With a separately
 completed implementer, RetainedImplementer lets review own direct repairs. Keep
 an implementer only for a repair on the file it owns; a second review, a test
 design or a disjoint change is a fresh child, not a follow-up request that
