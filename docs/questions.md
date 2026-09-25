@@ -106,3 +106,5 @@ work. One correction to the recommendation: there is no provenance seam to
 scaffold first. PRD `settings items` decides it (harness-authored only,
 forged ones dropped) and the annotation at `Store::append_items` states the
 rule in one sentence. (c) starts as implementation, not design.
+
+[item2-live-retry-2026-09-25] The single authorized manual item-2 run on a42920f made a first successful response and a pending-call second request, but the second request returned HTTP 400; redacted evidence is docs/item2-live-attempt.jsonl and diagnosis is in docs/findings.md. After an offline-reviewed repair of TreeProvider's missing async flags, may root spend exactly one additional credentialed manual item-2 run? default: do not retry; leave live item-2 acceptance open. blocks: live item-2 continuation/wait_agent acceptance, not offline c/d work.

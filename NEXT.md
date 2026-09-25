@@ -23,7 +23,7 @@ dependency amendment is `c427057`.
 | item | owner | source / candidate | checks | unverified | next |
 |---|---|---|---|---|---|
 | (a) one entry | done | `9da6efe`, `a9f7a12` | integrated | nothing | nothing |
-| (b) async tools | root manual trace | `d8097c3`; trace leaf `fb80016` merged with root `main.rs` in `integrate(item2-trace)` | `correction_wave` 1/1; trace 9/9; root trace/CLI 1/1 each | live item-2 continuation | one manual credentialed tree run, redacted findings |
+| (b) async tools | root | `d8097c3`; trace leaf `fb80016`; consumer `a42920f`; tree schema repair under review | offline demo 35/35; manual attempt: HTTP 400 on request 2 | live `wait_agent` continuation | no retry without operator authority; review tree fix and retain redacted attempt |
 | (c) settings items | unassigned | none | none | all | drop rule at append, then the order in the detail |
 | (d) `Compactor` | Compactor leaf `compaction.rs` | scaffold `c427057` | `cargo check -p harness` | all | PRD shape, `Server` only, unanswered-call experiment |
 | cache probe | done | `d0245b3` | 0 then 20,736 cached tokens | general cache behavior | nothing |
@@ -39,7 +39,7 @@ commit. Fences are recorded in `docs/exomonad-friction.md`; an `inbox=fenced`
 line means stop steering that child (rule below).
 
 **Owner map.** Root: this file, `docs/correction-plan.md`, workspace and crate
-manifests and `Cargo.lock`, `crates/harness-demo/src/{main,driver}.rs`
+manifests and `Cargo.lock`, `crates/harness-demo/src/{main,driver,tree}.rs`
 consumer wiring, integration commits, interviews, final checks. Contract files
 (list in `docs/tree.md`) change only by a root `amend(<label>)` commit. Each
 leaf owns the paths in its Task. Server, auth and web are frozen this wave;
@@ -195,9 +195,14 @@ section per node that ran.
   start/settle events. On the combined source, trace tests compiled/matched
   9/9 passed, provider/CLI focused tests 1/1 each, `cargo check -p
   harness-demo`, format and diff checks passed. **LIVE item-2 remains open**:
-  one manual credentialed slow-sleep/continued-request/`wait_agent` scenario,
-  recording redacted evidence in `docs/findings.md`. No inference has been
-  spent on item 2 in this run.
+  the single authorized manual attempt on `a42920f` produced a second request
+  with `sleep` still pending, but that request returned HTTP 400 before a
+  `wait_agent` continuation. Four redacted events are retained in
+  `docs/item2-live-attempt.jsonl`; analysis is in `docs/findings.md`. Root
+  found that `TreeProvider::all_tools` bypassed the crate's async stamping;
+  its offline repair is in progress. The 400's server-side cause is unknown.
+  Do not make another credentialed item-2 run unless the operator explicitly
+  grants one additional attempt (question in `docs/questions.md`).
 - (c) settings items: not started; the provenance seam is decided (Q5 above).
   Order inside (c): drop rule at append → `set_effort`
   appends the positional item → `here` fork strips by item type and re-pins

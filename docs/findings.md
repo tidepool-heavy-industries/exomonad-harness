@@ -374,3 +374,34 @@ surface to retain redacted outbound request bodies correlated with sleep-job
 timing and `wait_agent` resumption. A prompt-driven run without that evidence
 would spend inference without proving the acceptance. Details:
 `docs/item2-live.md`. Live item 2 is still open; this is not a passing trace.
+
+## Correction-wave item-2 manual attempt — 2026-09-25
+
+On reviewed trace/consumer source `a42920fff2d7e24debf137b00a4763a206a14dd0`,
+root made the **one permitted manual item-2 diagnostic run** with a fresh
+SQLite database and opt-in JSONL trace. The run exited 1 with
+`terminal HTTP status 400` on the second Responses request; no second run
+has been made. The redacted trace is retained verbatim as
+`docs/item2-live-attempt.jsonl` (SHA-256
+`7f5ff9cc13afdc6de4e4602a779ad3753e1645951ae614526cc10d9f4f34eecb`).
+No credential, prompt text, tool arguments/output, raw call ID, or raw request
+body is in that artifact.
+
+**Observed:** four trace records: first request; `sleep_started`; first
+`turn_complete` (580 input, 19 output, 0 cached tokens); then a second request
+about 40 ms after sleep start and before any `sleep_settled`. That second
+redacted request contains the original `sleep` `function_call` hash and no
+matching output. It did not yield a model continuation or `wait_agent`
+result: HTTP 400 terminated the run. No `sleep_settled` was recorded before
+shutdown. The trace projection showed every tool's `async` value as false.
+
+**Code finding:** the demo `TreeProvider::all_tools` override bypassed the
+crate `Provider::all_tools` method that stamps `async: true` except for
+`wait_agent`. The trace projection defaults a missing flag to false; source
+inspection confirms the tree override did not stamp it. This violates the
+item-2 tool-advertisement contract. It is a plausible contributor to the
+HTTP 400, **not a proven cause**: the transport reports only the status, not
+the server's response body. Root is repairing that override offline. The
+single-run rule bars a retry without explicit operator authority. Live
+item-2 acceptance remains **open**; neither the pending second request nor
+offline tests prove a resumed `wait_agent`.

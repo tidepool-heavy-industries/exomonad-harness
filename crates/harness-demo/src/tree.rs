@@ -64,37 +64,34 @@ impl Provider for TreeProvider {
     }
 
     fn tools(&self) -> Vec<Value> {
-        self.demo.tools()
-    }
-
-    fn all_tools(&self) -> Vec<Value> {
-        let mut tools = harness::agents::verb_tool_schemas();
         let demo_tools = self.demo.tools();
         let shell_enabled = demo_tools.iter().any(|tool| tool["name"] == "run");
-        tools.extend(demo_tools.into_iter().filter_map(|mut tool| {
-            match tool["name"].as_str() {
-                Some("ask" | "form" | "edit") => None,
-                Some("run") => {
-                    // CliProvider already enforces --dev-shell and makes run a
-                    // strict function when enabled.
-                    if shell_enabled {
-                        tool["type"] = json!("function");
-                        tool["strict"] = json!(true);
-                        tool["parameters"] = json!({
-                            "type":"object",
-                            "properties":{"script":{"type":"string"}},
-                            "required":["script"],
-                            "additionalProperties":false
-                        });
-                        Some(tool)
-                    } else {
-                        None
+        demo_tools
+            .into_iter()
+            .filter_map(|mut tool| {
+                match tool["name"].as_str() {
+                    Some("ask" | "form" | "edit") => None,
+                    Some("run") => {
+                        // CliProvider already enforces --dev-shell and makes run a
+                        // strict function when enabled.
+                        if shell_enabled {
+                            tool["type"] = json!("function");
+                            tool["strict"] = json!(true);
+                            tool["parameters"] = json!({
+                                "type":"object",
+                                "properties":{"script":{"type":"string"}},
+                                "required":["script"],
+                                "additionalProperties":false
+                            });
+                            Some(tool)
+                        } else {
+                            None
+                        }
                     }
+                    _ => Some(tool),
                 }
-                _ => Some(tool),
-            }
-        }));
-        tools
+            })
+            .collect()
     }
 }
 
@@ -134,6 +131,13 @@ mod tests {
     fn tool_list_preserves_demo_gates_and_agent_schemas() {
         for (shell, expected_run) in [(false, false), (true, true)] {
             let tools = provider(shell).all_tools();
+            for tool in &tools {
+                if tool["name"] == "wait_agent" {
+                    assert!(tool.get("async").is_none());
+                } else {
+                    assert_eq!(tool["async"], true, "tool {} must be async", tool["name"]);
+                }
+            }
             let names: Vec<_> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
             assert!(!names.contains(&"ask"));
             assert!(!names.contains(&"form"));
