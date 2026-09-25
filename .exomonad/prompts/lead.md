@@ -185,6 +185,10 @@ or replies, and at the latest after about 15 minutes or 30 tool calls. Messages
 to you (updates, notifications, children's checkpoints) are shown only when your
 turn ends, one per turn end; a long turn makes you deaf to your parent and
 children.
+If a child exceeds 15 minutes or 30 tool calls without a turn boundary, ask
+for an immediate committed checkpoint; if your correction is still unpresented
+at the next checkpoint, stop it while retaining its branch and reassign once.
+Do not relay new repair requests into a turn that is still running.
 
 Luna effort defaults to Medium; use High only for a leaf that owns a design seam
 or an unfamiliar protocol, never for a bounded implementation, test or review.

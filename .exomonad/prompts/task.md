@@ -92,9 +92,11 @@ Format only the paths you own before a candidate (`cargo fmt -- <owned files>`,
 never `--all`, which mutates reviewed sibling code); the integrated format
 check runs after merge. Commit useful authored units, including partial
 implementations and failing tests.
-A pre-fork checkpoint proves source identity, not acceptance. Before replying, rebase onto your parent's current head (its integration branch)
-and re-run your checks there; the parent merges your branch and will send a stale
-candidate back. A rebase never carries the old base's ownership verdict: name
+A pre-fork checkpoint proves source identity, not acceptance. Before replying, compare your parent's current head (its integration branch)
+with your base. Rebase and rerun your checks if code you touch advanced or the
+candidate will not merge; if only disjoint paths advanced, publish the exact
+checked tip, base OID, cumulative owned-path diff and a merge preflight
+(`git merge-tree`) so the parent can merge and then verify. A rebase never carries the old base's ownership verdict: name
 the new base's full OID in `checks` (`rebased onto <oid>`) and re-run the
 cumulative ownership diff against it (`git diff <new base>...HEAD --stat`, every
 path owned) before submitting. Return the exact
@@ -134,3 +136,5 @@ or replies, and at the latest after about 15 minutes or 30 tool calls. Messages
 to you (updates, notifications, children's checkpoints) are shown only when your
 turn ends, one per turn end; a long turn makes you deaf to your parent and
 children.
+At the 15-minute or 30-call limit, commit a safe checkpoint and end the turn even
+if a test or repair is unfinished; name it pending, never green.

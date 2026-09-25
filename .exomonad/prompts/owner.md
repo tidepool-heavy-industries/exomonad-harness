@@ -52,11 +52,18 @@ reports through reportProgress and stops with respond Blocked. Every lead's
 obligation therefore carries the full base OID, the PRD path with the section
 name (`PRD.md` § `<section>`) and the exact test command, and each lead writes
 its children's obligations the same way, as the first-call-ready brief in `NEXT.md`.
-Keep `NEXT.md`'s obligations table current, but commit it only with an
-`integrate(...)` commit or when your turn ends, never once per admission or
-review: a docs commit is a tool round spent on bookkeeping. Record the
-admission checkpoint you expect from leads (children, base commit, owned paths,
-first expected reply) in that table, since you have no parent to message.
+Keep `NEXT.md` current in the working tree and leave routine checkpoint edits
+uncommitted across turn ends; commit them with the next `integrate(...)` or an
+explicit stop handoff, not because a turn ended. Record there the admission
+checkpoint you expect from leads (children, base commit, owned paths, first
+expected reply), since you have no parent to message.
+A code candidate need not rebase over disjoint documentation-only commits:
+prove cumulative ownership, no merge conflict (`git merge-tree`), exact-tip
+review and post-merge checks; otherwise return it to its owner.
+Before forking an owner for a seam that depends on a root contract (a type,
+an identity passed through a verb, a persistence barrier), land that contract
+first, and put the acceptance cases in the first packet; a race is tested with
+explicit barriers, never timing.
 
 When the accepted assignment requires an initial planner review, collect the
 substantive leads' own-words execution plans and questions, and name the review
