@@ -83,7 +83,9 @@ fn normalize_schema(schema: Value, path: &str) -> Result<Value, FinalizeError> {
     let allowed: &[&str] = match schema_type {
         "object" => &["type", "properties", "required", "additionalProperties"],
         "array" => &["type", "items", "minItems", "maxItems"],
-        "string" => &["type", "minLength", "maxLength", "pattern", "enum", "const"],
+        // A pattern would require local regex validation for ReplayTransport.
+        // Refuse it rather than advertise a constraint the harness can bypass.
+        "string" => &["type", "minLength", "maxLength", "enum", "const"],
         "boolean" => &["type", "enum", "const"],
         "integer" | "number" => {
             return Err(unsupported(path, format!("unsupported type {schema_type}")));
@@ -135,7 +137,7 @@ fn normalize_schema(schema: Value, path: &str) -> Result<Value, FinalizeError> {
         "string" => copy_constraints(
             object,
             &mut normalized,
-            &["minLength", "maxLength", "pattern", "enum", "const"],
+            &["minLength", "maxLength", "enum", "const"],
         ),
         "boolean" => copy_constraints(object, &mut normalized, &["enum", "const"]),
         _ => unreachable!("type checked above"),
@@ -231,7 +233,12 @@ impl FinalizeParser {
         result_schema: &Value,
     ) -> Result<Value, FinalizeError> {
         let result: Value = self.parse_completed(item)?;
-        validate_result(&result, result_schema, "$")?;
+        if let Err(error) = validate_result(&result, result_schema, "$") {
+            // Parsing alone does not complete finalize: a schema-invalid call
+            // must leave the parser usable for a later valid call.
+            self.finalized = false;
+            return Err(error);
+        }
         Ok(result)
     }
 }
@@ -317,6 +324,51 @@ mod tests {
                 Err(FinalizeError::ResultSchemaMismatch(_))
             ));
         }
+    }
+
+    #[test]
+    fn dynamic_schema_invalid_call_does_not_consume_finalize_parser() {
+        let schema = tool_schema_from_result_schema(json!({
+            "type":"object", "properties":{"answer":{"type":"string"}}
+        }))
+        .unwrap();
+        let result_schema = &schema["parameters"]["properties"]["result"];
+        let mut parser = FinalizeParser::new();
+        assert!(matches!(
+            parser.parse_completed_with_result_schema(
+                &call("finalize", json!({"result":{"answer":7}})),
+                result_schema
+            ),
+            Err(FinalizeError::ResultSchemaMismatch(_))
+        ));
+        assert_eq!(
+            parser
+                .parse_completed_with_result_schema(
+                    &call("finalize", json!({"result":{"answer":"valid"}})),
+                    result_schema
+                )
+                .unwrap(),
+            json!({"answer":"valid"})
+        );
+        assert!(matches!(
+            parser.parse_completed_with_result_schema(
+                &call("finalize", json!({"result":{"answer":"again"}})),
+                result_schema
+            ),
+            Err(FinalizeError::AlreadyFinalized)
+        ));
+    }
+
+    #[test]
+    fn rejects_pattern_schema_instead_of_advertising_unchecked_constraint() {
+        assert!(matches!(
+            tool_schema_from_result_schema(json!({
+                "type":"object", "properties":{
+                    "answer":{"type":"string","pattern":"^ready$"}
+                }
+            })),
+            Err(FinalizeError::UnsupportedSchema { keyword, .. }) if keyword == "pattern"
+        ));
     }
     use serde::Deserialize;
     use std::collections::HashSet;
