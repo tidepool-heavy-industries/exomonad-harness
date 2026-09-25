@@ -17,9 +17,9 @@ outside the wave. Resolve full source OIDs from Git.
 | Obligation | Owner | State / next evidence |
 |---|---|---|
 | Shared lifecycle/provenance contract and scaffold | root | `lifecycle.rs` defines envelope-ID provenance and structured parent answer; optional `Contract.reply` is the strict result schema; compile and commit before forks |
-| Stable follow-up identity and durable provenance | store child | own `store/mod.rs`, `agent_runtime.rs`; no schema migration intended |
-| Typed completion | engine child | own `engine.rs`, `finalize.rs`; strict schema from `Contract.reply` |
-| Driver publication/continuation and integrated release gate | driver child | own `harness-demo/src/driver.rs`; parent envelope carries `PublishedAnswer` JSON as structured item payload |
+| Stable follow-up identity and durable provenance | store child | candidate `5b2741a` submitted; exact-source review pending; no schema migration |
+| Typed completion | engine child | submitted `5e8d58e`, then corrected tip `2d12a4a` to remove typed_result; exact-tip checked resubmission requested before review |
+| Driver publication/continuation and integrated release gate | driver child | owned driver edit and explicit-barrier test in progress; sibling APIs not integrated, no compiled gate yet |
 | Independent review, integration, interview and stop | root | exact-source verdict, executed integrated checks, handoff |
 
 Keep this table current as assignments settle; ordinary idle turn ends need no
@@ -63,8 +63,9 @@ provenance) as structured JSON and only renders at a model presentation
 boundary. No new durable log or schema migration: existing envelope IDs,
 `delivered_request`, request ancestry, and item content are authoritative.
 
-Planned first admission: three Sol Medium candidates from the scaffold
-commit. Store owns `store/mod.rs` and `agent_runtime.rs`, first reply stable
+First admission checkpoint: three Sol Medium candidates admitted from
+`f9ab1a9da48e0f119fdad48052e896f57d117bd2` in `wave10/implementation`.
+Store owns `store/mod.rs` and `agent_runtime.rs`, first reply stable
 `followup_task` envelope reference and persisted snapshot tests. Engine owns
 `engine.rs` and `finalize.rs`, first reply strict schema/typed completion
 using the shared contract. Driver owns `harness-demo/src/driver.rs`, first
@@ -73,3 +74,43 @@ paths are exclusive; report a requested root contract amendment rather than
 editing another lane. Root owns `agents.rs`, `lifecycle.rs`, `lib.rs`,
 manifests, combined gate and integration. Children return `Outcome Candidate`
 with `WorkProgress`, not `Delivery`.
+Admission routing currently uses `wave10-any` settlement watch; root reads
+every lane at the next checkpoint. No candidate is yet reviewed or integrated.
+Driver requested exact APIs; root accepted and sent to owners:
+`Store::completion_provenance(&AgentPath, &RequestId) ->
+Result<CompletionProvenance>` and
+`Engine::run_with_reply_schema(head,new_items,cancel,inbox,schema: Value) ->
+Result<EngineCompletion,EngineError>` with `EngineCompletion.typed_result:
+Option<Value>`. Transport acknowledgments do not prove incorporation.
+Scaffold baseline checks: `cargo test -p harness --test first_request_delivery`
+1/1 and `cargo test -p harness --test adapter_readiness` 1/1 passed.
+Engine owner confirmed the signature and behavior, including
+`finalize::tool_schema_from_result_schema(Value)`. The result schema
+parameter is named `result_schema`; `typed_result` is `Some` only for one
+strict finalize result. Root relayed this to driver. No candidate yet.
+Correction from driver, sent to Engine: `EngineCompletion.typed_result` is
+not needed. The required `run_with_reply_schema` returns `EngineCompletion`
+after enforcing one strict finalize; driver parses its `turn` through
+`FinalizeParser::parse_completed::<Value>`. Prior typed_result-field
+instruction is superseded. Store provenance API remains unchanged.
+Store owner's admission checkpoint reported its planned APIs:
+`Store::completion_provenance(&AgentPath,&RequestId)`,
+`Store::envelope(i64)->Result<Option<Envelope>>`, and production
+`followup_task` JSON `envelope_id`; no migration. Focused tests were in
+progress. Root relayed to driver as a report, not integrated evidence.
+Store candidate `5b2741a0a720fa52801657e8fbc4a016e7843369` is
+committed, cumulative diff limited to its two owned files; reported focused
+checks each matched/passed 1/1 (ancestry/reopen, service, first-request,
+adapter-readiness). Root commissioned exact-source independent review and
+relayed candidate status to driver. Not yet integrated.
+Engine's first response named `5e8d58e90f3d0d35b9bcd6ca94ecb76462246774`
+but its branch already advanced to `2d12a4af3c221b30fcb0df85dcec66be9dae28f0`
+for the driver correction (no `typed_result` field). Root did not
+review the stale candidate; it requested exact-tip checks/resubmission
+from the retained engine owner. This is a result-stage correction, not
+an integration.
+Driver progress reported uncommitted owned changes for strict factory,
+`PublishedAnswer` publication, and an explicit-barrier real-driver gate.
+It still mentioned `typed_result`, so root corrected it to parse the
+strict finalize call from `EngineCompletion.turn` at the intended engine
+tip. Its gate has not compiled or executed yet.
