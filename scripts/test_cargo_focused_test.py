@@ -34,6 +34,13 @@ class FocusedTestRunnerTests(unittest.TestCase):
             "        print('1 test, 0 benchmarks')\n"
             "else:\n"
             "    print('EXECUTED')\n"
+            "    mode = os.environ['STUB_MODE']\n"
+            "    if mode == 'runzero':\n"
+            "        print('test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s')\n"
+            "    elif mode != 'missing' and int(os.environ.get('STUB_EXIT', '0')) != 0:\n"
+            "        print('test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s')\n"
+            "    elif mode != 'missing':\n"
+            "        print('test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s')\n"
             "    sys.exit(int(os.environ.get('STUB_EXIT', '0')))\n"
         )
         self.stub.chmod(0o755)
@@ -76,12 +83,46 @@ class FocusedTestRunnerTests(unittest.TestCase):
         result = self.invoke("pass")
         self.assertEqual(result.returncode, 0)
         self.assertIn("1 matched, 1 runnable, 0 ignored", result.stderr)
+        self.assertIn("1 executed, 1 passed", result.stderr)
         self.assertIn("EXECUTED", result.stdout)
 
     def test_test_failure_exit_is_preserved(self) -> None:
         result = self.invoke("pass", exit_code=7)
         self.assertEqual(result.returncode, 7)
         self.assertIn("EXECUTED", result.stdout)
+        self.assertIn("1 executed, 0 passed, 1 failed", result.stderr)
+
+    def test_successful_cargo_exit_with_zero_executed_is_rejected(self) -> None:
+        result = self.invoke("runzero")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("0 executed", result.stderr)
+        self.assertIn("EXECUTED", result.stdout)
+
+    def test_successful_cargo_exit_without_result_summary_is_rejected(self) -> None:
+        result = self.invoke("missing")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("without a libtest result", result.stderr)
+
+    def test_filter_cannot_be_a_cargo_option(self) -> None:
+        env = os.environ.copy()
+        env["PATH"] = f"{self.bin_dir}{os.pathsep}{env['PATH']}"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--package",
+                "harness",
+                "--target",
+                "lib",
+                "--filter=--list",
+            ],
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must not start with `-`", result.stderr)
 
 
 if __name__ == "__main__":

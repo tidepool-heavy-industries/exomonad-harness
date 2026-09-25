@@ -12,6 +12,10 @@ from typing import Sequence
 
 
 TEST_LINE = re.compile(r"^(.+): test$")
+TEST_RESULT = re.compile(
+    r"^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; "
+    r"(\d+) ignored; (\d+) measured; (\d+) filtered out; finished in .+$"
+)
 
 
 def test_names(output: str) -> set[str]:
@@ -52,6 +56,8 @@ def run(argv: Sequence[str]) -> int:
         parser.error("integration test target name must not be empty")
     if not args.filter.strip():
         parser.error("--filter must not be empty")
+    if args.filter.startswith("-"):
+        parser.error("--filter must not start with `-`")
 
     command = cargo_command(args.package, args.target, args.filter)
     all_list = subprocess.run(
@@ -89,8 +95,36 @@ def run(argv: Sequence[str]) -> int:
         f"{len(ignored & matched)} ignored",
         file=sys.stderr,
     )
-    completed = subprocess.run(command, check=False)
-    return completed.returncode
+    completed = subprocess.Popen(command, stdout=subprocess.PIPE, text=True, bufsize=1)
+    summaries = []
+    assert completed.stdout is not None
+    for line in completed.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        match = TEST_RESULT.fullmatch(line.rstrip("\r\n"))
+        if match is not None:
+            summaries.append(tuple(int(value) for value in match.groups()))
+    returncode = completed.wait()
+    if summaries:
+        passed = sum(summary[0] for summary in summaries)
+        failed = sum(summary[1] for summary in summaries)
+        ignored_run = sum(summary[2] for summary in summaries)
+        executed = passed + failed
+        print(
+            f"focused test execution: {executed} executed, {passed} passed, "
+            f"{failed} failed, {ignored_run} ignored",
+            file=sys.stderr,
+        )
+    if returncode != 0:
+        return returncode
+    if not summaries:
+        print("focused test rejected: successful Cargo exit without a libtest result", file=sys.stderr)
+        return 1
+
+    if executed == 0:
+        print("focused test rejected: successful Cargo exit ran zero tests", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
