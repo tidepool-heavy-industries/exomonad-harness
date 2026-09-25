@@ -60,7 +60,8 @@ target/filter/count. Report local integration OID and incorporation checks.
 | Durable discovery and atomic publication | durable lead | reviewed local `f3551a0948e0c145cc4c997dd441ee3255f2f360`, `recovery_` 3/3, completion 2/2 | root merge and any separate production candidate |
 | Request-boundary replay/provenance | Engine lead | pending scaffold checks | reviewed Delivery |
 | Restart admission/shutdown | Driver lead | pending scaffold checks | reviewed Delivery |
-| Abrupt process-loss Store commit/wake gate | root | `test:process_recovery --filter process_loss_`: 2 expected/matched/executed/passed; child process killed at explicit stdout barrier | combined Driver restart gate still open |
+| Abrupt process-loss Store commit/wake gate | root | `test:process_recovery --filter process_loss_`: 2 expected/matched/executed/passed; child process killed at explicit stdout barrier | integrated |
+| Restarted real Driver after lost wake | root | `bin:harness-demo --filter process_restart_driver`: 1 expected/matched/executed/passed; killed helper then two Driver startups over file Store | final combined integrated-source gate |
 
 The root's process test kills a separate helper before completion commit and
 after Store commit but before any wake, then opens the file in the parent
@@ -70,6 +71,13 @@ durability. Durable lead's admission checkpoint: production child owns
 `store/mod.rs` and `agent_runtime.rs`; test child owns
 `store/recovery_tests.rs`; both start at scaffold `55d2cce...`, with first
 reply expected as Outcome Candidate and focused counts.
+Root added a separate cross-component process-loss gate in
+`harness-demo/src/process_restart_tests.rs`, wired by a root-owned `mod`
+declaration in `main.rs`: helper process commits the typed child answer,
+signals after Store commit before any wake, and is killed; a new Driver over
+the same file discovers it. Two sequential Driver startups see one answer,
+do not re-admit the child with head/no unread, and join shutdown. This does
+not run a real remote provider/Engine claim or prove power-loss durability.
 Driver lead's admission checkpoint: production child owns `driver.rs`, test
 child owns `driver/recovery_tests.rs`, both from `55d2cce...`; production
 first reply targets `driver_restart`, test reply `recovery_`, with counts and
@@ -134,6 +142,21 @@ contradicts the original-head ownership invariant; it also pre-marks
 Interrupted, so misses the intended Pending+empty-scheduler barrier. Root
 asked Engine lead to repair the owned test independent of pending production
 review, then run it against reviewed production.
+Engine lead's local `integrate(engine-production)` at
+`9caecf153412df77aecb6947634cc77a58874662` contains the repair:
+UnknownCall now checks `interrupt_claim` affected rows, rereads a zero-row
+claim, returns the actual Settled output or Interrupted only for that
+state, and fails closed otherwise. Local `dynamic_reply_schema` 2 matched/
+executed/passed, fmt and diff-check passed. Same exact-source reviewer is
+checking the repaired tip; direct `engine_recovery_` filter was 0 matched
+before the test child was reassigned to add two owned cases. This is not
+yet a reviewed/integrated root slice.
+The same reviewer returned Repair again on `9caecf1`: design accepted,
+but `dynamic_reply_schema` alone did not execute stale-Pending/Settled-output
+or genuine Interrupted recovery paths. Engine test owner is adding two
+cases in its separate file from `9caecf1`; `engine_recovery_` target is
+2 matched/executed/passed on the combined tip, then same-reviewer
+reviewAgain. No production-file repair is requested in this round.
 
 Root integration checkpoint: exact-scope reviewer accepted durable test
 candidate `cb87de6`; durable lead merged it as
@@ -143,6 +166,30 @@ passed, `complete_agent_with_publication_` 2 matched/executed/passed.
 Root verified cumulative scope and conflict-free merge-tree; root merge and
 post-merge check follow. The separate `9cc0866` pending-query production
 candidate is **not** part of this slice and remains under review.
+Root merged durable test slice as
+`3ae99f6f45507537f04a48a2489fdb091b3c829f`. On this integrated
+source, `recovery_` 3 expected/matched/executed/passed,
+`complete_agent_with_publication_` 2/2/2/2 and process `process_loss_`
+2/2/2/2. `9cc0866` adds a second public pending query whose production
+consumer already uses `unread`; root rejected it from this wave absent a
+specific missing datum. It remains an unmerged branch, not delivered work.
+Critical stale-callsite correction: `git grep` at root
+`3ae99f6f45507537f04a48a2489fdb091b3c829f` proves
+`crates/harness-demo/src/driver.rs:371` calls
+`Store::complete_agent_with_publication` in production after typed-answer
+preparation, then handles `CompletionCommit` and emits a later wake.
+The repeated assertion of "no production caller" searched the wrong crate
+scope; **do not** add Engine call-site wiring. An update to durable lead
+request 10 is queued but `UpdateUnconfirmed`, not incorporated.
+Durable lead later proposed accepting unmerged `9cc0866` as a hydrated
+pending-envelope snapshot from a test-owner contract. Root's current
+consumer inspection finds no production callsite for that body before
+admission: Driver::scan and scan_inbox read `unread(path)` metadata;
+Engine::append_unread_envelopes hydrates and consumes transactionally.
+Root has withheld integration pending a named failing production barrier
+and callsite; Driver lead was asked whether one exists. The INNER JOIN
+silent-omission defect in the proposed query warrants repair if pursued,
+but is not product approval for a redundant API.
 Driver production child's first reply was unchanged baseline `55d2cce...`,
 therefore findings only, not a candidate to integrate. `driver_restart`
 selected 0 tests; exact existing restart selector matched/executed/passed
@@ -169,6 +216,11 @@ root `f7b60c5...`; root clarified that the root commit changes only disjoint
 NEXT/process-test paths, so a rebase is optional if cumulative ownership,
 merge-tree, exact-tip review and post-merge checks prove integration. Actual
 child OID and checks remain pending.
+Driver test child's `cargo fmt -- crates/harness-demo/src/driver/recovery_tests.rs`
+also reformatted root-owned `crates/harness/tests/process_recovery.rs` in
+the child's isolated working tree, unstaged and not in candidate. Root's
+integrated checkout has that file clean; no root restore is needed. Record
+as formatting-scope friction, not candidate content.
 
 Candidate domains: durable recovery, Engine request-boundary recovery, and Driver
 restart/admission. Root finalizes exact ownership and retains the cross-component

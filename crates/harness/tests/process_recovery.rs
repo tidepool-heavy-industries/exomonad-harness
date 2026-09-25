@@ -121,12 +121,18 @@ fn process_loss_before_completion_commit_leaves_no_head_or_answer() {
 fn process_loss_after_completion_commit_before_wake_recovers_typed_answer_once() {
     let path = crash_at("after");
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.agent(&child()).unwrap().unwrap().head_request, Some(head()));
+    assert_eq!(
+        store.agent(&child()).unwrap().unwrap().head_request,
+        Some(head())
+    );
     let inbox = store.inbox(&root().0).unwrap();
     assert_eq!(inbox.len(), 1);
     let item = store.get_item(&inbox[0].item_hash).unwrap().unwrap();
     let decoded = PublishedAnswer::from_message_item(&item).unwrap();
-    assert_eq!(decoded.result, json!({"kind":"completed","value":{"answer":42}}));
+    assert_eq!(
+        decoded.result,
+        json!({"kind":"completed","value":{"answer":42}})
+    );
     assert_eq!(decoded.provenance.final_request, head());
     assert_eq!(decoded.provenance.seen_envelopes, vec![7]);
     assert_eq!(decoded.provenance.unseen_envelopes, vec![8]);

@@ -1,6 +1,8 @@
 //! Reference provider for the harness. `run` intentionally invokes a local
 //! shell and is suitable only for trusted, development-time demonstrations.
 pub mod driver;
+#[cfg(test)]
+mod process_restart_tests;
 mod trace;
 pub mod tree;
 
