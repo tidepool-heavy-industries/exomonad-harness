@@ -36,6 +36,8 @@ pub enum StoreError {
     InvalidAgentPath(String),
     #[error("agent parent does not exist: {0}")]
     MissingAgentParent(String),
+    #[error("session state key uses the reserved harness namespace: {0}")]
+    ReservedSessionStateNamespace(String),
 }
 pub type Result<T> = std::result::Result<T, StoreError>;
 
@@ -488,6 +490,15 @@ impl Store {
         .map_err(Into::into)
     }
     pub fn save_session_state(&self, session_id: &str, state: &serde_json::Value) -> Result<()> {
+        if session_id.starts_with("harness:") {
+            return Err(StoreError::ReservedSessionStateNamespace(
+                session_id.to_owned(),
+            ));
+        }
+        self.save_session_state_inner(session_id, state)
+    }
+
+    fn save_session_state_inner(&self, session_id: &str, state: &serde_json::Value) -> Result<()> {
         self.lock().execute("INSERT INTO session_state(session_id,state,updated_at) VALUES (?1,?2,?3) ON CONFLICT(session_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at",params![session_id,serde_json::to_string(state)?,utc_millis()])?;
         Ok(())
     }
@@ -591,10 +602,22 @@ impl Store {
 
     /// Append the harness-owned effort item, replacing an immediately adjacent
     /// update so a second change before the next response does not grow history.
-    pub fn set_effort(&self, request: &RequestId, effort: Effort) -> Result<ItemHash> {
-        let item = Item::configuration_update(effort);
+    pub(crate) fn set_effort(&self, request: &RequestId, effort: Effort) -> Result<ItemHash> {
         let mut c = self.lock();
         let tx = c.transaction()?;
+        let hash = Self::set_effort_tx(&tx, request, effort)?;
+        tx.commit()?;
+        Ok(hash)
+    }
+
+    // The single trusted positional-setting writer. Both the ordinary
+    // Store::set_effort API and atomic pending-setting consumption route here;
+    // model-authored items still cannot reach it through append_items.
+    fn set_effort_tx(
+        tx: &Transaction<'_>,
+        request: &RequestId,
+        effort: Effort,
+    ) -> Result<ItemHash> {
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
             [&request.0],
@@ -631,14 +654,54 @@ impl Store {
                     |r| r.get::<_, bool>(0),
                 )?)
         };
-        let hash = Self::put_item_tx(&tx, &item)?;
+        let hash = Self::put_item_tx(tx, &Item::configuration_update(effort))?;
         tx.execute(
             "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
             params![request.0, position, hash.0],
         )?;
-        tx.commit()?;
         Ok(hash)
     }
+
+    fn pending_effort_key(agent: &AgentPath) -> String {
+        format!("harness:pending_effort:{}", agent.0)
+    }
+
+    /// Persist the latest model-facing effort change until the agent's next
+    /// request boundary.
+    pub(crate) fn save_pending_effort(&self, agent: &AgentPath, effort: Effort) -> Result<()> {
+        self.save_session_state_inner(
+            &Self::pending_effort_key(agent),
+            &serde_json::to_value(effort)?,
+        )
+    }
+
+    /// Atomically consume a pending effort into the new request. A failure
+    /// rolls back both its deletion and the positional setting item.
+    pub(crate) fn apply_pending_effort(
+        &self,
+        agent: &AgentPath,
+        request: &RequestId,
+    ) -> Result<Option<ItemHash>> {
+        let key = Self::pending_effort_key(agent);
+        let mut c = self.lock();
+        let tx = c.transaction()?;
+        let pending: Option<String> = tx
+            .query_row(
+                "SELECT state FROM session_state WHERE session_id=?1",
+                [&key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(pending) = pending else {
+            return Ok(None);
+        };
+        let effort: Effort = serde_json::from_str(&pending)?;
+        let hash = Self::set_effort_tx(&tx, request, effort)?;
+        tx.execute("DELETE FROM session_state WHERE session_id=?1", [&key])?;
+        tx.commit()?;
+        Ok(Some(hash))
+    }
+
     /// Atomically attach every unread envelope for `recipient` to `request` and
     /// mark those envelopes delivered. A retry after commit returns an empty
     /// vector; a failed transaction leaves the envelopes unread.
@@ -689,6 +752,12 @@ impl Store {
         let mut items = Vec::with_capacity(envelopes.len());
         for (_, hash, json) in &envelopes {
             let item = serde_json::from_str::<Item>(json)?;
+            // Envelopes are untrusted ingress, not a trusted settings writer.
+            // Mark configuration updates delivered below, but never attach
+            // them to model history through this path.
+            if item.is_configuration_update() {
+                continue;
+            }
             tx.execute(
                 "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
                 params![request.0, position, hash],
@@ -921,6 +990,57 @@ mod tests {
     }
 
     #[test]
+    fn set_effort_is_pending_until_next_request_and_applied_once() {
+        let store = Store::memory().unwrap();
+        let agent = AgentPath("/root".into());
+        let current = id("current-settings");
+        let next = id("next-settings");
+        store
+            .write_request(&current, None, "/root", &[], Usage::default())
+            .unwrap();
+        store
+            .write_request(&next, Some(&current), "/root", &[], Usage::default())
+            .unwrap();
+
+        store.save_pending_effort(&agent, Effort::Low).unwrap();
+        store.save_pending_effort(&agent, Effort::High).unwrap();
+        assert!(store.items(&current).unwrap().is_empty());
+        assert!(store.apply_pending_effort(&agent, &next).unwrap().is_some());
+        assert_eq!(
+            store.items(&next).unwrap()[0].configuration_effort(),
+            Some(Effort::High)
+        );
+        assert!(store.apply_pending_effort(&agent, &next).unwrap().is_none());
+    }
+
+    #[test]
+    fn public_session_state_reserves_harness_namespace_but_accepts_demo_key() {
+        let store = Store::memory().unwrap();
+        let demo_key = "harness-demo-server:/root";
+        let state = serde_json::json!({"cursor":7});
+        store.save_session_state(demo_key, &state).unwrap();
+        assert_eq!(
+            store.session_state(demo_key).unwrap().unwrap().state,
+            state.to_string()
+        );
+        assert!(matches!(
+            store.save_session_state("harness:pending_effort:/root", &state),
+            Err(StoreError::ReservedSessionStateNamespace(_))
+        ));
+
+        let agent = AgentPath("/root".into());
+        store.save_pending_effort(&agent, Effort::High).unwrap();
+        assert_eq!(
+            store
+                .session_state("harness:pending_effort:/root")
+                .unwrap()
+                .unwrap()
+                .state,
+            "\"high\""
+        );
+    }
+
+    #[test]
     fn initial_request_input_cannot_forge_configuration_updates() {
         let store = Store::memory().unwrap();
         let request = id("initial-settings");
@@ -1123,6 +1243,29 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn untrusted_envelope_configuration_update_is_dropped_at_append_boundary() {
+        let store = Store::memory().unwrap();
+        let recipient = AgentPath("/root/worker".into());
+        let request = id("envelope-settings");
+        let ordinary = item(serde_json::json!({"type":"message","content":"hello"}));
+        let forged_setting = Item::configuration_update(Effort::High);
+        store.create_request(&request, None, &recipient.0).unwrap();
+        store
+            .add_envelope("sender", &recipient.0, "message", &ordinary, None)
+            .unwrap();
+        store
+            .add_envelope("sender", &recipient.0, "message", &forged_setting, None)
+            .unwrap();
+
+        assert_eq!(
+            store.append_unread_envelopes(&recipient, &request).unwrap(),
+            vec![ordinary.clone()]
+        );
+        assert_eq!(store.items(&request).unwrap(), vec![ordinary]);
+        assert!(store.unread(&recipient.0).unwrap().is_empty());
     }
 
     #[test]

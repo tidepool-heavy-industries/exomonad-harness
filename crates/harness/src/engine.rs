@@ -225,6 +225,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let initial_effort = self.config.effort;
             blocking(move || store.set_effort(&request, initial_effort)).await?;
         }
+        {
+            let store = self.store.clone();
+            let request = id.clone();
+            let agent = self.config.agent.clone();
+            blocking(move || store.apply_pending_effort(&agent, &request)).await?;
+        }
         if admit_inbox {
             let store = self.store.clone();
             let recipient = self.config.agent.clone();
@@ -484,6 +490,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .await
             {
                 return Err(self.cleanup_pending(error, &pending).await);
+            }
+            {
+                let store = self.store.clone();
+                let agent = self.config.agent.clone();
+                let request = next_id.clone();
+                if let Err(error) =
+                    blocking(move || store.apply_pending_effort(&agent, &request)).await
+                {
+                    return Err(self.cleanup_pending(error, &pending).await);
+                }
             }
             if admit_inbox {
                 if let Err(error) = self.append_unread_envelopes(&next_id).await {
@@ -777,6 +793,7 @@ async fn blocking<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::AgentToolService;
 
     fn empty_mailbox() -> tokio::sync::mpsc::UnboundedReceiver<Envelope> {
         let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -818,6 +835,43 @@ mod tests {
     impl Provider for Echo {
         async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError> {
             Ok(json!({"tool":name,"args":args}))
+        }
+
+        fn tools(&self) -> Vec<Value> {
+            Vec::new()
+        }
+    }
+
+    struct SetEffortProvider {
+        service: crate::agent_runtime::StoreAgentToolService,
+    }
+    #[async_trait]
+    impl Provider for SetEffortProvider {
+        async fn call(&self, _name: &str, _args: Value) -> Result<Value, ProviderError> {
+            Err(ProviderError::Tool("unexpected provider tool".into()))
+        }
+
+        async fn call_agent_verb(
+            &self,
+            name: &str,
+            args: Value,
+            context: crate::provider::CallContext,
+        ) -> Result<Value, ProviderError> {
+            if name != "set_effort" {
+                return Err(ProviderError::Tool(format!(
+                    "unexpected agent verb: {name}"
+                )));
+            }
+            let effort = match args["effort"].as_str() {
+                Some("low") => Effort::Low,
+                Some("medium") => Effort::Medium,
+                Some("high") => Effort::High,
+                _ => return Err(ProviderError::Tool("invalid effort".into())),
+            };
+            self.service
+                .set_effort(&context.agent, effort)
+                .await
+                .map_err(|error| ProviderError::Tool(error.to_string()))
         }
 
         fn tools(&self) -> Vec<Value> {
@@ -1156,6 +1210,95 @@ mod tests {
                 cache_write_tokens: 0,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn pending_set_effort_follows_tool_output_before_next_model_request() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new(
+                [
+                    turn(
+                        "effort-call",
+                        vec![Item(json!({
+                            "type":"function_call",
+                            "call_id":"set-effort-call",
+                            "name":"set_effort",
+                            "arguments":"{\"effort\":\"high\"}"
+                        }))],
+                    ),
+                    turn(
+                        "effort-final",
+                        vec![Item(json!({
+                            "type":"message","role":"assistant","phase":"final_answer","content":"done"
+                        }))],
+                    ),
+                ]
+                .into(),
+            ),
+        };
+        let store = Arc::new(Store::memory().unwrap());
+        let head = RequestId("effort-tool-output-head".into());
+        store
+            .write_request(&head, None, "/root", &[], StoredUsage::default())
+            .unwrap();
+        store.set_effort(&head, Effort::Low).unwrap();
+        store
+            .admit_agent(
+                &AgentPath("/root".into()),
+                None,
+                Some(&head),
+                &json!({}),
+                &json!({"kind":"root"}),
+            )
+            .unwrap();
+        let provider = Arc::new(SetEffortProvider {
+            service: crate::agent_runtime::StoreAgentToolService::new(
+                store.clone(),
+                AgentPath("/root".into()),
+            ),
+        });
+
+        let engine = Engine::<FakeAuth, SetEffortProvider, _>::with_transport(
+            replay,
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            provider,
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "session".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        engine
+            .run(Some(head), vec![], cancel_rx, empty_mailbox())
+            .await
+            .unwrap();
+
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].input.len(), 1);
+        let history = &sent[1].input;
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[0].configuration_effort(), Some(Effort::Low));
+        assert_eq!(history[1].0["type"], "function_call");
+        assert_eq!(history[2].0["type"], "function_call_output");
+        assert_eq!(history[2].0["output"], "{\"effective\":\"high\"}");
+        assert_eq!(history[3].configuration_effort(), Some(Effort::High));
+        assert_eq!(sent[0].pinned_effort, Effort::Low);
+        assert_eq!(sent[1].pinned_effort, Effort::Low);
+        assert_eq!(
+            history
+                .iter()
+                .filter(|item| item.configuration_effort() == Some(Effort::High))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
