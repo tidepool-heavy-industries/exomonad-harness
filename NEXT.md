@@ -75,7 +75,38 @@ never shows finished work as open.
   its reference is `Blocked` before it starts.
 - Every lead sends its parent an admission checkpoint right after a fork cell
   (children, base commit, owned paths, first expected reply) and one checkpoint
-  per child settlement.
+  per child settlement: `sendMessage` through `parentAgent`, or reportProgress
+  when `parentAgent` is Nothing.
+
+## Fork recipe
+
+The PRD is `PRD.md` at the repo root; cite it by heading (`PRD.md` § settings
+items). You need not re-read the fork or coordinate skills to write this.
+`base` is the full OID of your checked integration head, the commit your
+checkout is at when you fork. A child whose `parentAgent` is Nothing cannot
+message you, so each obligation carries base, PRD section, test command and
+how the child reports. One Luna leaf and one Sol lead in one admission cell,
+with a fresh group label per wave:
+
+```haskell
+let base = GitOid "<full 40-hex integration head>"
+let leafTask = task [label|store-drop|]
+      "Base <full 40-hex integration head>. PRD.md § settings items: drop non-harness items at Store::append_items. Test: `cargo test -p harness --test correction_wave`. Report: reportProgress for checkpoints, respond for the result."
+      ["crates/harness/src/store/mod.rs"] "The named test passes with its matched count reported" base
+let leadTask = task [label|core|]
+      "Base <full 40-hex integration head>. PRD.md § compaction (pluggable): Compactor with Server only. Test: `cargo test -p harness`. Report: checkpoints to parentAgent, else reportProgress; respond with the Delivery."
+      ["crates/harness/src/compaction.rs"] "Compactor per the PRD shape, focused tests green, one integrate(core) commit" base
+((leaf, leafProgress), (lead, leadProgress)) <- unfold (batch "correction" "wave-7") $ (,)
+  <$> childWithProgress @WorkProgress @(Outcome Candidate) (withReport Silent (lunaTaskFrom [label|store-drop|] Medium currentCheckout leafTask))
+  <*> childWithProgress @WorkProgress @Delivery (withReport Silent (solTaskFrom [label|core|] High currentCheckout leadTask))
+```
+
+End that cell. In the next, one router per result type:
+
+```haskell
+leafRouter <- followWork [("store-drop", leaf, leafProgress)] (notifyWork me (withCheckpoints (workMessage candidateSummary)))
+leadRouter <- followWork [("core", lead, leadProgress)] (notifyWork me (workMessage deliverySummary))
+```
 
 ## Standing objective (re-read before any final answer)
 
