@@ -25,10 +25,10 @@ serves. `docs/questions.md` Q4 and Q5 are answered; read them before planning.
   sent history → live item-13 trace with cache counters last.
 - (d) `Compactor`: not started. Annotation at `compaction.rs` has the target
   trait shape. `Server` only; unanswered-call experiment → findings.
-- Cache probe: unblocked and rescoped (Q4). Two requests through our builder,
-  same `prompt_cache_key`, record both redacted `usage` blocks. The question is
-  whether `cached_tokens` > 0 on the second, yes or no. No wire capture is
-  needed; field-diff against Codex's builder in source only if the answer is no.
+- Cache probe: measured on source `d0245b3` by the bounded probe. Two requests
+  through our builder with one key returned `cached_tokens` 0 then 20,736;
+  redacted usage blocks are in `docs/cache-probe-evidence.md`. This answers
+  Q4 yes for that pair, not general cache behavior or product approval.
 - Interviews: root, probe, core sections exist in `docs/interviews.md`. Every
   node that runs this time adds its own.
 

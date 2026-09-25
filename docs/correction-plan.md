@@ -88,7 +88,7 @@ their live traces in `docs/findings.md`, master is green, and
 | (b) async tools | provider stamp integrated on master (`d8097c3`); offline correction-wave test 1/1 passed, fmt passed | live item-2 trace (slow `sleep`, model continues, `wait_agent` resumed) with redacted request bodies in findings remains open |
 | (c) settings items | not started; the "provenance seam" the last lead blocked on is decided (Q5, TODO at `Store::append_items`) | `configuration_update` as a store item, drop rule at append, `set_effort`, fork strip list, effort pinned via the item; live item-13 trace with cache counters |
 | (d) Compactor | not started | PRD shape, `Server` only, unanswered-call experiment → findings |
-| cache probe | `Blocked` evidence merged (`b99337e`, `06148a1`); unblocked by Q4 | two requests through our builder, same key; record both redacted `usage` blocks; field diff vs codex source only if `cached_tokens` is 0 |
+| cache probe | measured on `d0245b3`: second request `cached_tokens` = 20,736; redacted blocks in `docs/cache-probe-evidence.md` | findings-only measurement; not product approval; no field diff needed under Q4 |
 | interviews | root, probe and core sections present | one section per node that runs next |
 
 The red offline test on master was accepted between slices and became green

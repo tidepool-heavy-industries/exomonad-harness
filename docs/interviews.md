@@ -92,3 +92,21 @@ was rebased as `1513e95` and merged by root at `06148a1`.
   green by (b), not mislabeled passing early. No repeated failing-check
   loop was observed. The inbox fence was an operator constraint for this
   run; no conjecture about its mechanism was promoted to an engine fact.
+
+## Cache-counter probe leaf — correction second half, 2026-09-24
+
+- **Scaffold and plan:** Q4 changed the earlier byte-parity blocker into one
+  yes/no measurement. I used the existing production request builder at
+  `d0245b3`; no scaffold code changed under me.
+- **Sibling interface:** None. The read-only credential and builder were
+  present; the temporary runner did not change repository code.
+- **API versus docs:** The production builder returned usage for both calls;
+  the second reported 20,736 cached input tokens. This measures the stated
+  criterion, not a promise of future cache hits.
+- **Tree cost:** Root must integrate this one findings-only document and
+  incorporate the result into shared findings. A narrower probe than the
+  previous byte-parity task avoided an unnecessary missing-capture blocker.
+- **Different scaffold next time:** State the measurement and its available
+  inputs in the task before admission, as Q4 now does.
+- **Nudges and trials:** No sibling change, intentional red test, or repeated
+  failed-check escalation occurred. No nudge firing was reported.

@@ -354,3 +354,14 @@ would not establish byte-for-byte parity. Root incorporated the probe's
 evidence as `cdbbd367` (`docs/cache-probe-evidence.md`), then integrated it
 on master in `b99337e`. Prior counters above are from different requests and
 must not be counted toward this probe.
+
+Q4 subsequently replaced byte parity with a two-request counter measurement.
+On source `d0245b3177afa21556c041ce05296a96b50b209a`, the bounded probe
+made exactly two sequential requests through the production
+`ResponsesClient::create` builder with a common key and >1,024-token stable
+prefix. Redacted `usage` blocks reported 20,923 input tokens on both requests
+and `cached_tokens` of 0 then 20,736. Thus the second request **did** report
+cached input tokens. The exact blocks and method are in
+`docs/cache-probe-evidence.md`. This is a finding for that pair, not a general
+cache guarantee or product approval; per Q4 no Codex field-order diff was
+required. No code or broad tests changed.
