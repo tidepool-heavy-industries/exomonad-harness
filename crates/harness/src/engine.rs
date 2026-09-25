@@ -36,6 +36,8 @@ struct PendingCall {
     call_id: CallId,
     claim_request: RequestId,
     is_wait_agent: bool,
+    persist_here_invocation_output: bool,
+    cancel_job_on_cleanup: bool,
 }
 
 #[derive(Debug, Error)]
@@ -60,6 +62,12 @@ pub enum EngineError {
     MultipleWaitAgents,
     #[error(transparent)]
     Compact(#[from] CompactError),
+    #[error("cannot resume a forked wait_agent call before its parent settles it")]
+    UnresumableForkedWaitAgent,
+    #[error("inherited settled call {0} has no durable output item")]
+    MissingInheritedOutput(String),
+    #[error("Here child has no durable snapshot request")]
+    MissingHereSnapshot,
     #[error(
         "engine operation failed: {primary}; additionally failed to clean up outstanding calls: {cleanup}"
     )]
@@ -216,10 +224,78 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         mut envelopes: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
         admit_inbox: bool,
     ) -> Result<EngineCompletion, EngineError> {
+        self.await_here_invocation_output(&head, &mut cancellation)
+            .await?;
         let inherited_history = match &head {
             Some(head) => self.read_history(head).await?,
             None => Vec::new(),
         };
+        let inherited_claims = match &head {
+            Some(head) => {
+                let store = self.store.clone();
+                let request = head.clone();
+                blocking(move || store.claims_on(&request)).await?
+            }
+            None => Vec::new(),
+        };
+        let mut pending = Vec::<PendingCall>::new();
+        let mut replay_items = Vec::<Item>::new();
+        let mut replay_outputs = Vec::<(CallId, crate::turn::JobOutput)>::new();
+        let mut attachable = Vec::new();
+        for claim in inherited_claims {
+            if inherited_history.iter().any(|item| {
+                item.0["type"] == "function_call_output"
+                    && item.0["call_id"].as_str() == Some(&claim.call_id.0)
+            }) {
+                continue;
+            }
+            if claim.state == crate::store::ClaimState::Settled {
+                let Some(hash) = claim.output else {
+                    return Err(EngineError::MissingInheritedOutput(claim.call_id.0.clone()));
+                };
+                let store = self.store.clone();
+                let item = blocking(move || store.get_item(&hash)).await?;
+                let Some(item) = item else {
+                    return Err(EngineError::MissingInheritedOutput(claim.call_id.0));
+                };
+                replay_items.push(item);
+                continue;
+            }
+            if claim.state == crate::store::ClaimState::Interrupted {
+                replay_items.push(items::function_output(
+                    &claim.call_id,
+                    &crate::turn::JobOutput::Interrupted,
+                ));
+                continue;
+            }
+            if inherited_history.iter().any(|item| {
+                items::function_call(item)
+                    .is_some_and(|(call, name, _)| call == claim.call_id && name == "wait_agent")
+            }) {
+                return Err(EngineError::UnresumableForkedWaitAgent);
+            }
+            // Validate every pending job before claiming any of them. The
+            // scheduler retains jobs for the lifetime of this shared runtime.
+            let call_id = claim.call_id.clone();
+            self.scheduler.output(&call_id).await?;
+            attachable.push(claim);
+        }
+        for claim in attachable {
+            match self
+                .scheduler
+                .fork_claim(&claim.call_id, self.config.agent.clone(), true)
+                .await?
+            {
+                Some(output) => replay_outputs.push((claim.call_id, output)),
+                None => pending.push(PendingCall {
+                    call_id: claim.call_id,
+                    claim_request: claim.request,
+                    is_wait_agent: false,
+                    persist_here_invocation_output: false,
+                    cancel_job_on_cleanup: false,
+                }),
+            }
+        }
         let id = RequestId(uuid::Uuid::new_v4().to_string());
         let store = self.store.clone();
         let request = id.clone();
@@ -247,6 +323,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let agent = self.config.agent.clone();
             blocking(move || store.apply_pending_effort(&agent, &request)).await?;
         }
+        for (call_id, output) in replay_outputs {
+            self.persist_output(&call_id, &output, &id).await?;
+        }
+        if !replay_items.is_empty() {
+            self.append(&id, replay_items).await?;
+        }
         if admit_inbox {
             let store = self.store.clone();
             let recipient = self.config.agent.clone();
@@ -259,7 +341,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .await?;
         }
         let mut parent = id.clone();
-        let mut pending = Vec::<PendingCall>::new();
         let mut compact_due = false;
         let mut previous_usage = Usage::default();
         loop {
@@ -311,6 +392,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             tokio::pin!(create);
             let mut turn_call_ids = Vec::<CallId>::new();
             let mut wait_call = None;
+            let mut persisted_items = Vec::<Item>::new();
             let mut event_stream_open = true;
             let turn = loop {
                 tokio::select! {
@@ -329,6 +411,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     event = event_rx.recv(), if event_stream_open => {
                         match event {
                             Some(StreamEvent::ItemDone(item)) => {
+                                if let Err(error) = self.append(&parent, vec![item.clone()]).await {
+                                    return Err(self.cleanup_pending(error, &pending).await);
+                                }
+                                persisted_items.push(item.clone());
                                 match self.dispatch_completed_item(item, &parent).await {
                                     Ok(Some(call)) => {
                                         if !pending.iter().any(|current| current.call_id == call.call_id) {
@@ -356,6 +442,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             // A completed response can race the buffered final item events.
             while let Ok(event) = event_rx.try_recv() {
                 if let StreamEvent::ItemDone(item) = event {
+                    if let Err(error) = self.append(&parent, vec![item.clone()]).await {
+                        return Err(self.cleanup_pending(error, &pending).await);
+                    }
+                    persisted_items.push(item.clone());
                     match self.dispatch_completed_item(item, &parent).await {
                         Ok(Some(call)) => {
                             if !pending
@@ -384,6 +474,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             // Some injected transports may only return a turn, without emitting
             // item events. The production client emits every completed item.
             for item in &turn.items {
+                if !remove_matching_item(&mut persisted_items, item) {
+                    if let Err(error) = self.append(&parent, vec![item.clone()]).await {
+                        return Err(self.cleanup_pending(error, &pending).await);
+                    }
+                }
                 if item.0["type"] == "function_call" {
                     let Some((call_id, _, _)) = items::function_call(item) else {
                         return Err(self
@@ -415,9 +510,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         }
                     }
                 }
-            }
-            if let Err(error) = self.append(&parent, turn.items.clone()).await {
-                return Err(self.cleanup_pending(error, &pending).await);
             }
             let usage_for_store = StoredUsage {
                 input_tokens: i64::try_from(turn.usage.input_tokens).unwrap_or(i64::MAX),
@@ -607,6 +699,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             return Err(EngineError::InvalidFunctionCall);
         };
         let is_wait_agent = name == "wait_agent";
+        let is_here_spawn = name == "spawn_agent" && args["from"]["kind"].as_str() == Some("here");
         if is_wait_agent {
             let store = self.store.clone();
             let call = call_id.clone();
@@ -616,6 +709,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 call_id,
                 claim_request: request.clone(),
                 is_wait_agent,
+                persist_here_invocation_output: false,
+                cancel_job_on_cleanup: false,
             }));
         }
         let provider: Arc<dyn Provider> = self.provider.clone();
@@ -648,13 +743,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             call_id,
             claim_request: request.clone(),
             is_wait_agent,
+            persist_here_invocation_output: is_here_spawn,
+            cancel_job_on_cleanup: true,
         }))
     }
 
     async fn cancel_pending(&self, pending: &[PendingCall]) -> Result<(), EngineError> {
         let mut first_error = None;
         for call in pending {
-            if !call.is_wait_agent {
+            if call.cancel_job_on_cleanup && !call.is_wait_agent {
                 if let Err(error) = self.scheduler.cancel(&call.call_id).await {
                     first_error.get_or_insert_with(|| EngineError::Job(error));
                 }
@@ -692,7 +789,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let outputs = outputs_in_call_order(&self.scheduler, &calls).await?;
         let mut settled = Vec::with_capacity(outputs.len());
         for (call_id, output) in outputs {
-            self.persist_output(&call_id, &output, request).await?;
+            let output_request = pending
+                .iter()
+                .find(|call| call.call_id == call_id)
+                .filter(|call| call.persist_here_invocation_output)
+                .map(|call| call.claim_request.clone())
+                .unwrap_or_else(|| request.clone());
+            self.persist_output(&call_id, &output, &output_request)
+                .await?;
             pending.retain(|call| call.call_id != call_id);
             settled.push(call_id);
         }
@@ -748,7 +852,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         durable_mailbox: bool,
     ) -> Result<(), EngineError> {
         for (call_id, output) in result.call_outputs {
-            self.persist_output(&call_id, &output, request).await?;
+            let output_request = pending
+                .iter()
+                .find(|call| call.call_id == call_id)
+                .filter(|call| call.persist_here_invocation_output)
+                .map(|call| call.claim_request.clone())
+                .unwrap_or_else(|| request.clone());
+            self.persist_output(&call_id, &output, &output_request)
+                .await?;
             pending.retain(|call| call.call_id != call_id);
         }
         let (agent_envelope, user_envelope, output) = match result.resumed_by {
@@ -800,6 +911,55 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
 
     async fn read_history(&self, id: &RequestId) -> Result<Vec<Item>, EngineError> {
         load_history(self.store.clone(), id.clone()).await
+    }
+
+    /// A model-facing Here child is admitted before its spawn tool returns.
+    /// Do not send the child's first model request until the parent's actual
+    /// function_call_output Item is durable in request history, then copy that
+    /// exact Item (not the earlier claim-settlement record) into the snapshot.
+    async fn await_here_invocation_output(
+        &self,
+        snapshot: &Option<RequestId>,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> Result<(), EngineError> {
+        let agent_path = self.config.agent.clone();
+        let store = self.store.clone();
+        let Some(agent) = blocking(move || store.agent(&agent_path)).await? else {
+            return Ok(());
+        };
+        if agent.fork_source["kind"] != "here" {
+            return Ok(());
+        }
+        let Some(source_request) = agent.fork_source["invocation_request"].as_str() else {
+            return Ok(());
+        };
+        let Some(call_id) = agent.fork_source["invocation_call_id"].as_str() else {
+            return Ok(());
+        };
+        let Some(snapshot) = snapshot.clone().or(agent.head_request) else {
+            return Err(EngineError::MissingHereSnapshot);
+        };
+        let source_request = RequestId(source_request.to_owned());
+        let call_id = CallId(call_id.to_owned());
+        loop {
+            let store = self.store.clone();
+            let source = source_request.clone();
+            let target = snapshot.clone();
+            let call = call_id.clone();
+            if blocking(move || store.copy_call_output_if_persisted(&source, &target, &call))
+                .await?
+            {
+                return Ok(());
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
+                changed = cancellation.changed() => {
+                    if changed.is_err() || *cancellation.borrow() {
+                        return Err(EngineError::Cancelled);
+                    }
+                }
+            }
+        }
     }
 
     async fn compact_window(
@@ -906,6 +1066,14 @@ async fn load_history(store: Arc<Store>, id: RequestId) -> Result<Vec<Item>, Eng
     .await
 }
 
+fn remove_matching_item(persisted: &mut Vec<Item>, item: &Item) -> bool {
+    let Some(index) = persisted.iter().position(|candidate| candidate == item) else {
+        return false;
+    };
+    persisted.remove(index);
+    true
+}
+
 fn is_final(turn: &ResponsesTurn) -> bool {
     turn.items
         .iter()
@@ -924,7 +1092,7 @@ async fn blocking<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::AgentToolService;
+    use crate::agents::{AgentInvocation, AgentToolService, dispatch_agent_verb};
 
     fn empty_mailbox() -> tokio::sync::mpsc::UnboundedReceiver<Envelope> {
         let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -959,6 +1127,59 @@ mod tests {
                 .pop_front()
                 .ok_or_else(|| TransportError::Stream("replay exhausted".into()))
         }
+    }
+
+    async fn inherited_claim_fixture() -> (Arc<Store>, RequestId, RequestId, CallId) {
+        let store = Arc::new(Store::memory().unwrap());
+        let parent = AgentPath("/root".into());
+        let child = AgentPath("/root/child".into());
+        let source_head = RequestId("inherited-parent-head".into());
+        let snapshot = RequestId("inherited-child-snapshot".into());
+        let call_id = CallId("inherited-call".into());
+        store.create_request(&source_head, None, &parent.0).unwrap();
+        store
+            .append_items(
+                &source_head,
+                &[Item(json!({
+                    "type":"function_call",
+                    "call_id":call_id.0,
+                    "name":"slow",
+                    "arguments":"{}"
+                }))],
+            )
+            .unwrap();
+        store.set_effort(&source_head, Effort::Low).unwrap();
+        store
+            .admit_agent(
+                &parent,
+                None,
+                Some(&source_head),
+                &json!({}),
+                &json!({"kind":"root"}),
+            )
+            .unwrap();
+        store.claim(&call_id, &source_head).unwrap();
+        store
+            .admit_here_agent_with_snapshot(
+                &child,
+                &parent,
+                &snapshot,
+                &json!({}),
+                &parent.0,
+                &child.0,
+                "AtBoundary",
+                &Item(json!({
+                    "type":"message","role":"assistant","content":[{
+                        "type":"output_text","text":"NEW_TASK"
+                    }]
+                })),
+            )
+            .unwrap();
+        let child_claims = store.claims_on(&snapshot).unwrap();
+        assert_eq!(child_claims.len(), 1);
+        assert_eq!(child_claims[0].call_id, call_id);
+        assert_eq!(child_claims[0].request, snapshot);
+        (store, source_head, snapshot, call_id)
     }
 
     struct Echo;
@@ -1010,6 +1231,53 @@ mod tests {
         }
     }
 
+    struct BlockingHereProvider {
+        service: crate::agent_runtime::StoreAgentToolService,
+        admitted: Arc<Notify>,
+        release: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+    #[async_trait]
+    impl Provider for BlockingHereProvider {
+        async fn call(&self, name: &str, _args: Value) -> Result<Value, ProviderError> {
+            Err(ProviderError::Tool(format!(
+                "unexpected provider tool: {name}"
+            )))
+        }
+
+        async fn call_agent_verb(
+            &self,
+            name: &str,
+            args: Value,
+            context: crate::provider::CallContext,
+        ) -> Result<Value, ProviderError> {
+            let request = context
+                .request
+                .clone()
+                .ok_or_else(|| ProviderError::Tool("active request is absent".into()))?;
+            let invocation = AgentInvocation {
+                request,
+                call_id: context.call_id,
+            };
+            let result =
+                dispatch_agent_verb(&self.service, &context.agent, Some(&invocation), name, args)
+                    .await
+                    .map_err(|error| ProviderError::Tool(error.to_string()))?;
+            self.admitted.notify_one();
+            self.release
+                .lock()
+                .await
+                .take()
+                .expect("active Here result is released once")
+                .await
+                .map_err(|_| ProviderError::Tool("active Here release dropped".into()))?;
+            Ok(result)
+        }
+
+        fn tools(&self) -> Vec<Value> {
+            Vec::new()
+        }
+    }
+
     struct SlowProvider {
         started: Arc<Notify>,
         release: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
@@ -1034,6 +1302,893 @@ mod tests {
         fn tools(&self) -> Vec<Value> {
             Vec::new()
         }
+    }
+
+    #[tokio::test]
+    async fn here_fork_inherits_claim_and_delivers_late_output_before_child_resumes() {
+        use crate::turn::JobOutput;
+
+        let (store, source_head, snapshot, call_id) = inherited_claim_fixture().await;
+        let started = Arc::new(Notify::new());
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let provider = Arc::new(SlowProvider {
+            started: started.clone(),
+            release: tokio::sync::Mutex::new(Some(release_rx)),
+            released: released.clone(),
+        });
+        let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+        scheduler
+            .start_for_agent(
+                provider.clone(),
+                AgentPath("/root".into()),
+                None,
+                call_id.clone(),
+                "slow".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        scheduler
+            .claim(&call_id, AgentPath("/root".into()))
+            .await
+            .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let first_turn = turn(
+            "fork-pending-continuation",
+            vec![Item(json!({
+                "type":"function_call","call_id":"quick-call","name":"quick","arguments":"{}"
+            }))],
+        );
+        let final_turn = turn(
+            "fork-final",
+            vec![Item(json!({
+                "type":"message","role":"assistant","phase":"final_answer","content":"done"
+            }))],
+        );
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new([first_turn, final_turn].into()),
+        };
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            replay,
+            store.clone(),
+            scheduler.clone(),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "child-session".into(),
+                agent: AgentPath("/root/child".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let run_head = snapshot.clone();
+        let run = tokio::spawn(async move {
+            engine
+                .run(Some(run_head), vec![], cancel_rx, empty_mailbox())
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if requests.lock().unwrap().len() == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("child sends its initial async request");
+        let first_input = requests.lock().unwrap()[0].input.clone();
+        assert!(
+            first_input.iter().any(|item| {
+                item.0["type"] == "function_call" && item.0["call_id"] == call_id.0
+            })
+        );
+        let inherited = store.claims_on(&snapshot).unwrap();
+        assert_eq!(inherited.len(), 1, "claim is bound to child snapshot");
+        assert_eq!(inherited[0].call_id, call_id);
+        assert_eq!(inherited[0].request, snapshot);
+        assert_eq!(inherited[0].state, crate::store::ClaimState::Pending);
+        assert!(!first_input.iter().any(|item| {
+            item.0["type"] == "function_call_output" && item.0["call_id"] == call_id.0
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .expect("shared provider job has started");
+        release_tx.send(()).unwrap();
+        let completion = tokio::time::timeout(std::time::Duration::from_secs(2), run)
+            .await
+            .expect("child resumes after inherited output")
+            .unwrap()
+            .unwrap();
+        assert!(released.load(std::sync::atomic::Ordering::SeqCst));
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1]
+                .input
+                .iter()
+                .filter(|item| item.0["type"] == "function_call_output"
+                    && item.0["call_id"] == call_id.0)
+                .count(),
+            1,
+            "resumed child request receives exactly one output for the original call"
+        );
+        assert_eq!(
+            completion
+                .transcript
+                .iter()
+                .filter(|item| item.0["type"] == "function_call_output"
+                    && item.0["call_id"] == call_id.0)
+                .count(),
+            1,
+            "child history contains the late output exactly once"
+        );
+        assert_eq!(
+            scheduler.output(&call_id).await.unwrap(),
+            Some(JobOutput::Completed(Ok(json!({"slow_done":true}))))
+        );
+        let claims = store.claims(&call_id).unwrap();
+        assert_eq!(claims.len(), 2);
+        assert!(
+            claims
+                .iter()
+                .all(|claim| claim.state == crate::store::ClaimState::Settled)
+        );
+        let child_claims = store.claims_on(&snapshot).unwrap();
+        assert_eq!(child_claims.len(), 1);
+        assert_eq!(child_claims[0].state, crate::store::ClaimState::Settled);
+        assert!(claims.iter().any(|claim| claim.request == source_head));
+        assert!(claims.iter().any(|claim| claim.request == snapshot));
+        let settled = scheduler.settled_claimants(&call_id).await.unwrap();
+        assert!(settled.contains(&AgentPath("/root".into())));
+        assert!(settled.contains(&AgentPath("/root/child".into())));
+    }
+
+    #[tokio::test]
+    async fn model_facing_here_spawn_waits_for_active_call_output_before_child_first_request() {
+        let store = Arc::new(Store::memory().unwrap());
+        let root = AgentPath("/root".into());
+        let stale_head = RequestId("active-here-stale-head".into());
+        store
+            .write_request(
+                &stale_head,
+                None,
+                &root.0,
+                &[
+                    Item(json!({"type":"message","role":"user","content":"old prefix"})),
+                    Item(json!({"type":"annotation","text":"strip me"})),
+                    Item(json!({"type":"dropped_claim","call_id":"old-drop"})),
+                ],
+                StoredUsage::default(),
+            )
+            .unwrap();
+        let compacted_head = RequestId("active-here-compacted-head".into());
+        store
+            .write_compaction_request(
+                &compacted_head,
+                &stale_head,
+                &root.0,
+                &[
+                    Item(json!({
+                        "type":"message",
+                        "role":"developer",
+                        "content":"compacted prefix"
+                    })),
+                    Item(json!({"type":"annotation","text":"strip after compaction"})),
+                    Item(json!({"type":"dropped_claim","call_id":"compact-drop"})),
+                    Item::configuration_update(Effort::High),
+                ],
+            )
+            .unwrap();
+        store
+            .admit_agent(
+                &root,
+                None,
+                Some(&stale_head),
+                &json!({}),
+                &json!({"kind":"root"}),
+            )
+            .unwrap();
+
+        let service = crate::agent_runtime::StoreAgentToolService::new(store.clone(), root.clone());
+        let admitted = Arc::new(Notify::new());
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let provider = Arc::new(BlockingHereProvider {
+            service,
+            admitted: admitted.clone(),
+            release: tokio::sync::Mutex::new(Some(release_rx)),
+        });
+        let spawn_call_id = "active-spawn-call";
+        let contract = json!({
+            "clauses":[],
+            "acceptance":[],
+            "owned":[],
+            "must_not":[],
+            "introduces":[],
+            "consumes":[],
+            "boundaries":[]
+        });
+        let spawn_item = Item(json!({
+            "type":"function_call",
+            "call_id":spawn_call_id,
+            "name":"spawn_agent",
+            "arguments":serde_json::to_string(&json!({
+                "task_name":"active-child",
+                "from":{"kind":"here","name":null},
+                "task":contract
+            })).unwrap()
+        }));
+        let parent_transport = Replay {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            turns: Mutex::new(
+                [
+                    turn("active-here-spawn", vec![spawn_item.clone()]),
+                    turn(
+                        "active-here-parent-final",
+                        vec![Item(json!({
+                            "type":"message",
+                            "role":"assistant",
+                            "phase":"final_answer",
+                            "content":"spawned"
+                        }))],
+                    ),
+                    turn(
+                        "active-here-parent-after-spawn",
+                        vec![Item(json!({
+                            "type":"message",
+                            "role":"assistant",
+                            "phase":"final_answer",
+                            "content":"spawn output persisted"
+                        }))],
+                    ),
+                ]
+                .into(),
+            ),
+        };
+        let parent_engine = Engine::<FakeAuth, BlockingHereProvider, _>::with_transport(
+            parent_transport,
+            store.clone(),
+            Arc::new(JobScheduler::new(2).unwrap()),
+            provider,
+            EngineConfig {
+                instructions: "parent".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Medium,
+                session_id: "parent-session".into(),
+                agent: root.clone(),
+            },
+        );
+        let (_parent_cancel_tx, parent_cancel_rx) = watch::channel(false);
+        let parent_run = tokio::spawn(async move {
+            parent_engine
+                .run(
+                    Some(compacted_head),
+                    vec![Item(json!({
+                        "type":"message",
+                        "role":"user",
+                        "content":"active request"
+                    }))],
+                    parent_cancel_rx,
+                    empty_mailbox(),
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), admitted.notified())
+            .await
+            .expect("model-facing Here admission");
+
+        let child_path = AgentPath("/root/active_child".into());
+        let child = store.agent(&child_path).unwrap().unwrap();
+        let snapshot = child.head_request.clone().unwrap();
+        let invocation_request = RequestId(
+            child.fork_source["invocation_request"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+        let invocation_call = CallId(
+            child.fork_source["invocation_call_id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+        assert_ne!(invocation_request.0, "active-here-stale-head");
+        assert_eq!(invocation_call.0, spawn_call_id);
+        assert_eq!(
+            store
+                .items(&invocation_request)
+                .unwrap()
+                .iter()
+                .filter(|item| item.0["type"] == "function_call")
+                .count(),
+            1,
+            "Engine persists the active call before routing its model-facing verb"
+        );
+
+        let child_requests = Arc::new(Mutex::new(Vec::new()));
+        let child_transport = Replay {
+            requests: child_requests.clone(),
+            turns: Mutex::new(
+                [turn(
+                    "active-here-child-final",
+                    vec![Item(json!({
+                        "type":"message",
+                        "role":"assistant",
+                        "phase":"final_answer",
+                        "content":"child ready"
+                    }))],
+                )]
+                .into(),
+            ),
+        };
+        let child_engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            child_transport,
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "child".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "child-session".into(),
+                agent: child_path,
+            },
+        );
+        let (_child_cancel_tx, child_cancel_rx) = watch::channel(false);
+        let child_run = tokio::spawn(async move {
+            child_engine
+                .run(Some(snapshot), vec![], child_cancel_rx, empty_mailbox())
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            child_requests.lock().unwrap().is_empty(),
+            "child must not issue its first model request before spawn output is durable"
+        );
+
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), parent_run)
+            .await
+            .expect("parent Engine run")
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), child_run)
+            .await
+            .expect("child Engine run")
+            .unwrap()
+            .unwrap();
+
+        let parent_items = store.items(&invocation_request).unwrap();
+        let actual_output = parent_items
+            .iter()
+            .find(|item| {
+                item.0["type"] == "function_call_output"
+                    && item.0["call_id"].as_str() == Some(&invocation_call.0)
+            })
+            .unwrap()
+            .clone();
+        let child_requests = child_requests.lock().unwrap();
+        let child_input = &child_requests[0].input;
+        assert!(child_input.contains(&spawn_item));
+        assert!(child_input.contains(&actual_output));
+        let spawn_position = child_input
+            .iter()
+            .position(|item| item == &spawn_item)
+            .unwrap();
+        assert_eq!(child_input[spawn_position + 1], actual_output);
+        assert_eq!(
+            child_input[spawn_position + 2].configuration_effort(),
+            Some(Effort::High),
+            "fresh effort pin follows the actual spawn output"
+        );
+        assert_eq!(child_requests[0].pinned_effort, Effort::High);
+        assert_eq!(
+            child_input
+                .iter()
+                .filter(|item| item.is_configuration_update())
+                .count(),
+            1
+        );
+        assert_eq!(
+            child_input.iter().find_map(Item::configuration_effort),
+            Some(Effort::High)
+        );
+        assert!(!child_input.iter().any(|item| {
+            matches!(
+                item.0["type"].as_str(),
+                Some("annotation" | "watchdog_annotation" | "dropped_claim")
+            )
+        }));
+        assert!(child_input.iter().any(|item| {
+            item.0["role"] == "developer" && item.0["content"] == "compacted prefix"
+        }));
+        assert!(
+            !child_input
+                .iter()
+                .any(|item| item.0["content"] == "old prefix")
+        );
+        assert_eq!(
+            parent_items
+                .iter()
+                .filter(|item| {
+                    item.0["type"] == "function_call"
+                        && item.0["call_id"].as_str() == Some(spawn_call_id)
+                })
+                .count(),
+            1,
+            "streamed function_call is not duplicated after response completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn here_child_waits_between_claim_settlement_and_persisted_spawn_output() {
+        let store = Arc::new(Store::memory().unwrap());
+        let parent = AgentPath("/root".into());
+        let child = AgentPath("/root/race_child".into());
+        let invocation_request = RequestId("here-output-race-parent".into());
+        let snapshot = RequestId("here-output-race-snapshot".into());
+        let call_id = CallId("here-output-race-call".into());
+        let other_call_id = CallId("here-output-race-other-call".into());
+        let other_call_item = Item(json!({
+            "type":"function_call",
+            "call_id":other_call_id.0,
+            "name":"slow",
+            "arguments":"{}"
+        }));
+        let spawn_item = Item(json!({
+            "type":"function_call",
+            "call_id":call_id.0,
+            "name":"spawn_agent",
+            "arguments":"{}"
+        }));
+        store
+            .create_request(&invocation_request, None, &parent.0)
+            .unwrap();
+        store.set_effort(&invocation_request, Effort::High).unwrap();
+        store
+            .append_items(
+                &invocation_request,
+                &[other_call_item.clone(), spawn_item.clone()],
+            )
+            .unwrap();
+        store
+            .admit_agent(
+                &parent,
+                None,
+                Some(&invocation_request),
+                &json!({}),
+                &json!({"kind":"root"}),
+            )
+            .unwrap();
+        store.claim(&other_call_id, &invocation_request).unwrap();
+        store.claim(&call_id, &invocation_request).unwrap();
+        store
+            .admit_here_agent_from_invocation(
+                &child,
+                &parent,
+                &snapshot,
+                &invocation_request,
+                &call_id,
+                &json!({}),
+                &parent.0,
+                &child.0,
+                "AtBoundary",
+                &Item(json!({"type":"message","role":"assistant","content":"NEW_TASK"})),
+            )
+            .unwrap();
+
+        let started = Arc::new(Notify::new());
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+        scheduler
+            .start_for_agent(
+                Arc::new(SlowProvider {
+                    started: started.clone(),
+                    release: tokio::sync::Mutex::new(Some(release_rx)),
+                    released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                }),
+                parent.clone(),
+                Some(invocation_request.clone()),
+                other_call_id.clone(),
+                "slow".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        scheduler
+            .claim(&other_call_id, parent.clone())
+            .await
+            .unwrap();
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new(
+                [
+                    turn(
+                        "here-output-race-provisional",
+                        vec![Item(json!({
+                            "type":"message",
+                            "role":"assistant",
+                            "phase":"final_answer",
+                            "content":"waiting for other pending call"
+                        }))],
+                    ),
+                    turn(
+                        "here-output-race-final",
+                        vec![Item(json!({
+                            "type":"message",
+                            "role":"assistant",
+                            "phase":"final_answer",
+                            "content":"ready"
+                        }))],
+                    ),
+                ]
+                .into(),
+            ),
+        };
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            replay,
+            store.clone(),
+            scheduler,
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "child".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "here-output-race-child".into(),
+                agent: child,
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let child_snapshot = snapshot.clone();
+        let child_run = tokio::spawn(async move {
+            engine
+                .run(Some(child_snapshot), vec![], cancel_rx, empty_mailbox())
+                .await
+        });
+
+        let output = Item(json!({
+            "type":"function_call_output",
+            "call_id":call_id.0,
+            "output":"{\"spawned\":true}"
+        }));
+        assert_eq!(store.write_output(&call_id, &output).unwrap(), 2);
+        let claims = store.claims(&call_id).unwrap();
+        assert_eq!(claims.len(), 2, "parent and child claims both settle");
+        assert!(
+            claims
+                .iter()
+                .all(|claim| claim.state == crate::store::ClaimState::Settled)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "settled claim alone must not release the child before its output Item is persisted"
+        );
+
+        store
+            .append_items(&invocation_request, &[output.clone()])
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .expect("second inherited call starts");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if requests.lock().unwrap().len() == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Here child starts while the second call remains pending");
+        let first_input = requests.lock().unwrap()[0].input.clone();
+        assert!(first_input.contains(&other_call_item));
+        assert!(!first_input.iter().any(|item| {
+            item.0["type"] == "function_call_output"
+                && item.0["call_id"].as_str() == Some(&other_call_id.0)
+        }));
+        assert!(
+            store
+                .claims(&other_call_id)
+                .unwrap()
+                .iter()
+                .all(|claim| claim.state == crate::store::ClaimState::Pending),
+            "the second active-call claim remains pending at the child's first request"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            !child_run.is_finished(),
+            "child waits for the second pending call after its first final response"
+        );
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), child_run)
+            .await
+            .expect("child wakes after invocation output persistence")
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .copy_call_output_if_persisted(&invocation_request, &snapshot, &call_id)
+                .unwrap()
+        );
+        let child_requests = requests.lock().unwrap();
+        let child_input = &child_requests[0].input;
+        assert_eq!(child_requests.len(), 2);
+        assert_eq!(
+            child_requests[1]
+                .input
+                .iter()
+                .filter(|item| {
+                    item.0["type"] == "function_call_output" && item.0["call_id"] == other_call_id.0
+                })
+                .count(),
+            1,
+            "the second active call's output arrives on the resumed request"
+        );
+        let spawn_position = child_input
+            .iter()
+            .position(|item| item == &spawn_item)
+            .unwrap();
+        assert_eq!(child_input[spawn_position + 1], output);
+        assert_eq!(
+            child_input[spawn_position + 2].configuration_effort(),
+            Some(Effort::High)
+        );
+        assert_eq!(child_requests[0].pinned_effort, Effort::High);
+        assert_eq!(
+            child_input
+                .iter()
+                .filter(|item| {
+                    item.0["type"] == "function_call_output" && item.0["call_id"] == call_id.0
+                })
+                .count(),
+            1,
+            "retrying the copy does not duplicate the output"
+        );
+    }
+
+    #[tokio::test]
+    async fn settled_inherited_claim_is_replayed_from_store_before_child_first_request() {
+        let (store, _source_head, snapshot, call_id) = inherited_claim_fixture().await;
+        let output = Item(json!({
+            "type":"function_call_output",
+            "call_id":call_id.0,
+            "output":"{\"settled_before_start\":true}"
+        }));
+        store.write_output(&call_id, &output).unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new(
+                [turn(
+                    "settled-fork-final",
+                    vec![Item(json!({
+                        "type":"message","role":"assistant","phase":"final_answer","content":"done"
+                    }))],
+                )]
+                .into(),
+            ),
+        };
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            replay,
+            store,
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "child-session".into(),
+                agent: AgentPath("/root/child".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let completion = engine
+            .run(Some(snapshot), vec![], cancel_rx, empty_mailbox())
+            .await
+            .unwrap();
+        let requests = requests.lock().unwrap();
+        let first_input = &requests[0].input;
+        let output_position = first_input.iter().position(|item| {
+            item.0["type"] == "function_call_output"
+                && item.0["call_id"] == call_id.0
+                && item.0["output"] == output.0["output"]
+        });
+        let task_position = first_input.iter().position(|item| {
+            item.0["type"] == "message"
+                && item.0["content"].as_array().is_some_and(|content| {
+                    content.iter().any(|part| {
+                        part["text"]
+                            .as_str()
+                            .is_some_and(|text| text.contains("NEW_TASK"))
+                    })
+                })
+        });
+        assert!(output_position.is_some());
+        assert!(task_position.is_some());
+        assert!(output_position.unwrap() < task_position.unwrap());
+        assert!(completion.transcript.contains(&output));
+    }
+
+    #[tokio::test]
+    async fn forked_wait_agent_claim_fails_closed_before_model_request() {
+        let store = Arc::new(Store::memory().unwrap());
+        let parent = AgentPath("/root".into());
+        let child = AgentPath("/root/child".into());
+        let source_head = RequestId("wait-parent-head".into());
+        let snapshot = RequestId("wait-child-snapshot".into());
+        let call_id = CallId("inherited-wait".into());
+        store.create_request(&source_head, None, &parent.0).unwrap();
+        store
+            .append_items(
+                &source_head,
+                &[Item(json!({
+                    "type":"function_call",
+                    "call_id":call_id.0,
+                    "name":"wait_agent",
+                    "arguments":"{}"
+                }))],
+            )
+            .unwrap();
+        store.set_effort(&source_head, Effort::Low).unwrap();
+        store
+            .admit_agent(
+                &parent,
+                None,
+                Some(&source_head),
+                &json!({}),
+                &json!({"kind":"root"}),
+            )
+            .unwrap();
+        store.claim(&call_id, &source_head).unwrap();
+        store
+            .admit_here_agent_with_snapshot(
+                &child,
+                &parent,
+                &snapshot,
+                &json!({}),
+                &parent.0,
+                &child.0,
+                "AtBoundary",
+                &Item(json!({
+                    "type":"message","role":"assistant","content":[{
+                        "type":"output_text","text":"NEW_TASK"
+                    }]
+                })),
+            )
+            .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            Replay {
+                requests: requests.clone(),
+                turns: Mutex::new([turn(
+                    "must-not-run",
+                    vec![Item(json!({
+                        "type":"message","role":"assistant","phase":"final_answer","content":"unexpected"
+                    }))],
+                )]
+                .into()),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "child-session".into(),
+                agent: child,
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        assert!(matches!(
+            engine
+                .run(Some(snapshot.clone()), vec![], cancel_rx, empty_mailbox())
+                .await,
+            Err(EngineError::UnresumableForkedWaitAgent)
+        ));
+        assert!(requests.lock().unwrap().is_empty());
+        assert_eq!(store.claims_on(&snapshot).unwrap()[0].request, snapshot);
+    }
+
+    #[tokio::test]
+    async fn child_cleanup_interrupts_only_its_inherited_claim_not_the_parent_job() {
+        use crate::store::ClaimState;
+
+        let (store, source_head, snapshot, call_id) = inherited_claim_fixture().await;
+        let provider = Arc::new(PendingProvider);
+        let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+        scheduler
+            .start_for_agent(
+                provider.clone(),
+                AgentPath("/root".into()),
+                None,
+                call_id.clone(),
+                "slow".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        scheduler
+            .claim(&call_id, AgentPath("/root".into()))
+            .await
+            .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new(
+                [turn(
+                    "fork-cancel",
+                    vec![Item(json!({
+                        "type":"message","role":"assistant","phase":"final_answer","content":"done"
+                    }))],
+                )]
+                .into(),
+            ),
+        };
+        let engine = Engine::<FakeAuth, PendingProvider, _>::with_transport(
+            replay,
+            store.clone(),
+            scheduler.clone(),
+            provider,
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "child-session".into(),
+                agent: AgentPath("/root/child".into()),
+            },
+        );
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let run_head = snapshot.clone();
+        let run = tokio::spawn(async move {
+            engine
+                .run(Some(run_head), vec![], cancel_rx, empty_mailbox())
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if !requests.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("child begins with the inherited call");
+        cancel_tx.send(true).unwrap();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), run)
+                .await
+                .expect("child cleanup returns")
+                .unwrap(),
+            Err(EngineError::Cancelled)
+        ));
+        assert_eq!(scheduler.output(&call_id).await.unwrap(), None);
+        let claims = store.claims(&call_id).unwrap();
+        assert_eq!(claims.len(), 2);
+        assert!(
+            claims
+                .iter()
+                .any(|claim| claim.request == source_head && claim.state == ClaimState::Pending)
+        );
+        assert!(
+            claims
+                .iter()
+                .any(|claim| claim.request == snapshot && claim.state == ClaimState::Interrupted)
+        );
     }
 
     struct AsyncContinuation {
@@ -1841,6 +2996,7 @@ mod tests {
             completion.transcript,
             vec![
                 initial.clone(),
+                Item::configuration_update(Effort::Low),
                 call,
                 items::function_output(
                     &CallId("transcript-call".into()),
@@ -1928,7 +3084,11 @@ mod tests {
         assert_eq!(first_req.parent, Some(parent.clone()));
         assert_eq!(
             requests.lock().unwrap()[0].input,
-            vec![prefix.clone(), first_new.clone()]
+            vec![
+                prefix.clone(),
+                first_new.clone(),
+                Item::configuration_update(Effort::Low)
+            ]
         );
 
         let (_cancel_tx, cancel_rx) = watch::channel(false);
@@ -1949,6 +3109,7 @@ mod tests {
             vec![
                 prefix.clone(),
                 first_new.clone(),
+                Item::configuration_update(Effort::Low),
                 first_answer.clone(),
                 second_new.clone(),
             ]
@@ -1960,6 +3121,7 @@ mod tests {
             vec![
                 prefix.clone(),
                 first_new,
+                Item::configuration_update(Effort::Low),
                 first_answer,
                 second_new,
                 second_answer,
@@ -2012,7 +3174,10 @@ mod tests {
             .unwrap();
         let recorded = requests.lock().unwrap();
         assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].input, vec![new_item]);
+        assert_eq!(
+            recorded[0].input,
+            vec![new_item, Item::configuration_update(Effort::Low)]
+        );
         assert_eq!(recorded[0].session_id, "new-session");
     }
 
@@ -2103,10 +3268,17 @@ mod tests {
             .run(None, vec![], cancel_rx, empty_mailbox())
             .await
             .unwrap();
-        assert_eq!(requests.lock().unwrap()[0].input, vec![task_item.clone()]);
+        assert_eq!(
+            requests.lock().unwrap()[0].input,
+            vec![Item::configuration_update(Effort::Low), task_item.clone()]
+        );
         assert_eq!(
             store.items(&first.head_request).unwrap(),
-            vec![task_item.clone(), first_answer.clone()]
+            vec![
+                Item::configuration_update(Effort::Low),
+                task_item.clone(),
+                first_answer.clone()
+            ]
         );
         assert!(store.unread(&recipient.0).unwrap().is_empty());
 
@@ -2122,7 +3294,14 @@ mod tests {
             .unwrap();
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[1].input, vec![task_item.clone(), first_answer]);
+        assert_eq!(
+            requests[1].input,
+            vec![
+                Item::configuration_update(Effort::Low),
+                task_item.clone(),
+                first_answer
+            ]
+        );
         assert_eq!(
             second
                 .transcript
@@ -2175,7 +3354,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             requests.lock().unwrap()[0].input,
-            vec![user_item, inbox_item]
+            vec![
+                user_item,
+                Item::configuration_update(Effort::Low),
+                inbox_item
+            ]
         );
     }
 
@@ -2621,15 +3804,15 @@ mod tests {
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         let resumed_history = &requests[2].input;
-        assert_eq!(resumed_history[1].0["call_id"], "slow-call");
-        assert_eq!(resumed_history[2].0["call_id"], "wait-call");
-        assert_eq!(resumed_history[3].0["call_id"], "slow-call");
-        assert_eq!(resumed_history[4].0["call_id"], "wait-call");
+        assert_eq!(resumed_history[2].0["call_id"], "slow-call");
+        assert_eq!(resumed_history[3].0["call_id"], "wait-call");
+        assert_eq!(resumed_history[4].0["call_id"], "slow-call");
+        assert_eq!(resumed_history[5].0["call_id"], "wait-call");
         let slow_output: Value =
-            serde_json::from_str(resumed_history[3].0["output"].as_str().unwrap()).unwrap();
+            serde_json::from_str(resumed_history[4].0["output"].as_str().unwrap()).unwrap();
         assert_eq!(slow_output, json!({"slow_done":true}));
         let wait_output: Value =
-            serde_json::from_str(resumed_history[4].0["output"].as_str().unwrap()).unwrap();
+            serde_json::from_str(resumed_history[5].0["output"].as_str().unwrap()).unwrap();
         assert_eq!(wait_output, json!({"resumed_by":{"job":"slow-call"}}));
     }
 
@@ -2701,8 +3884,8 @@ mod tests {
         );
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[1].input[1].0["call_id"], "late-call");
-        assert_eq!(requests[1].input[3].0["call_id"], "late-call");
+        assert_eq!(requests[1].input[2].0["call_id"], "late-call");
+        assert_eq!(requests[1].input[4].0["call_id"], "late-call");
     }
 
     #[tokio::test]
@@ -2775,14 +3958,15 @@ mod tests {
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         let next = &requests[1].input;
-        assert_eq!(next[1].0["call_id"], "wait-envelope");
-        assert_eq!(next[2].0["type"], "function_call_output");
+        assert_eq!(next[1], Item::configuration_update(Effort::Low));
         assert_eq!(next[2].0["call_id"], "wait-envelope");
-        let output: Value = serde_json::from_str(next[2].0["output"].as_str().unwrap()).unwrap();
+        assert_eq!(next[3].0["type"], "function_call_output");
+        assert_eq!(next[3].0["call_id"], "wait-envelope");
+        let output: Value = serde_json::from_str(next[3].0["output"].as_str().unwrap()).unwrap();
         assert_eq!(output, json!({"resumed_by":{"agent":"/root/worker"}}));
-        assert_eq!(next[3].0["type"], "message");
+        assert_eq!(next[4].0["type"], "message");
         assert_eq!(
-            next[3].0["content"],
+            next[4].0["content"],
             "Message Type: MESSAGE\nTask name: /root\nSender: /root/worker\nPayload:\narrived"
         );
     }
@@ -2849,13 +4033,14 @@ mod tests {
         let recorded = requests.lock().unwrap();
         assert_eq!(recorded.len(), 2);
         let resumed = &recorded[1].input;
-        assert_eq!(resumed.len(), 3);
-        assert_eq!(resumed[0].0["call_id"], "wait-envelope");
-        assert_eq!(resumed[1].0["type"], "function_call_output");
+        assert_eq!(resumed.len(), 4);
+        assert_eq!(resumed[0], Item::configuration_update(Effort::Low));
         assert_eq!(resumed[1].0["call_id"], "wait-envelope");
-        let status: Value = serde_json::from_str(resumed[1].0["output"].as_str().unwrap()).unwrap();
+        assert_eq!(resumed[2].0["type"], "function_call_output");
+        assert_eq!(resumed[2].0["call_id"], "wait-envelope");
+        let status: Value = serde_json::from_str(resumed[2].0["output"].as_str().unwrap()).unwrap();
         assert_eq!(status, json!({"resumed_by":{"agent":"/root/worker"}}));
-        assert_eq!(resumed[2], stored_item);
+        assert_eq!(resumed[3], stored_item);
         assert_eq!(
             completion
                 .transcript
