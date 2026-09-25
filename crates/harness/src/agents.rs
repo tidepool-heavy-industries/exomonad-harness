@@ -1,4 +1,4 @@
-use crate::model::AgentPath;
+use crate::model::{AgentPath, Effort};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt, str::FromStr};
@@ -164,6 +164,13 @@ pub trait AgentToolService: Send + Sync {
         agent: &AgentPath,
         name: String,
     ) -> Result<serde_json::Value, AgentVerbError>;
+    async fn set_effort(
+        &self,
+        _agent: &AgentPath,
+        _effort: Effort,
+    ) -> Result<serde_json::Value, AgentVerbError> {
+        Err(AgentVerbError("set_effort is not implemented".into()))
+    }
     async fn list_agents(
         &self,
         agent: &AgentPath,
@@ -184,6 +191,7 @@ pub fn is_agent_verb(name: &str) -> bool {
             | "followup_task"
             | "wait_agent"
             | "checkpoint"
+            | "set_effort"
             | "list_agents"
             | "interrupt_agent"
     )
@@ -290,6 +298,16 @@ pub async fn dispatch_agent_verb(
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| AgentVerbError("missing string field `name`".into()))?;
             service.checkpoint(agent, name.to_owned()).await
+        }
+        "set_effort" => {
+            exact_keys(&args, &["effort"])?;
+            let effort: Effort = serde_json::from_value(
+                args.get("effort")
+                    .cloned()
+                    .ok_or_else(|| AgentVerbError("missing field `effort`".into()))?,
+            )
+            .map_err(|e| AgentVerbError(format!("invalid effort: {e}")))?;
+            service.set_effort(agent, effort).await
         }
         "list_agents" => {
             exact_keys(&args, &["path_prefix"])?;
@@ -398,6 +416,14 @@ pub fn verb_tool_schemas() -> Vec<serde_json::Value> {
             object(json!({"name":string()}), &["name"]),
         ),
         function(
+            "set_effort",
+            "Set reasoning effort for the next request by appending a positional configuration update. A second change before a request replaces the first.",
+            object(
+                json!({"effort":{"type":"string","enum":["low","medium","high"]}}),
+                &["effort"],
+            ),
+        ),
+        function(
             "list_agents",
             "List live agents in the current root thread tree. Optionally filter by task-path prefix.",
             object(
@@ -494,6 +520,7 @@ mod tests {
                 "followup_task",
                 "wait_agent",
                 "checkpoint",
+                "set_effort",
                 "list_agents",
                 "interrupt_agent"
             ]
