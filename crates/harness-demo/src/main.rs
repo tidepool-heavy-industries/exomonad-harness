@@ -274,77 +274,87 @@ async fn tree_ask(options: &CliOptions) -> Result<(String, EngineCompletion), St
         ),
         None => None,
     };
-    let service = Arc::new(StoreAgentToolService::new(
-        store.clone(),
-        AgentPath("/root".into()),
-    ));
-    let mut demo_provider = DemoProvider::development(".", options.dev_shell);
-    if let Some(sink) = trace_sink.clone() {
-        demo_provider = demo_provider.with_trace(sink);
-    }
-    let provider = Arc::new(TreeProvider::new(
-        CliProvider(demo_provider),
-        service.clone(),
-    ));
-    let jobs = Arc::new(
-        JobScheduler::new(4).map_err(|_| "could not initialize tool scheduler".to_owned())?,
-    );
-    let transport_trace = trace_sink.clone();
-    let factory = Arc::new(HarnessEngineFactory {
-        auth: Arc::new(auth.clone()),
-        store: store.clone(),
-        scheduler: jobs,
-        provider,
-        config: move |_agent: &AgentPath| {
-            let client = ResponsesClient::new(auth.clone());
-            Ok(match &transport_trace {
-                Some(sink) => TraceTransport::new(client, sink.clone()),
-                None => TraceTransport::disabled(client),
-            })
-        },
-        transport: std::marker::PhantomData,
-    });
-    let driver = Driver::new(store, service, factory);
-    let mut failure = driver.failure_receiver();
-    if let Err(error) = driver.start(command_input(&[], &options.ask)).await {
-        let _ = driver.shutdown().await;
-        return Err(format!("could not start tree driver: {error}"));
-    }
-    let mut root_result = Box::pin(driver.wait_root_completion());
-    let result = loop {
-        tokio::select! {
-            settled = &mut root_result => break settled,
-            changed = failure.changed() => {
-                if changed.is_err() {
-                    break Err("tree supervisor closed unexpectedly".into());
-                }
-                if let Some(error) = failure.borrow().clone() {
-                    break Err(format!("tree agent failed: {error}"));
-                }
-            }
-            signal = tokio::signal::ctrl_c() => {
-                if signal.is_err() {
-                    break Err("could not listen for shutdown".into());
-                }
-                break Err("tree run cancelled by operator".into());
-            }
+    let outcome = async {
+        let service = Arc::new(StoreAgentToolService::new(
+            store.clone(),
+            AgentPath("/root".into()),
+        ));
+        let mut demo_provider = DemoProvider::development(".", options.dev_shell);
+        if let Some(sink) = trace_sink.clone() {
+            demo_provider = demo_provider.with_trace(sink);
         }
-    };
-    drop(root_result);
-    let shutdown = driver.shutdown().await;
-    let trace_flush = match &trace_sink {
-        Some(sink) => sink
-            .flush()
+        let provider = Arc::new(TreeProvider::new(
+            CliProvider(demo_provider),
+            service.clone(),
+        ));
+        let jobs = Arc::new(
+            JobScheduler::new(4).map_err(|_| "could not initialize tool scheduler".to_owned())?,
+        );
+        let transport_trace = trace_sink.clone();
+        let factory = Arc::new(HarnessEngineFactory {
+            auth: Arc::new(auth.clone()),
+            store: store.clone(),
+            scheduler: jobs,
+            provider,
+            config: move |_agent: &AgentPath| {
+                let client = ResponsesClient::new(auth.clone());
+                Ok(match &transport_trace {
+                    Some(sink) => TraceTransport::new(client, sink.clone()),
+                    None => TraceTransport::disabled(client),
+                })
+            },
+            transport: std::marker::PhantomData,
+        });
+        let driver = Driver::new(store, service, factory);
+        let mut failure = driver.failure_receiver();
+        if let Err(error) = driver.start(command_input(&[], &options.ask)).await {
+            let _ = driver.shutdown().await;
+            return Err(format!("could not start tree driver: {error}"));
+        }
+        let mut root_result = Box::pin(driver.wait_root_completion());
+        let result = loop {
+            tokio::select! {
+                settled = &mut root_result => break settled,
+                changed = failure.changed() => {
+                    if changed.is_err() {
+                        break Err("tree supervisor closed unexpectedly".into());
+                    }
+                    if let Some(error) = failure.borrow().clone() {
+                        break Err(format!("tree agent failed: {error}"));
+                    }
+                }
+                signal = tokio::signal::ctrl_c() => {
+                    if signal.is_err() {
+                        break Err("could not listen for shutdown".into());
+                    }
+                    break Err("tree run cancelled by operator".into());
+                }
+            }
+        };
+        drop(root_result);
+        let shutdown = driver.shutdown().await;
+        let completion = result?;
+        shutdown.map_err(|_| "could not fully stop tree agents".to_owned())?;
+        let text = final_text(&completion.turn.items)
+            .ok_or_else(|| "engine returned no final assistant text".to_owned())?;
+        Ok((text, completion))
+    }
+    .await;
+    flush_trace_result(trace_sink.as_ref(), outcome).await
+}
+
+/// Every exit after opening an opt-in sink, including setup/start failures,
+/// flushes it. A failed flush takes priority over the run result.
+async fn flush_trace_result<T>(
+    sink: Option<&TraceSink>,
+    result: Result<T, String>,
+) -> Result<T, String> {
+    if let Some(sink) = sink {
+        sink.flush()
             .await
-            .map_err(|_| "could not flush trace file".to_owned()),
-        None => Ok(()),
-    };
-    let completion = result?;
-    shutdown.map_err(|_| "could not fully stop tree agents".to_owned())?;
-    trace_flush?;
-    let text = final_text(&completion.turn.items)
-        .ok_or_else(|| "engine returned no final assistant text".to_owned())?;
-    Ok((text, completion))
+            .map_err(|_| "could not flush trace file".to_owned())?;
+    }
+    result
 }
 
 const ROOT_CONVERSATION_ID: &str = "conversation/root";
@@ -1387,6 +1397,27 @@ mod tests {
         assert_eq!(events[1]["event"], "sleep_settled");
         assert_eq!(events[0]["handle_hash"], events[1]["handle_hash"]);
         assert_eq!(events[0]["call_id_hash"], events[1]["call_id_hash"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn trace_flush_runs_on_forced_start_failure() {
+        let root = temp();
+        let path = root.join("failed-start.jsonl");
+        let sink = TraceSink::open(path.clone()).await.unwrap();
+        sink.record_job(JobEvent::SleepStarted {
+            call_id: "private-call".into(),
+            handle: "private-handle".into(),
+        })
+        .await
+        .unwrap();
+        let outcome: Result<(), String> =
+            flush_trace_result(Some(&sink), Err("forced driver.start failure".into())).await;
+        assert_eq!(outcome.unwrap_err(), "forced driver.start failure");
+        let raw = std::fs::read_to_string(path).unwrap();
+        assert_eq!(raw.lines().count(), 1);
+        assert!(!raw.contains("private-call"));
+        assert!(!raw.contains("private-handle"));
         let _ = std::fs::remove_dir_all(root);
     }
 
