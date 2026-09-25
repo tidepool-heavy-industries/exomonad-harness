@@ -17,8 +17,8 @@ outside the wave. Resolve full source OIDs from Git.
 | Obligation | Owner | State / next evidence |
 |---|---|---|
 | Shared lifecycle/provenance contract and scaffold | root | `lifecycle.rs` defines envelope-ID provenance and structured parent answer; optional `Contract.reply` is the strict result schema; compile and commit before forks |
-| Stable follow-up identity and durable provenance | store child | candidate `5b2741a` submitted; exact-source review pending; no schema migration |
-| Typed completion | engine child | submitted `5e8d58e`, then corrected tip `2d12a4a` to remove typed_result; exact-tip checked resubmission requested before review |
+| Stable follow-up identity and durable provenance | store child | exact-tip review accepted; integrated as `176a271`; provenance focused test 1/1 on integrated source |
+| Typed completion | engine child | exact-tip review of `2d12a4a` returned Repair; retained owner assigned parser-consumption and pattern enforcement fixes |
 | Driver publication/continuation and integrated release gate | driver child | owned driver edit and explicit-barrier test in progress; sibling APIs not integrated, no compiled gate yet |
 | Independent review, integration, interview and stop | root | exact-source verdict, executed integrated checks, handoff |
 
@@ -59,8 +59,12 @@ it must not retroactively change the first answer or be stranded. "Seen"
 means presented input only, never model acknowledgement/incorporation. The
 strict finalize call's `result` is preserved as JSON, not rendered prose.
 The parent FINAL_ANSWER envelope stores `PublishedAnswer` (sender, result,
-provenance) as structured JSON and only renders at a model presentation
-boundary. No new durable log or schema migration: existing envelope IDs,
+provenance) as a JSON-encoded standard `output_text` item; typed Store/hook
+consumers decode it, while Responses sees only valid message fields.
+Root-owned `lifecycle::PublishedAnswer::{to_message_item,from_message_item}`
+is the single codec. This amends the earlier proposed extra top-level
+`structured` field, which had no wire projection and could be rejected
+when Engine sends stored history unchanged. No new durable log or schema migration: existing envelope IDs,
 `delivered_request`, request ancestry, and item content are authoritative.
 
 First admission checkpoint: three Sol Medium candidates admitted from
@@ -109,6 +113,45 @@ for the driver correction (no `typed_result` field). Root did not
 review the stale candidate; it requested exact-tip checks/resubmission
 from the retained engine owner. This is a result-stage correction, not
 an integration.
+Store review accepted exactly `5b2741a` (ancestry/reopen test 1/1;
+the reviewer's second service command had no visible matched count and
+is not review evidence). Root merged it in `176a271d47f14fc1d3eea1c21bdb55b21a9d3b4e`
+and ran `cargo test -q -p harness completion_provenance_uses_ancestry_and_reopen`
+on that integrated source: 1 matched, 1 passed. Driver was informed.
+Engine corrected `2d12a4a` is under exact-tip review.
+Driver later found its implementation still consumed the superseded
+`typed_result` field. Root made the seam decision explicit again:
+driver MUST parse `completion.turn` through `FinalizeParser::<Value>`;
+engine must NOT add the field solely for driver. This corrects the
+earlier accepted field contract and unblocks driver-owned repair.
+Driver confirmed the correction was incorporated and its branch advanced
+through `27f75df0aacefcb5370327fb639fdda76e301c13` with strict
+turn parsing and reopened assertions. It incorrectly reported master
+still `f9ab1a9`; root corrected the current integrated Store source
+`176a271` and asked it to await Engine integration before final gate.
+Driver raised a strict-completion concern because public
+`run_with_reply_schema` delegates without parsing inline. Root inspected
+exact Engine tip: the shared `run_loop`'s only completion return arm
+collects finalize calls, rejects count != 1, then calls
+`parse_completed_with_result_schema` before `EngineCompletion` returns
+(`engine.rs` around lines 717-744). This is code-path evidence, not yet
+an independent verdict or integrated gate. Root forwarded the focus to
+Engine owner and reviewer and the observed path to driver.
+Driver identified that its extra top-level `structured` Item field
+would flow unchanged into Responses input (`engine.rs` builds request
+from stored history). Root decided on a standard-message JSON-text
+codec with strict `PublishedAnswer` decode and a roundtrip test in
+`lifecycle.rs`; driver was instructed to use it, not ad-hoc text/prose.
+Exact Engine review at `2d12a4a` confirmed shared-loop exactly-one
+validation but returned Repair for two `finalize.rs` bugs:
+schema-invalid dynamic result consumes `FinalizeParser`, contrary to
+invalid-then-valid behavior; normalized string `pattern` is advertised
+but not enforced locally, allowing ReplayTransport violation. Reviewer
+ran no completed tests (compiler artifact lock and unknown retained
+job); its matched count is 0/0. Root assigned repair to retained
+Engine owner, then one re-review by same reviewer. Driver was told
+Engine is not integrated; its branch reported rebase onto Store
+integration and an uncommitted borrow fix.
 Driver progress reported uncommitted owned changes for strict factory,
 `PublishedAnswer` publication, and an explicit-barrier real-driver gate.
 It still mentioned `typed_result`, so root corrected it to parse the
