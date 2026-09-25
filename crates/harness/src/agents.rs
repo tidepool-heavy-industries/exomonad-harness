@@ -102,6 +102,9 @@ pub struct Contract {
     pub introduces: Vec<String>,
     pub consumes: Vec<String>,
     pub boundaries: Vec<String>,
+    /// Optional strict JSON Schema for a follow-up's structured result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -6,6 +6,7 @@ pub mod compaction;
 pub mod engine;
 pub mod finalize;
 pub mod item;
+pub mod lifecycle;
 pub mod mailbox;
 pub mod model;
 pub mod protocol;

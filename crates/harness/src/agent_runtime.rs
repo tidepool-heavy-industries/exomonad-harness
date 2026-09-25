@@ -584,6 +584,7 @@ mod tests {
             introduces: vec![],
             consumes: vec![],
             boundaries: vec![],
+            reply: None,
         }
     }
 

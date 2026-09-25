@@ -73,6 +73,7 @@ fn contract(marker: &str) -> Contract {
         introduces: vec![],
         consumes: vec![],
         boundaries: vec![],
+        reply: None,
     }
 }
 
