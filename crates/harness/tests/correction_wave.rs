@@ -1,6 +1,6 @@
 //! Acceptance checks for the correction wave's model-facing tool declarations.
 use harness::provider::Provider;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 struct SchemaProvider;
 

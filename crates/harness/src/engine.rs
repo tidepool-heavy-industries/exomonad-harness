@@ -2153,7 +2153,10 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(2), second_request.notified())
             .await
             .expect("late settlement triggered next model request");
-        assert_eq!(run.await.unwrap().unwrap().turn.response_id, "late-continued");
+        assert_eq!(
+            run.await.unwrap().unwrap().turn.response_id,
+            "late-continued"
+        );
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[1].input[1].0["call_id"], "late-call");
@@ -2204,13 +2207,13 @@ mod tests {
         .await
         .expect("wait call claim persisted");
         let envelope = Envelope {
-                kind: crate::mailbox::EnvelopeType::Message,
-                recipient: AgentPath("/root".into()),
-                sender: AgentPath("/root/worker".into()),
-                payload: "arrived".into(),
-                class: crate::mailbox::DeliveryClass::AtBoundary,
-                timestamp_ms: 1,
-            };
+            kind: crate::mailbox::EnvelopeType::Message,
+            recipient: AgentPath("/root".into()),
+            sender: AgentPath("/root/worker".into()),
+            payload: "arrived".into(),
+            class: crate::mailbox::DeliveryClass::AtBoundary,
+            timestamp_ms: 1,
+        };
         let stored_item = Item(json!({
             "type":"message",
             "role":"assistant",
@@ -2282,11 +2285,8 @@ mod tests {
         );
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let (envelope_tx, envelope_rx) = tokio::sync::mpsc::unbounded_channel();
-        let run = tokio::spawn(async move {
-            engine
-                .run(None, vec![], cancel_rx, envelope_rx)
-                .await
-        });
+        let run =
+            tokio::spawn(async move { engine.run(None, vec![], cancel_rx, envelope_rx).await });
         let wait_call = CallId("wait-envelope".into());
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
@@ -2411,7 +2411,8 @@ mod tests {
             .await
             .expect("live engine turn");
         assert!(
-            turn.turn.items
+            turn.turn
+                .items
                 .iter()
                 .any(|item| item.0["phase"] == "final_answer")
         );
