@@ -34,6 +34,13 @@ two-phase `StoppedReleasing` acknowledgements). Next owner: the
 operator or next root, only for newly authorized work beyond this
 offline scope or the pre-existing live holds. Wave 10 itself stops.
 
+## Historical execution notes (closed)
+
+The following assignment and checkpoint entries preserve the wave's
+decision trail. Any "pending" or "must reassign" wording below
+describes an earlier checkpoint and is superseded by the completed
+handoff above.
+
 Read docs/rsi-iteration-2.md and implement its authorized outcome: the complete
 offline follow-up/finalization lifecycle with typed parent answers and durable
 seen/unseen input provenance. The root owns shared contract, decomposition,
