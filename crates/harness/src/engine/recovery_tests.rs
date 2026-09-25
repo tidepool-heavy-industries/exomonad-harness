@@ -108,13 +108,15 @@ async fn boundary_replay_keeps_typed_answer_and_classifies_interrupted_claim_onc
     store.set_effort(&head, Effort::Low).unwrap();
     store.claim(&call, &head).unwrap();
     assert_eq!(store.interrupt_claim(&call, &head).unwrap(), 1);
+    let resumed_prompt = Item(json!({"role":"user","content":"continue"}));
+    let resumed_hash = store.put_item(&resumed_prompt).unwrap();
 
     let requests = Arc::new(Mutex::new(Vec::new()));
     let (_cancel_tx, cancel_rx) = watch::channel(false);
     let completion = engine(store.clone(), requests.clone())
         .run_with_reply_schema(
             Some(head.clone()),
-            vec![Item(json!({"role":"user","content":"continue"}))],
+            vec![resumed_prompt],
             cancel_rx,
             empty_mailbox(),
             json!({
@@ -154,5 +156,12 @@ async fn boundary_replay_keeps_typed_answer_and_classifies_interrupted_claim_onc
     let head_seen = store.seen_by(&head).unwrap();
     assert!(child_seen.len() > head_seen.len());
     assert!(head_seen.iter().all(|hash| child_seen.contains(hash)));
-    assert_eq!(store.claims_on(&completion.head_request).unwrap().len(), 1);
+    assert!(
+        !head_seen.contains(&resumed_hash),
+        "new input was unseen at the source head"
+    );
+    assert!(
+        child_seen.contains(&resumed_hash),
+        "new input is visible in descendant ancestry"
+    );
 }
