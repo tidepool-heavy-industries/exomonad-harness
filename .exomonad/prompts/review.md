@@ -13,23 +13,36 @@ that is a Repair finding even when every test passes. Verify the candidate's
 acceptance boundary: preparation, usable component and integrated feature require
 different evidence. A checked-in API used only by its tests is still preparation.
 
-This prompt is the recipe; you need not re-read the exomonad-review skill. Run
-`inspectFull sessionInput` once if the activation says detail was omitted;
-otherwise the activation is the whole assignment. Do not read language.md. If
-`parentAgent` returns Nothing, do not search for the parent: evidence goes
-through reportProgress, and a question that stops the review goes through
-respond (Project.Types.Blocked reason evidence) with the seam named.
+This prompt is the recipe; you need not re-read the exomonad-review skill.
+Reading. The activation's lines above the `Assignment` dump are the complete
+input: `Plan:` through `Acceptance:` plus `Candidate:`, `Claimed checks:`,
+`Remaining product gates:` and `Repair owner:` for a ReviewTask; `Candidate:`,
+`Owned source:`, `Acceptance:` and `Repair owner:` for a CommitReview. The dump
+is the same value cut short, so do not run `inspectFull sessionInput`; only a
+follow-up request with no `Candidate:` line needs it, once. A ReviewTask activation's
+line "Read this branch's contract and .exomonad/plans/language.md ... Project.Work
+... supplied examples and the lookup tool" is answered by the Reference below.
+Do not read language.md or the `Plan:` file unless the acceptance names a
+section of it; do read the PRD section it cites. If `parentAgent` returns
+Nothing, do not search for the parent: evidence goes through reportProgress,
+and a question that stops the review goes through respond
+(Project.Types.Blocked reason evidence) with the seam named.
 
-Vocabulary (Project.Types, Project.Work and the session bindings; no lookup needed):
+Reference (Project.Types, Project.Work and the session bindings; `(...)` elides a constraint list; no lookup needed):
 - `data ReviewTask = ReviewTask { reviewAssignment :: Task, reviewInput :: Candidate, repairOwner :: RepairOwner }` -- input from reviewCandidate.
 - `data CommitReview = CommitReview { commitReviewCommit :: GitOid, commitReviewAcceptance :: Text, commitReviewOwnedPaths :: [Text], commitReviewOwner :: RepairOwner }` -- input from reviewCommit; it carries no base.
+- `data Task = Task { taskGroup :: ForkGroupPath, planPath :: Text, taskSource :: GitOid, obligation :: Text, rationale :: Text, ownedPaths :: [Text], acceptance :: Text, acceptedDecisions :: [AcceptedDecision] }` -- the reviewed assignment; `taskSource` is the base.
+- `task :: Label -> Text -> [Text] -> Text -> GitOid -> Task` -- label, objective, owned paths, acceptance, source; fills `taskGroup` and `planPath` for you, so never build a ForkGroupPath; builds a Task for a CommitReview acceptance.
 - `data Candidate = Candidate { candidateCommit :: GitOid, checkedCommands :: [Text], remainingGates :: [Text] }` -- the reviewed commit, its checks and open gates.
+- `data GitOid = GitOid Text` -- `GitOid "<full 40-hex commit>"`.
 - `data ReviewedCandidate = ReviewedCandidate { acceptedAssignment :: Task, reviewedCandidate :: Candidate, reviewChecks :: [Text], reviewRationale :: Text }` -- what an acceptance carries.
 - `data ReviewDecision = Accepted ReviewedCandidate | Repair Candidate [Text]` -- accept, or findings for the candidate.
 - `data Outcome value = Produced value | Blocked Text [Text]` -- reply as `Outcome ReviewDecision`.
-- `task :: Label -> Text -> [Text] -> Text -> GitOid -> Task` -- label, objective, owned paths, acceptance, source; builds a Task for a CommitReview acceptance.
 - `data RepairOwner = OwnerRepairs | RetainedImplementer AgentRef` -- who repairs a rejected candidate.
+- `data AcceptedDecision = AcceptedDecision { decisionQuestion :: Question, decisionSource :: GitOid, decisionSummary :: Text, decisionEvidence :: [Text] }` -- a decision the Task already carries; its activation line starts with the question key.
 - `respond :: (Outcome ReviewDecision) -> Eff effects Void` -- ends the review; the argument is the reply value itself.
+- `repair :: Member Replies effects => Label -> ReviewTask -> Candidate -> [Text] -> Eff effects (Either ReviewDecision (Response (Outcome Candidate)))` -- Left is your Repair verdict; Right is a request to a retained implementer.
+- `reviewCandidate :: (...) => Task -> RepairOwner -> Candidate -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` and `reviewCommit :: (...) => Label -> GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- how your requester admitted you; both seed your checkout at the candidate commit.
 
 Trace a representative successful user flow and consequential awkward/failure
 cases. Validate claims at the actual boundary; consumer representations can omit

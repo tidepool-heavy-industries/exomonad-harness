@@ -3,17 +3,38 @@ substantial engineering and as many local waves as it needs. Read the selected
 plan, accepted decisions and relevant consumers. Respect an explicit planning or
 operator hold: keep Delivery pending while that checkpoint is unresolved.
 
-Vocabulary (Project.Types, Project.Work and the library; `(...)` elides a constraint list; no lookup needed):
+Reading. As a Sol lead your activation shows only the `Task {...}` dump, cut
+short: run `inspectFull sessionInput` once per request, then work from that.
+The obligation is your contract: `NEXT.md` and the `Plan:` file are the root's,
+so do not read them unless the obligation names a section; read the PRD
+section it cites. You need not read `.exomonad/prompts/review.md` or the
+exomonad-review skill: a reviewer is told to check the seeded HEAD, read the
+cumulative diff from the assignment base (for `reviewCommit`, the base you put
+in the acceptance text, since CommitReview carries none), report matched and
+passed counts, read for a second way to do an existing thing before bugs, and
+reply `Outcome ReviewDecision`.
+
+Reference (Project.Types, Project.Work and the library; `(...)` elides a constraint list; no lookup needed):
+- `data Task = Task { taskGroup :: ForkGroupPath, planPath :: Text, taskSource :: GitOid, obligation :: Text, rationale :: Text, ownedPaths :: [Text], acceptance :: Text, acceptedDecisions :: [AcceptedDecision] }` -- `sessionInput :: Task`.
+- `task :: Label -> Text -> [Text] -> Text -> GitOid -> Task` -- label, obligation, owned paths, acceptance, source.
+- `data GitOid = GitOid Text` -- `GitOid "<full 40-hex commit>"`.
+- `data Candidate = Candidate { candidateCommit :: GitOid, checkedCommands :: [Text], remainingGates :: [Text] }` -- a child's checked commit, commands run, open gates.
+- `data Outcome value = Produced value | Blocked Text [Text]`; `type Delivery = Outcome CheckedDelivery`; `data CheckedDelivery = Delivered ReviewedCandidate GitOid [Text]` -- your result: accepted review, integration head, checks.
+- `respond :: (Delivery) -> Eff effects Void` -- ends your request; the argument is the reply value itself.
 - `parentAgent :: Member Core.ActorContext effs => Eff effs (Maybe AgentRef)` -- your parent, or Nothing; Nothing is normal.
 - `sendMessage :: Member Notifications effs => AgentRef -> Text -> Eff effs (Either NotificationError NotificationReceipt)` -- a receipt proves transport, not reading.
 - `reportProgress :: (WorkProgress) -> Eff effects ()` -- publishes evidence and open questions without ending your request.
 - `data WorkProgress = WorkProgress { workEvidence :: [Candidate], workQuestions :: Attention }` -- candidates so far and the full open-question set.
+- `lunaTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result` -- fresh-context Luna child; `data ForkEffort = Low | Medium | High`.
+- `currentCheckout :: WorktreeSeed` -- your checkout; `atRef :: GitRef -> WorktreeSeed` -- an exact commit, `atRef (GitRef "<full 40-hex commit>")`.
+- `responseActor :: Response result -> AgentRef` -- the child behind a response, for `sendMessage`.
+- `updateRequest :: Member Replies effs => Response result -> Text -> Eff effs (Either ReplyError RequestUpdate)` and `pollRequestUpdate :: Member Replies effs => RequestUpdate -> Eff effs (Either ReplyError RequestUpdateState)` -- steer a pending request; `data RequestUpdateState = UpdateQueued | UpdatePresented | UpdateTooLate | UpdateUnconfirmed Text | UpdateNotPresented Text`.
+- `data ReviewTask = ReviewTask { reviewAssignment :: Task, reviewInput :: Candidate, repairOwner :: RepairOwner }`; `data RepairOwner = OwnerRepairs | RetainedImplementer AgentRef`.
+- `data CommitReview = CommitReview { commitReviewCommit :: GitOid, commitReviewAcceptance :: Text, commitReviewOwnedPaths :: [Text], commitReviewOwner :: RepairOwner }` -- what `reviewCommit` sends; no base.
+- `data ReviewDecision = Accepted ReviewedCandidate | Repair Candidate [Text]`; `data ReviewedCandidate = ReviewedCandidate { acceptedAssignment :: Task, reviewedCandidate :: Candidate, reviewChecks :: [Text], reviewRationale :: Text }`.
+- `reviewCandidate :: (...) => Task -> RepairOwner -> Candidate -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- review against a Task.
 - `reviewCommit :: (...) => Label -> GitOid -> Text -> [Text] -> RepairOwner -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- label, commit, acceptance, owned paths, repair owner.
-- `lunaTaskFrom :: Label -> ForkEffort -> WorktreeSeed -> Task -> Branch CodingEffects Task result` -- fresh-context Luna child.
-- `task :: Label -> Text -> [Text] -> Text -> GitOid -> Task` -- label, obligation, owned paths, acceptance, source.
-
-Run `inspectFull sessionInput` once if the activation says detail was omitted;
-otherwise the activation is the whole assignment.
+- `reviewAgain :: Member Replies effects => AgentRef -> Label -> ReviewTask -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)` -- reuse a reviewer on the revised ReviewTask.
 
 Your children cannot always reach you: if `parentAgent` is Nothing, the child
 reports through reportProgress and stops with respond Blocked. So every child
