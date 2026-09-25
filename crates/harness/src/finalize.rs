@@ -75,27 +75,11 @@ fn normalize_schema(schema: Value, path: &str) -> Result<Value, FinalizeError> {
     let allowed: &[&str] = match schema_type {
         "object" => &["type", "properties", "required", "additionalProperties"],
         "array" => &["type", "items", "minItems", "maxItems", "uniqueItems"],
-        "string" => &[
-            "type",
-            "format",
-            "minLength",
-            "maxLength",
-            "pattern",
-            "enum",
-            "const",
-        ],
-        "integer" | "number" => &[
-            "type",
-            "format",
-            "minimum",
-            "maximum",
-            "exclusiveMinimum",
-            "exclusiveMaximum",
-            "multipleOf",
-            "enum",
-            "const",
-        ],
+        "string" => &["type", "minLength", "maxLength", "pattern", "enum", "const"],
         "boolean" | "null" => &["type", "enum", "const"],
+        "integer" | "number" => {
+            return Err(unsupported(path, format!("unsupported type {schema_type}")));
+        }
         other => return Err(unsupported(path, format!("unsupported type {other}"))),
     };
     for key in object.keys() {
@@ -147,30 +131,9 @@ fn normalize_schema(schema: Value, path: &str) -> Result<Value, FinalizeError> {
         "string" => copy_constraints(
             object,
             &mut normalized,
-            &[
-                "format",
-                "minLength",
-                "maxLength",
-                "pattern",
-                "enum",
-                "const",
-            ],
+            &["minLength", "maxLength", "pattern", "enum", "const"],
         ),
-        "integer" | "number" => copy_constraints(
-            object,
-            &mut normalized,
-            &[
-                "format",
-                "minimum",
-                "maximum",
-                "exclusiveMinimum",
-                "exclusiveMaximum",
-                "multipleOf",
-                "enum",
-                "const",
-            ],
-        ),
-        "boolean" | "null" => copy_constraints(object, &mut normalized, &["enum", "const"]),
+        "boolean" => copy_constraints(object, &mut normalized, &["enum", "const"]),
         _ => unreachable!("type checked above"),
     }
     Ok(Value::Object(normalized))
@@ -263,12 +226,12 @@ mod tests {
 
     #[derive(Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
     struct Reply {
-        answer: u32,
+        answer: String,
     }
 
     #[derive(Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
     struct Nested {
-        count: u32,
+        count: String,
     }
 
     #[derive(Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -286,6 +249,16 @@ mod tests {
     #[derive(Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
     struct ReferencedReply {
         nested: Nested,
+    }
+
+    fn email_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"type": "string", "format": "email"})
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+    struct FormattedReply {
+        #[schemars(schema_with = "email_schema")]
+        email: String,
     }
 
     fn call(name: &str, arguments: Value) -> Item {
@@ -306,8 +279,11 @@ mod tests {
         assert_eq!(schema["parameters"]["additionalProperties"], false);
         assert!(schema["parameters"]["properties"]["result"].is_object());
         assert_eq!(
-            respond_to_finalize(Reply { answer: 42 }).unwrap(),
-            json!({"result":{"answer":42}})
+            respond_to_finalize(Reply {
+                answer: "ok".into()
+            })
+            .unwrap(),
+            json!({"result":{"answer":"ok"}})
         );
     }
 
@@ -320,7 +296,7 @@ mod tests {
                 "properties":{
                     "nested":{
                         "type":"object",
-                        "properties":{"count":{"type":"integer"}},
+                        "properties":{"count":{"type":"string"}},
                         "required":["count"],
                         "additionalProperties":true
                     },
@@ -356,22 +332,35 @@ mod tests {
             tool_schema::<ReferencedReply>(),
             Err(FinalizeError::UnsupportedSchema { .. })
         ));
+        assert!(matches!(
+            tool_schema::<u32>(),
+            Err(FinalizeError::UnsupportedSchema { .. })
+        ));
+        assert!(matches!(
+            tool_schema::<FormattedReply>(),
+            Err(FinalizeError::UnsupportedSchema { .. })
+        ));
     }
 
     #[test]
     fn parses_completed_finalize_from_json_arguments() {
         let mut parser = FinalizeParser::new();
         let parsed: Reply = parser
-            .parse_completed(&call("finalize", json!("{\"result\":{\"answer\":42}}")))
+            .parse_completed(&call("finalize", json!("{\"result\":{\"answer\":\"42\"}}")))
             .unwrap();
-        assert_eq!(parsed, Reply { answer: 42 });
+        assert_eq!(
+            parsed,
+            Reply {
+                answer: "42".into()
+            }
+        );
     }
 
     #[test]
     fn rejects_wrong_name_malformed_unknown_missing_and_second_finalize() {
         let mut parser = FinalizeParser::new();
         assert_eq!(
-            parser.parse_completed::<Reply>(&call("other", json!({"result":{"answer":42}}))),
+            parser.parse_completed::<Reply>(&call("other", json!({"result":{"answer":"42"}}))),
             Err(FinalizeError::WrongTool)
         );
         assert!(matches!(
@@ -381,7 +370,7 @@ mod tests {
         assert_eq!(
             parser.parse_completed::<Reply>(&call(
                 "finalize",
-                json!({"result":{"answer":42},"extra":true})
+                json!({"result":{"answer":"42"},"extra":true})
             )),
             Err(FinalizeError::InvalidEnvelope)
         );
@@ -390,10 +379,12 @@ mod tests {
             Err(FinalizeError::InvalidEnvelope)
         );
 
-        let valid = call("finalize", json!({"result":{"answer":42}}));
+        let valid = call("finalize", json!({"result":{"answer":"42"}}));
         assert_eq!(
             parser.parse_completed::<Reply>(&valid),
-            Ok(Reply { answer: 42 })
+            Ok(Reply {
+                answer: "42".into()
+            })
         );
         assert_eq!(
             parser.parse_completed::<Reply>(&valid),
@@ -405,12 +396,12 @@ mod tests {
     fn rejects_invalid_t_payload_without_consuming_finalize() {
         let mut parser = FinalizeParser::new();
         assert!(matches!(
-            parser.parse_completed::<Reply>(&call("finalize", json!({"result":{"answer":"no"}}))),
+            parser.parse_completed::<Reply>(&call("finalize", json!({"result":{"answer":7}}))),
             Err(FinalizeError::MalformedArguments(_))
         ));
         assert_eq!(
-            parser.parse_completed::<Reply>(&call("finalize", json!({"result":{"answer":7}}))),
-            Ok(Reply { answer: 7 })
+            parser.parse_completed::<Reply>(&call("finalize", json!({"result":{"answer":"7"}}))),
+            Ok(Reply { answer: "7".into() })
         );
     }
 }
