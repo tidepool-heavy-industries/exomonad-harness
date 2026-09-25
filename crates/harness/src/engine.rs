@@ -236,6 +236,23 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         Ok((completion, reply))
     }
 
+    /// Run an agent whose stored contract supplies a strict result schema.
+    /// `result_schema` describes the value inside finalize's `result` field.
+    /// Unlike `run_finalized<T>`, the result remains in `completion.turn` for
+    /// the host to parse and route using its contract.
+    pub async fn run_with_reply_schema(
+        &self,
+        head: Option<RequestId>,
+        new_items: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+        incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+        result_schema: serde_json::Value,
+    ) -> Result<EngineCompletion, EngineError> {
+        let schema = crate::finalize::tool_schema_from_result_schema(result_schema)?;
+        self.run_with_finalize(head, new_items, cancellation, incoming, Some(schema))
+            .await
+    }
+
     async fn run_with_finalize(
         &self,
         head: Option<RequestId>,
@@ -700,6 +717,20 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     return Err(self.cleanup_pending(error, &pending).await);
                 }
             } else if is_final(&turn, finalize_schema.is_some()) && pending.is_empty() {
+                if let Some(schema) = finalize_schema {
+                    let calls: Vec<_> = turn
+                        .items
+                        .iter()
+                        .filter(|item| is_finalize_call(item))
+                        .collect();
+                    if calls.len() != 1 {
+                        return Err(EngineError::InvalidFinalizeCount);
+                    }
+                    FinalizeParser::new().parse_completed_with_result_schema(
+                        calls[0],
+                        &schema["parameters"]["properties"]["result"],
+                    )?;
+                }
                 // Read the durable parent chain only after every item/output
                 // from this final turn has been persisted.
                 let transcript = match self.read_history(&parent).await {
@@ -4288,6 +4319,14 @@ mod tests {
                 answer: "ready".into()
             }
         );
+        assert_eq!(
+            FinalizeParser::new()
+                .parse_completed::<FinalReply>(&completion.turn.items[0])
+                .unwrap(),
+            FinalReply {
+                answer: "ready".into()
+            }
+        );
         assert!(completion.transcript.contains(&final_call));
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
@@ -4313,6 +4352,142 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn dynamic_reply_schema_preserves_strict_result_without_job() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let final_call = Item(json!({
+            "type":"function_call", "call_id":"final-dynamic", "name":"finalize",
+            "arguments":{"result":{"answer":"ready"}}
+        }));
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new([turn("dynamic-final", vec![final_call.clone()])].into()),
+        };
+        let store = Arc::new(Store::memory().unwrap());
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            replay,
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "finalize".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "dynamic-session".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let completion = engine
+            .run_with_reply_schema(
+                None,
+                vec![Item(json!({"role":"user","content":"go"}))],
+                cancel_rx,
+                empty_mailbox(),
+                json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            FinalizeParser::new()
+                .parse_completed::<serde_json::Value>(&completion.turn.items[0])
+                .unwrap(),
+            json!({"answer":"ready"})
+        );
+        assert!(completion.transcript.contains(&final_call));
+        assert!(
+            store
+                .claims_on(&completion.head_request)
+                .unwrap()
+                .is_empty()
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .tools
+                .iter()
+                .filter(|t| t["name"] == "finalize")
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests[0]
+                .tools
+                .iter()
+                .find(|t| t["name"] == "finalize")
+                .unwrap()["strict"],
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_reply_schema_rejects_multiple_and_malformed_finalize() {
+        let valid = Item(json!({
+            "type":"function_call", "call_id":"final-1", "name":"finalize",
+            "arguments":{"result":{"answer":"ready"}}
+        }));
+        let second = Item(json!({
+            "type":"function_call", "call_id":"final-2", "name":"finalize",
+            "arguments":{"result":{"answer":"again"}}
+        }));
+        let malformed = Item(json!({
+            "type":"function_call", "call_id":"final-1", "name":"finalize",
+            "arguments":{"wrong":{"answer":"ready"}}
+        }));
+        let wrong_shape = Item(json!({
+            "type":"function_call", "call_id":"final-1", "name":"finalize",
+            "arguments":{"result":{"answer":7}}
+        }));
+        for (name, items) in [
+            ("multiple", vec![valid.clone(), second]),
+            ("missing-result", vec![malformed]),
+            ("wrong-result-shape", vec![wrong_shape]),
+        ] {
+            let replay = Replay {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                turns: Mutex::new([turn(name, items)].into()),
+            };
+            let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+                replay,
+                Arc::new(Store::memory().unwrap()),
+                Arc::new(JobScheduler::new(1).unwrap()),
+                Arc::new(Echo),
+                EngineConfig {
+                    instructions: "finalize".into(),
+                    tools: vec![],
+                    model: "test".into(),
+                    effort: Effort::Low,
+                    session_id: format!("bad-{name}"),
+                    agent: AgentPath("/root".into()),
+                },
+            );
+            let (_cancel_tx, cancel_rx) = watch::channel(false);
+            let error = engine
+                .run_with_reply_schema(
+                    None,
+                    vec![Item(json!({"role":"user","content":"go"}))],
+                    cancel_rx,
+                    empty_mailbox(),
+                    json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}),
+                )
+                .await
+                .expect_err(name);
+            match name {
+                "multiple" => assert!(matches!(error, EngineError::InvalidFinalizeCount)),
+                "missing-result" => assert!(matches!(
+                    error,
+                    EngineError::Finalize(FinalizeError::InvalidEnvelope)
+                )),
+                _ => assert!(matches!(
+                    error,
+                    EngineError::Finalize(FinalizeError::ResultSchemaMismatch(_))
+                )),
+            }
+        }
     }
 
     /// Explicit subscription smoke: opt in locally, never in ordinary CI.
