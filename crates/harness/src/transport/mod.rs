@@ -8,6 +8,7 @@ pub mod sse;
 
 use crate::item::Item;
 use crate::model::Effort;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -21,7 +22,7 @@ pub struct ResponsesRequest {
     pub session_id: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -29,7 +30,7 @@ pub struct Usage {
     pub cache_write_tokens: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ResponsesTurn {
     pub response_id: String,
     pub items: Vec<Item>,

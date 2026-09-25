@@ -4,6 +4,7 @@ pub mod schema;
 use crate::{
     item::{Item, ItemHash},
     model::{AgentPath, CallId, Effort, RequestId},
+    transport::ResponsesTurn,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -1211,6 +1212,52 @@ impl Store {
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
     }
+    /// Persist the completed model batch separately from later tool outputs
+    /// appended to the same request. The event is written only after Engine
+    /// has persisted all completed response items.
+    pub fn record_replay_turn(&self, request: &RequestId, turn: &ResponsesTurn) -> Result<i64> {
+        self.record_event(Some(request), "model_turn", &serde_json::to_value(turn)?)
+    }
+
+    /// Completed model turns on this request's branch, from `root` forward.
+    /// Fork branches are excluded even when they inherit `root` as an ancestor.
+    pub fn replay_turns(&self, root: &RequestId) -> Result<Vec<(RequestId, ResponsesTurn)>> {
+        let c = self.lock();
+        let mut q = c.prepare(
+            "WITH RECURSIVE chain(id, branch) AS (
+                SELECT id, branch FROM requests WHERE id=?1
+                UNION ALL
+                SELECT child.id, child.branch FROM requests child
+                JOIN chain parent ON child.parent_id=parent.id AND child.branch=parent.branch
+            )
+            SELECT e.request_id, e.payload FROM events e
+            JOIN chain ON chain.id=e.request_id
+            WHERE e.kind='model_turn' ORDER BY e.id",
+        )?;
+        let rows = q.query_map([&root.0], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            let (request, payload) = row?;
+            Ok((RequestId(request), serde_json::from_str(&payload)?))
+        })
+        .collect()
+    }
+
+    /// The durable settled output for one recorded provider call.
+    pub fn replay_output(&self, call: &CallId) -> Result<Option<Item>> {
+        let c = self.lock();
+        let json: Option<String> = c
+            .query_row(
+                "SELECT i.json FROM claims c JOIN items i ON i.hash=c.output_hash
+                 WHERE c.call_id=?1 AND c.state='settled' ORDER BY c.request_id LIMIT 1",
+                [&call.0],
+                |r| r.get(0),
+            )
+            .optional()?;
+        json.map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
+    }
     pub fn add_envelope(
         &self,
         sender: &str,
@@ -1558,6 +1605,63 @@ mod tests {
             Err(StoreError::MissingAgentParent(_))
         ));
     }
+    #[test]
+    fn replay_turns_and_outputs_survive_reopen_without_flat_history_guessing() {
+        let path = std::env::temp_dir().join(format!("harness-replay-{}.db", uuid::Uuid::new_v4()));
+        let root = id("replay-root");
+        let next = id("replay-next");
+        let fork = id("replay-fork");
+        let call = CallId("replay-call".into());
+        let call_item = item(serde_json::json!({
+            "type":"function_call","call_id":call.0,"name":"cell","arguments":"{}"
+        }));
+        let output = item(serde_json::json!({
+            "type":"function_call_output","call_id":call.0,"output":"{\"value\":\"done\"}"
+        }));
+        {
+            let s = Store::open(&path).unwrap();
+            s.create_request(&root, None, "/root").unwrap();
+            s.create_request(&next, Some(&root), "/root").unwrap();
+            s.create_request(&fork, Some(&root), "/root/child").unwrap();
+            s.append_items(&root, std::slice::from_ref(&call_item))
+                .unwrap();
+            s.record_replay_turn(
+                &root,
+                &ResponsesTurn {
+                    response_id: "recorded-call".into(),
+                    items: vec![call_item.clone()],
+                    usage: Default::default(),
+                },
+            )
+            .unwrap();
+            s.claim(&call, &root).unwrap();
+            s.write_output(&call, &output).unwrap();
+            s.append_items(&next, std::slice::from_ref(&output))
+                .unwrap();
+            s.record_replay_turn(
+                &fork,
+                &ResponsesTurn {
+                    response_id: "fork-only".into(),
+                    items: vec![],
+                    usage: Default::default(),
+                },
+            )
+            .unwrap();
+        }
+        {
+            let s = Store::open(&path).unwrap();
+            let turns = s.replay_turns(&root).unwrap();
+            assert_eq!(turns.len(), 1);
+            assert_eq!(turns[0].0, root);
+            assert_eq!(turns[0].1.response_id, "recorded-call");
+            assert_eq!(turns[0].1.items, vec![call_item]);
+            assert_eq!(s.replay_output(&call).unwrap(), Some(output));
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
     #[test]
     fn durable_dag_content_address_and_queries() {
         let path = std::env::temp_dir().join(format!("harness-store-{}.db", uuid::Uuid::new_v4()));

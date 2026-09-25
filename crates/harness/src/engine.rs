@@ -9,6 +9,7 @@ use crate::{
         CompactContext, CompactError, Compactor, Server, ServerCompactFuture, ToolName,
         TypedTurnFuture,
     },
+    finalize::{FINALIZE_TOOL_NAME, FinalizeError, FinalizeParser},
     item::Item,
     mailbox::{Envelope, MessageChannel},
     model::{AgentPath, CallId, Effort, RequestId},
@@ -23,6 +24,8 @@ use crate::{
         wait_agent_and_drain,
     },
 };
+use schemars::JsonSchema;
+use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::sync::Arc;
 use thiserror::Error;
@@ -54,6 +57,10 @@ pub enum EngineError {
     Cancelled,
     #[error("Responses turn did not contain a terminal assistant answer")]
     MissingFinal,
+    #[error(transparent)]
+    Finalize(#[from] FinalizeError),
+    #[error("typed completion requires exactly one finalize call")]
+    InvalidFinalizeCount,
     #[error("malformed Responses function_call item")]
     InvalidFunctionCall,
     #[error("request history has no harness-authored configuration_update")]
@@ -197,7 +204,45 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         head: Option<RequestId>,
         new_items: Vec<Item>,
         cancellation: watch::Receiver<bool>,
+        incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+    ) -> Result<EngineCompletion, EngineError> {
+        self.run_with_finalize(head, new_items, cancellation, incoming, None)
+            .await
+    }
+
+    /// Require a strict typed `finalize` call instead of an assistant final
+    /// message. The call is persisted as an item but never scheduled as a Job.
+    pub async fn run_finalized<T: JsonSchema + DeserializeOwned>(
+        &self,
+        head: Option<RequestId>,
+        new_items: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+        incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+    ) -> Result<(EngineCompletion, T), EngineError> {
+        let schema = crate::finalize::tool_schema::<T>()?;
+        let completion = self
+            .run_with_finalize(head, new_items, cancellation, incoming, Some(schema))
+            .await?;
+        let calls: Vec<_> = completion
+            .turn
+            .items
+            .iter()
+            .filter(|item| is_finalize_call(item))
+            .collect();
+        if calls.len() != 1 {
+            return Err(EngineError::InvalidFinalizeCount);
+        }
+        let reply = FinalizeParser::new().parse_completed(calls[0])?;
+        Ok((completion, reply))
+    }
+
+    async fn run_with_finalize(
+        &self,
+        head: Option<RequestId>,
+        new_items: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
         mut incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+        finalize_schema: Option<serde_json::Value>,
     ) -> Result<EngineCompletion, EngineError> {
         let (envelope_tx, envelopes) = tokio::sync::mpsc::unbounded_channel();
         let keepalive = envelope_tx.clone();
@@ -209,7 +254,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
         });
         let result = self
-            .run_loop(head, new_items, cancellation, envelopes, true)
+            .run_loop(
+                head,
+                new_items,
+                cancellation,
+                envelopes,
+                true,
+                finalize_schema.as_ref(),
+            )
             .await;
         drop(keepalive);
         forwarder.abort();
@@ -223,6 +275,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         mut cancellation: watch::Receiver<bool>,
         mut envelopes: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
         admit_inbox: bool,
+        finalize_schema: Option<&serde_json::Value>,
     ) -> Result<EngineCompletion, EngineError> {
         self.await_here_invocation_output(&head, &mut cancellation)
             .await?;
@@ -393,7 +446,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let req = ResponsesRequest {
                 input: history,
                 instructions: self.config.instructions.clone(),
-                tools: self.tools(),
+                tools: self.tools(finalize_schema),
                 model: self.config.model.clone(),
                 // The request-level field is only the cache-preserving mirror
                 // of the first positional update in the exact history sent.
@@ -428,6 +481,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                     return Err(self.cleanup_pending(error, &pending).await);
                                 }
                                 persisted_items.push(item.clone());
+                                if finalize_schema.is_some() && is_finalize_call(&item) {
+                                    continue;
+                                }
                                 match self.dispatch_completed_item(item, &parent).await {
                                     Ok(Some(call)) => {
                                         if !pending.iter().any(|current| current.call_id == call.call_id) {
@@ -459,6 +515,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         return Err(self.cleanup_pending(error, &pending).await);
                     }
                     persisted_items.push(item.clone());
+                    if finalize_schema.is_some() && is_finalize_call(&item) {
+                        continue;
+                    }
                     match self.dispatch_completed_item(item, &parent).await {
                         Ok(Some(call)) => {
                             if !pending
@@ -493,6 +552,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                 }
                 if item.0["type"] == "function_call" {
+                    if finalize_schema.is_some() && is_finalize_call(item) {
+                        continue;
+                    }
                     let Some((call_id, _, _)) = items::function_call(item) else {
                         return Err(self
                             .cleanup_pending(EngineError::InvalidFunctionCall, &pending)
@@ -522,6 +584,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             }
                         }
                     }
+                }
+            }
+            {
+                let store = self.store.clone();
+                let request = parent.clone();
+                let recorded = turn.clone();
+                if let Err(error) =
+                    blocking(move || store.record_replay_turn(&request, &recorded).map(|_| ()))
+                        .await
+                {
+                    return Err(self.cleanup_pending(error, &pending).await);
                 }
             }
             let usage_for_store = StoredUsage {
@@ -589,7 +662,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 {
                     return Err(self.cleanup_pending(error, &pending).await);
                 }
-            } else if is_final(&turn) && !pending.is_empty() && settled_this_turn.is_empty() {
+            } else if is_final(&turn, finalize_schema.is_some())
+                && !pending.is_empty()
+                && settled_this_turn.is_empty()
+            {
                 let result = match self
                     .wait_for_resume(&pending, &mut envelopes, &mut cancellation)
                     .await
@@ -606,7 +682,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 {
                     return Err(self.cleanup_pending(error, &pending).await);
                 }
-            } else if is_final(&turn) && pending.is_empty() {
+            } else if is_final(&turn, finalize_schema.is_some()) && pending.is_empty() {
                 // Read the durable parent chain only after every item/output
                 // from this final turn has been persisted.
                 let transcript = match self.read_history(&parent).await {
@@ -680,8 +756,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         .await
     }
 
-    fn tools(&self) -> Vec<serde_json::Value> {
+    fn tools(&self, finalize_schema: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
         let mut tools = self.config.tools.clone();
+        if let Some(schema) = finalize_schema {
+            // Typed completion owns this name for this run. A caller may have
+            // supplied a non-strict or differently-shaped finalize tool;
+            // advertising both would make the reply contract ambiguous.
+            tools.retain(|tool| {
+                tool.get("name").and_then(serde_json::Value::as_str) != Some(FINALIZE_TOOL_NAME)
+            });
+            tools.push(schema.clone());
+        }
         for tool in self.provider.all_tools() {
             let name = tool.get("name").and_then(serde_json::Value::as_str);
             if name.is_none_or(|name| {
@@ -1009,7 +1094,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     .create(ResponsesRequest {
                         input: items,
                         instructions: self.config.instructions.clone(),
-                        tools: self.tools(),
+                        tools: self.tools(None),
                         model: self.config.model.clone(),
                         pinned_effort: effective_effort,
                         session_id: self.config.session_id.clone(),
@@ -1087,10 +1172,18 @@ fn remove_matching_item(persisted: &mut Vec<Item>, item: &Item) -> bool {
     true
 }
 
-fn is_final(turn: &ResponsesTurn) -> bool {
-    turn.items
-        .iter()
-        .any(|item| item.0["phase"] == "final_answer")
+fn is_finalize_call(item: &Item) -> bool {
+    item.0["type"] == "function_call" && item.0["name"] == FINALIZE_TOOL_NAME
+}
+
+fn is_final(turn: &ResponsesTurn, finalized: bool) -> bool {
+    turn.items.iter().any(|item| {
+        if finalized {
+            is_finalize_call(item)
+        } else {
+            item.0["phase"] == "final_answer"
+        }
+    })
 }
 
 async fn blocking<T: Send + 'static>(
@@ -1114,6 +1207,7 @@ mod tests {
     use crate::provider::ProviderError;
     use crate::transport::{TransportError, Usage};
     use async_trait::async_trait;
+    use serde::Deserialize;
     use serde_json::{Value, json};
     use std::sync::Mutex;
     use tokio::sync::Notify;
@@ -4116,6 +4210,83 @@ mod tests {
             1
         );
         assert!(store.unread(&recipient.0).unwrap().is_empty());
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
+    struct FinalReply {
+        answer: String,
+    }
+
+    #[tokio::test]
+    async fn typed_finalize_is_the_only_terminal_path_and_is_not_a_job() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let final_call = Item(json!({
+            "type":"function_call", "call_id":"final-1", "name":"finalize",
+            "arguments":"{\"result\":{\"answer\":\"ready\"}}"
+        }));
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new([turn("typed-final", vec![final_call.clone()])].into()),
+        };
+        let store = Arc::new(Store::memory().unwrap());
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            replay,
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "finalize".into(),
+                tools: vec![json!({
+                    "type":"function", "name":"finalize", "strict":false,
+                    "parameters":{"type":"object","properties":{}}
+                })],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "typed-session".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let (completion, reply) = engine
+            .run_finalized::<FinalReply>(
+                None,
+                vec![Item(json!({"role":"user","content":"go"}))],
+                cancel_rx,
+                empty_mailbox(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reply,
+            FinalReply {
+                answer: "ready".into()
+            }
+        );
+        assert!(completion.transcript.contains(&final_call));
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .tools
+                .iter()
+                .filter(|t| t["name"] == "finalize")
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests[0]
+                .tools
+                .iter()
+                .find(|t| t["name"] == "finalize")
+                .unwrap()["strict"],
+            true
+        );
+        assert!(
+            store
+                .claims_on(&completion.head_request)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Explicit subscription smoke: opt in locally, never in ordinary CI.
