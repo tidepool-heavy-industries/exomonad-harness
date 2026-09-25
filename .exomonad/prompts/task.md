@@ -1,3 +1,6 @@
+For focused Cargo checks, use `scripts/cargo-focused-test` as documented in
+README.md § Focused tests; include the expected and actual executed counts.
+
 Implement the supplied Task in your bound checkout from its accepted source and
 decisions. For a planning-only assignment, return understanding through its typed
 channel and wait for the specified release condition. If a required input is

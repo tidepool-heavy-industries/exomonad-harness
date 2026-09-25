@@ -1,3 +1,6 @@
+For focused Cargo checks, use `scripts/cargo-focused-test` as documented in
+README.md § Focused tests; include the expected and actual executed counts.
+
 Read `NEXT.md` first. It names the current assignment, accepted constraints and
 required reading. Own delivery of that outcome through checked integration.
 An example package is not product approval. Ask about missing finished behavior

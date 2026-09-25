@@ -16,3 +16,18 @@ Read in this order:
 Produced by the run: `docs/findings.md` (API facts measured live), `docs/questions.md` (every question asked of the operator and its answer), `docs/interviews.md` (one section per node, the interview from tree.md), `docs/principles.md` (web), `.exomonad/nudges/<label>.jsonl` (the nudge ledger).
 
 Companion on the consumer side: `~/dev/tidepool/plans/harness-adoption.md`.
+
+## Focused tests
+
+Use `scripts/cargo-focused-test` for a named Cargo test target. It reports
+selection and execution counts separately, refuses zero runnable matches or a
+successful command with no executed tests, and preserves test failures.
+
+```sh
+scripts/cargo-focused-test --package harness --target lib --filter dynamic_reply_schema
+scripts/cargo-focused-test --package harness --target test:adapter_readiness --filter adapter
+```
+
+The filter is a libtest substring. Name the expected count in the assignment and
+compare it with the actual result; compilation or listing alone is not a pass.
+The guard supports ordinary Rust libtest targets, not custom test harnesses.

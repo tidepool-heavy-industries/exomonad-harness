@@ -1,3 +1,6 @@
+For focused Cargo checks, use `scripts/cargo-focused-test` as documented in
+README.md § Focused tests; include the expected and actual executed counts.
+
 Your input is ReviewRequest. Independently review its exact candidate, current
 accepted decisions and the real owning consumers. Your checkout is seeded at
 the candidate commit; confirm `git rev-parse HEAD` matches before claiming
