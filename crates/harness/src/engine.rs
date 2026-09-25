@@ -49,6 +49,8 @@ pub enum EngineError {
     MissingFinal,
     #[error("malformed Responses function_call item")]
     InvalidFunctionCall,
+    #[error("request history has no harness-authored configuration_update")]
+    MissingEffortPin,
     #[error("a model response contained more than one wait_agent call")]
     MultipleWaitAgents,
     #[error(
@@ -198,9 +200,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         mut envelopes: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
         admit_inbox: bool,
     ) -> Result<EngineCompletion, EngineError> {
-        if let Some(head) = &head {
-            self.read_history(head).await?;
-        }
+        let inherited_history = match &head {
+            Some(head) => self.read_history(head).await?,
+            None => Vec::new(),
+        };
         let id = RequestId(uuid::Uuid::new_v4().to_string());
         let store = self.store.clone();
         let request = id.clone();
@@ -216,6 +219,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             )
         })
         .await?;
+        if !inherited_history.iter().any(Item::is_configuration_update) {
+            let store = self.store.clone();
+            let request = id.clone();
+            let initial_effort = self.config.effort;
+            blocking(move || store.set_effort(&request, initial_effort)).await?;
+        }
         if admit_inbox {
             let store = self.store.clone();
             let recipient = self.config.agent.clone();
@@ -237,19 +246,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 Ok(history) => history,
                 Err(error) => return Err(self.cleanup_pending(error, &pending).await),
             };
+            let pinned_effort = history
+                .iter()
+                .find_map(Item::configuration_effort)
+                .ok_or(EngineError::MissingEffortPin)?;
             let req = ResponsesRequest {
                 input: history,
                 instructions: self.config.instructions.clone(),
                 tools: self.tools(),
                 model: self.config.model.clone(),
-                // FIXME(correction-wave c): effort is a request-level field only.
-                // PRD `decisions`: effort lives in history as a harness-authored
-                // `configuration_update` item; this field mirrors the FIRST update
-                // in the sent history (cache), never a config value. Needs the
-                // positional settings family in the store, `set_effort`, and the
-                // fork strip list. Acceptance item 13 depends on it.
-                // Provenance is settled: see the TODO at `Store::append_items`.
-                pinned_effort: self.config.effort,
+                // The request-level field is only the cache-preserving mirror
+                // of the first positional update in the exact history sent.
+                pinned_effort,
                 session_id: self.config.session_id.clone(),
             };
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
@@ -1199,22 +1207,34 @@ mod tests {
         let expected_history = {
             let requests = requests.lock().unwrap();
             assert_eq!(requests.len(), 3);
-            assert_eq!(requests[0].input.len(), 1);
+            for request in requests.iter() {
+                assert_eq!(
+                    request.pinned_effort,
+                    request
+                        .input
+                        .iter()
+                        .find_map(Item::configuration_effort)
+                        .expect("every sent history has an effort pin")
+                );
+            }
+            assert_eq!(requests[0].input.len(), 2);
+            assert_eq!(requests[0].input[1].0["type"], "configuration_update");
             let second = &requests[1].input;
             assert_eq!(second[0].0["content"], "go");
-            assert_eq!(second[1].0["type"], "function_call");
-            assert_eq!(second[2].0["type"], "function_call_output");
-            assert_eq!(second[2].0["call_id"], "c1");
+            assert_eq!(second[1].0["type"], "configuration_update");
+            assert_eq!(second[2].0["type"], "function_call");
+            assert_eq!(second[3].0["type"], "function_call_output");
+            assert_eq!(second[3].0["call_id"], "c1");
             let output: Value =
-                serde_json::from_str(second[2].0["output"].as_str().unwrap()).unwrap();
+                serde_json::from_str(second[3].0["output"].as_str().unwrap()).unwrap();
             assert_eq!(output, json!({"tool":"echo","args":{"x":1}}));
             let third = &requests[2].input;
-            assert_eq!(third[3].0["type"], "function_call");
-            assert_eq!(third[3].0["call_id"], "c2");
-            assert_eq!(third[4].0["type"], "function_call_output");
+            assert_eq!(third[4].0["type"], "function_call");
             assert_eq!(third[4].0["call_id"], "c2");
+            assert_eq!(third[5].0["type"], "function_call_output");
+            assert_eq!(third[5].0["call_id"], "c2");
             let output: Value =
-                serde_json::from_str(third[4].0["output"].as_str().unwrap()).unwrap();
+                serde_json::from_str(third[5].0["output"].as_str().unwrap()).unwrap();
             assert_eq!(output, json!({"tool":"echo","args":{"x":2}}));
             let mut history = third.clone();
             history.push(Item(json!({
