@@ -9,14 +9,15 @@
 use crate::{
     cell_job::{CellInput, CellJob, CellOutput},
     engine::ResponsesTransport,
+    item::Item,
     provider::{CallContext, ProviderError},
     store::Store,
-    transport::{ResponsesRequest, ResponsesTurn, TransportError, sse::StreamEvent},
+    transport::{ResponsesRequest, ResponsesTurn, TransportError, Usage, sse::StreamEvent},
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -29,11 +30,85 @@ use tokio::sync::Notify;
 pub struct ReplayTransport {
     turns: Mutex<VecDeque<ResponsesTurn>>,
     requests: Mutex<Vec<ResponsesRequest>>,
-    request_count: Mutex<usize>,
-    observer: Option<Arc<dyn Fn(&ResponsesRequest, &mut ResponsesTurn, usize) + Send + Sync>>,
+    scripted: Option<ScriptedAgent>,
     gated: bool,
     response_permits: Mutex<usize>,
     changed: Notify,
+}
+
+type UsageScript = dyn Fn(&ResponsesRequest, usize) -> Usage + Send + Sync;
+
+struct ScriptedState {
+    responses: Mutex<HashMap<String, VecDeque<Vec<Item>>>>,
+    requests: Mutex<Vec<(String, ResponsesRequest)>>,
+    ordinals: Mutex<HashMap<String, usize>>,
+}
+
+struct ScriptedAgent {
+    state: Arc<ScriptedState>,
+    agent: String,
+    usage: Arc<UsageScript>,
+}
+
+/// Shared per-agent queues and full-request collector for factory tests.
+/// Factory-created transports still use `ReplayTransport` itself.
+pub struct ReplayScenario {
+    state: Arc<ScriptedState>,
+    usage: Arc<UsageScript>,
+}
+
+impl ReplayScenario {
+    /// Build response queues keyed by agent path.
+    pub fn new(scripts: HashMap<String, Vec<Vec<Item>>>) -> Self {
+        Self {
+            state: Arc::new(ScriptedState {
+                responses: Mutex::new(
+                    scripts
+                        .into_iter()
+                        .map(|(agent, responses)| (agent, responses.into()))
+                        .collect(),
+                ),
+                requests: Mutex::new(Vec::new()),
+                ordinals: Mutex::new(HashMap::new()),
+            }),
+            usage: Arc::new(|_, _| Usage::default()),
+        }
+    }
+
+    /// Synthesize usage per request. Ordinals are 1-based and local to each
+    /// agent, enabling deterministic compaction triggers without inference.
+    pub fn with_usage(
+        mut self,
+        usage: impl Fn(&ResponsesRequest, usize) -> Usage + Send + Sync + 'static,
+    ) -> Self {
+        self.usage = Arc::new(usage);
+        self
+    }
+
+    /// Construct the per-agent transport returned by a factory.
+    pub fn transport_for(&self, agent: impl Into<String>) -> ReplayTransport {
+        ReplayTransport {
+            turns: Mutex::new(VecDeque::new()),
+            requests: Mutex::new(Vec::new()),
+            scripted: Some(ScriptedAgent {
+                state: self.state.clone(),
+                agent: agent.into(),
+                usage: self.usage.clone(),
+            }),
+            gated: false,
+            response_permits: Mutex::new(0),
+            changed: Notify::new(),
+        }
+    }
+
+    /// Full requests from one agent in arrival order.
+    pub fn recorded_requests_for(&self, agent: &str) -> Vec<ResponsesRequest> {
+        lock(&self.state.requests)
+            .iter()
+            .filter(|(recorded_agent, _)| recorded_agent == agent)
+            .map(|(_, request)| request.clone())
+            .collect()
+    }
 }
 
 impl ReplayTransport {
@@ -52,32 +127,31 @@ impl ReplayTransport {
         Self {
             turns: Mutex::new(turns.into_iter().collect()),
             requests: Mutex::new(Vec::new()),
-            request_count: Mutex::new(0),
-            observer: None,
+            scripted: None,
             gated,
             response_permits: Mutex::new(0),
             changed: Notify::new(),
         }
     }
 
-    /// Observe and mutate each successful replay response before it is
-    /// returned (or released by a gated transport). The ordinal is 1-based
-    /// and local to this transport, so factory tests can capture shared
-    /// per-agent request logs and synthesize usage deterministically.
-    pub fn with_observer(
-        mut self,
-        observer: Arc<dyn Fn(&ResponsesRequest, &mut ResponsesTurn, usize) + Send + Sync>,
-    ) -> Self {
-        self.observer = Some(observer);
-        self
-    }
-
     /// All requests in arrival order, including their full input envelopes.
     pub fn recorded_requests(&self) -> Vec<ResponsesRequest> {
+        if let Some(scripted) = &self.scripted {
+            return lock(&scripted.state.requests)
+                .iter()
+                .filter(|(agent, _)| agent == &scripted.agent)
+                .map(|(_, request)| request.clone())
+                .collect();
+        }
         lock(&self.requests).clone()
     }
 
     pub fn queue_remaining(&self) -> usize {
+        if let Some(scripted) = &self.scripted {
+            return lock(&scripted.state.responses)
+                .get(&scripted.agent)
+                .map_or(0, VecDeque::len);
+        }
         lock(&self.turns).len()
     }
 
@@ -120,18 +194,31 @@ impl ReplayTransport {
 #[async_trait]
 impl ResponsesTransport for ReplayTransport {
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
-        lock(&self.requests).push(request.clone());
-        let mut turn = lock(&self.turns)
-            .pop_front()
-            .ok_or_else(|| TransportError::Stream("replay turn queue exhausted".into()))?;
-        let ordinal = {
-            let mut count = lock(&self.request_count);
-            *count += 1;
-            *count
+        let turn = if let Some(scripted) = &self.scripted {
+            lock(&scripted.state.requests).push((scripted.agent.clone(), request.clone()));
+            let items = lock(&scripted.state.responses)
+                .get_mut(&scripted.agent)
+                .and_then(VecDeque::pop_front)
+                .ok_or_else(|| {
+                    TransportError::Stream(format!("no replay response for {}", scripted.agent))
+                })?;
+            let ordinal = {
+                let mut ordinals = lock(&scripted.state.ordinals);
+                let ordinal = ordinals.entry(scripted.agent.clone()).or_default();
+                *ordinal += 1;
+                *ordinal
+            };
+            ResponsesTurn {
+                response_id: format!("replay-{}", scripted.agent),
+                items,
+                usage: (scripted.usage)(&request, ordinal),
+            }
+        } else {
+            lock(&self.requests).push(request);
+            lock(&self.turns)
+                .pop_front()
+                .ok_or_else(|| TransportError::Stream("replay turn queue exhausted".into()))?
         };
-        if let Some(observer) = &self.observer {
-            observer(&request, &mut turn, ordinal);
-        }
         self.changed.notify_waiters();
         self.wait_for_response_release().await;
         Ok(turn)
@@ -402,49 +489,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn observer_records_full_requests_and_mutates_turn_before_gate_release() {
-        let observed = Arc::new(Mutex::new(Vec::new()));
-        let observer = {
-            let observed = observed.clone();
+    async fn scenario_shares_agent_queues_records_and_usage_ordinals() {
+        let scripts = HashMap::from([
+            (
+                "/root".to_owned(),
+                vec![vec![Item(json!({"type":"message","content":"root"}))]; 2],
+            ),
+            (
+                "/root/child".to_owned(),
+                vec![vec![Item(json!({"type":"message","content":"child"}))]],
+            ),
+        ]);
+        let scenario =
             Arc::new(
-                move |request: &ResponsesRequest, turn: &mut ResponsesTurn, ordinal: usize| {
-                    observed.lock().unwrap().push((request.clone(), ordinal));
-                    turn.usage.input_tokens = request.input.len() as u64 * 10 + ordinal as u64;
-                },
-            )
-        };
-        let replay =
-            Arc::new(ReplayTransport::gated([turn("r1"), turn("r2")]).with_observer(observer));
-        let running = {
-            let replay = replay.clone();
-            tokio::spawn(async move {
-                let first = replay.create(request("first-session")).await.unwrap();
-                let mut second_request = request("second-session");
-                second_request
-                    .input
-                    .push(Item(json!({"type":"message","content":"extra"})));
-                let second = replay.create(second_request).await.unwrap();
-                [first.usage.input_tokens, second.usage.input_tokens]
-            })
-        };
+                ReplayScenario::new(scripts).with_usage(|request, ordinal| Usage {
+                    input_tokens: request.input.len() as u64 * 100 + ordinal as u64,
+                    ..Usage::default()
+                }),
+            );
+        let root = scenario.transport_for("/root");
+        let child = scenario.transport_for("/root/child");
 
-        replay.wait_requested(1).await;
-        assert_eq!(replay.recorded_requests()[0].session_id, "first-session");
-        assert_eq!(observed.lock().unwrap()[0].1, 1);
+        let root_first = root.create(request("root-session")).await.unwrap();
+        let mut child_request = request("child-session");
+        child_request
+            .input
+            .push(Item(json!({"type":"message","role":"user"})));
+        let child_turn = child.create(child_request).await.unwrap();
+        let root_second = root.create(request("root-session")).await.unwrap();
+
+        assert_eq!(root_first.usage.input_tokens, 101);
+        assert_eq!(child_turn.usage.input_tokens, 201);
+        assert_eq!(root_second.usage.input_tokens, 102);
+        assert_eq!(scenario.recorded_requests_for("/root").len(), 2);
         assert_eq!(
-            observed.lock().unwrap()[0].0.input,
-            replay.recorded_requests()[0].input
+            scenario.recorded_requests_for("/root/child")[0].input.len(),
+            2
         );
-        assert!(!running.is_finished());
-        replay.release_next();
-
-        replay.wait_requested(2).await;
-        assert_eq!(replay.recorded_requests()[1].session_id, "second-session");
-        assert_eq!(replay.recorded_requests()[1].input.len(), 2);
-        assert_eq!(observed.lock().unwrap()[1].1, 2);
-        assert!(!running.is_finished());
-        replay.release_next();
-        assert_eq!(running.await.unwrap(), [11, 22]);
+        assert_eq!(root.recorded_requests().len(), 2);
+        assert_eq!(child.queue_remaining(), 0);
     }
 
     #[tokio::test]
