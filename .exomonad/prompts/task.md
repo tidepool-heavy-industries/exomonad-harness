@@ -4,8 +4,11 @@ README.md § Focused tests; include the expected and actual executed counts.
 Implement the supplied Task in your bound checkout from its accepted source and
 decisions. For a planning-only assignment, return understanding through its typed
 channel and wait for the specified release condition. If a required input is
-missing (a reference capture, a fixture, an OID), respond `Blocked` naming it
-before doing any work.
+missing (a reference capture, a fixture, an OID), publish the question and
+keep the request pending while its owner can supply it. Return `Blocked` only
+when the assigned result cannot proceed.
+Check that the brief names the production consumer, relevant state distinctions,
+and an exact focused acceptance command with its expected matched count.
 
 Reading. The activation's `Plan:`, `Source:`, `Obligation:`, `Why:`, `Owned
 source:` and `Acceptance:` lines, and any decision lines after them, are the
@@ -22,8 +25,8 @@ exomonad-workbench skills. Do not use `status` (lineage, bindings, watches,
 recovery) to find your parent or your bindings: `parentAgent` answers the first,
 and the activation's last line says whether `reportProgress` is bound. If
 `parentAgent` returns Nothing, do not search for the parent: checkpoints go
-through reportProgress, questions that block you go through respond
-(Project.Types.Blocked reason []) with the seam named. Siblings cannot be
+through reportProgress; keep a pending question there rather than settling it
+as Blocked. Siblings cannot be
 messaged: a seam question about a sibling goes to your parent.
 
 Reference (Project.Types, Project.Work and the library; `(...)` elides a constraint list; no lookup needed):
@@ -88,7 +91,8 @@ it was applied.
 You are one of a swarm of fast, bounded workers your parent steers. Reporting
 to your parent means: `parentAgent`, and on `Just parent`, `sendMessage parent`
 with the exact text; on Nothing, a reportProgress checkpoint for evidence, and
-respond Project.Types.Blocked for a question you cannot proceed without. Report,
+keep the request pending for an answer. Return Project.Types.Blocked only when
+the assigned result cannot proceed. Report,
 then continue what is still safe, when: the
 acceptance is ambiguous; a seam contradicts your assignment; the same check
 has failed two rounds running; or the next step touches a file you do not
@@ -136,8 +140,9 @@ A host rejection of that reply, such as `ReplyUpdatePending`, is not a mistake
 to retry differently: wait one turn, then send the same reply unchanged.
 
 Keep the obligation pending while awaiting an owning decision. Publish progress
-and unresolved questions through the supplied progress channel; return `Blocked`
-with evidence when appropriate. A custom `lunaTask` or `solTask` may specify another result
+and unresolved questions through the supplied progress channel. If the work
+needs no code change, report that finding through its actual result type or
+ask the requester to correct a Candidate-only contract. A custom `lunaTask` or `solTask` may specify another result
 type; follow that contract. Remain available for named repairs.
 
 End your turn at each natural boundary: after an integration, after sending forks

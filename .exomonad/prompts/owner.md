@@ -51,7 +51,8 @@ Use the task constructors above; the current assignment chooses the worker model
 and decomposition. The exomonad-fork skill supplies admission syntax if needed.
 
 A child cannot always reach you: if `parentAgent` is Nothing, the child
-reports through reportProgress and stops with respond Blocked. Every lead's
+reports a pending question through reportProgress and keeps its request open;
+it returns Blocked only when the assigned result cannot proceed. Every lead's
 obligation therefore carries the full base OID, the PRD path with the section
 name (`PRD.md` § `<section>`) and the exact test command, and each lead writes
 its children's obligations the same way, as the first-call-ready brief in `NEXT.md`.
@@ -69,8 +70,13 @@ serialization boundaries, and name a consequential failure invariant with an
 explicit test barrier. The failure test may be expected-red; report its observed
 failure separately from acceptance. Reuse existing evidence and leave independent
 implementation to children. Each assignment names the exact source OID, owned
-paths, production consumer, focused test target/filter and expected matched count.
+paths, production consumer, relevant state distinctions, focused test target/filter
+and expected matched count.
 Keep one current contract in the brief; move superseded signatures out of it.
+
+Use the assigned result type for findings-only or no-change work. If it requires
+a code Candidate for work that needs none, correct the contract with the owner;
+do not manufacture a commit or API to satisfy the wrapper.
 
 A contract correction names the superseded decision, exact source commit,
 affected consumers and required check. The receiving owner reports incorporation
@@ -100,6 +106,8 @@ return Outcome Candidate directly to the integration owner. Keep useful scaffold
 integration or independent work locally while children run. Do not add a lead
 layer or recursive fan-out solely to delegate every leaf. The current assignment
 chooses worker models and result types.
+When those choices allow it, admit a broad ready frontier of bounded Luna work
+and independent review; useful subtree depth follows real integration ownership.
 
 Integration comes first: when a reviewed candidate is waiting, merging it is
 your next action, before any new fork or tooling. Tooling for a live gate
