@@ -586,6 +586,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                 }
             }
+            {
+                let store = self.store.clone();
+                let request = parent.clone();
+                let recorded = turn.clone();
+                if let Err(error) =
+                    blocking(move || store.record_replay_turn(&request, &recorded).map(|_| ()))
+                        .await
+                {
+                    return Err(self.cleanup_pending(error, &pending).await);
+                }
+            }
             let usage_for_store = StoredUsage {
                 input_tokens: i64::try_from(turn.usage.input_tokens).unwrap_or(i64::MAX),
                 output_tokens: i64::try_from(turn.usage.output_tokens).unwrap_or(i64::MAX),
