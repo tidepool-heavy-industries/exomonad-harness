@@ -1,5 +1,44 @@
 # Exomonad friction — correction wave
 
+## RSI iteration 3 / wave 11 — 2026-09-25 (interim)
+
+- `friction:` Durable lead settled `Blocked` immediately after admitting
+  children rather than retaining Delivery; root had to assign a continuation.
+  Driver test child similarly settled `Blocked` before a fixture answer.
+- `friction:` `driver_restart` selected 0 matched/0 runnable tests, while
+  an existing exact root-head restart selector passed 1/1. Neither result
+  proved the new recovery outcome.
+- `friction:` Driver recovery test first returned a partial red candidate:
+  1 matched/1 executed/0 passed from an invalid sender, followed by an
+  unrun correction and compile failure. Retained repair produced a later
+  checked candidate.
+- `friction:` Engine boundary test stopped after two red rounds with an
+  assertion that a descendant request owned an ancestor claim. The
+  replacement test targeted Pending+empty scheduler explicitly.
+- `friction:` Exact-source Engine reviewer caught ignored
+  `interrupt_claim` affected-row count; same-reviewer repair then required
+  two executed recovery tests, not only the green schema baseline.
+- `friction:` Durable test review's first invocation exited 137 without a
+  verdict; an exact detached-candidate rerun passed 3/3 recovery and 2/2
+  completion before same-reviewer acceptance.
+- `friction:` `cargo fmt -- <driver/recovery_tests.rs>` also reformatted
+  root-owned `process_recovery.rs` in the child's isolated worktree. It
+  remained unstaged and outside the candidate; root checkout was clean.
+- `friction:` A correction naming the existing production completion caller
+  in `harness-demo/driver.rs:371` remained `UpdateUnconfirmed` while stale
+  "no caller" reports continued. Root withheld the redundant Store
+  `pending_envelopes` branch rather than convert queued steering into
+  claimed incorporation.
+- `friction:` Root's first integration-test design imported `driver.rs` as
+  a separate test crate and failed compilation because inline Driver tests
+  referenced the demo binary crate root. Root moved the gate to a `#[cfg(test)]`
+  module under `main.rs`; its focused test then ran 1/1.
+- `friction:` Driver reviewer verified exact HEAD `8a2a4c8` and both
+  focused filters 2/2, but its typed `ReviewedCandidate` still named
+  the previous `eb5d837` candidate/basis. Driver lead withheld integration
+  and asked the same reviewer to correct the typed record; semantic prose
+  alone is not an exact-tip verdict.
+
 Version-controlled field notes, not an engine bug tracker. “Fixed” below means
 the local prompt or workflow changed; it does not imply an engine fix. Earlier
 detail remains in Git history. Do not fabricate watchdog or nudge events.

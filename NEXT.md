@@ -31,6 +31,13 @@ An active head with no unread inbox is ambiguous (settled/quiescent versus
 interrupted), not definitely Interrupted. Do not replay it; explicitly
 classify unsupported resumption when attempted. A committed head/answer
 followed by lost wake must be discovered by Store-backed restart scanning.
+This **does not** apply to a distinct inherited Pending non-`wait_agent`
+claim whose fresh in-memory `JobScheduler` returns `UnknownCall`: the
+accepted Engine contract is to atomically mark only that durable claim
+Interrupted and replay its existing typed `JobOutput::Interrupted`, with
+zero-row reread preserving any concurrently Settled output. It makes no
+exactly-once external execution promise. Forked `wait_agent` and other
+unproven states stay fail-closed.
 
 Owners after scaffold: durable lead owns `store/mod.rs`,
 `agent_runtime.rs`, `store/recovery_tests.rs`; Engine lead owns `engine.rs`,
@@ -59,7 +66,7 @@ target/filter/count. Report local integration OID and incorporation checks.
 | --- | --- | --- | --- |
 | Durable discovery and atomic publication | durable lead | reviewed local `f3551a0948e0c145cc4c997dd441ee3255f2f360`, `recovery_` 3/3, completion 2/2 | root merge and any separate production candidate |
 | Request-boundary replay/provenance | Engine lead | pending scaffold checks | reviewed Delivery |
-| Restart admission/shutdown | Driver lead | pending scaffold checks | reviewed Delivery |
+| Restart admission/shutdown | Driver lead | reviewed local `5a5329ad741e4e38ee4fc518198053d2cba968b7`, recovery 2/2, follow-up 2/2, no-replay 1/1 | root merge and combined gate |
 | Abrupt process-loss Store commit/wake gate | root | `test:process_recovery --filter process_loss_`: 2 expected/matched/executed/passed; child process killed at explicit stdout barrier | integrated |
 | Restarted real Driver after lost wake | root | `bin:harness-demo --filter process_restart_driver`: 1 expected/matched/executed/passed; killed helper then two Driver startups over file Store | final combined integrated-source gate |
 
@@ -78,6 +85,14 @@ signals after Store commit before any wake, and is killed; a new Driver over
 the same file discovers it. Two sequential Driver startups see one answer,
 do not re-admit the child with head/no unread, and join shutdown. This does
 not run a real remote provider/Engine claim or prove power-loss durability.
+Exact-source Luna reviewer accepted root gate at
+`203d92726220863fbff5b760b5bf8ee1d3ae66c0`, verifying `process_restart_driver`
+1 expected/matched/runnable/executed/passed, cumulative owned diff and
+Driver scan/reap/shutdown paths. Reviewer explicitly limits the claim:
+the helper process is killed after committing Store data and a fresh
+Driver opens it; this does not kill an already-running Driver or execute
+a real remote provider/Engine job. The reviewer noted an unrelated
+unused-import warning in the still-stub Driver recovery test module.
 Driver lead's admission checkpoint: production child owns `driver.rs`, test
 child owns `driver/recovery_tests.rs`, both from `55d2cce...`; production
 first reply targets `driver_restart`, test reply `recovery_`, with counts and
@@ -157,6 +172,17 @@ or genuine Interrupted recovery paths. Engine test owner is adding two
 cases in its separate file from `9caecf1`; `engine_recovery_` target is
 2 matched/executed/passed on the combined tip, then same-reviewer
 reviewAgain. No production-file repair is requested in this round.
+**New Engine contradiction to resolve before root merge:** lead branch
+`70412aebf64d139a688c623aff1e42b17c502379` replaces the agreed
+UnknownCall→Interrupted output with `UnsupportedInFlightJob`, preserving
+Pending and returning an error. Its cumulative recovery_tests.rs still
+calls removed `recover_missing_job` and expects typed Interrupted, so the
+branch appears not to compile, let alone pass `engine_recovery_`. Root
+fenced the live Engine request with the explicit distinction between
+ambiguous agent head and proven missing in-memory job; update is
+`UpdateUnconfirmed`, not yet incorporated. Root requested exact rationale,
+reviewer decision and executed result; this
+cannot be published as Delivery until shared semantics and tests agree.
 
 Root integration checkpoint: exact-scope reviewer accepted durable test
 candidate `cb87de6`; durable lead merged it as
@@ -190,6 +216,14 @@ Root has withheld integration pending a named failing production barrier
 and callsite; Driver lead was asked whether one exists. The INNER JOIN
 silent-omission defect in the proposed query warrants repair if pursued,
 but is not product approval for a redundant API.
+Durable lead accepted root resolution and stopped the unneeded production
+owner; `stopAgent` returned `StoppedReleasing`, not terminal cleanup yet.
+Rejected branch
+`exomonad/wave11/component-owners/wave11-durable-lead/durable-recovery-wave1/branches/durable-store-production`
+is at `d6b9ab8c912fea8c16c5204c267f278307227857` (prior `9cc0866...`);
+it implements the unneeded hydrated query plus missing-item repair, unmerged.
+The durable Delivery will name only reviewed test slice `f3551a0`/root
+`3ae99f6` and leave Driver admission separate.
 Driver production child's first reply was unchanged baseline `55d2cce...`,
 therefore findings only, not a candidate to integrate. `driver_restart`
 selected 0 tests; exact existing restart selector matched/executed/passed
@@ -221,6 +255,14 @@ also reformatted root-owned `crates/harness/tests/process_recovery.rs` in
 the child's isolated working tree, unstaged and not in candidate. Root's
 integrated checkout has that file clean; no root restore is needed. Record
 as formatting-scope friction, not candidate content.
+Root exact integration-tip reviewer Accepted
+`5a5329ad741e4e38ee4fc518198053d2cba968b7` from base
+`3ae99f6f45507537f04a48a2489fdb091b3c829f`, owned diff only
+`driver/recovery_tests.rs`; reviewer executed `recovery_` 2/2,
+`followup_lifecycle` 2/2 and existing root-head no-replay selector 1/1.
+This is clean file-Store reopen, not process crash. Reviewer first
+observed an unrelated command handle, then corrected to the actual
+retained test job. Root merge/post-merge check follow.
 
 Candidate domains: durable recovery, Engine request-boundary recovery, and Driver
 restart/admission. Root finalizes exact ownership and retains the cross-component

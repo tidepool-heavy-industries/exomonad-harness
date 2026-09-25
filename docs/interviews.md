@@ -1,5 +1,33 @@
 # Correction-wave interviews
 
+## Wave 11 root — 2026-09-25 (interim; finish after combined gate)
+
+- **Tree and overlap:** Three Luna component owners each admitted production
+  and test children from scaffold `55d2cce`; while they worked, root built
+  separate Store and real-Driver process-kill gates. This depth did create
+  overlapping code/test/review work, but also several extra correction relays.
+- **What depth helped:** Separate test files let Store recovery, Engine
+  request-boundary logic and Driver restart admission proceed without racing
+  on `store/mod.rs`, `engine.rs` or `driver.rs`. A retained exact-source
+  reviewer found Engine's zero-row `interrupt_claim` race; the Driver
+  reviewer demanded an explicit no-blind-replay barrier.
+- **What depth cost:** A durable lead prematurely settled `Blocked` while
+  children ran and required a second Delivery request. The Driver test
+  child also settled `Blocked` before its fixture decision. One
+  `updateRequest` carrying a critical caller correction stayed
+  `UpdateUnconfirmed`, and repeated old assertions that atomic completion
+  lacked a production caller created avoidable cross-lane discussion.
+  Root's direct `git grep` showed the caller in `harness-demo/driver.rs`.
+- **Scaffold defect versus review:** The scaffold supplied compiling test
+  modules and existing atomic completion, catching a nonexistent
+  `driver_restart` filter (0 matches) early. Review, not the scaffold,
+  caught the Engine affected-row race and Driver no-blind-replay test gap.
+- **Next time:** Put the exact production caller file:line and the
+  non-consuming `unread` contract in the first-call brief. A typed
+  candidate must be a changed, checked commit, not a no-change
+  inspection; component owners should keep Delivery pending through
+  their children and publish reviewed slices promptly.
+
 ## root
 
 - **Scaffold change:** The project `AgentSpec` required `Journal`, but coding children do not receive that effect. Both first-wave children failed before starting. I amended the spec to install the baseline watchdog instead. This loses the project-specific nudge ledger for children; I will not invent events.
