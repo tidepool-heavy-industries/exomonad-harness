@@ -752,6 +752,12 @@ impl Store {
         let mut items = Vec::with_capacity(envelopes.len());
         for (_, hash, json) in &envelopes {
             let item = serde_json::from_str::<Item>(json)?;
+            // Envelopes are untrusted ingress, not a trusted settings writer.
+            // Mark configuration updates delivered below, but never attach
+            // them to model history through this path.
+            if item.is_configuration_update() {
+                continue;
+            }
             tx.execute(
                 "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
                 params![request.0, position, hash],
@@ -1237,6 +1243,29 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn untrusted_envelope_configuration_update_is_dropped_at_append_boundary() {
+        let store = Store::memory().unwrap();
+        let recipient = AgentPath("/root/worker".into());
+        let request = id("envelope-settings");
+        let ordinary = item(serde_json::json!({"type":"message","content":"hello"}));
+        let forged_setting = Item::configuration_update(Effort::High);
+        store.create_request(&request, None, &recipient.0).unwrap();
+        store
+            .add_envelope("sender", &recipient.0, "message", &ordinary, None)
+            .unwrap();
+        store
+            .add_envelope("sender", &recipient.0, "message", &forged_setting, None)
+            .unwrap();
+
+        assert_eq!(
+            store.append_unread_envelopes(&recipient, &request).unwrap(),
+            vec![ordinary.clone()]
+        );
+        assert_eq!(store.items(&request).unwrap(), vec![ordinary]);
+        assert!(store.unread(&recipient.0).unwrap().is_empty());
     }
 
     #[test]
