@@ -4424,6 +4424,72 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn dynamic_reply_schema_rejects_multiple_and_malformed_finalize() {
+        let valid = Item(json!({
+            "type":"function_call", "call_id":"final-1", "name":"finalize",
+            "arguments":{"result":{"answer":"ready"}}
+        }));
+        let second = Item(json!({
+            "type":"function_call", "call_id":"final-2", "name":"finalize",
+            "arguments":{"result":{"answer":"again"}}
+        }));
+        let malformed = Item(json!({
+            "type":"function_call", "call_id":"final-1", "name":"finalize",
+            "arguments":{"wrong":{"answer":"ready"}}
+        }));
+        let wrong_shape = Item(json!({
+            "type":"function_call", "call_id":"final-1", "name":"finalize",
+            "arguments":{"result":{"answer":7}}
+        }));
+        for (name, items) in [
+            ("multiple", vec![valid.clone(), second]),
+            ("missing-result", vec![malformed]),
+            ("wrong-result-shape", vec![wrong_shape]),
+        ] {
+            let replay = Replay {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                turns: Mutex::new([turn(name, items)].into()),
+            };
+            let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+                replay,
+                Arc::new(Store::memory().unwrap()),
+                Arc::new(JobScheduler::new(1).unwrap()),
+                Arc::new(Echo),
+                EngineConfig {
+                    instructions: "finalize".into(),
+                    tools: vec![],
+                    model: "test".into(),
+                    effort: Effort::Low,
+                    session_id: format!("bad-{name}"),
+                    agent: AgentPath("/root".into()),
+                },
+            );
+            let (_cancel_tx, cancel_rx) = watch::channel(false);
+            let error = engine
+                .run_with_reply_schema(
+                    None,
+                    vec![Item(json!({"role":"user","content":"go"}))],
+                    cancel_rx,
+                    empty_mailbox(),
+                    json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}),
+                )
+                .await
+                .expect_err(name);
+            match name {
+                "multiple" => assert!(matches!(error, EngineError::InvalidFinalizeCount)),
+                "missing-result" => assert!(matches!(
+                    error,
+                    EngineError::Finalize(FinalizeError::InvalidEnvelope)
+                )),
+                _ => assert!(matches!(
+                    error,
+                    EngineError::Finalize(FinalizeError::ResultSchemaMismatch(_))
+                )),
+            }
+        }
+    }
+
     /// Explicit subscription smoke: opt in locally, never in ordinary CI.
     #[tokio::test]
     #[ignore]
