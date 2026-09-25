@@ -793,6 +793,7 @@ async fn blocking<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::AgentToolService;
 
     fn empty_mailbox() -> tokio::sync::mpsc::UnboundedReceiver<Envelope> {
         let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -834,6 +835,43 @@ mod tests {
     impl Provider for Echo {
         async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError> {
             Ok(json!({"tool":name,"args":args}))
+        }
+
+        fn tools(&self) -> Vec<Value> {
+            Vec::new()
+        }
+    }
+
+    struct SetEffortProvider {
+        service: crate::agent_runtime::StoreAgentToolService,
+    }
+    #[async_trait]
+    impl Provider for SetEffortProvider {
+        async fn call(&self, _name: &str, _args: Value) -> Result<Value, ProviderError> {
+            Err(ProviderError::Tool("unexpected provider tool".into()))
+        }
+
+        async fn call_agent_verb(
+            &self,
+            name: &str,
+            args: Value,
+            context: crate::provider::CallContext,
+        ) -> Result<Value, ProviderError> {
+            if name != "set_effort" {
+                return Err(ProviderError::Tool(format!(
+                    "unexpected agent verb: {name}"
+                )));
+            }
+            let effort = match args["effort"].as_str() {
+                Some("low") => Effort::Low,
+                Some("medium") => Effort::Medium,
+                Some("high") => Effort::High,
+                _ => return Err(ProviderError::Tool("invalid effort".into())),
+            };
+            self.service
+                .set_effort(&context.agent, effort)
+                .await
+                .map_err(|error| ProviderError::Tool(error.to_string()))
         }
 
         fn tools(&self) -> Vec<Value> {
@@ -1180,12 +1218,23 @@ mod tests {
         let replay = Replay {
             requests: requests.clone(),
             turns: Mutex::new(
-                [turn(
-                    "effort-final",
-                    vec![Item(json!({
-                        "type":"message","role":"assistant","phase":"final_answer","content":"done"
-                    }))],
-                )]
+                [
+                    turn(
+                        "effort-call",
+                        vec![Item(json!({
+                            "type":"function_call",
+                            "call_id":"set-effort-call",
+                            "name":"set_effort",
+                            "arguments":"{\"effort\":\"high\"}"
+                        }))],
+                    ),
+                    turn(
+                        "effort-final",
+                        vec![Item(json!({
+                            "type":"message","role":"assistant","phase":"final_answer","content":"done"
+                        }))],
+                    ),
+                ]
                 .into(),
             ),
         };
@@ -1195,20 +1244,27 @@ mod tests {
             .write_request(&head, None, "/root", &[], StoredUsage::default())
             .unwrap();
         store.set_effort(&head, Effort::Low).unwrap();
-        let output = items::function_output(
-            &CallId("set-effort-call".into()),
-            &crate::turn::JobOutput::Completed(Ok(json!({"effective":"high"}))),
-        );
-        store.append_items(&head, &[output]).unwrap();
         store
-            .save_pending_effort(&AgentPath("/root".into()), Effort::High)
+            .admit_agent(
+                &AgentPath("/root".into()),
+                None,
+                Some(&head),
+                &json!({}),
+                &json!({"kind":"root"}),
+            )
             .unwrap();
+        let provider = Arc::new(SetEffortProvider {
+            service: crate::agent_runtime::StoreAgentToolService::new(
+                store.clone(),
+                AgentPath("/root".into()),
+            ),
+        });
 
-        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+        let engine = Engine::<FakeAuth, SetEffortProvider, _>::with_transport(
             replay,
-            store,
+            store.clone(),
             Arc::new(JobScheduler::new(1).unwrap()),
-            Arc::new(Echo),
+            provider,
             EngineConfig {
                 instructions: "instruction".into(),
                 tools: vec![],
@@ -1225,13 +1281,24 @@ mod tests {
             .unwrap();
 
         let sent = requests.lock().unwrap();
-        let history = &sent[0].input;
-        assert_eq!(history.len(), 3);
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].input.len(), 1);
+        let history = &sent[1].input;
+        assert_eq!(history.len(), 4);
         assert_eq!(history[0].configuration_effort(), Some(Effort::Low));
-        assert_eq!(history[1].0["type"], "function_call_output");
-        assert_eq!(history[1].0["output"], "{\"effective\":\"high\"}");
-        assert_eq!(history[2].configuration_effort(), Some(Effort::High));
+        assert_eq!(history[1].0["type"], "function_call");
+        assert_eq!(history[2].0["type"], "function_call_output");
+        assert_eq!(history[2].0["output"], "{\"effective\":\"high\"}");
+        assert_eq!(history[3].configuration_effort(), Some(Effort::High));
         assert_eq!(sent[0].pinned_effort, Effort::Low);
+        assert_eq!(sent[1].pinned_effort, Effort::Low);
+        assert_eq!(
+            history
+                .iter()
+                .filter(|item| item.configuration_effort() == Some(Effort::High))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
