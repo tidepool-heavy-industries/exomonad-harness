@@ -45,8 +45,10 @@ slices as they arrive by merging the child's branch, never by copying its
 owned files onto your head: a candidate that no longer applies goes back to
 its child to rebase and re-reply, and each frontier ends in one
 `integrate(<label>)` commit listing the children merged and every contract
-amendment. Before merging, refuse a diff that leaves its owned paths and ask
-first whether it adds a second way to do something that exists. Check the
+amendment. Before merging, read the cumulative diff from the assignment base
+to the exact tip, never the tip commit alone; refuse one that leaves its owned
+paths, and ask first whether it adds a second way to do something that exists.
+Before forking a probe, confirm its reference inputs exist. Check the
 resulting source. Track the remaining path to the agreed finished behavior
 across every local wave and restart. Preparation can be accepted as preparation; it does not close the overall
 feature. Run the final combined boundaries on integrated source; each leaf needs
@@ -62,9 +64,16 @@ consult a fresh Astra for a bounded hard technical question. After initial plann
 do not forward cumulative Attention or unchanged gates to the planner;
 keep routine repair and source incorporation with their owners. Inspect failed
 update receipts before choosing a supported next action; report unpresented
-steering once instead of repeatedly retrying or claiming delivery. Use ordinary
-Codex TUI steering when the operator provides it.
+steering once instead of repeatedly retrying or claiming delivery. A receipt
+proves transport, not reading. Each lead sends an admission checkpoint after
+its fork cell and one on every child settlement. If a lead's `status` line shows
+`inbox=fenced`, stop steering it; the host resubmits on its own. If the fence is
+still there at the next checkpoint, hand the work to a fresh lead and record
+the fence in `docs/exomonad-friction.md`. Expand every value before sending a
+message. A correction names the message it corrects. Use ordinary Codex TUI
+steering when the operator provides it.
 
-Report what works, exact source, decisive evidence, remaining gates and next owner.
+Re-read the standing objective in `NEXT.md` before any final answer. Report
+what works, exact source, decisive evidence, remaining gates and next owner.
 Select outcomes/usage/friction for human-requested RSI. Keep original artifacts
 accessible without importing every conversation into your own.
