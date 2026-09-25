@@ -211,3 +211,32 @@ was rebased as `1513e95` and merged by root at `06148a1`.
   continuation. I reported zero-match filters as zero, not as passing
   evidence. I have not spent inference beyond the single item-2 manual
   attempt already recorded; the operator hold on its retry remains.
+
+## Adapter-readiness gate — 2026-09-25
+
+- **Root:** I integrated the Store-backed replay provider, then scaffolded
+  one final Engine/Store vertical test and delegated its implementation plus
+  a read-only gate audit. The tree kept the test owner separate from the
+  contract auditor and exact-candidate reviewer, but the first review
+  incorrectly accepted a final-response race. I traced Engine's
+  final-with-pending fall-through and sent a bounded repair. One attempted
+  recheck stayed on the old HEAD, so no repaired candidate was accepted from
+  it; an exact-checkout recheck remains pending. No live inference was run.
+- **Vertical test leaf:** Its work stayed in the one owned integration-test
+  file. Auth/Arc fixture compilation, JSON-text tool output, and expected
+  input ordering each cost a local correction. It reported 1/1 on the first
+  candidate, then 1/1 after adding a retained scheduler-settlement barrier
+  and a sixth gated finalize response. The tree cost it a separate repair
+  request and exact-tip re-review before its file can reach master.
+- **Read-only gate audit:** It identified the production Engine/Store
+  boundary and cleanup risks without edits or checks. It initially placed
+  envelope insertion after `wait_requested(n)` as though request `n`
+  could already include it; root corrected the barrier numbering in the
+  implementer's task. The separate audit was useful only after the timing
+  correction, and cannot certify adapter-host wiring.
+- **Exact-candidate reviewer:** It ran the first candidate's focused test
+  1/1 and demo check, but misread Engine's final-with-pending branch as a
+  return rather than a wait followed by another request. Its first repair
+  recheck also reviewed stale HEAD despite being assigned the new commit.
+  The tree exposed a source-binding failure: a verdict is not usable unless
+  the reviewed HEAD equals the candidate OID.

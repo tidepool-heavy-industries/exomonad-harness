@@ -4,6 +4,37 @@ Version-controlled field notes, not an engine bug tracker. “Fixed” below mea
 the local prompt or workflow changed; it does not imply an engine fix. Earlier
 detail remains in Git history. Do not fabricate watchdog or nudge events.
 
+## Adapter readiness — 2026-09-25
+
+- `friction:` The original FIFO replay fixture had no durable request/response
+  turn mapping. Store exposed `children_of` (initially overlooked), but
+  `request_items` still intermingled inputs, response items, and tool outputs.
+  Root landed exact `ResponsesRequest`/response turn records before
+  reassigning the Store-backed provider; the leaf did not guess segmentation.
+- `friction:` The provider test initially expected configuration update
+  before user input, while Engine actually recorded the reverse order.
+  Correcting only the expectation produced a focused 2/2 provider pass.
+- `friction:` The vertical test leaf needed test-local `Auth` and `Arc<CellJob>`
+  wrappers, then corrected a moved `Item`, strict finalize's
+  `{"result":...}` arguments, and JSON-text decoding of durable tool output.
+  Its final candidate changed only the owned test file.
+- `friction:` The read-only gate audit initially misstated a replay barrier:
+  `wait_requested(n)` means request `n` has already been captured. Root
+  corrected insertion/check timing to envelopes inserted while responses
+  2/3/4 are gated and observed in requests 3/4/5.
+- `friction:` The first exact-candidate review accepted a scheduling-sensitive
+  five-turn test because it read final-with-pending as a return. Engine
+  actually waits and then creates another request. Root withheld integration
+  and requested a scheduler-settlement barrier and sixth gated response.
+- `friction:` The first same-reviewer recheck of the repair did not checkout
+  the assigned commit; its receipt and result still named the old HEAD and
+  repeated the old defect. Root marked that verdict invalid and reassigned
+  an explicit checkout/HEAD-confirmation recheck.
+- `friction:` Root also mistyped the full base OID in reviewer packets:
+  `...c5ab...` rather than committed `...c5cab...`. A fresh reviewer
+  correctly Blocked instead of inventing a cumulative diff. Root checked
+  the actual base object and ownership diff, then resent the exact OID.
+
 ## Root: still open
 
 | Observation and cost | Improvement to test |
