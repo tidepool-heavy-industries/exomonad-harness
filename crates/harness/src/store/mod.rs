@@ -639,6 +639,87 @@ impl Store {
         tx.commit()?;
         Ok(hash)
     }
+
+    fn pending_effort_key(agent: &AgentPath) -> String {
+        format!("harness:pending_effort:{}", agent.0)
+    }
+
+    /// Persist the latest model-facing effort change until the agent's next
+    /// request boundary.
+    pub fn save_pending_effort(&self, agent: &AgentPath, effort: Effort) -> Result<()> {
+        self.save_session_state(
+            &Self::pending_effort_key(agent),
+            &serde_json::to_value(effort)?,
+        )
+    }
+
+    /// Atomically consume a pending effort into the new request. A failure
+    /// rolls back both its deletion and the positional setting item.
+    pub fn apply_pending_effort(
+        &self,
+        agent: &AgentPath,
+        request: &RequestId,
+    ) -> Result<Option<ItemHash>> {
+        let key = Self::pending_effort_key(agent);
+        let mut c = self.lock();
+        let tx = c.transaction()?;
+        let pending: Option<String> = tx
+            .query_row(
+                "SELECT state FROM session_state WHERE session_id=?1",
+                [&key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(pending) = pending else {
+            return Ok(None);
+        };
+        let effort: Effort = serde_json::from_str(&pending)?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
+            [&request.0],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(StoreError::MissingRequest(request.0.clone()));
+        }
+        let last: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT ri.position,i.json FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 ORDER BY ri.position DESC LIMIT 1",
+                [&request.0],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (position, replace) = match last {
+            Some((position, raw)) => {
+                let previous: Item = serde_json::from_str(&raw)?;
+                (position, previous.is_configuration_update())
+            }
+            None => (0, false),
+        };
+        let position = if replace {
+            tx.execute(
+                "DELETE FROM request_items WHERE request_id=?1 AND position=?2",
+                params![request.0, position],
+            )?;
+            position
+        } else {
+            position
+                + i64::from(tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM request_items WHERE request_id=?1)",
+                    [&request.0],
+                    |r| r.get::<_, bool>(0),
+                )?)
+        };
+        let hash = Self::put_item_tx(&tx, &Item::configuration_update(effort))?;
+        tx.execute(
+            "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
+            params![request.0, position, hash.0],
+        )?;
+        tx.execute("DELETE FROM session_state WHERE session_id=?1", [&key])?;
+        tx.commit()?;
+        Ok(Some(hash))
+    }
+
     /// Atomically attach every unread envelope for `recipient` to `request` and
     /// mark those envelopes delivered. A retry after commit returns an empty
     /// vector; a failed transaction leaves the envelopes unread.
@@ -918,6 +999,30 @@ mod tests {
         assert_eq!(history.len(), 3);
         assert_eq!(history[0].configuration_effort(), Some(Effort::Medium));
         assert_eq!(history[2].configuration_effort(), Some(Effort::High));
+    }
+
+    #[test]
+    fn set_effort_is_pending_until_next_request_and_applied_once() {
+        let store = Store::memory().unwrap();
+        let agent = AgentPath("/root".into());
+        let current = id("current-settings");
+        let next = id("next-settings");
+        store
+            .write_request(&current, None, "/root", &[], Usage::default())
+            .unwrap();
+        store
+            .write_request(&next, Some(&current), "/root", &[], Usage::default())
+            .unwrap();
+
+        store.save_pending_effort(&agent, Effort::Low).unwrap();
+        store.save_pending_effort(&agent, Effort::High).unwrap();
+        assert!(store.items(&current).unwrap().is_empty());
+        assert!(store.apply_pending_effort(&agent, &next).unwrap().is_some());
+        assert_eq!(
+            store.items(&next).unwrap()[0].configuration_effort(),
+            Some(Effort::High)
+        );
+        assert!(store.apply_pending_effort(&agent, &next).unwrap().is_none());
     }
 
     #[test]

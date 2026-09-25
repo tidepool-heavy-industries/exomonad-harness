@@ -225,6 +225,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let initial_effort = self.config.effort;
             blocking(move || store.set_effort(&request, initial_effort)).await?;
         }
+        {
+            let store = self.store.clone();
+            let request = id.clone();
+            let agent = self.config.agent.clone();
+            blocking(move || store.apply_pending_effort(&agent, &request)).await?;
+        }
         if admit_inbox {
             let store = self.store.clone();
             let recipient = self.config.agent.clone();
@@ -484,6 +490,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .await
             {
                 return Err(self.cleanup_pending(error, &pending).await);
+            }
+            {
+                let store = self.store.clone();
+                let agent = self.config.agent.clone();
+                let request = next_id.clone();
+                if let Err(error) =
+                    blocking(move || store.apply_pending_effort(&agent, &request)).await
+                {
+                    return Err(self.cleanup_pending(error, &pending).await);
+                }
             }
             if admit_inbox {
                 if let Err(error) = self.append_unread_envelopes(&next_id).await {
