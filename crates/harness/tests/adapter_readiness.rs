@@ -9,7 +9,7 @@ use harness::{
     engine::{Engine, EngineConfig, ResponsesTransport},
     item::Item,
     mailbox::{DeliveryClass, Envelope, EnvelopeType},
-    model::{AgentPath, Effort},
+    model::{AgentPath, CallId, Effort},
     provider::{CallContext, ProviderError},
     replay::{FakeResidentCell, ReplayCellState, ReplaySessionKey, ReplayTransport},
     store::Store,
@@ -151,10 +151,11 @@ async fn active_cell_survives_three_boundary_envelopes_and_finalizes_durably() {
         turn("wait-for-cell", vec![wait_call("wait-cell")]),
         turn("finalized", vec![final_call.clone()]),
     ]));
+    let scheduler = Arc::new(JobScheduler::new(2).expect("job scheduler"));
     let engine = Engine::<OfflineAuth, CellJobProvider<SharedCell>, _>::with_transport(
         SharedReplay(replay.clone()),
         store.clone(),
-        Arc::new(JobScheduler::new(2).expect("job scheduler")),
+        scheduler.clone(),
         Arc::new(CellJobProvider::new(SharedCell(cell.clone()))),
         EngineConfig {
             instructions: "offline adapter readiness test".into(),
@@ -251,6 +252,10 @@ async fn active_cell_survives_three_boundary_envelopes_and_finalizes_durably() {
     // response is still gated. Completing the cell now must not finish the
     // run until response 5 is released and request 6 strict-finalizes.
     cell.release(cell_output.clone());
+    scheduler
+        .wait(&CallId("long-cell-call".into()))
+        .await
+        .expect("cell Job settles before releasing gated response 5");
     replay.release_next();
 
     replay.wait_requested(6).await;
@@ -326,6 +331,16 @@ async fn active_cell_survives_three_boundary_envelopes_and_finalizes_durably() {
             && item.0["call_id"] == "long-cell-call"
             && stored_cell_output_matches(item, &cell_output)
     }));
+    assert_eq!(
+        durable_items
+            .iter()
+            .filter(|item| {
+                item.0["type"] == "function_call_output" && item.0["call_id"] == "long-cell-call"
+            })
+            .count(),
+        1,
+        "durable cell output must be recorded once"
+    );
     assert!(durable_items.iter().any(|item| item == &final_call));
 
     drop(reopened);
