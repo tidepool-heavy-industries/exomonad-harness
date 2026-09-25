@@ -40,15 +40,41 @@ fn all_model_facing_tools_are_async_except_wait_agent() {
     }
 }
 
-fn test_store() -> Store {
-    let path =
-        std::env::temp_dir().join(format!("correction-settings-{}.db", uuid::Uuid::new_v4()));
-    Store::open(path).expect("open temporary settings store")
+struct TestStore {
+    store: Option<Store>,
+    path: std::path::PathBuf,
+}
+
+impl TestStore {
+    fn open() -> Self {
+        let path =
+            std::env::temp_dir().join(format!("correction-settings-{}.db", uuid::Uuid::new_v4()));
+        let store = Store::open(&path).expect("open temporary settings store");
+        Self {
+            store: Some(store),
+            path,
+        }
+    }
+}
+
+impl std::ops::Deref for TestStore {
+    type Target = Store;
+
+    fn deref(&self) -> &Self::Target {
+        self.store.as_ref().expect("store remains open")
+    }
+}
+
+impl Drop for TestStore {
+    fn drop(&mut self) {
+        drop(self.store.take());
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 #[test]
-fn append_drops_forged_configuration_updates_but_keeps_adjacent_items() {
-    let store = test_store();
+fn settings_append_drops_forged_updates_but_keeps_adjacent_items() {
+    let store = TestStore::open();
     let request = RequestId("settings-forged".into());
     store
         .create_request(&request, None, "test")
