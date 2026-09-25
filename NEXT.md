@@ -25,7 +25,7 @@ dependency amendment is `c427057`.
 | (a) one entry | done | `9da6efe`, `a9f7a12` | integrated | nothing | nothing |
 | (b) async tools | root | `d8097c3`; trace leaf `fb80016`; consumer `a42920f`; tree schema repair under review | offline demo 35/35; manual attempt: HTTP 400 on request 2 | live `wait_agent` continuation | no retry without operator authority; review tree fix and retain redacted attempt |
 | (c) settings items | settings-preflight-v8; root integrated core settings | reviewed settings stack `b0e1480` merged at `f1334bec8487aa710b8ba584fe14ce7d40ef5b2a`; root active-invocation contract `e28126e` | integrated set_effort 3/3, three Store tests 1/1 each, correction_wave settings 1/1, cargo check; invocation dispatch 1/1 | Here active-call gate, live item-13 trace | retained lead request43 rebases Here onto `e28126e`; demo Here gate remains closed |
-| (d) `Compactor` | root Engine seam; component lead delivered | Server component `03beea9` merged at `c3f29d0`; Engine/store `2b5e152` and production demo consumer `5c17907` on master, same-reviewer repair review pending | Engine compaction 3/3, component 2/2, production factory 1/1, CLI parser 1/1, cargo check harness-demo | review repaired consumer, live unanswered-call experiment | close review, integrated gate, then live experiment |
+| (d) `Compactor` | root Engine seam; component lead delivered | Server component `03beea9` merged at `c3f29d0`; Engine/store `2b5e152`, demo consumer `5c17907`, replay repair `c8c7fef` on master; same reviewer request48 pending | Engine compaction 3/3, component 2/2, replay factory 20 runs each 1/1, CLI parser 1/1, cargo check harness-demo | accept replay repair, live unanswered-call experiment | close same review, integrated gate, then live experiment |
 | cache probe | done | `d0245b3` | 0 then 20,736 cached tokens | general cache behavior | nothing |
 | interviews | every node | `docs/interviews.md` | root, probe, core present | later nodes | one section per node that runs |
 | wave-7 admission | root | base `763764d389763df6ab3ac0cc65b990c4b82fe1b7` | store-drop-v7 owns `crates/harness/src/store/mod.rs`; core-preflight-v7 owns no files | drop integrated; preflight passed | no next action |
@@ -258,8 +258,17 @@ section per node that ran.
   `cargo check -p harness-demo` passed. Exact review returned Repair because
   no production caller enabled the threshold. Root repaired the consumer at
   `5c17907e959b06c2b4214ccfe24de6ab7d269c3c`: the demo exposes
-  `--compact-at-input-tokens`, and an offline factory test proves invocation
-  (1/1); CLI parser test is 1/1. Same reviewer is checking that exact repair.
+  `--compact-at-input-tokens`, and an offline factory test proves invocation;
+  CLI parser test is 1/1. Same reviewer returned Repair at `5c17907`: the
+  factory replay can consume its final answer while a pending tool is still
+  unsettled, and then run out of responses (1 matched, 0 passed in review).
+  Root repaired the deterministic replay and ancestry assertion at
+  `c8c7fefed85b4fbdc9a894bc5ad0919e7dbb1e59`: 20 independent runs each
+  matched/passed 1; cargo check and format/diff checks passed. Same reviewer
+  request48 is pending. Its prior cumulative-ownership objection also crossed
+  the root-owned Here contract amendment `e28126e`; review scope now isolates
+  the demo consumer after that amendment without treating the Here code as
+  Compactor acceptance.
   Broad `cargo test -p harness --lib` ran 78 passed, 9 failed, 2 ignored:
   failures assert pre-settings history shapes, not yet compared on base.
   This is **not finished compaction**: review/integration gate and the
@@ -269,8 +278,8 @@ section per node that ran.
   Compactor; sibling `.../compaction-fresh/branches/review-1` is
   `75ab173cecac0493fcbb2157ab4aada58a0d008a`, **two commits behind**
   candidate tip (`fcc626d`, `caddc4c`), so final tip is not covered by that
-  review. Current lead requested exact-tip review. It also changes unowned settings paths, so await the settings
-  integration/rebase. `Server` only; unanswered-call experiment → findings.
+  review. It is reference-only; the newer `03beea9` component was separately
+  reviewed and merged. `Server` only; unanswered-call experiment → findings.
 - Cache probe: measured on source `d0245b3` by the bounded probe. Two requests
   through our builder with one key returned `cached_tokens` 0 then 20,736;
   redacted usage blocks are in `docs/cache-probe-evidence.md`. This answers
