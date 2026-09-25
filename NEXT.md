@@ -28,6 +28,7 @@ dependency amendment is `c427057`.
 | (d) `Compactor` | Compactor leaf `compaction.rs` | scaffold `c427057` | `cargo check -p harness` | all | PRD shape, `Server` only, unanswered-call experiment |
 | cache probe | done | `d0245b3` | 0 then 20,736 cached tokens | general cache behavior | nothing |
 | interviews | every node | `docs/interviews.md` | root, probe, core present | later nodes | one section per node that runs |
+| wave-7 admission | root | base `763764d389763df6ab3ac0cc65b990c4b82fe1b7` | store-drop-v7 owns `crates/harness/src/store/mod.rs`; core-preflight-v7 owns no files | replies pending | first replies: drop candidate; lead quotes `violet-lantern-763764d` before receiving compaction work |
 
 Expected-red tests: none recorded. One committed red gets a row here with its
 owner and closing slice.
