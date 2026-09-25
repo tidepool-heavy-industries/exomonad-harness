@@ -15,9 +15,12 @@ exactly-once external provider/tool execution.
 **Asked:** Asynchronously. **Answer:** Pending.
 **Recommendation while unanswered:** A, consistent with PRD.md § `store
 (sqlite, one file, one process)` and the executed Engine boundary tests at
-local `6988d51`; do not merge the later internally contradictory `70412ae`
-source. An operator answer would supersede this recommendation and require
-affected Engine/Driver tests and a reviewed contract correction.
+local `6988d51`; the internally contradictory `70412ae` was reverted by
+`65bace1`, whose owned-file tree matches `6988d51`. The operator audit
+confirmed this supersession and asked for the written wave-11 gates to be
+closed, without a new CLI restart-admission gate. It did not explicitly
+choose A or B. An explicit contrary answer would require affected
+Engine/Driver tests and a reviewed contract correction.
 
 ## Q1 — Wave 0 pre-flight credential (2026-09-23)
 

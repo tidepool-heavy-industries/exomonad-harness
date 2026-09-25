@@ -65,10 +65,14 @@ target/filter/count. Report local integration OID and incorporation checks.
 | Obligation | Owner | Current evidence | Gate |
 | --- | --- | --- | --- |
 | Durable discovery and atomic publication | durable lead | Delivery settled, root `3ae99f6f45507537f04a48a2489fdb091b3c829f`, `recovery_` 3/3, completion 2/2 | complete for Store scope; Driver/Engine separate |
-| Request-boundary replay/provenance | Engine lead | exact root review Accepted coherent `6988d5192065876e178e7fa97a3b8205dd21ea94`, engine recovery 2/2, schema 2/2 | root merge/post-merge combined gate; operator policy answer pending |
-| Restart admission/shutdown | Driver lead | Delivery settled; root `d23d0fc313b7a171d645628dc670e4a51bc706f9`, recovery 2/2, follow-up 2/2, no-replay 1/1, process restart 1/1 | Engine seam and final combined gate |
+| Request-boundary replay/provenance | root exact-source review/integration | Accepted `6988d5192065876e178e7fa97a3b8205dd21ea94`; root `ec012f042774e086634666623e45d40bb366be88`; engine recovery 2/2, schema 2/2 | source complete; Engine lead stopped without typed Delivery after prolonged redundant review |
+| Restart admission/shutdown | Driver lead | Delivery settled; root `d23d0fc313b7a171d645628dc670e4a51bc706f9`, recovery 2/2, follow-up 2/2, no-replay 1/1, process restart 1/1 | complete for written scope |
 | Abrupt process-loss Store commit/wake gate | root | `test:process_recovery --filter process_loss_`: 2 expected/matched/executed/passed; child process killed at explicit stdout barrier | integrated |
-| Restarted real Driver after lost wake | root | `bin:harness-demo --filter process_restart_driver`: 1 expected/matched/executed/passed; killed helper then two Driver startups over file Store | final combined integrated-source gate |
+| Restarted real Driver after lost wake | root | `bin:harness-demo --filter process_restart_driver`: 1 expected/matched/executed/passed; killed helper then two Driver startups over file Store | integrated-source gate passed |
+
+The table and the final handoff below are current. The following paragraphs
+retain chronological checkpoints; their then-pending or then-unreviewed
+statements are superseded by later integration evidence.
 
 The root's process test kills a separate helper before completion commit and
 after Store commit but before any wake, then opens the file in the parent
@@ -172,17 +176,16 @@ or genuine Interrupted recovery paths. Engine test owner is adding two
 cases in its separate file from `9caecf1`; `engine_recovery_` target is
 2 matched/executed/passed on the combined tip, then same-reviewer
 reviewAgain. No production-file repair is requested in this round.
-**New Engine contradiction to resolve before root merge:** lead branch
+**Superseded Engine contract drift (not an active source blocker):** lead branch
 `70412aebf64d139a688c623aff1e42b17c502379` replaces the agreed
 UnknownCall→Interrupted output with `UnsupportedInFlightJob`, preserving
 Pending and returning an error. Its cumulative recovery_tests.rs still
-calls removed `recover_missing_job` and expects typed Interrupted, so the
-branch appears not to compile, let alone pass `engine_recovery_`. Root
-fenced the live Engine request with the explicit distinction between
-ambiguous agent head and proven missing in-memory job; update is
-`UpdateUnconfirmed`, not yet incorporated. Root requested exact rationale,
-reviewer decision and executed result; this
-cannot be published as Delivery until shared semantics and tests agree.
+calls removed `recover_missing_job` and expects typed Interrupted. The later
+Engine commit `65bace13569b16f3cdf2976e0c3778edb5f5ba82` reverts that change.
+`git diff --exit-code` between `6988d51` and `65bace1` over the two owned
+Engine files passed: source and tests are identical. The root integrated and
+checked the earlier exact-reviewed `6988d51` tip, not transient `70412ae`.
+The contract-drift relay is an interview cost, not a new CLI restart gate.
 Root independently reviewed coherent Engine integration candidate
 `6988d5192065876e178e7fa97a3b8205dd21ea94` at the exact HEAD from
 baseline `55d2cce...`, cumulative owned diff only `engine.rs` and
@@ -190,9 +193,21 @@ baseline `55d2cce...`, cumulative owned diff only `engine.rs` and
 `engine_recovery_` 2 matched/executed/passed and `dynamic_reply_schema`
 2/2, confirming request-bound interrupt, settled-output reconciliation,
 no duplicate claim, ancestry and typed final. Root merge and post-merge
-checks follow. The later `70412ae`/`65bace1` Unsupported branch is not
-part of this accepted candidate and remains unmerged unless the operator
-changes the policy.
+checks followed. `65bace1` is source-equivalent to this reviewed tip;
+its ancestor `70412ae` is not the current Engine source.
+Root merged accepted `6988d51` as
+`ec012f042774e086634666623e45d40bb366be88`. Combined
+integrated-source focused checks: `engine_recovery_` 2 expected/matched/
+executed/passed; `dynamic_reply_schema` 2/2; harness-lib `recovery_`
+now 5 matched/executed/passed (broadened from earlier 3 because it
+includes two Engine tests); `complete_agent_with_publication_` 2/2;
+Store process `process_loss_` 2/2; Driver `recovery_` 2/2,
+`followup_lifecycle` 2/2, `shutdown_` 2/2, `process_restart_driver`
+1/1; `adapter_readiness` exact target 1/1. `cargo fmt --check` and
+`git diff --check` passed. No broad workspace battery or live
+adapter/provider call ran. The asynchronous policy question in
+docs/questions.md has no explicit answer; the operator audit confirmed
+the superseding source lineage and ruled out an extra CLI admission gate.
 
 Root integration checkpoint: exact-scope reviewer accepted durable test
 candidate `cb87de6`; durable lead merged it as
@@ -334,3 +349,37 @@ cells, stale reminder/reply retries and defects caught by the scaffold versus
 review. Interview root, component owners and reviewers. At completion record exact
 integrated source, decisive checks, remaining limits and any unmerged work; retire
 all descendants deliberately and stop.
+
+## Where the last run stopped (wave 11 current handoff)
+
+- Root code source `ec012f042774e086634666623e45d40bb366be88`
+  integrates exact-reviewed Store recovery tests (`cb87de6`), Driver
+  recovery tests (`5a5329a` integration tip), process-kill gates, and
+  exact-reviewed Engine integration candidate `6988d5192065876e178e7fa97a3b8205dd21ea94`.
+  All written focused gates listed above passed on this integrated source.
+  The Engine lead reported candidate `65bace1` incorporation and focused
+  checks, but remained in a redundant review loop rather than settling
+  typed Delivery. Root stopped it; its source work was already covered by
+  root's independent exact review/integration. Shared component group
+  cleanup completed with no pending responses/watches. No additional
+  CLI admission wave is authorized. Evidence is bounded to helper-process
+  kill plus clean Store/Driver reopen and offline Engine replay; it does
+  not certify an already-running Driver crash, remote provider/tool
+  exactly-once behavior, OS/power-loss durability, or live adapter calls.
+- `exomonad/wave11/component-owners/branches/wave11-engine-lead` at
+  `65bace13569b16f3cdf2976e0c3778edb5f5ba82`: unmerged branch
+  containing a revert of superseded `70412ae` policy drift.
+  Its owned Engine files match `6988d51` by `git diff --exit-code`;
+  root's Accepted exact-source review and integration attach to
+  `6988d51`, not `65bace1`. Lead Delivery did not settle before stop.
+- `exomonad/wave11/component-owners/branches/wave11-driver-lead` at
+  `24b61a0ee615499852c739fb9221e717736e9fde`: unmerged local
+  Delivery branch with equivalent reviewed Driver code already merged
+  through `5a5329a`/root `d23d0fc`; comparison found documentation-only
+  differences. No code is waiting to merge.
+- `exomonad/wave11/component-owners/wave11-durable-lead/durable-recovery-wave1/branches/durable-store-production`
+  at `d6b9ab8c912fea8c16c5204c267f278307227857`: unmerged
+  `pending_envelopes` API and missing-item repair. The earlier `9cc0866`
+  query had review/test evidence, but no production consumer needs this
+  second discovery API; root rejected it from wave 11. Do not merge by
+  assuming tests are product approval.

@@ -1,6 +1,6 @@
 # Correction-wave interviews
 
-## Wave 11 root — 2026-09-25 (interim; finish after combined gate)
+## Wave 11 root — 2026-09-25
 
 - **Tree and overlap:** Three Luna component owners each admitted production
   and test children from scaffold `55d2cce`; while they worked, root built
@@ -27,23 +27,34 @@
   candidate must be a changed, checked commit, not a no-change
   inspection; component owners should keep Delivery pending through
   their children and publish reviewed slices promptly.
+- **Contract drift and redundant coordination:** Engine's `70412ae`
+  briefly recast an inherited Pending non-`wait_agent` claim with a missing
+  in-memory job as `UnsupportedInFlightJob`, conflating it with the distinct
+  active-head/empty-inbox ambiguity. Its tests still expected typed
+  Interrupted. `65bace1` reverted the change and is source-equivalent to
+  the exact-reviewed `6988d51`; root had already integrated that candidate
+  as `ec012f0` and checked the combined gates. Root's extra policy question,
+  correction relays, separate exact review and equivalence check were
+  coordination costs rather than new product behavior. A single pinned
+  claim-state table and a test against the actual consumer before changing
+  the contract would have prevented the detour. The operator audit ruled
+  out adding CLI restart admission to the written acceptance matrix.
 
 ## Wave 11 durable component owner — 2026-09-25
 
-The owner's settled Delivery and checkpoints provide the interview evidence;
-a separate interview answer was requested but not received before retirement.
-Its two nested Luna children separated Store production investigation from
-`recovery_tests.rs`. That parallel split produced the accepted test candidate
-while production inspection found no needed Store API change. The owner
-reported that a search limited to `crates/harness/src` missed the actual
-`Driver::start_agent` completion caller in `harness-demo`; broadening the
-search resolved the seam. An exact-source reviewer initially hit exit 137,
-so the owner reran the decisive tests in an isolated Cargo target directory
-before acceptance. The extra depth cost a premature `Blocked` settlement,
-a continuation request, delayed delivery of the source correction, and
-time spent on an ultimately rejected `pending_envelopes` branch. The owner
-ultimately narrowed Delivery to the checked Store tests and left Driver
-admission separate.
+The owner said two bounded children were enough: a separate
+`recovery_tests.rs` child produced the isolated accepted slice, while one
+exact-source reviewer strengthened confidence without broadening
+production scope. After an initial review test-run exit 137, the rerun
+passed and review confirmed close/reopen, idempotence and
+Pending-versus-Interrupted assertions without claiming process-kill
+durability. Queued/unpresented contract corrections around the redundant
+`pending_envelopes` API consumed time and produced an unmerged rejected
+branch (`9cc0866`, later `d6b9ab8`) and an unnecessary repair/review loop.
+The useful nesting was implementation → one exact-scope reviewer; further
+production relay depth did not help. Root additionally observed that a
+search limited to `crates/harness/src` missed the actual completion caller
+in `harness-demo/driver.rs`, delaying the no-new-API resolution.
 
 ## Wave 11 Driver component owner — 2026-09-25
 
@@ -62,6 +73,21 @@ where it already worked, but cost relays across the Store/Engine contract,
 an unnecessary optional rebase, and the isolated rustfmt collateral. Its
 final Delivery distinguished clean reopen from root's separate killed-helper
 gate and did not claim real provider or Engine pending-claim recovery.
+
+## Wave 11 Engine component owner — 2026-09-25
+
+No separate own-words interview or typed Delivery settled before root
+retired the prolonged review loop. Its checkpoints establish the tree
+cost: production and boundary-test children were disjoint, and an
+exact-source reviewer caught the zero-row interruption race and required
+two direct recovery tests beyond the 2/2 schema baseline. That was useful
+review depth. The later `70412ae` Unsupported contract drift, stale test
+candidate, revert at `65bace1`, and repeated review relays were not useful
+product work. The lead reported `65bace1` with recovery 2/2 and schema
+2/2, while root independently reviewed the code-equivalent `6988d51`,
+integrated it and passed the combined focused gate. The next run should
+stop at one current contract and one exact candidate/reviewer loop, with
+no duplicate review after identical source has already been accepted.
 
 ## Wave 11 root process-gate reviewer — 2026-09-25
 
@@ -84,6 +110,20 @@ and follow-up ran 2/2 each and existing no-replay ran 1/1. Its reviewer
 node cost context and tool overhead: it initially observed an unrelated
 command handle, then recovered the actual retained test output. It
 distinguished orderly reopen from root's killed-helper process gate.
+
+## Wave 11 Engine integration reviewer — 2026-09-25
+
+The reviewer verified exact `6988d519` and its cumulative diff from the
+scaffold. For an inherited Pending claim with fresh-scheduler UnknownCall,
+Engine interrupts only that claim and replays a typed Interrupted output;
+on a zero-row transition it rereads durable state, preserving an already
+Settled output and failing closed on unresolved states. It ran
+`engine_recovery_` 2/2 and `dynamic_reply_schema` 2/2, and made no
+remote-execution exactly-once claim. Its separate checkout, cumulative
+diff and consumer inspection cost one additional review node and test
+execution, without implementation change. `friction:` notebook
+multi-line binding and detached-signature attempts were rejected before a
+simpler combined binding cell succeeded.
 
 ## root
 

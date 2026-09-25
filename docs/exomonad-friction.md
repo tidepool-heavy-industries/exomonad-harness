@@ -33,11 +33,34 @@
   a separate test crate and failed compilation because inline Driver tests
   referenced the demo binary crate root. Root moved the gate to a `#[cfg(test)]`
   module under `main.rs`; its focused test then ran 1/1.
+- `friction:` Process-gate reviewer saw an unrelated unused-import warning
+  in Driver recovery tests during its otherwise passing exact-candidate
+  Cargo run (1 matched/executed/passed); it was not a process-gate failure.
 - `friction:` Driver reviewer verified exact HEAD `8a2a4c8` and both
   focused filters 2/2, but its typed `ReviewedCandidate` still named
   the previous `eb5d837` candidate/basis. Driver lead withheld integration
   and asked the same reviewer to correct the typed record; semantic prose
   alone is not an exact-tip verdict.
+- `friction:` A delayed Driver-lead plan to merge `203d927` arrived after
+  its reviewed test slice and root process gate had already been integrated
+  and checked. It was treated as a stale plan, not a new gate or request
+  to repeat disjoint checks.
+- `friction:` Engine contract drift briefly replaced the already-tested
+  Pending-claim interruption with an Unsupported error at `70412ae`, while
+  tests still expected typed interruption. Commit `65bace1` reverted it
+  to the same owned-file tree as reviewed `6988d51`; extra steering, policy
+  question, review and equivalence check were redundant coordination.
+  The root integrated and checked `6988d51`, not the transient commit.
+- `friction:` Engine integration reviewer reported rejected notebook
+  multi-line binding and detached-signature cells before a simpler
+  combined binding worked. Its exact-source node executed recovery 2/2
+  and dynamic schema 2/2.
+- `friction:` Engine lead reported checked `65bace1` incorporation but
+  stayed in a redundant reviewer relay after root had already accepted
+  code-equivalent `6988d51` and integrated/checked it. Root sent one
+  convergence message, stopped the prolonged lead before typed Delivery,
+  and retired the component group. This is a coordination shortfall, not
+  an unreviewed code gap.
 
 Version-controlled field notes, not an engine bug tracker. “Fixed” below means
 the local prompt or workflow changed; it does not imply an engine fix. Earlier
