@@ -24,7 +24,7 @@ dependency amendment is `c427057`.
 |---|---|---|---|---|---|
 | (a) one entry | done | `9da6efe`, `a9f7a12` | integrated | nothing | nothing |
 | (b) async tools | root | `d8097c3`; trace leaf `fb80016`; consumer `a42920f`; tree schema repair `e4466b3` on master | tree schema 1/1, correction_wave async 1/1; manual attempt: HTTP 400 on request 2 | live `wait_agent` continuation | no retry without operator authority; redacted attempt retained |
-| (c) settings items | settings-preflight-v8; root integrated core settings | reviewed settings stack `b0e1480` merged at `f1334bec8487aa710b8ba584fe14ce7d40ef5b2a`; root active-invocation contract `e28126e` | integrated set_effort 3/3, three Store tests 1/1 each, correction_wave settings 1/1, cargo check; invocation dispatch 1/1 | Here active-call gate, live item-13 trace | retained lead request43 rebases Here onto `e28126e`; demo Here gate remains closed |
+| (c) settings items | settings-preflight-v8; root integrated core settings | reviewed settings stack `b0e1480` merged at `f1334bec8487aa710b8ba584fe14ce7d40ef5b2a`; root active-invocation contract `e28126e`; Here rescue on `f504dd0` | integrated set_effort 3/3, three Store tests 1/1 each, correction_wave settings 1/1, cargo check; invocation dispatch 1/1 | Here active-call gate, live item-13 trace | owner34 rebases stopped `f7a766e` onto `f504dd0`; demo Here gate remains closed |
 | (d) `Compactor` | root Engine seam; component lead delivered | Server component `03beea9` merged at `c3f29d0`; Engine/store `2b5e152`, demo consumer `5c17907`, replay repair `c8c7fef` on master; same reviewer Accepted exact `c8c7fef` | Engine compaction 3/3 incl. offline unanswered-call experiment; component 2/2; replay factory 20 runs each 1/1; CLI parser 1/1; cargo check harness-demo | live unanswered-call behavior unverified; operator authorization asked | retain offline findings; no unauthorized inference |
 | cache probe | done | `d0245b3` | 0 then 20,736 cached tokens | general cache behavior | nothing |
 | interviews | every node | `docs/interviews.md` | root, probe, core present | later nodes | one section per node that runs |
@@ -33,6 +33,7 @@ dependency amendment is `c427057`.
 | store-drop review | reviewer | candidate `46a5496e38e8493a4de63eeedd007997b0084e3b`, base `763764d389763df6ab3ac0cc65b990c4b82fe1b7` | read-only review of `crates/harness/src/store/mod.rs` | accepted, merged at `eabf47b`, integrated check 1/1 | no next action |
 | settings-preflight-v8 admission | root | base `eabf47b6b8b49e501a39960e02f989b8f4e89625` | no files | passed | quoted `amber-orbit-eabf47b`; follow-up sent |
 | settings-recovery-v8 follow-up | preflighted Sol lead | base `5c2c8bc89b310d0b77b3e484a2a7f0811f32ec1b` | owns `crates/harness/src/{engine,agent_runtime}.rs`, `store/mod.rs`, `crates/harness/tests/correction_wave.rs`; root owns contracts | pin/test/visibility/effort/provenance reviewed as stack through exact `d01e45e` (actor21 full cumulative 26f..d01 Accepted), lead `b0e1480` merged root at `f1334bec`; integrated focused checks above. Narrow `faae3dc` alone was Repair; original reviewer retired, actor21 used by explicit exception | Here rebase/review from `f1334bec`; live item-13 trace remains |
+| Here rescue request43 | retained settings lead; bounded owner34 and read-only audit35 | root base `f504dd062d2383a801462cbdb7cd304bfd54f316`; stopped prior worker's preserved branch `exomonad/settings-recovery-v8/wave-6-here-replacement/branches/here-recovery-fresh-v8` at `f7a766e71b4bcefd2db0562c23df2e296ede4ca2` | `f7` cumulative diff from `e28126e` touches only `agent_runtime.rs`, `engine.rs`, `store/mod.rs`; old `here` 4/4 does not establish active-call behavior | `f7` unreviewed/unintegrated; actor28 forcibly stopped after >133-call turn, custody retained | owner34 rebase/repair on `f504`, output-readiness race and full harness-lib checks, one exact review; root demo gate afterward |
 | compaction-component-v9 follow-up | retained Sol lead | base `48807d3a4fc25b692975329f4e0219be60c6a783` | `crates/harness/src/compaction.rs` | reviewed repair `0d8efbd`, integrated by lead `03beea9`, merged root `c3f29d0`; integrated 2/2, cargo check | root Engine candidate `2b5e152` review, then live experiment |
 
 Expected-red tests: none recorded. One committed red gets a row here with its
@@ -230,6 +231,15 @@ section per node that ran.
   lead as request43. A child must wait for the actual spawn output item to
   persist before sending its first request; claim-settled alone is too early.
   Demo TreeProvider still blocks model-facing Here until that gate is wired.
+  The first retained Here implementer exceeded the short-turn bound and was
+  stopped with work preserved. Its branch
+  `exomonad/settings-recovery-v8/wave-6-here-replacement/branches/here-recovery-fresh-v8`
+  is clean at `f7a766e71b4bcefd2db0562c23df2e296ede4ca2` (active-Here
+  snapshot changes in agent_runtime.rs/engine.rs/store/mod.rs), **not
+  reviewed or merged**; its old `here` checks do not test actual output
+  readiness. The lead admitted bounded rescue owner34 and read-only audit35
+  on exact `f504dd0`, tasked to rebase this candidate, prove the active-call
+  race and repair nine stale Engine assertions before exact review.
   Operator reported retained settings work from the previous run, not yet
   integrated; verify it against current master, do not assume correctness:
   - `exomonad/correction-second-half/preflight/branches/core-preflight-20260924`
