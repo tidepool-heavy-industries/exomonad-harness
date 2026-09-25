@@ -26,6 +26,7 @@ successful command with no executed tests, and preserves test failures.
 ```sh
 scripts/cargo-focused-test --package harness --target lib --filter dynamic_reply_schema
 scripts/cargo-focused-test --package harness --target test:adapter_readiness --filter active_cell_survives_three_boundary_envelopes_and_finalizes_durably
+scripts/cargo-focused-test --package harness-demo --target bin:harness-demo --filter followup_lifecycle
 ```
 
 The filter is a libtest substring. Name the expected count in the assignment and
