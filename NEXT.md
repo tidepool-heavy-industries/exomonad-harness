@@ -24,7 +24,7 @@ dependency amendment is `c427057`.
 |---|---|---|---|---|---|
 | (a) one entry | done | `9da6efe`, `a9f7a12` | integrated | nothing | nothing |
 | (b) async tools | root | `d8097c3`; trace leaf `fb80016`; consumer `a42920f`; tree schema repair under review | offline demo 35/35; manual attempt: HTTP 400 on request 2 | live `wait_agent` continuation | no retry without operator authority; review tree fix and retain redacted attempt |
-| (c) settings items | settings-preflight-v8, with retained prior candidates | store drop `46a5496` merged at `eabf47b`; prior stack `5876336` (unmerged) | drop 1/1 integrated | set_effort, here fork, live trace | verify/rebase prior candidates; implement remaining wiring |
+| (c) settings items | settings-preflight-v8; root integrated core settings | reviewed settings stack `b0e1480` merged at `f1334bec8487aa710b8ba584fe14ce7d40ef5b2a` | integrated set_effort 3/3, three Store tests 1/1 each, correction_wave settings 1/1, cargo check | Here fork, live item-13 trace | rebase/review Here onto exact root source; trace last |
 | (d) `Compactor` | root Engine seam; component lead delivered | Server component `03beea9` merged at `c3f29d0` | integrated compaction 2/2, cargo check | Engine::run consumer, unanswered-call experiment | wire production consumer after settings ownership releases engine.rs; live experiment last |
 | cache probe | done | `d0245b3` | 0 then 20,736 cached tokens | general cache behavior | nothing |
 | interviews | every node | `docs/interviews.md` | root, probe, core present | later nodes | one section per node that runs |
@@ -32,7 +32,7 @@ dependency amendment is `c427057`.
 | core-compaction-v7 follow-up | preflighted Sol lead | base `763764d389763df6ab3ac0cc65b990c4b82fe1b7` | owns `crates/harness/src/compaction.rs`; children compaction-server-v7 (implementation) and compaction-contract-v7 (read-only) | settled Blocked as component: retained repair e87b47f only compaction.rs, child final review pending; old caddc4c stacked | component can land independent of settings; follow-up below; root owns Engine::run wiring |
 | store-drop review | reviewer | candidate `46a5496e38e8493a4de63eeedd007997b0084e3b`, base `763764d389763df6ab3ac0cc65b990c4b82fe1b7` | read-only review of `crates/harness/src/store/mod.rs` | accepted, merged at `eabf47b`, integrated check 1/1 | no next action |
 | settings-preflight-v8 admission | root | base `eabf47b6b8b49e501a39960e02f989b8f4e89625` | no files | passed | quoted `amber-orbit-eabf47b`; follow-up sent |
-| settings-recovery-v8 follow-up | preflighted Sol lead | base `5c2c8bc89b310d0b77b3e484a2a7f0811f32ec1b` | owns `crates/harness/src/{engine,agent_runtime}.rs`, `store/mod.rs`, `crates/harness/tests/correction_wave.rs`; root owns contracts; wave-1 settings-pin-v8 (Luna Medium, engine/store) and here-candidate-probe-v8 (read-only) | admission checkpoint received; local `26f8634` 2/2 and `a243d1f` 1/1 reported reviewed, but root found public trusted-write API; neither merged | repair visibility and reviewAgain; set_effort uses durable pending value atomically applied at next request (not stale agent head); then exact integrate commit |
+| settings-recovery-v8 follow-up | preflighted Sol lead | base `5c2c8bc89b310d0b77b3e484a2a7f0811f32ec1b` | owns `crates/harness/src/{engine,agent_runtime}.rs`, `store/mod.rs`, `crates/harness/tests/correction_wave.rs`; root owns contracts | pin/test/visibility/effort/provenance reviewed as stack through exact `d01e45e` (actor21 full cumulative 26f..d01 Accepted), lead `b0e1480` merged root at `f1334bec`; integrated focused checks above. Narrow `faae3dc` alone was Repair; original reviewer retired, actor21 used by explicit exception | Here rebase/review from `f1334bec`; live item-13 trace remains |
 | compaction-component-v9 follow-up | retained Sol lead | base `48807d3a4fc25b692975329f4e0219be60c6a783` | `crates/harness/src/compaction.rs` | reviewed repair `0d8efbd`, integrated by lead `03beea9`, merged root `c3f29d0`; integrated 2/2, cargo check | Engine::run and live experiment remain |
 
 Expected-red tests: none recorded. One committed red gets a row here with its
@@ -212,6 +212,15 @@ section per node that ran.
   grants one additional attempt (question in `docs/questions.md`).
 - (c) settings items: the append drop rule is reviewed and integrated at
   `eabf47b6b8b49e501a39960e02f989b8f4e89625` (focused 1/1, cargo check).
+  Settings pin, model-facing effort verb, and provenance repairs are now
+  integrated from lead `b0e1480` at root `f1334bec8487aa710b8ba584fe14ce7d40ef5b2a`.
+  Exact `d01e45e` received actor21 Accepted review of cumulative
+  `26f8634..d01e45e`; actor27's isolated `faae3dc` review was Repair,
+  since that ancestor alone left envelope ingress open. Root integrated
+  `set_effort` 3/3, three Store tests 1/1 each, correction_wave settings
+  1/1 and cargo check. The old `drops_foreign_configuration_update` filter
+  matched zero after renaming and is not pass evidence. Here-fork integration
+  and the live item-13 trace are still open.
   Operator reported retained settings work from the previous run, not yet
   integrated; verify it against current master, do not assume correctness:
   - `exomonad/correction-second-half/preflight/branches/core-preflight-20260924`
