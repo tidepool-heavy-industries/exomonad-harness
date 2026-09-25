@@ -297,6 +297,157 @@ impl Store {
             envelope_id,
         ))
     }
+    /// Atomically fork a flattened `here` snapshot, admit its child, and put
+    /// the initial NEW_TASK envelope in the child's mailbox. The snapshot
+    /// request deliberately has no request-parent edge: `source_head` is
+    /// retained only in the agent's fork metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_here_agent_with_snapshot(
+        &self,
+        path: &AgentPath,
+        parent: &AgentPath,
+        snapshot_request: &RequestId,
+        contract: &serde_json::Value,
+        sender: &str,
+        recipient: &str,
+        class: &str,
+        task_item: &Item,
+    ) -> Result<(Agent, i64)> {
+        Self::validate_agent_path(&path.0, Some(&parent.0))?;
+        let mut c = self.lock();
+        let tx = c.transaction()?;
+        let parent_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agents WHERE path=?1)",
+            [&parent.0],
+            |r| r.get(0),
+        )?;
+        if !parent_exists {
+            return Err(StoreError::MissingAgentParent(parent.0.clone()));
+        }
+
+        let source_head: Option<RequestId> = tx.query_row(
+            "SELECT head_request FROM agents WHERE path=?1",
+            [&parent.0],
+            |row| Ok(row.get::<_, Option<String>>(0)?.map(RequestId)),
+        )?;
+        let history = if let Some(head) = source_head.as_ref() {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
+                [&head.0],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(StoreError::MissingRequest(head.0.clone()));
+            }
+            let mut q = tx.prepare(
+                "WITH RECURSIVE lineage(id,parent_id,depth) AS (
+                     SELECT id,parent_id,0 FROM requests WHERE id=?1
+                     UNION ALL
+                     SELECT r.id,r.parent_id,lineage.depth+1
+                     FROM requests r JOIN lineage ON r.id=lineage.parent_id
+                 )
+                 SELECT i.json FROM lineage
+                 JOIN request_items ri ON ri.request_id=lineage.id
+                 JOIN items i ON i.hash=ri.item_hash
+                 ORDER BY lineage.depth DESC,ri.position",
+            )?;
+            q.query_map([&head.0], |row| row.get::<_, String>(0))?
+                .map(|raw| Ok(serde_json::from_str::<Item>(&raw?)?))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
+        let inherited_calls = if let Some(head) = source_head.as_ref() {
+            let mut q = tx.prepare(
+                "WITH RECURSIVE lineage(id,parent_id) AS (
+                     SELECT id,parent_id FROM requests WHERE id=?1
+                     UNION ALL
+                     SELECT r.id,r.parent_id FROM requests r JOIN lineage ON r.id=lineage.parent_id
+                 )
+                 SELECT DISTINCT c.call_id FROM claims c
+                 JOIN lineage ON lineage.id=c.request_id
+                 WHERE c.state='pending' ORDER BY c.call_id",
+            )?;
+            q.query_map([&head.0], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+        let child_effort = history
+            .iter()
+            .rev()
+            .find_map(Item::configuration_effort)
+            .unwrap_or(Effort::Low);
+        let snapshot: Vec<_> = history
+            .into_iter()
+            .filter(|item| !Self::strip_from_here_snapshot(item))
+            .collect();
+        let source = serde_json::json!({
+            "kind":"here",
+            "source_head_request":source_head,
+            "snapshot_request":snapshot_request
+        });
+
+        tx.execute(
+            "INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros) VALUES (?1,NULL,?2,?3,0,0,0)",
+            params![snapshot_request.0, path.0, utc_millis()],
+        )?;
+        for (position, item) in snapshot.iter().enumerate() {
+            let hash = Self::put_item_tx(&tx, item)?;
+            tx.execute(
+                "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
+                params![snapshot_request.0, position as i64, hash.0],
+            )?;
+        }
+        for call_id in inherited_calls {
+            tx.execute(
+                "INSERT INTO claims(call_id,request_id,state) VALUES (?1,?2,'pending')",
+                params![call_id, snapshot_request.0],
+            )?;
+        }
+        // The existing trusted writer is factored into a transaction helper,
+        // so this is exactly one fresh pin in the same admission transaction.
+        Self::set_effort_tx(&tx, snapshot_request, child_effort)?;
+        let created_at = utc_millis();
+        tx.execute(
+            "INSERT INTO agents(path,parent_path,head_request,contract,fork_source,state,created_at) VALUES (?1,?2,?3,?4,?5,'active',?6)",
+            params![
+                path.0,
+                parent.0,
+                snapshot_request.0,
+                serde_json::to_string(contract)?,
+                serde_json::to_string(&source)?,
+                created_at
+            ],
+        )?;
+        let hash = Self::put_item_tx(&tx, task_item)?;
+        tx.execute(
+            "INSERT INTO envelopes(sender,recipient,class,item_hash,delivered_request,created_at) VALUES (?1,?2,?3,?4,NULL,?5)",
+            params![sender, recipient, class, hash.0, utc_millis()],
+        )?;
+        let envelope_id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok((
+            Agent {
+                path: path.clone(),
+                parent: Some(parent.clone()),
+                head_request: Some(snapshot_request.clone()),
+                contract: contract.clone(),
+                fork_source: source,
+                state: AgentState::Active,
+                created_at,
+            },
+            envelope_id,
+        ))
+    }
+
+    fn strip_from_here_snapshot(item: &Item) -> bool {
+        item.is_configuration_update()
+            || matches!(
+                item.0.get("type").and_then(serde_json::Value::as_str),
+                Some("annotation" | "watchdog_annotation" | "dropped_claim")
+            )
+    }
     pub fn agent(&self, path: &AgentPath) -> Result<Option<Agent>> {
         self.lock().query_row("SELECT path,parent_path,head_request,contract,fork_source,state,created_at FROM agents WHERE path=?1",[&path.0],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?.map(Self::decode_agent).transpose()
     }
@@ -651,7 +802,6 @@ impl Store {
         tx.commit()?;
         Ok(hash)
     }
-
     // The single trusted positional-setting writer. Both the ordinary
     // Store::set_effort API and atomic pending-setting consumption route here;
     // model-authored items still cannot reach it through append_items.
@@ -703,7 +853,6 @@ impl Store {
         )?;
         Ok(hash)
     }
-
     fn pending_effort_key(agent: &AgentPath) -> String {
         format!("harness:pending_effort:{}", agent.0)
     }
@@ -959,6 +1108,31 @@ impl Store {
         let c = self.lock();
         let mut q=c.prepare("SELECT call_id,request_id,state,output_hash FROM claims WHERE call_id=?1 ORDER BY request_id")?;
         q.query_map([&call.0], |r| {
+            let s: String = r.get(2)?;
+            Ok(Claim {
+                call_id: CallId(r.get(0)?),
+                request: RequestId(r.get(1)?),
+                state: match s.as_str() {
+                    "settled" => ClaimState::Settled,
+                    "interrupted" => ClaimState::Interrupted,
+                    _ => ClaimState::Pending,
+                },
+                output: r.get::<_, Option<String>>(3)?.map(ItemHash),
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+    }
+    /// Claims directly attached to one request, without following request
+    /// ancestry. Here-fork startup uses this to distinguish a child-owned
+    /// inherited claim from a pending ancestor claim visible through lineage.
+    pub fn claims_on(&self, request: &RequestId) -> Result<Vec<Claim>> {
+        let c = self.lock();
+        let mut q = c.prepare(
+            "SELECT call_id,request_id,state,output_hash FROM claims \
+             WHERE request_id=?1 ORDER BY call_id",
+        )?;
+        q.query_map([&request.0], |r| {
             let s: String = r.get(2)?;
             Ok(Claim {
                 call_id: CallId(r.get(0)?),
@@ -1469,6 +1643,66 @@ mod tests {
             .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, 3);
+    }
+
+    #[test]
+    fn here_snapshot_admission_rolls_back_request_claim_and_envelope_on_agent_conflict() {
+        let store = Store::memory().unwrap();
+        let root = AgentPath("/root".into());
+        let child = AgentPath("/root/child".into());
+        let source = id("here-parent");
+        let snapshot = id("here-child-snapshot");
+        let call = CallId("here-pending-call".into());
+        store.create_request(&source, None, &root.0).unwrap();
+        store
+            .append_items(
+                &source,
+                &[item(serde_json::json!({
+                    "type":"function_call","call_id":call.0,"name":"slow","arguments":"{}"
+                }))],
+            )
+            .unwrap();
+        store.set_effort(&source, Effort::Medium).unwrap();
+        store
+            .admit_agent(
+                &root,
+                None,
+                Some(&source),
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        store.claim(&call, &source).unwrap();
+        store
+            .admit_agent(
+                &child,
+                Some(&root),
+                Some(&source),
+                &serde_json::json!({}),
+                &serde_json::json!({"kind":"preexisting"}),
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .admit_here_agent_with_snapshot(
+                    &child,
+                    &root,
+                    &snapshot,
+                    &serde_json::json!({}),
+                    &root.0,
+                    &child.0,
+                    "AtBoundary",
+                    &item(serde_json::json!({
+                        "type":"message","role":"assistant","content":"NEW_TASK"
+                    })),
+                )
+                .is_err()
+        );
+        assert_eq!(store.request(&snapshot).unwrap(), None);
+        assert!(store.claims_on(&snapshot).unwrap().is_empty());
+        assert!(store.unread(&child.0).unwrap().is_empty());
+        assert_eq!(store.claims(&call).unwrap()[0].state, ClaimState::Pending);
     }
 
     #[test]

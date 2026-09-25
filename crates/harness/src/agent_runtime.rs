@@ -248,22 +248,34 @@ impl AgentToolService for StoreAgentToolService {
         let parent_path = parent.clone();
         let created_path = self
             .blocking(move |store| {
-                let parent_agent = Self::stored(&store, &parent_path)?;
+                Self::stored(&store, &parent_path)?;
+                let contract_value = serde_json::to_value(&contract).map_err(err)?;
+                let task_payload = serde_json::to_string(&contract_value).map_err(err)?;
+                let task_envelope = envelope(
+                    EnvelopeType::NewTask,
+                    parent_path.clone(),
+                    path.clone(),
+                    task_payload,
+                );
+                if matches!(from, SpawnSource::Here) {
+                    let snapshot_request = RequestId(uuid::Uuid::new_v4().to_string());
+                    let (admitted, _envelope_id) = store
+                        .admit_here_agent_with_snapshot(
+                            &path,
+                            &parent_path,
+                            &snapshot_request,
+                            &contract_value,
+                            &parent_path.0,
+                            &path.0,
+                            "AtBoundary",
+                            &envelope_item(&task_envelope),
+                        )
+                        .map_err(err)?;
+                    return Ok(admitted.path);
+                }
                 let (head, source) = match from {
                     SpawnSource::Prompt => (None, json!({"kind":"prompt"})),
-                    // TODO(correction-wave c): a `here` fork must apply the strip
-                    // list (parent's configuration_updates, annotations, dropped
-                    // claims) and re-pin effort with ONE fresh update, and the
-                    // child must inherit the parent's claims on pending calls
-                    // (PRD `agent verbs`, acceptance 11 and 13). Today it only
-                    // points the child at the parent's head request. The strip
-                    // list needs no provenance lookup: every configuration_update
-                    // in a stored history is harness-authored by construction
-                    // (see `Store::append_items`), so strip = drop by item type.
-                    SpawnSource::Here => (
-                        parent_agent.head_request.clone(),
-                        json!({"kind":"here","head_request":parent_agent.head_request}),
-                    ),
+                    SpawnSource::Here => unreachable!("handled as an atomic snapshot above"),
                     SpawnSource::Checkpoint(checkpoint) => {
                         let state = store
                             .session_state(&checkpoints_key(&parent_path))
@@ -284,14 +296,6 @@ impl AgentToolService for StoreAgentToolService {
                         )
                     }
                 };
-                let contract_value = serde_json::to_value(&contract).map_err(err)?;
-                let task_payload = serde_json::to_string(&contract_value).map_err(err)?;
-                let task_envelope = envelope(
-                    EnvelopeType::NewTask,
-                    parent_path.clone(),
-                    path.clone(),
-                    task_payload,
-                );
                 let (admitted, _envelope_id) = store
                     .admit_agent_with_envelope(
                         &path,
@@ -587,7 +591,14 @@ mod tests {
             .agent(&AgentPath("/root/here_worker".into()))
             .unwrap()
             .unwrap();
-        assert_eq!(here.head_request, Some(root_head));
+        let here_head = here.head_request.clone().unwrap();
+        assert_ne!(here_head, root_head);
+        assert_eq!(
+            store.request(&here_head).unwrap().unwrap().parent,
+            None,
+            "Here snapshots own a flattened request with no parent edge"
+        );
+        assert_eq!(here.fork_source["source_head_request"], root_head.0);
         assert_eq!(here.fork_source["kind"], "here");
 
         service
@@ -607,7 +618,7 @@ mod tests {
             .agent(&AgentPath("/root/checkpoint_worker".into()))
             .unwrap()
             .unwrap();
-        assert_eq!(checkpoint.head_request, here.head_request);
+        assert_eq!(checkpoint.head_request, Some(root_head));
         assert_eq!(checkpoint.fork_source["kind"], "checkpoint");
         assert_eq!(store.unread("/root/checkpoint_worker").unwrap().len(), 1);
     }
@@ -641,6 +652,126 @@ mod tests {
         assert_eq!(
             store.items(&next).unwrap()[0].configuration_effort(),
             Some(crate::model::Effort::High)
+        );
+    }
+
+    #[tokio::test]
+    async fn here_fork_commits_filtered_flattened_snapshot_and_task_without_request_edge() {
+        let (service, store, root_head) = service().await;
+        store
+            .append_items(
+                &root_head,
+                &[
+                    Item(json!({"type":"message","role":"user","content":"prefix"})),
+                    Item(json!({"type":"annotation","text":"watchdog note"})),
+                    Item(json!({"type":"watchdog_annotation","text":"watchdog note"})),
+                    Item(json!({"type":"dropped_claim","call_id":"old"})),
+                ],
+            )
+            .unwrap();
+        let committed_boundary = RequestId("root-spawn-boundary".into());
+        store
+            .write_request(
+                &committed_boundary,
+                Some(&root_head),
+                "/root",
+                &[
+                    Item(json!({"type":"function_call","call_id":"spawn-1","name":"spawn_agent"})),
+                    Item(json!({"type":"function_call_output","call_id":"spawn-1","output":"child started"})),
+                ],
+                Default::default(),
+            )
+            .unwrap();
+        assert!(
+            store
+                .advance_agent_head(
+                    &AgentPath("/root".into()),
+                    Some(&root_head),
+                    Some(&committed_boundary),
+                )
+                .unwrap()
+        );
+        store
+            .set_effort(&committed_boundary, crate::model::Effort::High)
+            .unwrap();
+        let inherited_call = crate::model::CallId("inherited-work".into());
+        store.claim(&inherited_call, &committed_boundary).unwrap();
+
+        service
+            .spawn_agent(
+                &AgentPath("/root".into()),
+                "item13-child",
+                SpawnSource::Here,
+                contract(),
+            )
+            .await
+            .unwrap();
+
+        let child_path = AgentPath("/root/item13_child".into());
+        let child = store.agent(&child_path).unwrap().unwrap();
+        let child_head = child.head_request.clone().unwrap();
+        let child_request = store.request(&child_head).unwrap().unwrap();
+        assert_eq!(child_request.parent, None);
+        assert_eq!(child_request.branch, child_path.0);
+        assert_eq!(
+            child.fork_source["source_head_request"],
+            committed_boundary.0
+        );
+        assert_eq!(child.fork_source["snapshot_request"], child_head.0);
+        let child_claims = store.claims_on(&child_head).unwrap();
+        assert_eq!(child_claims.len(), 1);
+        assert_eq!(child_claims[0].call_id, inherited_call);
+        assert_eq!(child_claims[0].request, child_head);
+        assert_eq!(child_claims[0].state, crate::store::ClaimState::Pending);
+        assert_eq!(
+            store.pending_at(&child_head).unwrap().len(),
+            1,
+            "the child snapshot is a root request; its claim is attached directly"
+        );
+        let history = store.items(&child_head).unwrap();
+        assert_eq!(
+            history
+                .iter()
+                .filter(|item| item.is_configuration_update())
+                .count(),
+            1
+        );
+        assert_eq!(
+            history.iter().find_map(Item::configuration_effort),
+            Some(crate::model::Effort::High)
+        );
+        assert_eq!(
+            history
+                .iter()
+                .filter(|item| {
+                    matches!(
+                        item.0.get("type").and_then(serde_json::Value::as_str),
+                        Some("annotation" | "watchdog_annotation" | "dropped_claim")
+                    )
+                })
+                .count(),
+            0
+        );
+        assert_eq!(
+            history
+                .iter()
+                .map(|item| item.0["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "message",
+                "function_call",
+                "function_call_output",
+                "configuration_update"
+            ]
+        );
+        let inbox = store.unread(&child_path.0).unwrap();
+        assert_eq!(inbox.len(), 1);
+        let task = store.get_item(&inbox[0].item_hash).unwrap().unwrap();
+        assert!(
+            task.0["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("NEW_TASK")
         );
     }
 

@@ -36,6 +36,7 @@ struct PendingCall {
     call_id: CallId,
     claim_request: RequestId,
     is_wait_agent: bool,
+    cancel_job_on_cleanup: bool,
 }
 
 #[derive(Debug, Error)]
@@ -60,6 +61,10 @@ pub enum EngineError {
     MultipleWaitAgents,
     #[error(transparent)]
     Compact(#[from] CompactError),
+    #[error("cannot resume a forked wait_agent call before its parent settles it")]
+    UnresumableForkedWaitAgent,
+    #[error("inherited settled call {0} has no durable output item")]
+    MissingInheritedOutput(String),
     #[error(
         "engine operation failed: {primary}; additionally failed to clean up outstanding calls: {cleanup}"
     )]
@@ -220,6 +225,71 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             Some(head) => self.read_history(head).await?,
             None => Vec::new(),
         };
+        let inherited_claims = match &head {
+            Some(head) => {
+                let store = self.store.clone();
+                let request = head.clone();
+                blocking(move || store.claims_on(&request)).await?
+            }
+            None => Vec::new(),
+        };
+        let mut pending = Vec::<PendingCall>::new();
+        let mut replay_items = Vec::<Item>::new();
+        let mut replay_outputs = Vec::<(CallId, crate::turn::JobOutput)>::new();
+        let mut attachable = Vec::new();
+        for claim in inherited_claims {
+            if inherited_history.iter().any(|item| {
+                item.0["type"] == "function_call_output"
+                    && item.0["call_id"].as_str() == Some(&claim.call_id.0)
+            }) {
+                continue;
+            }
+            if claim.state == crate::store::ClaimState::Settled {
+                let Some(hash) = claim.output else {
+                    return Err(EngineError::MissingInheritedOutput(claim.call_id.0.clone()));
+                };
+                let store = self.store.clone();
+                let item = blocking(move || store.get_item(&hash)).await?;
+                let Some(item) = item else {
+                    return Err(EngineError::MissingInheritedOutput(claim.call_id.0));
+                };
+                replay_items.push(item);
+                continue;
+            }
+            if claim.state == crate::store::ClaimState::Interrupted {
+                replay_items.push(items::function_output(
+                    &claim.call_id,
+                    &crate::turn::JobOutput::Interrupted,
+                ));
+                continue;
+            }
+            if inherited_history.iter().any(|item| {
+                items::function_call(item)
+                    .is_some_and(|(call, name, _)| call == claim.call_id && name == "wait_agent")
+            }) {
+                return Err(EngineError::UnresumableForkedWaitAgent);
+            }
+            // Validate every pending job before claiming any of them. The
+            // scheduler retains jobs for the lifetime of this shared runtime.
+            let call_id = claim.call_id.clone();
+            self.scheduler.output(&call_id).await?;
+            attachable.push(claim);
+        }
+        for claim in attachable {
+            match self
+                .scheduler
+                .fork_claim(&claim.call_id, self.config.agent.clone(), true)
+                .await?
+            {
+                Some(output) => replay_outputs.push((claim.call_id, output)),
+                None => pending.push(PendingCall {
+                    call_id: claim.call_id,
+                    claim_request: claim.request,
+                    is_wait_agent: false,
+                    cancel_job_on_cleanup: false,
+                }),
+            }
+        }
         let id = RequestId(uuid::Uuid::new_v4().to_string());
         let store = self.store.clone();
         let request = id.clone();
@@ -246,6 +316,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let request = id.clone();
             let agent = self.config.agent.clone();
             blocking(move || store.apply_pending_effort(&agent, &request)).await?;
+        }
+        for (call_id, output) in replay_outputs {
+            self.persist_output(&call_id, &output, &id).await?;
+        }
+        if !replay_items.is_empty() {
+            self.append(&id, replay_items).await?;
         }
         if admit_inbox {
             let store = self.store.clone();
@@ -616,6 +692,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 call_id,
                 claim_request: request.clone(),
                 is_wait_agent,
+                cancel_job_on_cleanup: false,
             }));
         }
         let provider: Arc<dyn Provider> = self.provider.clone();
@@ -648,13 +725,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             call_id,
             claim_request: request.clone(),
             is_wait_agent,
+            cancel_job_on_cleanup: true,
         }))
     }
 
     async fn cancel_pending(&self, pending: &[PendingCall]) -> Result<(), EngineError> {
         let mut first_error = None;
         for call in pending {
-            if !call.is_wait_agent {
+            if call.cancel_job_on_cleanup && !call.is_wait_agent {
                 if let Err(error) = self.scheduler.cancel(&call.call_id).await {
                     first_error.get_or_insert_with(|| EngineError::Job(error));
                 }
@@ -961,6 +1039,59 @@ mod tests {
         }
     }
 
+    async fn inherited_claim_fixture() -> (Arc<Store>, RequestId, RequestId, CallId) {
+        let store = Arc::new(Store::memory().unwrap());
+        let parent = AgentPath("/root".into());
+        let child = AgentPath("/root/child".into());
+        let source_head = RequestId("inherited-parent-head".into());
+        let snapshot = RequestId("inherited-child-snapshot".into());
+        let call_id = CallId("inherited-call".into());
+        store.create_request(&source_head, None, &parent.0).unwrap();
+        store
+            .append_items(
+                &source_head,
+                &[Item(json!({
+                    "type":"function_call",
+                    "call_id":call_id.0,
+                    "name":"slow",
+                    "arguments":"{}"
+                }))],
+            )
+            .unwrap();
+        store.set_effort(&source_head, Effort::Low).unwrap();
+        store
+            .admit_agent(
+                &parent,
+                None,
+                Some(&source_head),
+                &json!({}),
+                &json!({"kind":"root"}),
+            )
+            .unwrap();
+        store.claim(&call_id, &source_head).unwrap();
+        store
+            .admit_here_agent_with_snapshot(
+                &child,
+                &parent,
+                &snapshot,
+                &json!({}),
+                &parent.0,
+                &child.0,
+                "AtBoundary",
+                &Item(json!({
+                    "type":"message","role":"assistant","content":[{
+                        "type":"output_text","text":"NEW_TASK"
+                    }]
+                })),
+            )
+            .unwrap();
+        let child_claims = store.claims_on(&snapshot).unwrap();
+        assert_eq!(child_claims.len(), 1);
+        assert_eq!(child_claims[0].call_id, call_id);
+        assert_eq!(child_claims[0].request, snapshot);
+        (store, source_head, snapshot, call_id)
+    }
+
     struct Echo;
     #[async_trait]
     impl Provider for Echo {
@@ -1034,6 +1165,383 @@ mod tests {
         fn tools(&self) -> Vec<Value> {
             Vec::new()
         }
+    }
+
+    #[tokio::test]
+    async fn here_fork_inherits_claim_and_delivers_late_output_before_child_resumes() {
+        use crate::turn::JobOutput;
+
+        let (store, source_head, snapshot, call_id) = inherited_claim_fixture().await;
+        let started = Arc::new(Notify::new());
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let provider = Arc::new(SlowProvider {
+            started: started.clone(),
+            release: tokio::sync::Mutex::new(Some(release_rx)),
+            released: released.clone(),
+        });
+        let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+        scheduler
+            .start_for_agent(
+                provider.clone(),
+                AgentPath("/root".into()),
+                call_id.clone(),
+                "slow".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        scheduler
+            .claim(&call_id, AgentPath("/root".into()))
+            .await
+            .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let first_turn = turn(
+            "fork-pending-continuation",
+            vec![Item(json!({
+                "type":"function_call","call_id":"quick-call","name":"quick","arguments":"{}"
+            }))],
+        );
+        let final_turn = turn(
+            "fork-final",
+            vec![Item(json!({
+                "type":"message","role":"assistant","phase":"final_answer","content":"done"
+            }))],
+        );
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new([first_turn, final_turn].into()),
+        };
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            replay,
+            store.clone(),
+            scheduler.clone(),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "child-session".into(),
+                agent: AgentPath("/root/child".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let run_head = snapshot.clone();
+        let run = tokio::spawn(async move {
+            engine
+                .run(Some(run_head), vec![], cancel_rx, empty_mailbox())
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if requests.lock().unwrap().len() == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("child sends its initial async request");
+        let first_input = requests.lock().unwrap()[0].input.clone();
+        assert!(
+            first_input.iter().any(|item| {
+                item.0["type"] == "function_call" && item.0["call_id"] == call_id.0
+            })
+        );
+        let inherited = store.claims_on(&snapshot).unwrap();
+        assert_eq!(inherited.len(), 1, "claim is bound to child snapshot");
+        assert_eq!(inherited[0].call_id, call_id);
+        assert_eq!(inherited[0].request, snapshot);
+        assert_eq!(inherited[0].state, crate::store::ClaimState::Pending);
+        assert!(!first_input.iter().any(|item| {
+            item.0["type"] == "function_call_output" && item.0["call_id"] == call_id.0
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .expect("shared provider job has started");
+        release_tx.send(()).unwrap();
+        let completion = tokio::time::timeout(std::time::Duration::from_secs(2), run)
+            .await
+            .expect("child resumes after inherited output")
+            .unwrap()
+            .unwrap();
+        assert!(released.load(std::sync::atomic::Ordering::SeqCst));
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1]
+                .input
+                .iter()
+                .filter(|item| item.0["type"] == "function_call_output"
+                    && item.0["call_id"] == call_id.0)
+                .count(),
+            1,
+            "resumed child request receives exactly one output for the original call"
+        );
+        assert_eq!(
+            completion
+                .transcript
+                .iter()
+                .filter(|item| item.0["type"] == "function_call_output"
+                    && item.0["call_id"] == call_id.0)
+                .count(),
+            1,
+            "child history contains the late output exactly once"
+        );
+        assert_eq!(
+            scheduler.output(&call_id).await.unwrap(),
+            Some(JobOutput::Completed(Ok(json!({"slow_done":true}))))
+        );
+        let claims = store.claims(&call_id).unwrap();
+        assert_eq!(claims.len(), 2);
+        assert!(
+            claims
+                .iter()
+                .all(|claim| claim.state == crate::store::ClaimState::Settled)
+        );
+        let child_claims = store.claims_on(&snapshot).unwrap();
+        assert_eq!(child_claims.len(), 1);
+        assert_eq!(child_claims[0].state, crate::store::ClaimState::Settled);
+        assert!(claims.iter().any(|claim| claim.request == source_head));
+        assert!(claims.iter().any(|claim| claim.request == snapshot));
+        let settled = scheduler.settled_claimants(&call_id).await.unwrap();
+        assert!(settled.contains(&AgentPath("/root".into())));
+        assert!(settled.contains(&AgentPath("/root/child".into())));
+    }
+
+    #[tokio::test]
+    async fn settled_inherited_claim_is_replayed_from_store_before_child_first_request() {
+        let (store, _source_head, snapshot, call_id) = inherited_claim_fixture().await;
+        let output = Item(json!({
+            "type":"function_call_output",
+            "call_id":call_id.0,
+            "output":"{\"settled_before_start\":true}"
+        }));
+        store.write_output(&call_id, &output).unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new(
+                [turn(
+                    "settled-fork-final",
+                    vec![Item(json!({
+                        "type":"message","role":"assistant","phase":"final_answer","content":"done"
+                    }))],
+                )]
+                .into(),
+            ),
+        };
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            replay,
+            store,
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "child-session".into(),
+                agent: AgentPath("/root/child".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let completion = engine
+            .run(Some(snapshot), vec![], cancel_rx, empty_mailbox())
+            .await
+            .unwrap();
+        let requests = requests.lock().unwrap();
+        let first_input = &requests[0].input;
+        let output_position = first_input.iter().position(|item| {
+            item.0["type"] == "function_call_output"
+                && item.0["call_id"] == call_id.0
+                && item.0["output"] == output.0["output"]
+        });
+        let task_position = first_input.iter().position(|item| {
+            item.0["type"] == "message"
+                && item.0["content"].as_array().is_some_and(|content| {
+                    content.iter().any(|part| {
+                        part["text"]
+                            .as_str()
+                            .is_some_and(|text| text.contains("NEW_TASK"))
+                    })
+                })
+        });
+        assert!(output_position.is_some());
+        assert!(task_position.is_some());
+        assert!(output_position.unwrap() < task_position.unwrap());
+        assert!(completion.transcript.contains(&output));
+    }
+
+    #[tokio::test]
+    async fn forked_wait_agent_claim_fails_closed_before_model_request() {
+        let store = Arc::new(Store::memory().unwrap());
+        let parent = AgentPath("/root".into());
+        let child = AgentPath("/root/child".into());
+        let source_head = RequestId("wait-parent-head".into());
+        let snapshot = RequestId("wait-child-snapshot".into());
+        let call_id = CallId("inherited-wait".into());
+        store.create_request(&source_head, None, &parent.0).unwrap();
+        store
+            .append_items(
+                &source_head,
+                &[Item(json!({
+                    "type":"function_call",
+                    "call_id":call_id.0,
+                    "name":"wait_agent",
+                    "arguments":"{}"
+                }))],
+            )
+            .unwrap();
+        store.set_effort(&source_head, Effort::Low).unwrap();
+        store
+            .admit_agent(
+                &parent,
+                None,
+                Some(&source_head),
+                &json!({}),
+                &json!({"kind":"root"}),
+            )
+            .unwrap();
+        store.claim(&call_id, &source_head).unwrap();
+        store
+            .admit_here_agent_with_snapshot(
+                &child,
+                &parent,
+                &snapshot,
+                &json!({}),
+                &parent.0,
+                &child.0,
+                "AtBoundary",
+                &Item(json!({
+                    "type":"message","role":"assistant","content":[{
+                        "type":"output_text","text":"NEW_TASK"
+                    }]
+                })),
+            )
+            .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            Replay {
+                requests: requests.clone(),
+                turns: Mutex::new([turn(
+                    "must-not-run",
+                    vec![Item(json!({
+                        "type":"message","role":"assistant","phase":"final_answer","content":"unexpected"
+                    }))],
+                )]
+                .into()),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "child-session".into(),
+                agent: child,
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        assert!(matches!(
+            engine
+                .run(Some(snapshot.clone()), vec![], cancel_rx, empty_mailbox())
+                .await,
+            Err(EngineError::UnresumableForkedWaitAgent)
+        ));
+        assert!(requests.lock().unwrap().is_empty());
+        assert_eq!(store.claims_on(&snapshot).unwrap()[0].request, snapshot);
+    }
+
+    #[tokio::test]
+    async fn child_cleanup_interrupts_only_its_inherited_claim_not_the_parent_job() {
+        use crate::store::ClaimState;
+
+        let (store, source_head, snapshot, call_id) = inherited_claim_fixture().await;
+        let provider = Arc::new(PendingProvider);
+        let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+        scheduler
+            .start_for_agent(
+                provider.clone(),
+                AgentPath("/root".into()),
+                call_id.clone(),
+                "slow".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        scheduler
+            .claim(&call_id, AgentPath("/root".into()))
+            .await
+            .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new(
+                [turn(
+                    "fork-cancel",
+                    vec![Item(json!({
+                        "type":"message","role":"assistant","phase":"final_answer","content":"done"
+                    }))],
+                )]
+                .into(),
+            ),
+        };
+        let engine = Engine::<FakeAuth, PendingProvider, _>::with_transport(
+            replay,
+            store.clone(),
+            scheduler.clone(),
+            provider,
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "child-session".into(),
+                agent: AgentPath("/root/child".into()),
+            },
+        );
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let run_head = snapshot.clone();
+        let run = tokio::spawn(async move {
+            engine
+                .run(Some(run_head), vec![], cancel_rx, empty_mailbox())
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if !requests.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("child begins with the inherited call");
+        cancel_tx.send(true).unwrap();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), run)
+                .await
+                .expect("child cleanup returns")
+                .unwrap(),
+            Err(EngineError::Cancelled)
+        ));
+        assert_eq!(scheduler.output(&call_id).await.unwrap(), None);
+        let claims = store.claims(&call_id).unwrap();
+        assert_eq!(claims.len(), 2);
+        assert!(
+            claims
+                .iter()
+                .any(|claim| claim.request == source_head && claim.state == ClaimState::Pending)
+        );
+        assert!(
+            claims
+                .iter()
+                .any(|claim| claim.request == snapshot && claim.state == ClaimState::Interrupted)
+        );
     }
 
     struct AsyncContinuation {
@@ -1841,6 +2349,7 @@ mod tests {
             completion.transcript,
             vec![
                 initial.clone(),
+                Item::configuration_update(Effort::Low),
                 call,
                 items::function_output(
                     &CallId("transcript-call".into()),
@@ -1928,7 +2437,11 @@ mod tests {
         assert_eq!(first_req.parent, Some(parent.clone()));
         assert_eq!(
             requests.lock().unwrap()[0].input,
-            vec![prefix.clone(), first_new.clone()]
+            vec![
+                prefix.clone(),
+                first_new.clone(),
+                Item::configuration_update(Effort::Low)
+            ]
         );
 
         let (_cancel_tx, cancel_rx) = watch::channel(false);
@@ -1949,6 +2462,7 @@ mod tests {
             vec![
                 prefix.clone(),
                 first_new.clone(),
+                Item::configuration_update(Effort::Low),
                 first_answer.clone(),
                 second_new.clone(),
             ]
@@ -1960,6 +2474,7 @@ mod tests {
             vec![
                 prefix.clone(),
                 first_new,
+                Item::configuration_update(Effort::Low),
                 first_answer,
                 second_new,
                 second_answer,
@@ -2012,7 +2527,10 @@ mod tests {
             .unwrap();
         let recorded = requests.lock().unwrap();
         assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].input, vec![new_item]);
+        assert_eq!(
+            recorded[0].input,
+            vec![new_item, Item::configuration_update(Effort::Low)]
+        );
         assert_eq!(recorded[0].session_id, "new-session");
     }
 
@@ -2103,10 +2621,17 @@ mod tests {
             .run(None, vec![], cancel_rx, empty_mailbox())
             .await
             .unwrap();
-        assert_eq!(requests.lock().unwrap()[0].input, vec![task_item.clone()]);
+        assert_eq!(
+            requests.lock().unwrap()[0].input,
+            vec![Item::configuration_update(Effort::Low), task_item.clone()]
+        );
         assert_eq!(
             store.items(&first.head_request).unwrap(),
-            vec![task_item.clone(), first_answer.clone()]
+            vec![
+                Item::configuration_update(Effort::Low),
+                task_item.clone(),
+                first_answer.clone()
+            ]
         );
         assert!(store.unread(&recipient.0).unwrap().is_empty());
 
@@ -2122,7 +2647,14 @@ mod tests {
             .unwrap();
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[1].input, vec![task_item.clone(), first_answer]);
+        assert_eq!(
+            requests[1].input,
+            vec![
+                Item::configuration_update(Effort::Low),
+                task_item.clone(),
+                first_answer
+            ]
+        );
         assert_eq!(
             second
                 .transcript
@@ -2175,7 +2707,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             requests.lock().unwrap()[0].input,
-            vec![user_item, inbox_item]
+            vec![
+                user_item,
+                Item::configuration_update(Effort::Low),
+                inbox_item
+            ]
         );
     }
 
@@ -2621,15 +3157,15 @@ mod tests {
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         let resumed_history = &requests[2].input;
-        assert_eq!(resumed_history[1].0["call_id"], "slow-call");
-        assert_eq!(resumed_history[2].0["call_id"], "wait-call");
-        assert_eq!(resumed_history[3].0["call_id"], "slow-call");
-        assert_eq!(resumed_history[4].0["call_id"], "wait-call");
+        assert_eq!(resumed_history[2].0["call_id"], "slow-call");
+        assert_eq!(resumed_history[3].0["call_id"], "wait-call");
+        assert_eq!(resumed_history[4].0["call_id"], "slow-call");
+        assert_eq!(resumed_history[5].0["call_id"], "wait-call");
         let slow_output: Value =
-            serde_json::from_str(resumed_history[3].0["output"].as_str().unwrap()).unwrap();
+            serde_json::from_str(resumed_history[4].0["output"].as_str().unwrap()).unwrap();
         assert_eq!(slow_output, json!({"slow_done":true}));
         let wait_output: Value =
-            serde_json::from_str(resumed_history[4].0["output"].as_str().unwrap()).unwrap();
+            serde_json::from_str(resumed_history[5].0["output"].as_str().unwrap()).unwrap();
         assert_eq!(wait_output, json!({"resumed_by":{"job":"slow-call"}}));
     }
 
@@ -2701,8 +3237,8 @@ mod tests {
         );
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[1].input[1].0["call_id"], "late-call");
-        assert_eq!(requests[1].input[3].0["call_id"], "late-call");
+        assert_eq!(requests[1].input[2].0["call_id"], "late-call");
+        assert_eq!(requests[1].input[4].0["call_id"], "late-call");
     }
 
     #[tokio::test]
@@ -2775,14 +3311,15 @@ mod tests {
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         let next = &requests[1].input;
-        assert_eq!(next[1].0["call_id"], "wait-envelope");
-        assert_eq!(next[2].0["type"], "function_call_output");
+        assert_eq!(next[1], Item::configuration_update(Effort::Low));
         assert_eq!(next[2].0["call_id"], "wait-envelope");
-        let output: Value = serde_json::from_str(next[2].0["output"].as_str().unwrap()).unwrap();
+        assert_eq!(next[3].0["type"], "function_call_output");
+        assert_eq!(next[3].0["call_id"], "wait-envelope");
+        let output: Value = serde_json::from_str(next[3].0["output"].as_str().unwrap()).unwrap();
         assert_eq!(output, json!({"resumed_by":{"agent":"/root/worker"}}));
-        assert_eq!(next[3].0["type"], "message");
+        assert_eq!(next[4].0["type"], "message");
         assert_eq!(
-            next[3].0["content"],
+            next[4].0["content"],
             "Message Type: MESSAGE\nTask name: /root\nSender: /root/worker\nPayload:\narrived"
         );
     }
@@ -2849,13 +3386,14 @@ mod tests {
         let recorded = requests.lock().unwrap();
         assert_eq!(recorded.len(), 2);
         let resumed = &recorded[1].input;
-        assert_eq!(resumed.len(), 3);
-        assert_eq!(resumed[0].0["call_id"], "wait-envelope");
-        assert_eq!(resumed[1].0["type"], "function_call_output");
+        assert_eq!(resumed.len(), 4);
+        assert_eq!(resumed[0], Item::configuration_update(Effort::Low));
         assert_eq!(resumed[1].0["call_id"], "wait-envelope");
-        let status: Value = serde_json::from_str(resumed[1].0["output"].as_str().unwrap()).unwrap();
+        assert_eq!(resumed[2].0["type"], "function_call_output");
+        assert_eq!(resumed[2].0["call_id"], "wait-envelope");
+        let status: Value = serde_json::from_str(resumed[2].0["output"].as_str().unwrap()).unwrap();
         assert_eq!(status, json!({"resumed_by":{"agent":"/root/worker"}}));
-        assert_eq!(resumed[2], stored_item);
+        assert_eq!(resumed[3], stored_item);
         assert_eq!(
             completion
                 .transcript
