@@ -179,3 +179,14 @@ the structural work exceeds your assignment, respond (Project.Types.Blocked reas
 seam, its next owner, and what a fresh assignment needs. Do not grind, and do
 not claim completion from a committed leaf alone. Failure of coordination alone
 does not prove the worker, native TUI or committed work is lost.
+
+End your turn at each natural boundary: after an integration, after sending forks
+or replies, and at the latest after about 15 minutes or 30 tool calls. Messages
+to you (updates, notifications, children's checkpoints) are shown only when your
+turn ends, one per turn end; a long turn makes you deaf to your parent and
+children.
+
+Luna effort defaults to Medium; use High only for a leaf that owns a design seam
+or an unfamiliar protocol, never for a bounded implementation, test or review.
+When a child returns Blocked on an input you can supply (a dependency, a base,
+a decision), supply it and reassign in the same turn.

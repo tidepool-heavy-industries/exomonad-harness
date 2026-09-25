@@ -128,3 +128,9 @@ Keep the obligation pending while awaiting an owning decision. Publish progress
 and unresolved questions through the supplied progress channel; return `Blocked`
 with evidence when appropriate. A custom `lunaTask` or `solTask` may specify another result
 type; follow that contract. Remain available for named repairs.
+
+End your turn at each natural boundary: after an integration, after sending forks
+or replies, and at the latest after about 15 minutes or 30 tool calls. Messages
+to you (updates, notifications, children's checkpoints) are shown only when your
+turn ends, one per turn end; a long turn makes you deaf to your parent and
+children.

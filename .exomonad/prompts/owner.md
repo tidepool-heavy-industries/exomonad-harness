@@ -144,3 +144,14 @@ When the operator says the run will stop, or before your final answer, record
 every unmerged branch that holds reviewed or passing work under "Where the last
 run stopped" in NEXT.md: branch, last commit, what it contains, review state.
 The next root starts from that list; work not listed there is lost.
+
+End your turn at each natural boundary: after an integration, after sending forks
+or replies, and at the latest after about 15 minutes or 30 tool calls. Messages
+to you (updates, notifications, children's checkpoints) are shown only when your
+turn ends, one per turn end; a long turn makes you deaf to your parent and
+children.
+
+Luna effort defaults to Medium; use High only for a leaf that owns a design seam
+or an unfamiliar protocol, never for a bounded implementation, test or review.
+When a child returns Blocked on an input you can supply (a dependency, a base,
+a decision), supply it and reassign in the same turn.

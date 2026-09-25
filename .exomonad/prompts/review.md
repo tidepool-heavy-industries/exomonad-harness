@@ -128,3 +128,9 @@ respond (Project.Types.Produced (Project.Types.Accepted reviewed))
 For defects, `respond (Project.Types.Produced (Repair (Candidate (commitReviewCommit ci) checks gates) findings))`.
 Do not return Project.Types.Blocked because the input is CommitReview; that is the intended
 shape for a root or lead reviewing one exact commit.
+
+End your turn at each natural boundary: after an integration, after sending forks
+or replies, and at the latest after about 15 minutes or 30 tool calls. Messages
+to you (updates, notifications, children's checkpoints) are shown only when your
+turn ends, one per turn end; a long turn makes you deaf to your parent and
+children.
