@@ -46,6 +46,7 @@ pub struct HarnessEngineFactory<A, P, C, F> {
     pub store: Arc<Store>,
     pub scheduler: Arc<JobScheduler>,
     pub provider: Arc<P>,
+    pub compact_at_input_tokens: Option<u64>,
     pub config: F,
     pub transport: std::marker::PhantomData<C>,
 }
@@ -62,7 +63,7 @@ where
 
     async fn create(&self, agent: AgentPath) -> Result<Self::Engine, String> {
         let transport = (self.config)(&agent)?;
-        Ok(Engine::with_transport(
+        let engine = Engine::with_transport(
             transport,
             self.store.clone(),
             self.scheduler.clone(),
@@ -75,7 +76,11 @@ where
                 session_id: format!("harness-tree-{}", agent.0),
                 agent,
             },
-        ))
+        );
+        Ok(match self.compact_at_input_tokens {
+            Some(threshold) => engine.with_compaction_threshold(threshold),
+            None => engine,
+        })
     }
 
     async fn run(
@@ -650,10 +655,14 @@ mod tests {
                 .unwrap()
                 .entry(key.clone())
                 .or_default() += 1;
+            let input_tokens = request.input.len() as u64;
             Ok(ResponsesTurn {
                 response_id: format!("replay-{key}"),
                 items,
-                usage: TurnUsage::default(),
+                usage: TurnUsage {
+                    input_tokens,
+                    ..TurnUsage::default()
+                },
             })
         }
     }
@@ -670,6 +679,80 @@ mod tests {
             "type":"message","role":"assistant","phase":"final_answer",
             "content":[{"type":"output_text","text":text}]
         }))
+    }
+
+    #[tokio::test]
+    async fn production_factory_enables_configured_server_compaction() {
+        let store = Arc::new(Store::memory().unwrap());
+        let responses = Arc::new(StdMutex::new(HashMap::from([(
+            "/root".to_owned(),
+            VecDeque::from([
+                vec![function_call(
+                    "sleep-compact",
+                    "sleep",
+                    json!({"duration_ms":1}),
+                )],
+                vec![Item(
+                    json!({"type":"compaction","encrypted_content":"opaque"}),
+                )],
+                vec![final_answer("after compaction")],
+            ]),
+        )])));
+        let request_counts = Arc::new(StdMutex::new(HashMap::new()));
+        let inputs = Arc::new(StdMutex::new(HashMap::new()));
+        let factory = HarnessEngineFactory {
+            auth: Arc::new(ReplayAuth),
+            store: store.clone(),
+            scheduler: Arc::new(JobScheduler::new(1).unwrap()),
+            provider: Arc::new(crate::CliProvider(crate::DemoProvider::development(
+                ".", false,
+            ))),
+            compact_at_input_tokens: Some(2),
+            config: {
+                let responses = responses.clone();
+                let request_counts = request_counts.clone();
+                let inputs = inputs.clone();
+                move |agent: &AgentPath| {
+                    Ok(ReplayTransport {
+                        agent: agent.0.clone(),
+                        responses: responses.clone(),
+                        request_counts: request_counts.clone(),
+                        inputs: inputs.clone(),
+                    })
+                }
+            },
+            transport: std::marker::PhantomData,
+        };
+        let engine = factory.create(AgentPath("/root".into())).await.unwrap();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let completion = factory
+            .run(
+                &engine,
+                None,
+                vec![Item(
+                    json!({"type":"message","role":"user","content":"start"}),
+                )],
+                cancel_rx,
+                mpsc::unbounded_channel().1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            super::final_answer(&completion.turn.items).as_deref(),
+            Some("after compaction")
+        );
+        let sent = inputs.lock().unwrap();
+        let sent = &sent["/root"];
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[1].last().unwrap().0["type"], "compaction_trigger");
+        assert_eq!(sent[2][0].0["role"], "developer");
+        assert!(
+            store
+                .events(Some(&completion.head_request))
+                .unwrap()
+                .iter()
+                .any(|event| event.kind == "compaction")
+        );
     }
 
     struct JoinFailureFactory {
@@ -813,6 +896,7 @@ mod tests {
             store: store.clone(),
             scheduler: Arc::new(JobScheduler::new(2).unwrap()),
             provider,
+            compact_at_input_tokens: None,
             config: {
                 let responses = responses.clone();
                 let request_counts = request_counts.clone();
@@ -997,6 +1081,7 @@ mod tests {
             store: store.clone(),
             scheduler: Arc::new(JobScheduler::new(1).unwrap()),
             provider,
+            compact_at_input_tokens: None,
             config: {
                 let responses = responses.clone();
                 let request_counts = request_counts.clone();

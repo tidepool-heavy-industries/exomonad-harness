@@ -32,6 +32,7 @@ struct CliOptions {
     dev_shell: bool,
     tree: bool,
     trace_jsonl: Option<PathBuf>,
+    compact_at_input_tokens: Option<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -49,8 +50,15 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
     if args.first().map(String::as_str) == Some("--smoke") {
         return Ok(Mode::Smoke);
     }
-    let (mut db, mut ask, mut serve, mut dev_shell, mut tree, mut trace_jsonl) =
-        (None, None, None, false, false, None);
+    let (
+        mut db,
+        mut ask,
+        mut serve,
+        mut dev_shell,
+        mut tree,
+        mut trace_jsonl,
+        mut compact_at_input_tokens,
+    ) = (None, None, None, false, false, None, None);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -76,6 +84,19 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
                     args.get(i).ok_or("--trace-jsonl requires a path")?,
                 ));
             }
+            "--compact-at-input-tokens" => {
+                i += 1;
+                let raw = args
+                    .get(i)
+                    .ok_or("--compact-at-input-tokens requires a number")?;
+                let value: u64 = raw
+                    .parse()
+                    .map_err(|_| "--compact-at-input-tokens requires a positive integer")?;
+                if value == 0 {
+                    return Err("--compact-at-input-tokens requires a positive integer".into());
+                }
+                compact_at_input_tokens = Some(value);
+            }
             "--allow-shell" => {
                 return Err("use --dev-shell to opt into development shell execution".into());
             }
@@ -86,6 +107,9 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
     let db = db.ok_or("--db <sqlite-path> is required")?;
     if trace_jsonl.is_some() && (!tree || serve.is_some()) {
         return Err("--trace-jsonl requires --tree --ask".into());
+    }
+    if serve.is_some() && compact_at_input_tokens.is_some() {
+        return Err("--compact-at-input-tokens requires --ask".into());
     }
     if let Some(addr) = serve {
         if ask.is_some() {
@@ -110,6 +134,7 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
         dev_shell,
         tree,
         trace_jsonl,
+        compact_at_input_tokens,
     }))
 }
 
@@ -222,6 +247,10 @@ impl CliDriver {
                 agent: AgentPath("/root".into()),
             },
         );
+        let engine = match options.compact_at_input_tokens {
+            Some(threshold) => engine.with_compaction_threshold(threshold),
+            None => engine,
+        };
         Ok(Self { engine })
     }
 
@@ -296,6 +325,7 @@ async fn tree_ask(options: &CliOptions) -> Result<(String, EngineCompletion), St
             store: store.clone(),
             scheduler: jobs,
             provider,
+            compact_at_input_tokens: options.compact_at_input_tokens,
             config: move |_agent: &AgentPath| {
                 let client = ResponsesClient::new(auth.clone());
                 Ok(match &transport_trace {
@@ -533,6 +563,7 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
         dev_shell,
         tree: false,
         trace_jsonl: None,
+        compact_at_input_tokens: None,
     })?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -1033,12 +1064,40 @@ mod tests {
                 dev_shell: true,
                 tree: false,
                 trace_jsonl: None,
+                compact_at_input_tokens: None,
             })
         );
         assert!(matches!(
             parse(&["--db", "state.sqlite", "--ask", "hi", "--tree"]).unwrap(),
             Mode::Ask(CliOptions { tree: true, .. })
         ));
+        assert!(matches!(
+            parse(&[
+                "--db",
+                "state.sqlite",
+                "--ask",
+                "hi",
+                "--tree",
+                "--compact-at-input-tokens",
+                "200000"
+            ])
+            .unwrap(),
+            Mode::Ask(CliOptions {
+                compact_at_input_tokens: Some(200000),
+                ..
+            })
+        ));
+        assert!(
+            parse(&[
+                "--db",
+                "state.sqlite",
+                "--ask",
+                "hi",
+                "--compact-at-input-tokens",
+                "0"
+            ])
+            .is_err()
+        );
         assert!(
             parse(&[
                 "--db",
@@ -1261,6 +1320,7 @@ mod tests {
             dev_shell: false,
             tree: false,
             trace_jsonl: None,
+            compact_at_input_tokens: None,
         };
         let _driver = CliDriver::new(&options).unwrap();
         let provider = CliProvider(DemoProvider::development(".", false));
