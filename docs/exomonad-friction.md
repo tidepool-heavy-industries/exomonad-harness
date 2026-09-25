@@ -1,247 +1,75 @@
-# Exomonad friction and ideas — correction wave
+# Exomonad friction — correction wave
 
-Version-controlled field notes from each node. Record observations, their
-cost, and a concrete engine improvement; do not fabricate unobserved nudges.
+Version-controlled field notes, not an engine bug tracker. “Fixed” below means
+the local prompt or workflow changed; it does not imply an engine fix. Earlier
+detail remains in Git history. Do not fabricate watchdog or nudge events.
 
-## root
+## Root: still open
 
-### Notes and requests for the developers
-
-1. **Make waiting an event, not a model habit.** I want to express “resume
-   when this child settles or sends an actionable message” once, then do
-   independent work or stop. The current router retains evidence but I
-   still chose to query it repeatedly. The harness's async calls and
-   `wait_agent` should be dogfooded against that exact pattern. Acceptance
-   question: can a parent receive the result once, on its original call,
-   without a watch, poll, duplicate envelope, or empty model round?
-2. **Preflight the authority actually granted to each child role.** The
-   `Journal` mismatch was an effect-row fact knowable before fork; finding
-   it by failing two child starts wasted a wave. Please make
-   `exomonad check --workspace` resolve the installed spec against each
-   launchable child role's effect row, with a diagnostic naming the missing
-   effect and role. Do not silently grant `Journal`.
-3. **Make bounded assignments fail usefully.** A Luna doing structural work
-   needs a stop/ping condition and a cheap path back to its owner. I would
-   like the task packet to state the seam owner and the “two repeated
-   failures or ambiguity ⇒ ping” rule by default, while letting the parent
-   choose the actual threshold. The result should be a named blocker or a
-   committed candidate, not dozens of tool calls with no handoff.
-4. **Keep the source and reasoning handoff paired.** My plan/readback child
-   returned useful text but no source, and later children did not
-   automatically learn root decisions or commits. A typed assignment
-   update could show both exact source revision and decision delta, and
-   acknowledge *incorporation* separately from message delivery.
-5. **Preserve the ability to promote a discovered routine into code.**
-   This run's repetitive candidate path check, merge, focused verification,
-   and evidence update is a possible future project helper. I have not
-   installed one yet; please retain visible provenance from ad hoc cell to
-   helper to hook/tool so we can measure whether promotion saves model
-   rounds rather than merely relocating complexity.
-
-**Questions for the developers:** Is `wait_agent` intended to return only a
-resume reason while the settled output remains solely on its original
-`call_id` in every late-result path? The PRD says yes; I want that invariant
-tested with a pending Haskell-cell claim before the Exomonad adapter. For
-workspace preflight, which configured actor roles should be enumerated:
-all role policies, or only roles reachable from the current root's allowed
-forks? I recommend all configured launchable roles so a latent child-only
-spec error cannot survive a green check.
-
-### Kaizen backlog from this run
-
-These are deliberately small, specific observations. A proposed fix is not
-evidence that the fix works; test it in another run.
-
-| Observation and cost | Small improvement to try |
+| Observation and cost | Improvement to test |
 | --- | --- |
-| A Luna was assigned an execution-plan readback although root owned seam design; it settled `Blocked` to carry a plan because its requested `Delivery` type did not fit a plan-only artifact. | Give plan readbacks a plan-shaped reply only when a planner is actually needed; root authors an already-agreed local plan. Do not use `Blocked` as a successful text transport. |
-| Two startup failures surfaced only after `unfold` admission because the project spec needed `Journal`. | Compile the spec at workspace-check time against each launch role, and make admission report a preflight refusal rather than a deferred child lifecycle failure. |
-| I launched a retry wave after changing the spec and had to distinguish late notifications from the failed first wave. | Include fork group, attempt and source revision in notification previews; visually separate superseded attempts. |
-| The planning and probe results shared a `followWork` shape only if their reply types matched; my first Haskell cell was rejected when `Delivery` met `Outcome Candidate`. | Show a concise type-directed suggestion (“one router per result type”) or provide a heterogeneous event-only join where full values stay typed on their own handles. |
-| A second cell rejected an ambiguous `candidateSummary` name from two imports. | Prefer namespaced examples and make lookup identify the intended qualified name in copyable form. |
-| `reviewCommit` from root failed with “relative subgroup requires an allocated parent actor path”; the recipe read as root-facing. Core could review its own candidate. | Give the root helper an absolute group path or a root-specific constructor, with a recipe check run from an actual root. |
-| I initially expected a candidate to rebase before merge, then merged a clean reviewed engine diff myself. The source rule was unclear in the moment. | Make “applies cleanly” and “rebased onto latest head” separate, visible gate fields; state which is mandatory per project policy. |
-| A doc-only findings probe forked five reviewers and ran for 38 minutes without making the requested live calls. | Bound probes by their evidence question and time; forbid review recursion unless there is an integration candidate; return `Blocked` on missing instrumentation. |
-| The core Luna accumulated repeated failing checks before a new candidate; I learned about the count from the operator rather than the router. | Route failure streak and time-since-candidate to the owner, and have the child stop/ping at a named threshold instead of grinding. |
-| A Luna passed a whole fork-group path where a single kebab label was expected and got `InvalidKebabName`. | The error should say “expected one label segment, received path”; add one copyable `batch`/`subgroup` example in the activation prompt. |
-| The operator’s first Bash-output hypothesis was promoted into child constraints and docs, then retracted after engine measurement. | Label operator input as measurement, hypothesis, advice or constraint in task packets; attach the correction to affected children and amend the log without pretending the earlier belief was true. |
-| One compound shell command used `;`, so a failing `cargo fmt --check` was followed by passing compile checks and the process exit was 0. | Prefer `&&` for gating checks, or present each subcommand’s exit independently; never summarize a compound exit as all checks passing. |
-| `cargo test --no-run` compiled a demo test but did not run it; a harness test target had 2 ignored live tests. | Standard check receipt should include package, target, matched/run/ignored counts and distinguish compiled-only from passed. |
-| `cargo fmt --all --check` flagged child-owned `engine.rs` and root-owned demo files together. Formatting the whole tree would mutate reviewed child code. | Run owner-scoped formatting before candidate review and reserve the integrated format check for after merge; make changed-path formatting easy. |
-| The root's demo migration had to wait for an agreed engine signature and then touch two consumers. | Wire a real consumer against the scaffold signature earlier and include consumer compilation in the candidate acceptance gate, while preserving file ownership. |
-| Git branch names exposed committed leaf work before the typed parent progress did, but a branch head alone did not establish review or delivery. | In the tree view, show distinct committed, published, reviewed, merged and verified states rather than one “done” indicator. |
-| Read-only inspection of another actor’s branch was useful, but it was tempting to treat that as control over the actor’s work. | Put owner action (publish/rebase/stop) next to the read-only branch receipt, with explicit routing rather than implied authority. |
-| Router snapshots kept saying “pending”; I spent model rounds checking unchanged state. | One-shot event-driven continuation with actionable notices, no idle interval notices, and no stale notice after a value was already read. |
-| A child’s `sendMessage` acknowledgement proved delivery only, not that the recipient rebased, incorporated a test, or changed behavior. | Give source incorporation a typed acknowledgement tied to exact commit and check evidence. |
-| I used an independent red test as a useful early contract signal, but it made the integrated tree temporarily fail. | Allow an explicitly marked expected-red gate with owner and expiry (“must turn green in b”), visible in integration status; never call it passing. |
-| The cache probe produced a source-derived comparison, not the two byte-for-byte live requests it was assigned. | Require each findings artifact to label observed wire evidence versus code inference, list missing captures, and give the parent a direct “not proved” verdict. |
-| We had Q1–Q3 settled in docs, yet the plan child paused for a separate planner release. | Task packet should cite accepted human scope and say whether an external planner action is actually outstanding. Do not infer a gate from a generic workflow prompt. |
-| The first two launch failures and the absence of a nudge ledger appeared in the interview only after root reconstructed the sequence. | Capture per-node lifecycle/interview metadata (launch refusal, candidate, nudges observed/not installed) automatically, then have the actor add meaning rather than inventing facts. |
-| The project watchdog often lacks enough evidence on large tool results, so a hook may abstain just when output is complex (reported in Tidepool's next-wave inputs; not independently measured by me). | Select a bounded evidence excerpt or structured summary before judgment; report abstention as coverage, not a successful monitor. |
-| The Tidepool plans already recorded several defects I rediscovered only while working (root review helper, group labels, checkout contention). | Put the tiny actionable rule or example in the relevant prompt/skill, while keeping the full analysis in the plan; do not load every historical card into a child. |
+| The project `AgentSpec` required `Journal`, which coding children lack. Two children failed only after admission. | Preflight the selected spec against every launchable child role's actual effect row, with a diagnostic naming role and missing effect. Do not grant the effect silently. |
+| A completed leaf commit was visible in Git before its parent published a candidate. Commit, typed delivery, review, merge and verified integration were easy to confuse. | Show these as separate source-bound states; let a parent ask for the exact candidate rather than infer acceptance from a branch head. |
+| A probe's latest commit touched only owned paths, but an earlier commit in its branch still changed `docs/findings.md`. Root caught this by comparing the *cumulative* diff, sent it back, and merged only the repaired branch (`cdbbd367` via `b99337e`). | Make the cumulative base-to-candidate owned-path gate first-class. A clean tip commit is not sufficient. |
+| The cache probe had no exact Codex wire capture, so it sent no live requests and returned a documented blocker. It had initially edited the shared findings file before root corrected ownership. | Preflight reference evidence and shared-file ownership before inference spend. Preserve `Blocked` as a real outcome, not a passing probe. |
+| `sendMessage` to the core lead returned a delivery receipt, but the operator observed no active tmux work and root saw no progress or reply. The runtime showed the request as `Working` while its workbench was idle. This is a suspected wake/resume defect, **not yet diagnosed**; a receipt proves neither presentation nor action. | Trace notification receipt → actor wake → provider turn → progress/reply. Surface a “stalled despite pending request” state and an explicit recovery action. |
+| The root checked a router snapshot on status questions and found only `pending`. | Keep event-driven continuations: notify once on actionable change, and distinguish a meaningful wait from polling or an idle actor. |
+| A message asked core to incorporate probe evidence into `docs/findings.md`. Delivery alone does not show that it did so. | Require an incorporation receipt tied to the exact commit and focused check. This run's prompt trial uses that rule manually. |
+| The cache blocker required an operator question. The answer may never arrive. | Keep the recommendation and unanswered question in `docs/questions.md`; allow reversible work to proceed while the irreversible live comparison remains blocked. |
 
-### Bigger experiments: novel improvement and new tools
+## Local workflow corrections already applied
 
-These are proposals to test, not requests to expand the correction wave.
-Keep the harness generic; Exomonad may implement provider-specific meaning
-behind its adapter and typed hooks.
+- **Planning and release:** Root authored the correction plan; Q1–Q3 and the
+  correction scope were already settled, with no separate planner hold.
+  Do not delegate routine seam design or invent another release gate.
+- **Review and integration:** Review only source candidates at their exact
+  commit. A findings-only probe is read, not reviewed. Merge the child's
+  branch, never copy its files; send stale or out-of-scope candidates back.
+- **Bounded children:** Task packets now say to stop/ping on an ambiguous seam
+  or two failed check rounds without a candidate. This is a prompt trial,
+  not an engine-enforced limit.
+- **Checks:** Use `&&` for gating compound commands; distinguish tests run,
+  tests compiled but not run, zero matches and ignored live tests. The
+  intentionally red offline async-schema test names (b) as its owner.
+- **Operator notes:** The earlier Bash output-size explanation was a
+  hypothesis and was retracted; shared-checkout contention and a compile
+  cache miss better explained latency. Packets no longer promote a
+  hypothesis to a constraint.
+- **Tool guidance:** The current fork skill gives single-label
+  `batch`/`subgroup` examples, and the root review recipe now uses an
+  absolute group path. These reduce prompt-discovery friction; whether
+  diagnostics themselves improved is unverified.
 
-1. **A friction-to-experiment compiler.** Let an agent mark a tool call or
-   interval as friction, name the failed expectation, and bind it to item,
-   job, checkout, and source addresses. A typed helper produces a small
-   experiment packet: before/after behavior, measurement, safety boundary,
-   and a candidate owner. The agent edits that packet and can turn it into
-   a replay test or a task, not an automatic code change. First trial:
-   “I polled three times and learned nothing” should yield a wait/resume
-   replay and a count of empty model rounds. **Question:** what is the
-   smallest provenance record sufficient for another agent to reproduce
-   the friction without importing the whole conversation?
-2. **A promotion ladder with measured payback.** The current story is
-   ad hoc notebook expression → named project helper → installed hook →
-   tool. Make those transitions explicit and reversible, recording the
-   authored source revision, tests, usage sites, model rounds saved, added
-   latency, and abstention rate. This would help distinguish a genuine
-   reusable habit from a premature abstraction. First trial: automate the
-   repeated candidate path-scope/check/merge evidence packet, compare
-   time and mistakes on two later candidates. **Question:** who owns
-   promotion authority—the operator, a root agent with a scoped grant, or
-   a project policy compiled as code?
-3. **A typed event algebra for work, not a new polling vocabulary.**
-   Expose `settled(handle)`, `progress(handle)`, `message(path)`, and
-   `operatorReply(question)` as composable events with one blocking
-   primitive (`race`/`both` as library composition). `wait_agent` remains
-   the model-facing stop; a cell can await the event it needs. Claims
-   decide whether the same result also appears as a mailbox envelope,
-   avoiding duplicate consumption. First trial: parent with two children
-   and one pending shell job resumes exactly once on whichever matters,
-   then still sees the other later. **Question:** what state survives
-   compaction and host restart for an awaiting event and its claim?
-4. **Behavioral diff and replay for harness changes.** Given recorded
-   items, job settlements and hook decisions, run old and candidate
-   policies against the same addressed evidence and compare *behavior*:
-   tool availability, chosen work, refusals, messages, cost, and
-   continuation points. This is more meaningful than a source diff for
-   self-modifying harness policy. First trial: compare watchdog
-   pass-through versus a bounded-evidence selector on the same large
-   tool outputs, measuring abstention and false nudges. The replay is a
-   test aid, not proof about unseen model behavior.
-5. **A capability and memory continuity inspector.** One view should
-   answer “what can this actor do now, what live typed values does it
-   hold, what is merely serialized, and what will be lost at compaction,
-   fork, or restart?” It should show authority from runtime policy, not
-   infer authority from inherited handles. First trial: explain why the
-   child nudge hook could not access `Journal` before forking, and show
-   which bindings survive `Server` compaction. **Question:** should a
-   proposed memory/harness revision include an explicit loss budget
-   reviewed with the operator?
-6. **A contract-aware delegation preflight.** Before opening child
-   work, compile the proposed ownership graph and actual consumer
-   interfaces: every owned module exists and is in the parent `mod`
-   graph, required effects fit child roles, no siblings own one path,
-   source revision is checked, acceptance has a runnable target, and
-   the packet says when to stop/ping. Return a typed list of blocked
-   seams, not a generic admission error. First trial: it should have
-   caught this wave's `Journal` mismatch and the missing independent
-   demo consumer check.
-7. **An operator-facing uncertainty ledger.** Separate observed,
-   inferred, proposed, and unverified claims in the store, tied to
-   source revisions and evidence addresses. A later result can settle
-   or supersede a claim without rewriting history. First trial: the
-   cache-shape probe must not let a source-level comparison appear as
-   the requested live wire comparison; Q2's “zero is acceptable” must
-   not turn “cached prefix works” into a claim. This could support
-   precise human review without a long status interview.
+## Remaining design experiments
 
-**Prioritization idea:** prototype (3) with the harness's live slow-tool
-case, (6) against this exact failed first fork, and (1) against the
-polling trace. Those give behavioral evidence quickly. Promotion (2)
-and replay (4) then make repeated improvements cheap; continuity (5)
-and uncertainty (7) keep the loop honest and inspectable. The operator
-should be able to reject a proposed harness change even when the agent
-finds it locally convenient.
+1. **Event continuity:** Compose child settlement, progress, mailbox and
+   command completion as typed events; retain the pending claim across
+   compaction and restart. Trial: slow tool plus child, with one wake for
+   the first actionable event and later delivery of the other result.
+2. **Delegation preflight:** Check owned modules and `mod` lines, consumer
+   interfaces, effect rows, checked source, runnable acceptance and
+   stop/ping condition before forking. Reproduce the `Journal` startup
+   failure as a preflight refusal.
+3. **Behavioral replay:** Compare old and candidate scheduling, refusals,
+   messages and costs against the same addressed events. Use it to test a
+   bounded-evidence watchdog selector; report abstentions, not invented
+   nudges.
+4. **Capability and evidence view:** Show runtime authority, live typed
+   bindings, source revision, and what would be lost at fork/compaction.
+   Tie observed, inferred, proposed and unverified claims to evidence.
+5. **Measured promotion:** Promote a repeated notebook routine to a
+   workspace helper or hook only after comparing rounds saved, added
+   latency and error rate on later candidates.
 
-- **Experience against the larger goal (in-progress, 2026-09-24):**
-  - Tidepool's resident notebook and typed task/progress handles let me
-    admit and route real work without rebuilding context in prose each time.
-    The `followWork` router retained evidence across turns. I did not yet
-    turn a repeated procedure into an installed tool or hook: most
-    coordination remained model-authored cells and manual Git commands.
-  - The standalone harness did give the intended fast Rust inner loop:
-    the baseline `cargo check -p harness -p harness-demo --offline` finished
-    in seconds after dependency compilation, and the integrated demo's 24
-    tests passed quickly. The host Exomonad machinery around that loop
-    remained slow when many actors shared the machine checkout.
-  - The promised async-first experience is not present in this host. I
-    repeatedly checked a router to learn “pending”; the useful alternative
-    was a child messaging me on a candidate or blocker. The new harness's
-    `wait_agent` plus late results is aimed at deleting precisely this
-    watch/poll/wake pattern, but its live correction-wave proof is still open.
-  - Typed effects did enforce real boundaries, sometimes painfully: a
-    child effect row without `Journal` refused startup, and an unsupported
-    native child had no hosted tools. The right improvement is to check
-    those constraints before admission and surface a direct diagnostic,
-    not to weaken runtime authority.
-  - Recursive delegation helped when the seam was genuinely bounded (the
-    independent async-schema test). It hurt when I delegated the design
-    plan to a Luna or let a findings probe recursively review itself.
-    Sol-owned seam design, explicit stop/ping criteria, and candidate-only
-    review are necessary for the tree to be cheaper than solo work.
-  - The operator could correct these policies mid-run, and I could record
-    them in version-controlled docs and steer active children. That is an
-    early form of harness co-design, though it is still prompt-and-message
-    driven; no installed policy changed for running children.
+## Node notes
 
-- **Child startup:** Both initial Luna launches failed because the project
-  `AgentSpec` required `Journal` but child effect rows omit it. Cost: two
-  failed admissions and a repair/retry. Idea: validate an agent spec against
-  the selected child effect row before admission, and return a direct
-  preflight error rather than deferred startup failure. The temporary
-  watchdog fallback is commit `babfb4d`.
-- **Bash latency:** The initial output-size diagnosis was wrong. The operator
-  identified shared-checkout contention and a compile-cache miss as the
-  causes of slow calls, and fixed the one failing engine classification
-  step. Cost: tens-of-seconds latency in a wide tree. Idea: batch independent
-  commands and use fewer, larger bounded children while sharing this machine.
-- **Delegation:** I initially sent a Luna to plan and let a structural Luna
-  grind without a stop/ping trigger. Cost: expensive time and delayed seam
-  decisions. Idea: Sol-owned plans, bounded Luna tasks with a failure/time
-  checkpoint that returns `Blocked` or forks a named Luna subtree. Review
-  only integration candidates; read findings probes directly. These are
-  operator corrections now incorporated into `docs/correction-plan.md`.
-- **Prompt discovery:** The distinction between a single kebab label and a
-  group path had to be rediscovered only after a Luna hit `InvalidKebabName`.
-  Put that short example in the fork/task prompt up front. Likewise, the
-  stop-and-ping threshold for a Luna should be present in every assignment
-  without waiting for a long sequence of failed checks. Record future
-  “I had to look this up but it belonged in my prompt” moments here.
-- **Event-driven waiting:** Today the root repeatedly reads router snapshots
-  to learn that nothing has changed. The intended async-first harness should
-  allow “wait for this result, then resume” as a job, so the model works on
-  independent obligations instead of polling. This matters to the planned
-  Exomonad port and is a design goal, not behavior this correction wave has
-  already verified.
-
-## core-correction
-
-Awaiting the node's own observations. Root requested a stop/ping and current
-candidate or `Blocked` after repeated failed checks.
-
-## cache-shape-probe
-
-The operator observed this node still running after 38 minutes and spawning
-five reviewers for its findings-only report. Cost: probe latency and review
-work without an integration candidate. The operator told it directly to stop
-and reply; root will read the findings, not commission another review.
-Awaiting the node's own findings and friction note.
-
-## async-provider-schemas
-
-The operator observed `InvalidKebabName "correction-20260924/core-execution"`:
-the child passed a group path where `batch`/`subgroup` expected a single
-kebab label. Root relayed the exact fix through core. Idea: separate typed
-constructors or diagnostics that name “label, not path” at the call site.
-
-## correction-test-design
-
-Independent async-schema test compiled and failed as expected before (b).
-Root has not yet received a separate node friction note.
+- **Core lead:** Own-words plan received: (b), then (c), then (d), with
+  focused checks and manual live traces. Its final interview and source
+  delivery are pending. The suspected idle/wake issue above is a root
+  observation, not a diagnosis from core.
+- **Cache-probe leaf:** Its own account is in `docs/interviews.md`. It
+  found no byte-for-byte Codex reference capture, made no live calls, and
+  repaired an out-of-scope branch ancestor before integration. The blocker
+  is in `docs/cache-probe-evidence.md`.
+- **Other leaves:** Interviews remain due from nodes that ran. Do not infer
+  their experience from root observations.
