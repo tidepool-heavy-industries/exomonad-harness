@@ -28,6 +28,63 @@
   inspection; component owners should keep Delivery pending through
   their children and publish reviewed slices promptly.
 
+## Wave 11 durable component owner — 2026-09-25
+
+The owner's settled Delivery and checkpoints provide the interview evidence;
+a separate interview answer was requested but not received before retirement.
+Its two nested Luna children separated Store production investigation from
+`recovery_tests.rs`. That parallel split produced the accepted test candidate
+while production inspection found no needed Store API change. The owner
+reported that a search limited to `crates/harness/src` missed the actual
+`Driver::start_agent` completion caller in `harness-demo`; broadening the
+search resolved the seam. An exact-source reviewer initially hit exit 137,
+so the owner reran the decisive tests in an isolated Cargo target directory
+before acceptance. The extra depth cost a premature `Blocked` settlement,
+a continuation request, delayed delivery of the source correction, and
+time spent on an ultimately rejected `pending_envelopes` branch. The owner
+ultimately narrowed Delivery to the checked Store tests and left Driver
+admission separate.
+
+## Wave 11 Driver component owner — 2026-09-25
+
+The owner's settled Delivery and checkpoints provide the interview evidence;
+a separate own-words interview was requested but not received by settlement.
+Nested production and recovery-test children did useful work in parallel:
+production inspection showed the existing `list_agents()+unread` scan and
+completion caller were already sufficient, while the test child built the
+file-backed restart barrier. The production child returned an unchanged
+finding, not a candidate; the test child needed a fixture correction,
+a bounded retry, and a reviewer-requested no-blind-replay case. The owner
+preserved the seam by refusing a Store hydrated-query dependency and
+waiting for exact typed review correction after the reviewer initially
+named the stale candidate. Depth helped keep Driver production untouched
+where it already worked, but cost relays across the Store/Engine contract,
+an unnecessary optional rebase, and the isolated rustfmt collateral. Its
+final Delivery distinguished clean reopen from root's separate killed-helper
+gate and did not claim real provider or Engine pending-claim recovery.
+
+## Wave 11 root process-gate reviewer — 2026-09-25
+
+The reviewer reported that exact-source isolation made the failure model
+clear: a helper committed a typed answer/head, reached a post-commit
+pre-wake barrier, and was killed; fresh Driver startups found the one
+answer and joined shutdown. It verified 1 matched/executed/passed and
+read Driver scan/start/cleanup. The node cost one isolated checkout and
+test run, with no repair round; an unrelated unused-import warning was
+the only reported friction. It emphasized that this is not a crash of
+an already-running Driver, a real provider job, or power-loss durability.
+
+## Wave 11 Driver integration reviewer — 2026-09-25
+
+The reviewer said exact base/tip isolation prevented it from treating the
+integration branch as evidence. The clean file-Store reopen test proved
+durable inbox discovery without a live wake, while the active-head/empty
+inbox test prevented duplicate model turns through blind replay; recovery
+and follow-up ran 2/2 each and existing no-replay ran 1/1. Its reviewer
+node cost context and tool overhead: it initially observed an unrelated
+command handle, then recovered the actual retained test output. It
+distinguished orderly reopen from root's killed-helper process gate.
+
 ## root
 
 - **Scaffold change:** The project `AgentSpec` required `Journal`, but coding children do not receive that effect. Both first-wave children failed before starting. I amended the spec to install the baseline watchdog instead. This loses the project-specific nudge ledger for children; I will not invent events.

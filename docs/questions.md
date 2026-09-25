@@ -1,5 +1,24 @@
 # Operator questions
 
+## Wave 11 — Missing in-memory job at restart (asked 2026-09-25)
+
+**Boundary:** An inherited durable Pending non-`wait_agent` claim exists,
+but a fresh in-memory `JobScheduler` returns `UnknownCall`. This differs
+from an active agent head with no unread inbox, which is ambiguous.
+
+**Options:** (A) Mark only the missing-job claim Interrupted using the
+existing Store transition and pass a typed Interrupted output to the next
+request, preserving a concurrently Settled output; (B) leave the claim
+Pending and stop as UnsupportedInFlightJob. Neither option promises
+exactly-once external provider/tool execution.
+
+**Asked:** Asynchronously. **Answer:** Pending.
+**Recommendation while unanswered:** A, consistent with PRD.md § `store
+(sqlite, one file, one process)` and the executed Engine boundary tests at
+local `6988d51`; do not merge the later internally contradictory `70412ae`
+source. An operator answer would supersede this recommendation and require
+affected Engine/Driver tests and a reviewed contract correction.
+
 ## Q1 — Wave 0 pre-flight credential (2026-09-23)
 
 **Boundary:** The contract requires two live GPT-6 Responses calls *before*

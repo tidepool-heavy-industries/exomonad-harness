@@ -64,9 +64,9 @@ target/filter/count. Report local integration OID and incorporation checks.
 
 | Obligation | Owner | Current evidence | Gate |
 | --- | --- | --- | --- |
-| Durable discovery and atomic publication | durable lead | reviewed local `f3551a0948e0c145cc4c997dd441ee3255f2f360`, `recovery_` 3/3, completion 2/2 | root merge and any separate production candidate |
-| Request-boundary replay/provenance | Engine lead | pending scaffold checks | reviewed Delivery |
-| Restart admission/shutdown | Driver lead | reviewed local `5a5329ad741e4e38ee4fc518198053d2cba968b7`, recovery 2/2, follow-up 2/2, no-replay 1/1 | root merge and combined gate |
+| Durable discovery and atomic publication | durable lead | Delivery settled, root `3ae99f6f45507537f04a48a2489fdb091b3c829f`, `recovery_` 3/3, completion 2/2 | complete for Store scope; Driver/Engine separate |
+| Request-boundary replay/provenance | Engine lead | exact root review Accepted coherent `6988d5192065876e178e7fa97a3b8205dd21ea94`, engine recovery 2/2, schema 2/2 | root merge/post-merge combined gate; operator policy answer pending |
+| Restart admission/shutdown | Driver lead | Delivery settled; root `d23d0fc313b7a171d645628dc670e4a51bc706f9`, recovery 2/2, follow-up 2/2, no-replay 1/1, process restart 1/1 | Engine seam and final combined gate |
 | Abrupt process-loss Store commit/wake gate | root | `test:process_recovery --filter process_loss_`: 2 expected/matched/executed/passed; child process killed at explicit stdout barrier | integrated |
 | Restarted real Driver after lost wake | root | `bin:harness-demo --filter process_restart_driver`: 1 expected/matched/executed/passed; killed helper then two Driver startups over file Store | final combined integrated-source gate |
 
@@ -183,6 +183,16 @@ ambiguous agent head and proven missing in-memory job; update is
 `UpdateUnconfirmed`, not yet incorporated. Root requested exact rationale,
 reviewer decision and executed result; this
 cannot be published as Delivery until shared semantics and tests agree.
+Root independently reviewed coherent Engine integration candidate
+`6988d5192065876e178e7fa97a3b8205dd21ea94` at the exact HEAD from
+baseline `55d2cce...`, cumulative owned diff only `engine.rs` and
+`engine/recovery_tests.rs`. Luna reviewer Accepted after executing
+`engine_recovery_` 2 matched/executed/passed and `dynamic_reply_schema`
+2/2, confirming request-bound interrupt, settled-output reconciliation,
+no duplicate claim, ancestry and typed final. Root merge and post-merge
+checks follow. The later `70412ae`/`65bace1` Unsupported branch is not
+part of this accepted candidate and remains unmerged unless the operator
+changes the policy.
 
 Root integration checkpoint: exact-scope reviewer accepted durable test
 candidate `cb87de6`; durable lead merged it as
@@ -224,6 +234,14 @@ is at `d6b9ab8c912fea8c16c5204c267f278307227857` (prior `9cc0866...`);
 it implements the unneeded hydrated query plus missing-item repair, unmerged.
 The durable Delivery will name only reviewed test slice `f3551a0`/root
 `3ae99f6` and leave Driver admission separate.
+Durable Delivery has now settled `Produced (Delivered ... f3551a0 ...)`
+with exact review Accepted `cb87de6`, isolated-target checks recovery 3/3,
+completion 2/2, follow-up lifecycle 2/2 and source correction naming
+Driver::start_agent. Root had already merged and post-checked this slice;
+root stopped the settled durable lead with `StoppedNow`. The original
+wave-1 cleanup plan included still-running Engine/Driver actors because
+all three leads shared one unfold group, so root did not execute group
+cleanup prematurely.
 Driver production child's first reply was unchanged baseline `55d2cce...`,
 therefore findings only, not a candidate to integrate. `driver_restart`
 selected 0 tests; exact existing restart selector matched/executed/passed
@@ -262,7 +280,18 @@ Root exact integration-tip reviewer Accepted
 `followup_lifecycle` 2/2 and existing root-head no-replay selector 1/1.
 This is clean file-Store reopen, not process crash. Reviewer first
 observed an unrelated command handle, then corrected to the actual
-retained test job. Root merge/post-merge check follow.
+retained test job. Root merged the reviewed Driver slice as
+`d23d0fc313b7a171d645628dc670e4a51bc706f9`; post-merge focused
+`recovery_` 2 matched/executed/passed, `followup_lifecycle` 2/2,
+`restart_with_existing_root_head_does_not_duplicate_prompt` 1/1 and
+`process_restart_driver` 1/1, plus diff-check.
+Driver Delivery later settled with local `24b61a0ee615499852c739fb9221e717736e9fde`
+and focused `recovery_` 2/2, `followup_lifecycle` 2/2, `shutdown_` 2/2,
+`process_restart_driver` 1/1, Store process-loss 2/2. Root already
+integrated equivalent code via reviewed `5a5329a` into `d23d0fc`; `git
+diff` between those tips shows only documentation differences, not
+unincorporated code. Root requested Driver lead stop; outcome
+`StoppedReleasing`, so cleanup finality awaits notice.
 
 Candidate domains: durable recovery, Engine request-boundary recovery, and Driver
 restart/admission. Root finalizes exact ownership and retains the cross-component
