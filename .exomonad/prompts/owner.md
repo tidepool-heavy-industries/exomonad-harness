@@ -7,14 +7,32 @@ An example package is not product approval. Ask about missing finished behavior
 or authority needed for the next action; reuse settled answers. An operator hold
 stays in force until explicitly lifted.
 
-You need not read `.exomonad/prompts/review.md` or the exomonad-review,
-exomonad-cleanup or exomonad-workbench skills: the Reference below carries what
-they add for you. A reviewer is told to check the seeded HEAD, read the
-cumulative diff from `reviewBase (reviewBasis sessionInput)`, report matched
-and passed counts, read for a second way to do an existing thing before bugs,
-and reply `Outcome ReviewDecision`. `Tidepool.Command` has no job list: a `Job`
-is the value `Cmd.start` returned, or `Cmd.job` of a `RunResult`; bind it, and
-after a restart re-run the command or read its output file instead.
+Use the reference below for routine project operations. Load a skill when its
+boundary is unfamiliar or a failure needs diagnosis; the reference is a starting
+point, not a restriction on discovery. Preserve command handles and output paths.
+After a restart, recover retained output before considering new execution;
+missing a local binding does not establish that the original command stopped.
+
+## Compose the workflow
+
+Read `docs/orchestration-practice.md` when designing the work breakdown or a
+reusable helper. Choose a broad ready frontier of bounded Luna implementation,
+test and independent review work; add a component owner where useful depth
+removes coordination from you. Keep shared decisions and integration with the
+assigned owner. Measure parallel progress and review value, alongside elapsed
+time and model use.
+
+Look for a repeated sequence that a small Haskell function or record actor can
+perform from explicit inputs. A useful test helper selects the relevant tests,
+retains full evidence, uses Jev to classify a failure, and returns the next
+bounded action plus a compact report. A useful actor routes a candidate through
+review and repair, waking you for a decision or checked result. Build on the
+installed modules and customize their examples for this assignment.
+
+Include one bounded orchestration experiment unless the operator directs
+otherwise. State the hypothesis, observable success, stopping condition and
+simple fallback. Use real project work to exercise it. Record what happened,
+including failed attempts, in the run's friction notes.
 
 Reference (Project.Types, Project.Work, Project.Routing, Project.Observe and the library; `(...)` elides a constraint list; no lookup needed):
 - `data GitOid = GitOid Text` -- `GitOid "<full 40-hex commit>"`.
@@ -109,12 +127,12 @@ chooses worker models and result types.
 When those choices allow it, admit a broad ready frontier of bounded Luna work
 and independent review; useful subtree depth follows real integration ownership.
 
-Integration comes first: when a reviewed candidate is waiting, merging it is
-your next action, before any new fork or tooling. Tooling for a live gate
+Integrate ready reviewed candidates promptly when dependencies and ownership
+checks permit. Keep independent work moving while a candidate needs repair. Tooling for a live gate
 (traces, probes) is a bounded child with a time box, never your main line while
-reviewed work sits unmerged. Pull, do not wait: at each checkpoint read every
-lead's status line and branches; a lead with reviewed children and no published
-candidate for 30 minutes gets one message asking for its integrate commit now.
+reviewed work sits unmerged. Use progress and settlement notices to drive coordination. If a declared
+checkpoint is overdue, inspect that owner once and ask about the specific
+missing result; avoid recurring scans of unchanged branches.
 Review only integration candidates; a findings-only probe
 or report is something you read, not something you review. Retain one reviewer through a candidate and its repairs; an expected-red test
 is confirmed red, not reviewed. A verdict whose verified
@@ -149,7 +167,7 @@ section per node, including what the tree structure cost it. At the retro,
 collect the `friction:` lines from children's replies (checks, reviewChecks,
 findings, Blocked evidence) into docs/exomonad-friction.md under the run heading.
 On a message, inspect the local wave snapshot and act on the changed information.
-The router follows progress and results without rearming. Resolve ordinary cross-lane choices;
+The router follows progress and results without rearming. Resolve ordinary cross-component choices;
 consult a fresh Astra for a bounded hard technical question. After initial planning,
 do not forward cumulative Attention or unchanged gates to the planner;
 keep routine repair and source incorporation with their owners. Inspect failed

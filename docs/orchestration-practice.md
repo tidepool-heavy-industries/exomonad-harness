@@ -1,0 +1,98 @@
+# Build the workflow as you work
+
+Exomonad's Haskell notebook is a place to develop the orchestration for this
+project. Keep useful values, compose effects, and turn repeated work into small
+functions and actors that you and your children can reuse. The aim is useful
+parallel work with fewer model rounds spent relaying or reconstructing evidence.
+
+## A test helper worth inheriting
+
+Start from a real recurring task: edit a component, run its focused tests, inspect
+failures, and decide what deserves attention. Customize a helper around that
+component's target, expected test count and failure modes. `runTests` is a useful
+name for a project-owned function; it is not a promised built-in API.
+
+A good composition has these stages:
+
+1. **Select:** accept the component, source identity and intended check. Resolve
+   the actual package, target and filter. In this repository,
+   `scripts/cargo-focused-test` retains the selected executable and count evidence.
+2. **Execute and retain:** use `Cmd` when command results feed later computation.
+   Keep exit status, actual executed counts, output completeness and artifact
+   paths. Await an existing execution instead of rerunning to retrieve output.
+3. **Interpret:** supply Jev the task intent and relevant diagnostic excerpts.
+   Ask for comparable alternatives such as implementation failure, fixture issue,
+   missing prerequisite, or insufficient evidence. Keep full logs recoverable.
+4. **Branch:** code handles known exit/count/availability conditions. Jev can
+   choose which evidence deserves inspection or which authorized diagnostic to
+   run. Bound further commands and stop when evidence is missing or ambiguous.
+5. **Present:** return a compact typed result containing what ran, what happened,
+   source and log references, the semantic judgment, and any unresolved question.
+
+For example, one cell could run the selected tests, preserve their logs, classify
+an unexpected failure and extract the relevant assertion plus nearby context.
+The next model round then receives a useful debugging packet. Jev does not
+establish that tests passed, authorize edits, or supply evidence missing from a
+truncated log. A classifier failure still returns the command evidence.
+
+Begin with explicit parameters and a small behavior you can exercise. Test a
+success, a real failure, and missing evidence before depending on it. Change the
+helper when the task teaches you something; do not build a generic framework
+before there is a second consumer. A plain shell command is appropriate when
+there is no retained state, semantic judgment or effect composition to add.
+
+## Grow and pass down the scratchpad
+
+Notebook definitions are immediately useful for local iteration. Repeated,
+related definitions belong in an authored module with explicit imports and
+available-effect constraints. Use the source publication mechanism available in
+your installed host; a module edit alone does not publish new definitions.
+If `reload_helpers` is exposed, `.exomonad/helpers/` is the session helper
+surface. Otherwise use the existing workspace module/reload workflow. Treat
+reload failure as failure and keep using only a known valid revision.
+
+Give a child the helper's name, purpose, parameters and relevant source revision.
+Verify the selected fork mode carries the definitions or modules it needs;
+fresh context must not depend on an omitted explanation. A parent's later edits
+do not update existing children automatically. Deliver changes explicitly and
+ask affected consumers to identify what they incorporated and checked.
+
+Seeds are invitations to customize: replace generic test selection, choose useful
+Jev questions, and adjust output to the component's debugging needs. Keep an
+escape hatch to the original evidence. Promote a helper into shared project
+code when its consumers justify that ownership; a session experiment need not
+become a permanent subsystem.
+
+## Let actors carry repeated coordination
+
+Use installed routing and review modules before writing a custom protocol.
+A useful coordinator retains the current candidate, its review basis and the
+repair owner. It can route review findings to that owner, request review of the
+revised exact commit, and notify the integration owner of acceptance or a real
+question. Limit repair attempts and escalate with the accumulated evidence.
+Keep shared design decisions and final integration with their assigned owner.
+
+Questions must reach an owner while the request is pending. Findings-only work
+returns findings. Settlement, acceptance, incorporation and integration remain
+separate facts. Exercise rejection, stale candidates and a question during
+repair as well as a successful path before trusting automatic continuation.
+
+Choose useful parallel obligations: implementation, failure-case tests, consumer
+inspection and independent review. Add depth when a component owner can absorb
+its children's coordination. Judge delegation by overlapping work, useful Luna
+contributions and defects caught; the root may still do substantial integration.
+
+## Design by executable experiment
+
+For a consequential orchestration question, discuss alternatives with the user
+and make one small version executable. A typed record actor or notebook
+composition can reveal a missing event, a mistaken state distinction, or a
+needless model round before a larger design is committed.
+
+Each run normally includes one bounded experiment. Write down its hypothesis,
+workload, success evidence, stopping condition and fallback. Examples include
+reusing one customized evidence helper across several children, or letting an
+actor handle one complete review/repair cycle without root relay. Count actual
+calls, useful overlap, interventions and failures; separate structural savings
+from measured improvements. Keep the resulting helper and evidence available
+for the next iteration, including cases where the simpler workflow worked better.

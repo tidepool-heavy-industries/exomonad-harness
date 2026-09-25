@@ -15,19 +15,15 @@ source:` and `Acceptance:` lines, and any decision lines after them, are the
 complete Task; the `Task {...}` dump below them is the same value cut short, so
 do not run `inspectFull sessionInput`. An activation with no `Obligation:` line
 (a Sol child's, or a follow-up request's) needs `inspectFull sessionInput`, once.
-The activation's line "Read this branch's contract and .exomonad/plans/language.md
-... Project.Work; use their supplied examples and the lookup tool" is answered
-by the Reference below; the obligation is your contract. Do not read language.md,
-the `Plan:` file, `NEXT.md`, `README.md`, `docs/tree.md`, `docs/questions.md` or
-`docs/nudges.md` unless the obligation names a section of one; do read the PRD
-section it cites. You need not read the exomonad-fork, exomonad-review or
-exomonad-workbench skills. Do not use `status` (lineage, bindings, watches,
-recovery) to find your parent or your bindings: `parentAgent` answers the first,
-and the activation's last line says whether `reportProgress` is bound. If
+Use the reference below for routine operations. Read the PRD section and
+contract named by the assignment. Discover additional source, documentation or
+skills when a concrete question requires them; avoid repeating an inventory
+already supplied by the activation. Use `parentAgent` for the supervising actor
+and the activation for available reply/progress bindings. If
 `parentAgent` returns Nothing, do not search for the parent: checkpoints go
 through reportProgress; keep a pending question there rather than settling it
-as Blocked. Siblings cannot be
-messaged: a seam question about a sibling goes to your parent.
+as Blocked. Route a shared-contract question to its designated owner; when that owner is
+not supplied, send it to your requester.
 
 Reference (Project.Types, Project.Work and the library; `(...)` elides a constraint list; no lookup needed):
 - `data Task = Task { taskGroup :: ForkGroupPath, planPath :: Text, taskSource :: GitOid, obligation :: Text, rationale :: Text, ownedPaths :: [Text], acceptance :: Text, acceptedDecisions :: [AcceptedDecision] }` -- `sessionInput :: Task`; `taskSource` is your base.
@@ -152,3 +148,17 @@ turn ends, one per turn end; a long turn makes you deaf to your parent and
 children.
 At the 15-minute or 30-call limit, commit a safe checkpoint and end the turn even
 if a test or repair is unfinished; name it pending, never green.
+
+## Improve repeated work
+
+Use an inherited helper when it fits your assignment; inspect its inputs and
+failure behavior before relying on it. When the same command/read/triage sequence
+will recur, customize a small Haskell function so one cell returns the evidence
+and decision you need. See `docs/orchestration-practice.md` for composition
+patterns. Prefer explicit paths, filters and source identities over hidden
+checkout assumptions. A helper should preserve the failed outcome and full log
+reference even when it presents only a few useful lines.
+
+Report a useful helper by its module, purpose, inputs and validation. Forked
+children need the relevant helper name and contract in their brief. Later edits
+require explicit delivery; inheritance alone does not update existing children.
