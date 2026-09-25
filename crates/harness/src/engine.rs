@@ -351,7 +351,27 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             // Validate every pending job before claiming any of them. The
             // scheduler retains jobs for the lifetime of this shared runtime.
             let call_id = claim.call_id.clone();
-            self.scheduler.output(&call_id).await?;
+            match self.scheduler.output(&call_id).await {
+                Ok(_) => {}
+                // A pending durable claim with no in-memory job can only be
+                // resumed after process loss by replaying the external call,
+                // which is unsafe: it may already have had side effects.
+                // Classify it as interrupted instead. Persist that decision
+                // before appending the synthetic output so a crash between
+                // the two steps simply retries the output append on recovery.
+                Err(JobError::UnknownCall) => {
+                    let store = self.store.clone();
+                    let call = claim.call_id.clone();
+                    let request = claim.request.clone();
+                    blocking(move || store.interrupt_claim(&call, &request)).await?;
+                    replay_items.push(items::function_output(
+                        &claim.call_id,
+                        &crate::turn::JobOutput::Interrupted,
+                    ));
+                    continue;
+                }
+                Err(error) => return Err(EngineError::Job(error)),
+            }
             attachable.push(claim);
         }
         for claim in attachable {
