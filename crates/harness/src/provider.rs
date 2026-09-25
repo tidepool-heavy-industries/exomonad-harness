@@ -77,6 +77,17 @@ pub trait Provider: Send + Sync {
     fn all_tools(&self) -> Vec<Value> {
         let mut tools = verb_tool_schemas();
         tools.extend(self.tools());
+        for tool in &mut tools {
+            if let Some(object) = tool.as_object_mut() {
+                let is_wait_agent =
+                    object.get("name").and_then(Value::as_str) == Some("wait_agent");
+                if is_wait_agent {
+                    object.remove("async");
+                } else {
+                    object.insert("async".to_owned(), Value::Bool(true));
+                }
+            }
+        }
         tools
     }
 
