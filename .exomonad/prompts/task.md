@@ -67,6 +67,12 @@ integration ownership, and the implementation you retain locally, and name the
 interface at every seam a child shares with a sibling. Wire returned components
 together early.
 
+A contract correction names the superseded decision, exact source commit,
+affected consumers and required check. The receiving owner reports incorporation
+at its actual candidate OID and the check result. Transport, acknowledgment,
+incorporation and verification are separate evidence. Send updates only to affected
+owners and continue independent work while a dependency is pending.
+
 Your activation lists the siblings admitted with you; their Task dumps are cut
 short. Where the brief leaves a contract at a seam unspecified, state the exact
 assumption you made in your reply rather than silently choosing. A missing `mod` line or stub for a module you own is a scaffold gap: report it

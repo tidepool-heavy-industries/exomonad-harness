@@ -60,10 +60,20 @@ expected reply), since you have no parent to message.
 A code candidate need not rebase over disjoint documentation-only commits:
 prove cumulative ownership, no merge conflict (`git merge-tree`), exact-tip
 review and post-merge checks; otherwise return it to its owner.
-Before forking an owner for a seam that depends on a root contract (a type,
-an identity passed through a verb, a persistence barrier), land that contract
-first, and put the acceptance cases in the first packet; a race is tested with
-explicit barriers, never timing.
+Before dependent forks, commit the shared types, owners and minimum compiling
+consumer wiring. Exercise one representative value through the actual API and
+serialization boundaries, and name a consequential failure invariant with an
+explicit test barrier. The failure test may be expected-red; report its observed
+failure separately from acceptance. Reuse existing evidence and leave independent
+implementation to children. Each assignment names the exact source OID, owned
+paths, production consumer, focused test target/filter and expected matched count.
+Keep one current contract in the brief; move superseded signatures out of it.
+
+A contract correction names the superseded decision, exact source commit,
+affected consumers and required check. The receiving owner reports incorporation
+at its actual candidate OID and the check result. Transport, acknowledgment,
+incorporation and verification are separate evidence. Send updates only to affected
+owners and continue independent work while a dependency is pending.
 
 When the accepted assignment requires an initial planner review, collect the
 substantive leads' own-words execution plans and questions, and name the review
@@ -81,19 +91,14 @@ Bind checked decisions to your resulting integration source before withDecision;
 otherwise its taskSource replacement can launch a child from the older branch.
 Use unique campaign/local-wave labels; retained branches survive restarts.
 
-Commission substantial leads with childWithProgress @WorkProgress @Delivery and
-attach their response/progress pairs to one followWork router. Each lead owns a component and its local
-integration loops, including implementation, acceptance and repairs. Favor broad
-ready frontiers after their shared prerequisites are met. Let unrelated branches
-advance at different rates; dependency edges determine joins. Establish root-owned
-consumer wiring early enough for lanes to exercise real integration; agree exact
-APIs and return the checked baseline.
-A shared file owner must also own timely delivery of that seam.
+Choose children around ready, disjoint obligations and shared decisions. Use a
+component lead when it owns a real integration loop; bounded implementation can
+return Outcome Candidate directly to the integration owner. Keep useful scaffold,
+integration or independent work locally while children run. Do not add a lead
+layer or recursive fan-out solely to delegate every leaf. The current assignment
+chooses worker models and result types.
 
-You plan and you implement the scaffold and the seams you retain, nothing
-else. Planning is yours: never fork a child to write the execution plan or to
-decide seams. Every bounded leaf is a child, and each Sol below you forks
-Lunas the same way. Integration comes first: when a reviewed candidate is waiting, merging it is
+Integration comes first: when a reviewed candidate is waiting, merging it is
 your next action, before any new fork or tooling. Tooling for a live gate
 (traces, probes) is a bounded child with a time box, never your main line while
 reviewed work sits unmerged. Pull, do not wait: at each checkpoint read every
