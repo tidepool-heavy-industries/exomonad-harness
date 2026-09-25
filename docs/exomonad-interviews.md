@@ -192,3 +192,160 @@ The blocker should have been checked before fork. I also learned that
 that loss visible. Both are examples of why a source- and
 evidence-bound state view matters more than a generic “done/pending”
 label.
+
+### Round 2: shapes
+
+These are deliberately narrow API sketches, not claims that these names
+already exist. `Response`, `Eff`, `GitOid`, `AgentRef`, `WorkProgress`,
+`sendMessage`, `updateRequest`, `readWork`, and the typed `unfold`/router
+are the current vocabulary. Every read below is retained evidence, not
+a command to poll until something changes.
+
+#### A. Message lifecycle
+
+```haskell
+data Incorporation = AtCommit GitOid | AtDecision DecisionId
+data MessagePhase = Receipt | Queued | Presented TurnId
+                  | Acknowledged TurnId | Incorporated (NonEmpty Incorporation)
+                  | Fenced FenceReason
+data MessageState = MessageState MessageRef NotificationReceipt MessagePhase
+messageState :: Member Notifications e => MessageRef -> Eff e MessageState
+```
+
+`Receipt` means the service accepted the send; `Queued` means retained for
+presentation; `Presented` names the provider turn that contained it.
+`Acknowledged` means the child explicitly referenced `MessageRef` in a
+reply/ack effect, **not** that the model was forced to agree or even read
+every word. `Incorporated` points to one or both an exact commit and a
+durable decision record; it is never inferred from presentation. `Fenced`
+must retain the unsatisfied message and say whether it can later be
+presented. A parent calls `messageState` once on a changed-event wake, not
+as a status-poll loop.
+
+#### B. Replace before presentation
+
+```haskell
+data ReplaceResult = Replaced MessageRef | LinkedCorrection MessageRef
+replaceMessage :: Member Notifications e
+               => MessageRef -> Text -> Eff e ReplaceResult
+```
+
+The operation atomically replaces a queued, unpresented message, including
+one held behind a fence. If already presented, it appends a new message
+linked to the original and returns `LinkedCorrection`; it never rewrites
+what the child already saw. This would have replaced my literal
+`$(git rev-parse HEAD)` message before presentation, if it was still queued.
+
+#### C. Versioned assignment update
+
+```haskell
+data AssignmentDelta = AssignmentDelta
+  { ownedPaths :: [Path], acceptance :: Text, sourceBase :: GitOid
+  , effectiveFrom :: CellBoundary }
+data UpdateAck = UpdatePresented AssignmentVersion TurnId
+               | UpdateIncorporated AssignmentVersion (NonEmpty Incorporation)
+updateRequest :: Response r -> AssignmentDelta -> Eff e UpdateHandle
+cellAssignment :: Member ActorContext e
+               => Eff e (AssignmentVersion, CellBoundary)
+```
+
+`CellBoundary` is the **next** cell admission sequence, never the middle
+of a running cell. The cell sees its pinned version and boundary through
+`cellAssignment`; a late update changes the next cell's assignment, not
+the checks already in flight. `UpdatePresented` is a runtime fact;
+`UpdateIncorporated` is a child-attested source/decision fact. A queued
+`updateRequest` alone establishes neither.
+
+#### D. Batched admission
+
+```haskell
+data Admitted r = Admitted
+  { childReply :: Response r, providerReady :: Response ReadyState
+  , childProgress :: Progress WorkProgress, childRef :: AgentRef }
+forkBatch :: NonEmpty (Branch child Task r)
+          -> Eff e (NonEmpty (Either AdmissionError (Admitted r)))
+```
+
+Return every per-child admission promptly in one call; provider startup
+settles later on each retained `providerReady`. The parent can install one
+`followWork` router over admitted `childReply`/progress handles, do
+independent work, and observe readiness on a completion event. It must
+not call admission “running” or integrate a branch merely because the
+`Admitted` value exists. Heterogeneous branches can continue to use
+the existing applicative `unfold`; I would not add a second general fork DSL.
+
+#### E. Standing goal
+
+```haskell
+data GoalTrigger = IdlePending AgentRef | UnreviewedCommit GitOid
+                 | BeforeDiscard GitOid | BeforeFinal
+data Goal = Goal { objective :: Text, triggers :: Set GoalTrigger }
+data Reminder = Reminder
+  { changedFact :: Text, evidence :: EvidenceRef, nextOwner :: AgentRef }
+```
+
+The runtime emits one `Reminder` when a relevant fact *changes*, with a
+source address and next owner; it does not repeat the whole goal at every
+tool boundary. My goal would encode the correction-wave done criteria
+and no-more-forks hold; `BeforeFinal` would have reminded me that live
+item-2/item-13 and (c)/(d) were still open.
+
+#### F. Ownership gate
+
+```haskell
+data Scope = InScope | OutsideOwned [Path]
+data Stage = Committed | ReviewPending | Reviewed ReviewRef
+           | Merged GitOid | Verified GitOid
+data CandidateView = CandidateView
+  { base :: GitOid, tip :: GitOid, cumulative :: [(Path, ChangeKind)]
+  , scope :: Scope, stage :: Stage }
+candidateView :: Assignment -> GitOid -> Eff e CandidateView
+```
+
+`cumulative` is the parent-view diff from the **assignment base** to
+the exact candidate tip, never just the last commit. `OutsideOwned`
+forbids review/merge. `Reviewed` names the review of that exact tip;
+`Merged` names the integration commit; `Verified` names the integrated
+source checked. The minimal forward path is committed → reviewed →
+merged → verified, with a scope refusal before review and a new candidate
+tip restarting review. A report-only artifact does not enter this machine.
+
+#### G. Destructive-command hold
+
+```haskell
+data DiscardIntent = DiscardIntent
+  { expectedTip :: GitOid, target :: GitOid, reason :: Text }
+```
+
+Require this intent before `reset --hard` moves a branch backward,
+`rebase --onto`/`--skip` drops commits, `branch -D` removes its last ref,
+or a force-update overwrites a published ref. Compare `expectedTip` with
+the actual ref **before** execution; show the commits that will lose that
+ref. `git clean` and checkout of uncommitted edits have no OID to name,
+so require an exact path/diff acknowledgment instead. Refusal: **“Ref
+is at 4b15434, not expected 8d45d32; reset would drop committed
+6667ddc. Inspect/rebase or confirm the actual tip.”** A clean worktree
+does not waive this hold.
+
+#### H. Status line
+
+```text
+core-lead req=1 pending; provider=idle 27m; inbox=fenced(reason, since);
+  last_message=ref9 queued/not-presented; source=8d45d32; next=route-recovery
+core-lead req=1 pending; provider=running turn=T; inbox=open;
+  last_message=ref9 presented@T/ack-pending; source=8d45d32; next=await-event
+```
+
+Both are **one logical per-child line** in `status`, not a derived guess
+from `Working` plus `Idle`. `source` is the child's checked head, not
+root's head. `next` must name a supported action; if route recovery is
+unavailable, say `next=handoff`, not `retry sendMessage`.
+
+#### I. Revision to round one
+
+I would weaken my round-one wording that the runtime *showed* a fenced
+inbox: `status` showed Working/Idle and notification receipts; **core
+reported** the fence later through the operator/TUI path. I would also
+distinguish `providerReady` from a child actually running work. Neither
+correction changes my one priority: expose presentation/fence/recovery
+state before optimizing fork or cell latency.
