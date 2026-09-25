@@ -77,6 +77,8 @@ pub enum EngineError {
     UnresumableForkedWaitAgent,
     #[error("inherited settled call {0} has no durable output item")]
     MissingInheritedOutput(String),
+    #[error("claim {0} changed during missing-job recovery and could not be reconciled")]
+    ClaimRecoveryConflict(String),
     #[error("Here child has no durable snapshot request")]
     MissingHereSnapshot,
     #[error(
@@ -351,7 +353,19 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             // Validate every pending job before claiming any of them. The
             // scheduler retains jobs for the lifetime of this shared runtime.
             let call_id = claim.call_id.clone();
-            self.scheduler.output(&call_id).await?;
+            match self.scheduler.output(&call_id).await {
+                Ok(_) => {}
+                // A pending durable claim with no in-memory job can only be
+                // resumed after process loss by replaying the external call,
+                // which is unsafe: it may already have had side effects.
+                // Persist an interruption before appending its synthetic output;
+                // if settlement won the race, recover that durable output instead.
+                Err(JobError::UnknownCall) => {
+                    replay_items.push(self.recover_missing_job(&claim).await?);
+                    continue;
+                }
+                Err(error) => return Err(EngineError::Job(error)),
+            }
             attachable.push(claim);
         }
         for claim in attachable {
@@ -806,6 +820,48 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .map(|_| ())
         })
         .await
+    }
+
+    /// Turn a missing in-memory job into a durable interruption, unless a
+    /// concurrent settlement already won and supplied the actual output.
+    async fn recover_missing_job(&self, claim: &crate::store::Claim) -> Result<Item, EngineError> {
+        let store = self.store.clone();
+        let call = claim.call_id.clone();
+        let request = claim.request.clone();
+        let interrupted = blocking(move || store.interrupt_claim(&call, &request)).await?;
+        if interrupted > 0 {
+            return Ok(items::function_output(
+                &claim.call_id,
+                &crate::turn::JobOutput::Interrupted,
+            ));
+        }
+
+        // A settlement may race the missing-job check. Never replace its
+        // durable output with a synthetic interruption.
+        let store = self.store.clone();
+        let call = claim.call_id.clone();
+        let request = claim.request.clone();
+        let current = blocking(move || {
+            store
+                .claims(&call)
+                .map(|claims| claims.into_iter().find(|c| c.request == request))
+        })
+        .await?;
+        match current {
+            Some(current) if current.state == crate::store::ClaimState::Settled => {
+                let Some(hash) = current.output else {
+                    return Err(EngineError::MissingInheritedOutput(claim.call_id.0.clone()));
+                };
+                let store = self.store.clone();
+                blocking(move || store.get_item(&hash))
+                    .await?
+                    .ok_or_else(|| EngineError::MissingInheritedOutput(claim.call_id.0.clone()))
+            }
+            Some(current) if current.state == crate::store::ClaimState::Interrupted => Ok(
+                items::function_output(&claim.call_id, &crate::turn::JobOutput::Interrupted),
+            ),
+            _ => Err(EngineError::ClaimRecoveryConflict(claim.call_id.0.clone())),
+        }
     }
 
     fn tools(&self, finalize_schema: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
