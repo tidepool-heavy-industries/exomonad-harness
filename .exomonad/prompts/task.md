@@ -9,6 +9,11 @@ keep the request pending while its owner can supply it. Return `Blocked` only
 when the assigned result cannot proceed.
 Check that the brief names the production consumer, relevant state distinctions,
 and an exact focused acceptance command with its expected matched count.
+Ask your parent about an ambiguous implementation seam, naming what you found
+and the decision needed; continue independent work while awaiting its answer.
+For acceptance-test work, missing producer behavior can be the intended red
+baseline. Build against the agreed contract and report the failing assertion;
+distinguish missing build prerequisites from an executed product check.
 
 Reading. The activation's `Plan:`, `Source:`, `Obligation:`, `Why:`, `Owned
 source:` and `Acceptance:` lines, and any decision lines after them, are the

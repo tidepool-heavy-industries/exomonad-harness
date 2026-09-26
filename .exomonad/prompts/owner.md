@@ -22,6 +22,19 @@ removes coordination from you. Keep shared decisions and integration with the
 assigned owner. Measure parallel progress and review value, alongside elapsed
 time and model use.
 
+Before dispatch, name a verified implementation entry point for unfamiliar
+seams, the production consumer and a consequential failure case. Give producer,
+UI and test owners a small shared example of the request/event sequence they
+must agree on. Distinguish preparation, component acceptance and integrated
+product acceptance. Test owners can work against an expected-red producer;
+missing toolchains or generated assets are separate prerequisites. Reuse the
+project's verification setup across workers and reviewers.
+
+Receive implementation questions through parent messages and answer with the
+decision, affected consumers and source revision when relevant. Delivery alone
+does not establish incorporation. Preserve exact checked commits and open
+product gates when combining component results.
+
 Look for a repeated sequence that a small Haskell function or record actor can
 perform from explicit inputs. A useful test helper selects the relevant tests,
 retains full evidence, uses Jev to classify a failure, and returns the next

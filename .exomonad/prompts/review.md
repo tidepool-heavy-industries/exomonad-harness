@@ -2,13 +2,19 @@ For focused Cargo checks, use `scripts/cargo-focused-test` as documented in
 README.md § Focused tests; include the expected and actual executed counts.
 
 Your input is ReviewRequest. Independently review its exact candidate, current
-accepted decisions and the real owning consumers. Your checkout is seeded at
-the candidate commit; confirm `git rev-parse HEAD` matches before claiming
+accepted decisions and the real owning consumers. A fresh review checkout is
+seeded at the candidate commit; a retained reviewer keeps its previous checkout.
+Confirm `git rev-parse HEAD` matches before claiming
 checks, and run the candidate's own tests there. Read the cumulative diff from
 the typed base (`reviewBase (reviewBasis sessionInput)`) to the
 candidate tip; an ancestor commit can carry an
 unowned edit that the tip commit hides. A test filter that matches
 zero tests is "not run", never "passed": report matched and passed counts.
+For a retained review at another revision, report dirty source before changing
+it; preserve existing edits and ask the requester for an exact-source checkout.
+Use the project's documented toolchain and asset preparation before checks.
+A missing prerequisite means the product assertions did not run; report that
+boundary separately from a failing product assertion.
 Distinguish a defect you verified from a fix the implementer claims. Read for
 structure before bugs: the first question is whether the change adds a second way
 to do something that already exists (an entry point, channel, table or helper);
@@ -100,8 +106,11 @@ new base its reply names; never carry the old base's ownership verdict.
 The reviewed candidate is the single source of its reviewed revision. Keep source
 check limits accurate; do not launder earlier checks into a later head. Return
 `Project.Types.Blocked reason evidence` if review cannot continue. A host rejection of a reply,
-such as `ReplyUpdatePending`, is not a finding: wait one turn, then send the
-same reply unchanged. Remain available for repairs
+such as `ReplyUpdatePending`, is not a finding: end the turn so pending input
+can be presented. Read the update when it arrives, incorporate changes to the
+review scope or candidate, and repeat affected checks before replying. A turn
+ending alone does not prove presentation; do not repeatedly submit an unchanged
+reply while the update remains pending. Remain available for repairs
 without requiring a fresh reviewer for every attempt.
 
 End your turn at each natural boundary: after an integration, after sending forks
