@@ -609,6 +609,9 @@ struct DeterministicServerTransport {
 #[async_trait]
 impl harness::engine::ResponsesTransport for DeterministicServerTransport {
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        if let Some(path) = std::env::var_os("HARNESS_DEMO_CAPTURE_REQUESTS") {
+            capture_deterministic_request(&request, Path::new(&path))?;
+        }
         let (state, _outcome, answer) = deterministic_command(&self.command, self.waiting);
         if self.command == "wait" && state == "running" {
             return std::future::pending().await;
@@ -652,6 +655,29 @@ impl harness::engine::ResponsesTransport for DeterministicServerTransport {
             usage: Usage::default(),
         })
     }
+}
+
+/// Append the production transport's serialized body as one JSONL record.
+/// The caller owns the path and must provide an isolated capture destination.
+fn capture_deterministic_request(
+    request: &ResponsesRequest,
+    path: &Path,
+) -> Result<(), TransportError> {
+    use std::io::Write;
+    let body = harness::transport::client::request_body(request)?;
+    let mut record = serde_json::to_vec(&body).map_err(|error| {
+        TransportError::Stream(format!("request capture serialization failed: {error}"))
+    })?;
+    record.push(b'\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| TransportError::Stream(format!("request capture open failed: {error}")))?;
+    file.write_all(&record).map_err(|error| {
+        TransportError::Stream(format!("request capture write failed: {error}"))
+    })?;
+    Ok(())
 }
 
 async fn run_deterministic_engine_completion(
@@ -1800,6 +1826,8 @@ mod tests {
     #[tokio::test]
     async fn browser_provider_restricts_advertised_sleep_only() {
         let provider = BrowserProvider(CliProvider(DemoProvider::development(".", false)));
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&provider);
         let plan = harness::hooks::RequestPlan {
             items: vec![],
             tools_allowed: provider.all_tools(),
@@ -1816,7 +1844,30 @@ mod tests {
             result.evidence,
             Some(json!({"consumer":"standalone-browser","selection":"sleep"}))
         );
-        assert!(std::thread::spawn(|| {}).join().is_ok()); // provider remains ordinary Send.
+    }
+
+    #[test]
+    fn deterministic_capture_appends_production_request_body_jsonl() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("demo-request-{nonce}.jsonl"));
+        let request = ResponsesRequest {
+            input: vec![],
+            instructions: "capture-test".into(),
+            tools: vec![json!({"type":"function","name":"sleep","strict":true,
+                "parameters":{"type":"object","properties":{"duration_ms":{"type":"integer"}},
+                    "required":["duration_ms"],"additionalProperties":false}})],
+            tools_allowed: Some(vec!["sleep".into()]),
+            model: "deterministic-local".into(),
+            pinned_effort: Effort::Low,
+            session_id: "capture-test".into(),
+        };
+        capture_deterministic_request(&request, &path).unwrap();
+        let record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(record["tools"], json!(request.tools));
+        let _ = std::fs::remove_file(path);
     }
 
     #[derive(Clone)]
