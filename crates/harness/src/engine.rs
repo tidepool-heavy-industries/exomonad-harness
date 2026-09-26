@@ -498,6 +498,37 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 pinned_effort,
                 session_id: self.config.session_id.clone(),
             };
+            let plan = crate::hooks::RequestPlan {
+                items: req.input.clone(),
+                tools_allowed: req.tools.clone(),
+                effort: req.pinned_effort,
+            };
+            let started = std::time::Instant::now();
+            let before_request = self.evaluate_before_request(&plan).await;
+            let decision = crate::store::Decision {
+                hook: "before-request".into(),
+                event_refs: req
+                    .input
+                    .iter()
+                    .map(|item| {
+                        blake3::hash(
+                            &serde_json::to_vec(item).expect("Item serialization is infallible"),
+                        )
+                        .to_hex()
+                        .to_string()
+                    })
+                    .collect(),
+                decision: serde_json::to_value(&before_request.decision)
+                    .expect("typed hook decision serializes"),
+                evidence: before_request
+                    .evidence
+                    .clone()
+                    .unwrap_or(serde_json::Value::Null),
+                latency_ms: Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
+            };
+            let store = self.store.clone();
+            let decision_request = parent.clone();
+            blocking(move || store.record_decision(Some(&decision_request), &decision)).await?;
             let replay_request = req.clone();
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
             let create = self.client.create_streaming(req, event_tx);
