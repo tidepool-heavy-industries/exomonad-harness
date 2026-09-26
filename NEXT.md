@@ -1,6 +1,43 @@
 # Current assignment — wave14 before-request hook
 
-## Wave14 root checkpoint (in progress)
+## Wave14 integrated product checkpoint
+
+The authorized Send-only before-request hook is integrated at production
+source `75a1e014d0bc3d7e8208875c84e628dcc2f4bdca`. See
+`docs/wave14-handoff.md` for the exact contract, review, expected-red and
+final green evidence. At that source the Store, Provider forwarding, two
+Engine failure paths and standalone production browser focused tests each
+selected/executed/passed 1/1. Root prepared web assets, passed web 14/14
+and browser journey 1/1. Port 4600 remained HTTP 200 and untouched.
+No credentialed inference ran. Source evidence records the pre-existing
+dirty helper README; no clean-tree claim.
+
+All root, child and reviewer interviews are incorporated in
+`docs/interviews.md`. Outstanding: supervisor supplies exact matched runtime build/source,
+launch source, run ID, root thread and logs for `docs/wave14-launch.md`.
+Those facts are not inferred. The wave14 root has asked in
+`docs/questions.md`; this does not authorize host or live-demo changes.
+No reviewed/passing wave14 code branch remains unmerged after the
+`6ff6339`, `d1de787` and `75a1e014` integration commits. Preserve the
+pre-existing uncommitted helper README edit.
+
+### Where the last run stopped — wave14
+
+- No unmerged branch holds reviewed or passing wave14 code. Acceptance
+  `506e1791`, Provider/Store `cb8e94ba`, and Engine `978c650e` are
+  ancestors of integrated source `75a1e014`; their review/expected-red
+  states and final checks are in `docs/wave14-handoff.md`.
+- The three implementation actors and all three review actors were
+  retired through typed group cleanup after interviews. Review actors
+  reached stopped-now; the three implementation actors entered
+  `StoppedReleasing` (release notice pending at this checkpoint).
+  Retirement does not delete their branches, worktrees or evidence.
+- The sole unrelated root worktree change is the pre-existing
+  `.exomonad/helpers/README.md` edit. Do not fold it into product code.
+- Next owner: supervisor for exact launch identities and any subsequent
+  scope; no wave15 or live demo authority is inferred.
+
+## Wave14 execution chronology (superseded by integrated checkpoint above)
 
 - Actor-view `git status --porcelain` succeeded before forks; it reported
   pre-existing dirty `.exomonad/helpers/README.md` and

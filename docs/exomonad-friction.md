@@ -1107,3 +1107,20 @@ interview hold means I am stopping here, not opening those gates now.
   without running the two required tests. Root replaced that stale
   assignment once with a fresh exact-source review at `978c650e`; the
   prior source inspection was not treated as a verdict or test execution.
+- Fresh exact-source Engine review at `978c650e` accepted after two
+  1/1 focused checks. Its first combined command handle became unavailable
+  during observation; the reviewer ran the two specified checks
+  individually and retained evidence rather than claiming the unavailable
+  handle had passed. The source-only cleanup inspection from the blocked
+  prior review was not counted as verification.
+- Final integrated source `75a1e014` passed Store typed reopen,
+  provider forwarding, Engine Store-insert/pending-claim cleanup,
+  Engine transport-failure/pass-through, and standalone browser
+  production-consumer checks, each 1 selected/executed/passed. This
+  root checkout needed its own asset preparation despite the acceptance
+  child having built assets: Nix web verification then passed 14/14 web
+  tests and browser journey 1/1. `web/dist` was absent in the root before
+  that command, a missing prerequisite rather than a product failure.
+  Each final focused evidence record has source `75a1e014` with the
+  unrelated pre-existing dirty helper README. Port 4600 remained HTTP
+  200 after the checks.

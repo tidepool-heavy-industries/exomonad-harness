@@ -140,3 +140,13 @@ namespace-local production-binary and process-loss verification on
 separate temporary port/data. Until then, portable host operation is
 source/test evidence, not a verified host service identity. This does not
 authorize stopping port 4600 or changing Tailscale Serve.
+
+[wave14-launch-identities-2026-09-25] The wave-14 root actor can verify its
+code source and integrated tests, but `docs/wave14-launch.md` still has
+pending supervisor-owned matched runtime build/source, final launch source,
+run ID, root thread and log paths. Please provide the exact launch receipt
+and identities (including the workspace pin actually used). Recommendation:
+leave each field pending rather than infer it from this checkout or the
+template. This does not block the already-authorized local hook
+implementation, but it remains a handoff/provenance gap and grants no
+authority over port 4600 or Tailscale.
