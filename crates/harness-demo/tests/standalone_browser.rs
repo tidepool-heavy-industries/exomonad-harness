@@ -5,14 +5,17 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use futures_util::{SinkExt, StreamExt};
 use harness::{model::RequestId, store::Store};
 use serde_json::{Value, json};
 use tokio::{
-    io::AsyncReadExt,
     process::{Child, Command},
     time::timeout,
 };
-use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{Message, client::IntoClientRequest},
+};
 
 const SECRET: &str = "isolated-standalone-test-secret-32-bytes";
 type Socket =
@@ -122,31 +125,21 @@ async fn snapshot(base: &str, cookie: &str) -> Value {
 }
 
 async fn read_json(socket: &mut Socket) -> Value {
-    let tokio_tungstenite::MaybeTlsStream::Plain(stream) = socket.get_mut() else {
-        panic!("unexpected TLS on loopback");
-    };
-    loop {
-        let mut header = [0; 2];
-        stream.read_exact(&mut header).await.unwrap();
-        let len = match header[1] & 0x7f {
-            126 => {
-                let mut b = [0; 2];
-                stream.read_exact(&mut b).await.unwrap();
-                u16::from_be_bytes(b) as usize
+    while let Some(message) = socket.next().await {
+        match message.expect("read websocket frame") {
+            Message::Text(text) => {
+                return serde_json::from_str(&text).expect("decode websocket JSON text frame");
             }
-            127 => {
-                let mut b = [0; 8];
-                stream.read_exact(&mut b).await.unwrap();
-                u64::from_be_bytes(b) as usize
-            }
-            n => n as usize,
-        };
-        let mut body = vec![0; len];
-        stream.read_exact(&mut body).await.unwrap();
-        if header[0] & 0x0f == 1 {
-            return serde_json::from_slice(&body).unwrap();
+            Message::Ping(payload) => socket
+                .send(Message::Pong(payload))
+                .await
+                .expect("reply to websocket ping"),
+            Message::Pong(_) | Message::Frame(_) => {}
+            Message::Binary(_) => panic!("expected websocket JSON text frame, received binary"),
+            Message::Close(frame) => panic!("websocket closed before JSON text frame: {frame:?}"),
         }
     }
+    panic!("websocket ended before JSON text frame");
 }
 
 async fn submit(base: &str, cookie: &str, client: &reqwest::Client, command: &str) -> String {
