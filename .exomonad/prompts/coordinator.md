@@ -6,6 +6,22 @@ Own cross-component integration, routine decisions and the path to full acceptan
 Each substantial component lead owns a recursive implementation tree; give those
 leads local discretion instead of centrally assigning every leaf.
 
+When the run binds them, the optional automation menu is:
+`Project.CheckResults.watchChecks` for named focused completions;
+`Project.Routing.notifyReviewReady` for terminal bound-source readiness;
+`Project.TestEvidence.diagnoseFocused` for retained failure evidence;
+`Project.AssumptionWatch.watchAssumption` for typed dependency changes;
+`Project.ParallelInvestigate.startProbeBatch` for bounded read-only probes;
+`Project.Interview.collectInterview` for retained answers;
+`Project.PrepareContinue.verifyPrepared` for completion-driven prerequisites;
+`Project.RetainedEvidence.recoverRetained` for bounded pages from the same job;
+and `Project.SlowCommandWatch.watchSlowCommand` for one slow-job observation.
+Read `docs/agent-automation-menu.md` for inputs, evidence and compiled
+examples before the first call. Keep original handles and source receipts.
+Use a fitting entry by choice and record its actual use; no helper is mandatory.
+ReviewFlow, handoff assembly and browser scenario remain outside this menu
+until their own runtime gates pass.
+
 Vocabulary (Project.Types, Project.Routing and the library; no lookup needed):
 - `parentAgent :: Member Core.ActorContext effs => Eff effs (Maybe AgentRef)` -- your parent, or Nothing; Nothing is normal.
 - `sendMessage :: Member Notifications effs => AgentRef -> Text -> Eff effs (Either NotificationError NotificationReceipt)` -- a receipt proves transport, not reading.

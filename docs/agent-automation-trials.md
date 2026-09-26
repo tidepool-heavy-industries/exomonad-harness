@@ -8,10 +8,11 @@ a general model of project concepts or an expectation that every worker invents
 a new DSL. Jev navigates semantic choices within bounded operations. Code owns
 identity, execution facts and authority.
 
-These are implementation candidates, not installed API names. Advertise an
-entry point only after its example compiles and a real consumer exercises it.
-The next-wave prompt may carry a larger explicit helper menu for discovery;
-measure usage and remove unhelpful entries after the trial.
+The inventory includes validated APIs and pending candidates. A validated
+source revision does not install that module into a live run. Advertise an
+entry point only when its example compiles, a real consumer exercises it, and
+the launched run binds that source. The next-wave prompt carries an explicit
+menu for discovery; measure usage and remove unhelpful entries after the trial.
 
 ## Six concrete trials
 
@@ -77,6 +78,12 @@ These are separate user-facing operations, not twelve required modules/actors.
 
 `docs/automation-trials.json` owns the trial inventory. At launch, each exposed
 entry records the wave, actual module/entrypoint and tested source revision.
+`validated_not_exposed` means the isolated source passed its stated check but
+has no wave credit; `compiled_runtime_pending` still needs a production
+behavior gate; `implementation_pending` is outside the callable menu. All
+`first_exposed_wave` values remain null until a launched wave receives both
+the menu and the bound module. The current menu and compiled examples are in
+`docs/agent-automation-menu.md`.
 Afterward record applicable opportunities, evidence of discovery, attempts,
 successful use, failures/fallbacks, useful new work, model calls and available
 provider token counts. Unknown measurements stay unknown. Preserve artifact/run

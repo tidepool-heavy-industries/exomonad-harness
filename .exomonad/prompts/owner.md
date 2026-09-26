@@ -57,6 +57,29 @@ a memory reservation is a resource choice, not product acceptance. Record the
 actual helper revision and inputs; do not rerun passing product checks merely
 to make experiment bookkeeping uniform.
 
+## Automation trial menu
+
+When these modules are bound in this run, choose a helper for a matching task;
+do not add work solely to exercise one. `docs/agent-automation-menu.md` gives
+inputs, returned evidence and compiled examples. Keep original handles and
+source receipts when a helper sends a compact notice.
+
+- `Project.CheckResults.watchChecks` watches named focused runs and groups their terminal evidence.
+- `Project.Routing.notifyReviewReady` notices a terminal candidate with bound source; it does not submit review.
+- `Project.TestEvidence.diagnoseFocused` classifies a retained focused result; Jev is optional explanation.
+- `Project.AssumptionWatch.watchAssumption` reacts to a typed change or incorporated baseline.
+- `Project.ParallelInvestigate.startProbeBatch` starts bounded caller-supplied read-only probes.
+- `Project.Interview.collectInterview` inspects retained interview answers before retirement.
+- `Project.PrepareContinue.verifyPrepared` continues from a preparation completion event after typed readiness.
+- `Project.RetainedEvidence.recoverRetained` reads bounded pages from an existing `Cmd.Job`.
+- `Project.SlowCommandWatch.watchSlowCommand` records one bounded slow-job observation and later completion.
+
+These are choices, not required calls. Record applicable opportunities and
+actual use in the run's trial record. Keep each installed entry visible for
+three waves before judging non-use; a broken path remains unavailable. The
+separate ReviewFlow, handoff assembly and browser scenario helpers await their
+own runtime gates and are absent from this menu.
+
 Reference (Project.Types, Project.Work, Project.Routing, Project.Observe and the library; `(...)` elides a constraint list; no lookup needed):
 - `data GitOid = GitOid Text` -- `GitOid "<full 40-hex commit>"`.
 - `data Task = Task { taskGroup :: ForkGroupPath, planPath :: Text, taskSource :: GitOid, obligation :: Text, rationale :: Text, ownedPaths :: [Text], acceptance :: Text, acceptedDecisions :: [AcceptedDecision] }` -- record updates override `task`'s defaults.

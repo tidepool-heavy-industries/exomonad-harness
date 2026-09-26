@@ -5,21 +5,30 @@
     {
       "id": "check_watch",
       "purpose": "Watch my checks",
-      "status": "implementation_pending",
+      "status": "validated_not_exposed",
+      "entrypoint": "Project.CheckResults.watchChecks",
+      "source_revision": "d9537618cf8eba4c59d71cd2ac574c862f5f5c86",
+      "validation": "Project.CheckResultsChecks.completionRouting: 13/13; notification attempts retained, delivery untested",
       "first_exposed_wave": null,
       "waves": []
     },
     {
       "id": "review_readiness",
       "purpose": "Notify me of a reviewable candidate",
-      "status": "implementation_pending",
+      "status": "validated_not_exposed",
+      "entrypoint": "Project.Routing.notifyReviewReady",
+      "source_revision": "98aad7bdea70a3085601110ccbca520e19d4df66",
+      "validation": "Project.RoutingChecks.reviewReadiness: 4/4 on c40d68c; 98aad7b is its integration cherry-pick; does not run review",
       "first_exposed_wave": null,
       "waves": []
     },
     {
       "id": "failure_diagnostics",
       "purpose": "Diagnose this failure",
-      "status": "implementation_pending",
+      "status": "validated_not_exposed",
+      "entrypoint": "Project.TestEvidence.diagnoseFocused",
+      "source_revision": "d9537618cf8eba4c59d71cd2ac574c862f5f5c86",
+      "validation": "Project.CheckResultsChecks.completionRouting: 13/13, including selection, setup, assertion and short execution",
       "first_exposed_wave": null,
       "waves": []
     },
@@ -27,41 +36,57 @@
       "id": "repair_cycle",
       "purpose": "Carry this repair cycle",
       "status": "implementation_pending",
+      "note": "Existing Project.Review remains the ordinary workflow; separate ReviewFlow end-to-end behavior is unproved",
       "first_exposed_wave": null,
       "waves": []
     },
     {
       "id": "assumption_watch",
       "purpose": "Watch my assumptions",
-      "status": "implementation_pending",
+      "status": "validated_not_exposed",
+      "entrypoint": "Project.AssumptionWatch.watchAssumption",
+      "source_revision": "a61c13e6492a4f7d5bd323f9b6f8686214b77b7d",
+      "validation": "Project.AssumptionChecks.changes: 3/3, including deterministic, semantic and unresolved decisions",
       "first_exposed_wave": null,
       "waves": []
     },
     {
       "id": "parallel_investigation",
       "purpose": "Investigate alongside me",
-      "status": "implementation_pending",
+      "status": "validated_not_exposed",
+      "entrypoint": "Project.ParallelInvestigate.startProbeBatch",
+      "source_revision": "2a860832afbe675f78188dbdfbeb775bd2dbce80",
+      "validation": "Grouped definitions compiled; Project.AutomationRuntimeChecks.commandCustody: 5/5",
       "first_exposed_wave": null,
       "waves": []
     },
     {
       "id": "interview_collection",
       "purpose": "Collect interviews before retirement",
-      "status": "implementation_pending",
+      "status": "validated_not_exposed",
+      "entrypoint": "Project.Interview.collectInterview",
+      "source_revision": "1e3e822aca9d374e2d6bbb557f918b819b5fc196",
+      "validation": "Project.InterviewChecks.collectAnswers: 4/4, including empty input incomplete",
       "first_exposed_wave": null,
       "waves": []
     },
     {
       "id": "prerequisite_preparation",
       "purpose": "Prepare prerequisites and continue",
-      "status": "implementation_pending",
+      "status": "validated_not_exposed",
+      "entrypoint": "Project.PrepareContinue.verifyPrepared",
+      "source_revision": "151e467ca4978121a45fa8ae4ca4531de9f5a784",
+      "validation": "Project.PrepareContinueChecks.preparationCompletion: 6/6; late, failed and unready paths",
       "first_exposed_wave": null,
       "waves": []
     },
     {
       "id": "command_evidence",
       "purpose": "Recover useful command evidence",
-      "status": "implementation_pending",
+      "status": "validated_not_exposed",
+      "entrypoint": "Project.RetainedEvidence.recoverRetained",
+      "source_revision": "151e467ca4978121a45fa8ae4ca4531de9f5a784",
+      "validation": "Project.PrepareContinueChecks.preparationCompletion: 6/6, including failed-job reuse and four-byte cutoff",
       "first_exposed_wave": null,
       "waves": []
     },
@@ -69,20 +94,27 @@
       "id": "handoff_assembly",
       "purpose": "Assemble an evidence-backed handoff",
       "status": "implementation_pending",
+      "note": "Project.HandoffExamples.handoffProposal has a combined compile and recipe gate pending",
       "first_exposed_wave": null,
       "waves": []
     },
     {
       "id": "browser_scenario",
       "purpose": "Drive an isolated browser scenario",
-      "status": "implementation_pending",
+      "status": "compiled_runtime_pending",
+      "entrypoint": "Project.BrowserScenario.watchBrowserScenarios",
+      "source_revision": "2a860832afbe675f78188dbdfbeb775bd2dbce80",
+      "validation": "Grouped definitions and contract compiled; isolated browser end-to-end run pending",
       "first_exposed_wave": null,
       "waves": []
     },
     {
       "id": "slow_operation",
       "purpose": "Watch a slow operation",
-      "status": "implementation_pending",
+      "status": "validated_not_exposed",
+      "entrypoint": "Project.SlowCommandWatch.watchSlowCommand",
+      "source_revision": "2a860832afbe675f78188dbdfbeb775bd2dbce80",
+      "validation": "Grouped definitions compiled; Project.AutomationRuntimeChecks.commandCustody: 5/5",
       "first_exposed_wave": null,
       "waves": []
     }
