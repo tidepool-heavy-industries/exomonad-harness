@@ -12,7 +12,6 @@ use harness::agent_runtime::StoreAgentToolService;
 use harness::agents::{AgentToolService, Contract, SpawnSource};
 use harness::engine::{Engine, EngineCompletion, EngineConfig, EngineError};
 use harness::item::Item;
-use harness::lifecycle::{CompletionCommit, PublishedAnswer};
 use harness::model::{AgentPath, Effort};
 use harness::provider::{CallContext, Provider, ProviderError};
 use harness::server::{self, ClientCommand, QueuedCommand, ServerConfig, SessionSecret, Snapshot};
@@ -775,29 +774,10 @@ async fn run_deterministic_child_message(
     .await?;
     let reply = final_text(&completion.turn.items)
         .ok_or_else(|| "child Engine returned no final answer".to_owned())?;
-    let provenance = store
-        .completion_provenance(&child, &completion.head_request)
-        .map_err(|_| "could not capture child completion provenance")?;
-    let published = PublishedAnswer {
-        sender: child.0.clone(),
-        result: json!({"kind":"completed","value":{"answer":reply}}),
-        provenance,
-    };
-    let item = published
-        .to_message_item()
-        .map_err(|_| "could not encode typed child response")?;
-    match store
-        .complete_agent_with_publication(
-            &child,
-            None,
-            &completion.head_request,
-            Some((&root, &item)),
-        )
-        .map_err(|_| "could not commit child response")?
-    {
-        CompletionCommit::Committed { .. } => {}
-        CompletionCommit::HeadMismatch => return Err("child completion head changed".into()),
-    }
+    service
+        .send_message(&child, root.clone(), reply.clone())
+        .await
+        .map_err(|_| "could not persist child reply message")?;
     let stored = store
         .inbox(&root.0)
         .map_err(|_| "could not read root inbox")?
@@ -809,18 +789,20 @@ async fn run_deterministic_child_message(
         .get_item(&stored.item_hash)
         .map_err(|_| "could not read committed child response")?
         .ok_or_else(|| "committed child response item is missing".to_owned())?;
-    let decoded = PublishedAnswer::from_message_item(&item)
-        .map_err(|_| "committed child response is malformed")?;
-    let reply = decoded.result["value"]["answer"]
+    let stored_text = item.0["content"][0]["text"]
         .as_str()
-        .ok_or_else(|| "committed child response has no answer".to_owned())?
+        .ok_or_else(|| "committed child message is malformed".to_owned())?;
+    let reply = stored_text
+        .split_once("Payload:\n")
+        .map(|(_, payload)| payload)
+        .ok_or_else(|| "committed child message has no payload".to_owned())?
         .to_owned();
     let envelope = json!({
         "id":format!("envelope/{}", stored.id),
         "conversationId":ROOT_CONVERSATION_ID,
         "recipient":stored.recipient,
         "sender":stored.sender,
-        "type":"FINAL_ANSWER",
+        "type":"MESSAGE",
         "payload":reply
     });
     Ok((child, reply, envelope))
@@ -2059,10 +2041,18 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot["id"], format!("envelope/{}", committed.id));
         let item = store.get_item(&committed.item_hash).unwrap().unwrap();
-        let answer = PublishedAnswer::from_message_item(&item).unwrap();
-        assert_eq!(answer.sender, child.0);
-        assert_eq!(answer.result["value"]["answer"], reply);
-        assert!(!answer.provenance.seen_envelopes.is_empty());
+        let stored_text = item.0["content"][0]["text"].as_str().unwrap();
+        assert!(stored_text.ends_with(&reply));
+        let delivered = store
+            .inbox(&child.0)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.sender == ROOT_PATH)
+            .expect("child Engine did not claim a real parent message");
+        assert!(
+            delivered.delivered_request.is_some(),
+            "child inbound envelope was not claimed by its Engine request"
+        );
         let parent = run_deterministic_engine_completion(
             store.clone(),
             Arc::new(JobScheduler::new(2).unwrap()),
