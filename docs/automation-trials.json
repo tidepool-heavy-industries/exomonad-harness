@@ -323,41 +323,57 @@
       "id": "check_plan",
       "purpose": "One candidate and retained evidence across several focused checks",
       "entrypoint": "SessionHelpers.AcceptancePlan.startAcceptancePlan",
-      "status": "ready_for_trial",
-      "first_exposed_wave": null,
+      "status": "trialing",
+      "first_exposed_wave": 18,
       "waves": [],
       "validation": "Candidate-once and full packet recipe27/27; retained recovery2/2; both project consumers compiled.",
-      "source_revision": "8a21b71fdb9ca2cc7b241a5f3dd97a83b6c45d84"
+      "source_revision": "8a21b71fdb9ca2cc7b241a5f3dd97a83b6c45d84",
+      "exposure_evidence": {
+        "wave": 18,
+        "record": "docs/wave18-launch.md; run 29e61b63-2bc9-45d5-b5d1-b67e20918bea; initial root reads include helper implementations. Exposure is not use."
+      }
     },
     {
       "id": "background_investigator",
       "purpose": "One failed-job investigation packet without parent relay",
       "entrypoint": "Project.BackgroundInvestigator.watchFailedCheck",
-      "status": "ready_for_trial",
-      "first_exposed_wave": null,
+      "status": "trialing",
+      "first_exposed_wave": 18,
       "waves": [],
       "validation": "Terminal failure5/5 and deterministic pending probe5/5; original job retained.",
-      "source_revision": "8a21b71fdb9ca2cc7b241a5f3dd97a83b6c45d84"
+      "source_revision": "8a21b71fdb9ca2cc7b241a5f3dd97a83b6c45d84",
+      "exposure_evidence": {
+        "wave": 18,
+        "record": "docs/wave18-launch.md; run 29e61b63-2bc9-45d5-b5d1-b67e20918bea; initial root reads include helper implementations. Exposure is not use."
+      }
     },
     {
       "id": "baseline_incorporation",
       "purpose": "Deliver one accepted baseline and collect exact owner reports",
       "entrypoint": "Project.BaselineIncorporation.beginBaselineEpisode",
-      "status": "ready_for_trial",
-      "first_exposed_wave": null,
+      "status": "trialing",
+      "first_exposed_wave": 18,
       "waves": [],
       "validation": "Collector17/17 before semantic-only change; final source compiled; root live single-choice cases5/5.",
-      "source_revision": "8a21b71fdb9ca2cc7b241a5f3dd97a83b6c45d84"
+      "source_revision": "8a21b71fdb9ca2cc7b241a5f3dd97a83b6c45d84",
+      "exposure_evidence": {
+        "wave": 18,
+        "record": "docs/wave18-launch.md; run 29e61b63-2bc9-45d5-b5d1-b67e20918bea; initial root reads include helper implementations. Exposure is not use."
+      }
     },
     {
       "id": "workflow_reminders",
       "purpose": "Specific instructed reminders attached to observed progress",
       "entrypoint": "Project.WorkflowReminderExamples.withQuestionReminders",
-      "status": "ready_for_trial",
-      "first_exposed_wave": null,
+      "status": "trialing",
+      "first_exposed_wave": 18,
       "waves": [],
       "validation": "Core6/6; actual HostJev cases3/3; routing consumer6/6 including typed unavailable notification receipts.",
-      "source_revision": "8a21b71fdb9ca2cc7b241a5f3dd97a83b6c45d84"
+      "source_revision": "8a21b71fdb9ca2cc7b241a5f3dd97a83b6c45d84",
+      "exposure_evidence": {
+        "wave": 18,
+        "record": "docs/wave18-launch.md; run 29e61b63-2bc9-45d5-b5d1-b67e20918bea; initial root reads include helper implementations. Exposure is not use."
+      }
     }
   ],
   "wave16_run": {
@@ -393,5 +409,12 @@
       "BrowserScenario remains unavailable pending its own isolated browser runtime gate; no use claimed."
     ],
     "measurement": "Actual helper invocations and jobs are recorded; no model-round or token saving is inferred. ReviewFlow activated but missed a release setup defect, so it did not remove a review/repair frontier. This is the third exposed wave for entries first exposed in wave15, but exposure is not use."
+  },
+  "wave18_run": {
+    "run_id": "29e61b63-2bc9-45d5-b5d1-b67e20918bea",
+    "launch_revision": "5484b2a85f1db21f5f56a259226e64a42ba72615",
+    "workspace_revision": "8a21b71fdb9ca2cc7b241a5f3dd97a83b6c45d84",
+    "evidence": "docs/wave18-launch.md",
+    "observation": "Root first turn read brief, source notes, AgentSpec and helper implementations. Actual calls, opportunities, outcomes and savings remain to be audited."
   }
 }
