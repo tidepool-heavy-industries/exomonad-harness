@@ -344,12 +344,12 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
     assert!(
-        tool_names.contains(&"ask"),
-        "full definitions must include ask"
+        tool_names.contains(&"sleep"),
+        "full definitions must include sleep"
     );
     assert_eq!(
         echo_request["tool_choice"],
-        json!({"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"ask"}]})
+        json!({"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"sleep"}]})
     );
     assert_eq!(child_request["tool_choice"], "none");
     stop_sigint(&mut first).await;
