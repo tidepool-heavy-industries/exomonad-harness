@@ -42,6 +42,18 @@
 - Engine candidate `8248c7965b92b8fa3b4883d68959d1871b214268`
   passed its focused 1/1 test but exact-tip reviewer actor 7 found a Store
   insert-failure cleanup omission. Retained actor 3 has the repair.
+- Provider/Store candidate `cb8e94ba` was merged with the confirmed-red
+  browser barrier at `d1de78746a5df69e24a458f73b9058c32cc3995f`.
+  Post-merge Store typed-reopen and demo forwarding focused checks each
+  selected/executed/passed 1/1 there; neither proves Engine invocation.
+- Engine cleanup repair `978c650ea0fc460a609ed2a4aadf5b459b48d08a`
+  passed its own Store-failure/pending-claim and transport-failure focused
+  checks 1/1 each. Retained reviewer actor 7 correctly blocked because its
+  checkout stayed at the old tip; fresh exact-source reviewer actor 8
+  accepted `978c650e` after running both focused tests 1/1 at that tip.
+  Root's `web/dist` is absent even though acceptance child's checkout had
+  prepared assets; root must prepare its own assets before the production
+  standalone browser check.
 - Boundary: one Send decision per new transport attempt, associated with its
   durable request and agent; failed transport keeps the recorded decision.
   Readback/reopen alone must not invoke the hook. Retry is not exactly-once.

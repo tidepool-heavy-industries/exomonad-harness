@@ -1102,3 +1102,8 @@ interview hold means I am stopping here, not opening those gates now.
   exist, then located the actual deterministic browser consumer in
   `crates/harness-demo/src/main.rs`; the failed search was not review
   evidence about the consumer.
+- `friction:` Retained Engine reviewAgain for repair `978c650e` remained
+  bound to prior candidate `8248c796` and correctly returned Blocked
+  without running the two required tests. Root replaced that stale
+  assignment once with a fresh exact-source review at `978c650e`; the
+  prior source inspection was not treated as a verdict or test execution.
