@@ -9,13 +9,17 @@ pub mod tree;
 use async_trait::async_trait;
 use driver::{Driver, HarnessEngineFactory};
 use harness::agent_runtime::StoreAgentToolService;
+use harness::agents::{AgentToolService, Contract, SpawnSource};
 use harness::engine::{Engine, EngineCompletion, EngineConfig, EngineError};
 use harness::item::Item;
 use harness::model::{AgentPath, Effort};
 use harness::provider::{CallContext, Provider, ProviderError};
 use harness::server::{self, ClientCommand, QueuedCommand, ServerConfig, SessionSecret, Snapshot};
 use harness::store::Store;
-use harness::transport::{ResponsesClient, TransportError, auth::CodexFileAuth};
+use harness::transport::{
+    Auth, ResponsesClient, ResponsesRequest, ResponsesTurn, TransportError, Usage,
+    auth::CodexFileAuth,
+};
 use harness::turn::JobScheduler;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
@@ -400,10 +404,83 @@ fn request_record(id: &str, state: &str) -> Value {
     json!({"id":id,"conversationId":ROOT_CONVERSATION_ID,"state":state})
 }
 
+fn command_request_record(
+    id: &str,
+    state: &str,
+    command_id: &str,
+    command: &str,
+    outcome: &str,
+    detail: Option<&str>,
+) -> Value {
+    let mut record = request_record(id, state);
+    record["commandId"] = json!(command_id);
+    record["command"] = json!(command);
+    record["outcome"] = json!(outcome);
+    if let Some(detail) = detail {
+        record["detail"] = json!(detail);
+    }
+    record
+}
+
+fn next_envelope_ordinal(envelopes: &[Value]) -> u64 {
+    envelopes
+        .iter()
+        .filter_map(|envelope| envelope["ordinal"].as_u64())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn active_wait_request(requests: &[Value], history: &[Item]) -> Option<String> {
+    requests.iter().find_map(|request| {
+        if request["state"] != "running" {
+            return None;
+        }
+        let request_id = request["id"].as_str()?;
+        history
+            .iter()
+            .any(|item| item.0["request_id"] == request_id && item.0["command"] == "wait")
+            .then(|| request_id.to_owned())
+    })
+}
+
 fn job_record(id: &str, state: &str) -> Value {
     json!({"id":id,"conversationId":ROOT_CONVERSATION_ID,"state":state})
 }
 
+fn conversation_rows(root: &Value, envelopes: &[Value]) -> Vec<Value> {
+    let mut rows = vec![root.clone()];
+    let mut paths = std::collections::BTreeSet::new();
+    for envelope in envelopes {
+        for key in ["sender", "recipient"] {
+            if let Some(path) = envelope[key]
+                .as_str()
+                .filter(|path| path.starts_with("/root/"))
+            {
+                paths.insert(path.to_owned());
+            }
+        }
+    }
+    rows.extend(
+        paths
+            .into_iter()
+            .map(|path| json!({"id":format!("conversation/{path}"),"path":path,"state":"idle"})),
+    );
+    rows
+}
+
+struct AbortTasksOnDrop(Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>);
+
+impl Drop for AbortTasksOnDrop {
+    fn drop(&mut self) {
+        let handles = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        for handle in handles.iter() {
+            handle.abort();
+        }
+    }
+}
+
+#[cfg(test)]
 fn final_envelope(id: &str, payload: &str) -> Value {
     json!({"id":id,"conversationId":ROOT_CONVERSATION_ID,"recipient":ROOT_PATH,
         "sender":ROOT_PATH,"type":"FINAL_ANSWER","payload":payload})
@@ -415,6 +492,373 @@ fn command_input(history: &[Item], prompt: &str) -> Vec<Item> {
         json!({"type":"message","role":"user","content":prompt}),
     ));
     input
+}
+
+fn deterministic_command(
+    command: &str,
+    waiting: bool,
+) -> (&'static str, &'static str, Option<String>) {
+    if command == "wait" {
+        return if waiting {
+            (
+                "failed",
+                "already pending",
+                Some("A wait is already pending.".into()),
+            )
+        } else {
+            ("running", "pending", None)
+        };
+    }
+    if command == "cancel" && waiting {
+        return (
+            "settled",
+            "completed",
+            Some("Pending wait cancelled.".into()),
+        );
+    }
+    if let Some(text) = command.strip_prefix("echo ") {
+        return ("settled", "completed", Some(text.into()));
+    }
+    if command == "test" {
+        return (
+            "settled",
+            "completed",
+            Some("Deterministic check passed.".into()),
+        );
+    }
+    if let Some(text) = command.strip_prefix("message ") {
+        return (
+            "settled",
+            if waiting { "queued" } else { "no pending wait" },
+            Some(if waiting {
+                format!("Message queued: {text}")
+            } else {
+                "No pending wait; message not queued.".into()
+            }),
+        );
+    }
+    if let Some(text) = command.strip_prefix("child ") {
+        return (
+            "settled",
+            "completed",
+            Some(format!(
+                "Child /root/demo-child received and replied: {text}"
+            )),
+        );
+    }
+    if command == "child-reply" || command.starts_with("child-reply ") {
+        let text = command.strip_prefix("child-reply ").unwrap_or_default();
+        return (
+            "settled",
+            "completed",
+            Some(format!("Child received and replied: {text}")),
+        );
+    }
+    if command == "fail" {
+        return (
+            "failed",
+            "failed",
+            Some("Controlled deterministic failure.".into()),
+        );
+    }
+    (
+        "failed",
+        "failed",
+        Some("Unknown deterministic command.".into()),
+    )
+}
+
+#[derive(Clone)]
+struct OfflineServerAuth;
+
+impl Auth for OfflineServerAuth {
+    fn access(&self) -> Result<(String, String), TransportError> {
+        Err(TransportError::Authentication)
+    }
+}
+
+struct DeterministicServerTransport {
+    command: String,
+    waiting: bool,
+    answer_override: Option<String>,
+}
+
+#[async_trait]
+impl harness::engine::ResponsesTransport for DeterministicServerTransport {
+    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        let (state, _outcome, answer) = deterministic_command(&self.command, self.waiting);
+        if self.command == "wait" && state == "running" {
+            return std::future::pending().await;
+        }
+        if state == "failed" {
+            return Err(TransportError::Stream(
+                "controlled deterministic server failure".into(),
+            ));
+        }
+        let inbox_reply = (self.command == "child-reply")
+            .then(|| {
+                request.input.iter().find_map(|item| {
+                    let text = item.0["content"]
+                        .as_array()?
+                        .iter()
+                        .filter_map(|part| part["text"].as_str())
+                        .collect::<String>();
+                    if !text.contains("Message Type: MESSAGE") {
+                        return None;
+                    }
+                    text.split_once("Payload:\n")
+                        .map(|(_, payload)| format!("Child received and replied: {payload}"))
+                })
+            })
+            .flatten();
+        if self.command == "child-reply" && inbox_reply.is_none() {
+            return Err(TransportError::Stream(
+                "child had no delivered parent message".into(),
+            ));
+        }
+        let answer = inbox_reply
+            .or_else(|| self.answer_override.clone())
+            .or(answer)
+            .unwrap_or_default();
+        Ok(ResponsesTurn {
+            response_id: format!("deterministic-{}", request.session_id),
+            items: vec![Item(json!({
+                "type":"message","role":"assistant","phase":"final_answer",
+                "content":[{"type":"output_text","text":answer}]
+            }))],
+            usage: Usage::default(),
+        })
+    }
+}
+
+async fn run_deterministic_engine_completion(
+    store: Arc<Store>,
+    scheduler: Arc<JobScheduler>,
+    command_id: &str,
+    command: &str,
+    waiting: bool,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+    agent: AgentPath,
+    answer_override: Option<String>,
+) -> Result<EngineCompletion, String> {
+    let provider = Arc::new(CliProvider(DemoProvider::development(".", false)));
+    let engine = Engine::<OfflineServerAuth, CliProvider, _>::with_transport(
+        DeterministicServerTransport {
+            command: command.to_owned(),
+            waiting,
+            answer_override,
+        },
+        store,
+        scheduler,
+        provider,
+        EngineConfig {
+            instructions: "Deterministic browser journey. Do not use tools.".into(),
+            tools: Vec::new(),
+            model: "deterministic-local".into(),
+            effort: Effort::Low,
+            session_id: format!("harness-demo-server-{command_id}"),
+            agent,
+        },
+    );
+    engine
+        .run(
+            None,
+            command_input(&[], command),
+            cancel_rx,
+            tokio::sync::mpsc::unbounded_channel().1,
+        )
+        .await
+        .map_err(|_| "deterministic engine request failed".to_owned())
+}
+
+async fn run_deterministic_engine_turn(
+    store: Arc<Store>,
+    scheduler: Arc<JobScheduler>,
+    command_id: &str,
+    command: &str,
+    waiting: bool,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+    agent: AgentPath,
+    answer_override: Option<String>,
+) -> Result<(String, Item), String> {
+    let completion = run_deterministic_engine_completion(
+        store,
+        scheduler,
+        command_id,
+        command,
+        waiting,
+        cancel_rx,
+        agent,
+        answer_override,
+    )
+    .await?;
+    let answer = final_text(&completion.turn.items)
+        .ok_or_else(|| "deterministic engine returned no final text".to_owned())?;
+    let final_item = completion
+        .turn
+        .items
+        .iter()
+        .rev()
+        .find(|item| {
+            item.0["type"] == "message"
+                && item.0["role"] == "assistant"
+                && item.0["phase"] == "final_answer"
+        })
+        .cloned()
+        .ok_or_else(|| "deterministic Engine final item is missing".to_owned())?;
+    Ok((answer, final_item))
+}
+
+async fn run_deterministic_child_message(
+    store: Arc<Store>,
+    scheduler: Arc<JobScheduler>,
+    command_id: &str,
+    message: &str,
+) -> Result<(AgentPath, String, Value), String> {
+    let root = AgentPath(ROOT_PATH.into());
+    let root_exists = store
+        .agent(&root)
+        .map_err(|_| "could not inspect root agent")?
+        .is_some();
+    if !root_exists {
+        store
+            .admit_agent(&root, None, None, &json!({}), &json!({"kind":"root"}))
+            .map_err(|_| "could not register root agent")?;
+    }
+    let service = StoreAgentToolService::new(store.clone(), root.clone());
+    let mut suffix = command_id
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+        .take(32)
+        .collect::<String>();
+    if suffix.is_empty() {
+        suffix = "request".into();
+    }
+    let child_name = format!("demo_child_{suffix}");
+    let contract = Contract {
+        clauses: vec!["Receive the parent's message and reply deterministically.".into()],
+        acceptance: vec!["A final answer is durably published to the parent.".into()],
+        owned: vec![],
+        must_not: vec!["Use remote inference or shell tools.".into()],
+        introduces: vec![],
+        consumes: vec![],
+        boundaries: vec![],
+        reply: None,
+    };
+    let created = service
+        .spawn_agent(&root, &child_name, SpawnSource::Prompt, contract)
+        .await
+        .map_err(|_| "could not create deterministic child agent")?;
+    let child = AgentPath(
+        created["task_name"]
+            .as_str()
+            .ok_or("child service returned no identity")?
+            .to_owned(),
+    );
+    service
+        .send_message(&root, child.clone(), message.to_owned())
+        .await
+        .map_err(|_| "could not deliver parent message to child")?;
+    let child_command = "child-reply".to_owned();
+    let completion = run_deterministic_engine_completion(
+        store.clone(),
+        scheduler,
+        &format!("{command_id}-child"),
+        &child_command,
+        false,
+        tokio::sync::watch::channel(false).1,
+        child.clone(),
+        None,
+    )
+    .await?;
+    let reply = final_text(&completion.turn.items)
+        .ok_or_else(|| "child Engine returned no final answer".to_owned())?;
+    service
+        .send_message(&child, root.clone(), reply.clone())
+        .await
+        .map_err(|_| "could not persist child reply message")?;
+    let stored = store
+        .inbox(&root.0)
+        .map_err(|_| "could not read root inbox")?
+        .into_iter()
+        .rev()
+        .find(|entry| entry.sender == child.0 && entry.recipient == root.0)
+        .ok_or_else(|| "committed child response is missing from parent inbox".to_owned())?;
+    let item = store
+        .get_item(&stored.item_hash)
+        .map_err(|_| "could not read committed child response")?
+        .ok_or_else(|| "committed child response item is missing".to_owned())?;
+    let stored_text = item.0["content"][0]["text"]
+        .as_str()
+        .ok_or_else(|| "committed child message is malformed".to_owned())?;
+    let reply = stored_text
+        .split_once("Payload:\n")
+        .map(|(_, payload)| payload)
+        .ok_or_else(|| "committed child message has no payload".to_owned())?
+        .to_owned();
+    let envelope = json!({
+        "id":format!("envelope/{}", stored.id),
+        "conversationId":ROOT_CONVERSATION_ID,
+        "recipient":stored.recipient,
+        "sender":stored.sender,
+        "type":"MESSAGE",
+        "payload":reply
+    });
+    Ok((child, reply, envelope))
+}
+
+fn persist_browser_envelope(
+    store: &Store,
+    sender: &str,
+    recipient: &str,
+    kind: &str,
+    payload: &str,
+    ordinal: u64,
+) -> Result<Value, String> {
+    let role = if sender == "/operator" {
+        "user"
+    } else {
+        "assistant"
+    };
+    let item = Item(json!({
+        "type":"message",
+        "role":role,
+        "content":[{"type":"output_text","text":payload}]
+    }));
+    let id = store
+        .add_envelope(sender, recipient, "AtBoundary", &item, None)
+        .map_err(|_| "could not persist browser message envelope")?;
+    Ok(json!({
+        "id":format!("envelope/{id}"),
+        "conversationId":if recipient.starts_with("/root/") { format!("conversation/{recipient}") } else { ROOT_CONVERSATION_ID.to_owned() },
+        "recipient":recipient,
+        "sender":sender,
+        "type":kind,
+        "payload":payload,
+        "ordinal":ordinal
+    }))
+}
+
+fn persist_engine_final_envelope(
+    store: &Store,
+    item: &Item,
+    ordinal: u64,
+) -> Result<Value, String> {
+    let answer = final_text(std::slice::from_ref(item))
+        .ok_or_else(|| "Engine final item is not a final answer".to_owned())?;
+    let id = store
+        .add_envelope(ROOT_PATH, "/operator", "AtBoundary", item, None)
+        .map_err(|_| "could not persist Engine final answer envelope")?;
+    Ok(json!({
+        "id":format!("envelope/{id}"),
+        "conversationId":ROOT_CONVERSATION_ID,
+        "recipient":"/operator",
+        "sender":ROOT_PATH,
+        "type":"FINAL_ANSWER",
+        "payload":answer,
+        "ordinal":ordinal
+    }))
 }
 
 #[derive(Debug)]
@@ -488,18 +932,37 @@ fn restore_server_state(raw: &str) -> Result<PersistedServerState, String> {
         }
         if request.get("state").and_then(Value::as_str) == Some("running") {
             request["state"] = json!("failed");
+            if request.get("commandId").is_some() {
+                request["outcome"] = json!("failed");
+                request["detail"] = json!("Process restarted before this request settled.");
+            }
         }
     }
     let envelopes = records("envelopes")?;
+    let mut last_ordinal = 0;
     for envelope in &envelopes {
         if envelope.get("id").and_then(Value::as_str).is_none()
-            || envelope.get("conversationId").and_then(Value::as_str) != Some(ROOT_CONVERSATION_ID)
+            || !envelope
+                .get("conversationId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| {
+                    id == ROOT_CONVERSATION_ID || id.starts_with("conversation//root/")
+                })
             || envelope.get("sender").and_then(Value::as_str).is_none()
             || envelope.get("recipient").and_then(Value::as_str).is_none()
             || envelope.get("payload").and_then(Value::as_str).is_none()
-            || envelope.get("type").and_then(Value::as_str) != Some("FINAL_ANSWER")
+            || !matches!(
+                envelope.get("type").and_then(Value::as_str),
+                Some("PROGRESS" | "MESSAGE" | "FINAL_ANSWER")
+            )
         {
             return Err("persisted demo server envelope is malformed".into());
+        }
+        if let Some(ordinal) = envelope["ordinal"].as_u64() {
+            if ordinal <= last_ordinal {
+                return Err("persisted demo server envelope ordinals are not monotone".into());
+            }
+            last_ordinal = ordinal;
         }
     }
     if conversation["state"] == "requesting" {
@@ -529,7 +992,17 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
         .with_browser_session(secret, Duration::from_secs(8 * 60 * 60))?;
     let (app, control, mut commands) = server::server_with_config(config);
     let status_store =
-        Store::open(&db).map_err(|_| "could not open server status store".to_owned())?;
+        Arc::new(Store::open(&db).map_err(|_| "could not open server status store".to_owned())?);
+    let root_agent = AgentPath(ROOT_PATH.into());
+    if status_store
+        .agent(&root_agent)
+        .map_err(|_| "could not inspect server root agent")?
+        .is_none()
+    {
+        status_store
+            .admit_agent(&root_agent, None, None, &json!({}), &json!({"kind":"root"}))
+            .map_err(|_| "could not register server root agent")?;
+    }
     let mut history = Vec::<Item>::new();
     let mut jobs = Vec::new();
     let mut requests = Vec::new();
@@ -553,20 +1026,20 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
             .map_err(|_| "could not persist recovered server status".to_owned())?;
     }
     control.set_snapshot(Snapshot {
-        conversations: vec![conversation.clone()],
+        conversations: conversation_rows(&conversation, &envelopes),
         requests: requests.clone(),
         jobs: jobs.clone(),
         envelopes: envelopes.clone(),
         ..Snapshot::default()
     });
-    let driver = CliDriver::new(&CliOptions {
-        db,
-        ask: String::new(),
-        dev_shell,
-        tree: false,
-        trace_jsonl: None,
-        compact_at_input_tokens: None,
-    })?;
+    let scheduler = Arc::new(
+        JobScheduler::new(4)
+            .map_err(|_| "could not initialize server tool scheduler".to_owned())?,
+    );
+    // --serve is the credential-free deterministic browser journey. The
+    // interactive --ask path remains backed by CliDriver/Engine; browser
+    // commands must never silently turn into model requests.
+    let _ = dev_shell;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|_| "could not bind demo server address".to_owned())?;
@@ -577,6 +1050,8 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
             .map_err(|_| "could not read bound address")?
     );
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let task_aborts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _task_cleanup = AbortTasksOnDrop(task_aborts.clone());
     let mut server_task = tokio::spawn(async move {
         axum::serve(listener, app)
             .with_graceful_shutdown(async {
@@ -584,8 +1059,16 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
             })
             .await
     });
+    task_aborts
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(server_task.abort_handle());
     let shutdown_signal = tokio::signal::ctrl_c();
     tokio::pin!(shutdown_signal);
+    let mut pending_engine: Option<(
+        tokio::sync::watch::Sender<bool>,
+        tokio::task::JoinHandle<Result<(String, Item), String>>,
+    )> = None;
     loop {
         tokio::select! {
             _ = &mut shutdown_signal => break,
@@ -597,72 +1080,302 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
                 let Some(QueuedCommand { command_id, command }) = command else { break };
                 match command {
                     ClientCommand::Submit { command } => {
+                        let conversation_was_requesting = conversation["state"] == "requesting";
                         let request_id = format!("request/{command_id}");
                         let job_id = command_id.clone();
                         let queued_job = job_record(&job_id, "running");
-                        let queued_request = request_record(&request_id, "running");
-                        conversation = conversation_record("requesting");
-                        control.publish("conversation.upsert", conversation.clone());
-                        control.publish("request.upsert", queued_request.clone());
-                        control.publish("job.upsert", queued_job.clone());
+                        let queued_request = command_request_record(
+                            &request_id, "running", &command_id, &command, "accepted", None,
+                        );
                         jobs.push(queued_job);
                         requests.push(queued_request);
-                        control.set_snapshot(Snapshot { conversations: vec![conversation.clone()], requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
-
-                        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-                        let turn_history = history.clone();
-                        let mut turn = Box::pin(driver.ask(&command, &turn_history, cancel_rx));
-                        let (status, request_state, answer, result_items, shutting_down) = tokio::select! {
-                            result = &mut turn => match result {
-                                Ok((answer, completion)) => ("settled", "completed", answer, Some(completion.transcript), false),
-                                Err(error) => ("settled", "failed", error, None, false),
-                            },
-                            _ = &mut shutdown_signal => {
-                                let _ = cancel_tx.send(true);
-                                let result = turn.await;
-                                let (state, request_state, answer, items) = match result {
-                                    Ok((answer, completion)) => ("settled", "completed", answer, Some(completion.transcript)),
-                                    Err(error) => ("cancelled", "failed", error, None),
-                                };
-                                (state, request_state, answer, items, true)
-                            }
+                        conversation = conversation_record("requesting");
+                        status_store
+                            .save_session_state(
+                                "harness-demo-server:/root",
+                                &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
+                            )
+                            .map_err(|_| "could not persist accepted server command".to_owned())?;
+                        control.set_snapshot(Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+                        if !conversation_was_requesting {
+                            control.publish("conversation.upsert", conversation.clone());
+                        }
+                        control.publish("request.upsert", requests.last().unwrap().clone());
+                        control.publish("job.upsert", jobs.last().unwrap().clone());
+                        let waiting = active_wait_request(&requests, &history).is_some();
+                        let (initial_state, initial_outcome, fallback_answer) =
+                            deterministic_command(&command, waiting);
+                        if command == "wait" && initial_state == "running" {
+                            let pending_record = command_request_record(
+                                &request_id,
+                                "running",
+                                &command_id,
+                                &command,
+                                "pending",
+                                Some("Waiting for a cancel command."),
+                            );
+                            replace_by_id(&mut requests, pending_record.clone());
+                            status_store
+                                .save_session_state(
+                                    "harness-demo-server:/root",
+                                    &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
+                                )
+                                .map_err(|_| "could not persist pending wait")?;
+                            control.set_snapshot(Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+                            control.publish("request.upsert", pending_record);
+                        }
+                        if command.starts_with("message ") && waiting {
+                            let text = command.strip_prefix("message ").unwrap_or_default();
+                            let message = persist_browser_envelope(
+                                &status_store,
+                                "/operator",
+                                ROOT_PATH,
+                                "MESSAGE",
+                                text,
+                                next_envelope_ordinal(&envelopes),
+                            )?;
+                            envelopes.push(message.clone());
+                            status_store
+                                .save_session_state(
+                                    "harness-demo-server:/root",
+                                    &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
+                                )
+                                .map_err(|_| "could not persist queued browser message")?;
+                            control.set_snapshot(Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+                            control.publish("envelope.upsert", message);
+                        }
+                        let progress = persist_browser_envelope(
+                            &status_store,
+                            "/harness",
+                            ROOT_PATH,
+                            "PROGRESS",
+                            &format!("Request {command_id} accepted; deterministic Engine is processing it."),
+                            next_envelope_ordinal(&envelopes),
+                        )?;
+                        envelopes.push(progress.clone());
+                        status_store
+                            .save_session_state(
+                                "harness-demo-server:/root",
+                                &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
+                            )
+                            .map_err(|_| "could not persist server progress")?;
+                        control.set_snapshot(Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+                        control.publish("envelope.upsert", progress);
+                        let mut child_envelopes = Vec::new();
+                        let child_result = if let Some(text) = command.strip_prefix("child ") {
+                            Some(
+                                run_deterministic_child_message(
+                                    status_store.clone(),
+                                    scheduler.clone(),
+                                    &command_id,
+                                    text,
+                                )
+                                .await,
+                            )
+                        } else {
+                            None
                         };
-                        if let Some(items) = result_items {
-                            history = items;
+                        if let Some(Ok((child, _, child_envelope))) = &child_result {
+                            let parent_message = persist_browser_envelope(
+                                &status_store,
+                                ROOT_PATH,
+                                &child.0,
+                                "MESSAGE",
+                                command.strip_prefix("child ").unwrap_or_default(),
+                                next_envelope_ordinal(&envelopes),
+                            )?;
+                            envelopes.push(parent_message.clone());
+                            child_envelopes.push(parent_message);
+                            let mut reply = child_envelope.clone();
+                            reply["ordinal"] = json!(next_envelope_ordinal(&envelopes));
+                            envelopes.push(reply.clone());
+                            child_envelopes.push(reply);
                         }
-                        let envelope = (request_state == "completed")
-                            .then(|| final_envelope(&format!("envelope/{command_id}"), &answer));
-                        if let Some(envelope) = &envelope {
-                            envelopes.push(envelope.clone());
+                        if command == "cancel" && waiting {
+                            if let Some((cancel_tx, task)) = pending_engine.take() {
+                                let _ = cancel_tx.send(true);
+                                let _ = task.await;
+                            }
                         }
-                        conversation = conversation_record("idle");
-                        let done_request = request_record(
-                            &request_id,
-                            request_state,
-                        );
-                        let done_job = job_record(&job_id, status);
-                        replace_by_id(&mut requests, done_request.clone());
-                        replace_by_id(&mut jobs, done_job.clone());
-                        control.set_snapshot(Snapshot { conversations: vec![conversation.clone()], requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+                        let skip_engine_for_queued_message =
+                            command.starts_with("message ") && waiting;
+                        let child_failure = child_result
+                            .as_ref()
+                            .and_then(|result| result.as_ref().err())
+                            .cloned();
+                        let child_answer = child_result.as_ref().and_then(|result| {
+                            result.as_ref().ok().map(|(path, answer, _)| {
+                                format!("{} replied: {answer}", path.0)
+                            })
+                        });
+                        let engine_answer = if initial_state == "running" {
+                            let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+                            let engine_command_id = command_id.clone();
+                            let engine_command = command.clone();
+                            let engine_store = status_store.clone();
+                            let engine_scheduler = scheduler.clone();
+                            let task = tokio::spawn(async move {
+                                run_deterministic_engine_turn(
+                                    engine_store,
+                                    engine_scheduler,
+                                    &engine_command_id,
+                                    &engine_command,
+                                    waiting,
+                                    cancel_rx,
+                                    AgentPath(ROOT_PATH.into()),
+                                    None,
+                                )
+                                .await
+                            });
+                            task_aborts
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .push(task.abort_handle());
+                            pending_engine = Some((cancel_tx, task));
+                            None
+                        } else if skip_engine_for_queued_message {
+                            None
+                        } else if let Some(error) = child_failure {
+                            Some(Err(error))
+                        } else {
+                            let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+                            Some(
+                                run_deterministic_engine_turn(
+                                    status_store.clone(),
+                                    scheduler.clone(),
+                                    &command_id,
+                                    &command,
+                                    waiting,
+                                    cancel_rx,
+                                    AgentPath(ROOT_PATH.into()),
+                                    child_answer,
+                                )
+                                .await,
+                            )
+                        };
+                        let (state, outcome, answer, final_item) = match engine_answer {
+                            None => (initial_state, initial_outcome, fallback_answer, None),
+                            Some(Ok((answer, item))) => {
+                                (initial_state, initial_outcome, Some(answer), Some(item))
+                            }
+                            Some(Err(_)) => ("failed", "failed", fallback_answer, None),
+                        };
+                        history.push(Item(json!({"type":"demo_command","command_id":command_id,
+                            "request_id":request_id,
+                            "command":command,"outcome":outcome,"answer":answer})));
+                        if command == "cancel" && waiting {
+                            if let Some(pending_id) = active_wait_request(&requests, &history) {
+                                if let Some(pending) = history.iter_mut().find(|item| {
+                                    item.0["request_id"] == pending_id && item.0["command"] == "wait"
+                                }) {
+                                    pending.0["outcome"] = json!("cancelled");
+                                    pending.0["answer"] = json!("Request cancelled.");
+                                }
+                            }
+                        }
+                        let mut changed_requests = Vec::new();
+                        let mut changed_jobs = Vec::new();
+                        let mut changed_envelopes = child_envelopes;
+                        if state != "running" {
+                            let own_request_state = if state == "failed" { "failed" } else { "completed" };
+                            let own_job_state = if state == "failed" { "settled" } else if outcome == "cancelled" { "cancelled" } else { "settled" };
+                            let done_request = command_request_record(
+                                &request_id,
+                                own_request_state,
+                                &command_id,
+                                &command,
+                                outcome,
+                                answer.as_deref(),
+                            );
+                            let done_job = job_record(&job_id, own_job_state);
+                            replace_by_id(&mut requests, done_request.clone());
+                            replace_by_id(&mut jobs, done_job.clone());
+                            changed_requests.push(done_request);
+                            changed_jobs.push(done_job);
+                            if command == "cancel" && waiting {
+                                if let Some(pending_id) = active_wait_request(&requests, &history) {
+                                    let wait_item = history.iter().find(|item| item.0["request_id"] == pending_id && item.0["command"] == "wait");
+                                    let wait_command_id = wait_item.and_then(|item| item.0["command_id"].as_str()).unwrap_or_default();
+                                    let cancelled_request = command_request_record(
+                                        &pending_id, "failed", wait_command_id, "wait",
+                                        "cancelled", Some("Request cancelled."),
+                                    );
+                                    let cancelled_job = job_record(pending_id.strip_prefix("request/").unwrap_or(&pending_id), "cancelled");
+                                    replace_by_id(&mut requests, cancelled_request.clone());
+                                    replace_by_id(&mut jobs, cancelled_job.clone());
+                                    changed_requests.push(cancelled_request);
+                                    changed_jobs.push(cancelled_job);
+                                }
+                            }
+                            if own_request_state == "completed" {
+                                if let Some(Ok((_, _, child_envelope))) = &child_result {
+                                    let _ = child_envelope;
+                                } else if let Some(item) = final_item.as_ref() {
+                                    let envelope = persist_engine_final_envelope(&status_store, item, next_envelope_ordinal(&envelopes))?;
+                                    envelopes.push(envelope.clone());
+                                    changed_envelopes.push(envelope);
+                                } else if skip_engine_for_queued_message {
+                                    let queued = persist_browser_envelope(
+                                        &status_store,
+                                        ROOT_PATH,
+                                        "/operator",
+                                        "MESSAGE",
+                                        answer.as_deref().unwrap_or("Message queued."),
+                                        next_envelope_ordinal(&envelopes),
+                                    )?;
+                                    envelopes.push(queued.clone());
+                                    changed_envelopes.push(queued);
+                                }
+                            } else if let Some(answer) = answer.as_deref() {
+                                let failure = persist_browser_envelope(
+                                    &status_store,
+                                    ROOT_PATH,
+                                    "/operator",
+                                    "MESSAGE",
+                                    answer,
+                                    next_envelope_ordinal(&envelopes),
+                                )?;
+                                envelopes.push(failure.clone());
+                                changed_envelopes.push(failure);
+                            }
+                        } else {
+                            // Keep the wait outstanding while the receiver is
+                            // free to accept message/cancel frames.
+                        }
+                        let next_conversation = if active_wait_request(&requests, &history).is_some() {
+                            conversation_record("requesting")
+                        } else {
+                            conversation_record("idle")
+                        };
+                        let conversation_changed = conversation != next_conversation;
+                        conversation = next_conversation;
                         status_store
                             .save_session_state(
                                 "harness-demo-server:/root",
                                 &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
                             )
                             .map_err(|_| "could not persist server job status".to_owned())?;
-                        control.publish("request.upsert", done_request);
-                        control.publish("job.upsert", done_job);
-                        if let Some(envelope) = envelope {
+                        control.set_snapshot(Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+                        for request in changed_requests {
+                            control.publish("request.upsert", request);
+                        }
+                        for job in changed_jobs {
+                            control.publish("job.upsert", job);
+                        }
+                        for envelope in changed_envelopes {
                             control.publish("envelope.upsert", envelope);
                         }
-                        control.publish("conversation.upsert", conversation);
-                        if shutting_down {
-                            break;
+                        if conversation_changed {
+                            control.publish("conversation.upsert", conversation.clone());
                         }
                     }
                 }
             }
         }
+    }
+    if let Some((cancel_tx, task)) = pending_engine.take() {
+        let _ = cancel_tx.send(true);
+        let _ = task.await;
     }
     let _ = shutdown_tx.send(());
     let _ = server_task.await;
@@ -1252,6 +1965,173 @@ mod tests {
                 "jobs":[{"id":"j1","conversationId":"conversation/root","state":"settled"}],
                 "envelopes":[{"id":"e1","conversationId":"conversation/root","recipient":"/root","sender":"/root","type":"FINAL_ANSWER","payload":"final answer"}]
             })
+        );
+    }
+
+    #[test]
+    fn deterministic_server_commands_keep_wait_pending_without_blocking_followups() {
+        assert_eq!(
+            deterministic_command("wait", false),
+            ("running", "pending", None)
+        );
+        assert_eq!(
+            deterministic_command("message queued text", true),
+            (
+                "settled",
+                "queued",
+                Some("Message queued: queued text".into())
+            )
+        );
+        assert_eq!(
+            deterministic_command("cancel", true),
+            (
+                "settled",
+                "completed",
+                Some("Pending wait cancelled.".into())
+            )
+        );
+        let request_id = "request/client-command-1";
+        assert_eq!(
+            active_wait_request(
+                &[request_record(request_id, "running")],
+                &[Item(json!({
+                    "type":"demo_command",
+                    "command_id":"client-command-1",
+                    "request_id":request_id,
+                    "command":"wait"
+                }))]
+            )
+            .as_deref(),
+            Some(request_id),
+            "the wait matches its explicit request id, not client command id"
+        );
+    }
+
+    #[test]
+    fn deterministic_server_commands_separate_failure_and_recovery_success() {
+        assert_eq!(
+            deterministic_command("fail", false),
+            (
+                "failed",
+                "failed",
+                Some("Controlled deterministic failure.".into())
+            )
+        );
+        assert_eq!(
+            deterministic_command("echo recovered", false),
+            ("settled", "completed", Some("recovered".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn deterministic_server_child_message_and_answer_are_store_backed() {
+        let store = Arc::new(Store::memory().unwrap());
+        let scheduler = Arc::new(JobScheduler::new(2).unwrap());
+        let (child, reply, snapshot) =
+            run_deterministic_child_message(store.clone(), scheduler, "child-id", "hello")
+                .await
+                .unwrap();
+        assert!(child.0.starts_with("/root/demo_child_"));
+        assert_eq!(reply, "Child received and replied: hello");
+        let stored = store.inbox(ROOT_PATH).unwrap();
+        let committed = stored
+            .iter()
+            .rev()
+            .find(|entry| entry.sender == child.0)
+            .unwrap();
+        assert_eq!(snapshot["id"], format!("envelope/{}", committed.id));
+        let item = store.get_item(&committed.item_hash).unwrap().unwrap();
+        let stored_text = item.0["content"][0]["text"].as_str().unwrap();
+        assert!(stored_text.ends_with(&reply));
+        let delivered = store
+            .inbox(&child.0)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.sender == ROOT_PATH)
+            .expect("child Engine did not claim a real parent message");
+        assert!(
+            delivered.delivered_request.is_some(),
+            "child inbound envelope was not claimed by its Engine request"
+        );
+        let parent = run_deterministic_engine_completion(
+            store.clone(),
+            Arc::new(JobScheduler::new(2).unwrap()),
+            "parent-id",
+            "child hello",
+            false,
+            tokio::sync::watch::channel(false).1,
+            AgentPath(ROOT_PATH.into()),
+            Some(format!("{} replied: {reply}", child.0)),
+        )
+        .await
+        .unwrap();
+        let parent_reply = format!("{} replied: {reply}", child.0);
+        assert_eq!(
+            final_text(&parent.turn.items).as_deref(),
+            Some(parent_reply.as_str())
+        );
+        assert!(store.unread(ROOT_PATH).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deterministic_server_turn_uses_store_backed_offline_engine() {
+        let store = Arc::new(Store::memory().unwrap());
+        let scheduler = Arc::new(JobScheduler::new(2).unwrap());
+        assert!(
+            run_deterministic_engine_turn(
+                store.clone(),
+                scheduler.clone(),
+                "fail-id",
+                "fail",
+                false,
+                tokio::sync::watch::channel(false).1,
+                AgentPath(ROOT_PATH.into()),
+                None,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            run_deterministic_engine_turn(
+                store,
+                scheduler,
+                "echo-id",
+                "echo offline engine",
+                false,
+                tokio::sync::watch::channel(false).1,
+                AgentPath(ROOT_PATH.into()),
+                None,
+            )
+            .await
+            .unwrap()
+            .0,
+            "offline engine"
+        );
+    }
+
+    #[tokio::test]
+    async fn deterministic_server_engine_wait_observes_cancellation() {
+        let store = Arc::new(Store::memory().unwrap());
+        let scheduler = Arc::new(JobScheduler::new(2).unwrap());
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(run_deterministic_engine_turn(
+            store,
+            scheduler,
+            "wait-id",
+            "wait",
+            false,
+            cancel_rx,
+            AgentPath(ROOT_PATH.into()),
+            None,
+        ));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        cancel_tx.send(true).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
         );
     }
 
