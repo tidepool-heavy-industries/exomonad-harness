@@ -15,11 +15,12 @@ When the run binds them, the optional automation menu is:
 `Project.Interview.collectInterview` for retained answers;
 `Project.PrepareContinue.verifyPrepared` for completion-driven prerequisites;
 `Project.RetainedEvidence.recoverRetained` for bounded pages from the same job;
+`Project.HandoffExamples.handoffProposal` for supplied handoff observations;
 and `Project.SlowCommandWatch.watchSlowCommand` for one slow-job observation.
 Read `docs/agent-automation-menu.md` for inputs, evidence and compiled
 examples before the first call. Keep original handles and source receipts.
 Use a fitting entry by choice and record its actual use; no helper is mandatory.
-ReviewFlow, handoff assembly and browser scenario remain outside this menu
+ReviewFlow and browser scenario remain outside this menu
 until their own runtime gates pass.
 
 Vocabulary (Project.Types, Project.Routing and the library; no lookup needed):
