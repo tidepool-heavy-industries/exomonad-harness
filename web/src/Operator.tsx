@@ -21,6 +21,7 @@ export function Operator() {
   const [failure, setFailure] = useState('')
   const [checking, setChecking] = useState(true)
   const [sendCommand, setSendCommand] = useState<(command: string) => void>()
+  const [acceptedCommandIds, setAcceptedCommandIds] = useState<string[]>([])
 
   const checkSession = useCallback(async () => {
     setChecking(true)
@@ -44,6 +45,7 @@ export function Operator() {
     if (authenticated !== true) return
     let active = true
     setState(normalizeSnapshot(emptySnapshot))
+    setAcceptedCommandIds([])
     setSnapshotLoaded(false)
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const socket = new WebSocket(`${protocol}//${location.host}/api/ws`)
@@ -58,6 +60,10 @@ export function Operator() {
         if (!active) return
         setFailure(`${message} Recheck the session or sign in again.`)
         setAuthenticated(false)
+      },
+      (commandId) => {
+        if (!active) return
+        setAcceptedCommandIds((current) => current.includes(commandId) ? current : [...current, commandId])
       },
     )
     setSendCommand(() => send)
@@ -135,7 +141,7 @@ export function Operator() {
       </header>
       {failure && <p className="session-error" role="alert">{failure}</p>}
       {snapshotLoaded
-        ? <App data={toViewModel(state)} onCommand={sendCommand} />
+        ? <App data={toViewModel(state)} onCommand={sendCommand} acceptedCommandIds={acceptedCommandIds} />
         : <main aria-busy="true"><p role="status">Loading authoritative harness snapshot…</p></main>}
     </>
   )

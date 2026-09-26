@@ -25,19 +25,25 @@ export type HarnessViewModel = {
     startedAt?: string;
     duration?: string;
     detail?: string;
+    commandId?: string;
+    command?: string;
+    outcome?: "accepted" | "pending" | "queued" | "presented" | "acted" | "completed" | "cancelled" | "failed";
   }>;
   inbox: Array<{
     id: string;
     sender: string;
+    recipient?: string;
     message: string;
     state: string;
     receivedAt?: string;
+    ordinal?: number;
   }>;
 };
 
 export type AppProps = {
   data?: HarnessViewModel;
   onCommand?: (command: string) => void;
+  acceptedCommandIds?: readonly string[];
 };
 
 type Screen = "tree" | "timeline" | "inbox" | "command";
@@ -144,7 +150,14 @@ function Timeline({ data }: { data: HarnessViewModel }) {
       {data.timeline.map((item) => <div className="row" role="row" key={item.id}>
         <span role="cell"><span className="mono">{item.kind}</span> · {item.label}</span>
         <span role="cell" className="state" data-state={item.state}>{item.state}</span>
-        <span role="cell" className="meta">{[item.nodeId, item.startedAt, item.duration, item.detail].filter(Boolean).join(" · ") || "—"}</span>
+        <span role="cell" className="meta">{[
+          item.nodeId,
+          item.commandId ? `command ${item.commandId}` : undefined,
+          item.outcome ? `outcome ${item.outcome}` : undefined,
+          item.startedAt,
+          item.duration,
+          item.detail,
+        ].filter(Boolean).join(" · ") || "—"}</span>
       </div>)}
     </div>
   );
@@ -154,14 +167,14 @@ function Inbox({ data }: { data: HarnessViewModel }) {
   return data.inbox.length === 0 ? <Empty title="Inbox is clear" help="Operator messages and pending questions appear here. Use “g t” to return to the tree." /> : (
     <div role="list" className="rows" aria-label="Inbox messages">
       {data.inbox.map((item) => <article className="row" role="listitem" key={item.id}>
-        <strong>{item.sender}</strong><span className="state" data-state={item.state}>{item.state}</span>
+        <strong>{item.sender}{item.recipient ? ` → ${item.recipient}` : ""}</strong><span className="state" data-state={item.state}>{item.state}{item.ordinal !== undefined ? ` · #${item.ordinal}` : ""}</span>
         <span className="message">{item.message}</span><span className="meta">{item.receivedAt ?? ""}</span>
       </article>)}
     </div>
   );
 }
 
-export default function App({ data = emptyData, onCommand }: AppProps) {
+export default function App({ data = emptyData, onCommand, acceptedCommandIds = [] }: AppProps) {
   const [screen, setScreen] = useState<Screen>("tree");
   const [command, setCommand] = useState("");
   useEffect(() => {
@@ -228,6 +241,9 @@ export default function App({ data = emptyData, onCommand }: AppProps) {
           {!onCommand && <p className="hint" role="status">Command channel is not connected.</p>}
           <h2>Authoritative activity</h2>
           <p className="hint">Stored records received from the host; refresh reconnects to the server snapshot and does not replay submitted commands.</p>
+          {acceptedCommandIds.filter((id) => !data.timeline.some((item) => item.commandId === id)).map((id) => (
+            <p className="hint" role="status" key={id}>Server accepted command {id}; this acknowledgment is not a terminal outcome.</p>
+          ))}
           <Timeline data={data} />
           <h2>Conversation and child identities</h2><Tree data={data} />
           <h2>Messages and replies</h2><Inbox data={data} />
