@@ -35,6 +35,10 @@ executed on two real consumers: server 8/8 and standalone 1/1 at
 `cf19ed4`. Its strict clean-source predicate remained false because
 runner `working_tree_status` was null here. The direct project script
 remains the final check. See [friction](docs/exomonad-friction.md).
+After the Tidepool host-source mismatch was reverted, a resident
+Haskell smoke cell compiled and three reviewer interviews were
+collected. The finished wave-13 child groups were retired through
+typed cleanup; their worktrees, branches and evidence were not deleted.
 
 ## Accepted constraints and next owner
 

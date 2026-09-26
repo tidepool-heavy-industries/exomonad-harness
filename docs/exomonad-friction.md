@@ -1025,4 +1025,10 @@ interview hold means I am stopping here, not opening those gates now.
 - `friction:` A request for reviewer interviews failed at Haskell
   dependency compilation before any unit executed:
   `Tidepool.Effects.Core` did not export `CommandQueueWait`. Root did
-  not retry blindly or claim those interviews were delivered.
+  not retry blindly or claim those interviews were delivered. The
+  host operator later identified a mutable Tidepool source mismatch
+  and reverted it without replacing the live binary/schema. One
+  small resident cell compiled and ran; root then resubmitted the
+  three interviews, which were admitted and returned. The fail-closed
+  reviewer reported one rejected Haskell multiline-list cell, then
+  a compact binding succeeded; its review findings were unaffected.

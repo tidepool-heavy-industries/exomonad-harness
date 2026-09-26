@@ -50,11 +50,13 @@
   ordinary-host-shell acceptance remains with the operator.
 - **Interview limitations:** Four cancelled acceptance/docs actors
   yielded no own-words interviews. Reviewer findings/checks were
-  incorporated as reports, not mislabelled as interviews. A later
+  incorporated as reports, not mislabelled as interviews. The first
   attempt to request their own-words interviews was rejected before
   submission by a workbench compiler dependency mismatch
-  (`Tidepool.Effects.Core` lacked `CommandQueueWait`); no reviewer
-  interview requests were delivered.
+  (`Tidepool.Effects.Core` lacked `CommandQueueWait`). After the
+  Tidepool source revert restored the resident compiler, root
+  retried and admitted three reviewer interviews; their sections
+  below record the replies that arrived.
 
 ## Wave 13 launch owner — 2026-09-25
 
@@ -89,6 +91,80 @@
   shebang and failed; correcting the fixture let shell syntax and
   unrelated-cwd/missing-binary mock checks pass. The release build was
   deliberately not run during the owner's repair.
+
+## Wave 13 launch exact-source reviewer — 2026-09-25
+
+- **Scaffold and missing input:** The reviewer verified absolute,
+  serve-only `--assets`, legacy ask/serve compatibility, script
+  syntax and focused Rust checks at the exact tip. The missing
+  host-environment contract was Cargo's target directory: source
+  review did not run preparation, so it could not establish where
+  the executable landed. The reviewer needed root's retained
+  integrated command exit, environment and artifact paths.
+- **API versus docs and tree cost:** The script assumed
+  `target/release/harness-demo`, but this environment wrote to
+  `.exomonad/build/cargo/release`. Passing focused source tests did
+  not make preparation usable. Exact-base diff, production consumer
+  inspection, two focused invocations and shell syntax had moderate
+  review cost; tool-truncated output required retained count
+  summaries. Later shell-inspection jobs queued, delaying evidence.
+- **Rerun scaffold:** Record `CARGO_TARGET_DIR`, check the Cargo
+  output path, then launch from an unrelated directory with
+  absolute DB/assets and no secret in argv. Carry expected
+  selected/executed counts into the acceptance packet.
+- **Nudge and friction:** The reviewer calls out the nudge not to
+  infer real preparation from source review or a successful Cargo
+  build. Its first review explicitly left web preparation and
+  standalone launch with root; that boundary should be stated
+  early rather than presenting source acceptance as end-to-end.
+
+## Wave 13 artifact-path reviewer — 2026-09-25
+
+- **Finding and missing contract:** The reviewer traced the configured
+  target output through `scripts/prepare-browser-harness` into its
+  launcher consumer. If the configured build produced no executable,
+  preparation exited without removing an older stable binary, while
+  the launcher accepted any executable at that stable path. The
+  assignment said “missing binary cleanup” but did not state the
+  stale-output consequence; inspecting the actual consumer supplied
+  it without another sibling result.
+- **Docs/API and tree cost:** The preparation and launcher paths agreed;
+  no separate API/documentation mismatch appeared. Review was one
+  owned-script diff, one production consumer read, syntax and
+  whitespace checks. Cargo and the full browser journey were
+  intentionally not run in this source-only review.
+- **Rerun scaffold and nudge:** State success as “configured release
+  executable exists and is staged at the launcher path,” and failure
+  as “no stale executable remains launchable.” Put a focused
+  stale-output fixture in the acceptance packet rather than relying
+  on the vague phrase “cleanup.” The review nudge was to check the
+  consuming launcher before treating a missing-source error as
+  harmless.
+
+## Wave 13 fail-closed repair reviewer — 2026-09-25
+
+- **Scaffold and checks:** At exact candidate `2e7e6f9`, the reviewer
+  read the cumulative preparation diff and launcher. Isolated
+  mocked Nix and Cargo failures with an old default binary left no
+  launchable default; configured-target success staged an executable.
+  A mocked default-target “Cargo reports success but no output”
+  case failed and left no old default. Shell syntax and diff checks
+  passed. The reviewer did not run real Cargo's fingerprint/cache
+  behavior or full Nix/web/browser preparation.
+- **Sibling evidence and documentation:** The assignment supplied
+  root's earlier web 14/14, browser 1/1 and failed artifact-lookup
+  evidence as a boundary, not as new reviewer execution. The
+  reviewer found no separate API/docs mismatch; the explicit shell
+  contract and launcher path governed this narrow review.
+- **Tree cost, rerun scaffold and friction:** The clean exact checkout
+  and one-file cumulative diff kept review modest, but hand-built
+  temporary shell mocks were needed because the repo had no script
+  fixture. A reusable checked-in fixture could count failure,
+  configured-target, default-target stale/fresh-cache and stage
+  cleanup cases while keeping full preparation separate. One
+  Haskell multiline-list cell was rejected before a compact
+  binding succeeded; it did not alter the verdict. No repair
+  finding remained.
 
 ## Wave 12 root — 2026-09-25
 
