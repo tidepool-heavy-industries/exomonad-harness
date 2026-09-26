@@ -190,3 +190,65 @@ The closing critique should name the best composition, its setup cost, where it
 broke down, and the next concrete interface change. Retain unsuccessful attempts;
 compare their actual work and prerequisites before attributing differences to a
 helper or a model tier.
+
+### Coordinate baseline changes and review without root relay
+
+A feature owner may receive a new shared baseline while its children still work
+from older source. Track the desired baseline separately from delivery,
+acknowledgment, actual incorporation and checked resulting commits. Use the
+existing accepted-decision/amendment and incorporation contracts to carry these
+facts. Coordinate dependent work in dependency order; independent owners can
+incorporate in parallel. Preserve dirty work and escalate conflicts that change
+shared semantics instead of silently choosing a resolution.
+
+A changed candidate needs evidence for that candidate. Re-evaluate affected checks
+and exact-source review after incorporation; retain earlier evidence as earlier
+evidence. Do not queue a new incorporation request behind the very delivery that
+is waiting on the change: steer its active assignment through the supported
+update path and require incorporation evidence. The integration owner remains
+responsible for the final combined source. Build the first automation around an
+actual baseline change, with named affected consumers and an explicit fallback.
+
+For automated review, name the exact basis/candidate, repair owner, attempt bound
+and escalation recipient. Routine within-contract repair can go straight to its
+owner. A disputed invariant, changed ownership, incompatible baseline or exhausted
+repair budget reaches the parent with findings and alternatives. A review pass
+is not integration, and a changed candidate does not inherit its old verdict.
+
+### Nudge for a specific better workflow
+
+Useful nudges offer a different operation at the moment it fits. Examples:
+
+- A feature owner has several independent ready tasks but is doing them serially:
+  suggest the concrete forkable obligations and the installed coordination entry.
+- An actor repeatedly reads the same pending result: point to its retained handle
+  and the available completion-driven composition.
+- A parent manually relays review findings: suggest the installed review/repair
+  coordinator with the current repair owner and escalation boundary.
+- Siblings repeat the same check/read sequence: suggest publishing one contextual
+  helper and passing its module, inputs and source with the next assignments.
+
+Treat these as hypotheses grounded in a bounded event slice. Code suppresses
+repeated nudges for the same episode; use Jev only if deciding whether a pattern
+fits requires semantic judgment. Send one specific suggestion with its evidence,
+callable alternative and expected benefit. An actor can explain why it does not
+fit. Do not repeatedly nag, interrupt a critical operation, or count acceptance
+of a suggestion as successful automation. A quiet actor may simply be waiting on
+correctly routed work. Trial a few actionable triggers before broad coverage.
+
+### Use role instructions for semantic invariants
+
+At assignment construction, put stable role/feature invariants in the supported
+instruction surface and changing source, authority and work in the typed task.
+Examples include preserving original command evidence, treating missing checks
+as unknown, keeping candidate/review identities exact, and escalating a semantic
+conflict to its owner. Keep these concrete enough to guide a decision.
+
+Verify how the installed host renders role guidance into provider messages before
+claiming developer-message delivery. An ordinary notification is a notification;
+it does not become a developer instruction by saying so. Preserve the shared
+instruction prefix and the role contract when adding guidance: nested
+`withInstructions` calls replace rather than concatenate the previous override.
+Compose required role text deliberately and verify the actual starting packet.
+Changed decisions for an active child require supported request updates and
+incorporation evidence, not only an edited prompt file.

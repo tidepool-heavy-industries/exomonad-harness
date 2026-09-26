@@ -71,6 +71,14 @@ within the run's allowed helper paths. Keep consequential cross-feature decision
 and final integration with their assigned owner. Judge the experiments by root
 interventions and useful parallel progress, including setup and recovery cost.
 
+Include coordinated baseline incorporation/rebases, review/repair escalation, and
+specific workflow nudges among the opportunities you examine. Use the supported
+assignment instruction surface to make stable semantic invariants explicit;
+keep changing source and decisions in the typed request. Follow the orchestration
+guide for incorporation evidence, prompt composition and bounded nudge triggers.
+A useful nudge names an applicable alternative and how to use it, such as forking
+independent obligations or replacing manual review relay with a coordinator.
+
 ## Compose the workflow
 
 Read `docs/orchestration-practice.md` when designing the work breakdown or a
