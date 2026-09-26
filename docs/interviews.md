@@ -1291,3 +1291,103 @@ recovery returned HTTP 409; on-disk evidence was read without
 rerunning. Improvement: fix a small executable producer/browser
 request example with advertised names and capture seam before
 dispatch, then require combined-source browser review.
+
+## Wave 15 root — supervisor follow-up interview, 2026-09-26
+
+This is findings only. The integrated product source remains `40bd399e`;
+no implementation or product check was started for this interview.
+**Trace evidence** below means a retained job, documented check outcome,
+candidate/review reply, or automation record. **Recollection** is my
+reason for a choice where the retained artifacts do not prove intent.
+
+1. **Short command waits.** Recollection: I used `bash`
+   `yield_time_ms=1000` to get a command handle promptly and kept
+   observing that same handle with empty `write_stdin`, so an apparently
+   long Cargo/Nix build would not be mistaken for a stopped job or
+   restarted merely to obtain output. It was a manual completion loop,
+   not a deliberate use of background-completion routing. For commands
+   whose result was a dependency, a longer initial wait would have been
+   simpler; for independent checks, `background: true` plus a registered
+   completion route would have freed the turn. Trace evidence: final
+   integrated focused runs and the web preparation have retained job
+   IDs and terminal outcomes in `docs/wave15-handoff.md`. The bounded
+   watcher did send a late notice, but its evidence read failed and its
+   compact result was unknown (`docs/automation-trials.json`). I do not
+   find an intermediate *still-running* observation that changed a
+   product decision: the decisions came from terminal outcomes and
+   evidence. In particular, missing `web/dist` led to prerequisite
+   preparation, an exit 137 led to sequential memory-bounded focused
+   checks, expected-red product assertions kept gates open, and the
+   combined candidate's failed child assertion led to repair. Those
+   are terminal findings, not a justification for repeated one-second
+   polling. A future loop should wait longer on a blocking job or
+   register a reliable completion route, retaining the original handle.
+
+2. **Advertised automation not used.** Trace: the menu and its
+   wave-specific statuses are recorded in `docs/automation-trials.json`;
+   only `CheckResults.watchChecks` and bounded
+   `RetainedEvidence.recoverRetained` were exercised here. Recollection:
+   after the watcher failed to read evidence, I did not trust a compact
+   automation notice as the sole final acceptance proof, although that
+   failure does not establish other helpers are broken.
+   `notifyReviewReady` offered little fit because exact candidate/base
+   and typed review admission were already in hand; it notices
+   readiness, not review. `diagnoseFocused` was unnecessary for
+   unambiguous missing-asset, exit-137, and exact assertion failures,
+   while the original evidence-read failure also made evidence inputs
+   uncertain. `watchAssumption` and `startProbeBatch` did not replace
+   the required concrete source/consumer inspection; a typed
+   assumption baseline had not been installed before the `ask` error.
+   `collectInterview` was not needed to obtain the actual retained
+   interview replies. `verifyPrepared` was not adopted because web
+   preparation and the dependent browser check were already being
+   handled as an explicit sequential gate. `handoffProposal` was
+   unnecessary once exact commits, reviews and checks were assembled
+   directly; `watchSlowCommand` overlapped the manual job handles but
+   would need a trusted completion route. The separate ReviewFlow and
+   browser-scenario helpers still had runtime gates and were not
+   product-ready. This is a fit/trust judgment, not evidence that each
+   helper was imported or tried: the trace records no wave15 import or
+   setup attempt for those skipped entries.
+
+3. **Bounded delegation I would trust.** A small Haskell function can
+   take an exact source OID, package/target/filter/expected count,
+   memory reservation and a retained `Cmd.Job`; read the focused
+   evidence, return selection/execution counts, source, exit/cleanup
+   and an explicit `EvidenceUnavailable` rather than an empty result.
+   Applied here it could have classified the existing
+   `request_is_stateless_and_pins_effort` job from its on-disk
+   `evidence.json` without rerunning it. A Jev judgment is useful only
+   *after* code establishes those facts: it could label a terminal
+   failure as prerequisite (missing `web/dist`), build-resource
+   interruption (exit 137, zero tests), expected-red assertion, or
+   product assertion, then propose one bounded next action. It must
+   not turn exit 137 into a test failure or declare a review accepted.
+   A second function could compare exact `git rev-parse HEAD`,
+   assignment base, owned-path cumulative diff, and required sibling
+   commit ancestry before admitting review. These are proposed
+   follow-ups, not helpers executed for this interview.
+
+4. **Facts to freeze before delegation.** Trace: the first task
+   assumed echo could restrict `ask`; `CliProvider::tools` filters
+   `ask`, so the final advertised safe name was `sleep`. The
+   provider-only reviewer at `59bf6236` observed `tool_choice:"auto"`
+   because its checkout lacked sibling Engine/transport `f616be77`;
+   combined review on `8db250a5` then found a real child-route
+   failure despite passing component checks. Before forking I should
+   have run one compiling production example through the final
+   `CliProvider.tools`/`RequestPlan` list and the canonical
+   `request_body`: root `echo ...` -> selected `[sleep]`, child ->
+   `[]`/`none`, default -> `auto`, with full tool schemas unchanged.
+   The task packet should have named the existing deterministic
+   transport capture seam, exact evidence keys (`selection` and
+   `sleep_advertised`), typed Store decision and request/agent
+   provenance, and the fact that `before_request` is infallible while
+   Engine validates invalid names before transport. Each reviewer
+   needed the actual candidate HEAD **and** the incorporated sibling
+   source (or an explicit label that the checkout was partial), plus
+   the standalone-browser test and web-asset prerequisite. Recollection:
+   that executable shared sequence and source-composition gate would
+   likely have removed the `ask` correction and the false attribution
+   of a sibling-source gap; it would not by itself prove away the real
+   child failure, which required the production consumer test.
