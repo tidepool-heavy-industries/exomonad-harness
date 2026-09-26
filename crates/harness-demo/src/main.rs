@@ -732,27 +732,29 @@ impl Provider for BrowserProvider {
         plan: &harness::hooks::RequestPlan,
     ) -> harness::hooks::BeforeRequestResult {
         let mut result = self.0.before_request(plan).await;
-        let command_text = plan
-            .items
-            .iter()
-            .map(|item| item.0.to_string())
-            .collect::<String>();
+        let current_command = plan.items.iter().rev().find_map(|item| {
+            let value = &item.0;
+            (value["type"] == "message" && value["role"] == "user")
+                .then(|| value["content"].as_str())
+                .flatten()
+        });
         let advertised = plan
             .tools_allowed
             .iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .collect::<Vec<_>>();
         let sleep_advertised = advertised.contains(&"sleep");
-        let (selection, label) = if command_text.contains("child ") {
-            (Some(Vec::new()), "child-empty")
-        } else if command_text.contains("echo ") {
-            // Always request the intended selection. Engine validation must
-            // reject it as an invalid selection if the final plan omits sleep;
-            // never silently widen availability to Send.
-            (Some(vec!["sleep".to_owned()]), "echo-sleep")
-        } else {
-            (None, "send")
-        };
+        let (selection, label) =
+            if current_command.is_some_and(|command| command.starts_with("child ")) {
+                (Some(Vec::new()), "child-empty")
+            } else if current_command.is_some_and(|command| command.starts_with("echo ")) {
+                // Always request the intended selection. Engine validation must
+                // reject it as an invalid selection if the final plan omits sleep;
+                // never silently widen availability to Send.
+                (Some(vec!["sleep".to_owned()]), "echo-sleep")
+            } else {
+                (None, "send")
+            };
         if let Some(tools_allowed) = selection {
             result.decision =
                 harness::hooks::BeforeRequestDecision::SendRestricted { tools_allowed };
@@ -1848,9 +1850,14 @@ mod tests {
         fn assert_send<T: Send>(_: &T) {}
         assert_send(&provider);
         let plan = harness::hooks::RequestPlan {
-            items: vec![harness::item::Item(json!({
-                "type":"message","role":"user","content":[{"type":"input_text","text":"echo hello"}]
-            }))],
+            items: vec![
+                harness::item::Item(json!({
+                    "type":"message","role":"user","content":"earlier child should not affect routing"
+                })),
+                harness::item::Item(json!({
+                    "type":"message","role":"user","content":"echo hello"
+                })),
+            ],
             tools_allowed: provider.all_tools(),
             effort: Effort::Low,
         };
@@ -1891,10 +1898,33 @@ mod tests {
                 json!({"consumer":"standalone-browser","selection":"echo-sleep","sleep_advertised":false})
             )
         );
-        let child_plan = harness::hooks::RequestPlan {
+        let incidental_words_plan = harness::hooks::RequestPlan {
             items: vec![harness::item::Item(json!({
-                "type":"message","role":"user","content":[{"type":"input_text","text":"child hello"}]
+                "type":"message","role":"user","content":"please echo hello, and child appears only in this payload"
             }))],
+            tools_allowed: provider.all_tools(),
+            effort: Effort::Low,
+        };
+        let incidental_words = provider.before_request(&incidental_words_plan).await;
+        assert_eq!(
+            incidental_words.decision,
+            harness::hooks::BeforeRequestDecision::Send
+        );
+        assert_eq!(
+            incidental_words.evidence,
+            Some(
+                json!({"consumer":"standalone-browser","selection":"send","sleep_advertised":true})
+            )
+        );
+        let child_plan = harness::hooks::RequestPlan {
+            items: vec![
+                harness::item::Item(json!({
+                    "type":"message","role":"user","content":"earlier echo should not affect routing"
+                })),
+                harness::item::Item(json!({
+                    "type":"message","role":"user","content":"child hello"
+                })),
+            ],
             tools_allowed: provider.all_tools(),
             effort: Effort::Low,
         };
