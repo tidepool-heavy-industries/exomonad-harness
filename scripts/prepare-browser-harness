@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+stable_binary="$PWD/target/release/harness-demo"
+staged_binary=""
+prepared=false
+cleanup() {
+  if [[ "$prepared" != true ]]; then
+    rm -f "$stable_binary"
+  fi
+  if [[ -n "$staged_binary" ]]; then
+    rm -f "$staged_binary"
+  fi
+}
+trap cleanup EXIT
+
+# Invalidate any previous artifact before even the web preparation starts, so
+# every failed attempt leaves the host launcher unable to select stale output.
+if ! rm -f "$stable_binary"; then
+  echo "could not invalidate previous browser harness binary at $stable_binary" >&2
+  exit 1
+fi
 nix develop .#web -c scripts/verify-browser-journey
 cargo build --release --package harness-demo --bin harness-demo
 target_dir="${CARGO_TARGET_DIR:-$PWD/target}"
@@ -8,13 +27,16 @@ if [[ "$target_dir" != /* ]]; then
   target_dir="$PWD/$target_dir"
 fi
 built_binary="$target_dir/release/harness-demo"
-stable_binary="$PWD/target/release/harness-demo"
 if [[ ! -x "$built_binary" ]]; then
   echo "release harness binary was not produced at $built_binary" >&2
   exit 1
 fi
 mkdir -p "$(dirname "$stable_binary")"
 if [[ ! "$built_binary" -ef "$stable_binary" ]]; then
-  install -m 755 "$built_binary" "$stable_binary"
+  staged_binary="$(mktemp "$(dirname "$stable_binary")/.harness-demo.XXXXXX")"
+  install -m 755 "$built_binary" "$staged_binary"
+  mv -f "$staged_binary" "$stable_binary"
+  staged_binary=""
 fi
 printf 'Prepared standalone browser harness: %s\n' "$stable_binary"
+prepared=true
