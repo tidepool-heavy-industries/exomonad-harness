@@ -1,4 +1,45 @@
-# Active assignment — wave17
+# Completed assignment — wave17 deterministic browser integration/release
+
+Wave16 Inject handoff `21cb20e` is merged with the wave17 helper baseline,
+workspace pin and active brief. The clean combined product/test source
+`6c28a7918d722beace4715344220d048d7a7d95a` passed the standalone
+browser journey plus Engine valid Inject, invalid Inject/claim cleanup,
+typed Store reopen and invalid restriction checks, each
+expected/matched/runnable/executed/passed 1/1 at that exact source.
+The browser preparation passed TypeScript, web tests 14/14 and Vite build.
+See [wave17 handoff](docs/wave17-handoff.md) for exact jobs, review chronology,
+helper trial, retained stash and cleanup uncertainties, and
+[release instructions](docs/wave17-release.md) for isolated operation.
+
+No credentialed inference, adapter, successor, recurring timer, new hook
+semantics, protected-demo or Tailscale change was authorized or performed.
+The supervisor owns any external launch or later scope; this run stops at
+the checked deterministic slice. The old active brief below is retained
+as historical assignment, not ongoing authority.
+
+### Where the last run stopped — wave17
+
+- No unmerged branch holds reviewed or passing wave17 product/test code:
+  reviewed release instructions `07d7c8c` and browser test repair
+  `f6def4d` are ancestors of the checked source. The old unaccepted
+  docs candidates `bba9416` and `9358cf2` were superseded by repairs.
+- A pre-existing **unapproved helper draft**, not product code, remains
+  preserved in stash object
+  `79a179cc23c38217722df87a6f797f52975c16fa`
+  (`wave17-preexisting-helper-draft`). It contains changes to
+  `.exomonad/helpers/README.md` and `SessionHelpers.hs` plus deletion
+  of `SessionHelpers/BrowserChecks.hs`; do not drop or silently merge
+  it. The committed BrowserChecks and workspace pin remain the tested
+  baseline. No stash/reset/path-checkout operation is authorized next.
+- Later host notices confirmed the two wave17 frontier workers
+  (actors 4@1 and 5@1) stopped with resources released. The refused
+  root cleanup plan for the ReviewFlow-owned reviewer group remains a
+  separate resource-release uncertainty; it holds no unmerged accepted code.
+- Next owner: supervisor for launch identity, optional host observation
+  and any separately authorized later scope. Do not infer scope from
+  this handoff or start a timer.
+
+## Historical wave17 assignment (closed)
 
 Read [wave17 brief](docs/wave17-brief.md). Integrate wave16 on this run's branch,
 then verify and document the combined standalone deterministic browser release
@@ -9,11 +50,155 @@ The supervisor owns launch identity. Do not launch another run, move the host
 master branch, or attempt credentialed inference. Preserve the new workspace pin
 and this active assignment when merging wave16's historical NEXT/handoff.
 
-# Previous assignment — wave16
+# Completed assignment — wave16 deterministic before-request Inject
 
-Read [wave16 brief](docs/wave16-brief.md). Implement its standalone deterministic
-before-request injection slice and Haskell composition trial. The supervisor owns
-launch identity; do not start another run or attempt credentialed inference.
+The authorized standalone Inject slice is integrated and checked at
+product-code source `9123ffba6af1171f072b48c9e95db94786eabc67`.
+See [wave16 handoff](docs/wave16-handoff.md) for contracts, exact reviews,
+counted checks, raw evidence, automation trial and remaining uncertainty.
+At that source the typed Inject serde test and standalone production browser
+journey each matched/runnable/executed/passed 1/1; browser coverage includes
+the existing child, reconnect and process-loss path. Engine valid/invalid/
+restriction checks each passed 1/1 at integrated `91cf294`, and Provider/
+Store checks each passed 1/1 at integrated `3f4ec09`. Web tests passed
+14/14 on the unchanged web source. The final source's `cargo fmt --check`,
+`git diff --check` and trial-ledger JSON check exited 0. Working-tree
+evidence explicitly lists dirty run docs and pre-existing helper files;
+no clean-tree assertion is made.
+
+`SessionHelpers.Wave16Gate` executed in a child and retained count/source
+evidence, but correctly returned unknown strict assurance due an older
+expected OID and dirty child checkout. The bounded ReviewFlow routed an
+Engine candidate but its reviewer never produced a first observation;
+fallback ordinary exact-tip review independently accepted Engine. That
+cancelled reviewer reported exit, but its stop outcome retained
+ToolService/socket/build/worktree cleanup uncertainty. All implementer
+and successful-reviewer interviews are retained in `docs/interviews.md`.
+The supervisor owns launch identity and any later scope. Stop at this
+completed deterministic slice: no credentialed inference, adapter, new
+browser command, live-demo or Tailscale change was run or authorized.
+
+### Where the last run stopped — wave16
+
+- No unmerged branch holds reviewed or passing wave16 product code.
+  Acceptance `424bab6` is merged at `394311f`; independently reviewed
+  Provider/Store `859f56a` is merged at `3f4ec09`; independently reviewed
+  Engine `7dd904f` is merged at `91cf294`; root formatting amendment
+  `9123ffb` is the checked product-code source. The earlier ReviewFlow
+  reviewer produced no verdict and has no accepted code to merge.
+- The run's documentation and helper trial source are committed in the
+  explicit stop handoff after product checks. Pre-existing dirty
+  `.exomonad/helpers/README.md`,
+  `.exomonad/helpers/SessionHelpers.hs` and
+  `.exomonad/helpers/SessionHelpers/TestEvidence.hs` edits were preserved
+  and not folded into product code.
+- Next owner: supervisor for any separate launch/runtime or later scope.
+  Host cleanup confirmation for the cancelled ReviewFlow reviewer remains
+  unverified; do not infer a clean release.
+
+## Wave16 execution chronology (historical; superseded above)
+
+The shared typed `Inject { item, tools_allowed }` seam is committed at
+`594b3d006f49d0fefbbc38114bd7c276f8f57975`; its focused serde check
+matched/executed/passed 1/1. An earlier `cargo test --exact` compiled but
+matched **zero** tests and is not evidence of a pass. The current contract is
+[wave16-contract](docs/wave16-contract.md), PRD.md § “before-request”.
+The Engine arm at this scaffold only compiles; it does **not** apply injection.
+The source that incorporates this brief will be resolved before wave admission.
+Admission source is `f84e8b08d8a8111f896903e5470003f8b90ce6a4`.
+Actors 2, 3 and 4 were admitted from it, owning Engine/transport,
+Provider/Store and standalone browser acceptance respectively. First expected
+replies: checked Engine component candidate, checked Provider/Store component
+candidate, and expected-red browser candidate. Root's `web/dist` was absent;
+`npm ci && npm run check && npm test && npm run build` was attempted as retained
+job `2ad87a61-1f2e-4105-8e69-b369c0a7475d`, without touching the demo.
+That job exited 127 before checks because plain `npm` is absent. Root verified
+the pinned `nix develop .#web` shell has Node 24.13.0/npm 11.6.2, informed
+acceptance and provider owners, and launched prerequisite job
+`1379eb23-7029-49aa-ba01-391d40636f55` using that shell. No assertion
+result follows from the first preparation attempt.
+Pinned preparation job `1379eb23-7029-49aa-ba01-391d40636f55` subsequently
+exited 0: `npm ci`, TypeScript check, web tests 14/14 across 5 files, and
+production Vite build passed at the f84e8b0 checkout. This prepared root's
+`web/dist`; each isolated child still needs assets in its own checkout.
+Acceptance owner added test coverage but its first focused run compiled and
+matched/executed 1/1 only to fail at missing child-checkout `web/dist`; it did
+not reach the expected-red Inject assertion. The focused runner's integration
+test target is `test:standalone_browser`, not `standalone_browser` (the brief
+named the wrong syntax). Root supplied the pinned Nix build command and
+correct target; the owner still owes asset preparation and assertion-level red.
+
+Admission plan: one Luna Engine/transport owner (`engine.rs`,
+`transport/client.rs`), one Luna Provider/Store owner (`harness-demo/src/main.rs`,
+`harness/src/store/mod.rs`), and one independent Luna browser acceptance owner
+(`harness-demo/tests/standalone_browser.rs`). First expected replies are
+checked component candidates for the first two and a confirmed expected-red
+barrier for acceptance. Shared sequence: root `echo inject-context` injects one
+user message after canonical history with sleep restriction; ordinary echo,
+child and Send remain unchanged. Root owns review and integration. The
+specialized Haskell helper is `SessionHelpers.Wave16Gate.startWave16Gate`
+(owner, name, `FocusedSpec`, fixed 3 GiB), then `readWave16Gate` on terminal
+notice with failed/unknown callbacks; published helper source is
+`e98a8f2fa0231e2e4973aad03eb4da7a6435891e206628f71e5b9b865556a71d`.
+
+Engine owner submitted candidate `7dd904f8279a17b0189817137e3465e7cb84ac56`
+from f84e8b0. Root's cumulative diff shows only owned `engine.rs`.
+Owner reports three focused checks each matched/executed/passed 1/1 after
+one initial exit-137 build; these are component reports, not yet review.
+The bounded `Project.ReviewFlow` trial is active on this component, source
+plan `ComponentReview`, repair limit 1, base f84e8b0, candidate 7dd904f,
+coordinator actor 5 and forwarding route 6. Hypothesis: one exact-candidate
+review or bounded repair reaches a typed acceptance/question without root
+relaying routine findings. Stop on accepted or unresolved/one repair;
+fallback is ordinary `reviewCommit` at exact tip. Root retains merge authority.
+
+Acceptance owner corrected its isolated preparation with
+`nix develop path:..#web` in its own checkout, then the focused
+`test:standalone_browser` target matched/executed 1/1 and failed at the
+intended missing-producer decision assertion (SendRestricted instead of
+Inject), not assets. Test-only candidate `424bab6eb7aa9e405de2f92a904aa65909958b70`
+changed only owned `standalone_browser.rs`, and root merged that confirmed-red
+barrier at `394311f1567f48bd1472231b4836c9692f7553a9`. It is not green
+product acceptance. The independent test still includes child, reconnect and
+process-loss assertions beyond the red barrier.
+The acceptance owner's typed own-words interview is retained in
+`docs/interviews.md`; actor 4 was then retired with `StoppedNow`. Its branch,
+worktree and raw focused evidence remain retained.
+
+Provider/Store candidate `859f56a9d0493d24b43437eb35137fd0886e1151`
+was independently accepted at that exact HEAD for component-only scope:
+reviewer's Provider and Store focused checks each matched/executed/passed
+1/1. Root merged it over the red acceptance barrier at
+`3f4ec09bc9514689073b29ef3a0f51fce95eb655` and reran both focused
+checks there, each 1/1. This is not combined Engine/browser acceptance.
+The Provider owner's `startWave16Gate`/`readWave16Gate` trial ran one
+original job with 1 matched/runnable/executed/passed, but returned **unknown**
+because its expected source was f84e8b0 versus actual candidate 859f56a,
+and the child had dirty helper/hooks files. See `docs/automation-trials.json`
+for job/evidence. Provider owner and reviewer interviews are retained;
+both actors stopped `StoppedNow`.
+
+The Engine ReviewFlow trial admitted exact candidate `7dd904f` but its
+reviewer never obtained a first provider observation. Root stopped that
+unresolved reviewer; `stopAgent` returned `StoppedRetaining`, with
+ToolService/socket/build/worktree release unconfirmed. Flow state is
+`ReviewStopped ReviewerUnavailable`, no verdict/repair. Fresh ordinary
+exact-tip review actor 11 is the bounded fallback and is pending; Engine
+candidate is **not** reviewed or integrated yet. Host cleanup uncertainty
+is in the friction record.
+
+Fallback Engine reviewer independently accepted exact HEAD
+`7dd904f8279a17b0189817137e3465e7cb84ac56` for component scope,
+after three named checks each matched/executed/passed 1/1. Its first valid
+Cargo attempt exited 137, then `CARGO_BUILD_JOBS=1` and 6144 MiB succeeded.
+Root's cumulative diff confirmed only owned `engine.rs`; conflict-free merge
+over Provider/Store + red acceptance produced combined source
+`91cf294eb4fd5426821b7e2137d3ce4cd74cf59b`.
+The integrated Engine valid/invalid/restriction tests and production browser
+journey are now running as retained command
+`48ed7275-fcc4-4440-a779-0c43ef66a6bf` (all four gated by `&&`).
+No combined green is claimed until that command's terminal count/source
+evidence is read. Root `web/dist` was prepared and present before launch.
 
 The completed wave15 handoff below is retained history, not unfinished work.
 

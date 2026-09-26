@@ -1176,3 +1176,133 @@ interview hold means I am stopping here, not opening those gates now.
   Each final focused evidence record has source `75a1e014` with the
   unrelated pre-existing dirty helper README. Port 4600 remained HTTP
   200 after the checks.
+# Wave16 — deterministic Inject slice
+
+- `friction:` Root's first shared-hook `cargo test --exact` compiled the harness
+  but selected **zero** tests; it is not a passing assertion. The focused
+  `scripts/cargo-focused-test` correction at `594b3d0` matched/executed/passed
+  the serde boundary 1/1, retaining
+  `.exomonad/build/cargo/debug/deps/focused-98dq3ihm/evidence.json`.
+- `friction:` Root's plain `npm ci` preparation job
+  `2ad87a61-1f2e-4105-8e69-b369c0a7475d` exited 127 because `npm`
+  was absent from PATH. No web check ran in that job. The pinned
+  `nix develop .#web` shell provided Node 24.13.0/npm 11.6.2;
+  corrected job `1379eb23-7029-49aa-ba01-391d40636f55` exited 0,
+  including web tests 14/14 and production build at f84e8b0 with dirty
+  helper and NEXT files. Root informed acceptance and provider owners;
+  transport receipts do not establish when each incorporated the correction.
+- `friction:` The acceptance brief used focused target `standalone_browser`,
+  which the runner rejected before test execution. The correct integration
+  target is `test:standalone_browser`. The acceptance owner's first corrected
+  run compiled and matched/executed 1/1 but panicked at missing child-checkout
+  `web/dist`; that is a prerequisite failure, not the expected-red Inject
+  assertion. Root supplied the pinned Nix preparation command for the child's
+  own checkout; root's dist cannot be assumed available there.
+  A literal `nix develop .#web` in that managed child checkout failed because
+  Nix required a Git-tracked flake; explicit `nix develop path:.#web` succeeded
+  and built child-local `web/dist`. The subsequent focused browser test
+  matched/executed 1/1 and failed at the intended SendRestricted-vs-Inject
+  assertion, separately from the earlier missing-assets panic.
+- `friction:` Engine owner's first focused build exited 137; with
+  `CARGO_BUILD_JOBS=2`, three checks each matched/executed/passed 1/1 at
+  `7dd904f`. The candidate remains subject to exact-source review, and
+  checked component behavior does not establish browser integration.
+- `friction:` Provider/Store owner's first
+  `SessionHelpers.Wave16Gate.startWave16Gate` notebook call failed whole-cell
+  typechecking with ambiguous effects and launched no command. An explicit
+  `Eff CodingEffects GateStart` annotation admitted one watcher-backed job.
+  `readWave16Gate` reported unknown source assurance: spec still named
+  f84e8b0, while original job `29d5ad41-d721-47a0-98b1-aa31c0ac7e3c`
+  executed at candidate 859f56a with 1 matched/runnable/executed/passed.
+  The child checkout had dirty unrelated helpers and hooks.rs, so the
+  helper did not confer a clean-source pass. Raw evidence is
+  `.exomonad/build/cargo/debug/deps/focused-p5qg7ds6/evidence.json`.
+  Independent exact-HEAD Provider/Store review accepted after its own
+  provider and Store focused checks, each 1/1, but explicitly did not
+  establish the combined Engine/browser journey.
+- `friction:` The bounded Engine `Project.ReviewFlow` trial admitted its
+  exact-source reviewer but the reviewer remained `NeedsAttention`,
+  `provider=unknown`, with no first observation or verdict after the
+  independent Provider/Store review and integration completed. The trial
+  therefore did not avoid a root frontier. Root stopped the pending
+  reviewer as an unresolved launch; `stopAgent` returned
+  `StoppedRetaining` (ToolService resident/HTTP, socket, BuildResource and
+  WorktreeBinding cleanup unconfirmed), **not** a clean release. No trial
+  review acceptance is inferred. Ordinary fresh exact-tip review is the
+  fallback; the retained resource state needs host follow-up.
+  A later stop notice said actor 7 exited Cancelled, and `R.finish` returned
+  the typed `ReviewStopped ReviewerUnavailable` state. A subsequent typed
+  cleanup plan for that review response refused with `unknown fork group 2`;
+  it did not establish release of the resources named by `StoppedRetaining`.
+- `friction:` Final integrated source `91cf294` passed three Engine and
+  complete browser focused checks 1/1 each. `cargo fmt --all -- --check`
+  then caught a root-owned `hooks.rs` formatting omission. Root committed
+  the formatting-only amendment at `9123ffb`, after which final-source
+  serde and standalone browser checks each matched/executed/passed 1/1.
+  Their source JSON names `9123ffb` and lists only pre-existing helpers
+  and run docs as dirty. This extra source/check round was caused by a
+  late format gate, not by new product behavior.
+
+## Wave17 integration/release
+
+- `friction:` At startup, `git status` from the bound `/tmp/exomonad-actor-workspace`
+  failed because the copied `.exomonad/workspace/.git` pointed relatively to
+  a nonexistent Git metadata path. The supervisor confirmed the fix was only
+  that submodule's untracked `.git` metadata, now pointing to its absolute
+  gitdir; no tracked source or index changed. The host run path referred to
+  the same checkout. Normal bound-path Git commands then worked.
+- `friction:` Wave16 merge conflicted in `NEXT.md` and
+  `docs/automation-trials.json`. Root kept the active wave17 assignment,
+  preserved both ledger variants' trial observations and wave16 handoff
+  history, and retained the `2599a643` helper workspace pin. The three
+  pre-existing dirty helper draft paths were stashed before merge and remain
+  recoverable as `stash@{0}`; committed helper source was used for checks.
+- `friction:` A post-admission message to the browser worker about helper
+  publication returned `NotificationUnavailable`. Its original task already
+  named the committed helper and source; no incorporation of the later
+  publication was inferred from the failed transport receipt.
+- `friction:` The browser worker invoked `SessionHelpers.runBrowserCheck` but
+  did not retain its `GateWatching` value across notebook units, and settled
+  with only a running snapshot. A retained-child recovery read the **original**
+  job `9928d6c5-88a1-4bc9-9086-2ede08edd96b` without rerun: asset
+  preparation succeeded, browser test matched/runnable/executed 1/1 and
+  failed 0/1 at `standalone_browser.rs:120` (`event` instead of `snapshot`).
+  The test reads raw bytes from `socket.get_mut()` after tungstenite handshake,
+  bypassing its frame buffer. That is a test-harness defect candidate, not an
+  Inject assertion pass or a prerequisite failure. A bounded repair is owned
+  by the retained browser worker.
+- `friction:` ReviewFlow did activate its first live component reviewer
+  (actor 13, exact release-doc candidate `bba9416`) and returned typed
+  `Accepted`, no repair. Root's production-path check found the accepted
+  instructions used `--db "$PWD/.local/..."` without creating `.local`;
+  `Store::open` does not create parent directories and a clean checkout lacks
+  `.local`. Root refused the accepted candidate, sent the retained docs owner
+  a scoped repair, and commissioned an ordinary fresh exact-tip review for
+  repaired `9358cf2`. The activation smoke succeeded as an activation/verdict
+  observation but its verdict did **not** establish content acceptance or
+  automate a useful repair frontier.
+- `friction:` Fresh exact-tip ordinary review of repaired release candidate
+  `9358cf2` returned typed `Repair`: `mkdir -p .local` fixes startup but
+  does not enforce the document's "private database" claim under a permissive
+  umask. The retained docs owner received a scoped `umask 077`/permissions
+  correction. No reviewed release doc has been integrated yet.
+- `friction:` Browser repair first returned `Blocked` because the
+  `futures_util::{StreamExt,SinkExt}` import needed a direct
+  `harness-demo` dev-dependency outside the test owner's path.
+  Root committed the manifest at `fc652b4`; the owner rebased the
+  one-file test change to `f6def4d`. Its `runBrowserCheck` job
+  `cb1cd32c-47d3-4630-bf79-cf10baa70bd0` prepared assets and
+  matched/runnable/executed/passed 1/1, but generated a dirty
+  `Cargo.lock`, so strict source assurance remained unknown.
+  Root `cargo check -p harness-demo --test standalone_browser`
+  compiled (did not run) the old test target and showed the lock diff
+  was only a direct `futures-util` package dependency; root committed
+  that exact path at `b6fea32`. The reviewed `f6def4d` test was merged
+  at `6749fbe`; a final clean integrated browser check is still
+  required.
+- `friction:` The operator clarified a standing ban on `git stash`,
+  `git reset` and `git checkout -- <path>` after root had already
+  stashed/applied and restored helper draft files at startup. Root will
+  not repeat those commands or drop the retained stash. Its three
+  tracked draft paths and changes are enumerated in the wave17 handoff;
+  no user/helper draft is claimed as product source.
