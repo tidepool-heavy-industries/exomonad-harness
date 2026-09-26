@@ -742,15 +742,14 @@ impl Provider for BrowserProvider {
             .iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .collect::<Vec<_>>();
+        let sleep_advertised = advertised.contains(&"sleep");
         let (selection, label) = if command_text.contains("child ") {
             (Some(Vec::new()), "child-empty")
         } else if command_text.contains("echo ") {
-            let (selected, label) = if advertised.contains(&"sleep") {
-                (Some(vec!["sleep".to_owned()]), "echo-sleep")
-            } else {
-                (None, "echo-no-advertised-sleep")
-            };
-            (selected, label)
+            // Always request the intended selection. Engine validation must
+            // reject it as an invalid selection if the final plan omits sleep;
+            // never silently widen availability to Send.
+            (Some(vec!["sleep".to_owned()]), "echo-sleep")
         } else {
             (None, "send")
         };
@@ -758,7 +757,11 @@ impl Provider for BrowserProvider {
             result.decision =
                 harness::hooks::BeforeRequestDecision::SendRestricted { tools_allowed };
         }
-        result.evidence = Some(json!({"consumer":"standalone-browser","selection":label}));
+        result.evidence = Some(json!({
+            "consumer":"standalone-browser",
+            "selection":label,
+            "sleep_advertised":sleep_advertised
+        }));
         result
     }
     async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError> {
@@ -1870,7 +1873,27 @@ mod tests {
         );
         assert_eq!(
             result.evidence,
-            Some(json!({"consumer":"standalone-browser","selection":"echo-sleep"}))
+            Some(
+                json!({"consumer":"standalone-browser","selection":"echo-sleep","sleep_advertised":true})
+            )
+        );
+        let missing_sleep_plan = harness::hooks::RequestPlan {
+            items: plan.items.clone(),
+            tools_allowed: vec![],
+            effort: Effort::Low,
+        };
+        let missing_sleep = provider.before_request(&missing_sleep_plan).await;
+        assert_eq!(
+            missing_sleep.decision,
+            harness::hooks::BeforeRequestDecision::SendRestricted {
+                tools_allowed: vec!["sleep".into()]
+            }
+        );
+        assert_eq!(
+            missing_sleep.evidence,
+            Some(
+                json!({"consumer":"standalone-browser","selection":"echo-sleep","sleep_advertised":false})
+            )
         );
         let child_plan = harness::hooks::RequestPlan {
             items: vec![harness::item::Item(json!({
@@ -1888,7 +1911,9 @@ mod tests {
         );
         assert_eq!(
             child.evidence,
-            Some(json!({"consumer":"standalone-browser","selection":"child-empty"}))
+            Some(
+                json!({"consumer":"standalone-browser","selection":"child-empty","sleep_advertised":true})
+            )
         );
     }
 
