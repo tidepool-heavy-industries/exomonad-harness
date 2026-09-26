@@ -1438,3 +1438,115 @@ attest to an untried API's ergonomics.
 **Inference, not measured savings:** a single cheap typed Jev call after authoritative parsing could choose among *prerequisite*, *build interruption*, *expected-red*, *product regression*, and *unresolved*, with an evidence excerpt and bounded next action. It should never infer source identity, counts, ownership, review approval, or integration from prose. No live Jev judgment of this composition ran in wave15. The setup burden was real: I knew the menu existed, but lacked a copied working root recipe for importing these modules, binding a real checkout/job, and handling evidence-read failure. The failed watcher reduced confidence in compact summaries, not in the idea of actors or Haskell composition.
 
 **Strongest disagreement:** replacing the one-second polling with longer Bash waits alone optimizes waiting, not the expensive evidence/source/review frontier. Nor does one wave's low uptake imply low utility. Next wave, on one existing focused consumer check, exercise an improved `startFocused`→completion→`collectFocused` composition with an induced evidence-read failure. Require one retained job, exact source/counts or explicit unavailable state, and no model wake until a decision is needed; compare rounds against the manual path. Keep the reviewer and product acceptance gates unchanged.
+
+## Wave 16 independent acceptance owner interview — 2026-09-26
+
+> The single bounded acceptance node saved me from touching Engine/Store and
+> made the expected-red boundary easy to identify; the only friction was
+> runner target spelling and preparing web assets locally.
+>
+> The hardest part was distinguishing two setup failures from product behavior:
+> an initial assets panic, then the actual missing-Inject assertion after the
+> pinned build.
+>
+> The focused Cargo test actually compiled and executed 1 matched test
+> (0 passed, 1 failed at the intended Inject assertion); the Rust test source
+> compiled, and web build succeeded, but that is separate evidence.
+>
+> Next automation change: teach the focused runner to accept Cargo's bare
+> integration-target name and emit an explicit prerequisite classification
+> when `web/dist` is absent.
+
+In the owner's typed follow-up, they clarified that the single extra
+worker/context boundary cost coordination but kept test ownership disjoint,
+and named the canonical-request/typed-Store seam as hardest. Raw focused
+evidence: `.exomonad/build/cargo/debug/deps/focused-l7nh30o5/evidence.json`
+in that child checkout. The green integrated browser run was explicitly
+not claimed.
+
+## Wave 16 Provider/Store exact-tip reviewer interview — 2026-09-26
+
+The reviewer checked exact HEAD `859f56a9` against `f84e8b0` and the two
+owned files' cumulative diff. Its provider and Store focused checks each
+matched/executed/passed 1/1. The one-node review tree kept cost low without
+another delegation. It found no owned-path defect, but could not establish
+Engine/browser end-to-end injection: the provider test calls
+`before_request` directly. Three unrelated dirty helper files were preserved.
+The reviewer recommends encoding expected and executed counts in a reusable
+focused-check helper/report to make review evidence easier to compare.
+
+## Wave 16 Provider/Store implementation owner interview — 2026-09-26
+
+The owner kept the coupled BrowserProvider and Store seams in one node and
+commit, avoiding an internal handoff. The hard seam was classifying exact
+root `echo inject-context` before broad echo without changing child/default
+behavior. Its provider and Store focused checks each selected/runnable/
+executed/passed 1/1 with candidate edits dirty at base `f84e8b0`; an earlier
+Store attempt exited 137 and was not counted as a pass. The provider test
+called `BrowserProvider` directly; the owner did not run the production
+browser path. The Store test did close/reopen and typed readback.
+
+The owner's Haskell helper initially failed whole-cell type inference, then
+ran with an explicit `Eff CodingEffects GateStart`. Original job
+`29d5ad41-d721-47a0-98b1-aa31c0ac7e3c` exited 0/clean and had one
+matched/runnable/executed/passed at candidate `859f56a`. The helper correctly
+returned **unknown** because its spec expected older `f84e8b0` and the
+checkout had dirty helper files plus hooks.rs. The owner retained the original
+entry and evidence rather than rerunning for a cosmetic pass. Next change:
+bind expected source to the candidate OID and display check-relevant dirty
+paths with counts. This is a proposed workflow change, not implemented here.
+
+## Wave 16 Engine implementation owner interview — 2026-09-26
+
+The owner worked in one bounded Engine node alongside Provider/Store and
+acceptance siblings; overlap existed, but time saved was not measured. The
+hard seam was validating exact message and optional tool subset before
+transport, keeping decision `event_refs` on pre-injection history, and
+cleaning pending claims on invalid input. An initial focused run exited 137.
+With `CARGO_BUILD_JOBS=2`, valid-injection/transport-failure,
+invalid-injection/cleanup and prior restricted-selection filters each
+matched/executed/passed 1/1. The valid test also checked serialized request
+position/count. The owner did not claim to observe review or integration.
+Proposed runner change: default to a small Cargo job limit and retain the
+initial process exit beside any bounded retry.
+
+## Wave 16 fallback Engine reviewer interview — 2026-09-26
+
+The fallback reviewer checked the exact cumulative Engine diff
+`f84e8b0..7dd904f`; `transport/client.rs` did not change. No owned-component
+defect was found. One replacement review activation and three focused runs
+were needed after ReviewFlow ended unavailable, so no measured time saving
+is claimed. Valid injection/transport-failure, invalid-injection/claim cleanup,
+and prior invalid restriction/finalize tests each matched/executed/passed
+1/1. The first valid attempt exited 137 without test output; retry with
+`CARGO_BUILD_JOBS=1`, 6144 MiB passed. The hardest path was rejecting bad
+injection or tool restriction before transport while interrupting an existing
+pending claim. Proposed automation: expose the compiled FocusedGateExample
+workflow directly to fallback reviewers for common source/count evidence.
+
+## Wave 16 root interview — 2026-09-26
+
+The three-way bounded frontier helped: acceptance proved red while Engine
+and Provider/Store changed disjoint files, and the shared `Inject` shape
+plus concrete `echo inject-context` sequence aligned the seams. I retained
+integration and exact-source review, which cost source and dirty-tree
+reconciliation but kept component passes separate from product acceptance.
+The final production browser check is the decisive combined boundary.
+
+The hardest coordination failure was not a Rust defect: ReviewFlow admitted
+an exact-source reviewer that never reached a first provider observation.
+Stopping it returned retained resource cleanup, so I used a fresh ordinary
+reviewer. The helper trial consumed a round on an ambiguous Haskell effect
+row and yielded an honest unknown when its spec named the old source.
+These were useful failure-state observations, not measured automation
+savings. Plain `npm` and the bare child Nix flake path failed before tests;
+pinned `path:` Nix preparation recovered them. An early zero-match Cargo
+test was replaced by the focused runner's explicit 1/1 evidence.
+
+The tree cost three worker contexts, two component reviews, a failed
+review-flow reviewer and replacement, plus interviews. It avoided file
+ownership conflicts and separated prerequisite and source-composition
+gates, but elapsed-time and token savings were not measured. Next run,
+pass exact focused target syntax and source-bound `FocusedSpec`, and make
+ReviewFlow launch health observable before counting an automatic frontier.
+Keep independent review and integrated browser acceptance unchanged.
