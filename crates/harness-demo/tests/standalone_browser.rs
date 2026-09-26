@@ -301,15 +301,15 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
                 .as_str()
                 .is_some_and(|request| !request.is_empty())
                 && row["agent"].as_str().is_some_and(|agent| !agent.is_empty())
-                && row["decision"] == json!("Send")
         }),
-        "hook decisions must retain request and agent provenance and Send: {tagged:#?}"
+        "hook decisions must retain request and agent provenance: {tagged:#?}"
     );
     assert!(
         tagged.iter().any(|row| {
             row["agent"] == "/root"
                 && serde_json::to_string(&row["items"])
                     .is_ok_and(|items| items.contains("echo standalone"))
+                && row["decision"] == json!({"SendRestricted":{"tools_allowed":["sleep"]}})
                 && row["evidence"]["selection"] == "echo-sleep"
                 && row["evidence"]["sleep_advertised"] == true
         }),
@@ -317,7 +317,9 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     );
     assert!(
         tagged.iter().any(|row| {
-            row["agent"] != "/root" && row["evidence"]["selection"] == "child-empty"
+            row["agent"] != "/root"
+                && row["decision"] == json!({"SendRestricted":{"tools_allowed":[]}})
+                && row["evidence"]["selection"] == "child-empty"
         }),
         "expected child-empty decision (its path is intentionally not fixed): {tagged:#?}"
     );
