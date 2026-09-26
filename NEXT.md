@@ -1,3 +1,16 @@
+# Active assignment — wave18 standalone harness and coordination experiments
+
+Read [the wave18 brief](docs/wave18-brief.md). Deliver the browser-operable
+standalone deterministic milestone with an Astra root and parallel Luna
+feature-area trees. Evaluate and adapt the Haskell automations on real work,
+including concrete feedback from workers before retirement.
+
+This brief supersedes the closed assignments below. Preserve their evidence;
+no stale historical instruction authorizes a new run or source rollback.
+The supervisor supplies exact launch revisions and validation in the launch record.
+
+---
+
 # Completed assignment — wave17 deterministic browser integration/release
 
 Wave16 Inject handoff `21cb20e` is merged with the wave17 helper baseline,
