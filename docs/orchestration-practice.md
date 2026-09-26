@@ -59,8 +59,10 @@ ask affected consumers to identify what they incorporated and checked.
 
 When an import fails, retain the exact compiler error and distinguish the module
 file in the checkout from the published helper layer and the actor's import
-roots. If `reload_helpers` is available, publish the intended helper revision
-and retry the import once. If it still fails, report both observations and use
+roots. If `reload_helpers` is available, first establish that the intended module is
+in this consumer's bound helper branch at its module-relative path. Reload
+publishes that branch; a root-layer publication does not update it. Publish the
+intended revision and retry the import once. If it still fails, report both observations and use
 the direct operation while the owning mechanism is investigated. Do not copy
 helpers into another source subsystem to hide a publication failure. A root
 revert does not revert a child's inherited dirty snapshot.
