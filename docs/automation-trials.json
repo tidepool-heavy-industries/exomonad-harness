@@ -46,7 +46,7 @@
       "status": "validated_not_exposed",
       "entrypoint": "Project.AssumptionWatch.watchAssumption",
       "source_revision": "a61c13e6492a4f7d5bd323f9b6f8686214b77b7d",
-      "validation": "Project.AssumptionChecks.changes: 3/3, including deterministic, semantic and unresolved decisions",
+      "validation": "Project.AssumptionChecks.changes: 3/3 deterministic callbacks including unresolved; Project.AssumptionExamples.semanticImpact compiled, live Jev unvalidated",
       "first_exposed_wave": null,
       "waves": []
     },
