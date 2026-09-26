@@ -1242,3 +1242,67 @@ interview hold means I am stopping here, not opening those gates now.
   Their source JSON names `9123ffb` and lists only pre-existing helpers
   and run docs as dirty. This extra source/check round was caused by a
   late format gate, not by new product behavior.
+
+## Wave17 integration/release
+
+- `friction:` At startup, `git status` from the bound `/tmp/exomonad-actor-workspace`
+  failed because the copied `.exomonad/workspace/.git` pointed relatively to
+  a nonexistent Git metadata path. The supervisor confirmed the fix was only
+  that submodule's untracked `.git` metadata, now pointing to its absolute
+  gitdir; no tracked source or index changed. The host run path referred to
+  the same checkout. Normal bound-path Git commands then worked.
+- `friction:` Wave16 merge conflicted in `NEXT.md` and
+  `docs/automation-trials.json`. Root kept the active wave17 assignment,
+  preserved both ledger variants' trial observations and wave16 handoff
+  history, and retained the `2599a643` helper workspace pin. The three
+  pre-existing dirty helper draft paths were stashed before merge and remain
+  recoverable as `stash@{0}`; committed helper source was used for checks.
+- `friction:` A post-admission message to the browser worker about helper
+  publication returned `NotificationUnavailable`. Its original task already
+  named the committed helper and source; no incorporation of the later
+  publication was inferred from the failed transport receipt.
+- `friction:` The browser worker invoked `SessionHelpers.runBrowserCheck` but
+  did not retain its `GateWatching` value across notebook units, and settled
+  with only a running snapshot. A retained-child recovery read the **original**
+  job `9928d6c5-88a1-4bc9-9086-2ede08edd96b` without rerun: asset
+  preparation succeeded, browser test matched/runnable/executed 1/1 and
+  failed 0/1 at `standalone_browser.rs:120` (`event` instead of `snapshot`).
+  The test reads raw bytes from `socket.get_mut()` after tungstenite handshake,
+  bypassing its frame buffer. That is a test-harness defect candidate, not an
+  Inject assertion pass or a prerequisite failure. A bounded repair is owned
+  by the retained browser worker.
+- `friction:` ReviewFlow did activate its first live component reviewer
+  (actor 13, exact release-doc candidate `bba9416`) and returned typed
+  `Accepted`, no repair. Root's production-path check found the accepted
+  instructions used `--db "$PWD/.local/..."` without creating `.local`;
+  `Store::open` does not create parent directories and a clean checkout lacks
+  `.local`. Root refused the accepted candidate, sent the retained docs owner
+  a scoped repair, and commissioned an ordinary fresh exact-tip review for
+  repaired `9358cf2`. The activation smoke succeeded as an activation/verdict
+  observation but its verdict did **not** establish content acceptance or
+  automate a useful repair frontier.
+- `friction:` Fresh exact-tip ordinary review of repaired release candidate
+  `9358cf2` returned typed `Repair`: `mkdir -p .local` fixes startup but
+  does not enforce the document's "private database" claim under a permissive
+  umask. The retained docs owner received a scoped `umask 077`/permissions
+  correction. No reviewed release doc has been integrated yet.
+- `friction:` Browser repair first returned `Blocked` because the
+  `futures_util::{StreamExt,SinkExt}` import needed a direct
+  `harness-demo` dev-dependency outside the test owner's path.
+  Root committed the manifest at `fc652b4`; the owner rebased the
+  one-file test change to `f6def4d`. Its `runBrowserCheck` job
+  `cb1cd32c-47d3-4630-bf79-cf10baa70bd0` prepared assets and
+  matched/runnable/executed/passed 1/1, but generated a dirty
+  `Cargo.lock`, so strict source assurance remained unknown.
+  Root `cargo check -p harness-demo --test standalone_browser`
+  compiled (did not run) the old test target and showed the lock diff
+  was only a direct `futures-util` package dependency; root committed
+  that exact path at `b6fea32`. The reviewed `f6def4d` test was merged
+  at `6749fbe`; a final clean integrated browser check is still
+  required.
+- `friction:` The operator clarified a standing ban on `git stash`,
+  `git reset` and `git checkout -- <path>` after root had already
+  stashed/applied and restored helper draft files at startup. Root will
+  not repeat those commands or drop the retained stash. Its three
+  tracked draft paths and changes are enumerated in the wave17 handoff;
+  no user/helper draft is claimed as product source.

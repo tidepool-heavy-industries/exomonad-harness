@@ -1550,3 +1550,111 @@ gates, but elapsed-time and token savings were not measured. Next run,
 pass exact focused target syntax and source-bound `FocusedSpec`, and make
 ReviewFlow launch health observable before counting an automatic frontier.
 Keep independent review and integrated browser acceptance unchanged.
+
+## Wave17 source/replay auditor interview — 2026-09-26
+
+I audited the integrated Inject and restriction path at exact `7c7f8bb`,
+including Engine validation and pending-claim cleanup, transport-item
+placement and typed Store persistence. The hard evidence distinction was
+that wave16's green handoff checks belonged to earlier OIDs, not this
+combined source. My Store reopen attempt exited 137 without output, so it
+did not establish compilation or a test count; I did not run the browser.
+The inherited focused helper could have retained count/source evidence,
+but this attempted check was not a successful gate. The branch cost one
+read-only child worktree and one failed Cargo runner attempt, with no edits.
+
+## Wave17 ReviewFlow first reviewer interview — 2026-09-26
+
+I reviewed exact release-doc candidate `bba9416`, its cumulative
+`docs/wave17-release.md` diff, preparation script, before-request PRD,
+CLI/server source and browser journey test. My first provider turn ran;
+I did not run product tests or launch the server. My typed acceptance
+missed that the copy-paste database path under `.local` had no parent
+creation in a clean checkout. I checked semantic correspondence but not
+first-use startup prerequisites. ReviewFlow added a coordinator worktree,
+record actor and forwarder plus this reviewer context. It reached a typed
+verdict unlike wave16, but it did not replace root's release-path check
+or avoid a repair/review frontier.
+
+## Wave17 release-doc owner interview — 2026-09-26
+
+I wrote the operator handoff for preparation, isolated launch,
+echo/inject-context/child, reconnect and process-loss reopen. My commits
+were `bba9416` (first instructions), `9358cf2` (create `.local`) and
+`07d7c8c` (`umask 077` before directory/database creation). I ran
+`git diff --check` and `git show --check`; no build, runtime or browser
+test ran in my branch. A markdown-check helper would cost more than
+direct commands for this one file. The tree cost three sequential
+commits and separate review/repair fronts without implementation edits.
+The owner recalled both findings as ReviewFlow feedback; the recorded
+chronology is narrower: root found the missing parent after ReviewFlow
+accepted, and an ordinary exact-tip reviewer found the umask issue.
+
+## Wave17 final release-doc reviewer interview — 2026-09-26
+
+I reviewed exact `07d7c8c` against `7c7f8bb`, checking HEAD, clean
+tree, cumulative one-file diff, the preparation script, CLI/server
+startup, deterministic policy and browser test source. I did not run
+Cargo, a server or a browser. The hard seam was path privacy:
+`umask 077` protects newly created `.local`, SQLite database and
+sidecars, but does not repair a pre-existing permissive directory or
+database. The review cost one focused child context and source tracing;
+it did not prove copied instructions against a live runtime or
+pre-existing filesystem modes.
+
+## Wave17 browser acceptance/test owner interview — 2026-09-26
+
+The original `runBrowserCheck` job `9928d6c5` prepared assets and
+selected/executed 1/1 but failed at snapshot vs event. I initially lost
+the notebook-local gate handle, then recovered the original retained
+job/evidence without rerun. I replaced raw post-handshake socket reads
+with tungstenite `WebSocketStream::next()`, retaining text JSON, Ping/Pong,
+close/error and process-cleanup behavior in one owned test file. Root
+owned the `futures-util` manifest amendment; I rebased onto `fc652b4`
+and returned `f6def4d`. That candidate's browser run prepared assets
+and passed 1/1, but a dirty generated Cargo.lock left source assurance
+unknown. The tree cost a recovery request, root dependency amendment,
+rebase and repeated candidate check. Helper calls provided exact job
+and counts but only after publishing the committed helper layer in my
+checkout; the gate must be retained across notebook units.
+
+## Wave17 browser test reviewer interview — 2026-09-26
+
+I reviewed exact `f6def4d` against `fc652b4`, only the browser test
+file. `git diff --check` passed and `cargo test -p harness-demo --test
+standalone_browser --no-run` compiled its target; **zero tests ran** in
+my checkout. The hard seam was consuming WebSocket frames through
+tungstenite instead of its underlying TCP socket without weakening
+snapshot, reconnect or process-loss cleanup assertions. Independent
+review cost a cumulative diff, dependency inspection and compile-only
+command; I did not redundantly rerun the browser.
+
+## Wave17 root kaizen interview — 2026-09-26
+
+The ready frontier separated source audit, full browser gate and
+operator handoff. I merged wave16 by ancestry and preserved the new
+helper pin and assignment, then kept component checks attached to
+the integrated OID. The first browser check found a real test-reader
+defect, not an Inject failure. A bounded test repair and exact-source
+review were useful; the dependency and lockfile required root-owned
+amendments. `runCheck` supplied four 1/1 clean-source results without
+manual runner parsing. `runBrowserCheck` retained prerequisite and
+assertion evidence, but the worker's gate-local binding cost a recovery
+request and the later dirty lockfile prevented an early strict pass.
+
+The ReviewFlow experiment answered its narrow startup question: actor
+13 reached a first provider turn and typed verdict at one docs candidate,
+unlike wave16. It did not save a review frontier: its acceptance missed
+a copy-paste startup failure that I found by tracing Store::open. Ordinary
+review then caught the private-path umask issue. Setup cost one coordinator
+worktree, actor, forwarder and reviewer, plus correction/review contexts.
+I should not count native activation as review quality or model-round
+savings. The three-way tree created independent evidence but also branch,
+interview and handoff work; no elapsed-time or token saving is inferred.
+
+Startup Git friction and my earlier helper-draft handling were avoidable.
+The operator's later constraint forbids repeating stash, reset or
+path-checkout commands. The pre-existing draft is retained as a stash
+and not part of the checked helper baseline; subsequent commits are
+path-scoped. The final combined browser check and resource retirement
+remain separate from this interview.

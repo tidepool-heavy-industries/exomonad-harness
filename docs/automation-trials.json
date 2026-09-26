@@ -330,5 +330,27 @@
     ],
     "setup_and_recovery": "Helper module was added and published at e98a8f2, with one ambiguous-effect cell rejection before an annotated child execution. ReviewFlow required a coordinator worktree, actor and forwarder; the stalled reviewer added a cancellation and ordinary-review fallback. Root's first plain-npm preparation failed before checks; pinned Nix shell corrected it. No model-round or token savings are measured.",
     "frontier_rounds": "Focused helper watcher returned a compact terminal notice but unknown strict verdict and required original-evidence inspection; no round avoided is claimed. ReviewFlow did not avoid the review frontier; ordinary fallback added a reviewer. Independent component owners and acceptance test overlapped, but causal time savings are unmeasured."
+  },
+  "wave17_run": {
+    "helper_source": "committed SessionHelpers at wave17 integration 7c7f8bbf251c364dbaa165b9783b6844f1e5231b; root reload_helpers publication a77f5d424c1dbf4f7a1019a064325dfdcf069fb950bba1504cb1e734593e12ef",
+    "calls": [
+      "Root SessionHelpers.runCheck: four named harness lib checks at 7c7f8bb, each expected/matched/runnable/executed/passed 1/1; original jobs e95a2765-e24c-4663-96e9-7bc84bee33c1, 428b8746-9140-4fec-9d8a-276d321ec744, 13cc00b0-f0db-4fc9-b6f7-91af24b13f8e and 81d7724a-e5ac-44d3-8a16-5581c8f6a497. Retained readGate summaries reported source verified and clean.",
+      "Browser child SessionHelpers.runBrowserCheck: original job 9928d6c5-88a1-4bc9-9086-2ede08edd96b at 7c7f8bb prepared assets, selected/executed 1/1 but failed the snapshot assertion; child recovered the original job without rerun. Later repaired-source gate remains separately recorded in wave17 handoff.",
+      "Project.ReviewFlow.reviewFlow on docs component bba9416: coordinator actor 11, reviewer actor 13 first provider turn and typed Accepted observed, zero repairs. Root refused the verdict after identifying missing SQLite parent directory and used ordinary exact-tip review for subsequent corrections."
+    ],
+    "rejected_or_failed_setup": [
+      "A browser-child SessionHelpers import failed before it published its bound helper source; reload_helpers recovered without a source edit.",
+      "The browser child kept its first gate only inside an effect block, so the terminal state required a retained-original-job recovery request; no duplicate check was launched for that recovery.",
+      "A root attempt to read ReviewFlow reviewSnapshot with R.send was rejected by notebook typechecking; R.call succeeded and no actor operation ran from the rejected cell."
+    ],
+    "opportunities_and_nonuse": [
+      "CheckResults was used indirectly by runCheck/runBrowserCheck; no second watcher was needed.",
+      "ParallelInvestigate, AssumptionWatch and SlowCommandWatch did not have competing probes, a changing assumption or actionable delay; not called.",
+      "Interview.collectInterview was not needed for the small directly addressable worker tree; retained typed interview requests were used.",
+      "RetainedEvidence.recoverRetained was available, but browser recovery read the original command output directly; no helper use claimed.",
+      "HandoffExamples and notifyReviewReady would not confer acceptance or add readiness beyond settled candidate responses; not called.",
+      "BrowserScenario remains unavailable pending its own isolated browser runtime gate; no use claimed."
+    ],
+    "measurement": "Actual helper invocations and jobs are recorded; no model-round or token saving is inferred. ReviewFlow activated but missed a release setup defect, so it did not remove a review/repair frontier. This is the third exposed wave for entries first exposed in wave15, but exposure is not use."
   }
 }
