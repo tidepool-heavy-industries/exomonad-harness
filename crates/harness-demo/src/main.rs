@@ -732,17 +732,35 @@ impl Provider for BrowserProvider {
         plan: &harness::hooks::RequestPlan,
     ) -> harness::hooks::BeforeRequestResult {
         let mut result = self.0.before_request(plan).await;
-        let selected = plan
+        let command_text = plan
+            .items
+            .iter()
+            .map(|item| item.0.to_string())
+            .collect::<String>();
+        let advertised = plan
             .tools_allowed
             .iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
-            .find(|name| *name == "sleep");
-        if let Some(name) = selected {
-            result.decision = harness::hooks::BeforeRequestDecision::SendRestricted {
-                tools_allowed: vec![name.to_owned()],
+            .collect::<Vec<_>>();
+        let (selection, label) = if command_text.contains("child ") {
+            (Some(Vec::new()), "child-empty")
+        } else if command_text.contains("echo ") {
+            let (selected, label) = if advertised.contains(&"ask") {
+                (Some(vec!["ask".to_owned()]), "echo-ask")
+            } else if advertised.contains(&"sleep") {
+                (Some(vec!["sleep".to_owned()]), "echo-sleep")
+            } else {
+                (None, "echo-no-advertised-safe-tool")
             };
+            (selected, label)
+        } else {
+            (None, "send")
+        };
+        if let Some(tools_allowed) = selection {
+            result.decision =
+                harness::hooks::BeforeRequestDecision::SendRestricted { tools_allowed };
         }
-        result.evidence = Some(json!({"consumer":"standalone-browser","selection":"sleep"}));
+        result.evidence = Some(json!({"consumer":"standalone-browser","selection":label}));
         result
     }
     async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError> {
@@ -1829,10 +1847,18 @@ mod tests {
         fn assert_send<T: Send>(_: &T) {}
         assert_send(&provider);
         let plan = harness::hooks::RequestPlan {
-            items: vec![],
+            items: vec![harness::item::Item(json!({
+                "type":"message","role":"user","content":[{"type":"input_text","text":"echo hello"}]
+            }))],
             tools_allowed: provider.all_tools(),
             effort: Effort::Low,
         };
+        assert!(
+            plan.tools_allowed
+                .iter()
+                .any(|tool| tool["name"] == "sleep")
+        );
+        assert!(!plan.tools_allowed.iter().any(|tool| tool["name"] == "ask"));
         let result = provider.before_request(&plan).await;
         assert_eq!(
             result.decision,
@@ -1842,7 +1868,25 @@ mod tests {
         );
         assert_eq!(
             result.evidence,
-            Some(json!({"consumer":"standalone-browser","selection":"sleep"}))
+            Some(json!({"consumer":"standalone-browser","selection":"echo-sleep"}))
+        );
+        let child_plan = harness::hooks::RequestPlan {
+            items: vec![harness::item::Item(json!({
+                "type":"message","role":"user","content":[{"type":"input_text","text":"child hello"}]
+            }))],
+            tools_allowed: provider.all_tools(),
+            effort: Effort::Low,
+        };
+        let child = provider.before_request(&child_plan).await;
+        assert_eq!(
+            child.decision,
+            harness::hooks::BeforeRequestDecision::SendRestricted {
+                tools_allowed: vec![]
+            }
+        );
+        assert_eq!(
+            child.evidence,
+            Some(json!({"consumer":"standalone-browser","selection":"child-empty"}))
         );
     }
 
