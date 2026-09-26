@@ -14,7 +14,8 @@ it does not authorize changes to the port-4600 demo or Tailscale Serve.
   on the process's subsequent working directory. `--assets` is serve-only.
 - Startup fails before accepting connections when assets are missing, with a
   nonzero exit and a diagnostic naming the path. Readiness is a successful
-  authenticated `GET /api/snapshot`, not merely a printed PID.
+  `GET /api/session` followed by authenticated `/api/ws` initial `snapshot`,
+  not merely a printed PID. There is no `GET /api/snapshot` route.
 - A host operator owns the process using ordinary OS process management. Send
   SIGINT for graceful stop and SIGKILL only for the process-loss test; never
   stop by matching a broad process name. The environment provides
