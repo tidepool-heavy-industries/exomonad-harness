@@ -130,3 +130,13 @@ forged ones dropped) and the annotation at `Store::append_items` states the
 rule in one sentence. (c) starts as implementation, not design.
 
 [item2-live-retry-2026-09-25] The single authorized manual item-2 run on a42920f made a first successful response and a pending-call second request, but the second request returned HTTP 400; redacted evidence is docs/item2-live-attempt.jsonl and diagnosis is in docs/findings.md. After an offline-reviewed repair of TreeProvider's missing async flags, may root spend exactly one additional credentialed manual item-2 run? default: do not retry; leave live item-2 acceptance open. blocks: live item-2 continuation/wait_agent acceptance, not offline c/d work.
+
+[wave13-host-service-2026-09-25] Root's sandbox cannot reach the host user
+service manager (`systemctl --user`: "No data available"), and local SSH
+cannot authenticate. Can the operator run the documented isolated
+launch/stop once in an ordinary host shell and return the host-visible
+service/PID and result? Recommendation: yes, while root completes
+namespace-local production-binary and process-loss verification on
+separate temporary port/data. Until then, portable host operation is
+source/test evidence, not a verified host service identity. This does not
+authorize stopping port 4600 or changing Tailscale Serve.

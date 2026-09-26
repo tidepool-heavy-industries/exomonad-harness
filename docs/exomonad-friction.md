@@ -944,3 +944,91 @@ interview hold means I am stopping here, not opening those gates now.
   1 matched/executed. Real local Chromium journey and isolated
   process-kill browser recovery passed. The existing tailnet HTTPS
   URL returned 200 from this host, but no second-device test ran.
+
+## Wave 13 — standalone browser harness
+
+- `friction:` Initial acceptance and operator Luna children, both replacements,
+  and the first exact-source reviewer were cancelled by the host with
+  `TargetCancelled("host selected completion abort for shutdown")` before
+  returning results. Their retained branches were not treated as candidates.
+  Root wrote the test and operator guide; an independent review remains due.
+- `friction:` `SessionHelpers.TestEvidence` published and imported, but two
+  `startFocused` trials remained queued without opened output streams. Both
+  were cancelled and returned `CommandUnavailable`; neither was a test run.
+  The proposed two-consumer reuse was not achieved. Fallback is the existing
+  `scripts/cargo-focused-test`, after the pinned web preparation.
+  The operator later identified the resource cause: the shared command pool
+  is 8 GiB and the protected live demo holds 1 GiB, while the helper asked
+  for 8 GiB. Root reduced its request to 4 GiB and republished it; further
+  smoke execution then succeeded for two real consumers: server filter
+  8 selected/executed/passed at `cf19ed4` (evidence
+  `.exomonad/build/cargo/debug/deps/focused-hgmvh3_m/evidence.json`) and
+  standalone production-binary filter 1 selected/executed/passed at
+  `cf19ed4` (evidence
+  `.exomonad/build/cargo/debug/deps/focused-_5bvmybi/evidence.json`).
+  Each required a start and finish notebook call instead of one direct
+  script call. The helper returned typed full-log paths/counts and no Jev
+  triage on successful commands. Its strict `focusedPassed` remained
+  `False` because the runner wrote null `working_tree_status` in this
+  checkout; it did not establish a clean-worktree pass.
+- `friction:` The launch candidate passed reported focused CLI checks but its
+  host launcher called `cargo run --release`, making runtime depend on source
+  and a Rust toolchain. Root returned that concrete defect to the retained
+  owner; checked integration and production acceptance remain open.
+- `friction:` The launch owner's first mock-launch fixture had a malformed
+  temporary shebang and failed. After fixture correction, shell syntax,
+  unrelated-cwd mock execution and missing-binary rejection passed. This
+  did not exercise a built release binary.
+- `friction:` First integrated `scripts/prepare-browser-harness` at
+  `d39a7ac` executed web checks (14/14), built assets, and passed
+  `browser_journey` (1 matched/executed), then built the release binary
+  but exited 1: it assumed `target/release/harness-demo`, while this
+  checkout sets `CARGO_TARGET_DIR=.exomonad/build/cargo`. The executable
+  was present there. Root sent the artifact-path repair to the script
+  owner; the release build was not a successful preparation command.
+- `friction:` The first integrated standalone focused test on `d39a7ac`
+  compiled, selected/executed 1/1 and passed. It covered missing
+  assets, unrelated cwd, login/command/child message, clean SIGINT
+  reopen and SIGKILL reopen. Its build emitted an unused-`mut`
+  warning, removed by root afterward; the edited final test still
+  requires a rerun after integration.
+- `friction:` Independent exact-tip review of artifact-path repair
+  `19a6818` returned Repair: a failed new build could leave an old
+  `target/release/harness-demo` in place, and the launcher would accept
+  that stale artifact. Root returned this to the retained script owner
+  with a fail-closed preparation invariant rather than merging it.
+- `friction:` The retained owner produced `2e7e6f9` on integrated base
+  `fbf08e6` with script-owned output invalidation, configured-target
+  staging and an EXIT cleanup trap. Controlled stale-artifact and
+  missing-built-binary failures passed; an actual release build with a
+  no-op Nix shim passed. The first parallel release build had exited
+  137; retrying with `CARGO_BUILD_JOBS=1` succeeded. Full unshimmed Nix
+  preparation was not run in the child checkout; exact review and root
+  integrated verification were still due at that point. Reviewer
+  accepted the exact tip; root merged it as `d2de055`.
+- On `d2de055`, the full unshimmed preparation passed (web 14/14,
+  browser journey 1/1, staged release binary), as did final focused
+  standalone 1/1, server 8/8 and assets CLI 1/1. A copied isolated
+  release bundle ran from `/`; its completed command persisted across
+  process-loss reopen and a subsequent SIGINT stop released its
+  loopback port. These are namespace-local checks. The host bus was
+  unavailable and local SSH did not authenticate, so a host-visible
+  process/service identity and host-lifetime check remain open.
+- `friction:` The first manual WebSocket snapshot probe skipped curl's
+  `#HttpOnly_` cookie-jar line and failed with an `IndexError` before
+  connecting. Correcting the fixture parser produced a reconnect
+  snapshot with the completed request. The initial detached launch
+  command returned `CommandUnconfirmed`/`CommandRetained` even though
+  HTTP readiness worked; exact command cancellation followed by
+  curl/`ss` established port release. No clean-stop claim rests on
+  that cancellation; clean SIGINT was checked on the reopen.
+- `friction:` A request for reviewer interviews failed at Haskell
+  dependency compilation before any unit executed:
+  `Tidepool.Effects.Core` did not export `CommandQueueWait`. Root did
+  not retry blindly or claim those interviews were delivered. The
+  host operator later identified a mutable Tidepool source mismatch
+  and reverted it without replacing the live binary/schema. One
+  small resident cell compiled and ran; root then resubmitted the
+  three interviews, which were admitted and returned. The fail-closed
+  reviewer reported one rejected Haskell multiline-list cell, then
+  a compact binding succeeded; its review findings were unaffected.
