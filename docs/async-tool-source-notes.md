@@ -44,6 +44,8 @@ completed merely because the question was displayed.
 
 ## Apply this to the standalone harness
 
+The target is GPT-6 only; earlier-model compatibility is not a requirement.
+Do not reproduce the current Codex wait barrier as a compatibility obligation.
 Use the existing Engine, event, Store and extension owners. First inspect their
 actual capabilities. Agree on a concrete event sequence before parallel feature
 work: launch pending A, continue independent B, complete B before A, deliver each

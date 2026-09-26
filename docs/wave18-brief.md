@@ -36,6 +36,9 @@ slice and prove it with deterministic asynchronous tool stubs. Use [the source-b
 local Codex implementation and the published provider contract. Inspect relevant
 owning source instead of guessing protocol behavior.
 This priority should shape the shared contract before dependent feature trees fork.
+The intended model target is GPT-6 only. Design for its native async capabilities;
+do not add earlier-model compatibility modes, fallback protocols or lowest-common-
+denominator provider abstractions. Deterministic stubs exercise that same contract.
 
 While delivering this milestone, identify where a custom harness could make your
 work simpler or enable useful behavior that the current host makes awkward.
