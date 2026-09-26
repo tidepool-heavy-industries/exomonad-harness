@@ -729,6 +729,7 @@ async fn run_deterministic_engine_completion(
 enum BrowserPolicy {
     Child,
     Echo,
+    Inject,
     Send,
 }
 
@@ -736,6 +737,8 @@ impl BrowserPolicy {
     fn for_invocation(command: &str, agent: &AgentPath) -> Self {
         if agent.0 != ROOT_PATH || command.starts_with("child ") {
             Self::Child
+        } else if command == "echo inject-context" {
+            Self::Inject
         } else if command.starts_with("echo ") {
             Self::Echo
         } else {
@@ -767,9 +770,17 @@ impl Provider for BrowserProvider {
                 // never silently widen availability to Send.
                 (Some(vec!["sleep".to_owned()]), "echo-sleep")
             }
+            BrowserPolicy::Inject => (Some(vec!["sleep".to_owned()]), "echo-inject-sleep"),
             BrowserPolicy::Send => (None, "send"),
         };
-        if let Some(tools_allowed) = selection {
+        if matches!(self.1, BrowserPolicy::Inject) {
+            result.decision = harness::hooks::BeforeRequestDecision::Inject {
+                item: harness::item::Item(json!({
+                    "type":"message","role":"user","content":"standalone injected context"
+                })),
+                tools_allowed: selection,
+            };
+        } else if let Some(tools_allowed) = selection {
             result.decision =
                 harness::hooks::BeforeRequestDecision::SendRestricted { tools_allowed };
         }
@@ -1885,6 +1896,26 @@ mod tests {
         );
         assert!(!plan.tools_allowed.iter().any(|tool| tool["name"] == "ask"));
         let result = provider.before_request(&plan).await;
+        let inject_provider = BrowserProvider(
+            CliProvider(DemoProvider::development(".", false)),
+            BrowserPolicy::for_invocation("echo inject-context", &AgentPath(ROOT_PATH.into())),
+        );
+        let injected = inject_provider.before_request(&plan).await;
+        assert_eq!(
+            injected.decision,
+            harness::hooks::BeforeRequestDecision::Inject {
+                item: harness::item::Item(json!({
+                    "type":"message","role":"user","content":"standalone injected context"
+                })),
+                tools_allowed: Some(vec!["sleep".into()])
+            }
+        );
+        assert_eq!(
+            injected.evidence,
+            Some(
+                json!({"consumer":"standalone-browser","selection":"echo-inject-sleep","sleep_advertised":true})
+            )
+        );
         assert_eq!(
             result.decision,
             harness::hooks::BeforeRequestDecision::SendRestricted {
