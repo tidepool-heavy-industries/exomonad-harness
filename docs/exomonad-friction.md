@@ -780,3 +780,167 @@ interview hold means I am stopping here, not opening those gates now.
 - **Evidence churn:** stale candidate/checkouts and repeated source relays cost turns; zero-match filters and lost command-job observation obscured executed checks. Keep `ReviewBasis` and notebook exploration; a typed review submission tool only helps if it binds exact HEAD/basis and gives an authoritative terminal receipt. Add a nonzero-match guard to the existing gate runner rather than a second scheduler.
 - **Repeated reviewer `respond` attempts:** the Engine reviewer reported `current_request=None` after submission while a later notice said request 8 remained open; root saw a Ready response and integrated it. A stale notice/ambiguous terminal receipt is the supported inference; there is no evidence here of a failed Accepted reply or a `ReplyUpdatePending` rejection causing those particular attempts.
 - **Next offline milestone proposal, not approval:** crash/restart recovery after atomic completion commit but before wake hint, with an explicit barrier and wire-faithful strict reply; clean reopen in wave 10 did not prove crash recovery. Existing live/item-2/item-13 holds remain. Review prompt line `let repairLabel = "repair-candidate" :: Label` is stale; fix next iteration with a compile-checked label. Notebook indentation auto-repair remains deferred; supervisor reports the multiline placement fix is already present.
+# Wave 12 (in progress)
+
+- Initial black-box acceptance child was host-cancelled before a reply:
+  `ResponseUnavailable(TargetCancelled("host selected completion abort for shutdown"))`.
+  Replacement was admitted from the same contract baseline. Stop notice
+  reported process cleanup unconfirmed (`process supervisor I/O: No such
+  file or directory`); no branch was treated as integrated.
+- Server child initially returned `Blocked`: it inferred credential-free
+  deterministic work could not traverse Engine. Root identified the existing
+  `Engine::with_transport` and local `ResponsesTransport` examples and
+  reassigned the retained owner with the exact seam. This cost a round trip;
+  the accepted contract had required Engine but not named its constructor.
+- The server's next candidate `70f3989` nevertheless bypassed Engine and
+  substituted static Store `session_state` transitions; root rejected it
+  before review/integration and returned it for same-owner repair. Its
+  `server` focused filter passed 5/5, but those tests did not exercise the
+  required production Engine path or genuine child messaging. A bounded
+  independent Astra seam consultation was admitted.
+- Web candidate `f2a040a` passed reviewer-run Vitest 11/11, but `npm run
+  check` and `npm run build` failed TS2345, and review found unsupported
+  loaded/outcome wording. Root routed exact findings to its retained owner.
+- Web reviewer initially saw its old checkout `f2a040a` on a revised-candidate
+  review; it explicitly checked out `ef5e612` and then reviewed/tested the
+  assigned exact HEAD. Accepted prep was merged; integrated npm checks were
+  11/11, typecheck and build passing. Additive server fields remain a separate
+  web follow-up, not retroactive evidence for that prep.
+- Server `bcedd45` added an offline Engine transport and passed its `server`
+  filter 7/7, but independent review found fake child messaging, absent real
+  progress, cancelled wait marked failed as a request, duplicate prior upserts
+  and incomplete HTTP/Engine cleanup. This review caught product defects
+  that unit-level success missed. The retained owner has exact repair work.
+- The black-box acceptance candidate `9fc9152` compiled and was confirmed
+  expected-red on integrated root: 1 selected/executed, failed at missing
+  cancelled outcome. Root observed that the test reconnected immediately
+  after asynchronous submits; its failure may be a test race, not the intended
+  product invariant, so the owner was asked for a state/event barrier.
+- Astra read-only seam consultation found existing `Engine::with_transport`
+  and `StoreAgentToolService::{spawn_agent,send_message}` sufficient without
+  a new harness library API. No tests/compilation ran for that consultation.
+- Actual-browser tooling was not installed in the project: Playwright-core
+  was installed outside the repository under `/tmp/wave12-browser-tools`;
+  Nix fetched Chromium (reported 504.57 MiB download / 1579.33 MiB
+  unpacked). A Playwright `data:` page smoke check ran successfully, but
+  this is **not** the required live-server browser journey.
+- Additive web candidate `3bfa370` passed owner npm 14/14, check/build,
+  but independent reviewer returned Repair because the server producer
+  at its web-only baseline lacked additive records. This is a real
+  integration gate, not a code defect the web owner can fix. Root requested
+  a second exact-tip verdict scoped explicitly to web preparation, with
+  producer verification deferred to the combined integration. That
+  preparation-scoped review accepted the exact tip; root merged it and
+  integrated npm checks passed 14/14, typecheck and build. The first
+  review's producer finding remains an open product gate.
+- Cancellation state contract correction `c9c7281` kept the existing
+  request coarse `failed` state while requiring specific `outcome:
+  cancelled` and job `cancelled`. Its active server `updateRequest`
+  returned `UpdateUnconfirmed` (durably queued, not presented); root has
+  not claimed incorporation. The test-owner update returned
+  `ReplyAlreadySettled`; a new owned test request carried the correction.
+- The expected-red browser test needed two owner revisions: immediate
+  reconnect could race accepted commands; the first barrier revision
+  `5dd5532` was red 1/1 at a 10-second wait for the missing pending
+  outcome, but overconstrained child reply as FINAL_ANSWER within the
+  child conversation. Candidate `1e08bc6` allowed a real child-sent
+  MESSAGE or FINAL_ANSWER correlated by paths/ordinal, asserted the
+  cancelled coarse/specific distinction, and was merged. Integrated
+  run was 1 selected/executed, failed at missing request
+  `commandId`/`outcome` upsert in 2.91 seconds. This is a stable
+  producer barrier, not a passing acceptance test.
+
+## Wave-12 kaizen notes (before delivery)
+
+- **Prompt/task packet:** The first server brief said "real Engine path"
+  but did not name `Engine::with_transport` or the local replay example.
+  A Luna first returned Blocked, then produced a bypass candidate. A
+  first-call-ready packet should name one valid credential-free constructor,
+  the forbidden bypass, the production `--serve` consumer, and the
+  consequential failure invariant. This is a prompting failure, not
+  evidence that the API seam was missing.
+- **Helper publication:** `reload_helpers` reported a valid publication,
+  but notebook imports of both `SessionHelpers` and
+  `SessionHelpers.TestEvidence` failed, and children could not look up
+  `demoSpec`. The experiment produced zero measured helper reuse. A
+  publication receipt should include an executable import/use smoke check
+  (or the exact actor-visible module path) before a helper is advertised
+  to children. Direct focused-script calls were the safe fallback.
+- **Event routing:** Delayed settlement and ordinary child messages
+  repeatedly surfaced earlier request IDs after those candidates had
+  already been repaired or merged. We used the typed request ID and
+  `status`/retained responses to avoid replay, but model turns were spent
+  saying "already handled." A notice carrying latest active assignment
+  and supersession relation, or suppressing acknowledged old notices,
+  could reduce this relaying cost. No precise call savings measured.
+- **Review continuation:** `reviewAgain` did not always start the
+  reviewer at the revised candidate HEAD; reviewers had to detect the
+  mismatch and check out the exact OID before running checks. The
+  exact-tip gate was valuable, but auto-pinning the retained review
+  checkout (with an explicit receipt) would avoid a common correction.
+  On request 20, the retained reviewer still had HEAD `bcedd45` instead
+  of `7ae65fb`, with a modified `Cargo.lock` and untracked helper files.
+  It correctly returned Blocked and ran zero candidate checks rather than
+  disturbing that checkout. Root replaced it with a fresh exact-tip
+  `reviewCommit` request 21; request 20 is not a review verdict.
+  Fresh request 21 did pin `7ae65fb` and server tests passed 8/8, but
+  its browser target selected and executed 1/1 then failed before server
+  readiness because that checkout lacked generated `web/dist`. The
+  production binary requires those assets, while the acceptance fixture
+  does not provision them. Root supplied the known Nix Node path and
+  requested an asset build plus browser rerun in retained request 22.
+  The failed run did not exercise any HTTP/WS journey assertion.
+  Also, a web-only preparatory slice was initially returned as Repair
+  because its separately owned server producer was absent. Review
+  packets should distinguish "preparation accepted" from "full feature
+  accepted" up front; neither is a substitute for integrated proof.
+- **Steering evidence:** `updateRequest` returned
+  `UpdateUnconfirmed` for a consequential cancellation contract change,
+  meaning durably queued but not known presented. We could not claim
+  incorporation until a candidate named its actual source/check. A
+  typed presentation wake would make active-child correction less
+  guesswork; transport receipt alone is intentionally insufficient.
+- **Positive controls:** `scripts/cargo-focused-test` distinguished
+  selected from executed counts and retained full evidence; expected-red
+  was not mistaken for green. Exact-tip review caught fake child
+  messaging, missing progress, duplicate events and cleanup that
+  server unit tests missed. Path ownership and `git merge-tree` kept
+  reviewed web/test preparation moving while the server owner repaired
+  the bottleneck. The Astra read-only consultation resolved the hard
+  Engine/Store seam without an unowned library edit.
+- Revised server candidate `7ae65fb` reported focused `server` 8/8
+  and black-box browser 1/1 green from a branch based on integrated
+  root `3224398`. The initial requested `--expect 7` was rejected
+  before execution because the filter selected 8 runnable tests;
+  the owner corrected the expectation and reran. At this checkpoint
+  those are child-branch results only; exact-tip review and integrated
+  verification remain outstanding.
+- Session helper seed was copied into `.exomonad/helpers`, customized with
+  `demoSpec`, and `reload_helpers` reported publication. Two subsequent
+  notebook imports (`SessionHelpers.TestEvidence`, `SessionHelpers`) failed
+  with "Could not find module", so no helper check was executed or counted
+  as reuse. Direct `scripts/cargo-focused-test` worked (wire-contract filter
+  1 expected/1 executed). Fresh-context children were told not to assume
+  post-fork helper availability.
+- Web child reported `npm` unavailable and ran no web checks. Root found
+  pinned Node/npm at
+  `/nix/store/v6wsd9nyglmwh32yn7w8z11dq9cksg4m-nodejs-24.20.0/bin`
+  and sent the exact path to the retained worker and reviewer. This is an
+  environment-discovery failure, not passing web evidence.
+- `friction:` The first live Chromium script used a tab name that did not
+  match the accessibility tree; after fixing it, the script incorrectly
+  expected the transient `pending` outcome to remain in history after
+  `cancel`. Its next refresh-count check ran before a final echo
+  settled. These failures were in acceptance automation, not observed
+  server behavior. A unique per-run echo and a final-answer barrier
+  made the final local browser journey pass.
+- `friction:` A first separate process-restart browser script used a
+  non-unique `getByText('outcome pending')` locator and failed before
+  the kill barrier. Restricting to the first matching UI element let
+  the isolated SIGKILL/reopen test pass; the persistent port-4600
+  service was not disturbed.
+- Final integrated source `2c19e45` passed server 8 matched/executed,
+  production browser 1 matched/executed and prior Driver process-kill
+  1 matched/executed. Real local Chromium journey and isolated
+  process-kill browser recovery passed. The existing tailnet HTTPS
+  URL returned 200 from this host, but no second-device test ran.

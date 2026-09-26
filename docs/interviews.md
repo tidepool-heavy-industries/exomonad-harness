@@ -1,5 +1,55 @@
 # Correction-wave interviews
 
+## Wave 12 root — 2026-09-25
+
+- **Tree cost and benefit:** Disjoint server, web and production-binary
+  acceptance owners could work from one shared contract. Web preparation
+  and an expected-red consumer test were integrated while the server
+  was repaired. A bounded read-only Engine/Store consultant resolved
+  the missing-seam claim without a library edit. No component-lead layer
+  was needed: adding one would have added a relay across the single
+  `main.rs` seam rather than useful independent ownership.
+- **Where prompting failed:** The first server packet required a real
+  Engine path but omitted the existing `Engine::with_transport` example.
+  The owner initially declared the credential-free path blocked and
+  then produced a bypass. The follow-up contract had to name the
+  production consumer, genuine Store child service and no-fake-progress
+  invariant. The first review found fake messaging, missing progress,
+  duplicate upserts and incomplete cleanup, all consequential.
+- **Where the harness helped:** Exact cumulative ownership plus
+  `git merge-tree` let reviewed web/test preparation merge independently.
+  Typed request IDs prevented old settlement notices from being
+  mistaken for current replies. `scripts/cargo-focused-test` enforced
+  nonzero selection and exact executed counts. Independent review of
+  `7ae65fb` eventually verified both server 8/8 and real-binary 1/1
+  after assets were supplied. Integrated checks and Chromium then
+  exercised the joined source.
+- **Where orchestration cost turns:** A retained `reviewAgain` started
+  on stale `bcedd45` rather than `7ae65fb`; the reviewer correctly
+  refused to switch its dirty checkout. A fresh exact-tip review
+  started correctly but its browser check failed before readiness
+  because `web/dist` was missing. A second request to the same
+  reviewer built the assets and passed. The session helper seed
+  compiled/published but could not be imported in notebook or child;
+  measured reuse was zero. This experiment was archived under
+  `/tmp/wave12-live/helper-experiment`; direct script calls were the
+  fallback.
+- **Product versus evidence:** The reviewed branch was not delivered
+  until merged at `2c19e45` and rerun 8/8 and 1/1 there. Local
+  Chromium login/command/reconnect and a separate process-kill
+  recovery passed, while remote-device tailnet reachability remains
+  for the operator. The browser script's first selector, transient
+  pending-history and final-echo count assertions failed as test
+  design issues; they were corrected with exact UI selectors,
+  lifecycle-aware expectations and a unique final-answer barrier.
+- **Next improvement:** Make `reviewAgain` pin or explicitly report
+  its HEAD before work, and make a production-binary acceptance target
+  provision or declare web assets rather than failing before the
+  assertion body. A helper publication receipt should include a
+  consumer import/use smoke check. Preserve the valuable typed
+  exact-source and positive-count gates rather than replacing them
+  with another review submission wrapper.
+
 ## Wave 11 root — 2026-09-25
 
 - **Tree and overlap:** Three Luna component owners each admitted production
