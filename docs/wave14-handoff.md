@@ -68,11 +68,14 @@ implementation actors. Branches, worktrees and evidence were not deleted.
 
 ## Remaining provenance and next owner
 
-`docs/wave14-launch.md` is still a template: the supervisor owns the exact
-matched runtime build/source, final launch source, run ID, root thread and
-logs. Root asked for those facts in `docs/questions.md`; leave them pending
-until the supervisor supplies them. No host launch, second-device check,
-credentialed provider inference, full hook catalogue, or live demo migration
-is claimed here. The next owner is the supervisor for launch-record identity
-and any later authorization; the checked Send-only feature needs no such
-identity to establish the local product tests above.
+Supervisor verified the existing completed [launch record](wave14-launch.md):
+runtime checkout15306f7c4 (production42db232c0), run
+08a7d4c5-4821-4887-8a07-42470a08029b, root thread
+01a0dc67-2aed-7eb0-95d5-15dedc7ef92f, workspace98aef850d7be.
+The earlier template claim was stale; those facts were recorded in7f06c78.
+Five final focused evidence records were read directly from the actor's retained
+build overlay and copied to [supervisor evidence](wave14-supervisor-evidence.json).
+Each establishes source75a1e014, one selected/passed test and exit0; unrelated
+helper README dirt remains explicit. Root and child interviews are retained.
+No second-device check, credentialed inference, full hook catalogue or live-demo
+migration is claimed. Next wave waits for reviewed runtime/helper improvements.

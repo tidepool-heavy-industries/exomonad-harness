@@ -13,10 +13,9 @@ No credentialed inference ran. Source evidence records the pre-existing
 dirty helper README; no clean-tree claim.
 
 All root, child and reviewer interviews are incorporated in
-`docs/interviews.md`. Outstanding: supervisor supplies exact matched runtime build/source,
-launch source, run ID, root thread and logs for `docs/wave14-launch.md`.
-Those facts are not inferred. The wave14 root has asked in
-`docs/questions.md`; this does not authorize host or live-demo changes.
+`docs/interviews.md`. Supervisor verified the completed launch record and raw
+focused evidence; see `docs/wave14-handoff.md` and
+`docs/wave14-supervisor-evidence.json`.
 No reviewed/passing wave14 code branch remains unmerged after the
 `6ff6339`, `d1de787` and `75a1e014` integration commits. Preserve the
 pre-existing uncommitted helper README edit.

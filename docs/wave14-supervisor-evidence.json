@@ -1,0 +1,207 @@
+{
+  "run": "08a7d4c5-4821-4887-8a07-42470a08029b",
+  "checks": [
+    {
+      "retained_host_path": "/home/inanna/.cache/tidepool/exomonad/actor-worktrees/024e4ade59c0b3e7c37883155ae5b1f1d536ded093228e681251403a9e786d5c/worktrees/.resources/08a7d4c5-4821-4887-8a07-42470a08029b/actor-1-1/build/upper/debug/deps/focused-ulha_e9w/evidence.json",
+      "evidence": {
+        "build_command": [
+          "cargo",
+          "test",
+          "-p",
+          "harness",
+          "--lib",
+          "--no-run",
+          "--message-format=json"
+        ],
+        "package": "harness",
+        "target": "lib",
+        "filter": "before_request_decision_store_failure_cleans_pending_claim",
+        "expected": 1,
+        "executable": "/tmp/exomonad-actor-workspace/.exomonad/build/cargo/debug/deps/focused-ulha_e9w/harness-2f7ac4b23bcebd22",
+        "sha256": "09f731770072882eb0814b970faefd275765449b8f036f537b83f68793a86ced",
+        "source": "75a1e014d0bc3d7e8208875c84e628dcc2f4bdca",
+        "working_tree_status": " M .exomonad/helpers/README.md\n",
+        "output": "/tmp/exomonad-actor-workspace/.exomonad/build/cargo/debug/deps/focused-ulha_e9w/output.log",
+        "matched": [
+          "engine::tests::before_request_decision_store_failure_cleans_pending_claim"
+        ],
+        "runnable": [
+          "engine::tests::before_request_decision_store_failure_cleans_pending_claim"
+        ],
+        "ignored": [],
+        "exit_code": 0,
+        "summaries": [
+          [
+            1,
+            0,
+            0,
+            0,
+            132
+          ]
+        ]
+      }
+    },
+    {
+      "retained_host_path": "/home/inanna/.cache/tidepool/exomonad/actor-worktrees/024e4ade59c0b3e7c37883155ae5b1f1d536ded093228e681251403a9e786d5c/worktrees/.resources/08a7d4c5-4821-4887-8a07-42470a08029b/actor-1-1/build/upper/debug/deps/focused-pibdmwhm/evidence.json",
+      "evidence": {
+        "build_command": [
+          "cargo",
+          "test",
+          "-p",
+          "harness",
+          "--lib",
+          "--no-run",
+          "--message-format=json"
+        ],
+        "package": "harness",
+        "target": "lib",
+        "filter": "before_request_send_persists_on_transport_failure",
+        "expected": 1,
+        "executable": "/tmp/exomonad-actor-workspace/.exomonad/build/cargo/debug/deps/focused-pibdmwhm/harness-2f7ac4b23bcebd22",
+        "sha256": "09f731770072882eb0814b970faefd275765449b8f036f537b83f68793a86ced",
+        "source": "75a1e014d0bc3d7e8208875c84e628dcc2f4bdca",
+        "working_tree_status": " M .exomonad/helpers/README.md\n",
+        "output": "/tmp/exomonad-actor-workspace/.exomonad/build/cargo/debug/deps/focused-pibdmwhm/output.log",
+        "matched": [
+          "engine::tests::before_request_send_persists_on_transport_failure"
+        ],
+        "runnable": [
+          "engine::tests::before_request_send_persists_on_transport_failure"
+        ],
+        "ignored": [],
+        "exit_code": 0,
+        "summaries": [
+          [
+            1,
+            0,
+            0,
+            0,
+            132
+          ]
+        ]
+      }
+    },
+    {
+      "retained_host_path": "/home/inanna/.cache/tidepool/exomonad/actor-worktrees/024e4ade59c0b3e7c37883155ae5b1f1d536ded093228e681251403a9e786d5c/worktrees/.resources/08a7d4c5-4821-4887-8a07-42470a08029b/actor-1-1/build/upper/debug/deps/focused-fa9enxig/evidence.json",
+      "evidence": {
+        "build_command": [
+          "cargo",
+          "test",
+          "-p",
+          "harness",
+          "--lib",
+          "--no-run",
+          "--message-format=json"
+        ],
+        "package": "harness",
+        "target": "lib",
+        "filter": "before_request_decision_roundtrips_after_reopen",
+        "expected": 1,
+        "executable": "/tmp/exomonad-actor-workspace/.exomonad/build/cargo/debug/deps/focused-fa9enxig/harness-2f7ac4b23bcebd22",
+        "sha256": "09f731770072882eb0814b970faefd275765449b8f036f537b83f68793a86ced",
+        "source": "75a1e014d0bc3d7e8208875c84e628dcc2f4bdca",
+        "working_tree_status": " M .exomonad/helpers/README.md\n",
+        "output": "/tmp/exomonad-actor-workspace/.exomonad/build/cargo/debug/deps/focused-fa9enxig/output.log",
+        "matched": [
+          "store::tests::before_request_decision_roundtrips_after_reopen"
+        ],
+        "runnable": [
+          "store::tests::before_request_decision_roundtrips_after_reopen"
+        ],
+        "ignored": [],
+        "exit_code": 0,
+        "summaries": [
+          [
+            1,
+            0,
+            0,
+            0,
+            132
+          ]
+        ]
+      }
+    },
+    {
+      "retained_host_path": "/home/inanna/.cache/tidepool/exomonad/actor-worktrees/024e4ade59c0b3e7c37883155ae5b1f1d536ded093228e681251403a9e786d5c/worktrees/.resources/08a7d4c5-4821-4887-8a07-42470a08029b/actor-1-1/build/upper/debug/deps/focused-0f4nsfbi/evidence.json",
+      "evidence": {
+        "build_command": [
+          "cargo",
+          "test",
+          "-p",
+          "harness-demo",
+          "--bin",
+          "harness-demo",
+          "--no-run",
+          "--message-format=json"
+        ],
+        "package": "harness-demo",
+        "target": "bin:harness-demo",
+        "filter": "before_request_forwards_standalone_browser_marker",
+        "expected": 1,
+        "executable": "/tmp/exomonad-actor-workspace/.exomonad/build/cargo/debug/deps/focused-0f4nsfbi/harness_demo-99365aebb10c5f12",
+        "sha256": "19d966acd5eb1cb39b905d882d0f2ff805bd4443037f69f8856fee7423d1fd72",
+        "source": "75a1e014d0bc3d7e8208875c84e628dcc2f4bdca",
+        "working_tree_status": " M .exomonad/helpers/README.md\n",
+        "output": "/tmp/exomonad-actor-workspace/.exomonad/build/cargo/debug/deps/focused-0f4nsfbi/output.log",
+        "matched": [
+          "tree::tests::before_request_forwards_standalone_browser_marker"
+        ],
+        "runnable": [
+          "tree::tests::before_request_forwards_standalone_browser_marker"
+        ],
+        "ignored": [],
+        "exit_code": 0,
+        "summaries": [
+          [
+            1,
+            0,
+            0,
+            0,
+            49
+          ]
+        ]
+      }
+    },
+    {
+      "retained_host_path": "/home/inanna/.cache/tidepool/exomonad/actor-worktrees/024e4ade59c0b3e7c37883155ae5b1f1d536ded093228e681251403a9e786d5c/worktrees/.resources/08a7d4c5-4821-4887-8a07-42470a08029b/actor-1-1/build/upper/debug/deps/focused-hb7se6bj/evidence.json",
+      "evidence": {
+        "build_command": [
+          "cargo",
+          "test",
+          "-p",
+          "harness-demo",
+          "--test",
+          "standalone_browser",
+          "--no-run",
+          "--message-format=json"
+        ],
+        "package": "harness-demo",
+        "target": "test:standalone_browser",
+        "filter": "standalone_missing_assets_and_clean_and_process_loss_reopen",
+        "expected": 1,
+        "executable": "/tmp/exomonad-actor-workspace/.exomonad/build/cargo/debug/deps/focused-hb7se6bj/standalone_browser-dca19672d4493cc4",
+        "sha256": "5f21e162f1113503f1569035805642c8743a9bd6e5623e3375abe2d4aca25ec7",
+        "source": "75a1e014d0bc3d7e8208875c84e628dcc2f4bdca",
+        "working_tree_status": " M .exomonad/helpers/README.md\n",
+        "output": "/tmp/exomonad-actor-workspace/.exomonad/build/cargo/debug/deps/focused-hb7se6bj/output.log",
+        "matched": [
+          "standalone_missing_assets_and_clean_and_process_loss_reopen"
+        ],
+        "runnable": [
+          "standalone_missing_assets_and_clean_and_process_loss_reopen"
+        ],
+        "ignored": [],
+        "exit_code": 0,
+        "summaries": [
+          [
+            1,
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      }
+    }
+  ]
+}
