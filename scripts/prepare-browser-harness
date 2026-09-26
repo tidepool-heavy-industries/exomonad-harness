@@ -3,9 +3,18 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 nix develop .#web -c scripts/verify-browser-journey
 cargo build --release --package harness-demo --bin harness-demo
-binary="$PWD/target/release/harness-demo"
-if [[ ! -x "$binary" ]]; then
-  echo "release harness binary was not produced at $binary" >&2
+target_dir="${CARGO_TARGET_DIR:-$PWD/target}"
+if [[ "$target_dir" != /* ]]; then
+  target_dir="$PWD/$target_dir"
+fi
+built_binary="$target_dir/release/harness-demo"
+stable_binary="$PWD/target/release/harness-demo"
+if [[ ! -x "$built_binary" ]]; then
+  echo "release harness binary was not produced at $built_binary" >&2
   exit 1
 fi
-printf 'Prepared standalone browser harness: %s\n' "$binary"
+mkdir -p "$(dirname "$stable_binary")"
+if [[ ! "$built_binary" -ef "$stable_binary" ]]; then
+  install -m 755 "$built_binary" "$stable_binary"
+fi
+printf 'Prepared standalone browser harness: %s\n' "$stable_binary"
