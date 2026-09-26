@@ -18,6 +18,21 @@ No credentialed inference, Tidepool adapter, new external service or Tailscale
 reconfiguration is authorized. Existing Tailscale access can be documented after
 checking the configured route; do not weaken the server's bind/authentication rules.
 
+## The home we are building
+
+Our longer-term goal is to replace Codex as Exomonad's agent harness and give you
+an environment designed specifically for Exomonad: resident Haskell cells,
+composable effects, typed actor conversations, parallel worker trees and durable
+human interaction. This standalone harness is the foundation of that future home.
+Your experience operating the current environment is valuable design evidence.
+
+While delivering this milestone, identify where a custom harness could make your
+work simpler or enable useful behavior that the current host makes awkward.
+Describe concrete interactions, required extension points and preserved semantics;
+separate demonstrated needs from speculative ideas. Feed those observations into
+your final critique. Prove the standalone foundation with deterministic stubs this
+wave; the Exomonad adapter and real inference integration are subsequent work.
+
 ## Root and worker organization
 
 You are the Astra delivery and orchestration-design owner. Use parallel Luna
