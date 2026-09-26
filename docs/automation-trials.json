@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "minimum_exposed_waves": 3,
+  "entries": [
+    {
+      "id": "check_watch",
+      "purpose": "Watch my checks",
+      "status": "implementation_pending",
+      "first_exposed_wave": null,
+      "waves": []
+    },
+    {
+      "id": "review_readiness",
+      "purpose": "Notify me of a reviewable candidate",
+      "status": "implementation_pending",
+      "first_exposed_wave": null,
+      "waves": []
+    },
+    {
+      "id": "failure_diagnostics",
+      "purpose": "Diagnose this failure",
+      "status": "implementation_pending",
+      "first_exposed_wave": null,
+      "waves": []
+    },
+    {
+      "id": "repair_cycle",
+      "purpose": "Carry this repair cycle",
+      "status": "implementation_pending",
+      "first_exposed_wave": null,
+      "waves": []
+    },
+    {
+      "id": "assumption_watch",
+      "purpose": "Watch my assumptions",
+      "status": "implementation_pending",
+      "first_exposed_wave": null,
+      "waves": []
+    },
+    {
+      "id": "parallel_investigation",
+      "purpose": "Investigate alongside me",
+      "status": "implementation_pending",
+      "first_exposed_wave": null,
+      "waves": []
+    },
+    {
+      "id": "interview_collection",
+      "purpose": "Collect interviews before retirement",
+      "status": "implementation_pending",
+      "first_exposed_wave": null,
+      "waves": []
+    },
+    {
+      "id": "prerequisite_preparation",
+      "purpose": "Prepare prerequisites and continue",
+      "status": "implementation_pending",
+      "first_exposed_wave": null,
+      "waves": []
+    },
+    {
+      "id": "command_evidence",
+      "purpose": "Recover useful command evidence",
+      "status": "implementation_pending",
+      "first_exposed_wave": null,
+      "waves": []
+    },
+    {
+      "id": "handoff_assembly",
+      "purpose": "Assemble an evidence-backed handoff",
+      "status": "implementation_pending",
+      "first_exposed_wave": null,
+      "waves": []
+    },
+    {
+      "id": "browser_scenario",
+      "purpose": "Drive an isolated browser scenario",
+      "status": "implementation_pending",
+      "first_exposed_wave": null,
+      "waves": []
+    },
+    {
+      "id": "slow_operation",
+      "purpose": "Watch a slow operation",
+      "status": "implementation_pending",
+      "first_exposed_wave": null,
+      "waves": []
+    }
+  ]
+}

@@ -57,5 +57,36 @@ Record opportunity, chosen helper, actual actor consumption, model calls and
 provider token usage where available, underlying effects, setup/compile cost,
 failures/fallbacks and outcome. Count eliminated polling/relay turns separately
 from newly affordable useful observations. No usage can mean poor discovery,
-a missing opportunity or low utility: inspect those before pruning. Drop prompt
-entries with no demonstrated value; retain full evidence outside prompt context.
+a missing opportunity or low utility: inspect those before pruning. Give every validated entry at least three waves of prompt exposure, even if
+initially unused. Count exposure from the first wave actually supplied with the
+working helper and its menu, not from implementation or publication. Investigate
+discovery, applicable opportunities and failures before changing the interface
+or retiring it for non-use. Keep unsafe/broken paths unavailable until repaired;
+a three-wave trial is not a requirement to repeat a known failure. After the
+trial, prune based on evidence and retain results outside prompt context.
+
+
+## Additional practical machinery
+
+The second batch adds interview collection, prerequisite preparation, retained
+command evidence recovery, evidence-backed handoff assembly, isolated browser
+scenarios and slow-operation diagnosis. Each reuses the first batch where useful.
+These are separate user-facing operations, not twelve required modules/actors.
+
+## Exposure and usage record
+
+`docs/automation-trials.json` owns the trial inventory. At launch, each exposed
+entry records the wave, actual module/entrypoint and tested source revision.
+Afterward record applicable opportunities, evidence of discovery, attempts,
+successful use, failures/fallbacks, useful new work, model calls and available
+provider token counts. Unknown measurements stay unknown. Preserve artifact/run
+references. A wave with no appropriate opportunity still counts as exposure but
+not as evidence of low utility. Interview unused helpers explicitly after three
+waves before removing their menu entries.
+
+Before the next launch, assemble the model-facing menu from validated entries:
+when useful, callable signature, required context/authority, returned evidence,
+async behavior and compiled example location. Add short examples where they
+save more model work than their prompt cost. Pending implementations belong in
+this operator inventory, not in the callable menu. Menu construction and exposure
+recording are launch gates; no uncompiled Haskell snippets in prompts.
