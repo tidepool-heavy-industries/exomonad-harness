@@ -5,11 +5,9 @@ module SessionHelpers
   , module SessionHelpers.BrowserChecks
   , module SessionHelpers.AcceptancePlan
   , module SessionHelpers.BrowserInvestigation
-  , module Project.FocusedGateExample
   ) where
 
 import SessionHelpers.TestEvidence
 import SessionHelpers.BrowserChecks
 import SessionHelpers.AcceptancePlan
 import SessionHelpers.BrowserInvestigation
-import Project.FocusedGateExample
