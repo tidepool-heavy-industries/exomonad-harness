@@ -26,6 +26,14 @@ composable effects, typed actor conversations, parallel worker trees and durable
 human interaction. This standalone harness is the foundation of that future home.
 Your experience operating the current environment is valuable design evidence.
 
+The intended home also gives us our own typed mailbox semantics, event hooks and
+Haskell continuations. Evaluate them as parts of one interaction model: which
+messages, subscriptions and hook decisions should advance work automatically,
+which facts must be retained, and where a model turn contributes useful judgment.
+Favor clean extension seams exercised by concrete consumers. Your critique should
+show how the async foundation can support these capabilities and identify the next
+useful slice; avoid building a speculative universal framework in advance.
+
 The other core motivation is taking advantage of newer model capabilities,
 especially asynchronous tool calls. Prioritize that foundation: represent tool
 work that remains in flight while useful work continues, explicit completion and
