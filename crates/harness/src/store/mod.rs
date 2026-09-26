@@ -2220,13 +2220,13 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let expected_decision = crate::hooks::BeforeRequestDecision::SendRestricted {
-            tools_allowed: vec!["ask".into()],
+            tools_allowed: vec!["sleep".into()],
         };
         let expected = Decision {
             hook: "before-request".into(),
             event_refs: vec!["echo-item".into()],
             decision: serde_json::to_value(&expected_decision).unwrap(),
-            evidence: serde_json::json!({"consumer":"standalone-browser","selection":"echo-ask"}),
+            evidence: serde_json::json!({"consumer":"standalone-browser","selection":"echo-sleep"}),
             latency_ms: None,
         };
         {

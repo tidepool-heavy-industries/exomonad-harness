@@ -776,14 +776,10 @@ impl Provider for BrowserProvider {
         self.0.call_with_context(name, args, context).await
     }
     fn tools(&self) -> Vec<Value> {
-        self.0
-            .tools()
-            .into_iter()
-            .filter(|tool| tool["name"] != "run")
-            .collect()
+        self.0.tools()
     }
     fn all_tools(&self) -> Vec<Value> {
-        self.tools()
+        self.0.all_tools()
     }
 }
 
@@ -1915,6 +1911,12 @@ mod tests {
                 json!({"consumer":"standalone-browser","selection":"child-empty","sleep_advertised":true})
             )
         );
+        let cli = CliProvider(DemoProvider::development(".", false));
+        let cli_result = cli.before_request(&plan).await;
+        assert_eq!(
+            cli_result.decision,
+            harness::hooks::BeforeRequestDecision::Send
+        );
     }
 
     #[test]
@@ -1939,6 +1941,11 @@ mod tests {
         let record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(record["tools"], json!(request.tools));
         let _ = std::fs::remove_file(path);
+        let directory = std::env::temp_dir();
+        assert!(matches!(
+            capture_deterministic_request(&request, &directory),
+            Err(TransportError::Stream(_))
+        ));
     }
 
     #[derive(Clone)]
