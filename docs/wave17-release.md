@@ -21,6 +21,7 @@ In a second terminal, from the repository root, choose a private database path
 and session secret, then start on loopback (replace `43127` if occupied):
 
 ```sh
+umask 077
 mkdir -p .local
 export HARNESS_DEMO_SESSION_SECRET="$(openssl rand -hex 32)"
 target/release/harness-demo \
