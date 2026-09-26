@@ -32,8 +32,9 @@ work that remains in flight while useful work continues, explicit completion and
 result delivery, cancellation, and late results. Preserve call/result identity and
 an honest durable lifecycle through reconnect/reopen. Start by inspecting what the
 existing Engine and extension seams already provide; build the smallest missing
-slice and prove it with deterministic asynchronous tool stubs. Keep provider wire
-assumptions explicit and unimplemented until checked against the real protocol.
+slice and prove it with deterministic asynchronous tool stubs. Use [the source-backed async notes](async-tool-source-notes.md), which trace our
+local Codex implementation and the published provider contract. Inspect relevant
+owning source instead of guessing protocol behavior.
 This priority should shape the shared contract before dependent feature trees fork.
 
 While delivering this milestone, identify where a custom harness could make your
