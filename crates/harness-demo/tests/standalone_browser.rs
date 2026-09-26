@@ -5,6 +5,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use harness::{model::RequestId, store::Store};
 use serde_json::{Value, json};
 use tokio::{
     io::AsyncReadExt,
@@ -197,6 +198,37 @@ async fn stop_sigint(child: &mut Child) {
     assert!(exit.success(), "graceful shutdown failed: {exit}");
 }
 
+fn before_request_decisions(db: &Path) -> Vec<Value> {
+    let store = Store::open(db).expect("open isolated Engine Store");
+    store
+        .decisions(None)
+        .expect("read Store decisions")
+        .into_iter()
+        .filter(|row| row.decision.hook == "before_request")
+        .map(|row| {
+            let request = row
+                .request
+                .as_ref()
+                .expect("before-request decision must reference a request");
+            let stored_request = store
+                .request(request)
+                .expect("read decision request")
+                .expect("decision request must exist");
+            let items = store
+                .items(&RequestId(request.0.clone()))
+                .expect("read decision request items");
+            json!({
+                "id": row.id,
+                "request": request.0,
+                "agent": stored_request.branch,
+                "items": items,
+                "decision": row.decision.decision,
+                "evidence": row.decision.evidence,
+            })
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     let root = temp_path();
@@ -243,6 +275,37 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
             .any(|e| e["type"] == "MESSAGE"),
         "child message absent before reopen"
     );
+    let decisions_before_reopen = before_request_decisions(&db);
+    let tagged: Vec<_> = decisions_before_reopen
+        .iter()
+        .filter(|row| row["evidence"] == json!({"consumer":"standalone-browser"}))
+        .collect();
+    assert!(
+        !tagged.is_empty(),
+        "expected before-request evidence for browser Engine requests; decisions: {decisions_before_reopen:#?}"
+    );
+    assert!(
+        tagged.iter().all(|row| {
+            row["request"]
+                .as_str()
+                .is_some_and(|request| !request.is_empty())
+                && row["agent"].as_str().is_some_and(|agent| !agent.is_empty())
+                && row["decision"] == json!("Send")
+        }),
+        "hook decisions must retain request and agent provenance and Send: {tagged:#?}"
+    );
+    assert!(
+        tagged.iter().any(|row| {
+            row["agent"] == "/root"
+                && serde_json::to_string(&row["items"])
+                    .is_ok_and(|items| items.contains("echo standalone"))
+        }),
+        "expected echo decision correlated to its Engine request and /root agent: {tagged:#?}"
+    );
+    assert!(
+        tagged.iter().any(|row| row["agent"] != "/root"),
+        "expected a child-agent decision (its path is intentionally not fixed): {tagged:#?}"
+    );
     stop_sigint(&mut first).await;
 
     let mut second = spawn(&db, &assets, selected_port);
@@ -262,6 +325,11 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
             .unwrap()
             .iter()
             .any(|r| r["commandId"] == child_id)
+    );
+    assert_eq!(
+        before_request_decisions(&db),
+        decisions_before_reopen,
+        "opening and reading the stored session must not create hook decisions"
     );
     second.kill().await.unwrap();
     assert!(
