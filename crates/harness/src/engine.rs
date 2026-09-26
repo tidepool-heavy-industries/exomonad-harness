@@ -176,6 +176,16 @@ impl<A: Auth + Clone + 'static, P: Provider + 'static> Engine<A, P, ResponsesCli
 }
 
 impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
+    /// Hook invocation seam for the request-loop owner: call after the final
+    /// request is assembled and before transport, then persist against that
+    /// request's durable identity. A retry of transport is a new attempt, not
+    /// an exactly-once hook transaction.
+    async fn evaluate_before_request(
+        &self,
+        plan: &crate::hooks::RequestPlan,
+    ) -> crate::hooks::BeforeRequestResult {
+        self.provider.before_request(plan).await
+    }
     /// Alternate transport constructor, primarily for deterministic replay.
     pub fn with_transport(
         client: C,

@@ -1,5 +1,6 @@
 use crate::{
     agents::{is_agent_verb, verb_tool_schemas},
+    hooks::{BeforeRequestResult, RequestPlan},
     model::{AgentPath, CallId},
 };
 use async_trait::async_trait;
@@ -39,6 +40,10 @@ pub enum ProviderError {
 /// A provider owns tool meaning; the harness owns scheduling and history.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Invoked once before an Engine transport attempt. Default is pass-through.
+    async fn before_request(&self, _plan: &RequestPlan) -> BeforeRequestResult {
+        BeforeRequestResult::default()
+    }
     async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError>;
     /// Context-aware entry point. Existing providers remain source-compatible;
     /// providers which emit progress may override this method.
