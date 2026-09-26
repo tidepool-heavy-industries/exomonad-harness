@@ -289,7 +289,7 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     let decisions_before_reopen = before_request_decisions(&db);
     let tagged: Vec<_> = decisions_before_reopen
         .iter()
-        .filter(|row| row["evidence"] == json!({"consumer":"standalone-browser"}))
+        .filter(|row| row["evidence"]["consumer"] == "standalone-browser")
         .collect();
     assert!(
         !tagged.is_empty(),
@@ -301,21 +301,27 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
                 .as_str()
                 .is_some_and(|request| !request.is_empty())
                 && row["agent"].as_str().is_some_and(|agent| !agent.is_empty())
-                && row["decision"] == json!("Send")
         }),
-        "hook decisions must retain request and agent provenance and Send: {tagged:#?}"
+        "hook decisions must retain request and agent provenance: {tagged:#?}"
     );
     assert!(
         tagged.iter().any(|row| {
             row["agent"] == "/root"
                 && serde_json::to_string(&row["items"])
                     .is_ok_and(|items| items.contains("echo standalone"))
+                && row["decision"] == json!({"SendRestricted":{"tools_allowed":["sleep"]}})
+                && row["evidence"]["selection"] == "echo-sleep"
+                && row["evidence"]["sleep_advertised"] == true
         }),
-        "expected echo decision correlated to its Engine request and /root agent: {tagged:#?}"
+        "expected echo-sleep decision, advertised sleep, Engine request and /root agent: {tagged:#?}"
     );
     assert!(
-        tagged.iter().any(|row| row["agent"] != "/root"),
-        "expected a child-agent decision (its path is intentionally not fixed): {tagged:#?}"
+        tagged.iter().any(|row| {
+            row["agent"] != "/root"
+                && row["decision"] == json!({"SendRestricted":{"tools_allowed":[]}})
+                && row["evidence"]["selection"] == "child-empty"
+        }),
+        "expected child-empty decision (its path is intentionally not fixed): {tagged:#?}"
     );
     let captured: Vec<Value> = std::fs::read_to_string(&capture)
         .expect("deterministic transport must capture outgoing requests")
