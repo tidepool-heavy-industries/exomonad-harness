@@ -38,6 +38,16 @@ Use ordinary event-driven review; automatic review/repair convergence is deferre
 The root owns integration and uses broad bounded Luna delegation with useful depth.
 See the brief for the helper composition experiment and acceptance evidence.
 
+Wave-12 working contract: `docs/wave12-contract.md`. First frontier starts from
+the shared-contract commit following `6e3dcd32b686cc84dc4149cd18183bfacb7bc54c`.
+Expected owners: deterministic server (`crates/harness-demo/src/main.rs`),
+browser (`web/src/`), and black-box acceptance
+(`crates/harness-demo/tests/browser_journey.rs`). The first expected replies
+are code candidates or specific seam questions; each owner reports focused
+test expected/executed counts and friction. Root owns integration, helper
+publication, live browser acceptance and Tailscale launch. Reconcile the
+exact admission checkpoint and branch identities after the fork cell.
+
 ## Evidence and constraints
 
 [Wave-11 checkpoint history](docs/wave11-handoff.md),
