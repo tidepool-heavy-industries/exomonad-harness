@@ -20,8 +20,30 @@
           "binding": "default notebook imports",
           "evidence": "docs/wave15-launch.md",
           "opportunities": null,
-          "attempts": [],
-          "outcome": "pending"
+          "attempts": [
+            {
+              "call": "call_LQRdIo6UnI3Js9xw5yFUvYbt",
+              "outcome": "compile refusal: Project.TestEvidence not explicitly imported; no command started"
+            },
+            {
+              "call": "call_maM0YIkFWSHBBhlekH2omTQQ",
+              "outcome": "explicit import and original focused job started",
+              "job": "049a8eea-5221-42f9-9edc-f607cba4a9a6"
+            },
+            {
+              "call": "call_kPJhNW98t6X0btcKPdEsQeOV",
+              "outcome": "rejected String/Text fallback; corrected before watcher admission"
+            },
+            {
+              "call": "call_RrI3nmwwNwyVcRw7k2wbB7vO",
+              "outcome": "watcher5@1 admitted"
+            },
+            {
+              "call": "call_03pktoqNhroZgbJpIMosl7ew",
+              "outcome": "CheckUnknown with one retained notice; not strict acceptance"
+            }
+          ],
+          "outcome": "watcher consumed; interpretation and final outcome pending"
         }
       ]
     },

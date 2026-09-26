@@ -5,6 +5,10 @@ source. A commit or this menu alone does not install a module into a live run.
 Keep the original response, `Cmd.Job`, source OID, or evidence path so a compact
 notice remains traceable. Choose useful helpers; no entry is mandatory.
 
+For qualified `Project.TestEvidence` calls, first `import Project.TestEvidence`.
+`Project.CheckResults` re-exports its unqualified names but does not bring that
+module qualifier into scope. Wave15 exercised this explicit import successfully.
+
 | Need | Callable entry and inputs | Result and compiled example |
 | --- | --- | --- |
 | Let focused checks finish while working | `Project.CheckResults.watchChecks`: owner, `NoticePolicy`, named `FocusedRun` values. Start each run with explicit `Cmd.Memory` through `Project.TestEvidence.startFocused` or `startFocusedIn`. | One completion watcher retains raw command receipts, parsed count/source evidence, and notice attempts; `readChecks` and `checksSummary` inspect it. `Project.CheckResultsChecks.completionRouting` exercises late, failed, dirty, missing, and mismatched results. |

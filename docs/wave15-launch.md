@@ -66,3 +66,16 @@ instructed by the menu. Its live import has not yet been observed. This records
 prompt exposure, not helper use, successful notification delivery or savings.
 Trial opportunities and outcomes remain pending. Root was compiling the shared
 contract by 09:50 UTC; no final product acceptance is implied.
+
+## First frontier and initial helper use
+
+Root landed scaffold `a61a9c6d5f36d7efd91bde779d07c114174e0007`.
+Actors `2@1`, `3@1` and `4@1` reached interactive with resource admission.
+Root recovered a missing qualified TestEvidence import, then attached watcher
+`5@1` to original job `049a8eea-5221-42f9-9edc-f607cba4a9a6`.
+An additional String/Text fallback cell was rejected and corrected. The latest
+observation was `CheckUnknown`, with one notice retained. A direct command
+receipt reported 1 selected/executed/passed test with a dirty working tree;
+that does not establish strict source acceptance or successful notice delivery.
+The bounded observer ended after this startup/frontier evidence. Exact calls
+and pending interpretation are retained in `docs/automation-trials.json`.
