@@ -42,6 +42,7 @@ describe('operator views', () => {
     fireEvent.change(screen.getByLabelText('Command'), { target: { value: 'echo  keep spaces' } })
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
     expect(onCommand).toHaveBeenLastCalledWith('echo  keep spaces')
-    expect(screen.getByText(/A send is not a completion/)).toBeInTheDocument()
+    expect(screen.getByText(/Sending is not acceptance or completion/)).toBeInTheDocument()
+    expect(screen.getByText(/Outcomes, progress, and messages appear only to the extent represented/)).toBeInTheDocument()
   })
 })

@@ -204,21 +204,21 @@ export default function App({ data = emptyData, onCommand }: AppProps) {
         {screen === "inbox" && <Inbox data={data} />}
         {screen === "command" && <section aria-labelledby="command-heading">
           <h2 id="command-heading">Send a command</h2>
-          <p className="hint">Deterministic mode · commands run on the authenticated host. A send is not a completion; state below changes only when the server publishes it.</p>
-          <div className="rows" aria-label="Command guide">
-            <p><code>echo TEXT</code> records progress and an answer. <code>test</code> runs the deterministic check.</p>
-            <p><code>wait</code> stays pending; use Cancel wait to end it. <code>message TEXT</code> reports its actual delivery state.</p>
-            <p><code>child TEXT</code> creates a child and ordered messages. <code>fail</code> records a controlled failure; retry with echo.</p>
+          <p className="hint">Deterministic mode · commands are sent to the authenticated host. Sending is not acceptance or completion; this client displays only state present in the server snapshot and events.</p>
+          <div className="rows" aria-label="Command grammar">
+            <p><code>echo TEXT</code> · <code>test</code> · <code>wait</code> · <code>message TEXT</code></p>
+            <p><code>cancel</code> · <code>child TEXT</code> · <code>fail</code></p>
+            <p className="hint">Use the command form for the documented operations. Outcomes, progress, and messages appear only to the extent represented by received server records.</p>
           </div>
           <div className="toolbar" aria-label="Common deterministic actions">
-            {[
+            {([
               ["Run test", "test"],
               ["Start wait", "wait"],
               ["Cancel wait", "cancel"],
               ["Create example child", "child browser example"],
               ["Fail request", "fail"],
               ["Recover with echo", "echo recovered"],
-            ].map(([label, value]) => <button key={value} type="button" disabled={!onCommand} onClick={() => onCommand?.(value)}>{label}</button>)}
+            ] as const).map(([label, value]) => <button key={value} type="button" disabled={!onCommand} onClick={() => onCommand?.(value)}>{label}</button>)}
           </div>
           <form className="command-form" onSubmit={submit}>
             <label className="sr-only" htmlFor="command-input">Command</label>
@@ -227,7 +227,7 @@ export default function App({ data = emptyData, onCommand }: AppProps) {
           </form>
           {!onCommand && <p className="hint" role="status">Command channel is not connected.</p>}
           <h2>Authoritative activity</h2>
-          <p role="status">Snapshot sequence {data.nodes.length || data.timeline.length || data.inbox.length ? "loaded" : "loaded; no activity recorded"} — reconnect or refresh to load stored history. Refresh does not replay commands.</p>
+          <p className="hint">Stored records received from the host; refresh reconnects to the server snapshot and does not replay submitted commands.</p>
           <Timeline data={data} />
           <h2>Conversation and child identities</h2><Tree data={data} />
           <h2>Messages and replies</h2><Inbox data={data} />
