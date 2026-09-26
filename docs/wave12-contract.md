@@ -34,6 +34,11 @@ Additive browser fields for this wave, owned by the server:
   and optional `detail` (readable reason). Existing `state` remains the
   coarse request lifecycle; do not overload it with delivery states.
   `outcome` describes only what the server has actually observed.
+  For a cancelled wait, preserve the existing request `state:"failed"`
+  (the request did not complete), set `outcome:"cancelled"`, and mark its
+  associated job `state:"cancelled"`. The browser presents the specific
+  `outcome`, not the coarse request state, as the human-facing reason.
+  This avoids widening the shared Request.state enum merely for this demo.
 - Progress is a durable envelope with `type:"PROGRESS"`, `sender:"/harness"`,
   `recipient` identifying the affected agent and human-readable `payload`.
   Message and reply envelopes use existing `MESSAGE` and `FINAL_ANSWER`
