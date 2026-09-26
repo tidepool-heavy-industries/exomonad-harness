@@ -29,8 +29,9 @@ pre-existing uncommitted helper README edit.
   states and final checks are in `docs/wave14-handoff.md`.
 - The three implementation actors and all three review actors were
   retired through typed group cleanup after interviews. Review actors
-  reached stopped-now; the three implementation actors entered
-  `StoppedReleasing` (release notice pending at this checkpoint).
+  reached stopped-now; the three implementation actors initially entered
+  `StoppedReleasing`, then host notices confirmed actors 2, 3 and 4
+  stopped with resources released.
   Retirement does not delete their branches, worktrees or evidence.
 - The sole unrelated root worktree change is the pre-existing
   `.exomonad/helpers/README.md` edit. Do not fold it into product code.

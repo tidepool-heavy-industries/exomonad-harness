@@ -62,6 +62,9 @@ test was independently authored and merged in `6ff6339`; its integrated
 green run is the product consumer check, not its earlier compilation.
 Details, failed helper trials and tree costs are in
 `docs/exomonad-friction.md` and `docs/interviews.md`.
+All six wave-14 workers/reviewers were retired through typed cleanup;
+subsequent host notices confirmed resource release for the three
+implementation actors. Branches, worktrees and evidence were not deleted.
 
 ## Remaining provenance and next owner
 
