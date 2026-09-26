@@ -39,6 +39,7 @@ Reference (Project.Types, Project.Work and the library; `(...)` elides a constra
 - `reportProgress :: (WorkProgress) -> Eff effects ()` -- bound only when the activation does not say it is unavailable.
 - `data WorkProgress = WorkProgress { workEvidence :: [Candidate], workQuestions :: Attention }` -- evidence so far and every open question.
 - `type Attention = [Question]`; `data Question = Question { questionKey :: Text, questionDetails :: DesignQuestion }` -- pass `[]` when you have no open question.
+- `data DesignQuestion = DesignQuestion { questionPlan :: Text, questionSource :: GitOid, questionFinding :: Text, questionEvidence :: [Text], questionAlternatives :: [Text], questionUnblocks :: [Text] }` -- all six fields are required; use your assigned plan and exact source, the decision needed, supporting observations, alternatives (or `[]`), and what the answer unblocks.
 - `parentAgent :: Member Core.ActorContext effs => Eff effs (Maybe AgentRef)` -- Nothing is a normal answer, not a fault.
 - `sendMessage :: Member Notifications effs => AgentRef -> Text -> Eff effs (Either NotificationError NotificationReceipt)` -- a receipt proves transport, not reading.
 - `inspectFull :: FullDisplay a => a -> FullInspection` -- shows a value in full.
