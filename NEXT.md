@@ -1,5 +1,43 @@
 # Current assignment — wave14 before-request hook
 
+## Wave14 root checkpoint (in progress)
+
+- Actor-view `git status --porcelain` succeeded before forks; it reported
+  pre-existing dirty `.exomonad/helpers/README.md` and
+  `.exomonad/helpers/SessionHelpers/TestEvidence.hs`. No unknown-clean status.
+- Shared Send-only hook contract and Engine invocation seam:
+  `81ef34ce05c4c9bc823f6d495befd485055cbbc8`. Root checked
+  `cargo check -p harness --lib` and the focused serde test (1 selected,
+  1 executed, 1 passed). The first focused evidence was run before amend;
+  a same-named notebook helper run at the amended source also passed 1/1
+  but its strict cleanliness predicate was false for the dirty helper files.
+- Planned wave14 provider/store, engine, independent expected-red acceptance
+  children start at the exact shared contract above. Provider/Store owns
+  `provider.rs`, `store/mod.rs`, `harness-demo/src/main.rs` and `tree.rs`;
+  Engine owns `engine.rs`; acceptance owns
+  `harness-demo/tests/standalone_browser.rs`. First expected replies:
+  checked component candidates, or the acceptance test's observed red.
+- Admission occurred: Provider/Store actor 2, Engine actor 3, acceptance actor
+  4. Provider/Store candidate `2a9852cc6444a960010151b3d26d8b637224d498`
+  passed its own focused Store and demo checks 1/1 each; independent exact-tip
+  review actor 5 is pending. Engine initial candidate
+  `7b5693a6cad67d6c294947dd8144a123323ab768` compiled only; root
+  requested repair from retained actor 3 for cancellation and focused
+  failure-path tests. Acceptance actor 4 is pending expected-red; corrected
+  consumer seam: browser echo/child do invoke Engine via
+  `run_deterministic_engine_turn`, and decision request IDs are Engine UUIDs,
+  not the browser snapshot's UI IDs.
+- Acceptance actor 4 corrected the hook discriminant to `before-request` at
+  `506e1791a19e3bd7a932926ceb9654aa2119997c`; its focused standalone
+  test selected/executed 1/1 and failed as expected because Store decisions
+  were `[]` without the producer. This is a confirmed red barrier, not a
+  reviewed or integrated green test. Provider/Store review requested typed
+  Send serialization repair on actor 2; actor 3's Engine test/cancellation
+  repair is also still pending.
+- Boundary: one Send decision per new transport attempt, associated with its
+  durable request and agent; failed transport keeps the recorded decision.
+  Readback/reopen alone must not invoke the hook. Retry is not exactly-once.
+
 Read [the wave-14 brief](docs/wave14-brief.md) first. This branch is
 `rsi/wave14` from harness master `36cdebf01f7b0792cf6828ee0e0d4ab045e3b61e`;
 the pinned shared workspace is

@@ -1032,3 +1032,57 @@ interview hold means I am stopping here, not opening those gates now.
   three interviews, which were admitted and returned. The fail-closed
   reviewer reported one rejected Haskell multiline-list cell, then
   a compact binding succeeded; its review findings were unaffected.
+# Wave 14 before-request hook (in progress)
+
+- `friction:` Root's actor-view `git status --porcelain` succeeded before
+  forking and found pre-existing helper README/TestEvidence edits. The pinned
+  helper source in the shared contract commit reserves 4 GiB. Root briefly
+  published a 3-GiB local edit for a one-cell start/finish experiment; the
+  focused scaffold test selected/executed/passed 1/1 at `81ef34ce`, but the
+  helper's strict clean-tree predicate was false because helper files were
+  dirty. Root reverted its local 3-GiB edit to 4 GiB; fork snapshots did not
+  receive that later change.
+- `friction:` Provider/Store owner used the dirty 3-GiB helper in one cell.
+  The Store reopen test selected/executed/passed 1/1 and retained JSON, but
+  source cleanliness was not established. It separately ran the direct demo
+  forwarding check 1/1. Implementation actor was useful on owned files;
+  exact-tip review and integration remain distinct.
+- `friction:` Engine owner's helper trial initially rejected at module
+  import. After `reload_helpers`, a one-cell start/finish trial issued three
+  command effects: the focused runner exited 1 with 0/0/0 selected/runnable/
+  executed, evidence read exited 0, diagnostic tail exited 1 after zero-match
+  rejection. Jev failure classification returned HTTP 403 circuit-open.
+  This was not a product test. The child still held the dirty 3-GiB helper
+  snapshot, so root directed a direct focused-script fallback, not another
+  helper attempt. The first Engine candidate compiled but had no focused
+  test or cancellation guard, requiring a retained-owner repair.
+- Supervisor audit (reported): Jev recovered at 06:40:26 UTC after 10
+  actual RBAC403 requests and 120 local breaker refusals; no credential
+  cause was established. The helper experiment measures composition and
+  reuse, not a fixed 4-GiB reservation. A 3-GiB trial is valid when its
+  actual helper/source identity, command effects and counts are recorded;
+  product checks do not depend on Jev. Root had earlier treated the
+  3-GiB fork snapshot as insufficient for a 4-GiB trial, prompting
+  unnecessary steering; do not rerun completed tests for that reason.
+- `friction:` Acceptance owner initially read `deterministic_command` as the
+  whole browser consumer and declared the Engine hook unreachable. Root
+  located the actual `run_deterministic_engine_turn` calls in main.rs for
+  echo/child and delivered a source-specific correction. Browser snapshot
+  request IDs differ from durable Engine request IDs; the latter join through
+  Store::request to the agent branch. Acceptance incorporation remains
+  pending.
+- `friction:` Exact-tip Provider/Store review at `2a9852c` caught a
+  misleading passing Store test: it hand-built `{"decision":"Send"}` rather
+  than serializing the typed unit enum, whose serde representation is
+  `"Send"`. Root returned this to the retained Provider/Store owner for a
+  focused typed roundtrip. The reviewer also identified the unproven
+  production Engine/browser boundary, tracked as a combined-product gate
+  owned by the separate Engine and acceptance workers; the component review
+  alone cannot close it.
+- `friction:` Independent browser acceptance test was correctly
+  expected-red (1 selected/executed/failed with no producer decisions)
+  after web assets and 14/14 web tests were prepared, but root's
+  cumulative diff inspection caught a hook-key mismatch before integration:
+  it filtered `before_request` while the Engine candidate records
+  `before-request`. Root returned the single-file test to its owner so
+  integrated green would not be blocked by the test's own spelling.
