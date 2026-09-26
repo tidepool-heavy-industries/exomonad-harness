@@ -244,6 +244,10 @@ async fn wait_for_outcome(
                 && frame["event"]["event"]["kind"] == "request.upsert"
             {
                 let request = &frame["event"]["event"]["value"];
+                assert!(
+                    request["commandId"].is_string() && request["outcome"].is_string(),
+                    "request.upsert omitted the contract's commandId/outcome fields"
+                );
                 if request["commandId"] == command_id
                     && outcomes.contains(&request["outcome"].as_str().unwrap_or_default())
                 {
@@ -351,6 +355,13 @@ async fn browser_journey_auth_pending_cancel_child_failure_and_reconnect() {
     let requests = restored["snapshot"]["requests"].as_array().unwrap();
     let by_id = |id: &str| requests.iter().find(|r| r["commandId"] == id).unwrap();
     assert_eq!(by_id(&wait_id)["outcome"], "cancelled");
+    assert_eq!(by_id(&wait_id)["state"], "failed");
+    let jobs = restored["snapshot"]["jobs"].as_array().unwrap();
+    let wait_job = jobs
+        .iter()
+        .find(|job| job["id"] == wait_id)
+        .expect("cancelled wait has no associated durable job");
+    assert_eq!(wait_job["state"], "cancelled");
     assert!(
         ["queued", "presented", "acted"].contains(&by_id(&message_id)["outcome"].as_str().unwrap())
     );
@@ -395,23 +406,27 @@ async fn browser_journey_auth_pending_cancel_child_failure_and_reconnect() {
         .filter_map(|row| row["ordinal"].as_u64())
         .collect();
     assert!(ordinals.windows(2).all(|pair| pair[0] < pair[1]));
-    let child_envelopes: Vec<&Value> = envelopes
+    let child_path = child_conversation["path"].as_str().unwrap();
+    let parent_message = envelopes
         .iter()
-        .filter(|row| row["conversationId"] == child_conversation["id"])
-        .collect();
-    let parent_message = child_envelopes
+        .find(|row| row["type"] == "MESSAGE" && row["recipient"] == child_path)
+        .expect("child is missing the delivered parent message");
+    let child_reply = envelopes
         .iter()
-        .find(|row| row["type"] == "MESSAGE")
-        .expect("child conversation is missing the delivered parent message");
-    let child_reply = child_envelopes
-        .iter()
-        .find(|row| row["type"] == "FINAL_ANSWER")
-        .expect("child conversation is missing its reply");
+        .find(|row| {
+            (row["type"] == "MESSAGE" || row["type"] == "FINAL_ANSWER")
+                && row["sender"] == child_path
+        })
+        .expect("child is missing its sent reply");
     assert!(
         !parent_message["sender"]
             .as_str()
             .unwrap_or_default()
             .is_empty()
+    );
+    assert_eq!(
+        parent_message["sender"], child_reply["recipient"],
+        "child reply is not addressed to the actual parent sender"
     );
     assert!(
         !parent_message["recipient"]
