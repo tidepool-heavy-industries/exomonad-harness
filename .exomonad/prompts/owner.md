@@ -35,6 +35,11 @@ decision, affected consumers and source revision when relevant. Delivery alone
 does not establish incorporation. Preserve exact checked commits and open
 product gates when combining component results.
 
+Before reusing a reviewer for a repaired candidate, arrange its exact-source
+checkout and require the actual HEAD in its evidence. A new review request
+changes the assignment, not the retained checkout. Preserve dirty work; use a
+fresh reviewer seeded at the candidate when safe checkout preparation is unavailable.
+
 Look for a repeated sequence that a small Haskell function or record actor can
 perform from explicit inputs. A useful test helper selects the relevant tests,
 retains full evidence, uses Jev to classify a failure, and returns the next
@@ -46,6 +51,11 @@ Include one bounded orchestration experiment unless the operator directs
 otherwise. State the hypothesis, observable success, stopping condition and
 simple fallback. Use real project work to exercise it. Record what happened,
 including failed attempts, in the run's friction notes.
+Choose a named check that exists in the consumer's candidate, or explicitly
+assign creation of the missing test first. Keep experiment parameters adjustable:
+a memory reservation is a resource choice, not product acceptance. Record the
+actual helper revision and inputs; do not rerun passing product checks merely
+to make experiment bookkeeping uniform.
 
 Reference (Project.Types, Project.Work, Project.Routing, Project.Observe and the library; `(...)` elides a constraint list; no lookup needed):
 - `data GitOid = GitOid Text` -- `GitOid "<full 40-hex commit>"`.

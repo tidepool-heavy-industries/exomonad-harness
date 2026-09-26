@@ -57,6 +57,20 @@ fresh context must not depend on an omitted explanation. A parent's later edits
 do not update existing children automatically. Deliver changes explicitly and
 ask affected consumers to identify what they incorporated and checked.
 
+When an import fails, retain the exact compiler error and distinguish the module
+file in the checkout from the published helper layer and the actor's import
+roots. If `reload_helpers` is available, publish the intended helper revision
+and retry the import once. If it still fails, report both observations and use
+the direct operation while the owning mechanism is investigated. Do not copy
+helpers into another source subsystem to hide a publication failure. A root
+revert does not revert a child's inherited dirty snapshot.
+
+Count reuse only when a consumer imports and executes the helper. Report actor,
+helper revision, test target/filter, selected/executed counts and command effects
+separately from model tool calls. A missing test is a selection failure; a Jev
+service failure leaves deterministic command evidence usable. Neither becomes
+a passing judgment.
+
 Seeds are invitations to customize: replace generic test selection, choose useful
 Jev questions, and adjust output to the component's debugging needs. Keep an
 escape hatch to the original evidence. Promote a helper into shared project
