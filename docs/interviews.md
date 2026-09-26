@@ -50,6 +50,109 @@
   exact-source and positive-count gates rather than replacing them
   with another review submission wrapper.
 
+### Supervisor's six-question wave-12 retrospective
+
+1. **Parallel value and serial convergence.** **Observed:** One ready
+   frontier gave `main.rs` to the server owner, `web/src/` to the web
+   owner, and `browser_journey.rs` to an independent acceptance owner;
+   the first acceptance actor was host-cancelled and replaced. Web
+   `ef5e612` and additive-renderer `3bfa370` were reviewed and merged
+   while the server owner repaired its path. The acceptance test
+   `1e08bc6` was useful *red* evidence: it selected/executed 1/1 and
+   failed at absent `commandId`/`outcome`, not at a guessed UI state.
+   The read-only Astra consultation independently found
+   `Engine::with_transport` and `StoreAgentToolService` without a
+   library edit. **Serial point:** one owner and one production file
+   (`main.rs`) then had to absorb the shared contract and the
+   `bcedd45` review findings (fake child, absent progress, duplicate
+   upserts, cleanup), reach `7ae65fb`, receive exact-tip acceptance,
+   and only then merge at `2c19e45` for combined checks and Chromium.
+   Explanation: the work was parallel by ownership, but a single
+   server producer was the unavoidable integration gate; more lead
+   layers would not have removed it.
+2. **Missing facts versus real discovery.** **Observed:** The initial
+   packet said “real Engine path” but omitted the existing
+   `Engine::with_transport`/`ResponsesTransport` replay example and
+   `StoreAgentToolService::{spawn_agent,send_message}`; request 1
+   returned Blocked, then `70f3989` implemented a Store-only bypass
+   despite 5/5 local server tests. A first-call packet naming that
+   constructor, the `--serve` production consumer, and explicit
+   “no canned child reply/progress” and cancellation failure barriers
+   would likely have changed the first attempt. **Inference, not
+   observation:** that packet might have saved the initial Blocked and
+   bypass rounds; it would not guarantee a correct implementation.
+   Genuine discovery still included how the existing Request and Job
+   state enums represented cancellation (`c9c7281`), whether an
+   Engine turn actually persisted progress and child delivery, and
+   how HTTP/Engine tasks were joined on errors. Exact `bcedd45`
+   review and the production-binary test established those facts.
+3. **Late notices and refused/unconfirmed steering.** **Observed:**
+   old candidate settlements (including `70f3989`) surfaced after
+   newer work was active; root repeatedly reconciled request IDs and
+   explained that a reply was not an integration. The cancellation
+   `updateRequest` returned `UpdateUnconfirmed` for the server
+   (queued, not known presented); the acceptance owner's update
+   returned `ReplyAlreadySettled`, requiring a fresh request carrying
+   `c9c7281`. The server later named the correction in its candidate,
+   which is incorporation evidence rather than proof from the update
+   receipt. **Cost:** at least one new acceptance request and several
+   explicit source/status reconciliation turns; no reliable token or
+   wall-clock savings were measured. **Explanation:** a transport
+   receipt cannot prove a child read or used a correction; a
+   supersession-aware, presented/incorporated event would have reduced
+   repeated explanations without silently replacing assignments.
+4. **Cleanup sequencing and the needed receipt.** **Observed:** At
+   delivery root executed seven `planCleanupFor`/`executeCleanup`
+   operations in one Haskell cell, sequentially. The first
+   ready-frontier plan covered actors 2 and 3 together, so a later
+   plan for actor 3 was empty. Every plan had no pending response or
+   watch; several `CleanupReceipt`s said `cleanupReceiptComplete=True`
+   while their actor step was `AgentStoppedReleasing`. Later host
+   notices separately confirmed actor resources released. **Why
+   sequential:** the operations mutate group/actor revisions and
+   shared group 1, and a plan can stale; sequential composition was
+   the simplest safe decision, not a measured throughput need.
+   The `StoppedReleasing` receipt already permitted ending the turn
+   without polling or issuing stop again. A clearer *batch* receipt
+   separating “request settled,” “actor terminal,” “release pending
+   with a notice token,” and “resource release terminal” would have
+   made it obvious when root could finish and which releases still
+   awaited notice. `cleanupReceiptComplete=True` alone did not mean
+   process cleanup was terminal.
+5. **Reusable helper and existing payoffs.** A small
+   `focusedGate(package,target,filter,expected)` returning the
+   retained evidence path, exact selected/executed counts, outcome
+   and (only on failure) bounded semantic triage would have been
+   used for the server 8/8, production browser 1/1, and existing
+   process-restart 1/1 gates, and by owners/reviewers running those
+   same boundaries. **Observed experiment:** the customized
+   `SessionHelpers.TestEvidence.demoSpec` compiled/published, but
+   notebook import and child lookup failed; actual reuse and calls
+   avoided were zero. It was not counted as working infrastructure.
+   `scripts/cargo-focused-test` itself already paid off by enforcing
+   positive selection and retaining JSON evidence. Typed
+   `Response`/request IDs, `reviewCommit` at an exact OID,
+   cumulative owned-diff/`git merge-tree`, and cleanup plans also
+   paid off; an automatic review/repair collector was not necessary.
+6. **Top three next-run structural changes and surprise.**
+   (a) Make the first-call contract a source-pinned executable
+   producer→Store/Engine→wire→browser example with one failure
+   invariant and named constructor/consumer, not more prose.
+   (b) Make review continuation bind and report its exact checkout
+   HEAD and required build artifacts before checks: request 20's
+   `reviewAgain` stayed at `bcedd45` rather than `7ae65fb`, and
+   fresh request 21 selected/executed the browser test 1/1 but failed
+   before any journey assertion because `web/dist` was absent;
+   request 22 built assets and passed. (c) Give asynchronous
+   assignments a supersession-aware presented/incorporated signal,
+   and give cleanup a separate terminal resource-release receipt.
+   **Surprise:** the helper publication receipt did not imply an
+   importable module; the failed archive move copied its files to
+   `/tmp/wave12-live/helper-experiment` but could not remove the
+   mounted `.exomonad/helpers` directory (`Device or resource busy`).
+   No user work or demo process was removed. This is a workflow
+   observation, not a product failure.
+
 ## Wave 11 root — 2026-09-25
 
 - **Tree and overlap:** Three Luna component owners each admitted production
