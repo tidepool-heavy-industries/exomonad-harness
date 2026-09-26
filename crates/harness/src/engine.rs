@@ -65,6 +65,8 @@ pub enum EngineError {
     Finalize(#[from] FinalizeError),
     #[error("typed completion requires exactly one finalize call")]
     InvalidFinalizeCount,
+    #[error("invalid restricted tool selection: {0}")]
+    InvalidToolSelection(String),
     #[error("malformed Responses function_call item")]
     InvalidFunctionCall,
     #[error("request history has no harness-authored configuration_update")]
@@ -488,7 +490,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .iter()
                 .find_map(Item::configuration_effort)
                 .ok_or(EngineError::MissingEffortPin)?;
-            let req = ResponsesRequest {
+            let mut req = ResponsesRequest {
                 input: history,
                 instructions: self.config.instructions.clone(),
                 tools: self.tools(finalize_schema),
@@ -514,6 +516,40 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     continue;
                 }
             };
+            let selected_tools = match &before_request.decision {
+                crate::hooks::BeforeRequestDecision::Send => None,
+                crate::hooks::BeforeRequestDecision::SendRestricted { tools_allowed } => {
+                    let mut seen = std::collections::HashSet::new();
+                    let available = req
+                        .tools
+                        .iter()
+                        .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
+                        .collect::<std::collections::HashSet<_>>();
+                    let invalid = tools_allowed.iter().find(|name| {
+                        !seen.insert(name.as_str()) || !available.contains(name.as_str())
+                    });
+                    if let Some(name) = invalid {
+                        return Err(self
+                            .cleanup_pending(
+                                EngineError::InvalidToolSelection(name.clone()),
+                                &pending,
+                            )
+                            .await);
+                    }
+                    if finalize_schema.is_some() && !seen.contains(FINALIZE_TOOL_NAME) {
+                        return Err(self
+                            .cleanup_pending(
+                                EngineError::InvalidToolSelection(
+                                    "required typed completion tool excluded".into(),
+                                ),
+                                &pending,
+                            )
+                            .await);
+                    }
+                    Some(tools_allowed.clone())
+                }
+            };
+            req.tools_allowed = selected_tools;
             let decision = crate::store::Decision {
                 hook: "before-request".into(),
                 event_refs: req
@@ -1467,6 +1503,29 @@ mod tests {
     struct BeforeRequestRecorder {
         plans: Arc<Mutex<Vec<crate::hooks::RequestPlan>>>,
     }
+    struct RestrictedSelection(Vec<String>);
+    #[async_trait]
+    impl Provider for RestrictedSelection {
+        async fn before_request(
+            &self,
+            _plan: &crate::hooks::RequestPlan,
+        ) -> crate::hooks::BeforeRequestResult {
+            crate::hooks::BeforeRequestResult {
+                decision: crate::hooks::BeforeRequestDecision::SendRestricted {
+                    tools_allowed: self.0.clone(),
+                },
+                evidence: None,
+            }
+        }
+        async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError> {
+            Err(ProviderError::Tool(format!(
+                "unexpected tool: {name} {args}"
+            )))
+        }
+        fn tools(&self) -> Vec<Value> {
+            Vec::new()
+        }
+    }
     #[async_trait]
     impl Provider for BeforeRequestRecorder {
         async fn before_request(
@@ -1750,6 +1809,60 @@ mod tests {
                 .unwrap(),
             Err(EngineError::Cancelled)
         ));
+    }
+
+    #[tokio::test]
+    async fn restricted_invalid_names_and_excluded_finalize_fail_before_transport_and_cleanup_claims()
+     {
+        for (selection, typed) in [
+            (vec!["unknown".to_owned()], false),
+            (vec!["slow".to_owned(), "slow".to_owned()], false),
+            (vec![], true),
+        ] {
+            let (store, _source, snapshot, call_id) = inherited_claim_fixture().await;
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let replay = Replay {
+                requests: requests.clone(),
+                turns: Mutex::new(std::collections::VecDeque::new()),
+            };
+            let engine = Engine::<FakeAuth, RestrictedSelection, _>::with_transport(
+                replay,
+                store.clone(),
+                Arc::new(JobScheduler::new(1).unwrap()),
+                Arc::new(RestrictedSelection(selection)),
+                EngineConfig {
+                    instructions: "instruction".into(),
+                    tools: vec![json!({"type":"function","name":"slow","strict":true})],
+                    model: "test".into(),
+                    effort: Effort::Low,
+                    session_id: "invalid-selection".into(),
+                    agent: AgentPath("/root/child".into()),
+                },
+            );
+            let (_cancel_tx, cancel_rx) = watch::channel(false);
+            let error = if typed {
+                engine
+                    .run_finalized::<FinalReply>(
+                        Some(snapshot.clone()),
+                        vec![],
+                        cancel_rx,
+                        empty_mailbox(),
+                    )
+                    .await
+                    .unwrap_err()
+            } else {
+                engine
+                    .run(Some(snapshot.clone()), vec![], cancel_rx, empty_mailbox())
+                    .await
+                    .unwrap_err()
+            };
+            assert!(matches!(error, EngineError::InvalidToolSelection(_)));
+            assert!(requests.lock().unwrap().is_empty());
+            let claims = store.claims_on(&snapshot).unwrap();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0].call_id, call_id);
+            assert_eq!(claims[0].state, crate::store::ClaimState::Interrupted);
+        }
     }
 
     struct SetEffortProvider {
