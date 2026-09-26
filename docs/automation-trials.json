@@ -7,8 +7,8 @@
       "purpose": "Watch my checks",
       "status": "trialed",
       "entrypoint": "Project.CheckResults.watchChecks",
-      "source_revision": "d9537618cf8eba4c59d71cd2ac574c862f5f5c86",
-      "validation": "Project.CheckResultsChecks.completionRouting: 13/13; notification attempts retained, delivery untested",
+      "source_revision": "b6167e7a3804a317ccf3f7078b2355b9887a38c1",
+      "validation": "Updated completionRouting: 13/13; original-job JSON, counts/source/cleanup/artifact, failed and unknown evidence. Offline notice attempts tested; native delivery is a wave observation.",
       "first_exposed_wave": 15,
       "waves": [
         {
@@ -48,8 +48,8 @@
       "purpose": "Diagnose this failure",
       "status": "trialing",
       "entrypoint": "Project.TestEvidence.diagnoseFocused",
-      "source_revision": "d9537618cf8eba4c59d71cd2ac574c862f5f5c86",
-      "validation": "Project.CheckResultsChecks.completionRouting: 13/13, including selection, setup, assertion and short execution",
+      "source_revision": "b6167e7a3804a317ccf3f7078b2355b9887a38c1",
+      "validation": "Updated completionRouting:13/13 including retained diagnostic excerpt; FollowupChecks.bounded:5/5 (two-probe limit, abstention, success, invalid probes, cancellation). Live Jev selection not claimed.",
       "first_exposed_wave": 15,
       "waves": [],
       "exposure_evidence": {
@@ -67,7 +67,7 @@
       "waves": [],
       "wave16_revision": "Bounded component trial planned: required sibling ancestry before review; one same-reviewer empty-findings correction; integration stays with root. Exposure starts only at launch.",
       "entrypoint": "Project.ReviewFlow.reviewFlow",
-      "source_revision": "4266ad7e6d8d06dcc5b8e6f0a990574cbc0b6125",
+      "source_revision": "b6167e7a3804a317ccf3f7078b2355b9887a38c1",
       "validation": "Source preflight 3/3, empty findings 2/2, exact-source review/repair 6/6, failure paths 2/2; offline resident recipes, no native reviewers or notification delivery claimed."
     },
     {
@@ -89,7 +89,7 @@
       "purpose": "Investigate alongside me",
       "status": "trialing",
       "entrypoint": "Project.ParallelInvestigate.startProbeBatch",
-      "source_revision": "2a860832afbe675f78188dbdfbeb775bd2dbce80",
+      "source_revision": "b6167e7a3804a317ccf3f7078b2355b9887a38c1",
       "validation": "Grouped definitions compiled; Project.AutomationRuntimeChecks.commandCustody: 5/5",
       "first_exposed_wave": 15,
       "waves": [],
@@ -117,7 +117,7 @@
       "purpose": "Prepare prerequisites and continue",
       "status": "trialing",
       "entrypoint": "Project.PrepareContinue.verifyPrepared",
-      "source_revision": "151e467ca4978121a45fa8ae4ca4531de9f5a784",
+      "source_revision": "b6167e7a3804a317ccf3f7078b2355b9887a38c1",
       "validation": "Project.PrepareContinueChecks.preparationCompletion: 6/6; late, failed and unready paths",
       "first_exposed_wave": 15,
       "waves": [],
