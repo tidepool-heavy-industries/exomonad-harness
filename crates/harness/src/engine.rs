@@ -548,6 +548,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                     Some(tools_allowed.clone())
                 }
+                // The Engine owner validates and applies the item before transport.
+                // This compiling arm only establishes the shared decision seam.
+                crate::hooks::BeforeRequestDecision::Inject { tools_allowed, .. } => {
+                    tools_allowed.clone()
+                }
             };
             req.tools_allowed = selected_tools;
             let decision = crate::store::Decision {
