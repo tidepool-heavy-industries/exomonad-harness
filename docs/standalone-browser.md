@@ -9,38 +9,43 @@ inference or shell tools.
 From a checkout with Rust installed, run:
 
 ```sh
-nix develop .#web -c scripts/verify-browser-journey
+scripts/prepare-browser-harness
 ```
 
-This installs locked web dependencies, checks/tests/builds `web/dist`, and runs
-the production-binary browser journey. Missing Nix, Node/npm or Rust are
+This runs `nix develop .#web -c scripts/verify-browser-journey` to install
+locked web dependencies, check/test/build `web/dist`, and run the
+production-binary browser journey, then builds `target/release/harness-demo`.
+Missing Nix, Node/npm or Rust are
 preparation failures, not browser assertion failures. Preserve the built
 `web/dist` assets with the binary; neither location should be treated as the
-database home. If your host is not a Nix host, supply the equivalent locked
-Node/npm and Rust toolchains before running the script; this alternative has
-not been verified for this wave.
+database home. Copy the prepared binary and assets to stable absolute host
+paths if the checkout is disposable. If your host is not a Nix host, supply
+the equivalent locked Node/npm and Rust toolchains before running the script;
+this alternative has not been verified for this wave.
 
 ## Launch from an ordinary host shell
 
 Choose a *new* loopback port and durable directory outside disposable source
-and build trees. This example assumes the checkout and assets are retained at
-`/opt/harness`; substitute your actual absolute paths.
+and build trees. This example assumes a retained launcher at
+`/opt/harness/scripts/launch-browser-harness`, with a prepared binary and
+assets copied to stable `/opt/harness` paths; substitute your actual absolute
+paths. The launcher invokes the prebuilt binary, not Cargo.
 
 ```sh
 install -d -m 700 "$HOME/.local/state/harness-browser"
 read -rsp 'Browser login secret: ' HARNESS_DEMO_SESSION_SECRET; echo
 export HARNESS_DEMO_SESSION_SECRET
 cd /
-/opt/harness/target/debug/harness-demo \
-  --db "$HOME/.local/state/harness-browser/session.sqlite" \
-  --serve 127.0.0.1:4613 \
-  --assets /opt/harness/web/dist
+HARNESS_DEMO_BIN=/opt/harness/bin/harness-demo \
+  /opt/harness/scripts/launch-browser-harness \
+    "$HOME/.local/state/harness-browser/session.sqlite" \
+    127.0.0.1:4613 \
+    /opt/harness/web/dist
 ```
 
 Keep the foreground shell open for the simplest ownership and stop semantics:
-its Ctrl-C sends SIGINT only to this instance. The actual binary path may
-instead be `.exomonad/build/cargo/debug/harness-demo` after the focused
-runner. No secret appears in the arguments or committed files. The example
+its Ctrl-C sends SIGINT only to this instance. No secret appears in the
+arguments or committed files. The example
 does not create a secret file; the login secret must be supplied again for a
 reopen. Avoid shell tracing while entering it.
 
