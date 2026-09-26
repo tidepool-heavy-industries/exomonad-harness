@@ -609,6 +609,9 @@ struct DeterministicServerTransport {
 #[async_trait]
 impl harness::engine::ResponsesTransport for DeterministicServerTransport {
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        if let Some(path) = std::env::var_os("HARNESS_DEMO_CAPTURE_REQUESTS") {
+            capture_deterministic_request(&request, Path::new(&path))?;
+        }
         let (state, _outcome, answer) = deterministic_command(&self.command, self.waiting);
         if self.command == "wait" && state == "running" {
             return std::future::pending().await;
@@ -654,6 +657,29 @@ impl harness::engine::ResponsesTransport for DeterministicServerTransport {
     }
 }
 
+/// Append the production transport's serialized body as one JSONL record.
+/// The caller owns the path and must provide an isolated capture destination.
+fn capture_deterministic_request(
+    request: &ResponsesRequest,
+    path: &Path,
+) -> Result<(), TransportError> {
+    use std::io::Write;
+    let body = harness::transport::client::request_body(request)?;
+    let mut record = serde_json::to_vec(&body).map_err(|error| {
+        TransportError::Stream(format!("request capture serialization failed: {error}"))
+    })?;
+    record.push(b'\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| TransportError::Stream(format!("request capture open failed: {error}")))?;
+    file.write_all(&record).map_err(|error| {
+        TransportError::Stream(format!("request capture write failed: {error}"))
+    })?;
+    Ok(())
+}
+
 async fn run_deterministic_engine_completion(
     store: Arc<Store>,
     scheduler: Arc<JobScheduler>,
@@ -664,8 +690,12 @@ async fn run_deterministic_engine_completion(
     agent: AgentPath,
     answer_override: Option<String>,
 ) -> Result<EngineCompletion, String> {
-    let provider = Arc::new(CliProvider(DemoProvider::development(".", false)));
-    let engine = Engine::<OfflineServerAuth, CliProvider, _>::with_transport(
+    let policy = BrowserPolicy::for_invocation(command, &agent);
+    let provider = Arc::new(BrowserProvider(
+        CliProvider(DemoProvider::development(".", false)),
+        policy,
+    ));
+    let engine = Engine::<OfflineServerAuth, BrowserProvider, _>::with_transport(
         DeterministicServerTransport {
             command: command.to_owned(),
             waiting,
@@ -673,7 +703,7 @@ async fn run_deterministic_engine_completion(
         },
         store,
         scheduler,
-        provider,
+        provider.clone(),
         EngineConfig {
             instructions: "Deterministic browser journey. Do not use tools.".into(),
             tools: Vec::new(),
@@ -692,6 +722,81 @@ async fn run_deterministic_engine_completion(
         )
         .await
         .map_err(|_| "deterministic engine request failed".to_owned())
+}
+
+/// Browser-only deterministic policy. The shared CLI provider remains Send/auto.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserPolicy {
+    Child,
+    Echo,
+    Send,
+}
+
+impl BrowserPolicy {
+    fn for_invocation(command: &str, agent: &AgentPath) -> Self {
+        if agent.0 != ROOT_PATH || command.starts_with("child ") {
+            Self::Child
+        } else if command.starts_with("echo ") {
+            Self::Echo
+        } else {
+            Self::Send
+        }
+    }
+}
+
+struct BrowserProvider(CliProvider, BrowserPolicy);
+
+#[async_trait]
+impl Provider for BrowserProvider {
+    async fn before_request(
+        &self,
+        plan: &harness::hooks::RequestPlan,
+    ) -> harness::hooks::BeforeRequestResult {
+        let mut result = self.0.before_request(plan).await;
+        let advertised = plan
+            .tools_allowed
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        let sleep_advertised = advertised.contains(&"sleep");
+        let (selection, label) = match self.1 {
+            BrowserPolicy::Child => (Some(Vec::new()), "child-empty"),
+            BrowserPolicy::Echo => {
+                // Always request the intended selection. Engine validation must
+                // reject it as an invalid selection if the final plan omits sleep;
+                // never silently widen availability to Send.
+                (Some(vec!["sleep".to_owned()]), "echo-sleep")
+            }
+            BrowserPolicy::Send => (None, "send"),
+        };
+        if let Some(tools_allowed) = selection {
+            result.decision =
+                harness::hooks::BeforeRequestDecision::SendRestricted { tools_allowed };
+        }
+        result.evidence = Some(json!({
+            "consumer":"standalone-browser",
+            "selection":label,
+            "sleep_advertised":sleep_advertised
+        }));
+        result
+    }
+    async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError> {
+        self.0.call(name, args).await
+    }
+    async fn call_with_context(
+        &self,
+        name: &str,
+        args: Value,
+        context: CallContext,
+    ) -> Result<Value, ProviderError> {
+        self.0.call_with_context(name, args, context).await
+    }
+    fn tools(&self) -> Vec<Value> {
+        self.0.tools()
+    }
+    fn all_tools(&self) -> Vec<Value> {
+        self.0.all_tools()
+    }
 }
 
 async fn run_deterministic_engine_turn(
@@ -1752,6 +1857,146 @@ mod tests {
     use harness::transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, Usage};
     use harness::turn::JobScheduler;
     use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn browser_provider_policy_uses_explicit_invocation_classification() {
+        let provider = BrowserProvider(
+            CliProvider(DemoProvider::development(".", false)),
+            BrowserPolicy::for_invocation("echo hello", &AgentPath(ROOT_PATH.into())),
+        );
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&provider);
+        let plan = harness::hooks::RequestPlan {
+            items: vec![
+                harness::item::Item(json!({
+                    "type":"message","role":"user","content":"earlier child should not affect routing"
+                })),
+                harness::item::Item(json!({
+                    "type":"message","role":"user","content":"echo hello"
+                })),
+            ],
+            tools_allowed: provider.all_tools(),
+            effort: Effort::Low,
+        };
+        assert!(
+            plan.tools_allowed
+                .iter()
+                .any(|tool| tool["name"] == "sleep")
+        );
+        assert!(!plan.tools_allowed.iter().any(|tool| tool["name"] == "ask"));
+        let result = provider.before_request(&plan).await;
+        assert_eq!(
+            result.decision,
+            harness::hooks::BeforeRequestDecision::SendRestricted {
+                tools_allowed: vec!["sleep".into()]
+            }
+        );
+        assert_eq!(
+            result.evidence,
+            Some(
+                json!({"consumer":"standalone-browser","selection":"echo-sleep","sleep_advertised":true})
+            )
+        );
+        let missing_sleep_plan = harness::hooks::RequestPlan {
+            items: plan.items.clone(),
+            tools_allowed: vec![],
+            effort: Effort::Low,
+        };
+        let missing_sleep = provider.before_request(&missing_sleep_plan).await;
+        assert_eq!(
+            missing_sleep.decision,
+            harness::hooks::BeforeRequestDecision::SendRestricted {
+                tools_allowed: vec!["sleep".into()]
+            }
+        );
+        assert_eq!(
+            missing_sleep.evidence,
+            Some(
+                json!({"consumer":"standalone-browser","selection":"echo-sleep","sleep_advertised":false})
+            )
+        );
+        let incidental_words_plan = harness::hooks::RequestPlan {
+            items: vec![harness::item::Item(json!({
+                "type":"message","role":"user","content":"please echo hello, and child appears only in this payload"
+            }))],
+            tools_allowed: provider.all_tools(),
+            effort: Effort::Low,
+        };
+        let send_provider = BrowserProvider(
+            CliProvider(DemoProvider::development(".", false)),
+            BrowserPolicy::for_invocation("status", &AgentPath(ROOT_PATH.into())),
+        );
+        let incidental_words = send_provider.before_request(&incidental_words_plan).await;
+        assert_eq!(
+            incidental_words.decision,
+            harness::hooks::BeforeRequestDecision::Send
+        );
+        assert_eq!(
+            incidental_words.evidence,
+            Some(
+                json!({"consumer":"standalone-browser","selection":"send","sleep_advertised":true})
+            )
+        );
+        let child_provider = BrowserProvider(
+            CliProvider(DemoProvider::development(".", false)),
+            BrowserPolicy::for_invocation("child-reply", &AgentPath("/root/demo-child".into())),
+        );
+        let child_plan = harness::hooks::RequestPlan {
+            items: vec![harness::item::Item(json!({
+                "type":"message","role":"user","content":"echo misleading plan text"
+            }))],
+            tools_allowed: child_provider.all_tools(),
+            effort: Effort::Low,
+        };
+        let child = child_provider.before_request(&child_plan).await;
+        assert_eq!(
+            child.decision,
+            harness::hooks::BeforeRequestDecision::SendRestricted {
+                tools_allowed: vec![]
+            }
+        );
+        assert_eq!(
+            child.evidence,
+            Some(
+                json!({"consumer":"standalone-browser","selection":"child-empty","sleep_advertised":true})
+            )
+        );
+        let cli = CliProvider(DemoProvider::development(".", false));
+        let cli_result = cli.before_request(&plan).await;
+        assert_eq!(
+            cli_result.decision,
+            harness::hooks::BeforeRequestDecision::Send
+        );
+    }
+
+    #[test]
+    fn deterministic_capture_appends_production_request_body_jsonl() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("demo-request-{nonce}.jsonl"));
+        let request = ResponsesRequest {
+            input: vec![],
+            instructions: "capture-test".into(),
+            tools: vec![json!({"type":"function","name":"sleep","strict":true,
+                "parameters":{"type":"object","properties":{"duration_ms":{"type":"integer"}},
+                    "required":["duration_ms"],"additionalProperties":false}})],
+            tools_allowed: Some(vec!["sleep".into()]),
+            model: "deterministic-local".into(),
+            pinned_effort: Effort::Low,
+            session_id: "capture-test".into(),
+        };
+        capture_deterministic_request(&request, &path).unwrap();
+        let record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(record["tools"], json!(request.tools));
+        let _ = std::fs::remove_file(path);
+        let directory = std::env::temp_dir();
+        assert!(matches!(
+            capture_deterministic_request(&request, &directory),
+            Err(TransportError::Stream(_))
+        ));
+    }
 
     #[derive(Clone)]
     struct FakeAuth;
