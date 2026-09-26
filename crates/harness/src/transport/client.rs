@@ -188,6 +188,7 @@ mod tests {
         assert_eq!(body["prompt_cache_key"], "shared");
         assert_eq!(body["instructions"], "fixed");
         assert_eq!(body["input"][0]["content"], "hello");
+        assert_eq!(body["tool_choice"], "auto");
         assert!(body.get("previous_response_id").is_none());
     }
 

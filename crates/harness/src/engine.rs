@@ -1503,6 +1503,29 @@ mod tests {
     struct BeforeRequestRecorder {
         plans: Arc<Mutex<Vec<crate::hooks::RequestPlan>>>,
     }
+    struct RestrictedSelection(Vec<String>);
+    #[async_trait]
+    impl Provider for RestrictedSelection {
+        async fn before_request(
+            &self,
+            _plan: &crate::hooks::RequestPlan,
+        ) -> crate::hooks::BeforeRequestResult {
+            crate::hooks::BeforeRequestResult {
+                decision: crate::hooks::BeforeRequestDecision::SendRestricted {
+                    tools_allowed: self.0.clone(),
+                },
+                evidence: None,
+            }
+        }
+        async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError> {
+            Err(ProviderError::Tool(format!(
+                "unexpected tool: {name} {args}"
+            )))
+        }
+        fn tools(&self) -> Vec<Value> {
+            Vec::new()
+        }
+    }
     #[async_trait]
     impl Provider for BeforeRequestRecorder {
         async fn before_request(
@@ -1786,6 +1809,60 @@ mod tests {
                 .unwrap(),
             Err(EngineError::Cancelled)
         ));
+    }
+
+    #[tokio::test]
+    async fn restricted_invalid_names_and_excluded_finalize_fail_before_transport_and_cleanup_claims()
+     {
+        for (selection, typed) in [
+            (vec!["unknown".to_owned()], false),
+            (vec!["slow".to_owned(), "slow".to_owned()], false),
+            (vec![], true),
+        ] {
+            let (store, _source, snapshot, call_id) = inherited_claim_fixture().await;
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let replay = Replay {
+                requests: requests.clone(),
+                turns: Mutex::new(std::collections::VecDeque::new()),
+            };
+            let engine = Engine::<FakeAuth, RestrictedSelection, _>::with_transport(
+                replay,
+                store.clone(),
+                Arc::new(JobScheduler::new(1).unwrap()),
+                Arc::new(RestrictedSelection(selection)),
+                EngineConfig {
+                    instructions: "instruction".into(),
+                    tools: vec![json!({"type":"function","name":"slow","strict":true})],
+                    model: "test".into(),
+                    effort: Effort::Low,
+                    session_id: "invalid-selection".into(),
+                    agent: AgentPath("/root/child".into()),
+                },
+            );
+            let (_cancel_tx, cancel_rx) = watch::channel(false);
+            let error = if typed {
+                engine
+                    .run_finalized::<FinalReply>(
+                        Some(snapshot.clone()),
+                        vec![],
+                        cancel_rx,
+                        empty_mailbox(),
+                    )
+                    .await
+                    .unwrap_err()
+            } else {
+                engine
+                    .run(Some(snapshot.clone()), vec![], cancel_rx, empty_mailbox())
+                    .await
+                    .unwrap_err()
+            };
+            assert!(matches!(error, EngineError::InvalidToolSelection(_)));
+            assert!(requests.lock().unwrap().is_empty());
+            let claims = store.claims_on(&snapshot).unwrap();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0].call_id, call_id);
+            assert_eq!(claims[0].state, crate::store::ClaimState::Interrupted);
+        }
     }
 
     struct SetEffortProvider {
