@@ -20,7 +20,7 @@ if ! rm -f "$stable_binary"; then
   echo "could not invalidate previous browser harness binary at $stable_binary" >&2
   exit 1
 fi
-nix develop .#web -c scripts/verify-browser-journey
+bash scripts/prepare-browser-check "$(git rev-parse HEAD)"
 cargo build --release --package harness-demo --bin harness-demo
 target_dir="${CARGO_TARGET_DIR:-$PWD/target}"
 if [[ "$target_dir" != /* ]]; then
@@ -38,5 +38,11 @@ if [[ ! "$built_binary" -ef "$stable_binary" ]]; then
   mv -f "$staged_binary" "$stable_binary"
   staged_binary=""
 fi
+# Exercise the staged release executable through the production launcher and
+# the existing deterministic browser journey. The test harness remains reusable.
+HARNESS_DEMO_TEST_BIN="$stable_binary" scripts/cargo-focused-test \
+  --package harness-demo --target test:standalone_browser \
+  --filter standalone_missing_assets_and_clean_and_process_loss_reopen --expect 1
 printf 'Prepared standalone browser harness: %s\n' "$stable_binary"
+sha256sum "$stable_binary"
 prepared=true

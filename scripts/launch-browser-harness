@@ -16,8 +16,31 @@ if [[ ! -x "$binary" ]]; then
   echo "prebuilt harness binary is missing or not executable at $binary; run scripts/prepare-browser-harness" >&2
   exit 1
 fi
-if [[ ! -d "$assets" ]]; then
+if [[ ! -s "$assets/index.html" ]]; then
   echo "web assets are missing at $assets; run scripts/prepare-browser-harness" >&2
   exit 1
 fi
+# A private newly created directory is safe; an existing public path needs an
+# explicit operator decision. Never silently change ownership or permissions.
+umask 077
+parent="$(dirname "$db")"
+[[ ! -L "$parent" && ! -L "$db" ]] || { echo "database and parent must not be symlinks" >&2; exit 2; }
+mkdir -p -- "$parent"
+private_path() {
+  local path="$1" mode owner
+  [[ ! -L "$path" ]] || { echo "database path must not be a symlink: $path" >&2; return 2; }
+  mode="$(stat -c %a -- "$path")"
+  owner="$(stat -c %u -- "$path")"
+  if [[ "$owner" != "$(id -u)" ]] || (( (8#$mode & 077) != 0 )); then
+    echo "database path must be owned by this user and private: $path" >&2
+    return 2
+  fi
+}
+private_path "$parent"
+for existing in "$db" "$db-wal" "$db-shm"; do
+  if [[ -e "$existing" || -L "$existing" ]]; then
+    [[ -f "$existing" ]] || { echo "database path must be a regular file: $existing" >&2; exit 2; }
+    private_path "$existing"
+  fi
+done
 exec "$binary" --db "$db" --serve "$addr" --assets "$assets"

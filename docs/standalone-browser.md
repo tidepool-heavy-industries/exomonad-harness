@@ -12,9 +12,13 @@ From a checkout with Rust installed, run:
 scripts/prepare-browser-harness
 ```
 
-This runs `nix develop .#web -c scripts/verify-browser-journey` to install
-locked web dependencies, check/test/build `web/dist`, and run the
-production-binary browser journey, then builds `target/release/harness-demo`.
+This snapshots the pinned flake inputs to prepare `web/dist`, builds and stages
+`target/release/harness-demo`, then runs the existing standalone browser journey
+against that exact release executable through `scripts/launch-browser-harness`.
+The check uses a temporary database and unrelated working directory, tests
+reconnect and process-loss reopen, and stops only its own process. A failed
+preparation or release check invalidates the staged binary. The successful
+output includes its SHA256 and focused evidence location.
 Missing Nix, Node/npm or Rust are
 preparation failures, not browser assertion failures. Preserve the built
 `web/dist` assets with the binary; neither location should be treated as the
@@ -29,7 +33,11 @@ Choose a *new* loopback port and durable directory outside disposable source
 and build trees. This example assumes a retained launcher at
 `/opt/harness/scripts/launch-browser-harness`, with a prepared binary and
 assets copied to stable `/opt/harness` paths; substitute your actual absolute
-paths. The launcher invokes the prebuilt binary, not Cargo.
+paths. The launcher invokes the prebuilt binary, not Cargo. It creates a missing
+database parent with private permissions and refuses an existing parent,
+database or SQLite sidecar that is not owned by the current user or grants
+group/world access. It does not change existing permissions. Review and correct
+such paths deliberately before retrying; `umask` cannot repair existing files.
 
 ```sh
 install -d -m 700 "$HOME/.local/state/harness-browser"

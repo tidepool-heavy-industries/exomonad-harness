@@ -12,22 +12,22 @@ From the repository root, prepare the web assets and standalone release binary:
 scripts/prepare-browser-harness
 ```
 
-The script runs `nix develop .#web -c scripts/verify-browser-journey`, then
-builds the `harness-demo` release binary and installs it as
-`target/release/harness-demo`. Nix and Rust/Cargo build prerequisites must be
+The script prepares assets with the pinned web shell, builds and stages the
+release binary, then runs the standalone browser journey against that binary
+through the production launcher. Nix and Rust/Cargo build prerequisites must be
 available. The standalone binary needs the prepared `web/dist` assets.
+See [the maintained procedure](standalone-browser.md) for the current tested
+entrypoint and its evidence contract.
 
 In a second terminal, from the repository root, choose a private database path
 and session secret, then start on loopback (replace `43127` if occupied):
 
 ```sh
-umask 077
-mkdir -p .local
 export HARNESS_DEMO_SESSION_SECRET="$(openssl rand -hex 32)"
-target/release/harness-demo \
-  --db "$PWD/.local/wave17-demo.sqlite" \
-  --serve 127.0.0.1:43127 \
-  --assets "$PWD/web/dist"
+scripts/launch-browser-harness \
+  "$PWD/.local/wave17-demo.sqlite" \
+  127.0.0.1:43127 \
+  "$PWD/web/dist"
 ```
 
 The secret is required by the browser-session login; keep it out of command

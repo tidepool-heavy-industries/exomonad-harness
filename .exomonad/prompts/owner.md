@@ -36,7 +36,9 @@ missing a local binding does not establish that the original command stopped.
 When the launch brief assigns an Astra root, own both product delivery and an
 active evaluation of the installed automation. Start with the actual AgentSpec,
 `docs/agent-automation-menu.md`, and the helper implementations relevant to the
-planned work. Check what is exposed and published; a file on disk alone does not
+planned work. Read the main Haskell implementations first; skip test modules
+unless an uncertainty needs their evidence. Follow deeper imports when useful.
+Check what is exposed and published; a file on disk alone does not
 establish that a child can import it. Keep this first pass bounded and continue
 learning from execution.
 

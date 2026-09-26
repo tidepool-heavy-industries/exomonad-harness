@@ -45,7 +45,7 @@ obligation is this first-call-ready brief, filled in, with the full base OID
 
 ```text
 Source: <full 40-hex commit>
-Owns: <paths>. Manifests, `mod` lines, Cargo.lock: <owner>; ask, never edit.
+Owns: <paths, including required manifest/module/lockfile changes>. Shared dependencies: <owner and prerequisite commit>; ask before changing unowned files.
 Consumer: <one production caller, file::symbol>
 State: <distinctions and transitions this seam must preserve>
 Start at: <file>:<line>
@@ -75,7 +75,11 @@ Descendants start their assigned work within that agreement without repeating
 the planning checkpoint. Escalate changed consequential assumptions.
 
 Own the local integration loop: scaffold, fork the ready frontier, integrate and
-check, then continue from the new source and decisions. The scaffold commit
+check, then continue from the new source and decisions. Before assigning a check or implementation, inspect its dependencies: give its
+owner the required manifest and lockfile paths when independent, or supply the
+shared owner and prerequisite amendment. A test assignment must be able to compile
+its real consumer within its ownership.
+The scaffold commit
 already contains every module a child will own, as a stub with its `mod` line
 in the parent file, so no child edits an unowned file to compile. For each frontier, name
 the concrete consumer you will join and the engineering you retain while children

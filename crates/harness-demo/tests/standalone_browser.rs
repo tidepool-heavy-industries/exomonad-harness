@@ -39,20 +39,22 @@ fn temp_path() -> PathBuf {
     std::env::temp_dir().join(format!("harness-standalone-{}-{nonce}", std::process::id()))
 }
 
-fn binary() -> &'static str {
-    env!("CARGO_BIN_EXE_harness-demo")
+fn binary() -> PathBuf {
+    std::env::var_os("HARNESS_DEMO_TEST_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_harness-demo")))
 }
 
 fn spawn(db: &Path, assets: &Path, port: u16, capture: &Path) -> Child {
-    Command::new(binary())
+    let launcher =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/launch-browser-harness");
+    Command::new(launcher)
         .args([
-            "--db",
             db.to_str().unwrap(),
-            "--serve",
             &format!("127.0.0.1:{port}"),
-            "--assets",
             assets.to_str().unwrap(),
         ])
+        .env("HARNESS_DEMO_BIN", binary())
         .current_dir(std::env::temp_dir())
         .env("HARNESS_DEMO_SESSION_SECRET", SECRET)
         .env("HARNESS_DEMO_CAPTURE_REQUESTS", capture)
@@ -227,7 +229,7 @@ fn before_request_decisions(db: &Path) -> Vec<Value> {
 async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     let root = temp_path();
     std::fs::create_dir_all(&root).unwrap();
-    let db = root.join("session.sqlite");
+    let db = root.join("private/session.sqlite");
     let capture = root.join("outgoing-requests.jsonl");
     let missing = root.join("not-built");
     let missing_port = port();
@@ -252,6 +254,24 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
         .join("../../web/dist")
         .canonicalize()
         .expect("web/dist must be prepared before this test");
+    // A failed launch must leave the occupied listener with its original owner.
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    let occupied_port = occupied.local_addr().unwrap().port();
+    let refused = spawn(
+        &root.join("occupied/session.sqlite"),
+        &assets,
+        occupied_port,
+        &capture,
+    );
+    let refused = timeout(Duration::from_secs(5), refused.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(TcpListener::bind(("127.0.0.1", occupied_port)).is_err());
+    drop(occupied);
+    assert!(TcpListener::bind(("127.0.0.1", occupied_port)).is_ok());
+
     let selected_port = port();
     let base = format!("http://127.0.0.1:{selected_port}");
     let client = reqwest::Client::new();
