@@ -1,4 +1,45 @@
-# Active assignment — wave17
+# Completed assignment — wave17 deterministic browser integration/release
+
+Wave16 Inject handoff `21cb20e` is merged with the wave17 helper baseline,
+workspace pin and active brief. The clean combined product/test source
+`6c28a7918d722beace4715344220d048d7a7d95a` passed the standalone
+browser journey plus Engine valid Inject, invalid Inject/claim cleanup,
+typed Store reopen and invalid restriction checks, each
+expected/matched/runnable/executed/passed 1/1 at that exact source.
+The browser preparation passed TypeScript, web tests 14/14 and Vite build.
+See [wave17 handoff](docs/wave17-handoff.md) for exact jobs, review chronology,
+helper trial, retained stash and cleanup uncertainties, and
+[release instructions](docs/wave17-release.md) for isolated operation.
+
+No credentialed inference, adapter, successor, recurring timer, new hook
+semantics, protected-demo or Tailscale change was authorized or performed.
+The supervisor owns any external launch or later scope; this run stops at
+the checked deterministic slice. The old active brief below is retained
+as historical assignment, not ongoing authority.
+
+### Where the last run stopped — wave17
+
+- No unmerged branch holds reviewed or passing wave17 product/test code:
+  reviewed release instructions `07d7c8c` and browser test repair
+  `f6def4d` are ancestors of the checked source. The old unaccepted
+  docs candidates `bba9416` and `9358cf2` were superseded by repairs.
+- A pre-existing **unapproved helper draft**, not product code, remains
+  preserved in stash object
+  `79a179cc23c38217722df87a6f797f52975c16fa`
+  (`wave17-preexisting-helper-draft`). It contains changes to
+  `.exomonad/helpers/README.md` and `SessionHelpers.hs` plus deletion
+  of `SessionHelpers/BrowserChecks.hs`; do not drop or silently merge
+  it. The committed BrowserChecks and workspace pin remain the tested
+  baseline. No stash/reset/path-checkout operation is authorized next.
+- The two wave17 frontier worker cleanup steps that returned
+  `StoppedReleasing` and the refused root cleanup plan for the
+  ReviewFlow-owned reviewer group remain resource-release uncertainties
+  until host confirmation; neither holds unmerged accepted code.
+- Next owner: supervisor for launch identity, optional host observation
+  and any separately authorized later scope. Do not infer scope from
+  this handoff or start a timer.
+
+## Historical wave17 assignment (closed)
 
 Read [wave17 brief](docs/wave17-brief.md). Integrate wave16 on this run's branch,
 then verify and document the combined standalone deterministic browser release
