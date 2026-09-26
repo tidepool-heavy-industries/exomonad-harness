@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+if ! command -v npm >/dev/null || ! command -v cargo >/dev/null; then
+  echo "verification prerequisite missing: enter 'nix develop .#web' and provide the Rust toolchain" >&2
+  exit 2
+fi
+
+echo "verification preparation: npm ci"
+(cd web && npm ci)
+echo "verification preparation: npm run check"
+(cd web && npm run check)
+echo "verification preparation: npm test"
+(cd web && npm test)
+echo "verification preparation: npm run build"
+(cd web && npm run build)
+test -f web/dist/index.html || { echo "verification prerequisite missing: web/dist/index.html" >&2; exit 2; }
+
+echo "verification assertion: browser_journey"
+scripts/cargo-focused-test --package harness-demo --target test:browser_journey --filter browser --expect 1

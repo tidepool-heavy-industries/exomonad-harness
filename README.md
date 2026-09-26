@@ -19,6 +19,10 @@ Companion on the consumer side: `~/dev/tidepool/plans/harness-adoption.md`.
 
 ## Focused tests
 
+For the production browser journey, run
+`nix develop .#web -c scripts/verify-browser-journey`. This prepares the locked
+web dependencies and assets before the focused Cargo test; see `web/README.md`.
+
 Use `scripts/cargo-focused-test` for a named Cargo test target. It reports
 selection and execution counts separately, refuses zero runnable matches or a
 successful command with no executed tests, and preserves test failures.

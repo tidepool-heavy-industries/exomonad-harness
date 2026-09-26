@@ -1,6 +1,14 @@
 # Operator web view
 
-Run `npm install`, `npm test`, and `npm run build` from this directory.
+For a reproducible browser journey check from the repository root, run
+`nix develop .#web -c scripts/verify-browser-journey` with the Rust toolchain
+available. The pinned Node 24 shell and package lock drive `npm ci`, typecheck,
+unit tests, and the production asset build. The script then runs the production
+API/WebSocket browser journey through `scripts/cargo-focused-test`, which retains
+its executable, output, and test counts in `evidence.json`. A preparation failure
+ends before the browser assertions and is reported as such.
+
+For web-only development, run `npm ci`, `npm test`, and `npm run build` from this directory.
 The default view renders `src/fixture.ts`; this keeps the screens usable before
 the harness server is integrated. Add `?live=1` to connect to the same-origin
 WebSocket endpoint `/api/ws`.
