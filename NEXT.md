@@ -3,7 +3,9 @@
 Read [the wave18 brief](docs/wave18-brief.md). Deliver the browser-operable
 standalone deterministic milestone with an Astra root and parallel Luna
 feature-area trees. Evaluate and adapt the Haskell automations on real work,
-including concrete feedback from workers before retirement.
+including concrete feedback from workers before retirement. Prioritize the
+asynchronous tool lifecycle foundation described in the brief: this harness is
+intended to become Exomonad's custom home beyond Codex.
 
 This brief supersedes the closed assignments below. Preserve their evidence;
 no stale historical instruction authorizes a new run or source rollback.

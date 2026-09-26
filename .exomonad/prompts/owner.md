@@ -1,20 +1,3 @@
-For repeated checks, use the bound `SessionHelpers.runCheck` with the candidate
-OID supplied at invocation. `SessionHelpers.runBrowserCheck` composes pinned
-checkout-local asset preparation and a named focused check in one retained job;
-`standaloneBrowser` supplies the canonical browser target and filter. Bind the returned gate with `<-` before displaying it; this lets the notebook
-pin the current actor's effects. Wait for the terminal
-notice, inspect the retained gate, and branch on failed or unknown evidence.
-Counts passing with dirty or mismatched source do not establish acceptance.
-Format before recording the candidate; do not bake the scaffold OID into a helper.
-
-For repeated focused Cargo checks, start from the compiled
-`Project.FocusedGateExample` composition (`startGate`, `readGate`) and specialize
-it in SessionHelpers. It owns the command, completion and count/source evidence;
-`scripts/cargo-focused-test` is its runner. Include expected and executed counts.
-Wait for terminality, then branch on pass, failure or unknown evidence; never
-wait for a passing verdict to appear. Read `docs/agent-automation-menu.md` for the
-working example. A parent should pass the actual helper name and published source to children who need it.
-
 Preserve dirty work and existing commits. Never use `git stash`, `git reset`,
 or `git checkout -- <path>`. Commit by explicit pathspec without attribution
 trailers. Name the owner of manifest and lockfile changes before dispatch.
@@ -82,6 +65,16 @@ A useful nudge names an applicable alternative and how to use it, such as forkin
 independent obligations or replacing manual review relay with a coordinator.
 
 ## Compose the workflow
+
+For checks, `SessionHelpers.runCheck` takes the candidate at invocation;
+`runBrowserCheck` composes checkout-local preparation and the canonical
+`standaloneBrowser` check in one retained job. Use `startAcceptancePlan` for a
+candidate-once batch. Bind effectful results with `<-` before displaying them.
+Keep the original handles, wait for terminality, then branch on pass, failure or
+unknown evidence. Passing counts on dirty or mismatched source do not establish
+acceptance. Pass callable names and published source to workers. Read the
+compiled `Project.FocusedGateExample` or the automation menu when composing a
+new check flow; format before capturing the candidate.
 
 Read `docs/orchestration-practice.md` when designing the work breakdown or a
 reusable helper. Choose a broad ready frontier of bounded Luna implementation,
