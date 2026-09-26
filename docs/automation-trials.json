@@ -1,6 +1,18 @@
 {
   "version": 1,
   "minimum_exposed_waves": 3,
+  "wave16_run": {
+    "opportunities": [
+      "Project.FocusedGateExample.startGate/readGate specialized as SessionHelpers.Wave16Gate for Provider/Store Store reopen check: executed once; exact source/counts retained, strict verdict unknown.",
+      "Project.ReviewFlow.reviewFlow on Engine exact component candidate: executed once; reviewer launch never became observable and flow stopped unavailable, then ordinary review fallback.",
+      "Project.PrepareContinue.verifyPrepared could have composed root pinned web build with browser focused run, but root used direct Nix shell and focused script; child needed preparation in its own checkout.",
+      "Project.RetainedEvidence.recoverRetained was not needed: focused runner and review logs remained readable from original handles; no extra command was launched to simulate expiry.",
+      "Project.Interview.collectInterview was applicable to multiple child interviews but root used typed request and retained replies directly; no collection helper call.",
+      "Project.ParallelInvestigate, AssumptionWatch, SlowCommandWatch, HandoffExamples and Routing.notifyReviewReady did not fit an unresolved factual probe or unobserved event in this bounded product slice; no calls claimed."
+    ],
+    "setup_and_recovery": "Helper module was added and published at e98a8f2, with one ambiguous-effect cell rejection before an annotated child execution. ReviewFlow required a coordinator worktree, actor and forwarder; the stalled reviewer added a cancellation and ordinary-review fallback. Root's first plain-npm preparation failed before checks; pinned Nix shell corrected it. No model-round or token savings are measured.",
+    "frontier_rounds": "Focused helper watcher returned a compact terminal notice but unknown strict verdict and required original-evidence inspection; no round avoided is claimed. ReviewFlow did not avoid the review frontier; ordinary fallback added a reviewer. Independent component owners and acceptance test overlapped, but causal time savings are unmeasured."
+  },
   "entries": [
     {
       "id": "check_watch",
@@ -21,6 +33,17 @@
           "evidence": "/tmp/exomonad-actor-workspace/.exomonad/build/cargo/debug/deps/focused-g91rvzh_/evidence.json",
           "outcome": "Late command exit 0, 1 matched/runnable/executed/passed. Watcher notice reached root but summary was unknown: its initial cat of evidence exited 1, so it did not report counts or source. Later collectFocused on the original job read evidence successfully and observed source a61a9c6 plus two pre-existing dirty helper files. A bounded recoverRetained 1024-byte attempt on the same original job returned CommandUnavailable/HTTP 409 for both output streams after retention expiry; status still said exited 0. This is a failed automation summary and raw-output recovery, not a failed product check; no test was rerun.",
           "fallback": "Use direct focused script for final integrated product gates; trial result is not integrated acceptance."
+        },
+        {
+          "wave": 16,
+          "opportunity": "Provider/Store owner needed a focused Store reopen check with exact candidate and test-count evidence",
+          "attempt": "SessionHelpers.Wave16Gate.startWave16Gate then readWave16Gate on terminal notice, backed by Project.FocusedGateExample.startGate/readGate; published helper source e98a8f2fa0231e2e4973aad03eb4da7a6435891e206628f71e5b9b865556a71d",
+          "source": "859f56a9d0493d24b43437eb35137fd0886e1151",
+          "check": "harness lib inject_before_request_decision_roundtrips_after_reopen, expected 1",
+          "job": "29d5ad41-d721-47a0-98b1-aa31c0ac7e3c",
+          "evidence": ".exomonad/build/cargo/debug/deps/focused-p5qg7ds6/evidence.json in Provider/Store child checkout",
+          "outcome": "CommandExited 0/CommandClean, 1 matched/runnable/executed/passed; gate verdict unknown because FocusedSpec named older f84e8b0 while actual runner source was 859f56a and the checkout had dirty unrelated helper/hooks files. An initial unannotated Haskell call was rejected by ambiguous effect row and issued no check; explicit Eff CodingEffects GateStart executed the single retained job. No strict pass inferred from unknown source assurance.",
+          "fallback": "Read original CheckEntry/CheckOutcome and verify post-merge integrated source with focused runner; do not rerun solely to normalize trial bookkeeping."
         }
       ],
       "exposure_evidence": {
@@ -61,10 +84,24 @@
     {
       "id": "repair_cycle",
       "purpose": "Carry this repair cycle",
-      "status": "validated_not_yet_exposed",
+      "status": "trialing",
       "note": "Existing Project.Review remains the ordinary workflow; separate ReviewFlow end-to-end behavior is unproved",
-      "first_exposed_wave": null,
-      "waves": [],
+      "first_exposed_wave": 16,
+      "waves": [
+        {
+          "wave": 16,
+          "opportunity": "Route reviewed Engine candidate 7dd904f with at most one retained-owner repair while Provider/Store and browser acceptance proceed independently",
+          "attempt": "Root created coordinator worktree at f84e8b0, started Project.ReviewFlow.reviewFlow with ComponentReview and repair limit 1, then R.forwardResult from the Engine worker; actor 5, forwarder 8, reviewer 7",
+          "source": "f84e8b08d8a8111f896903e5470003f8b90ce6a4",
+          "candidate": "7dd904f8279a17b0189817137e3465e7cb84ac56",
+          "outcome": "The flow routed one candidate and admitted one exact-source reviewer, but that reviewer remained NeedsAttention/provider=unknown with no first observation or verdict. Root stopped it; stopAgent returned StoppedRetaining with ToolService/socket/BuildResource/WorktreeBinding cleanup unconfirmed, then a later notice reported actor 7 exited Cancelled. Flow snapshot and R.finish returned ReviewStopped ReviewerUnavailable, with zero repairs and one stop notice. A later cleanup plan refused unknown fork group 2, so release is not inferred. No review acceptance or frontier round avoided is claimed; setup added one coordinator worktree, record actor and forwarder.",
+          "fallback": "Ordinary reviewCommit at exact candidate if the actor reports unresolved or unavailable."
+        }
+      ],
+      "exposure_evidence": {
+        "wave": 16,
+        "record": "docs/wave16-brief.md and compiled review-flow-loop.hs recipe in root bound source"
+      },
       "wave16_revision": "Bounded component trial planned: required sibling ancestry before review; one same-reviewer empty-findings correction; integration stays with root. Exposure starts only at launch.",
       "entrypoint": "Project.ReviewFlow.reviewFlow",
       "source_revision": "eac5cad2e11f07e3cfafe2a675494f288a78e107",
