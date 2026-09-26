@@ -204,7 +204,7 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     let db = root.join("session.sqlite");
     let missing = root.join("not-built");
     let missing_port = port();
-    let mut absent = spawn(&db, &missing, missing_port);
+    let absent = spawn(&db, &missing, missing_port);
     let output = timeout(Duration::from_secs(5), absent.wait_with_output())
         .await
         .unwrap()
