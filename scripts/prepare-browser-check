@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Copy only the pinned flake inputs; path:. would import the warm build tree.
+set -euo pipefail
+expected=${1:?expected candidate commit required}
+test "$(git rev-parse HEAD)" = "$expected"
+shell_source=$(mktemp -d)
+trap 'rm -rf -- "$shell_source"' EXIT
+cp flake.nix flake.lock "$shell_source/"
+nix develop "path:$shell_source#web" --command bash scripts/verify-browser-journey --prepare-only
+test "$(git rev-parse HEAD)" = "$expected"
+test -s web/dist/index.html

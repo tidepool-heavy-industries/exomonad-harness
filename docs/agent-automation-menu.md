@@ -64,3 +64,33 @@ wave, record applicable opportunities, discovery, attempted calls, outcome,
 fallback, source/evidence references and token or attention measurements when
 available. An empty use count alone does not justify removal; inspect discovery
 and opportunities first. A known broken path stays unavailable while repaired.
+
+## Choose an opportunity, not a helper quota
+
+For repeated focused checks, specialize `SessionHelpers.CheckDefinition` and pass
+the committed candidate to `runCheck` each time. For browser acceptance,
+`runBrowserCheck` prepares assets and runs that definition in the same original
+job and checkout. The watcher reads retained evidence and sends the terminal
+notice; it does not acquire write authority to the owner's checkout. The command
+records prerequisite failure separately and never starts the test after it.
+Dirty-source evidence remains unknown even when execution passes.
+
+Use `verifyPrepared` when a continuation already has authority over its next
+operation. Use the single-job composition when preparation and test both need
+the invoking checkout. The pinned Node environment imports only flake.nix and
+flake.lock, avoiding copying a warm target directory into the Nix store.
+
+- Diagnostics/probes: use for unresolved causes or competing bounded probes;
+  skip Jev when a missing prerequisite or assertion already identifies the action.
+- Assumption/slow watchers: use for a changing assumption or an actionable delay;
+  skip additional alerts when completion alone is sufficient.
+- Interview collection: use when replies remain outstanding across a larger tree;
+  direct retained answers are sufficient for a small completed set.
+- Handoff projection: use for recurring summaries; it does not establish acceptance.
+- Review readiness: skip a second notice when the settled candidate already supplies
+  everything needed. ReviewFlow still needs a successful activation smoke check
+  before the next live trial.
+
+Record applicable non-use as well as attempts. Keep the three-wave trial window.
+Avoid explicit short yields and repeated empty write_stdin calls for batch work;
+use one completion route and read the original job when a decision needs it.

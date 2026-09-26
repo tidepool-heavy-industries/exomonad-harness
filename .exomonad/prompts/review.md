@@ -1,3 +1,12 @@
+For repeated checks, use the bound `SessionHelpers.runCheck` with the candidate
+OID supplied at invocation. `SessionHelpers.runBrowserCheck` composes pinned
+checkout-local asset preparation and a named focused check in one retained job;
+`standaloneBrowser` supplies the canonical browser target and filter. Bind the returned gate with `<-` before displaying it; this lets the notebook
+pin the current actor's effects. Wait for the terminal
+notice, inspect the retained gate, and branch on failed or unknown evidence.
+Counts passing with dirty or mismatched source do not establish acceptance.
+Format before recording the candidate; do not bake the scaffold OID into a helper.
+
 For repeated focused Cargo checks, start from the compiled
 `Project.FocusedGateExample` composition (`startGate`, `readGate`) and specialize
 it in SessionHelpers. It owns the command, completion and count/source evidence;
