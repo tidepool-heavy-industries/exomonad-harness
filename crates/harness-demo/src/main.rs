@@ -405,6 +405,33 @@ fn request_record(id: &str, state: &str) -> Value {
     json!({"id":id,"conversationId":ROOT_CONVERSATION_ID,"state":state})
 }
 
+fn command_request_record(
+    id: &str,
+    state: &str,
+    command_id: &str,
+    command: &str,
+    outcome: &str,
+    detail: Option<&str>,
+) -> Value {
+    let mut record = request_record(id, state);
+    record["commandId"] = json!(command_id);
+    record["command"] = json!(command);
+    record["outcome"] = json!(outcome);
+    if let Some(detail) = detail {
+        record["detail"] = json!(detail);
+    }
+    record
+}
+
+fn next_envelope_ordinal(envelopes: &[Value]) -> u64 {
+    envelopes
+        .iter()
+        .filter_map(|envelope| envelope["ordinal"].as_u64())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
 fn active_wait_request(requests: &[Value], history: &[Item]) -> Option<String> {
     requests.iter().find_map(|request| {
         if request["state"] != "running" {
@@ -420,6 +447,38 @@ fn active_wait_request(requests: &[Value], history: &[Item]) -> Option<String> {
 
 fn job_record(id: &str, state: &str) -> Value {
     json!({"id":id,"conversationId":ROOT_CONVERSATION_ID,"state":state})
+}
+
+fn conversation_rows(root: &Value, envelopes: &[Value]) -> Vec<Value> {
+    let mut rows = vec![root.clone()];
+    let mut paths = std::collections::BTreeSet::new();
+    for envelope in envelopes {
+        for key in ["sender", "recipient"] {
+            if let Some(path) = envelope[key]
+                .as_str()
+                .filter(|path| path.starts_with("/root/"))
+            {
+                paths.insert(path.to_owned());
+            }
+        }
+    }
+    rows.extend(
+        paths
+            .into_iter()
+            .map(|path| json!({"id":format!("conversation/{path}"),"path":path,"state":"idle"})),
+    );
+    rows
+}
+
+struct AbortTasksOnDrop(Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>);
+
+impl Drop for AbortTasksOnDrop {
+    fn drop(&mut self) {
+        let handles = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        for handle in handles.iter() {
+            handle.abort();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -452,7 +511,11 @@ fn deterministic_command(
         };
     }
     if command == "cancel" && waiting {
-        return ("settled", "cancelled", Some("Request cancelled.".into()));
+        return (
+            "settled",
+            "completed",
+            Some("Pending wait cancelled.".into()),
+        );
     }
     if let Some(text) = command.strip_prefix("echo ") {
         return ("settled", "completed", Some(text.into()));
@@ -769,6 +832,7 @@ fn persist_browser_envelope(
     recipient: &str,
     kind: &str,
     payload: &str,
+    ordinal: u64,
 ) -> Result<Value, String> {
     let role = if sender == "/operator" {
         "user"
@@ -785,15 +849,20 @@ fn persist_browser_envelope(
         .map_err(|_| "could not persist browser message envelope")?;
     Ok(json!({
         "id":format!("envelope/{id}"),
-        "conversationId":ROOT_CONVERSATION_ID,
+        "conversationId":if recipient.starts_with("/root/") { format!("conversation/{recipient}") } else { ROOT_CONVERSATION_ID.to_owned() },
         "recipient":recipient,
         "sender":sender,
         "type":kind,
-        "payload":payload
+        "payload":payload,
+        "ordinal":ordinal
     }))
 }
 
-fn persist_engine_final_envelope(store: &Store, item: &Item) -> Result<Value, String> {
+fn persist_engine_final_envelope(
+    store: &Store,
+    item: &Item,
+    ordinal: u64,
+) -> Result<Value, String> {
     let answer = final_text(std::slice::from_ref(item))
         .ok_or_else(|| "Engine final item is not a final answer".to_owned())?;
     let id = store
@@ -805,7 +874,8 @@ fn persist_engine_final_envelope(store: &Store, item: &Item) -> Result<Value, St
         "recipient":"/operator",
         "sender":ROOT_PATH,
         "type":"FINAL_ANSWER",
-        "payload":answer
+        "payload":answer,
+        "ordinal":ordinal
     }))
 }
 
@@ -880,18 +950,37 @@ fn restore_server_state(raw: &str) -> Result<PersistedServerState, String> {
         }
         if request.get("state").and_then(Value::as_str) == Some("running") {
             request["state"] = json!("failed");
+            if request.get("commandId").is_some() {
+                request["outcome"] = json!("failed");
+                request["detail"] = json!("Process restarted before this request settled.");
+            }
         }
     }
     let envelopes = records("envelopes")?;
+    let mut last_ordinal = 0;
     for envelope in &envelopes {
         if envelope.get("id").and_then(Value::as_str).is_none()
-            || envelope.get("conversationId").and_then(Value::as_str) != Some(ROOT_CONVERSATION_ID)
+            || !envelope
+                .get("conversationId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| {
+                    id == ROOT_CONVERSATION_ID || id.starts_with("conversation//root/")
+                })
             || envelope.get("sender").and_then(Value::as_str).is_none()
             || envelope.get("recipient").and_then(Value::as_str).is_none()
             || envelope.get("payload").and_then(Value::as_str).is_none()
-            || envelope.get("type").and_then(Value::as_str) != Some("FINAL_ANSWER")
+            || !matches!(
+                envelope.get("type").and_then(Value::as_str),
+                Some("PROGRESS" | "MESSAGE" | "FINAL_ANSWER")
+            )
         {
             return Err("persisted demo server envelope is malformed".into());
+        }
+        if let Some(ordinal) = envelope["ordinal"].as_u64() {
+            if ordinal <= last_ordinal {
+                return Err("persisted demo server envelope ordinals are not monotone".into());
+            }
+            last_ordinal = ordinal;
         }
     }
     if conversation["state"] == "requesting" {
@@ -955,7 +1044,7 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
             .map_err(|_| "could not persist recovered server status".to_owned())?;
     }
     control.set_snapshot(Snapshot {
-        conversations: vec![conversation.clone()],
+        conversations: conversation_rows(&conversation, &envelopes),
         requests: requests.clone(),
         jobs: jobs.clone(),
         envelopes: envelopes.clone(),
@@ -979,6 +1068,8 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
             .map_err(|_| "could not read bound address")?
     );
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let task_aborts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _task_cleanup = AbortTasksOnDrop(task_aborts.clone());
     let mut server_task = tokio::spawn(async move {
         axum::serve(listener, app)
             .with_graceful_shutdown(async {
@@ -986,6 +1077,10 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
             })
             .await
     });
+    task_aborts
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(server_task.abort_handle());
     let shutdown_signal = tokio::signal::ctrl_c();
     tokio::pin!(shutdown_signal);
     let mut pending_engine: Option<(
@@ -1007,7 +1102,9 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
                         let request_id = format!("request/{command_id}");
                         let job_id = command_id.clone();
                         let queued_job = job_record(&job_id, "running");
-                        let queued_request = request_record(&request_id, "running");
+                        let queued_request = command_request_record(
+                            &request_id, "running", &command_id, &command, "accepted", None,
+                        );
                         jobs.push(queued_job);
                         requests.push(queued_request);
                         conversation = conversation_record("requesting");
@@ -1017,7 +1114,7 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
                                 &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
                             )
                             .map_err(|_| "could not persist accepted server command".to_owned())?;
-                        control.set_snapshot(Snapshot { conversations: vec![conversation.clone()], requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+                        control.set_snapshot(Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
                         if !conversation_was_requesting {
                             control.publish("conversation.upsert", conversation.clone());
                         }
@@ -1026,6 +1123,25 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
                         let waiting = active_wait_request(&requests, &history).is_some();
                         let (initial_state, initial_outcome, fallback_answer) =
                             deterministic_command(&command, waiting);
+                        if command == "wait" && initial_state == "running" {
+                            let pending_record = command_request_record(
+                                &request_id,
+                                "running",
+                                &command_id,
+                                &command,
+                                "pending",
+                                Some("Waiting for a cancel command."),
+                            );
+                            replace_by_id(&mut requests, pending_record.clone());
+                            status_store
+                                .save_session_state(
+                                    "harness-demo-server:/root",
+                                    &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
+                                )
+                                .map_err(|_| "could not persist pending wait")?;
+                            control.set_snapshot(Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+                            control.publish("request.upsert", pending_record);
+                        }
                         if command.starts_with("message ") && waiting {
                             let text = command.strip_prefix("message ").unwrap_or_default();
                             let message = persist_browser_envelope(
@@ -1034,6 +1150,7 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
                                 ROOT_PATH,
                                 "MESSAGE",
                                 text,
+                                next_envelope_ordinal(&envelopes),
                             )?;
                             envelopes.push(message.clone());
                             status_store
@@ -1042,15 +1159,16 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
                                     &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
                                 )
                                 .map_err(|_| "could not persist queued browser message")?;
-                            control.set_snapshot(Snapshot { conversations: vec![conversation.clone()], requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+                            control.set_snapshot(Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
                             control.publish("envelope.upsert", message);
                         }
                         let progress = persist_browser_envelope(
                             &status_store,
+                            "/harness",
                             ROOT_PATH,
-                            "/operator",
-                            "MESSAGE",
+                            "PROGRESS",
                             &format!("Request {command_id} accepted; deterministic Engine is processing it."),
+                            next_envelope_ordinal(&envelopes),
                         )?;
                         envelopes.push(progress.clone());
                         status_store
@@ -1059,8 +1177,9 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
                                 &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
                             )
                             .map_err(|_| "could not persist server progress")?;
-                        control.set_snapshot(Snapshot { conversations: vec![conversation.clone()], requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+                        control.set_snapshot(Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
                         control.publish("envelope.upsert", progress);
+                        let mut child_envelopes = Vec::new();
                         let child_result = if let Some(text) = command.strip_prefix("child ") {
                             Some(
                                 run_deterministic_child_message(
@@ -1074,6 +1193,22 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
                         } else {
                             None
                         };
+                        if let Some(Ok((child, _, child_envelope))) = &child_result {
+                            let parent_message = persist_browser_envelope(
+                                &status_store,
+                                ROOT_PATH,
+                                &child.0,
+                                "MESSAGE",
+                                command.strip_prefix("child ").unwrap_or_default(),
+                                next_envelope_ordinal(&envelopes),
+                            )?;
+                            envelopes.push(parent_message.clone());
+                            child_envelopes.push(parent_message);
+                            let mut reply = child_envelope.clone();
+                            reply["ordinal"] = json!(next_envelope_ordinal(&envelopes));
+                            envelopes.push(reply.clone());
+                            child_envelopes.push(reply);
+                        }
                         if command == "cancel" && waiting {
                             if let Some((cancel_tx, task)) = pending_engine.take() {
                                 let _ = cancel_tx.send(true);
@@ -1110,6 +1245,10 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
                                 )
                                 .await
                             });
+                            task_aborts
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .push(task.abort_handle());
                             pending_engine = Some((cancel_tx, task));
                             None
                         } else if skip_engine_for_queued_message {
@@ -1154,11 +1293,18 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
                         }
                         let mut changed_requests = Vec::new();
                         let mut changed_jobs = Vec::new();
-                        let mut changed_envelopes = Vec::new();
+                        let mut changed_envelopes = child_envelopes;
                         if state != "running" {
                             let own_request_state = if state == "failed" { "failed" } else { "completed" };
                             let own_job_state = if state == "failed" { "settled" } else if outcome == "cancelled" { "cancelled" } else { "settled" };
-                            let done_request = request_record(&request_id, own_request_state);
+                            let done_request = command_request_record(
+                                &request_id,
+                                own_request_state,
+                                &command_id,
+                                &command,
+                                outcome,
+                                answer.as_deref(),
+                            );
                             let done_job = job_record(&job_id, own_job_state);
                             replace_by_id(&mut requests, done_request.clone());
                             replace_by_id(&mut jobs, done_job.clone());
@@ -1166,7 +1312,12 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
                             changed_jobs.push(done_job);
                             if command == "cancel" && waiting {
                                 if let Some(pending_id) = active_wait_request(&requests, &history) {
-                                    let cancelled_request = request_record(&pending_id, "failed");
+                                    let wait_item = history.iter().find(|item| item.0["request_id"] == pending_id && item.0["command"] == "wait");
+                                    let wait_command_id = wait_item.and_then(|item| item.0["command_id"].as_str()).unwrap_or_default();
+                                    let cancelled_request = command_request_record(
+                                        &pending_id, "failed", wait_command_id, "wait",
+                                        "cancelled", Some("Request cancelled."),
+                                    );
                                     let cancelled_job = job_record(pending_id.strip_prefix("request/").unwrap_or(&pending_id), "cancelled");
                                     replace_by_id(&mut requests, cancelled_request.clone());
                                     replace_by_id(&mut jobs, cancelled_job.clone());
@@ -1176,10 +1327,9 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
                             }
                             if own_request_state == "completed" {
                                 if let Some(Ok((_, _, child_envelope))) = &child_result {
-                                    envelopes.push(child_envelope.clone());
-                                    changed_envelopes.push(child_envelope.clone());
+                                    let _ = child_envelope;
                                 } else if let Some(item) = final_item.as_ref() {
-                                    let envelope = persist_engine_final_envelope(&status_store, item)?;
+                                    let envelope = persist_engine_final_envelope(&status_store, item, next_envelope_ordinal(&envelopes))?;
                                     envelopes.push(envelope.clone());
                                     changed_envelopes.push(envelope);
                                 } else if skip_engine_for_queued_message {
@@ -1189,6 +1339,7 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
                                         "/operator",
                                         "MESSAGE",
                                         answer.as_deref().unwrap_or("Message queued."),
+                                        next_envelope_ordinal(&envelopes),
                                     )?;
                                     envelopes.push(queued.clone());
                                     changed_envelopes.push(queued);
@@ -1200,6 +1351,7 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
                                     "/operator",
                                     "MESSAGE",
                                     answer,
+                                    next_envelope_ordinal(&envelopes),
                                 )?;
                                 envelopes.push(failure.clone());
                                 changed_envelopes.push(failure);
@@ -1221,7 +1373,7 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
                                 &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
                             )
                             .map_err(|_| "could not persist server job status".to_owned())?;
-                        control.set_snapshot(Snapshot { conversations: vec![conversation.clone()], requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+                        control.set_snapshot(Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
                         for request in changed_requests {
                             control.publish("request.upsert", request);
                         }
@@ -1238,6 +1390,10 @@ async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), Str
                 }
             }
         }
+    }
+    if let Some((cancel_tx, task)) = pending_engine.take() {
+        let _ = cancel_tx.send(true);
+        let _ = task.await;
     }
     let _ = shutdown_tx.send(());
     let _ = server_task.await;
@@ -1846,7 +2002,11 @@ mod tests {
         );
         assert_eq!(
             deterministic_command("cancel", true),
-            ("settled", "cancelled", Some("Request cancelled.".into()))
+            (
+                "settled",
+                "completed",
+                Some("Pending wait cancelled.".into())
+            )
         );
         let request_id = "request/client-command-1";
         assert_eq!(
