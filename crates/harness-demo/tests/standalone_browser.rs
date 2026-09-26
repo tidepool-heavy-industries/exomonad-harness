@@ -276,6 +276,16 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     assert_eq!(echo_record["state"], "completed");
     assert_eq!(echo_record["outcome"], "completed");
     assert_eq!(echo_record["detail"], "standalone");
+    let inject_id = submit(&base, &cookie, &client, "echo inject-context").await;
+    let injected = await_request(&base, &cookie, &inject_id).await;
+    let inject_record = injected["snapshot"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["commandId"] == inject_id)
+        .expect("inject-context request must be visible");
+    assert_eq!(inject_record["state"], "completed");
+    assert_eq!(inject_record["outcome"], "completed");
     let child_id = submit(&base, &cookie, &client, "child standalone-child").await;
     let first_shot = await_request(&base, &cookie, &child_id).await;
     assert!(
@@ -315,6 +325,34 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
         }),
         "expected echo-sleep decision, advertised sleep, Engine request and /root agent: {tagged:#?}"
     );
+    let injected_decisions: Vec<_> = tagged
+        .iter()
+        .filter(|row| {
+            serde_json::to_string(&row["items"])
+                .is_ok_and(|items| items.contains("echo inject-context"))
+        })
+        .collect();
+    assert_eq!(
+        injected_decisions.len(),
+        1,
+        "inject-context should produce exactly one hook decision: {tagged:#?}"
+    );
+    assert_eq!(injected_decisions[0]["agent"], "/root");
+    assert_eq!(
+        injected_decisions[0]["decision"],
+        json!({"Inject":{
+            "item":{"type":"message","role":"user","content":"standalone injected context"},
+            "tools_allowed":["sleep"]
+        }})
+    );
+    assert_eq!(
+        injected_decisions[0]["evidence"]["selection"],
+        "echo-inject-sleep"
+    );
+    assert_eq!(
+        injected_decisions[0]["evidence"]["consumer"],
+        "standalone-browser"
+    );
     assert!(
         tagged.iter().any(|row| {
             row["agent"] != "/root"
@@ -335,6 +373,13 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
                 .is_ok_and(|input| input.contains("echo standalone"))
         })
         .expect("captured echo Engine request");
+    let inject_request = captured
+        .iter()
+        .find(|request| {
+            serde_json::to_string(&request["input"])
+                .is_ok_and(|input| input.contains("echo inject-context"))
+        })
+        .expect("captured echo inject-context Engine request");
     let child_request = captured
         .iter()
         .find(|request| {
@@ -343,6 +388,28 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
         })
         .expect("captured child Engine request");
     assert_eq!(echo_request["tools"], child_request["tools"]);
+    assert_eq!(inject_request["tools"], echo_request["tools"]);
+    let injected_input = inject_request["input"].as_array().unwrap();
+    assert_eq!(
+        injected_input.last().unwrap(),
+        &json!({"type":"message","role":"user","content":"standalone injected context"})
+    );
+    assert_eq!(
+        injected_input
+            .iter()
+            .filter(|item| item["content"] == "standalone injected context")
+            .count(),
+        1
+    );
+    assert!(
+        serde_json::to_string(&inject_request["input"])
+            .unwrap()
+            .contains("echo inject-context")
+    );
+    assert_eq!(
+        inject_request["tool_choice"],
+        json!({"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"sleep"}]})
+    );
     let tool_names: Vec<&str> = echo_request["tools"]
         .as_array()
         .unwrap()
@@ -377,6 +444,13 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
             .as_array()
             .unwrap()
             .iter()
+            .any(|r| r["commandId"] == inject_id)
+    );
+    assert!(
+        clean["snapshot"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
             .any(|r| r["commandId"] == child_id)
     );
     assert_eq!(
@@ -405,6 +479,13 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
             .unwrap()
             .iter()
             .any(|r| r["commandId"] == first_id)
+    );
+    assert!(
+        lost["snapshot"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["commandId"] == inject_id)
     );
     assert!(
         lost["snapshot"]["envelopes"]
