@@ -30,11 +30,13 @@ module qualifier into scope.
 
 Ordinary exact-candidate review requests remain in `Project.Work`, with
 event-driven collection in `Project.Routing`. Use `Project.ReviewFlow`
-for a bounded component after the launch brief confirms its runtime gate: declare component-only review or required sibling
+for a bounded component: declare component-only review or required sibling
 commits before requesting review, retain root integration authority, and escalate
 unresolved contracts. The compiled `checks/review-flow-loop.hs` consumer shows setup, including
 `R.withWorktree` authority; `Project.ReviewFlowChecks` exercises acceptance,
-repair, missing sibling source and empty-findings correction.
+repair, missing sibling source and empty-findings correction. Native reviewer
+activation and typed acceptance were observed in wave17; retain the first updated
+policy flow's startup and result as wave18 evidence before wider reuse.
 `Project.BrowserScenario` remains unavailable pending its isolated browser check.
 
 For conditional diagnostics, `Project.ParallelInvestigate.followFailure` observes
@@ -88,8 +90,8 @@ flake.lock, avoiding copying a warm target directory into the Nix store.
   direct retained answers are sufficient for a small completed set.
 - Handoff projection: use for recurring summaries; it does not establish acceptance.
 - Review readiness: skip a second notice when the settled candidate already supplies
-  everything needed. ReviewFlow still needs a successful activation smoke check
-  before the next live trial.
+  everything needed. Exercise the updated ReviewFlow policy on one bounded
+  component before composing it across the whole tree.
 
 Record applicable non-use as well as attempts. Keep the three-wave trial window.
 Avoid explicit short yields and repeated empty write_stdin calls for batch work;
