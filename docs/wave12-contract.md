@@ -25,6 +25,11 @@ The server owns command interpretation, durable state transitions and event
 publication. Wire records retain the existing `Snapshot` arrays and
 `*.upsert` event kinds; optional descriptive fields are additive. Every
 accepted command gets an ID and must be represented by a durable outcome.
+Tests may assert the existing record keys (`id`, `conversationId`, `state`,
+`sender`, `recipient`, `type`, `payload`) and states, and should not guess
+the names of additive progress fields before the server owner publishes
+them. The root supplies HTTP and WebSocket test dependencies in the demo
+crate's manifest; the test owner edits only the integration test.
 Snapshot on reconnect must reflect stored history, not replay commands.
 Browser refresh is the primary reconnect guarantee. Process restart must
 recover settled history and mark interrupted work honestly, never re-execute
