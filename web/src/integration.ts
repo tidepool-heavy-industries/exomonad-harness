@@ -10,16 +10,25 @@ export function toViewModel(state: NormalizedState): HarnessViewModel {
     state: conversation.state,
     detail: [...state.requests.values()]
       .filter((request) => request.conversationId === conversation.id)
-      .map((request) => `request ${request.state}`)
+      .map((request) => [
+        request.commandId ? `command ${request.commandId}` : undefined,
+        request.command ? `"${request.command}"` : undefined,
+        request.outcome ? `outcome ${request.outcome}` : undefined,
+        request.detail,
+      ].filter(Boolean).join(' · ') || `request ${request.state}`)
       .join(', '),
   }))
   const timeline: HarnessViewModel['timeline'] = [
     ...[...state.requests.values()].map((request) => ({
       id: request.id,
       nodeId: request.conversationId,
-      label: 'Response request',
+      label: request.command ?? 'Response request',
       kind: 'request' as const,
       state: request.state,
+      commandId: request.commandId,
+      command: request.command,
+      outcome: request.outcome,
+      detail: request.detail,
     })),
     ...[...state.jobs.values()].map((job) => ({
       id: job.id,
@@ -29,13 +38,22 @@ export function toViewModel(state: NormalizedState): HarnessViewModel {
       state: job.state,
     })),
   ]
-  const inbox = [...state.envelopes.values()].map((envelope) => ({
-    id: envelope.id,
-    sender: envelope.sender,
-    message: envelope.payload,
-    // The wire contract supplies envelope kind, not read/acted delivery state.
-    state: envelope.type,
-  }))
+  const envelopeRows = [...state.envelopes.values()]
+    .map((envelope, index) => ({
+      id: envelope.id,
+      sender: envelope.sender,
+      recipient: envelope.recipient,
+      message: envelope.payload,
+      state: envelope.type,
+      ordinal: envelope.ordinal,
+      index,
+    }))
+  const hasCompleteOrder = envelopeRows.every((envelope) => envelope.ordinal !== undefined)
+  const inbox = envelopeRows
+    .sort((left, right) => hasCompleteOrder
+      ? (left.ordinal ?? 0) - (right.ordinal ?? 0)
+      : left.index - right.index)
+    .map(({ index: _index, ...envelope }) => envelope)
   return { nodes, timeline, inbox }
 }
 

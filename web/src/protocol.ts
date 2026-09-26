@@ -23,6 +23,10 @@ export interface RequestRecord {
   readonly id: EntityId;
   readonly conversationId: EntityId;
   readonly state: "running" | "completed" | "failed";
+  readonly commandId?: EntityId;
+  readonly command?: string;
+  readonly outcome?: "accepted" | "pending" | "queued" | "presented" | "acted" | "completed" | "cancelled" | "failed";
+  readonly detail?: string;
   readonly version?: number;
 }
 
@@ -37,8 +41,9 @@ export interface Envelope {
   readonly id: EntityId;
   readonly recipient: string;
   readonly sender: string;
-  readonly type: "NEW_TASK" | "MESSAGE" | "FINAL_ANSWER";
+  readonly type: "NEW_TASK" | "MESSAGE" | "FINAL_ANSWER" | "PROGRESS";
   readonly payload: string;
+  readonly ordinal?: number;
   readonly version?: number;
 }
 

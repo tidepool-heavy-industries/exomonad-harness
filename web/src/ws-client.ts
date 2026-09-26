@@ -15,6 +15,7 @@ export function connectHarness(
   socket: WebSocket,
   receive: (state: NormalizedState) => void,
   error: (message: string) => void,
+  accepted: (commandId: string) => void = () => undefined,
 ): (command: string) => void {
   let current: NormalizedState | undefined
   socket.addEventListener('message', (message: MessageEvent<string>) => {
@@ -22,6 +23,7 @@ export function connectHarness(
       const frame = JSON.parse(message.data) as
         | { type: 'snapshot'; snapshot: Snapshot }
         | { type: 'event'; event: SequencedEvent }
+        | { type: 'command.accepted'; command_id: string }
         | { type: 'error'; reason: string }
       if (frame.type === 'snapshot') {
         current = normalizeSnapshot(frame.snapshot)
@@ -38,6 +40,9 @@ export function connectHarness(
         }
         current = result.state
         receive(current)
+      } else if (frame.type === 'command.accepted') {
+        if (typeof frame.command_id === 'string' && frame.command_id.length > 0) accepted(frame.command_id)
+        else error('Invalid command acceptance frame from server.')
       } else error(frame.reason)
     } catch {
       error('Invalid JSON event from server.')

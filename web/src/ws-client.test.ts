@@ -12,13 +12,16 @@ describe('WebSocket API boundary', () => {
     } as unknown as WebSocket
     const receive = vi.fn()
     const error = vi.fn()
-    const sendCommand = connectHarness(socket, receive, error)
+    const accepted = vi.fn()
+    const sendCommand = connectHarness(socket, receive, error, accepted)
     const dispatch = (frame: unknown) => listeners.get('message')?.(
       new MessageEvent('message', { data: JSON.stringify(frame) }),
     )
 
     dispatch({ type: 'snapshot', snapshot: fixtureSnapshot })
     expect(receive).toHaveBeenCalledTimes(1)
+    dispatch({ type: 'command.accepted', command_id: 'cmd-42' })
+    expect(accepted).toHaveBeenCalledWith('cmd-42')
     dispatch({
       type: 'event',
       event: {

@@ -45,4 +45,27 @@ describe('operator views', () => {
     expect(screen.getByText(/Sending is not acceptance or completion/)).toBeInTheDocument()
     expect(screen.getByText(/Outcomes, progress, and messages appear only to the extent represented/)).toBeInTheDocument()
   })
+
+  it('presents server command outcomes and real ordered message endpoints', () => {
+    const data: HarnessViewModel = {
+      nodes: [{ id: 'root', name: '/root', state: 'idle' }],
+      timeline: [{
+        id: 'req', nodeId: 'root', label: 'echo hello', kind: 'request', state: 'completed',
+        commandId: 'cmd-7', command: 'echo hello', outcome: 'completed', detail: 'echoed hello',
+      }],
+      inbox: [{
+        id: 'progress', sender: '/harness', recipient: '/root', message: 'working',
+        state: 'PROGRESS', ordinal: 1,
+      }],
+    }
+    render(<App data={data} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Timeline' }))
+    expect(screen.getByText(/command cmd-7/)).toBeInTheDocument()
+    expect(screen.getByText(/outcome completed/)).toBeInTheDocument()
+    expect(screen.getByText(/echoed hello/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Inbox' }))
+    expect(screen.getByText('/harness → /root')).toBeInTheDocument()
+    expect(screen.getByText('PROGRESS · #1')).toBeInTheDocument()
+    expect(screen.getByText('working')).toBeInTheDocument()
+  })
 })
