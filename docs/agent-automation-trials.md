@@ -17,12 +17,12 @@ measure usage and remove unhelpful entries after the trial.
 
 | Machinery | Model interaction | Result and stopping boundary |
 | --- | --- | --- |
-| Command completion | Start a check and subscribe to its result | One useful terminal notice, exact job and evidence; no model polling |
-| Grouped checks | Supply several named checks and desired notification policy | One combined result with individual failures/unknowns; do not hide incomplete checks |
-| Review readiness | Supply exact candidate and required preparation | Establish actual checkout/prerequisites before review; dirty conflicting work remains preserved |
-| Slow-operation observation | Select operations, duration threshold and bounded diagnostics | Gather wait/compile/execution evidence and report an actionable episode; no blind cancellation |
-| Dependency-change notice | Observe declared source/decision dependencies for active assignments | Notify affected owner of exact change; delivery is not incorporation |
-| Focused failure diagnostics | Inspect a retained failed check through bounded reads and optional Jev choices | Compact evidence packet; zero selection, setup failure and product assertion failure remain distinct |
+| Watch my checks | Named focused runs, owner and notification policy | Completion events produce failures or one combined summary without model polling |
+| Prepare my review | Exact terminal candidate and declared prerequisites | Establish actual source before review; preserve conflicting dirty work |
+| Diagnose this failure | Retained failed check, context and bounded read operations | Distinguish selection/setup/assertion failures and return a compact evidence packet |
+| Carry this repair cycle | Existing implementer/reviewer relationship, scope and repair limit | Route within-contract repairs, escalate unresolved decisions, preserve exact candidate evidence |
+| Watch my assumptions | Existing dependency events, projection and relevant-change callback | Notify affected owners of meaningful changes with exact before/after evidence |
+| Investigate alongside me | Named caller-supplied read-only probes, context and work budget | Gather independent evidence and use optional Jev choices within supplied operations; return unresolved work explicitly |
 
 ## Composition and implementation
 
@@ -30,10 +30,18 @@ Extend existing Cmd completion, Project.Routing, focused-test evidence and sourc
 publication owners. No second scheduler, durable log, task registry or parser.
 Fix helper delivery into each consumer's actual bound source layer before
 claiming helper reuse. Keep code and prompts isolated from running wave sources.
-Start with command completion and grouped results. Review readiness, slow-call
-and dependency observation follow as slots free and actual primitives are verified.
+Start with command completion and grouped results. Reuse the existing review
+coordinator; do not add another owner for its repair loop. Dependency observation
+and bounded investigation use available event and concurrency primitives.
 Use focused failure diagnostics to extend the current test helper rather than
 introducing a parallel test runner.
+
+Each automation may be a prebuilt actor configured by functions, context and
+policy, or ordinary helpers composed in a notebook. Stable interfaces operate
+concrete machinery. Agents primarily use these interfaces; extending the DSL is
+not a routine assignment. Choose the strongest reliable narrow version over a
+wide interface with unverified behavior. Four workflow automations and two
+background capabilities form the trial portfolio.
 
 ## Prompt menu shape
 
