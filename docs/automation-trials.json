@@ -323,37 +323,41 @@
       "id": "check_plan",
       "purpose": "One candidate and retained evidence across several focused checks",
       "entrypoint": "SessionHelpers.AcceptancePlan.startAcceptancePlan",
-      "status": "awaiting_launch",
+      "status": "ready_for_trial",
       "first_exposed_wave": null,
       "waves": [],
-      "validation": "Final combined launch gates pending; focused implementation evidence in Tidepool docs/reports/wave17-to-18-implementation.md."
+      "validation": "Candidate-once and full packet recipe27/27; retained recovery2/2; both project consumers compiled.",
+      "source_revision": "8a21b71fdb9ca2cc7b241a5f3dd97a83b6c45d84"
     },
     {
       "id": "background_investigator",
       "purpose": "One failed-job investigation packet without parent relay",
       "entrypoint": "Project.BackgroundInvestigator.watchFailedCheck",
-      "status": "awaiting_launch",
+      "status": "ready_for_trial",
       "first_exposed_wave": null,
       "waves": [],
-      "validation": "Final combined launch gates pending; focused implementation evidence in Tidepool docs/reports/wave17-to-18-implementation.md."
+      "validation": "Terminal failure5/5 and deterministic pending probe5/5; original job retained.",
+      "source_revision": "8a21b71fdb9ca2cc7b241a5f3dd97a83b6c45d84"
     },
     {
       "id": "baseline_incorporation",
       "purpose": "Deliver one accepted baseline and collect exact owner reports",
       "entrypoint": "Project.BaselineIncorporation.beginBaselineEpisode",
-      "status": "awaiting_launch",
+      "status": "ready_for_trial",
       "first_exposed_wave": null,
       "waves": [],
-      "validation": "Final combined launch gates pending; focused implementation evidence in Tidepool docs/reports/wave17-to-18-implementation.md."
+      "validation": "Collector17/17 before semantic-only change; final source compiled; root live single-choice cases5/5.",
+      "source_revision": "8a21b71fdb9ca2cc7b241a5f3dd97a83b6c45d84"
     },
     {
       "id": "workflow_reminders",
       "purpose": "Specific instructed reminders attached to observed progress",
       "entrypoint": "Project.WorkflowReminderExamples.withQuestionReminders",
-      "status": "awaiting_launch",
+      "status": "ready_for_trial",
       "first_exposed_wave": null,
       "waves": [],
-      "validation": "Final combined launch gates pending; focused implementation evidence in Tidepool docs/reports/wave17-to-18-implementation.md."
+      "validation": "Core6/6; actual HostJev cases3/3; routing consumer6/6 including typed unavailable notification receipts.",
+      "source_revision": "8a21b71fdb9ca2cc7b241a5f3dd97a83b6c45d84"
     }
   ],
   "wave16_run": {
