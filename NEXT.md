@@ -1,4 +1,15 @@
-# Active assignment — wave16
+# Active assignment — wave17
+
+Read [wave17 brief](docs/wave17-brief.md). Integrate wave16 on this run's branch,
+then verify and document the combined standalone deterministic browser release
+candidate with the new Haskell helpers. The brief names exact source/evidence,
+parallel obligations, and the bounded native review activation gate.
+
+The supervisor owns launch identity. Do not launch another run, move the host
+master branch, or attempt credentialed inference. Preserve the new workspace pin
+and this active assignment when merging wave16's historical NEXT/handoff.
+
+# Previous assignment — wave16
 
 Read [wave16 brief](docs/wave16-brief.md). Implement its standalone deterministic
 before-request injection slice and Haskell composition trial. The supervisor owns
