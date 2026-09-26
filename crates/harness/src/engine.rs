@@ -492,6 +492,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 input: history,
                 instructions: self.config.instructions.clone(),
                 tools: self.tools(finalize_schema),
+                tools_allowed: None,
                 model: self.config.model.clone(),
                 // The request-level field is only the cache-preserving mirror
                 // of the first positional update in the exact history sent.
@@ -1256,6 +1257,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         input: items,
                         instructions: self.config.instructions.clone(),
                         tools: self.tools(None),
+                        tools_allowed: None,
                         model: self.config.model.clone(),
                         pinned_effort: effective_effort,
                         session_id: self.config.session_id.clone(),

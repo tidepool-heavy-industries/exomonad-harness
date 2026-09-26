@@ -1758,6 +1758,7 @@ mod tests {
             )],
             instructions: "reply by tool".into(),
             tools: vec![serde_json::json!({"type":"function","name":"cell"})],
+            tools_allowed: None,
             model: "offline-recording".into(),
             pinned_effort: Effort::Low,
             session_id: "recorded-session".into(),

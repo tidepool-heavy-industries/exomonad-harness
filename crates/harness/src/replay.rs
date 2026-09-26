@@ -560,6 +560,7 @@ mod tests {
             input: vec![Item(json!({"type":"message","role":"user","content":[]}))],
             instructions: "offline".into(),
             tools: vec![],
+            tools_allowed: None,
             model: "test-model".into(),
             pinned_effort: Effort::Medium,
             session_id: session_id.into(),
