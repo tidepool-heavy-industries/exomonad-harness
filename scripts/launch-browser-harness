@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+  echo "usage: launch-browser-harness ABSOLUTE_SQLITE_PATH LOOPBACK_ADDR [ABSOLUTE_ASSET_DIR]" >&2
+  exit 2
+fi
+db="$1"
+addr="$2"
+assets="${3:-$root/web/dist}"
+[[ "$db" = /* ]] || { echo "database path must be absolute" >&2; exit 2; }
+[[ "$assets" = /* ]] || { echo "asset path must be absolute" >&2; exit 2; }
+if [[ ! -d "$assets" ]]; then
+  echo "web assets are missing at $assets; run scripts/prepare-browser-harness" >&2
+  exit 1
+fi
+cd "$root"
+exec cargo run --release --package harness-demo -- --db "$db" --serve "$addr" --assets "$assets"

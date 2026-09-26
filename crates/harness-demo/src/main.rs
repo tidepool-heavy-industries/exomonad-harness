@@ -39,6 +39,7 @@ struct CliOptions {
     tree: bool,
     trace_jsonl: Option<PathBuf>,
     compact_at_input_tokens: Option<u64>,
+    assets: Option<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -49,6 +50,7 @@ enum Mode {
         db: PathBuf,
         addr: SocketAddr,
         dev_shell: bool,
+        assets: Option<PathBuf>,
     },
 }
 
@@ -64,7 +66,8 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
         mut tree,
         mut trace_jsonl,
         mut compact_at_input_tokens,
-    ) = (None, None, None, false, false, None, None);
+        mut assets,
+    ) = (None, None, None, false, false, None, None, None);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -81,6 +84,14 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
                 serve = Some(parse_serve_address(
                     args.get(i).ok_or("--serve requires an address")?,
                 )?);
+            }
+            "--assets" => {
+                i += 1;
+                let path = PathBuf::from(args.get(i).ok_or("--assets requires an absolute path")?);
+                if !path.is_absolute() {
+                    return Err("--assets requires an absolute path".into());
+                }
+                assets = Some(path);
             }
             "--dev-shell" => dev_shell = true,
             "--tree" => tree = true,
@@ -117,6 +128,9 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
     if serve.is_some() && compact_at_input_tokens.is_some() {
         return Err("--compact-at-input-tokens requires --ask".into());
     }
+    if assets.is_some() && serve.is_none() {
+        return Err("--assets is serve-only".into());
+    }
     if let Some(addr) = serve {
         if ask.is_some() {
             return Err("--serve and --ask are mutually exclusive".into());
@@ -128,6 +142,7 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
             db,
             addr,
             dev_shell,
+            assets,
         });
     }
     let ask = ask.ok_or("--ask <text> is required")?;
@@ -141,6 +156,7 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
         tree,
         trace_jsonl,
         compact_at_input_tokens,
+        assets: None,
     }))
 }
 
@@ -977,13 +993,20 @@ fn restore_server_state(raw: &str) -> Result<PersistedServerState, String> {
     })
 }
 
-async fn serve(db: PathBuf, addr: SocketAddr, dev_shell: bool) -> Result<(), String> {
+async fn serve(
+    db: PathBuf,
+    addr: SocketAddr,
+    dev_shell: bool,
+    assets: Option<PathBuf>,
+) -> Result<(), String> {
     if !addr.ip().is_loopback() {
         return Err(
             "--serve is loopback-only because browser-session login uses plain HTTP".into(),
         );
     }
-    let asset_root = PathBuf::from("web/dist");
+    let cwd = std::env::current_dir().map_err(|_| "could not determine current directory")?;
+    let db = if db.is_absolute() { db } else { cwd.join(db) };
+    let asset_root = assets.unwrap_or_else(|| cwd.join("web/dist"));
     ensure_asset_root(&asset_root)?;
     let secret = std::env::var("HARNESS_DEMO_SESSION_SECRET")
         .map_err(|_| "HARNESS_DEMO_SESSION_SECRET is required".to_owned())?;
@@ -1686,8 +1709,9 @@ async fn main() {
             db,
             addr,
             dev_shell,
+            assets,
         }) => {
-            if let Err(error) = serve(db, addr, dev_shell).await {
+            if let Err(error) = serve(db, addr, dev_shell, assets).await {
                 eprintln!("harness-demo: {error}");
                 std::process::exit(1);
             }
@@ -1780,6 +1804,7 @@ mod tests {
                 tree: false,
                 trace_jsonl: None,
                 compact_at_input_tokens: None,
+                assets: None,
             })
         );
         assert!(matches!(
@@ -1869,6 +1894,7 @@ mod tests {
                 db: PathBuf::from("state.sqlite"),
                 addr: "127.0.0.1:8080".parse().unwrap(),
                 dev_shell: false,
+                assets: None,
             }
         );
         assert!(parse(&["--db", "state.sqlite", "--serve", "bad"]).is_err());
@@ -1903,6 +1929,38 @@ mod tests {
                 .contains("build web/dist")
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn assets_cli_is_absolute_and_serve_only() {
+        let parse =
+            |args: &[&str]| parse_args(&args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        assert!(
+            parse(&[
+                "--db",
+                "state.sqlite",
+                "--ask",
+                "hi",
+                "--assets",
+                "/tmp/assets"
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "--db",
+                "state.sqlite",
+                "--serve",
+                "127.0.0.1:0",
+                "--assets",
+                "web/dist"
+            ])
+            .is_err()
+        );
+        assert!(matches!(
+            parse(&["--db", "state.sqlite", "--serve", "127.0.0.1:0", "--assets", "/tmp/assets"]).unwrap(),
+            Mode::Serve { assets: Some(path), .. } if path == PathBuf::from("/tmp/assets")
+        ));
     }
 
     #[test]
@@ -2203,6 +2261,7 @@ mod tests {
             tree: false,
             trace_jsonl: None,
             compact_at_input_tokens: None,
+            assets: None,
         };
         let _driver = CliDriver::new(&options).unwrap();
         let provider = CliProvider(DemoProvider::development(".", false));
