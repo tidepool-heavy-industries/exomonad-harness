@@ -1,4 +1,23 @@
-# Current assignment — wave14 before-request hook
+# Next assignment — wave15 restricted before-request tools
+
+Read [the wave15 brief](docs/wave15-brief.md). Wave14's Send-only hook is
+integrated at `75a1e014d0bc3d7e8208875c84e628dcc2f4bdca`; this brief
+starts from harness master `6c37e5a6bc55987190ac991117f4a773cd29c913`.
+The next bounded gap is the PRD's per-request tool restriction: selected
+availability reaches `tool_choice` while the full tool schemas remain stable,
+and the existing standalone browser path proves the actual request and stored
+decision. Root owns the small shared contract and integration, Luna owners
+take bounded implementation and independent acceptance, and exact-source
+review precedes final focused checks. Trial the validated background check
+watcher with retained evidence once; record actual use in the automation
+ledger. This planning commit has not launched wave15. The supervisor owns
+launch source, runtime/workspace pin and run identities.
+
+The completed wave14 checkpoint and chronology below remain historical
+evidence. Its statement that no successor was authorized described the
+wave14 close, before this new assignment.
+
+# Completed assignment — wave14 before-request hook
 
 ## Wave14 integrated product checkpoint
 
