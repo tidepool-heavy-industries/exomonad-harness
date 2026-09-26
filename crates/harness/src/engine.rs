@@ -536,7 +536,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             };
             let store = self.store.clone();
             let decision_request = parent.clone();
-            blocking(move || store.record_decision(Some(&decision_request), &decision)).await?;
+            if let Err(error) =
+                blocking(move || store.record_decision(Some(&decision_request), &decision)).await
+            {
+                return Err(self.cleanup_pending(error, &pending).await);
+            }
             let replay_request = req.clone();
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
             let create = self.client.create_streaming(req, event_tx);
@@ -1505,6 +1509,129 @@ mod tests {
         fn tools(&self) -> Vec<Value> {
             Vec::new()
         }
+    }
+
+    struct NeverSettlingTool;
+    #[async_trait]
+    impl Provider for NeverSettlingTool {
+        async fn call(&self, _name: &str, _args: Value) -> Result<Value, ProviderError> {
+            std::future::pending().await
+        }
+
+        fn tools(&self) -> Vec<Value> {
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn before_request_decision_store_failure_cleans_pending_claim() {
+        let db_path = std::env::temp_dir().join(format!(
+            "harness-before-request-store-failure-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Arc::new(Store::open(&db_path).unwrap());
+        let root = AgentPath("/root".into());
+        let child = AgentPath("/root/child".into());
+        let source_head = RequestId("decision-failure-parent".into());
+        let snapshot = RequestId("decision-failure-child".into());
+        let call_id = CallId("decision-failure-pending".into());
+        store.create_request(&source_head, None, &root.0).unwrap();
+        store
+            .append_items(
+                &source_head,
+                &[Item(json!({
+                    "type":"function_call",
+                    "call_id":call_id.0,
+                    "name":"never",
+                    "arguments":"{}"
+                }))],
+            )
+            .unwrap();
+        store.set_effort(&source_head, Effort::Low).unwrap();
+        store
+            .admit_agent(
+                &root,
+                None,
+                Some(&source_head),
+                &json!({}),
+                &json!({"kind":"root"}),
+            )
+            .unwrap();
+        store.claim(&call_id, &source_head).unwrap();
+        store
+            .admit_here_agent_with_snapshot(
+                &child,
+                &root,
+                &snapshot,
+                &json!({}),
+                &root.0,
+                &child.0,
+                "AtBoundary",
+                &Item(json!({
+                    "type":"message","role":"assistant","content":[{
+                        "type":"output_text","text":"continue"
+                    }]
+                })),
+            )
+            .unwrap();
+
+        let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+        scheduler
+            .start(
+                Arc::new(NeverSettlingTool),
+                call_id.clone(),
+                "never".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_before_request_decision
+                 BEFORE INSERT ON decisions
+                 BEGIN SELECT RAISE(ABORT, 'injected decision persistence failure'); END;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            Replay {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                turns: Mutex::new(std::collections::VecDeque::new()),
+            },
+            store.clone(),
+            scheduler.clone(),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "decision-store-failure".into(),
+                agent: child,
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let error = engine
+            .run(Some(snapshot.clone()), vec![], cancel_rx, empty_mailbox())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, EngineError::Store(_)));
+        assert!(store.decisions(None).unwrap().is_empty());
+        let claims = store.claims_on(&snapshot).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].state, crate::store::ClaimState::Interrupted);
+        assert_eq!(
+            store.request(&snapshot).unwrap().unwrap().branch,
+            "/root/child"
+        );
+
+        scheduler.cancel(&call_id).await.unwrap();
+        drop(engine);
+        drop(store);
+        std::fs::remove_file(&db_path).unwrap();
     }
 
     #[tokio::test]
