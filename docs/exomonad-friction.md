@@ -1046,7 +1046,14 @@ interview hold means I am stopping here, not opening those gates now.
   The Store reopen test selected/executed/passed 1/1 and retained JSON, but
   source cleanliness was not established. It separately ran the direct demo
   forwarding check 1/1. Implementation actor was useful on owned files;
-  exact-tip review and integration remain distinct.
+  exact-tip review and integration remain distinct. Its first import cell
+  failed with `Could not find module SessionHelpers.TestEvidence` and zero
+  command effects. After `reload_helpers` published revision `64e67c3d`,
+  one import/start/finish cell issued job `a191c28d` for the focused runner
+  (exit 0, cleanup clean, 1/1) and separate evidence-read command
+  `e1ee974a` (exit 0); no Jev judgment was needed on pass. Evidence
+  identified base source `81ef34ce` with a dirty worktree, not a clean
+  committed-helper trial.
 - `friction:` Engine owner's helper trial initially rejected at module
   import. After `reload_helpers`, a one-cell start/finish trial issued three
   command effects: the focused runner exited 1 with 0/0/0 selected/runnable/
@@ -1086,3 +1093,12 @@ interview hold means I am stopping here, not opening those gates now.
   it filtered `before_request` while the Engine candidate records
   `before-request`. Root returned the single-file test to its owner so
   integrated green would not be blocked by the test's own spelling.
+- `friction:` Exact-tip Engine review at `8248c796` caught a failure-path
+  cleanup omission: a Store decision-insert failure returned through `?`
+  instead of `cleanup_pending`, potentially leaving unsettled tool claims.
+  Root returned the same owned file to the retained Engine implementer for
+  error routing and a focused failure assertion. The reviewer first
+  searched a shorthand `crates/harness/src/main.rs` path that does not
+  exist, then located the actual deterministic browser consumer in
+  `crates/harness-demo/src/main.rs`; the failed search was not review
+  evidence about the consumer.

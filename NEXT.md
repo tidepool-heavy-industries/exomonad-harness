@@ -34,6 +34,14 @@
   reviewed or integrated green test. Provider/Store review requested typed
   Send serialization repair on actor 2; actor 3's Engine test/cancellation
   repair is also still pending.
+- Provider/Store repair `cb8e94baf0cb97ffa0e3f2951d7d48b0c2e4b08f`
+  passed focused Store and demo checks 1/1 each and was independently
+  accepted at that exact tip by retained reviewer actor 5. Its typed
+  `Send` Store serialization and historical-record readback are component
+  acceptance; merge and post-merge checks establish integration separately.
+- Engine candidate `8248c7965b92b8fa3b4883d68959d1871b214268`
+  passed its focused 1/1 test but exact-tip reviewer actor 7 found a Store
+  insert-failure cleanup omission. Retained actor 3 has the repair.
 - Boundary: one Send decision per new transport attempt, associated with its
   durable request and agent; failed transport keeps the recorded decision.
   Readback/reopen alone must not invoke the hook. Retry is not exactly-once.
