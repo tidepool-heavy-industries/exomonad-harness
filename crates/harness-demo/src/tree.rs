@@ -24,6 +24,13 @@ impl TreeProvider {
 
 #[async_trait]
 impl Provider for TreeProvider {
+    async fn before_request(
+        &self,
+        plan: &harness::hooks::RequestPlan,
+    ) -> harness::hooks::BeforeRequestResult {
+        self.demo.before_request(plan).await
+    }
+
     async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError> {
         self.demo.call(name, args).await
     }
@@ -112,6 +119,10 @@ mod tests {
     use super::*;
     use crate::DemoProvider;
     use harness::{agent_runtime::StoreAgentToolService, model::AgentPath, store::Store};
+    use harness::{
+        hooks::{BeforeRequestDecision, RequestPlan},
+        model::Effort,
+    };
 
     fn provider(shell: bool) -> TreeProvider {
         let store = Arc::new(Store::memory().unwrap());
@@ -128,6 +139,22 @@ mod tests {
     fn contract() -> Value {
         json!({"clauses":["do work"],"acceptance":["done"],"owned":[],"must_not":[],
             "introduces":[],"consumes":[],"boundaries":[]})
+    }
+
+    #[tokio::test]
+    async fn before_request_forwards_standalone_browser_marker() {
+        let result = provider(false)
+            .before_request(&RequestPlan {
+                items: vec![],
+                tools_allowed: vec![],
+                effort: Effort::Low,
+            })
+            .await;
+        assert_eq!(result.decision, BeforeRequestDecision::Send);
+        assert_eq!(
+            result.evidence,
+            Some(json!({"consumer":"standalone-browser"}))
+        );
     }
 
     fn context(agent: &str) -> CallContext {

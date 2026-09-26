@@ -5,6 +5,7 @@ pub mod cell_job;
 pub mod compaction;
 pub mod engine;
 pub mod finalize;
+pub mod hooks;
 pub mod item;
 pub mod lifecycle;
 pub mod mailbox;

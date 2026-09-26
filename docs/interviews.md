@@ -980,3 +980,173 @@ should replace it next iteration. I saw no evidence it caused wave-10
 rework, and I did not edit the prompt. Notebook indentation
 auto-repair is deferred as requested; the supervisor reports a
 valid multiline placement fix already implemented.
+# Wave 14 root interview — before-request hook
+
+**Observed outcome.** I landed the Send-only contract and serialization
+example first, then admitted three disjoint Luna owners: Provider/Store,
+Engine and independent expected-red browser acceptance. Three review actors
+were used in total: one retained Provider/Store reviewer across repair, the
+initial Engine reviewer, and one fresh exact-source replacement after
+reviewAgain remained pinned to the old tip. Provider/Store and Engine both
+required real repairs found by review. The standalone browser barrier went
+red before producer integration and green on integrated source `75a1e014`.
+Every final focused check selected/executed/passed 1/1; the web prerequisite
+ran 14/14 and the browser journey 1/1.
+
+**What the tree cost.** Parallel owners let the browser test expose missing
+product evidence while Engine and Store work progressed, but handoff cost was
+real. I had to correct an early browser-chain assumption (production
+standalone uses CliProvider, not TreeProvider), an acceptance owner's reading
+of `deterministic_command` (it still calls Engine), and the browser test's
+`before_request` versus `before-request` key. The first Engine candidate had
+no focused test; a later review caught a missing pending-claim cleanup. The
+Store reviewer caught a hand-built JSON value that did not represent typed
+Send. These corrections were more valuable than a single unchecked merge,
+but made two repair waves necessary. I did not measure aggregate model tool
+calls or elapsed model time reliably enough to claim savings.
+
+**Helper experiment.** I republished a 3-GiB `SessionHelpers.TestEvidence`
+variant locally and used one Haskell cell to start/finish the scaffold test:
+one focused runner and one evidence read, 1/1 passed, with strict
+clean-source false because helper files were dirty. Provider/Store's first
+import failed with zero command effects; after publication it ran one
+start/finish cell with a focused runner and evidence read, 1/1 passed at a
+dirty source. The independent reviewer could not import the helper and used
+the direct script. Engine's diagnostic trial ran 0/0/0 and its Jev failure
+classification encountered a circuit-open 403; it correctly switched to
+direct focused checks. The supervisor later clarified that 3 GiB was a
+valid experiment reservation; my initial insistence on the committed
+4-GiB variant created avoidable steering. Helper consumption was useful
+for one owner but not reliably reusable across fork snapshots this run.
+
+**Next improvement.** Publish the helper source once before forking and
+name that published revision in every assignment, then distinguish inherited
+workspace modules from later root edits. Keep a fresh exact-source review
+checkout for repairs rather than relying on a retained checkout to move.
+Use one explicit hook-key constant or typed mapping at the persistence seam
+so producer and acceptance tests cannot silently spell different keys.
+These are proposals, not changes made in wave 14.
+
+## Wave 14 acceptance owner interview
+
+**Report.** The independent owner changed only the standalone browser test
+to inspect persisted decisions, correlate Engine request UUIDs with Store
+request branch/items, assert marker/Send/provenance and no extra decisions
+after reopen, while retaining reconnect/process-loss checks. Its first
+candidate `49b5eded` and hook-key repair `506e1791` each ran one selected
+and executed standalone test; the corrected pre-producer test failed with
+an empty decision list as intended. Its checkout also prepared web assets
+and passed web 14/14 and browser journey 1/1. The owner did **not** run
+the integrated green test; root ran that later at `75a1e014`.
+
+**Tree cost and friction.** Parallel Provider/Store and Engine work allowed
+the expected-red consumer test to develop independently, but the owner
+needed three handoff clarifications: exact opaque marker, the difference
+between Engine request UUIDs and browser UI IDs, and source proof that
+browser commands enter Engine. Root's diff inspection caught the test's
+`before_request`/`before-request` mismatch before integration. The owner
+reported no Haskell helper or review-handle calls, so no experiment effects
+are attributed to this node. Its inference is that a source-backed
+consumer/serialized-key note before delegation would reduce coordination
+cost; next time it would verify the concrete consumer and hook spelling
+before writing the assertion.
+
+## Wave 14 Engine owner interview
+
+**Report.** The owner wired the hook into Engine's final
+`ResponsesRequest` path, persisted typed results against the active
+Engine request, made a slow hook cancellable, and repaired decision-write
+failure routing through `cleanup_pending`. At candidate `978c650e`, the
+pending-claim Store-failure test and the
+transport-failure/pass-through/provenance/reopen test each matched,
+executed and passed 1/1. The owner did not run those tests at integrated
+`75a1e014`; root did.
+
+**Tree cost and friction.** Provider/Store and acceptance advanced in
+parallel, but review caused two serial Engine repair handoffs: first
+coverage/cancellation, then Store-failure cleanup. Parent corrections
+clarified request/branch provenance and that the browser command ID is
+not the Engine request ID. The owner cannot quantify saved time; it
+infers parallel ownership gave independent contract/consumer work while
+review exposed lifecycle gaps. The helper import first failed with no
+command effects. After reload, a one-cell start/finish attempt issued
+three command effects: focused Cargo exited 1 with 0 matched/runnable/
+executed, evidence read exited 0, diagnostic tail exited 1; a secondary
+Jev diagnosis returned HTTP 403. Direct focused tests, not that
+experiment, established its candidate. Total model-call count was not
+known. The proposed improvement is to publish and verify helper modules
+and name exact focused filters before implementation, keeping the direct
+script as delivery fallback.
+
+## Wave 14 fresh Engine reviewer interview
+
+**Report.** The replacement reviewer verified exact HEAD
+`978c650e`, inspected the engine.rs-only cumulative diff and PRD/brief,
+and ran both focused tests at that tip: each selected, executed and
+passed 1/1. The injected Store-failure fixture observed the pending
+claim become `Interrupted`; the transport-failure fixture covered
+Send pass-through, evidence, request provenance and readback.
+
+**Tree cost and friction.** This reviewer was needed because the retained
+reviewer's checkout stayed on the old candidate. It saw no new contract
+correction during its own exchange and cannot measure the broader tree's
+cost. It infers that a fresh exact-tip checkout avoided a stale-source
+verdict. Its unrelated helper README edit was left untouched. An initial
+combined check's retained handle became unavailable (`Unknown (command
+job)`), so it ran the two prescribed commands individually and retained
+their 1/1 evidence. It did not run a helper trial. Proposed improvement:
+put exact-tip identity and per-command evidence handles into review
+handoffs, and use individual focused commands when observation is
+unreliable.
+
+## Wave 14 Provider/Store reviewer interview
+
+**Report.** At repaired exact tip `cb8e94ba`, the reviewer checked the
+owned cumulative diff, typed Send survival through Store reopen beside
+historical generic decisions, and marker forwarding through
+CliProvider/TreeProvider. The Store and demo checks each selected,
+executed and passed 1/1. It accepted that component, not the later
+integrated Engine/browser product.
+
+**Tree cost and friction.** Parallel implementation and consumer work
+allowed independent component review. The first review caught a
+hand-built JSON value in the Store test, which proved only generic
+roundtrip, not typed Send persistence. Repair and re-review added a
+handoff but closed a real evidence gap; net time saving is only an
+inference because the reviewer did not observe all sibling timelines.
+Its one-cell helper import failed (`Could not find module`) before any
+command effect; it used direct focused scripts instead. The retained
+checkout initially remained at the old tip, so it explicitly switched
+to `cb8e94ba` while preserving an unrelated dirty helper README. One
+stale completed-job observation returned `CommandUnavailable`; it did
+not replay that job and then observed the correct handle. Proposed
+improvement: publish the helper to reviewers before admission and
+attach exact source plus real command evidence to the review request.
+
+## Wave 14 Provider/Store owner interview
+
+**Report.** The owner forwarded `before_request` through
+DemoProvider→CliProvider→TreeProvider, supplied deterministic opaque
+browser evidence, and tested typed Send persistence/reopen alongside
+historical generic decisions. At repaired candidate `cb8e94ba`,
+the Store test serialized `BeforeRequestDecision::Send` to `"Send"`,
+reopened the record, and checked request/branch association. Its
+focused Store and demo-chain checks each selected, executed and
+passed 1/1.
+
+**Tree cost and friction.** Engine and acceptance were disjoint
+siblings, avoiding duplicate implementation, but the reviewer found
+the owner's first test had hand-built the wrong JSON representation,
+causing a repair and repeated focused check. Root also corrected the
+assumption that the deterministic browser used TreeProvider: its
+actual direct path uses CliProvider. The owner reports extra handoff
+turns and only infers an overall parallel benefit. Its first helper
+import failed before any command effect. After `reload_helpers`, a
+one-cell start/finish run used the dirty 3-GiB workspace helper:
+focused job `a191c28d` matched/ran/passed 1/1 (130 filtered);
+`finishFocused` read evidence through command `e1ee974a`. The helper
+run recorded a dirty checkout. `cargo fmt` surfaced an unowned
+hooks.rs-only formatting change; the owner excluded it from the
+candidate. Proposed improvement: establish the actual provider path
+and typed serialized value before forking, and check helper/worktree
+state before import.

@@ -176,6 +176,16 @@ impl<A: Auth + Clone + 'static, P: Provider + 'static> Engine<A, P, ResponsesCli
 }
 
 impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
+    /// Hook invocation seam for the request-loop owner: call after the final
+    /// request is assembled and before transport, then persist against that
+    /// request's durable identity. A retry of transport is a new attempt, not
+    /// an exactly-once hook transaction.
+    async fn evaluate_before_request(
+        &self,
+        plan: &crate::hooks::RequestPlan,
+    ) -> crate::hooks::BeforeRequestResult {
+        self.provider.before_request(plan).await
+    }
     /// Alternate transport constructor, primarily for deterministic replay.
     pub fn with_transport(
         client: C,
@@ -488,6 +498,49 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 pinned_effort,
                 session_id: self.config.session_id.clone(),
             };
+            let plan = crate::hooks::RequestPlan {
+                items: req.input.clone(),
+                tools_allowed: req.tools.clone(),
+                effort: req.pinned_effort,
+            };
+            let started = std::time::Instant::now();
+            let before_request = tokio::select! {
+                result = self.evaluate_before_request(&plan) => result,
+                changed = cancellation.changed() => {
+                    if changed.is_err() || *cancellation.borrow() {
+                        return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
+                    }
+                    continue;
+                }
+            };
+            let decision = crate::store::Decision {
+                hook: "before-request".into(),
+                event_refs: req
+                    .input
+                    .iter()
+                    .map(|item| {
+                        blake3::hash(
+                            &serde_json::to_vec(item).expect("Item serialization is infallible"),
+                        )
+                        .to_hex()
+                        .to_string()
+                    })
+                    .collect(),
+                decision: serde_json::to_value(&before_request.decision)
+                    .expect("typed hook decision serializes"),
+                evidence: before_request
+                    .evidence
+                    .clone()
+                    .unwrap_or(serde_json::Value::Null),
+                latency_ms: Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
+            };
+            let store = self.store.clone();
+            let decision_request = parent.clone();
+            if let Err(error) =
+                blocking(move || store.record_decision(Some(&decision_request), &decision)).await
+            {
+                return Err(self.cleanup_pending(error, &pending).await);
+            }
             let replay_request = req.clone();
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
             let create = self.client.create_streaming(req, event_tx);
@@ -1407,6 +1460,294 @@ mod tests {
         fn tools(&self) -> Vec<Value> {
             Vec::new()
         }
+    }
+
+    struct BeforeRequestRecorder {
+        plans: Arc<Mutex<Vec<crate::hooks::RequestPlan>>>,
+    }
+    #[async_trait]
+    impl Provider for BeforeRequestRecorder {
+        async fn before_request(
+            &self,
+            plan: &crate::hooks::RequestPlan,
+        ) -> crate::hooks::BeforeRequestResult {
+            self.plans.lock().unwrap().push(plan.clone());
+            crate::hooks::BeforeRequestResult {
+                decision: crate::hooks::BeforeRequestDecision::Send,
+                evidence: Some(json!({"marker":"engine-before-request"})),
+            }
+        }
+
+        async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError> {
+            Err(ProviderError::Tool(format!(
+                "unexpected tool: {name} {args}"
+            )))
+        }
+
+        fn tools(&self) -> Vec<Value> {
+            Vec::new()
+        }
+    }
+
+    struct PausingBeforeRequest {
+        started: Arc<Notify>,
+    }
+    #[async_trait]
+    impl Provider for PausingBeforeRequest {
+        async fn before_request(
+            &self,
+            _plan: &crate::hooks::RequestPlan,
+        ) -> crate::hooks::BeforeRequestResult {
+            self.started.notify_one();
+            std::future::pending().await
+        }
+
+        async fn call(&self, _name: &str, _args: Value) -> Result<Value, ProviderError> {
+            unreachable!("no transport request should be made")
+        }
+
+        fn tools(&self) -> Vec<Value> {
+            Vec::new()
+        }
+    }
+
+    struct NeverSettlingTool;
+    #[async_trait]
+    impl Provider for NeverSettlingTool {
+        async fn call(&self, _name: &str, _args: Value) -> Result<Value, ProviderError> {
+            std::future::pending().await
+        }
+
+        fn tools(&self) -> Vec<Value> {
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn before_request_decision_store_failure_cleans_pending_claim() {
+        let db_path = std::env::temp_dir().join(format!(
+            "harness-before-request-store-failure-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Arc::new(Store::open(&db_path).unwrap());
+        let root = AgentPath("/root".into());
+        let child = AgentPath("/root/child".into());
+        let source_head = RequestId("decision-failure-parent".into());
+        let snapshot = RequestId("decision-failure-child".into());
+        let call_id = CallId("decision-failure-pending".into());
+        store.create_request(&source_head, None, &root.0).unwrap();
+        store
+            .append_items(
+                &source_head,
+                &[Item(json!({
+                    "type":"function_call",
+                    "call_id":call_id.0,
+                    "name":"never",
+                    "arguments":"{}"
+                }))],
+            )
+            .unwrap();
+        store.set_effort(&source_head, Effort::Low).unwrap();
+        store
+            .admit_agent(
+                &root,
+                None,
+                Some(&source_head),
+                &json!({}),
+                &json!({"kind":"root"}),
+            )
+            .unwrap();
+        store.claim(&call_id, &source_head).unwrap();
+        store
+            .admit_here_agent_with_snapshot(
+                &child,
+                &root,
+                &snapshot,
+                &json!({}),
+                &root.0,
+                &child.0,
+                "AtBoundary",
+                &Item(json!({
+                    "type":"message","role":"assistant","content":[{
+                        "type":"output_text","text":"continue"
+                    }]
+                })),
+            )
+            .unwrap();
+
+        let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+        scheduler
+            .start(
+                Arc::new(NeverSettlingTool),
+                call_id.clone(),
+                "never".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_before_request_decision
+                 BEFORE INSERT ON decisions
+                 BEGIN SELECT RAISE(ABORT, 'injected decision persistence failure'); END;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            Replay {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                turns: Mutex::new(std::collections::VecDeque::new()),
+            },
+            store.clone(),
+            scheduler.clone(),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "decision-store-failure".into(),
+                agent: child,
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let error = engine
+            .run(Some(snapshot.clone()), vec![], cancel_rx, empty_mailbox())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, EngineError::Store(_)));
+        assert!(store.decisions(None).unwrap().is_empty());
+        let claims = store.claims_on(&snapshot).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].state, crate::store::ClaimState::Interrupted);
+        assert_eq!(
+            store.request(&snapshot).unwrap().unwrap().branch,
+            "/root/child"
+        );
+
+        scheduler.cancel(&call_id).await.unwrap();
+        drop(engine);
+        drop(store);
+        std::fs::remove_file(&db_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn before_request_send_persists_on_transport_failure() {
+        let db_path = std::env::temp_dir().join(format!(
+            "harness-before-request-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Arc::new(Store::open(&db_path).unwrap());
+        let plans = Arc::new(Mutex::new(Vec::new()));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let replay = Replay {
+            requests: requests.clone(),
+            turns: Mutex::new(std::collections::VecDeque::new()),
+        };
+        let tools = vec![json!({"type":"function","name":"distinctive"})];
+        let engine = Engine::<FakeAuth, BeforeRequestRecorder, _>::with_transport(
+            replay,
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(BeforeRequestRecorder {
+                plans: plans.clone(),
+            }),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: tools.clone(),
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "before-request".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let input = Item(json!({"type":"message","role":"user","content":"hello"}));
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let error = engine
+            .run(None, vec![input], cancel_rx, empty_mailbox())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, EngineError::Transport(_)));
+
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        let sent = &sent[0];
+        let observed_plans = plans.lock().unwrap();
+        assert_eq!(observed_plans.len(), 1);
+        assert_eq!(observed_plans[0].items, sent.input);
+        assert_eq!(observed_plans[0].tools_allowed, sent.tools);
+        assert_eq!(observed_plans[0].effort, sent.pinned_effort);
+        assert!(sent.tools.contains(&tools[0]));
+
+        let decisions = store.decisions(None).unwrap();
+        assert_eq!(decisions.len(), 1);
+        let row = &decisions[0];
+        let request_id = row
+            .request
+            .as_ref()
+            .expect("decision correlated to request");
+        assert_eq!(store.request(request_id).unwrap().unwrap().branch, "/root");
+        assert_eq!(row.decision.hook, "before-request");
+        assert_eq!(
+            row.decision.event_refs,
+            sent.input
+                .iter()
+                .map(|item| blake3::hash(&serde_json::to_vec(item).unwrap())
+                    .to_hex()
+                    .to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(row.decision.decision, json!("Send"));
+        assert_eq!(
+            row.decision.evidence,
+            json!({"marker":"engine-before-request"})
+        );
+
+        drop(engine);
+        drop(store);
+        let reopened = Store::open(&db_path).unwrap();
+        assert_eq!(reopened.decisions(Some(request_id)).unwrap().len(), 1);
+        assert_eq!(observed_plans.len(), 1, "readback does not invoke hook");
+        drop(observed_plans);
+        drop(reopened);
+        std::fs::remove_file(db_path).unwrap();
+
+        let cancel_store = Arc::new(Store::memory().unwrap());
+        let started = Arc::new(Notify::new());
+        let engine = Engine::<FakeAuth, PausingBeforeRequest, _>::with_transport(
+            Replay {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                turns: Mutex::new(std::collections::VecDeque::new()),
+            },
+            cancel_store,
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(PausingBeforeRequest {
+                started: started.clone(),
+            }),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "cancel-before-request".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let task =
+            tokio::spawn(async move { engine.run(None, vec![], cancel_rx, empty_mailbox()).await });
+        started.notified().await;
+        cancel_tx.send(true).unwrap();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                .await
+                .expect("cancel interrupts hook")
+                .unwrap(),
+            Err(EngineError::Cancelled)
+        ));
     }
 
     struct SetEffortProvider {
