@@ -20,6 +20,24 @@ stop or migrate it, alter its data or secret, or change Tailscale Serve.
 Prove this wave on a separate ephemeral loopback port and isolated data.
 The supervisor retains the old host solely to preserve that service.
 
+## Wave 13 admission checkpoint
+
+Shared launch contract: `docs/wave13-contract.md`, commit
+`b43cdb141763634f5e773217bbd0efd43491005a`. Three Luna children were
+admitted from that base:
+
+- `wave13-launch`: `crates/harness-demo/src/main.rs`,
+  `scripts/prepare-browser-harness`, `scripts/launch-browser-harness`;
+  first expected reply is the exact CLI/launcher candidate and server test counts.
+- `wave13-acceptance`: `crates/harness-demo/tests/standalone_browser.rs`;
+  first expected reply is expected-red production-binary test evidence.
+- `wave13-operator`: `docs/standalone-browser.md`; first expected reply is
+  operator instructions with unverified claims clearly marked.
+
+Root retains review, checked integration, isolated host run, focused-gate
+helper trial and final handoff. No wave-13 implementation candidate is
+integrated yet. Do not disturb the port-4600 demo or Tailscale route.
+
 ## Preparation and orchestration
 
 - `nix develop .#web -c scripts/verify-browser-journey` prepares pinned Node/npm,
