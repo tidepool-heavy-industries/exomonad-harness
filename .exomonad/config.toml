@@ -1,6 +1,6 @@
 [defaults]
-model = "gpt-6-sol"
-effort = "medium"
+model = "gpt-6-astra"
+effort = "high"
 
 [models]
 planner = "gpt-6-astra"

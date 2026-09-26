@@ -94,3 +94,45 @@ flake.lock, avoiding copying a warm target directory into the Nix store.
 Record applicable non-use as well as attempts. Keep the three-wave trial window.
 Avoid explicit short yields and repeated empty write_stdin calls for batch work;
 use one completion route and read the original job when a decision needs it.
+
+## Wave18 compositions
+
+Read the production modules first; open a checks module only to answer a specific
+question. These compositions preserve the individual operations above.
+
+- **One candidate, several checks:** `SessionHelpers.AcceptancePlan` supplies
+  `standaloneChecks` and `startAcceptancePlan`. Customize the list to the affected
+  product boundary. `startCheckPlan` keeps each original job and setup refusal;
+  `readCheckPlan` aggregates preparation, source, counts and retained output.
+- **A failed job, one investigation packet:**
+  `SessionHelpers.BrowserInvestigation.startBrowserInvestigation` starts browser
+  preparation/checking in the invoking checkout and attaches its sole investigator.
+  The example uses deterministic probe selection. Customize `watchFailedCheck`'s
+  supplied read-only probes and selection callback when semantic choice helps.
+  `readInvestigation` retains the original failed check as well as diagnostics;
+  `finishInvestigation` refuses to retire pending work.
+- **Ordinary repair without parent relay:** `Project.ReviewFlow.reviewFlowWith`
+  accepts a bounded semantic policy over the exact candidate, findings and repair
+  budget. `semanticReviewChoice` chooses within-contract repair or escalation;
+  uncertainty escalates. It cannot turn a repair decision into acceptance.
+  Follow the compiled `checks/review-flow-workflow*.hs` sequence for retained
+  interview evidence and owner-authorized cleanup after the flow settles.
+- **One baseline change, several active owners:**
+  `Project.BaselineIncorporation.openBaselineEpisode` creates the collector before
+  forks. `lunaBaselineTaskFrom` carries its handle and assignment into selected
+  Luna contexts. The request owner calls `beginBaselineEpisode`, then
+  `refreshBaselineEpisode` to observe incorporation. Worker reports remain reports,
+  not independent checks. Route exact named owners directly; `routeQuestion` uses
+  Jev only for ambiguous ownership and retains an unresolved outcome.
+- **A specific reminder attached to real progress:**
+  `Project.WorkflowReminderExamples.withQuestionReminders` wraps an existing
+  `followWork` sink. It submits source-identified question deltas to a fixed-recipient
+  reminder actor while preserving the sink's ordinary behavior. Supply the precise
+  context, trigger, exclusions and suggested workflow; each immutable episode is
+  evaluated once. Changed evidence needs a new episode. No silence-based readiness
+  inference, repeated nagging, or second after-tool hook.
+
+For every composed flow, retain its handle and evidence packet before deciding
+whether a frontier-model turn is needed. Escalate ambiguous shared decisions;
+let deterministic state transitions handle routine bookkeeping. Compare direct,
+delegated and sibling reuse where the work presents real opportunities.
