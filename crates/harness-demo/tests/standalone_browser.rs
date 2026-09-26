@@ -18,8 +18,13 @@ type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 fn port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
+    loop {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let chosen = listener.local_addr().unwrap().port();
+        if chosen != 4600 {
+            return chosen;
+        }
+    }
 }
 
 fn temp_path() -> PathBuf {
