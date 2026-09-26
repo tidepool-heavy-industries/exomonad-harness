@@ -1391,3 +1391,50 @@ reason for a choice where the retained artifacts do not prove intent.
    likely have removed the `ask` correction and the false attribution
    of a sibling-source gap; it would not by itself prove away the real
    child failure, which required the production consumer test.
+
+## Wave 15 root — API-quality retrospective, 2026-09-26
+
+**Evidence first.** At scaffold `a61a9c6`, I started
+`request_is_stateless_and_pins_effort` through
+`Project.TestEvidence.startFocused (GiB 3)` and
+`CheckResults.watchChecks`; job `049a8eea` selected/executed/passed
+1/1. The watcher noticed completion but its first evidence read
+failed, yielding unknown counts/source. `collectFocused` later read the
+original evidence without rerunning; `recoverRetained` then found raw
+output expired (HTTP 409). See `docs/automation-trials.json`.
+**Recollection:** the repeated round cost was re-observing handles,
+extracting counts/source, verifying the reviewed revision, and
+coordinating review/repair. The clearest episode was
+provider source `59bf6236`: a reviewer saw `tool_choice:"auto"` in a
+checkout missing sibling Engine commit `f616be77`; I had to identify
+source composition, obtain a rebase, request combined review, then
+route the real child failure at `8db250a5`. A compositional Haskell
+source/evidence gate could have prevented the first review round.
+
+“Noticed” is recollection absent an import or call trace; I cannot
+attest to an untried API's ergonomics.
+
+| Advertised abstraction | Awareness/use in wave15 | Opportunity; why skipped or what would improve fit |
+| --- | --- | --- |
+| `CheckResults.watchChecks` | Noticed and called. | Good fit for the independent default-auto check while owners worked. Its notice lost counts/source on one failed evidence read. Prefer a typed incomplete result retaining job and evidence path, plus an on-disk retry, before treating it as final proof. |
+| `Routing.notifyReviewReady` | Noticed in menu; not called. | Provider and Engine candidates did need review, but I already had settlement replies and exact OIDs. An actor combining terminal candidate, source ancestry and review admission could save a round; a notice alone would not. |
+| `TestEvidence.collectFocused/diagnoseFocused/finishFocused` | Called `collectFocused` after the watcher failure; no recorded `diagnoseFocused` or `finishFocused` call. | The source/count recovery was useful. A `finishFocused` path that preserves explicit evidence-read failure and optionally explains terminal assertions would have reduced manual extraction. I did not ask an API-help tool to implement this; reading the menu is not executing it. |
+| `AssumptionWatch.watchAssumption` | Noticed in menu; skipped. | Final advertised names were a consequential assumption: `ask` was filtered, `sleep` present. I had not established a typed initial provider-list baseline or incorporated-source event. An easy `watchIncorporatedBaseline` example bound to the actual provider consumer would make it preferable. |
+| `ParallelInvestigate.startProbeBatch` | Noticed in menu; skipped. | There were bounded read-only probes—`CliProvider.tools`, deterministic transport capture, final plan—before delegation. I inspected them ad hoc. A short recipe accepting actual checkout and named commands, returning source-bound results, might have avoided the `ask` correction; no probe batch was run. |
+| `Interview.collectInterview` | Noticed in menu; skipped. | Interviews were required before retirement, but replies already arrived as typed settlements. A collector would help if it joined known and pending answers without additional turn-by-turn reads; I cannot attest to its runtime behavior here. |
+| `PrepareContinue.verifyPrepared` | Noticed in menu; skipped. | `web/dist` preparation preceded standalone browser checks. I used a sequential gate; a completion-triggered continuation could have released my turn and refused a missing asset distinctly from a product failure. It needs a simple, demonstrably source-bound readiness function. |
+| `RetainedEvidence.recoverRetained` | Noticed and called with 1024-byte budget on original job. | Correct custody fit, but HTTP 409 meant raw pages were unavailable. It did not repair the watcher summary; falling back to the evidence JSON was appropriate. Typed expiry and a recoverable evidence-path fallback would be better than a second manual step. |
+| `SlowCommandWatch.watchSlowCommand` | Noticed in menu; skipped. | Long Cargo/Nix jobs invited one slow alert, but my short `write_stdin` loop was already underway. A single attach-to-existing-job call returning both slow and completion events would be preferable to polling, not another alert needing manual follow-up. |
+| `HandoffExamples.handoffProposal` | Noticed in menu; skipped. | Final candidate/review/check/gate synthesis matched its purpose, but I had already assembled it manually and did not import this example. A projection that fails closed on mismatched candidate OIDs and missing check source would make it worth using. |
+
+**Three wanted compositions (pseudocode, uncompiled).**
+
+1. `focusedGate :: ExactSource -> FocusedSpec -> Memory -> Eff ... (Job, FocusedEvidence)` should start once, attach completion before I leave, and return actual matched/runnable/executed/failed counts, exit/cleanup, source, dirty-path snapshot, evidence path and typed `Unavailable` states. It could extend `TestEvidence.startFocused/collectFocused` plus `CheckResults`, rather than add a parallel test runner. A short callback might route `web/dist` missing to asset preparation or exit 137 with zero executed to a bounded resource retry; 137 is *not* proven OOM, and an expected-red assertion is *not* a pass. This would remove command-polling and evidence-extraction rounds. I still decide whether a failed product assertion demands repair.
+
+2. `reviewable :: Base -> Candidate -> OwnedPaths -> RequiredSiblingOids -> Eff ... ReviewInput` should compare real HEAD, cumulative diff, merge preflight, ancestry and checkout source, returning an explicit partial-source refusal. It could sit inside the existing `Project.Work.reviewCommit` entrypoint or as its preflight, not create another reviewer router. The `59bf6236` false attribution is the concrete saved round. An actor is justified only if it can then receive repair candidates and re-run that preflight without waking me for unchanged facts; otherwise a notebook function is less setup. Independent judgment of production semantics remains with the reviewer and me.
+
+3. `prepareThen :: Cmd.Job -> Readiness -> FocusedSpec -> Eff ... (Preparation, FocusedEvidence)` could compose `PrepareContinue.verifyPrepared` and the focused gate for `web/dist` plus `standalone_browser`. Missing assets would remain a prerequisite result; a product assertion would remain a product result. Its worktree must be explicit, since a green child checkout is not the integrated source. This removes a preparation-completion frontier round, not the final acceptance judgment.
+
+**Inference, not measured savings:** a single cheap typed Jev call after authoritative parsing could choose among *prerequisite*, *build interruption*, *expected-red*, *product regression*, and *unresolved*, with an evidence excerpt and bounded next action. It should never infer source identity, counts, ownership, review approval, or integration from prose. No live Jev judgment of this composition ran in wave15. The setup burden was real: I knew the menu existed, but lacked a copied working root recipe for importing these modules, binding a real checkout/job, and handling evidence-read failure. The failed watcher reduced confidence in compact summaries, not in the idea of actors or Haskell composition.
+
+**Strongest disagreement:** replacing the one-second polling with longer Bash waits alone optimizes waiting, not the expensive evidence/source/review frontier. Nor does one wave's low uptake imply low utility. Next wave, on one existing focused consumer check, exercise an improved `startFocused`→completion→`collectFocused` composition with an induced evidence-read failure. Require one retained job, exact source/counts or explicit unavailable state, and no model wake until a decision is needed; compare rounds against the manual path. Keep the reviewer and product acceptance gates unchanged.
