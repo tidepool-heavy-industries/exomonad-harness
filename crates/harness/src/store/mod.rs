@@ -2168,12 +2168,23 @@ mod tests {
             "harness-before-request-{}.db",
             uuid::Uuid::new_v4()
         ));
+        let typed_send = crate::hooks::BeforeRequestDecision::Send;
         let expected = Decision {
             hook: "before-request".into(),
             event_refs: vec!["item-1".into()],
-            decision: serde_json::json!({"decision":"Send"}),
+            decision: serde_json::to_value(typed_send).unwrap(),
             evidence: serde_json::json!({"consumer":"standalone-browser"}),
             latency_ms: Some(3),
+        };
+        assert_eq!(expected.decision, serde_json::json!("Send"));
+        // Existing generic decision rows must remain readable alongside the
+        // newly typed before-request decision.
+        let legacy = Decision {
+            hook: "tool-call-admission".into(),
+            event_refs: vec!["legacy-item".into()],
+            decision: serde_json::json!({"allow":true}),
+            evidence: serde_json::json!({"basis":"historical"}),
+            latency_ms: None,
         };
         {
             let store = Store::open(&path).unwrap();
@@ -2183,13 +2194,20 @@ mod tests {
             store
                 .record_decision(Some(&id("request-1")), &expected)
                 .unwrap();
+            store
+                .record_decision(Some(&id("request-1")), &legacy)
+                .unwrap();
         }
         {
             let store = Store::open(&path).unwrap();
             let rows = store.decisions(Some(&id("request-1"))).unwrap();
-            assert_eq!(rows.len(), 1);
+            assert_eq!(rows.len(), 2);
             assert_eq!(rows[0].request, Some(id("request-1")));
             assert_eq!(rows[0].decision, expected);
+            assert_eq!(rows[1].request, Some(id("request-1")));
+            assert_eq!(rows[1].decision, legacy);
+            let request = store.request(&id("request-1")).unwrap().unwrap();
+            assert_eq!(request.branch, "/root");
         }
         let _ = std::fs::remove_file(path);
     }
