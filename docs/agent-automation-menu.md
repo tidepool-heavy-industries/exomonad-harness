@@ -2,6 +2,9 @@
 
 Use an entry when its named module is present in the actor's bound project
 source. A commit or this menu alone does not install a module into a live run.
+Start with the compiled `Project/FocusedGateExample.hs` source for a complete
+focused-check workflow. Customize its inputs or callbacks in SessionHelpers;
+pass the callable helper and published source to children.
 Keep the original response, `Cmd.Job`, source OID, or evidence path so a compact
 notice remains traceable. Choose useful helpers; no entry is mandatory.
 
@@ -23,9 +26,30 @@ module qualifier into scope. Wave15 exercised this explicit import successfully.
 | Assemble a compact handoff | `Project.HandoffExamples.handoffProposal`: reported candidate, optional reported review, observed check state and remaining obligations. Import the example module explicitly and customize its projection. | Reuses existing summaries without granting integration authority. `Project.AutomationChecks.integration` compiles and exercises this projection. |
 
 Ordinary exact-candidate review requests remain in `Project.Work`, with
-event-driven collection in `Project.Routing`. The separate `ReviewFlow`
-automation has no demonstrated end-to-end
-run and is absent from the callable menu. `Project.BrowserScenario` awaits its isolated browser run and is not advertised here yet.
+event-driven collection in `Project.Routing`. Wave16 trials `Project.ReviewFlow`
+for one bounded component: declare component-only review or required sibling
+commits before requesting review, retain root integration authority, and escalate
+unresolved contracts. The compiled `checks/review-flow-loop.hs` consumer shows setup, including
+`R.withWorktree` authority; `Project.ReviewFlowChecks` exercises acceptance,
+repair, missing sibling source and empty-findings correction.
+`Project.BrowserScenario` remains unavailable pending its isolated browser check.
+
+For conditional diagnostics, `Project.ParallelInvestigate.followFailure` observes
+the original job and lets Jev choose at most two supplied `CommandProbe` values.
+`followFailureWith` accepts a deterministic selection function instead. Each
+result retains the original outcome, diagnostic observations and typed stop;
+unknown judgment stops without guessing. Invoke it from a completion handler; a
+pending original remains unchanged for its existing completion route. Diagnostic
+jobs use completion-oriented observation. Shared original jobs do not grant
+authority to arm their owner's notice.
+The caller supplies read-only commands; this is not an extra sandbox guarantee.
+No original command is retried. `Project.FollowupChecks.bounded` is the example.
+
+For preparation followed by a check, `Project.WorkflowExamples.prepareFocused`
+composes `verifyPrepared` with `startFocused`: the readiness callback returns the
+actual `FocusedSpec`, and the resulting original job can feed `watchChecks`.
+Use it from the preparation completion handler. Paths do not grant authority;
+run checkout-sensitive preparation in the actor that owns that checkout.
 
 ## Trial record
 

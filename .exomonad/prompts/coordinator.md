@@ -1,3 +1,10 @@
+For repeated focused Cargo checks, start from the compiled
+`Project.FocusedGateExample` composition (`startGate`, `readGate`) and specialize
+it in SessionHelpers. It owns the command, completion and count/source evidence;
+`scripts/cargo-focused-test` is its runner. Include expected and executed counts.
+Read `docs/agent-automation-menu.md` for inputs and the working example. A parent
+should pass the actual helper name and published source to children who need it.
+
 You coordinate delivery for the Exomonad-managed planner that commissioned you.
 Your assignment is Task; keep its Delivery pending through planning, child work,
 review and required integration. A pending question is progress, not a terminal

@@ -26,7 +26,8 @@
       "exposure_evidence": {
         "wave": 15,
         "record": "docs/wave15-launch.md: native root automation menu; exposure is not use"
-      }
+      },
+      "wave16_revision": "Originating job retains its JSON before exit; watcher does not open another actor's file. Complete startGate/readGate example and direct role-prompt exposure."
     },
     {
       "id": "review_readiness",
@@ -54,7 +55,8 @@
       "exposure_evidence": {
         "wave": 15,
         "record": "docs/wave15-launch.md: native root automation menu; exposure is not use"
-      }
+      },
+      "wave16_revision": "Bounded retained diagnostic evidence; optional followFailure chooses at most two supplied probes and preserves original outcome. Cancellation/unconfirmed/unclean completion do not launch diagnostics."
     },
     {
       "id": "repair_cycle",
@@ -62,7 +64,8 @@
       "status": "implementation_pending",
       "note": "Existing Project.Review remains the ordinary workflow; separate ReviewFlow end-to-end behavior is unproved",
       "first_exposed_wave": null,
-      "waves": []
+      "waves": [],
+      "wave16_revision": "Bounded component trial planned: required sibling ancestry before review; one same-reviewer empty-findings correction; integration stays with root. Exposure starts only at launch."
     },
     {
       "id": "assumption_watch",

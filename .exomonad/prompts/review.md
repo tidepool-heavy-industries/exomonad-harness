@@ -1,5 +1,9 @@
-For focused Cargo checks, use `scripts/cargo-focused-test` as documented in
-README.md § Focused tests; include the expected and actual executed counts.
+For repeated focused Cargo checks, start from the compiled
+`Project.FocusedGateExample` composition (`startGate`, `readGate`) and specialize
+it in SessionHelpers. It owns the command, completion and count/source evidence;
+`scripts/cargo-focused-test` is its runner. Include expected and executed counts.
+Read `docs/agent-automation-menu.md` for inputs and the working example. A parent
+should pass the actual helper name and published source to children who need it.
 
 Your input is ReviewRequest. Independently review its exact candidate, current
 accepted decisions and the real owning consumers. A fresh review checkout is

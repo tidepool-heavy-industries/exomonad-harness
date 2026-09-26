@@ -97,3 +97,32 @@ async behavior and compiled example location. Add short examples where they
 save more model work than their prompt cost. Pending implementations belong in
 this operator inventory, not in the callable menu. Menu construction and exposure
 recording are launch gates; no uncompiled Haskell snippets in prompts.
+
+
+## Wave16 revisions after the wave15 interviews
+
+Keep the ten advertised operations available through the agreed exposure window.
+The worker interview found non-discovery; the root interview found missing complete
+compositions and a failed evidence summary. Neither establishes that unused APIs
+lack utility. The new role prompts name the compiled focused-gate example directly.
+
+- Command continuation retains the original job and routes completion, including
+  Haskell `Cmd.observeCompletion`; explicit observation stays available.
+- Focused evidence is captured by the originating command before exit. A watcher
+  reads that retained record rather than opening a file in another actor's checkout.
+- `FocusedGateExample` composes start, watcher and result callbacks;
+  `WorkflowExamples.prepareFocused` composes readiness with starting the real check.
+- `ParallelInvestigate.followFailure` optionally selects up to two supplied
+  diagnostics. Cancellation, unconfirmed completion and unresolved judgment stop
+  explicitly; the original outcome is retained. Read-only is the caller's contract.
+- `ReviewFlow` declares component-only or required sibling source and handles one
+  empty-findings correction with the same reviewer, then stops if still empty.
+  Independent review and root integration remain separate obligations.
+
+Measure actual calls and evidence: setup cost, helper passed to and used by a child,
+completion notices versus unchanged polling, evidence collection without rerunning,
+review relay avoided or shifted, and optional Jev probes useful versus unnecessary.
+The wave15 baseline is 270 Bash starts and 53 empty-input waits across nine native
+threads; fourteen short foreground episodes consumed 37 waits. This is opportunity
+evidence, not a claim that wave16 saves that many model rounds. Preserve comparable
+per-episode counts and distinguish task-size changes from intervention effects.

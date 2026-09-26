@@ -20,6 +20,7 @@ modules = [
   "Project.Service", "Project.Repository", "Project.CheckResults",
   "Project.PrepareContinue", "Project.RetainedEvidence", "Project.AssumptionWatch",
   "Project.ParallelInvestigate", "Project.SlowCommandWatch", "Project.Interview",
+  "Project.FocusedGateExample", "Project.WorkflowExamples", "Project.ReviewFlow",
 ]
 spec = "AgentSpec.agentSpec"
 checks = [

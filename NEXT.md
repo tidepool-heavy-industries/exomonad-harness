@@ -1,3 +1,11 @@
+# Active assignment — wave16
+
+Read [wave16 brief](docs/wave16-brief.md). Implement its standalone deterministic
+before-request injection slice and Haskell composition trial. The supervisor owns
+launch identity; do not start another run or attempt credentialed inference.
+
+The completed wave15 handoff below is retained history, not unfinished work.
+
 # Completed assignment — wave15 restricted before-request tools
 
 Wave15's authorized deterministic-browser product behavior is
