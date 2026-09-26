@@ -690,9 +690,11 @@ async fn run_deterministic_engine_completion(
     agent: AgentPath,
     answer_override: Option<String>,
 ) -> Result<EngineCompletion, String> {
-    let provider = Arc::new(BrowserProvider(CliProvider(DemoProvider::development(
-        ".", false,
-    ))));
+    let policy = BrowserPolicy::for_invocation(command, &agent);
+    let provider = Arc::new(BrowserProvider(
+        CliProvider(DemoProvider::development(".", false)),
+        policy,
+    ));
     let engine = Engine::<OfflineServerAuth, BrowserProvider, _>::with_transport(
         DeterministicServerTransport {
             command: command.to_owned(),
@@ -723,7 +725,26 @@ async fn run_deterministic_engine_completion(
 }
 
 /// Browser-only deterministic policy. The shared CLI provider remains Send/auto.
-struct BrowserProvider(CliProvider);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserPolicy {
+    Child,
+    Echo,
+    Send,
+}
+
+impl BrowserPolicy {
+    fn for_invocation(command: &str, agent: &AgentPath) -> Self {
+        if agent.0 != ROOT_PATH || command.starts_with("child ") {
+            Self::Child
+        } else if command.starts_with("echo ") {
+            Self::Echo
+        } else {
+            Self::Send
+        }
+    }
+}
+
+struct BrowserProvider(CliProvider, BrowserPolicy);
 
 #[async_trait]
 impl Provider for BrowserProvider {
@@ -732,29 +753,22 @@ impl Provider for BrowserProvider {
         plan: &harness::hooks::RequestPlan,
     ) -> harness::hooks::BeforeRequestResult {
         let mut result = self.0.before_request(plan).await;
-        let current_command = plan.items.iter().rev().find_map(|item| {
-            let value = &item.0;
-            (value["type"] == "message" && value["role"] == "user")
-                .then(|| value["content"].as_str())
-                .flatten()
-        });
         let advertised = plan
             .tools_allowed
             .iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .collect::<Vec<_>>();
         let sleep_advertised = advertised.contains(&"sleep");
-        let (selection, label) =
-            if current_command.is_some_and(|command| command.starts_with("child ")) {
-                (Some(Vec::new()), "child-empty")
-            } else if current_command.is_some_and(|command| command.starts_with("echo ")) {
+        let (selection, label) = match self.1 {
+            BrowserPolicy::Child => (Some(Vec::new()), "child-empty"),
+            BrowserPolicy::Echo => {
                 // Always request the intended selection. Engine validation must
                 // reject it as an invalid selection if the final plan omits sleep;
                 // never silently widen availability to Send.
                 (Some(vec!["sleep".to_owned()]), "echo-sleep")
-            } else {
-                (None, "send")
-            };
+            }
+            BrowserPolicy::Send => (None, "send"),
+        };
         if let Some(tools_allowed) = selection {
             result.decision =
                 harness::hooks::BeforeRequestDecision::SendRestricted { tools_allowed };
@@ -1845,8 +1859,11 @@ mod tests {
     use tokio::sync::mpsc;
 
     #[tokio::test]
-    async fn browser_provider_restricts_echo_and_child_by_final_plan() {
-        let provider = BrowserProvider(CliProvider(DemoProvider::development(".", false)));
+    async fn browser_provider_policy_uses_explicit_invocation_classification() {
+        let provider = BrowserProvider(
+            CliProvider(DemoProvider::development(".", false)),
+            BrowserPolicy::for_invocation("echo hello", &AgentPath(ROOT_PATH.into())),
+        );
         fn assert_send<T: Send>(_: &T) {}
         assert_send(&provider);
         let plan = harness::hooks::RequestPlan {
@@ -1905,7 +1922,11 @@ mod tests {
             tools_allowed: provider.all_tools(),
             effort: Effort::Low,
         };
-        let incidental_words = provider.before_request(&incidental_words_plan).await;
+        let send_provider = BrowserProvider(
+            CliProvider(DemoProvider::development(".", false)),
+            BrowserPolicy::for_invocation("status", &AgentPath(ROOT_PATH.into())),
+        );
+        let incidental_words = send_provider.before_request(&incidental_words_plan).await;
         assert_eq!(
             incidental_words.decision,
             harness::hooks::BeforeRequestDecision::Send
@@ -1916,19 +1937,18 @@ mod tests {
                 json!({"consumer":"standalone-browser","selection":"send","sleep_advertised":true})
             )
         );
+        let child_provider = BrowserProvider(
+            CliProvider(DemoProvider::development(".", false)),
+            BrowserPolicy::for_invocation("child-reply", &AgentPath("/root/demo-child".into())),
+        );
         let child_plan = harness::hooks::RequestPlan {
-            items: vec![
-                harness::item::Item(json!({
-                    "type":"message","role":"user","content":"earlier echo should not affect routing"
-                })),
-                harness::item::Item(json!({
-                    "type":"message","role":"user","content":"child hello"
-                })),
-            ],
-            tools_allowed: provider.all_tools(),
+            items: vec![harness::item::Item(json!({
+                "type":"message","role":"user","content":"echo misleading plan text"
+            }))],
+            tools_allowed: child_provider.all_tools(),
             effort: Effort::Low,
         };
-        let child = provider.before_request(&child_plan).await;
+        let child = child_provider.before_request(&child_plan).await;
         assert_eq!(
             child.decision,
             harness::hooks::BeforeRequestDecision::SendRestricted {
