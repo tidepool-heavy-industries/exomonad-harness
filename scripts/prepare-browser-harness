@@ -2,3 +2,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 nix develop .#web -c scripts/verify-browser-journey
+cargo build --release --package harness-demo --bin harness-demo
+binary="$PWD/target/release/harness-demo"
+if [[ ! -x "$binary" ]]; then
+  echo "release harness binary was not produced at $binary" >&2
+  exit 1
+fi
+printf 'Prepared standalone browser harness: %s\n' "$binary"

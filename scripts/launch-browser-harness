@@ -8,11 +8,16 @@ fi
 db="$1"
 addr="$2"
 assets="${3:-$root/web/dist}"
+binary="${HARNESS_DEMO_BIN:-$root/target/release/harness-demo}"
 [[ "$db" = /* ]] || { echo "database path must be absolute" >&2; exit 2; }
 [[ "$assets" = /* ]] || { echo "asset path must be absolute" >&2; exit 2; }
+[[ "$binary" = /* ]] || { echo "HARNESS_DEMO_BIN must be an absolute path" >&2; exit 2; }
+if [[ ! -x "$binary" ]]; then
+  echo "prebuilt harness binary is missing or not executable at $binary; run scripts/prepare-browser-harness" >&2
+  exit 1
+fi
 if [[ ! -d "$assets" ]]; then
   echo "web assets are missing at $assets; run scripts/prepare-browser-harness" >&2
   exit 1
 fi
-cd "$root"
-exec cargo run --release --package harness-demo -- --db "$db" --serve "$addr" --assets "$assets"
+exec "$binary" --db "$db" --serve "$addr" --assets "$assets"
