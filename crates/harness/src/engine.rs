@@ -67,6 +67,8 @@ pub enum EngineError {
     InvalidFinalizeCount,
     #[error("invalid restricted tool selection: {0}")]
     InvalidToolSelection(String),
+    #[error("invalid before-request injected item")]
+    InvalidInjectedItem,
     #[error("malformed Responses function_call item")]
     InvalidFunctionCall,
     #[error("request history has no harness-authored configuration_update")]
@@ -548,17 +550,63 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                     Some(tools_allowed.clone())
                 }
-                // The Engine owner validates and applies the item before transport.
-                // This compiling arm only establishes the shared decision seam.
-                crate::hooks::BeforeRequestDecision::Inject { tools_allowed, .. } => {
+                crate::hooks::BeforeRequestDecision::Inject {
+                    item,
+                    tools_allowed,
+                } => {
+                    let valid = item.0.as_object().is_some_and(|object| {
+                        object.len() == 3
+                            && object.get("type").and_then(serde_json::Value::as_str)
+                                == Some("message")
+                            && object.get("role").and_then(serde_json::Value::as_str)
+                                == Some("user")
+                            && object
+                                .get("content")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|content| !content.is_empty())
+                    });
+                    if !valid {
+                        return Err(self
+                            .cleanup_pending(EngineError::InvalidInjectedItem, &pending)
+                            .await);
+                    }
+                    if let Some(names) = tools_allowed {
+                        let mut seen = std::collections::HashSet::new();
+                        let available = req
+                            .tools
+                            .iter()
+                            .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
+                            .collect::<std::collections::HashSet<_>>();
+                        if let Some(name) = names.iter().find(|name| {
+                            !seen.insert(name.as_str()) || !available.contains(name.as_str())
+                        }) {
+                            return Err(self
+                                .cleanup_pending(
+                                    EngineError::InvalidToolSelection(name.clone()),
+                                    &pending,
+                                )
+                                .await);
+                        }
+                        if finalize_schema.is_some() && !seen.contains(FINALIZE_TOOL_NAME) {
+                            return Err(self
+                                .cleanup_pending(
+                                    EngineError::InvalidToolSelection(
+                                        "required typed completion tool excluded".into(),
+                                    ),
+                                    &pending,
+                                )
+                                .await);
+                        }
+                    }
+                    req.input.push(item.clone());
                     tools_allowed.clone()
                 }
             };
             req.tools_allowed = selected_tools;
             let decision = crate::store::Decision {
                 hook: "before-request".into(),
-                event_refs: req
-                    .input
+                event_refs: plan
+                    .items
                     .iter()
                     .map(|item| {
                         blake3::hash(
@@ -1509,6 +1557,28 @@ mod tests {
         plans: Arc<Mutex<Vec<crate::hooks::RequestPlan>>>,
     }
     struct RestrictedSelection(Vec<String>);
+    struct InjectSelection(Item, Option<Vec<String>>);
+    #[async_trait]
+    impl Provider for InjectSelection {
+        async fn before_request(
+            &self,
+            _plan: &crate::hooks::RequestPlan,
+        ) -> crate::hooks::BeforeRequestResult {
+            crate::hooks::BeforeRequestResult {
+                decision: crate::hooks::BeforeRequestDecision::Inject {
+                    item: self.0.clone(),
+                    tools_allowed: self.1.clone(),
+                },
+                evidence: Some(json!({"inject":"opaque"})),
+            }
+        }
+        async fn call(&self, _name: &str, _args: Value) -> Result<Value, ProviderError> {
+            unreachable!("injection test does not dispatch tools")
+        }
+        fn tools(&self) -> Vec<Value> {
+            Vec::new()
+        }
+    }
     #[async_trait]
     impl Provider for RestrictedSelection {
         async fn before_request(
@@ -1868,6 +1938,104 @@ mod tests {
             assert_eq!(claims[0].call_id, call_id);
             assert_eq!(claims[0].state, crate::store::ClaimState::Interrupted);
         }
+    }
+
+    #[tokio::test]
+    async fn injected_message_is_attempt_only_after_history_and_persists_on_transport_failure() {
+        let (store, _source, snapshot, _call_id) = inherited_claim_fixture().await;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let injected = Item(json!({"type":"message","role":"user","content":"injected context"}));
+        let engine = Engine::<FakeAuth, InjectSelection, _>::with_transport(
+            Replay {
+                requests: requests.clone(),
+                turns: Mutex::new(Default::default()),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(InjectSelection(injected.clone(), Some(vec!["slow".into()]))),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![json!({"type":"function","name":"slow","strict":true})],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "inject".into(),
+                agent: AgentPath("/root/child".into()),
+            },
+        );
+        let (_tx, rx) = watch::channel(false);
+        assert!(matches!(
+            engine
+                .run(Some(snapshot.clone()), vec![], rx, empty_mailbox())
+                .await,
+            Err(EngineError::Transport(_))
+        ));
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].input.last(), Some(&injected));
+        assert_eq!(
+            sent[0]
+                .input
+                .iter()
+                .filter(|item| **item == injected)
+                .count(),
+            1
+        );
+        let body = crate::transport::client::request_body(&sent[0]).unwrap();
+        assert_eq!(body["input"].as_array().unwrap().last(), Some(&injected.0));
+        assert_eq!(body["input"].as_array().unwrap().len(), sent[0].input.len());
+        assert_eq!(body["tool_choice"]["tools"][0]["name"], "slow");
+        assert_eq!(sent[0].tools_allowed, Some(vec!["slow".into()]));
+        let row = store.decisions(None).unwrap().pop().unwrap();
+        assert_eq!(row.decision.event_refs.len(), sent[0].input.len() - 1);
+        assert_eq!(row.decision.evidence, json!({"inject":"opaque"}));
+        assert_eq!(
+            store
+                .items(&snapshot)
+                .unwrap()
+                .iter()
+                .all(|item| item != &injected),
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_injected_item_fails_before_transport_and_cleans_claim() {
+        let (store, _source, snapshot, call_id) = inherited_claim_fixture().await;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::<FakeAuth, InjectSelection, _>::with_transport(
+            Replay {
+                requests: requests.clone(),
+                turns: Mutex::new(Default::default()),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(InjectSelection(
+                Item(json!({
+                    "type":"message","role":"assistant","content":"not user","extra":true
+                })),
+                None,
+            )),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "invalid-inject".into(),
+                agent: AgentPath("/root/child".into()),
+            },
+        );
+        let (_tx, rx) = watch::channel(false);
+        assert!(matches!(
+            engine
+                .run(Some(snapshot.clone()), vec![], rx, empty_mailbox())
+                .await,
+            Err(EngineError::InvalidInjectedItem)
+        ));
+        assert!(requests.lock().unwrap().is_empty());
+        let claims = store.claims_on(&snapshot).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].call_id, call_id);
+        assert_eq!(claims[0].state, crate::store::ClaimState::Interrupted);
     }
 
     struct SetEffortProvider {
