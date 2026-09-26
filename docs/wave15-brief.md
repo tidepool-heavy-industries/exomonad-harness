@@ -47,7 +47,7 @@ The owning path is `Provider::before_request` →
 `Engine::evaluate_before_request` / `Engine::run` → `ResponsesRequest` →
 `transport::client::request_body`, with `Store::record_decision` as the durable
 decision owner. The current browser consumer is
-`harness-demo/src/main.rs::run_deterministic_engine_completion`, via
+`crates/harness-demo/src/main.rs::run_deterministic_engine_completion`, via
 `CliProvider` and `DemoProvider`; `crates/harness-demo/tests/standalone_browser.rs`
 is its independent acceptance test. Verify these exact paths before changing
 them. No second request builder, tool registry, or browser-only lifecycle.
@@ -96,8 +96,9 @@ job with `Project.RetainedEvidence.recoverRetained` under a byte budget. The
 trial measures whether a late result reaches the owner with its command
 receipt, selected/executed counts and source observation; it never resubmits
 the test to obtain a summary. Consult `docs/agent-automation-menu.md` and
-the compiled check examples, and first prove the module is actually bound in
-the launched workspace. Capture one opportunity, attempt, outcome, fallback
+the compiled check examples. The supervisor launch record identifies the tested
+workspace pin; report a missing module as source drift instead of doing a routine
+bindings inventory. Capture one opportunity, attempt, outcome, fallback
 and evidence in `docs/automation-trials.json`. A notice attempt is not proof
 of delivery; unavailable/unknown results stay unknown. If binding or command
 admission fails, use the direct focused script and keep product acceptance
@@ -107,7 +108,7 @@ independent of the trial.
 
 No Exomonad adapter, credentialed inference, external shell tools, new UI
 command, live port-4600 demo change or Tailscale change. Preserve the
-pre-existing helper README edit and all wave14 evidence. The supervisor owns
+unrelated dirty work and all wave14 evidence. The supervisor owns
 launch identity and exact runtime/workspace pin. Root records the final source,
 checks, selected/executed counts, unresolved behavior, interviews and resource
 release; retire only this wave's actors after their evidence is retained.

@@ -16,13 +16,12 @@ notice remains traceable. Choose useful helpers; no entry is mandatory.
 | Continue when a prerequisite finishes | Start and retain the preparation `Cmd.Job`; use `Project.PrepareContinue.verifyPrepared` inside `R.on (Cmd.completion job)` with a readiness function returning a typed value. | The continuation receives that value after exact terminal receipt, clean exit and readiness checks; failure keeps the original run receipt. `Project.PrepareContinueChecks.preparationCompletion` compiles and exercises late, failed and unready paths. A long job never requires a foreground polling loop. |
 | Recover output from an existing command | `Project.RetainedEvidence.evidenceBudget`, then `recoverRetained` on the original `Cmd.Job`. | Original status and raw stdout/stderr pages with typed EOF, current end, budget, incomplete-page or refusal stops. Each stream has an explicit byte budget; no command is resubmitted. `Project.PrepareContinueChecks.preparationCompletion` checks a failed job and a four-byte cutoff. |
 | Notice a command that remains slow | `Project.SlowCommandWatch.watchSlowCommand`: owner, context, existing `Cmd.Job`, observation threshold from attachment (0..30000 ms), diagnostic character limit and callback over typed observation. | At most one slow alert after that bounded observation, then the same job's later completion; the threshold says nothing about the job's prior lifetime. The callback may use Jev without changing job status. `Project.AutomationRuntimeChecks.commandCustody` exercises cross-actor custody and `checks/automation-helper-contract.hs` checks the typed API. |
+| Assemble a compact handoff | `Project.HandoffExamples.handoffProposal`: reported candidate, optional reported review, observed check state and remaining obligations. Import the example module explicitly and customize its projection. | Reuses existing summaries without granting integration authority. `Project.AutomationChecks.integration` compiles and exercises this projection. |
 
 Ordinary exact-candidate review requests remain in `Project.Work`, with
 event-driven collection in `Project.Routing`. The separate `ReviewFlow`
 automation has no demonstrated end-to-end
-run and is absent from the callable menu. `Project.HandoffExamples` awaits its
-combined gate, and `Project.BrowserScenario` awaits its isolated browser run.
-Neither is advertised here yet.
+run and is absent from the callable menu. `Project.BrowserScenario` awaits its isolated browser run and is not advertised here yet.
 
 ## Trial record
 

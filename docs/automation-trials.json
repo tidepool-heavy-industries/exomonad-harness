@@ -93,10 +93,17 @@
     {
       "id": "handoff_assembly",
       "purpose": "Assemble an evidence-backed handoff",
-      "status": "implementation_pending",
+      "status": "validated_not_exposed",
       "note": "Project.HandoffExamples.handoffProposal has a combined compile and recipe gate pending",
       "first_exposed_wave": null,
-      "waves": []
+      "waves": [],
+      "entrypoint": "Project.HandoffExamples.handoffProposal",
+      "validation": {
+        "workspace_revision": "ce861b7acbd2743f03464c85700f842dd20043c7",
+        "recipe": "Project.AutomationChecks.integration",
+        "assertions_passed": 23,
+        "evidence": "/tmp/automation-integration-validation/check.log"
+      }
     },
     {
       "id": "browser_scenario",

@@ -72,12 +72,13 @@ source receipts when a helper sends a compact notice.
 - `Project.Interview.collectInterview` inspects retained interview answers before retirement.
 - `Project.PrepareContinue.verifyPrepared` continues from a preparation completion event after typed readiness.
 - `Project.RetainedEvidence.recoverRetained` reads bounded pages from an existing `Cmd.Job`.
+- `Project.HandoffExamples.handoffProposal` composes supplied candidate, review and check observations with remaining obligations.
 - `Project.SlowCommandWatch.watchSlowCommand` records one bounded slow-job observation and later completion.
 
 These are choices, not required calls. Record applicable opportunities and
 actual use in the run's trial record. Keep each installed entry visible for
 three waves before judging non-use; a broken path remains unavailable. The
-separate ReviewFlow, handoff assembly and browser scenario helpers await their
+separate ReviewFlow and browser scenario helpers await their
 own runtime gates and are absent from this menu.
 
 Reference (Project.Types, Project.Work, Project.Routing, Project.Observe and the library; `(...)` elides a constraint list; no lookup needed):

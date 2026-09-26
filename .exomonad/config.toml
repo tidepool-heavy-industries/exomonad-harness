@@ -17,7 +17,9 @@ modules = [
   "Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.Observe",
   "Project.Shell", "Project.Sift", "Project.Lookup", "Project.Reflex", "Project.Evidence", "Project.Contract",
   "Project.Investigate", "Project.Merge", "Project.Review", "Project.Search", "Project.History",
-  "Project.Service", "Project.Repository",
+  "Project.Service", "Project.Repository", "Project.CheckResults",
+  "Project.PrepareContinue", "Project.RetainedEvidence", "Project.AssumptionWatch",
+  "Project.ParallelInvestigate", "Project.SlowCommandWatch", "Project.Interview",
 ]
 spec = "AgentSpec.agentSpec"
 checks = [
