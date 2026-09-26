@@ -1,10 +1,10 @@
-# Wave 14 prepared — activation pending
+# Current assignment — wave14 before-request hook
 
 Read [the wave-14 brief](docs/wave14-brief.md) first. This branch is
 `rsi/wave14` from harness master `36cdebf01f7b0792cf6828ee0e0d4ab045e3b61e`;
 the pinned shared workspace is
-`98aef850d7be1b322aebcea929d62de3a56ab92f`. The worktree and submodule
-are prepared, but no wave-14 run or actor has been launched. Record the matched
+`98aef850d7be1b322aebcea929d62de3a56ab92f`. The supervisor has accepted the matched runtime build and workspace check.
+This assignment is authorized for the wave14 root. Record the matched
 runtime build, final launch source, run ID, root thread and logs in
 [the launch record](docs/wave14-launch.md) only after those facts exist.
 
@@ -25,8 +25,8 @@ memory reservation; the protected port-4600 demo holds 1 GiB of the shared
 8 GiB command pool. A missing Git status remains unknown cleanliness.
 
 No Exomonad adapter, credentialed inference, real shell tools, new browser
-command, or live demo/Tailscale change is authorized. Do not start this run
-until the supervisor confirms the matched runtime fixes and launch record.
+command, or live demo/Tailscale change is authorized. The supervisor owns host launch and records its exact identities; root may
+begin the brief on receiving the initial instruction.
 
 The wave-13 notes below are history; their open host gate was closed by the
 supervisor's accepted external check.
