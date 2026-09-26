@@ -664,8 +664,10 @@ async fn run_deterministic_engine_completion(
     agent: AgentPath,
     answer_override: Option<String>,
 ) -> Result<EngineCompletion, String> {
-    let provider = Arc::new(CliProvider(DemoProvider::development(".", false)));
-    let engine = Engine::<OfflineServerAuth, CliProvider, _>::with_transport(
+    let provider = Arc::new(BrowserProvider(CliProvider(DemoProvider::development(
+        ".", false,
+    ))));
+    let engine = Engine::<OfflineServerAuth, BrowserProvider, _>::with_transport(
         DeterministicServerTransport {
             command: command.to_owned(),
             waiting,
@@ -673,10 +675,10 @@ async fn run_deterministic_engine_completion(
         },
         store,
         scheduler,
-        provider,
+        provider.clone(),
         EngineConfig {
             instructions: "Deterministic browser journey. Do not use tools.".into(),
-            tools: Vec::new(),
+            tools: provider.all_tools(),
             model: "deterministic-local".into(),
             effort: Effort::Low,
             session_id: format!("harness-demo-server-{command_id}"),
@@ -692,6 +694,48 @@ async fn run_deterministic_engine_completion(
         )
         .await
         .map_err(|_| "deterministic engine request failed".to_owned())
+}
+
+/// Browser-only deterministic policy. The shared CLI provider remains Send/auto.
+struct BrowserProvider(CliProvider);
+
+#[async_trait]
+impl Provider for BrowserProvider {
+    async fn before_request(
+        &self,
+        plan: &harness::hooks::RequestPlan,
+    ) -> harness::hooks::BeforeRequestResult {
+        let mut result = self.0.before_request(plan).await;
+        let selected = plan
+            .tools_allowed
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .find(|name| *name == "sleep");
+        if let Some(name) = selected {
+            result.decision = harness::hooks::BeforeRequestDecision::SendRestricted {
+                tools_allowed: vec![name.to_owned()],
+            };
+        }
+        result.evidence = Some(json!({"consumer":"standalone-browser","selection":"sleep"}));
+        result
+    }
+    async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError> {
+        self.0.call(name, args).await
+    }
+    async fn call_with_context(
+        &self,
+        name: &str,
+        args: Value,
+        context: CallContext,
+    ) -> Result<Value, ProviderError> {
+        self.0.call_with_context(name, args, context).await
+    }
+    fn tools(&self) -> Vec<Value> {
+        self.0.tools()
+    }
+    fn all_tools(&self) -> Vec<Value> {
+        self.0.all_tools()
+    }
 }
 
 async fn run_deterministic_engine_turn(
@@ -1752,6 +1796,28 @@ mod tests {
     use harness::transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, Usage};
     use harness::turn::JobScheduler;
     use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn browser_provider_restricts_advertised_sleep_only() {
+        let provider = BrowserProvider(CliProvider(DemoProvider::development(".", false)));
+        let plan = harness::hooks::RequestPlan {
+            items: vec![],
+            tools_allowed: provider.all_tools(),
+            effort: Effort::Low,
+        };
+        let result = provider.before_request(&plan).await;
+        assert_eq!(
+            result.decision,
+            harness::hooks::BeforeRequestDecision::SendRestricted {
+                tools_allowed: vec!["sleep".into()]
+            }
+        );
+        assert_eq!(
+            result.evidence,
+            Some(json!({"consumer":"standalone-browser","selection":"sleep"}))
+        );
+        assert!(std::thread::spawn(|| {}).join().is_ok()); // provider remains ordinary Send.
+    }
 
     #[derive(Clone)]
     struct FakeAuth;
