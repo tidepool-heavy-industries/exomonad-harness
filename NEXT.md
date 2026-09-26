@@ -4,6 +4,29 @@ Read [wave16 brief](docs/wave16-brief.md). Implement its standalone deterministi
 before-request injection slice and Haskell composition trial. The supervisor owns
 launch identity; do not start another run or attempt credentialed inference.
 
+## Wave16 shared checkpoint
+
+The shared typed `Inject { item, tools_allowed }` seam is committed at
+`594b3d006f49d0fefbbc38114bd7c276f8f57975`; its focused serde check
+matched/executed/passed 1/1. An earlier `cargo test --exact` compiled but
+matched **zero** tests and is not evidence of a pass. The current contract is
+[wave16-contract](docs/wave16-contract.md), PRD.md § “before-request”.
+The Engine arm at this scaffold only compiles; it does **not** apply injection.
+The source that incorporates this brief will be resolved before wave admission.
+
+Admission plan: one Luna Engine/transport owner (`engine.rs`,
+`transport/client.rs`), one Luna Provider/Store owner (`harness-demo/src/main.rs`,
+`harness/src/store/mod.rs`), and one independent Luna browser acceptance owner
+(`harness-demo/tests/standalone_browser.rs`). First expected replies are
+checked component candidates for the first two and a confirmed expected-red
+barrier for acceptance. Shared sequence: root `echo inject-context` injects one
+user message after canonical history with sleep restriction; ordinary echo,
+child and Send remain unchanged. Root owns review and integration. The
+specialized Haskell helper is `SessionHelpers.Wave16Gate.startWave16Gate`
+(owner, name, `FocusedSpec`, fixed 3 GiB), then `readWave16Gate` on terminal
+notice with failed/unknown callbacks; published helper source is
+`e98a8f2fa0231e2e4973aad03eb4da7a6435891e206628f71e5b9b865556a71d`.
+
 The completed wave15 handoff below is retained history, not unfinished work.
 
 # Completed assignment — wave15 restricted before-request tools
