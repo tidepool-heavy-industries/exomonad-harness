@@ -204,7 +204,7 @@ fn before_request_decisions(db: &Path) -> Vec<Value> {
         .decisions(None)
         .expect("read Store decisions")
         .into_iter()
-        .filter(|row| row.decision.hook == "before_request")
+        .filter(|row| row.decision.hook == "before-request")
         .map(|row| {
             let request = row
                 .request
