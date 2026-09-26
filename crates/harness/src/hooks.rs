@@ -44,7 +44,10 @@ mod tests {
             effort: Effort::Medium,
         };
         let encoded = serde_json::to_value(&plan).unwrap();
-        assert_eq!(serde_json::from_value::<RequestPlan>(encoded).unwrap(), plan);
+        assert_eq!(
+            serde_json::from_value::<RequestPlan>(encoded).unwrap(),
+            plan
+        );
         let result = BeforeRequestResult {
             decision: BeforeRequestDecision::Send,
             evidence: Some(json!({"source":"deterministic-hook"})),
@@ -65,7 +68,10 @@ mod tests {
             evidence: Some(json!({"opaque": [1, 2]})),
         };
         let encoded = serde_json::to_value(&result).unwrap();
-        assert_eq!(serde_json::from_value::<BeforeRequestResult>(encoded).unwrap(), result);
+        assert_eq!(
+            serde_json::from_value::<BeforeRequestResult>(encoded).unwrap(),
+            result
+        );
     }
 
     #[test]
@@ -78,6 +84,9 @@ mod tests {
             evidence: Some(json!({"source":"deterministic-browser"})),
         };
         let encoded = serde_json::to_value(&result).unwrap();
-        assert_eq!(serde_json::from_value::<BeforeRequestResult>(encoded).unwrap(), result);
+        assert_eq!(
+            serde_json::from_value::<BeforeRequestResult>(encoded).unwrap(),
+            result
+        );
     }
 }
