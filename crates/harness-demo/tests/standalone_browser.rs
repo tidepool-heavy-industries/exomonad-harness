@@ -40,7 +40,7 @@ fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_harness-demo")
 }
 
-fn spawn(db: &Path, assets: &Path, port: u16) -> Child {
+fn spawn(db: &Path, assets: &Path, port: u16, capture: &Path) -> Child {
     Command::new(binary())
         .args([
             "--db",
@@ -52,6 +52,7 @@ fn spawn(db: &Path, assets: &Path, port: u16) -> Child {
         ])
         .current_dir(std::env::temp_dir())
         .env("HARNESS_DEMO_SESSION_SECRET", SECRET)
+        .env("HARNESS_DEMO_CAPTURE_REQUESTS", capture)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -234,9 +235,10 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     let root = temp_path();
     std::fs::create_dir_all(&root).unwrap();
     let db = root.join("session.sqlite");
+    let capture = root.join("outgoing-requests.jsonl");
     let missing = root.join("not-built");
     let missing_port = port();
-    let absent = spawn(&db, &missing, missing_port);
+    let absent = spawn(&db, &missing, missing_port, &capture);
     let output = timeout(Duration::from_secs(5), absent.wait_with_output())
         .await
         .unwrap()
@@ -260,11 +262,20 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     let selected_port = port();
     let base = format!("http://127.0.0.1:{selected_port}");
     let client = reqwest::Client::new();
-    let mut first = spawn(&db, &assets, selected_port);
+    let mut first = spawn(&db, &assets, selected_port, &capture);
     ready(&mut first, &base, &client).await;
     let cookie = login(&base, &client).await;
     let first_id = submit(&base, &cookie, &client, "echo standalone").await;
-    let _ = await_request(&base, &cookie, &first_id).await;
+    let echo = await_request(&base, &cookie, &first_id).await;
+    let echo_record = echo["snapshot"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["commandId"] == first_id)
+        .expect("echo request must be visible");
+    assert_eq!(echo_record["state"], "completed");
+    assert_eq!(echo_record["outcome"], "completed");
+    assert_eq!(echo_record["detail"], "standalone");
     let child_id = submit(&base, &cookie, &client, "child standalone-child").await;
     let first_shot = await_request(&base, &cookie, &child_id).await;
     assert!(
@@ -306,9 +317,45 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
         tagged.iter().any(|row| row["agent"] != "/root"),
         "expected a child-agent decision (its path is intentionally not fixed): {tagged:#?}"
     );
+    let captured: Vec<Value> = std::fs::read_to_string(&capture)
+        .expect("deterministic transport must capture outgoing requests")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("captured request must be JSON"))
+        .collect();
+    let echo_request = captured
+        .iter()
+        .find(|request| {
+            serde_json::to_string(&request["input"])
+                .is_ok_and(|input| input.contains("echo standalone"))
+        })
+        .expect("captured echo Engine request");
+    let child_request = captured
+        .iter()
+        .find(|request| {
+            serde_json::to_string(&request["input"])
+                .is_ok_and(|input| input.contains("child standalone"))
+        })
+        .expect("captured child Engine request");
+    assert_eq!(echo_request["tools"], child_request["tools"]);
+    let tool_names: Vec<&str> = echo_request["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        tool_names.contains(&"ask"),
+        "full definitions must include ask"
+    );
+    assert_eq!(
+        echo_request["tool_choice"],
+        json!({"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"ask"}]})
+    );
+    assert_eq!(child_request["tool_choice"], "none");
     stop_sigint(&mut first).await;
 
-    let mut second = spawn(&db, &assets, selected_port);
+    let captured_before_reopen = std::fs::read_to_string(&capture).unwrap();
+    let mut second = spawn(&db, &assets, selected_port, &capture);
     ready(&mut second, &base, &client).await;
     let cookie = login(&base, &client).await;
     let clean = snapshot(&base, &cookie).await;
@@ -331,13 +378,18 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
         decisions_before_reopen,
         "opening and reading the stored session must not create hook decisions"
     );
+    assert_eq!(
+        std::fs::read_to_string(&capture).unwrap(),
+        captured_before_reopen,
+        "reopening the stored session must not issue/capture another Engine request"
+    );
     second.kill().await.unwrap();
     assert!(
         !second.wait().await.unwrap().success(),
         "process-loss phase was not a kill"
     );
 
-    let mut third = spawn(&db, &assets, selected_port);
+    let mut third = spawn(&db, &assets, selected_port, &capture);
     ready(&mut third, &base, &client).await;
     let cookie = login(&base, &client).await;
     let lost = snapshot(&base, &cookie).await;
