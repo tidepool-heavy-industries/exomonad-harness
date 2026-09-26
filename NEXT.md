@@ -1,3 +1,36 @@
+# Wave 14 prepared — activation pending
+
+Read [the wave-14 brief](docs/wave14-brief.md) first. This branch is
+`rsi/wave14` from harness master `36cdebf01f7b0792cf6828ee0e0d4ab045e3b61e`;
+the pinned shared workspace is
+`98aef850d7be1b322aebcea929d62de3a56ab92f`. The worktree and submodule
+are prepared, but no wave-14 run or actor has been launched. Record the matched
+runtime build, final launch source, run ID, root thread and logs in
+[the launch record](docs/wave14-launch.md) only after those facts exist.
+
+The outcome is one typed, default pass-through before-request hook invoked by
+the existing Engine, durably recorded with request provenance, and exercised
+through the deterministic browser production consumer. Keep the browser's
+existing command, child, reconnect and process-loss behavior. Root owns the
+small compiling shared contract and invocation boundary before admitting three
+bounded Luna obligations: Provider/Store, Engine, and independent expected-red
+acceptance. Commission exact-commit review, integrate, then run focused checks
+on the integrated revision.
+
+Implementation owner and independent reviewer each trial the existing
+`SessionHelpers.TestEvidence` start/wait/finish composition in one notebook
+cell on the same named check. Count actual actors, model tool calls, underlying
+command effects, selected/executed tests and retained evidence. Use a realistic
+memory reservation; the protected port-4600 demo holds 1 GiB of the shared
+8 GiB command pool. A missing Git status remains unknown cleanliness.
+
+No Exomonad adapter, credentialed inference, real shell tools, new browser
+command, or live demo/Tailscale change is authorized. Do not start this run
+until the supervisor confirms the matched runtime fixes and launch record.
+
+The wave-13 notes below are history; their open host gate was closed by the
+supervisor's accepted external check.
+
 # Wave13 completed — supervisor acceptance
 
 Production integration `d2de055` passed the root's focused checks and the
