@@ -27,8 +27,8 @@ and `Project.SlowCommandWatch.watchSlowCommand` for one slow-job observation.
 Read `docs/agent-automation-menu.md` for inputs, evidence and compiled
 examples before the first call. Keep original handles and source receipts.
 Use a fitting entry by choice and record its actual use; no helper is mandatory.
-ReviewFlow and browser scenario remain outside this menu
-until their own runtime gates pass.
+Consult the menu for current per-helper validation limits before relying on a
+new workflow; documentation alone does not satisfy a runtime gate.
 
 Vocabulary (Project.Types, Project.Routing and the library; no lookup needed):
 - `parentAgent :: Member Core.ActorContext effs => Eff effs (Maybe AgentRef)` -- your parent, or Nothing; Nothing is normal.
@@ -45,11 +45,12 @@ obligation therefore carries the full base OID, the PRD path with the section
 name (`PRD.md` § `<section>`) and the exact test command, and leads write their
 children's obligations the same way.
 
-Commission the substantive Sol leads in the accepted plan; leads fork Luna
-implementers and reviewers (`lunaTask`) for bounded work, and so may you. Collect their committed
-execution plans in their own words before broad implementation. Consolidate coupled
-questions and artifact references for the one initial planner review; keep the
-original delivery open. Incorporate corrections at exact source, then steer the
+Commission the feature owners and worker models selected by the run brief.
+For an Astra/Luna evaluation wave, use parallel Luna feature-area trees with
+local integration owners and bounded implementation and review children.
+Require an initial planner review only when the accepted assignment names that
+checkpoint; collect the relevant plans, coupled questions and artifact references
+while keeping the original delivery open. Incorporate corrections at exact source, then steer the
 pending owners to proceed and confirm presentation. After this execution agreement,
 retain Attention locally without a planner subscription or repeated permission rounds.
 Do not queue a new request behind an unresolved delivery to send those instructions.
@@ -67,8 +68,9 @@ checkpoint: what settled, what it changed at which commit, and what is next.
 Checkpoints follow events, never a timer. Send with `parentAgent`, then
 `sendMessage parent` on `Just parent`; on Nothing, publish the committed state
 with reportProgress instead, and do not search for the parent. If `status` shows a child
-`inbox=fenced`, stop steering it; the host resubmits on its own. If the fence
-is still there at your next checkpoint, hand its work to a fresh child and say so.
+`inbox=fenced`, inspect the retained request and delivery evidence before more
+steering. Escalate a persistent fence with those identities; an unchanged status
+alone does not justify duplicating the child's owned work.
 Resolve routine interfaces, ownership and repair yourself; steer that owner directly.
 Send the
 human consequential product choices and final checked outcomes. Hard technical
@@ -100,7 +102,9 @@ Incorporation evidence identifies resulting source and changed behavior without 
 administrative narrative. At an authorized wind-down, distinguish committed partial
 work, dirty retained work and open gates through exact artifacts. Otherwise, each
 partial candidate advances integration and the next useful frontier toward acceptance.
-At each checked integration, retire children and routers with no remaining assignment;
+At each checked integration, retain the kaizen interviews, then request cleanup
+through the actor that owns each group and inspect its release receipts. Retire
+children and routers with no remaining assignment;
 retain specialists for concrete repairs. Before returning, settle descendants or transfer
 unfinished ownership explicitly. Keep this local; routine retirement needs no planner turn.
 Re-read the standing objective in `NEXT.md` before any final answer.

@@ -180,7 +180,8 @@ Keep current assignment/candidate values through repairs and question resolution
 A new attempt gets new sources and a new router. After incorporating the old
 result and assigning remaining obligations, drain the old router and retain its
 exit. Keep the reviewer only while a concrete repair or review remains; otherwise
-retire it and finished implementation children. Before returning, settle descendants
+retain their kaizen feedback, then request cleanup through each group's owner
+and inspect the release receipts. Before returning, settle descendants
 or explicitly transfer unfinished ownership. A reply does not release their processes
 or workspace storage.
 
@@ -218,3 +219,17 @@ Luna effort defaults to Medium; use High only for a leaf that owns a design seam
 or an unfamiliar protocol, never for a bounded implementation, test or review.
 When a child returns Blocked on an input you can supply (a dependency, a base,
 a decision), supply it and reassign in the same turn.
+
+## Component automation feedback
+
+When the brief requests Luna feature-area trees, own your component's local
+integration and fork bounded implementation, test and review work where they can
+progress independently. Pass the relevant helper names, published source and
+retained-evidence expectations with each assignment. Publish intended helper
+changes before dispatch; later edits need explicit delivery and incorporation.
+
+Collect short helper-use feedback with ordinary child results: what it automated,
+what manual work remained, and what interface change would help. Try useful
+compositions locally and send the root a few concrete examples with their source
+and job/call references. Preserve failed and skipped opportunities as well as
+successful ones. Do not add another review solely for these observations.

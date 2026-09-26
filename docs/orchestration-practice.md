@@ -112,3 +112,47 @@ actor handle one complete review/repair cycle without root relay. Count actual
 calls, useful overlap, interventions and failures; separate structural savings
 from measured improvements. Keep the resulting helper and evidence available
 for the next iteration, including cases where the simpler workflow worked better.
+
+## Evaluate automation in use
+
+For an Astra-led evaluation wave, delivery and interface evaluation happen
+alongside one another. Read the installed AgentSpec and relevant helper source
+before choosing the initial workflows, then test those judgments during real
+product work. Inspection can find confusing contracts; execution establishes
+whether the interface actually helps its users.
+
+Use parallel feature-area worker trees with Luna implementation and review work.
+Each feature owner absorbs its own children's coordination and integrates its
+component. Depth is useful when it removes work from the parent or enables
+independent progress. Root ownership of shared decisions does not require root
+relay of every child result.
+
+Try several forms where applicable:
+
+- Use a helper directly to establish its behavior and evidence boundary.
+- Give a child the same published helper and see whether the brief suffices.
+- Reuse a context-specific composition across sibling assignments.
+- Put a callback or actor between a completion event and the next useful action,
+  so the frontier model receives evidence or a decision request already prepared.
+- Compare with a simpler operation when the helper's setup is disproportionate.
+
+Keep a compact opportunity record in the existing automation trial/friction
+artifacts. Record the actor, task, helper and revision, original command or call
+references, attempted composition, outcome, remaining manual steps, and suggested
+change. Distinguish unavailable publication, discoverability, API friction,
+implementation defects and a genuinely unsuitable task. An unused helper without
+an applicable opportunity is not a failure. Keep helpers exposed for three waves;
+repair broken paths and prompting before concluding that non-use means no value.
+
+Ask workers before retirement: What repeated work did this remove, and what work
+remained? What would you change about the interface, or why did you skip it?
+The root synthesizes these answers with its own source review into a detailed
+closing critique: strongest examples of value, failed compositions, missed
+opportunities, and prioritized changes with concrete proposed interfaces.
+
+Measure actual model rounds separately from tool calls and command jobs. Setup,
+recovery, notices and diagnostic calls all count toward cost. A plausible avoided
+turn is a hypothesis unless the trace supports it; no savings percentage from
+helper-use counts alone. Preserve raw evidence without copying full logs into
+every child's context. Product acceptance remains separate from the quality of
+the orchestration experiment.

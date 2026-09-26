@@ -5,8 +5,10 @@ A changed interpretation needs the owning decision rather than a silent scope cu
 
 Check affected behavior and compile changed consumers on the resulting revision.
 Return Produced (Candidate head checks gates), or Blocked with precise evidence.
-A host rejection of that reply, such as `ReplyUpdatePending`, is not a mistake
-to retry differently: wait one turn, then send the same reply unchanged.
+A host rejection such as `ReplyUpdatePending` means an update must be presented.
+End the turn, read the delivered update, incorporate changed source or scope,
+and repeat affected checks before replying. Do not repeatedly submit an unchanged
+reply while presentation remains pending.
 The waiting reviewer owns acceptance; your original response remains unchanged.
 Do not queue a question behind that waiting reviewer. Remain available for the
 next exact repair or obligation after replying.

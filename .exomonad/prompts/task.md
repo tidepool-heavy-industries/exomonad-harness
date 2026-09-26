@@ -152,8 +152,10 @@ in this assignment with the tool call or file, e.g. `friction: inspectFull
 sessionInput needed twice; activation cut the Owns line`. The root collects them
 at the retro; never edit `docs/exomonad-friction.md` or another shared file yourself.
 
-A host rejection of that reply, such as `ReplyUpdatePending`, is not a mistake
-to retry differently: wait one turn, then send the same reply unchanged.
+A host rejection such as `ReplyUpdatePending` means an update must be presented.
+End the turn, read the delivered update, incorporate any changed assignment or
+source, and repeat affected checks before replying. Ending a turn alone does not
+prove the update was presented; do not repeatedly submit an unchanged reply.
 
 Keep the obligation pending while awaiting an owning decision. Publish progress
 and unresolved questions through the supplied progress channel. If the work
@@ -170,6 +172,19 @@ At the 15-minute or 30-call limit, commit a safe checkpoint and end the turn eve
 if a test or repair is unfinished; name it pending, never green.
 
 ## Improve repeated work
+
+Preserve dirty work and existing commits. Never use `git stash`, `git reset`,
+or `git checkout -- <path>`. Commit only your owned paths by explicit pathspec,
+without attribution trailers. Ask the owner when a required manifest or lockfile
+change lies outside your assignment.
+
+When trialing automation, include a short account in your existing friction
+feedback: opportunity, helper/module and published revision, how you used or
+composed it, observed benefit or failure, and the interface you would prefer.
+Report useful automation as well as problems. If you skipped an applicable helper,
+say whether it was unavailable, hard to discover, awkward, or unnecessary for this
+particular task. Your normal result carries this evidence; do not create a separate
+reporting tree or edit shared run reports.
 
 Use an inherited helper when it fits your assignment; inspect its inputs and
 failure behavior before relying on it. When the same command/read/triage sequence

@@ -15,6 +15,10 @@ Wait for terminality, then branch on pass, failure or unknown evidence; never
 wait for a passing verdict to appear. Read `docs/agent-automation-menu.md` for the
 working example. A parent should pass the actual helper name and published source to children who need it.
 
+Preserve dirty work and existing commits. Never use `git stash`, `git reset`,
+or `git checkout -- <path>`. Commit by explicit pathspec without attribution
+trailers. Name the owner of manifest and lockfile changes before dispatch.
+
 Read `NEXT.md` first. It names the current assignment, accepted constraints and
 required reading. Own delivery of that outcome through checked integration.
 An example package is not product approval. Ask about missing finished behavior
@@ -26,6 +30,29 @@ boundary is unfamiliar or a failure needs diagnosis; the reference is a starting
 point, not a restriction on discovery. Preserve command handles and output paths.
 After a restart, recover retained output before considering new execution;
 missing a local binding does not establish that the original command stopped.
+
+## Evaluate the workflow while delivering
+
+When the launch brief assigns an Astra root, own both product delivery and an
+active evaluation of the installed automation. Start with the actual AgentSpec,
+`docs/agent-automation-menu.md`, and the helper implementations relevant to the
+planned work. Check what is exposed and published; a file on disk alone does not
+establish that a child can import it. Keep this first pass bounded and continue
+learning from execution.
+
+Organize parallel feature areas as Luna worker trees, each with an owner for its
+local decisions, review and integration. Give useful component owners room to
+fork their own ready work; retain shared cross-component decisions at the root.
+The brief controls model selection. Do not flatten every feature into root-owned
+leaf tasks or manufacture depth for tasks that are already small.
+
+Deliberately try helpers in different ways on applicable work: direct use,
+child use, reuse across siblings, and composition with project-specific functions
+or actor callbacks. Vary approaches where the work justifies it. Include both
+useful and unsuccessful trials; do not rerun passing checks merely to create a
+comparison. Follow `docs/orchestration-practice.md#evaluate-automation-in-use`.
+Ask feature owners and workers for concrete feedback before retirement, then
+return a detailed critique with proposed interface changes and supporting traces.
 
 ## Compose the workflow
 
@@ -91,9 +118,9 @@ source receipts when a helper sends a compact notice.
 
 These are choices, not required calls. Record applicable opportunities and
 actual use in the run's trial record. Keep each installed entry visible for
-three waves before judging non-use; a broken path remains unavailable. The
-separate ReviewFlow and browser scenario helpers await their
-own runtime gates and are absent from this menu.
+three waves before judging non-use; a broken path remains unavailable. Consult
+the menu for each helper's current validation limits; a pending
+runtime gate does not become satisfied because an API is documented.
 
 Reference (Project.Types, Project.Work, Project.Routing, Project.Observe and the library; `(...)` elides a constraint list; no lookup needed):
 - `data GitOid = GitOid Text` -- `GitOid "<full 40-hex commit>"`.
@@ -236,9 +263,10 @@ update receipts before choosing a supported next action; report unpresented
 steering once instead of repeatedly retrying or claiming delivery. A receipt
 proves transport, not reading. Each lead sends an admission checkpoint after
 its fork cell and one on every child settlement. If a lead's `status` line shows
-`inbox=fenced`, stop steering it; the host resubmits on its own. If the fence is
-still there at the next checkpoint, hand the work to a fresh lead and record
-the fence in `docs/exomonad-friction.md`. Expand every value before sending a
+`inbox=fenced`, retain its request and inspect the delivery evidence before
+sending more steering. Report a persistent fence to the supervisor with the
+actor and request identity; do not duplicate owned work merely because a
+status observation is unchanged. Expand every value before sending a
 message. A correction names the message it corrects. Use ordinary Codex TUI
 steering when the operator provides it.
 

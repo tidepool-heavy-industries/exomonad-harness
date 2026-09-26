@@ -13,7 +13,7 @@ notice remains traceable. Choose useful helpers; no entry is mandatory.
 
 For qualified `Project.TestEvidence` calls, first `import Project.TestEvidence`.
 `Project.CheckResults` re-exports its unqualified names but does not bring that
-module qualifier into scope. Wave15 exercised this explicit import successfully.
+module qualifier into scope.
 
 | Need | Callable entry and inputs | Result and compiled example |
 | --- | --- | --- |
@@ -29,8 +29,8 @@ module qualifier into scope. Wave15 exercised this explicit import successfully.
 | Assemble a compact handoff | `Project.HandoffExamples.handoffProposal`: reported candidate, optional reported review, observed check state and remaining obligations. Import the example module explicitly and customize its projection. | Reuses existing summaries without granting integration authority. `Project.AutomationChecks.integration` compiles and exercises this projection. |
 
 Ordinary exact-candidate review requests remain in `Project.Work`, with
-event-driven collection in `Project.Routing`. Wave16 trials `Project.ReviewFlow`
-for one bounded component: declare component-only review or required sibling
+event-driven collection in `Project.Routing`. Use `Project.ReviewFlow`
+for a bounded component after the launch brief confirms its runtime gate: declare component-only review or required sibling
 commits before requesting review, retain root integration authority, and escalate
 unresolved contracts. The compiled `checks/review-flow-loop.hs` consumer shows setup, including
 `R.withWorktree` authority; `Project.ReviewFlowChecks` exercises acceptance,
