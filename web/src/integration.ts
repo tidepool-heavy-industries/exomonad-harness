@@ -33,7 +33,8 @@ export function toViewModel(state: NormalizedState): HarnessViewModel {
     id: envelope.id,
     sender: envelope.sender,
     message: envelope.payload,
-    state: envelope.type === 'FINAL_ANSWER' ? 'answered' : 'unread',
+    // The wire contract supplies envelope kind, not read/acted delivery state.
+    state: envelope.type,
   }))
   return { nodes, timeline, inbox }
 }

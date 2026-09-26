@@ -182,8 +182,9 @@ export default function App({ data = emptyData, onCommand }: AppProps) {
   }, []);
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const value = command.trim();
-    if (value) { onCommand?.(value); setCommand(""); }
+    // Preserve the payload exactly: whitespace after the verb is data in the
+    // deterministic command grammar.
+    if (command.trim()) { onCommand?.(command); setCommand(""); }
   };
   return <>
     <style>{styles}</style>
@@ -203,13 +204,33 @@ export default function App({ data = emptyData, onCommand }: AppProps) {
         {screen === "inbox" && <Inbox data={data} />}
         {screen === "command" && <section aria-labelledby="command-heading">
           <h2 id="command-heading">Send a command</h2>
-          <p className="hint">Commands are passed to the host; this view does not assume or fabricate a result.</p>
+          <p className="hint">Deterministic mode · commands are sent to the authenticated host. Sending is not acceptance or completion; this client displays only state present in the server snapshot and events.</p>
+          <div className="rows" aria-label="Command grammar">
+            <p><code>echo TEXT</code> · <code>test</code> · <code>wait</code> · <code>message TEXT</code></p>
+            <p><code>cancel</code> · <code>child TEXT</code> · <code>fail</code></p>
+            <p className="hint">Use the command form for the documented operations. Outcomes, progress, and messages appear only to the extent represented by received server records.</p>
+          </div>
+          <div className="toolbar" aria-label="Common deterministic actions">
+            {([
+              ["Run test", "test"],
+              ["Start wait", "wait"],
+              ["Cancel wait", "cancel"],
+              ["Create example child", "child browser example"],
+              ["Fail request", "fail"],
+              ["Recover with echo", "echo recovered"],
+            ] as const).map(([label, value]) => <button key={value} type="button" disabled={!onCommand} onClick={() => onCommand?.(value)}>{label}</button>)}
+          </div>
           <form className="command-form" onSubmit={submit}>
             <label className="sr-only" htmlFor="command-input">Command</label>
             <input id="command-input" value={command} onChange={(event) => setCommand(event.target.value)} autoComplete="off" />
             <button type="submit" disabled={!command.trim() || !onCommand}>Send</button>
           </form>
           {!onCommand && <p className="hint" role="status">Command channel is not connected.</p>}
+          <h2>Authoritative activity</h2>
+          <p className="hint">Stored records received from the host; refresh reconnects to the server snapshot and does not replay submitted commands.</p>
+          <Timeline data={data} />
+          <h2>Conversation and child identities</h2><Tree data={data} />
+          <h2>Messages and replies</h2><Inbox data={data} />
         </section>}
       </main>
     </div>

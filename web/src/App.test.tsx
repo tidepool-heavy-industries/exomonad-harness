@@ -31,4 +31,18 @@ describe('operator views', () => {
     expect(onCommand).toHaveBeenCalledWith('wait_agent')
     expect(screen.queryByText('Command sent')).not.toBeInTheDocument()
   })
+
+  it('offers deterministic actions and preserves payload whitespace after the verb', () => {
+    const onCommand = vi.fn()
+    render(<App onCommand={onCommand} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Command' }))
+    expect(screen.getByText(/Deterministic mode/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel wait' }))
+    expect(onCommand).toHaveBeenCalledWith('cancel')
+    fireEvent.change(screen.getByLabelText('Command'), { target: { value: 'echo  keep spaces' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    expect(onCommand).toHaveBeenLastCalledWith('echo  keep spaces')
+    expect(screen.getByText(/Sending is not acceptance or completion/)).toBeInTheDocument()
+    expect(screen.getByText(/Outcomes, progress, and messages appear only to the extent represented/)).toBeInTheDocument()
+  })
 })
