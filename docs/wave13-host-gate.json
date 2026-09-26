@@ -1,0 +1,53 @@
+{
+  "source_commit": "d2de0554a0e8ac18e09aabc5619b30ba31546674",
+  "handoff_commit": "ee5a0dafe9c2ed4f2a53ef592bf734249f1d3bd5",
+  "binary_sha256": "a8e4715014050ab7f8933d35fb9b75a4f4c721a5ecc0de4ad878508525235c58",
+  "index_sha256": "4ce323164c8e6101f15ca4688e4e596e7acead62bc18aaa3b401f7dcab6eef3e",
+  "copied_bundle": "/tmp/wave13-host-gate-zn4v9dqj",
+  "launcher_cwd": "/",
+  "database": "/tmp/wave13-host-gate-zn4v9dqj/data/session.sqlite",
+  "address": "127.0.0.1:33367",
+  "first_unit": "wave13-host-gate-zn4v9dqj-b.service",
+  "first_invocation": "85f3de286a3b4a749c79d986eb4b2a25",
+  "first_pid": 3669031,
+  "first_pid_namespace": "pid:[4026531836]",
+  "host_shell_pid_namespace": "pid:[4026531836]",
+  "first_ppid": 1513,
+  "first_cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/wave13-host-gate-zn4v9dqj-b.service",
+  "first_probe": {
+    "session_http": 200,
+    "index_http": 200,
+    "login_http": 200,
+    "websocket": "authenticated snapshot",
+    "submit_http": 202,
+    "command_id": "296bcff8-55d6-4048-ab2c-6c98043ffd07",
+    "state": "completed",
+    "detail_contains_marker": true
+  },
+  "process_loss": {
+    "signal": "SIGKILL exact first unit main PID",
+    "unit_result": "signal",
+    "exec_main_status": 9,
+    "port_released": true
+  },
+  "reopen_unit": "wave13-host-gate-zn4v9dqj-c.service",
+  "reopen_invocation": "34feb02c0a0d44f78df3cb3dad230b50",
+  "reopen_pid": 3670139,
+  "reopen_probe": {
+    "login_http": 200,
+    "websocket": "authenticated snapshot",
+    "same_command_id": true,
+    "state": "completed",
+    "detail_contains_marker": true,
+    "index_http": 200
+  },
+  "clean_stop": {
+    "signal": "SIGINT exact second unit main PID",
+    "unit_result": "success",
+    "exec_main_status": 0,
+    "port_released": true
+  },
+  "protected_demo_http_after": 200,
+  "initial_service_prerequisite_failure": "User systemd PATH lacked bash for /usr/bin/env bash; first unit a exited 127 before app startup. Isolated unit b/c supplied PATH=/run/current-system/sw/bin:/usr/bin:/bin.",
+  "secret": "fresh 32-byte random URL-safe value stored only in mode-0600 EnvironmentFile during run; never printed; file removed after stop"
+}

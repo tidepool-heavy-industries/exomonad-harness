@@ -1,3 +1,14 @@
+# Wave13 completed — supervisor acceptance
+
+Production integration `d2de055` passed the root's focused checks and the
+supervisor's external ordinary-host lifetime gate. See
+[handoff](docs/wave13-handoff.md) and [host evidence](docs/wave13-host-gate.json).
+No successor assignment is active yet. Do not start adapter or credentialed
+inference work. Preserve the port4600 demo and Tailscale configuration.
+
+The preceding working notes below retain the investigation chronology; their
+open-gate statements are superseded by the accepted handoff above.
+
 # Current handoff — wave 13 host-lifetime gate
 
 Read [wave-13 brief](docs/wave13-brief.md) and

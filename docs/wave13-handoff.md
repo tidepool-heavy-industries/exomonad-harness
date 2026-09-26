@@ -66,18 +66,33 @@ The protected wave-12 port 4600 still returned HTTP 200 after these checks.
 Its service, data, secret and Tailscale Serve configuration were untouched.
 No second-device tailnet check ran.
 
-## Open host gate
+## External host gate — completed by supervisor
 
-This tool sandbox cannot reach the host user service manager
-(`systemctl --user`: “No data available”), and local SSH did not
-authenticate. It therefore cannot report a **host-visible** PID/unit or
-claim that a host service outlived the agent's mount/PID namespace. The
-operator has been asked in [questions](questions.md) to run one isolated
-prepare/launch/stop/reopen from an ordinary host shell and report the exact
-service/PID. Until that occurs, namespace-local production checks establish
-the implementation and recovery behavior, but the external host-lifetime
-acceptance gate remains open. The next owner is the host operator for that
-one check; no credentialed inference or adapter work is authorized.
+At 2026-09-26 06:10 UTC the operator copied the exact prepared binary, assets
+and launcher to `/tmp/wave13-host-gate-zn4v9dqj` and launched from `/` through
+host user systemd. No Cargo ran at launch. Binary and index hashes matched the
+prepared bundle; [retained evidence](wave13-host-gate.json) records hashes,
+source, invocation IDs, PIDs, namespace, cgroup and outcomes.
+
+The first successful unit was `wave13-host-gate-zn4v9dqj-b.service`, host PID
+3669031, parent 1513 (user systemd). Its PID namespace matched the operator's
+host shell, and the service remained active after the launch command returned.
+On isolated port33367, static/session HTTP, login, authenticated WebSocket
+snapshot/reconnect and `echo host-gate` succeeded. Exact unit-main SIGKILL
+released the port. Reopening the same database as unit c, host PID3670139,
+retained the completed command and its detail. Exact SIGINT then exited0;
+the unit became inactive and the port was released.
+
+The first attempt failed before application startup because this host's user
+systemd PATH omitted Bash. Successful units supplied
+`PATH=/run/current-system/sw/bin:/usr/bin:/bin`. This is a launch prerequisite,
+not an application failure. A fresh private secret was never printed, and its
+mode0600 environment file was removed after stopping the isolated instances.
+The protected port4600 demo remained healthy; no Tailscale configuration or
+existing secret/data changed. No second-device tailnet verification is claimed.
+
+The ordinary-host lifetime gate is now closed. The product evidence does not
+claim a two-actor helper experiment or clean-source metadata that was unavailable.
 
 ## Focused-gate helper trial
 
