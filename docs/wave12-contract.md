@@ -23,13 +23,34 @@ Deterministic mode commands (case-sensitive; whitespace after the verb is data):
 
 The server owns command interpretation, durable state transitions and event
 publication. Wire records retain the existing `Snapshot` arrays and
-`*.upsert` event kinds; optional descriptive fields are additive. Every
-accepted command gets an ID and must be represented by a durable outcome.
-Tests may assert the existing record keys (`id`, `conversationId`, `state`,
-`sender`, `recipient`, `type`, `payload`) and states, and should not guess
-the names of additive progress fields before the server owner publishes
-them. The root supplies HTTP and WebSocket test dependencies in the demo
-crate's manifest; the test owner edits only the integration test.
+`*.upsert` event kinds. Every accepted command gets an ID and must be
+represented by a durable outcome.
+
+Additive browser fields for this wave, owned by the server:
+
+- Each request record has `commandId` (the ID in `command.accepted`),
+  `command` (the submitted string), `outcome` (`accepted`, `pending`,
+  `queued`, `presented`, `acted`, `completed`, `cancelled`, or `failed`),
+  and optional `detail` (readable reason). Existing `state` remains the
+  coarse request lifecycle; do not overload it with delivery states.
+  `outcome` describes only what the server has actually observed.
+- Progress is a durable envelope with `type:"PROGRESS"`, `sender:"/harness"`,
+  `recipient` identifying the affected agent and human-readable `payload`.
+  Message and reply envelopes use existing `MESSAGE` and `FINAL_ANSWER`
+  types with their real sender/recipient. Each new envelope has an additive
+  integer `ordinal`, monotonically increasing within the persisted session,
+  so browser refresh preserves the same order. Do not insert a progress
+  envelope only after completion and call that live progress.
+- A child is a distinct conversation row with its own `id` and `path`
+  under `/root/`; a child-looking final envelope alone is insufficient.
+
+The browser accepts absent additive fields for old snapshots, but when they
+exist it displays command ID/outcome, detail, progress and ordered messages
+without inferring `presented` or `acted` from `queued`. Tests may assert the
+existing record keys (`id`, `conversationId`, `state`, `sender`, `recipient`,
+`type`, `payload`) plus the additive fields above. The root supplies HTTP
+and WebSocket test dependencies in the demo crate's manifest; the test
+owner edits only the integration test.
 Snapshot on reconnect must reflect stored history, not replay commands.
 Browser refresh is the primary reconnect guarantee. Process restart must
 recover settled history and mark interrupted work honestly, never re-execute
