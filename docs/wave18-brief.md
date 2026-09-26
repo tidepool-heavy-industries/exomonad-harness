@@ -26,6 +26,16 @@ composable effects, typed actor conversations, parallel worker trees and durable
 human interaction. This standalone harness is the foundation of that future home.
 Your experience operating the current environment is valuable design evidence.
 
+The other core motivation is taking advantage of newer model capabilities,
+especially asynchronous tool calls. Prioritize that foundation: represent tool
+work that remains in flight while useful work continues, explicit completion and
+result delivery, cancellation, and late results. Preserve call/result identity and
+an honest durable lifecycle through reconnect/reopen. Start by inspecting what the
+existing Engine and extension seams already provide; build the smallest missing
+slice and prove it with deterministic asynchronous tool stubs. Keep provider wire
+assumptions explicit and unimplemented until checked against the real protocol.
+This priority should shape the shared contract before dependent feature trees fork.
+
 While delivering this milestone, identify where a custom harness could make your
 work simpler or enable useful behavior that the current host makes awkward.
 Describe concrete interactions, required extension points and preserved semantics;
