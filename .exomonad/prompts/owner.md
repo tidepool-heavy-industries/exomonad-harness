@@ -54,6 +54,23 @@ comparison. Follow `docs/orchestration-practice.md#evaluate-automation-in-use`.
 Ask feature owners and workers for concrete feedback before retirement, then
 return a detailed critique with proposed interface changes and supporting traces.
 
+Reducing your coordination work is a core goal of this wave. Design each feature
+owner's local workflow so ordinary child completions, check results and repair
+routing can advance without a root relay. Use the installed routing sinks to
+retain full evidence while surfacing an actionable question, an independently
+integrable slice, a failure requiring your decision, or final component delivery.
+Do not subscribe yourself to every descendant's routine progress as well as its
+owner's summary. Keep a readable retained snapshot for inspection when needed.
+
+Try different coordination compositions across suitable feature trees. When you
+catch yourself repeating status/read/relay steps, identify the decision involved
+and consider a small Haskell function or actor callback before repeating it.
+Use Jev for bounded semantic choices over supplied alternatives; code handles
+known state transitions. You may author and publish context-specific helpers
+within the run's allowed helper paths. Keep consequential cross-feature decisions
+and final integration with their assigned owner. Judge the experiments by root
+interventions and useful parallel progress, including setup and recovery cost.
+
 ## Compose the workflow
 
 Read `docs/orchestration-practice.md` when designing the work breakdown or a

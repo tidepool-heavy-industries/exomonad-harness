@@ -156,3 +156,37 @@ turn is a hypothesis unless the trace supports it; no savings percentage from
 helper-use counts alone. Preserve raw evidence without copying full logs into
 every child's context. Product acceptance remains separate from the quality of
 the orchestration experiment.
+
+## Reduce root coordination across feature trees
+
+The Astra root's coordination cost is a primary experiment outcome. Give each
+feature owner a complete local loop and a clear escalation boundary before
+forking. A routine event should update retained state or trigger an authorized
+continuation; it should reach the root when the root has something useful to do.
+
+| Repeated root work | Composition to try | Root receives |
+| --- | --- | --- |
+| Read every child's progress and retell it | Local `Project.Routing.followWork` with a task-specific `WorkSink`; retain full snapshots and choose notification deltas | New decision, integration-ready slice, or component result |
+| Start checks, remember handles, collect several outputs | The validated acceptance-plan composition with one candidate and retained per-check evidence | Aggregate terminal result including refusals and unknowns |
+| Relay review findings, repair requests and revised candidates | Validated ReviewFlow with a named repair owner and bounded attempts | Reviewed candidate or unresolved contract question |
+| Read failure logs and choose the first diagnostic command | Validated completion-driven investigator with supplied probes | Original failure plus bounded diagnostic evidence |
+| Reconstruct state after a missed notice or notebook failure | Read the retained router/check/job handle and source receipt | Current evidence without resubmitting work |
+| Ask every worker the same closing questions manually | Supply the feedback contract in assignments and collect answers before owner-authorized cleanup | Local synthesis with links to the original answers |
+
+Use only workflows confirmed available in the launch brief. A proposed API is
+not a callable tool. Prefer extending the existing sink or callback to creating
+another coordinator that owns the same state. Do not send both automatic and
+manual notices for the same event unless the latter adds a needed decision.
+Keep notification failures and unresolved work visible in retained state.
+
+Choose different useful compositions for different feature areas and explain the
+choice. Record root interventions by purpose: shared design, integration, manual
+relay, status recovery, or automation repair. This classification belongs in the
+retrospective and compact retained notes, not a mandatory message on every event.
+Inspect representative event sequences to establish what automation actually did.
+A quieter root is useful only if work advances and questions still reach owners.
+
+The closing critique should name the best composition, its setup cost, where it
+broke down, and the next concrete interface change. Retain unsuccessful attempts;
+compare their actual work and prerequisites before attributing differences to a
+helper or a model tier.
