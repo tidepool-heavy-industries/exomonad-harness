@@ -5,12 +5,24 @@
     {
       "id": "check_watch",
       "purpose": "Watch my checks",
-      "status": "validated_not_exposed",
+      "status": "trialed",
       "entrypoint": "Project.CheckResults.watchChecks",
       "source_revision": "d9537618cf8eba4c59d71cd2ac574c862f5f5c86",
       "validation": "Project.CheckResultsChecks.completionRouting: 13/13; notification attempts retained, delivery untested",
-      "first_exposed_wave": null,
-      "waves": []
+      "first_exposed_wave": 15,
+      "waves": [
+        {
+          "wave": 15,
+          "opportunity": "Run an existing transport default-auto regression while component owners work",
+          "attempt": "Project.TestEvidence.startFocused (GiB 3) then Project.CheckResults.watchChecks NotifyAllTerminal",
+          "source": "a61a9c6d5f36d7efd91bde779d07c114174e0007",
+          "check": "harness lib request_is_stateless_and_pins_effort --expect 1",
+          "job": "049a8eea-5221-42f9-9edc-f607cba4a9a6",
+          "evidence": "/tmp/exomonad-actor-workspace/.exomonad/build/cargo/debug/deps/focused-g91rvzh_/evidence.json",
+          "outcome": "Late command exit 0, 1 matched/runnable/executed/passed. Watcher notice reached root but summary was unknown: its initial cat of evidence exited 1, so it did not report counts or source. Later collectFocused on the original job read evidence successfully and observed source a61a9c6 plus two pre-existing dirty helper files. A bounded recoverRetained 1024-byte attempt on the same original job returned CommandUnavailable/HTTP 409 for both output streams after retention expiry; status still said exited 0. This is a failed automation summary and raw-output recovery, not a failed product check; no test was rerun.",
+          "fallback": "Use direct focused script for final integrated product gates; trial result is not integrated acceptance."
+        }
+      ]
     },
     {
       "id": "review_readiness",
@@ -87,8 +99,16 @@
       "entrypoint": "Project.RetainedEvidence.recoverRetained",
       "source_revision": "151e467ca4978121a45fa8ae4ca4531de9f5a784",
       "validation": "Project.PrepareContinueChecks.preparationCompletion: 6/6, including failed-job reuse and four-byte cutoff",
-      "first_exposed_wave": null,
-      "waves": []
+      "first_exposed_wave": 15,
+      "waves": [
+        {
+          "wave": 15,
+          "opportunity": "Recover raw output after CheckResults could not read the background focused evidence",
+          "attempt": "Project.RetainedEvidence.recoverRetained with a 1024-byte budget on original job 049a8eea-5221-42f9-9edc-f607cba4a9a6",
+          "outcome": "Retained status remained exited 0, but stdout and stderr reads each returned CommandUnavailable/HTTP 409 after output retention expiry; no output pages were recovered.",
+          "fallback": "Existing evidence.json had already been read by Project.TestEvidence.collectFocused without rerunning the test."
+        }
+      ]
     },
     {
       "id": "handoff_assembly",

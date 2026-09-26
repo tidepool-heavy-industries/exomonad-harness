@@ -1150,3 +1150,144 @@ hooks.rs-only formatting change; the owner excluded it from the
 candidate. Proposed improvement: establish the actual provider path
 and typed serialized value before forking, and check helper/worktree
 state before import.
+
+## Wave 15 Engine owner interview
+
+Implemented Engine validation of selected final tool names and transport
+`allowed_tools`/`none`/`auto` serialization. Its final candidate
+`f616be77` passed focused serialization, invalid-selection/pending-claim
+cleanup, and default-auto tests, each 1 matched/executed/passed. It
+does not claim browser integration. Disjoint ownership helped merge
+preflight against the advancing acceptance test, but a first focused
+command exited 137 before tests ran and required a repair handoff.
+`friction:` The owner recommends a realistic 3-GiB reservation on
+the first focused invocation rather than treating build termination
+as test evidence.
+
+## Wave 15 Provider/Store owner interview
+
+Implemented browser-local selection, canonical `request_body` JSONL
+capture with typed open/write failure, and restricted Store typed
+readback. Final candidate `59bf6236` passed Store, provider policy
+and capture focused checks, each 1 matched/executed/passed. It does
+not claim integrated standalone-browser acceptance. Independent
+review caught whole-history substring misrouting and drove the
+latest-user-command repair; source/contract handoffs also corrected
+the `ask` assumption to `sleep`. `friction:` The first reported
+candidate OID was mistyped and nonexistent. The owner recommends
+deriving and verifying the exact reply OID with `git rev-parse HEAD`
+and `git show` before submission.
+
+## Wave 15 acceptance owner interview
+
+Owned the standalone browser test: echo completion, captured full tools
+and selection, typed Store decision/request/agent/evidence, reopen
+invariance, and existing child/reconnect/process-loss journey. Corrected
+`ask` to `sleep`, enriched evidence matching and restricted decision
+assertions. Its focused test selected/executed 1/1 in four reported
+runs, none green: first stopped at missing `web/dist`; later runs
+reached intended expected-red missing capture or old-provider evidence
+barriers. It claims no integrated acceptance. Separate ownership
+allowed a red barrier before producers, but tool-name, evidence and
+decision-shape corrections caused repeated handoffs. `friction:`
+The child lacked `web/dist`; Nix could not use an untracked
+`flake.nix`, so it used a temporary minimal asset fixture. It
+recommends freezing advertised names, evidence and decision shape
+before forking and providing reproducible asset preparation.
+
+## Wave 15 Engine reviewer interview
+
+Reviewed `f616be77` at exact HEAD; focused transport serialization
+and Engine invalid-selection/cleanup checks each matched/executed/passed
+1/1. Independent review added a separate check but its first typed
+`Repair` contradicted its no-defect prose, costing a clarification
+handoff. A combined Cargo invocation exited 137 before sequential
+focused commands with explicit memory passed. `friction:` The
+reviewer recommends checking verdict against findings before
+submission and avoiding a memory-heavy combined build. No integrated
+browser acceptance was claimed.
+
+## Wave 15 first Provider reviewer interview
+
+Reviewed `b5b61f84` without edits; Store roundtrip, browser policy
+and capture checks each matched/executed/passed 1/1. It caught the
+whole-request substring-routing defect before integration and
+returned `Repair`; root retained the browser-local wrapper seam
+and returned the concrete classifier fix to the owner. A fresh
+review was required after repair. `friction:` Finding exact focused
+test names required searching `main.rs`; the reviewer recommends
+putting exact filter names and expected counts in review packets.
+It did not claim later integrated browser gates.
+
+## Wave 15 source-composition reviewer interview
+
+Reviewed exact provider HEAD `59bf6236`. Store restricted reopen,
+demo policy and capture checks each matched/executed/passed 1/1.
+Its checkout still hardcoded `tool_choice:"auto"` because it began
+before sibling Engine/transport `f616be77`; the reviewer initially
+reported that observation as `Repair`. Root clarified that it proved
+an exact-source composition gap, not a provider-owned defect, and
+required a rebase for combined review. The separate standalone test
+was not run on this source. `friction:` The extra review cost three
+focused runs and a handoff but exposed the source boundary. The
+reviewer recommends naming required sibling commits at admission,
+or explicitly marking a candidate partial, then reviewing combined
+source for product acceptance.
+
+## Wave 15 combined provider reviewer interview
+
+Reviewed exact candidate `8db250a5` on integrated Engine base
+`37f9c74`, without edits. Store, transport, provider policy, capture
+and Engine invalid/cleanup checks each matched/executed/passed 1/1.
+After documented web preparation (separate browser journey 1/1),
+standalone browser acceptance matched/executed 1/1 but failed:
+the child row had `SendRestricted([sleep])`/`echo-sleep`, not
+`child-empty`. A prior run with missing `web/dist` had failed at
+the prerequisite, not product assertions. Narrow component tests
+quickly checked their parts; exact-source production review caught
+a real sequence gap those fixtures missed and required another
+provider repair/review. `friction:` Absent `web/dist` caused an
+initial non-product failure. The reviewer recommends checking or
+preparing assets explicitly before the focused browser assertion.
+
+## Wave 15 final Provider reviewer interview
+
+Reviewed exact candidate `5f31285c` without edits. Store restricted
+reopen, explicit browser policy, production capture, and standalone
+browser focused tests each matched/executed/passed 1/1; the prepared
+browser journey also passed 1/1. The preceding production review had
+found child misclassification; the repair moved policy authority to
+explicit invocation command and agent, and this review exercised
+that consumer. Repeated handoffs and exact-source re-review cost
+time, but caught behavior beyond isolated component fixtures.
+`friction:` One combined Cargo handle became unavailable and a
+later high-memory build exited 137; sequential focused checks with
+retained handles and realistic memory completed. The reviewer
+recommends asset preparation before Cargo and sequential focused
+review checks. Root merge and post-merge checks were not its claim.
+
+## Wave 15 root interview
+
+Root landed the compiling shared contract, assigned disjoint
+Engine/transport, Provider/Store, and independent browser acceptance
+paths, then integrated exact-source-reviewed candidates. Nine named
+focused Cargo checks on product source `40bd399e` each
+matched/executed/passed 1/1; web tests passed 14/14 and the separate
+browser journey 1/1. The final standalone production consumer
+confirmed selected `sleep` versus child `none`, unchanged full
+definitions, typed Store provenance and reopen behavior.
+
+Parallel acceptance exposed missing request capture before producers
+landed. Independent review caught whole-history classifier
+misrouting, and then the real browser child failure; passing
+component checks alone would not have closed those defects. The tree
+cost contract handoffs: root initially named `ask` before checking
+`CliProvider.tools`, reviewed provider-only source lacking sibling
+Engine transport, and repeated review after a production failure.
+Final explicit invocation context removed that ambiguity.
+`friction:` The background CheckResults notice arrived without
+counts after an evidence read failure, and later retained raw-output
+recovery returned HTTP 409; on-disk evidence was read without
+rerunning. Improvement: fix a small executable producer/browser
+request example with advertised names and capture seam before
+dispatch, then require combined-source browser review.

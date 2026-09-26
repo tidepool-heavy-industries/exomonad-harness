@@ -1,4 +1,127 @@
-# Next assignment — wave15 restricted before-request tools
+# Completed assignment — wave15 restricted before-request tools
+
+Wave15's authorized deterministic-browser product behavior is
+independently reviewed and checked at source
+`40bd399e274c95d56374cb36efe09f66eb74b43a`.
+The before-request hook selects final advertised tool names for one
+attempt without changing full schemas. Echo selects `sleep`, child
+selects none, default Send remains auto. Invalid/duplicate selection
+or excluded typed completion fails before transport and cleans
+pending claims; Store records typed choice and opaque evidence with
+request/agent provenance. The standalone browser command, child,
+reconnect and process-loss journey remains green.
+
+At that exact source nine named focused Cargo checks each selected
+and executed 1/1 and passed; web tests passed 14/14 and browser
+journey 1/1. See [wave15 handoff](docs/wave15-handoff.md) for exact
+commands, evidence and review chronology. Port 4600 returned HTTP
+200 and was not changed. The background-check automation trial
+ran but its compact summary failed; see `docs/automation-trials.json`.
+No credentialed inference, adapter, external tool or live-demo
+change was authorized or run.
+
+### Where the last run stopped — wave15
+
+- No unmerged branch holds reviewed or passing wave15 product code.
+  Acceptance `441e52fb`, Engine `f616be77`, and Provider/Store
+  `5f31285c` are ancestors of integrated product source `40bd399e`.
+  Superseded provider tips `b5b61f84` and `8db250a5` were rejected
+  after concrete review/production-browser failures; do not merge them.
+- Wave15 documentation/checkpoint notes are committed in the explicit
+  stop handoff, after the checked product source. Pre-existing unrelated
+  `.exomonad/helpers/README.md` and
+  `.exomonad/helpers/SessionHelpers/TestEvidence.hs` edits remain
+  uncommitted and must not be folded into product code.
+- Next owner: supervisor for exact launch/runtime identity and later
+  scope. No further live or credentialed behavior is inferred.
+
+## Wave15 execution checkpoint (historical; superseded above)
+
+Shared compiling source `a61a9c6d5f36d7efd91bde779d07c114174e0007`
+adds the typed `SendRestricted` names and optional request selection. Its
+focused serialization check selected/executed/passed 1/1; no application or
+product acceptance follows from that scaffold.
+
+From that exact base, Luna actor 2 owns `engine.rs` and
+`transport/client.rs` (first expected reply: checked Engine/transport
+candidate), actor 3 owns `harness-demo/src/main.rs`, Store and possibly
+`harness-demo/src/tree.rs` (first expected reply: checked provider/Store
+candidate), and actor 4 owns standalone browser acceptance (first expected
+reply: expected-red test candidate). Acceptance first returned Blocked on
+missing deterministic request capture; root resolved an opt-in
+`HARNESS_DEMO_CAPTURE_REQUESTS` JSONL capture in the existing deterministic
+transport, using canonical `request_body`. Echo selects `ask`; child selects
+an empty subset. Acceptance was reassigned on that exact seam. No candidate
+is integrated or reviewed yet.
+
+The bounded check watcher was exercised on the existing transport regression
+at scaffold source: underlying test selected/executed/passed 1/1, but the
+watcher summary was unknown after its first evidence `cat` exited 1. A later
+read of the original job's evidence succeeded without rerun. See
+`docs/automation-trials.json`; that trial is not product acceptance.
+
+Independent acceptance test `6db60d0` is merged at `b7119207`. Root
+prepared web assets (web check, tests and build exited 0), then ran the
+focused standalone test at that test-only source: 1 selected, 1 executed,
+1 failed at the intended missing-capture product assertion. Raw evidence
+is `.exomonad/build/cargo/debug/deps/focused-3g_9lckc/evidence.json`.
+This is a confirmed expected-red barrier, not a green browser journey.
+Root's earlier `ask` selection assumption was wrong: `CliProvider::tools`
+filters it out. The actual advertised safe name is `sleep`. Acceptance
+owner has the test correction; provider owner has echo `[sleep]`, child
+`[]`, default Send elsewhere, and removal of duplicate EngineConfig
+tool-list wiring. This is a contract correction at `b7119207`, not a
+new UI command.
+
+First implementation replies are not accepted: Engine candidate `a671079b`
+has selection/body code but its focused run exited 137 before executing
+and its invalid/cleanup test was absent. Provider reported nonexistent
+candidate `d453d120`; its actual submitted HEAD `d453d126` has only
+browser policy, not the agreed capture seam, Store restricted readback or
+the echo/empty cases. Both retained owners received explicit repair
+requests. Acceptance remains on its reassigned expected-red test. No
+review has yet been commissioned on these incomplete tips.
+
+Subsequent Engine repair `f616be77` passed transport serialization,
+invalid-selection/pending-claim cleanup and default-auto focused checks,
+each 1/1. Independent exact-HEAD review first returned `Repair` without
+a defect; its clarified typed verdict accepted the same exact source,
+with reviewer transport and Engine tests 1/1 each. Root merged that
+reviewed tip at `37e3d4ae4587fbfd7dc774161705cd6e8ab539e1` and
+reran the two changed Engine/transport focused tests there, each
+selected/executed/passed 1/1. Provider policy, Store and browser green
+remain open; do not mistake this component check for product acceptance.
+
+Provider/Store final submitted candidate `b5b61f84d5b437300e391aa5111ebb1b7458de5c`
+received independent exact-HEAD `Repair`: the browser hook classified
+by substring over serialized *whole* request items, risking incidental
+command words in unrelated content. The retained provider owner has
+the precise last-user-command parser/adversarial-test repair. Its
+Store, policy and capture checks each ran 1/1 at the rejected tip;
+those passes do not close the review finding. The acceptance owner
+corrected old evidence/Send assertions in `441e52fb`, merged at
+`37f9c74f5d72b92684f34ef4a1b198ace3b02b46`; its focused test
+compiled and confirmed red at the intended old-provider evidence
+barrier (1 selected/1 executed/1 failed). No reviewed provider
+candidate or green combined browser gate exists yet.
+Repaired provider tip `59bf6236` passed its three component checks,
+but fresh exact-tip review ran from its old `a61a9c6` source, which
+lacks sibling Engine `f616be77`, and observed `tool_choice:"auto"`.
+This is a source-composition blocker to product review, not an
+identified provider-owned defect. The retained provider owner has a
+safe-rebase request onto integrated `37f9c74` (preserving dirty
+helpers), then must rerun affected focused checks and return an exact
+new HEAD for combined review.
+Rebased provider candidate `8db250a5` included Engine and passed its
+three focused component checks, but independent combined exact-tip
+review prepared assets and ran the production standalone browser test:
+1 selected, 1 executed, 1 failed at child-empty decision assertion.
+The child Engine actually invokes `child-reply`; inferring policy from
+RequestPlan history misclassified it as echo-sleep. Root returned this
+exact failure to retained provider owner: use explicit invocation
+`command` and `agent` at `run_deterministic_engine_completion` to
+choose root echo `[sleep]`, root/child request `[]`, others Send;
+then new exact-tip review and browser gate. No provider tip merged.
 
 Read [the wave15 brief](docs/wave15-brief.md). Wave14's Send-only hook is
 integrated at `75a1e014d0bc3d7e8208875c84e628dcc2f4bdca`; this brief
