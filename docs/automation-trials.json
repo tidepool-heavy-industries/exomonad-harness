@@ -5,32 +5,71 @@
     {
       "id": "check_watch",
       "purpose": "Watch my checks",
-      "status": "validated_not_exposed",
+      "status": "trialing",
       "entrypoint": "Project.CheckResults.watchChecks",
       "source_revision": "d9537618cf8eba4c59d71cd2ac574c862f5f5c86",
       "validation": "Project.CheckResultsChecks.completionRouting: 13/13; notification attempts retained, delivery untested",
-      "first_exposed_wave": null,
-      "waves": []
+      "first_exposed_wave": 15,
+      "waves": [
+        {
+          "wave": 15,
+          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
+          "actor": "1@1",
+          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
+          "exposure": "root initial Automation trial menu",
+          "binding": "default notebook imports",
+          "evidence": "docs/wave15-launch.md",
+          "opportunities": null,
+          "attempts": [],
+          "outcome": "pending"
+        }
+      ]
     },
     {
       "id": "review_readiness",
       "purpose": "Notify me of a reviewable candidate",
-      "status": "validated_not_exposed",
+      "status": "trialing",
       "entrypoint": "Project.Routing.notifyReviewReady",
       "source_revision": "98aad7bdea70a3085601110ccbca520e19d4df66",
       "validation": "Project.RoutingChecks.reviewReadiness: 4/4 on c40d68c; 98aad7b is its integration cherry-pick; does not run review",
-      "first_exposed_wave": null,
-      "waves": []
+      "first_exposed_wave": 15,
+      "waves": [
+        {
+          "wave": 15,
+          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
+          "actor": "1@1",
+          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
+          "exposure": "root initial Automation trial menu",
+          "binding": "default notebook imports",
+          "evidence": "docs/wave15-launch.md",
+          "opportunities": null,
+          "attempts": [],
+          "outcome": "pending"
+        }
+      ]
     },
     {
       "id": "failure_diagnostics",
       "purpose": "Diagnose this failure",
-      "status": "validated_not_exposed",
+      "status": "trialing",
       "entrypoint": "Project.TestEvidence.diagnoseFocused",
       "source_revision": "d9537618cf8eba4c59d71cd2ac574c862f5f5c86",
       "validation": "Project.CheckResultsChecks.completionRouting: 13/13, including selection, setup, assertion and short execution",
-      "first_exposed_wave": null,
-      "waves": []
+      "first_exposed_wave": 15,
+      "waves": [
+        {
+          "wave": 15,
+          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
+          "actor": "1@1",
+          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
+          "exposure": "root initial Automation trial menu",
+          "binding": "default notebook imports",
+          "evidence": "docs/wave15-launch.md",
+          "opportunities": null,
+          "attempts": [],
+          "outcome": "pending"
+        }
+      ]
     },
     {
       "id": "repair_cycle",
@@ -43,60 +82,138 @@
     {
       "id": "assumption_watch",
       "purpose": "Watch my assumptions",
-      "status": "validated_not_exposed",
+      "status": "trialing",
       "entrypoint": "Project.AssumptionWatch.watchAssumption",
       "source_revision": "a61c13e6492a4f7d5bd323f9b6f8686214b77b7d",
       "validation": "Project.AssumptionChecks.changes: 3/3 deterministic callbacks including unresolved; Project.AssumptionExamples.semanticImpact compiled, live Jev unvalidated",
-      "first_exposed_wave": null,
-      "waves": []
+      "first_exposed_wave": 15,
+      "waves": [
+        {
+          "wave": 15,
+          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
+          "actor": "1@1",
+          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
+          "exposure": "root initial Automation trial menu",
+          "binding": "default notebook imports",
+          "evidence": "docs/wave15-launch.md",
+          "opportunities": null,
+          "attempts": [],
+          "outcome": "pending"
+        }
+      ]
     },
     {
       "id": "parallel_investigation",
       "purpose": "Investigate alongside me",
-      "status": "validated_not_exposed",
+      "status": "trialing",
       "entrypoint": "Project.ParallelInvestigate.startProbeBatch",
       "source_revision": "2a860832afbe675f78188dbdfbeb775bd2dbce80",
       "validation": "Grouped definitions compiled; Project.AutomationRuntimeChecks.commandCustody: 5/5",
-      "first_exposed_wave": null,
-      "waves": []
+      "first_exposed_wave": 15,
+      "waves": [
+        {
+          "wave": 15,
+          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
+          "actor": "1@1",
+          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
+          "exposure": "root initial Automation trial menu",
+          "binding": "default notebook imports",
+          "evidence": "docs/wave15-launch.md",
+          "opportunities": null,
+          "attempts": [],
+          "outcome": "pending"
+        }
+      ]
     },
     {
       "id": "interview_collection",
       "purpose": "Collect interviews before retirement",
-      "status": "validated_not_exposed",
+      "status": "trialing",
       "entrypoint": "Project.Interview.collectInterview",
       "source_revision": "1e3e822aca9d374e2d6bbb557f918b819b5fc196",
       "validation": "Project.InterviewChecks.collectAnswers: 4/4, including empty input incomplete",
-      "first_exposed_wave": null,
-      "waves": []
+      "first_exposed_wave": 15,
+      "waves": [
+        {
+          "wave": 15,
+          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
+          "actor": "1@1",
+          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
+          "exposure": "root initial Automation trial menu",
+          "binding": "default notebook imports",
+          "evidence": "docs/wave15-launch.md",
+          "opportunities": null,
+          "attempts": [],
+          "outcome": "pending"
+        }
+      ]
     },
     {
       "id": "prerequisite_preparation",
       "purpose": "Prepare prerequisites and continue",
-      "status": "validated_not_exposed",
+      "status": "trialing",
       "entrypoint": "Project.PrepareContinue.verifyPrepared",
       "source_revision": "151e467ca4978121a45fa8ae4ca4531de9f5a784",
       "validation": "Project.PrepareContinueChecks.preparationCompletion: 6/6; late, failed and unready paths",
-      "first_exposed_wave": null,
-      "waves": []
+      "first_exposed_wave": 15,
+      "waves": [
+        {
+          "wave": 15,
+          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
+          "actor": "1@1",
+          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
+          "exposure": "root initial Automation trial menu",
+          "binding": "default notebook imports",
+          "evidence": "docs/wave15-launch.md",
+          "opportunities": null,
+          "attempts": [],
+          "outcome": "pending"
+        }
+      ]
     },
     {
       "id": "command_evidence",
       "purpose": "Recover useful command evidence",
-      "status": "validated_not_exposed",
+      "status": "trialing",
       "entrypoint": "Project.RetainedEvidence.recoverRetained",
       "source_revision": "151e467ca4978121a45fa8ae4ca4531de9f5a784",
       "validation": "Project.PrepareContinueChecks.preparationCompletion: 6/6, including failed-job reuse and four-byte cutoff",
-      "first_exposed_wave": null,
-      "waves": []
+      "first_exposed_wave": 15,
+      "waves": [
+        {
+          "wave": 15,
+          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
+          "actor": "1@1",
+          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
+          "exposure": "root initial Automation trial menu",
+          "binding": "default notebook imports",
+          "evidence": "docs/wave15-launch.md",
+          "opportunities": null,
+          "attempts": [],
+          "outcome": "pending"
+        }
+      ]
     },
     {
       "id": "handoff_assembly",
       "purpose": "Assemble an evidence-backed handoff",
-      "status": "validated_not_exposed",
+      "status": "trialing",
       "note": "Project.HandoffExamples.handoffProposal has a combined compile and recipe gate pending",
-      "first_exposed_wave": null,
-      "waves": [],
+      "first_exposed_wave": 15,
+      "waves": [
+        {
+          "wave": 15,
+          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
+          "actor": "1@1",
+          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
+          "exposure": "root initial Automation trial menu",
+          "binding": "explicit import documented; live import not yet observed",
+          "evidence": "docs/wave15-launch.md",
+          "opportunities": null,
+          "attempts": [],
+          "outcome": "pending"
+        }
+      ],
       "entrypoint": "Project.HandoffExamples.handoffProposal",
       "validation": {
         "workspace_revision": "ce861b7acbd2743f03464c85700f842dd20043c7",
@@ -118,12 +235,25 @@
     {
       "id": "slow_operation",
       "purpose": "Watch a slow operation",
-      "status": "validated_not_exposed",
+      "status": "trialing",
       "entrypoint": "Project.SlowCommandWatch.watchSlowCommand",
       "source_revision": "2a860832afbe675f78188dbdfbeb775bd2dbce80",
       "validation": "Grouped definitions compiled; Project.AutomationRuntimeChecks.commandCustody: 5/5",
-      "first_exposed_wave": null,
-      "waves": []
+      "first_exposed_wave": 15,
+      "waves": [
+        {
+          "wave": 15,
+          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
+          "actor": "1@1",
+          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
+          "exposure": "root initial Automation trial menu",
+          "binding": "default notebook imports",
+          "evidence": "docs/wave15-launch.md",
+          "opportunities": null,
+          "attempts": [],
+          "outcome": "pending"
+        }
+      ]
     }
   ]
 }

@@ -54,3 +54,15 @@ its process, data and Tailscale setup were preserved. Wave14 was already
 completed and its retained cleanup uncertainty was not force-released.
 The periodic supervision timer remains inactive. A read-only startup observer
 checks source delivery, first operations and the first delegation frontier.
+
+## Initial exposure evidence
+
+The startup observer confirmed a distinct Automation trial menu in the native
+root prompt listing all ten validated operations. Root read NEXT/brief in calls
+`call_TVbsK8NAN89oQdcbyit9TgrK` and `call_ZpV5hoqA1JBlxqXu1VG8qdzH`.
+Nine entries resolve through default notebook imports; HandoffExamples is in
+the pinned source and compiled by the combined gate, with explicit import
+instructed by the menu. Its live import has not yet been observed. This records
+prompt exposure, not helper use, successful notification delivery or savings.
+Trial opportunities and outcomes remain pending. Root was compiling the shared
+contract by 09:50 UTC; no final product acceptance is implied.
