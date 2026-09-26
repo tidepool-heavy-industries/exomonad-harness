@@ -1,60 +1,63 @@
-# Current assignment — wave 13 standalone browser operation
+# Current handoff — wave 13 host-lifetime gate
 
-Read [the wave-13 brief](docs/wave13-brief.md). Deliver a deterministic browser
-harness that a human can prepare, start, stop and reopen from an ordinary host
-shell, independently of the agent working directory and command lifetime.
-Keep inference and tools deterministic; no Exomonad adapter or credentialed
-inference is authorized. Do not resume completed wave-12 implementation.
+Read [wave-13 brief](docs/wave13-brief.md) and
+[wave-13 handoff](docs/wave13-handoff.md). The standalone deterministic
+browser harness code is integrated. The remaining consequential gate is
+an **ordinary host-shell service/PID check** outside this tool's PID/mount
+namespace. The root asked the operator in [questions](docs/questions.md)
+to run that isolated launch/stop/reopen and report its host-visible
+identity. Do not infer that namespace-local PIDs are host PIDs.
 
-## Accepted baseline and protected service
+Integrated product source tested:
+`d2de0554a0e8ac18e09aabc5619b30ba31546674`.
+Reviewed launch `ef86255` and reviewed fail-closed preparation repair
+`2e7e6f9` are merged. Preparation
+`CARGO_BUILD_JOBS=1 scripts/prepare-browser-harness` exited 0 at that
+source: web tests 14/14, production browser journey 1 matched/executed/
+passed, release binary staged. Focused standalone production-binary test
+1/1, server 8/8 and assets CLI 1/1 also passed at that source. See
+handoff for exact evidence paths, failure-path coverage and the isolated
+release-script exercise.
 
-Wave 12 integrated product source `2c19e457d7707b1d57666541fa7c1450003f1234`:
-server 8/8, production-binary browser journey 1/1, Driver process-kill 1/1,
-real Chromium journey and isolated process-kill/reopen checks passed.
-Second-device Tailscale reachability remains unverified. Details and limits:
-[handoff](docs/wave12-handoff.md), [interviews](docs/interviews.md).
+The release-script bundle was copied to `/tmp/wave13-isolated.c0Shds` and
+launched from `/` on loopback port 51807 with isolated data. Login,
+command completion and WebSocket reconnect worked. After observed
+process loss, the same data reopened; SIGINT to the second exact
+namespace PID stopped it. Port 51807 was confirmed released. The test
+secret was removed. The protected wave-12 demo on port 4600 still
+returned HTTP 200 and was not touched; Tailscale Serve was not changed.
+No second-device test ran.
 
-The existing port-4600 demo must stay running. Its PID in the handoff is
-namespace-relative; it remains owned by the prior development run. Do not
-stop or migrate it, alter its data or secret, or change Tailscale Serve.
-Prove this wave on a separate ephemeral loopback port and isolated data.
-The supervisor retains the old host solely to preserve that service.
+The Haskell focused-gate experiment is committed at `fbf08e6`.
+Initial 8-GiB jobs never started because the protected demo reserves
+1 GiB of the shared 8-GiB pool. After a 4-GiB correction, the helper
+executed on two real consumers: server 8/8 and standalone 1/1 at
+`cf19ed4`. Its strict clean-source predicate remained false because
+runner `working_tree_status` was null here. The direct project script
+remains the final check. See [friction](docs/exomonad-friction.md).
 
-## Wave 13 admission checkpoint
+## Accepted constraints and next owner
 
-Shared launch contract: `docs/wave13-contract.md`, commit
-`b43cdb141763634f5e773217bbd0efd43491005a`. Three Luna children were
-admitted from that base:
+- Keep the existing port-4600 wave-12 demo and its data, login secret
+  and Tailscale route untouched. Its handoff PID is namespace-relative.
+- No live Exomonad adapter inference, credentialed item-2 retry, item-13
+  trace, real shell tools, new scheduler, mailbox or durable journal.
+- Use an isolated loopback port and separate durable data for the
+  operator's host check. Record host-visible unit/PID, readiness,
+  start/stop/reopen commands and release; do not claim a second-device
+  check unless it actually ran.
+- Root's tool sandbox could not reach the host user bus or authenticate
+  to local SSH. **Next owner: host operator** for the one external
+  service-lifetime check; root can incorporate its result and update
+  product acceptance. Continue from the checked source, not from a
+  cancelled helper command.
 
-- `wave13-launch`: `crates/harness-demo/src/main.rs`,
-  `scripts/prepare-browser-harness`, `scripts/launch-browser-harness`;
-  first expected reply is the exact CLI/launcher candidate and server test counts.
-- `wave13-acceptance`: `crates/harness-demo/tests/standalone_browser.rs`;
-  first expected reply is expected-red production-binary test evidence.
-- `wave13-operator`: `docs/standalone-browser.md`; first expected reply is
-  operator instructions with unverified claims clearly marked.
+## Where the last run stopped
 
-Root retains review, checked integration, isolated host run, focused-gate
-helper trial and final handoff. No wave-13 implementation candidate is
-integrated yet. Do not disturb the port-4600 demo or Tailscale route.
-
-## Preparation and orchestration
-
-- `nix develop .#web -c scripts/verify-browser-journey` prepares pinned Node/npm,
-  locked web dependencies and assets before the existing focused Cargo runner.
-  Rust remains an explicit prerequisite. It passed on clean `7fd8e02`;
-  integrated preparation is `c6a5916`. Product checks belong to the exact source
-  tested, not a later merge by implication.
-- Prompt corrections `6119ae5` distinguish fresh and retained review checkouts,
-  missing prerequisites, expected-red tests and pending update presentation.
-- Root owns shared contracts/integration; use bounded parallel Luna work and
-  independent exact-source review, with depth where useful.
-- The experiment is a context-specific Haskell focused-gate composition reused
-  by at least two actual consumers. Prove import and execution before claiming
-  reuse; fall back to the script if unavailable. Read the brief for measurements.
-
-Keep existing holds on live adapter inference, credentialed item-2 retry and
-item-13 trace. No new scheduler, mailbox or durable journal. Use focused checks
-with selected/executed counts, one compiler worker, pathspec commits and no
-attribution trailers. Never stash/reset/checkout paths or restart shared daemons.
-Interview before retiring actors; preserve the live demo and dirty worktrees.
+No unmerged branch holds reviewed or passing wave-13 code. Candidate
+`19a6818` was rejected for stale-artifact behavior and superseded by
+reviewed, merged `2e7e6f9`; do not merge it. Four host-cancelled
+acceptance/docs workers and the first cancelled reviewer returned no
+candidates. Their worktrees/branches remain retained but contain no
+accepted delivery. The working tree may contain documentation/checkpoint
+edits; preserve them and inspect scoped Git status before any commit.

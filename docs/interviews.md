@@ -1,5 +1,95 @@
 # Correction-wave interviews
 
+## Wave 13 root — 2026-09-25 (delivery still open)
+
+- **Scaffold change:** Root committed `docs/wave13-contract.md` at
+  `b43cdb1`. Root corrected its invented `GET /api/snapshot` readiness
+  route at `a2ccbde` after reading `server.rs`: the actual boundary is
+  `GET /api/session` followed by an authenticated `/api/ws` initial
+  snapshot. The launch owner reported that correction did not affect
+  its candidate because it had no readiness-route check.
+- **Sibling gap and tree cost:** Three disjoint Luna obligations were
+  admitted together, but host cancellation killed the test and docs
+  children and their replacements before they produced candidates.
+  Root took those paths over. The split named the right seams, but the
+  cancellations cost two replacement admissions and left no useful
+  parallel evidence from those branches. A first independent exact-tip
+  reviewer was also host-cancelled before a verdict. The one useful
+  retained implementation owner allowed a concrete launcher repair
+  request instead of copying its files.
+- **API versus docs:** The readiness-route error was in root's new
+  contract, not server code. The candidate's CLI exposed absolute
+  `--assets`, but its wrapper still invoked `cargo run --release` at
+  runtime; describing it as standalone would have hidden a Rust and
+  source dependency. That defect was returned to the owner, distinct
+  from the no-op readiness correction.
+- **Rerun scaffold:** Put a small executable start-from-unrelated-cwd
+  test in the source before delegating the launcher. Have preparation
+  produce a named runnable binary and make the launcher consume that
+  explicit binary rather than choosing `cargo run`. Keep an isolated
+  port/data fixture and confirm real browser-session/WS snapshot
+  behavior before writing a readiness contract.
+- **Nudges:** No wave-13 nudge ledger entries were observed by root.
+  The module helper published/imported, but neither of two focused
+  calls started; cancellation left no output streams. This is failed
+  execution/reuse, not a passed test. After the operator identified an
+  impossible 8-GiB request in a pool partly reserved by the live demo,
+  a 4-GiB helper version executed on two actual root consumers (server
+  8/8 and standalone 1/1). Its clean-source predicate stayed false on
+  null runner status, so the direct script remained the final gate.
+- **Review value and finished boundary:** Exact review accepted the
+  no-Cargo launcher `ef86255`, then rejected artifact-path repair
+  `19a6818` for leaving a stale release executable launchable after
+  failed preparation. A further fail-closed repair `2e7e6f9` was
+  independently accepted and merged. On `d2de055`, full preparation
+  passed web 14/14 and production browser 1/1, and focused standalone
+  1/1, server 8/8 and assets CLI 1/1 passed. A copied release bundle
+  started from `/`, survived command lifetime, retained a completed
+  request after process loss and stopped on SIGINT after reopen. The
+  tool sandbox cannot report a host-visible service/PID, so the
+  ordinary-host-shell acceptance remains with the operator.
+- **Interview limitations:** Four cancelled acceptance/docs actors
+  yielded no own-words interviews. Reviewer findings/checks were
+  incorporated as reports, not mislabelled as interviews. A later
+  attempt to request their own-words interviews was rejected before
+  submission by a workbench compiler dependency mismatch
+  (`Tidepool.Effects.Core` lacked `CommandQueueWait`); no reviewer
+  interview requests were delivered.
+
+## Wave 13 launch owner — 2026-09-25
+
+- **Scaffold change and discovery:** The first launcher called `cargo run
+  --release`; root's Request 10 identified that this still required Cargo,
+  toolchain and source at runtime. The owner moved release build into
+  preparation and changed launch to exec a prebuilt absolute binary with
+  early missing-binary/assets checks. The defect was an initial
+  implementation omission, not a Cargo API change; focused Rust tests did
+  not catch shell launch behavior.
+- **Missing sibling input and tree cost:** The owner had no concrete
+  end-to-end operator acceptance result before its first candidate.
+  Parallel acceptance, docs and launch branches were a sensible split,
+  but the host-cancelled acceptance child did not supply the launcher
+  check in time. Root needed a serial repair request and another
+  review/integration cycle. A shared executable lifecycle test at the
+  seam could have caught the runtime-Cargo dependency earlier.
+- **API versus docs:** Root's original readiness sentence named a
+  nonexistent `GET /api/snapshot`. The real routes are `GET /api/session`
+  and authenticated `/api/ws` initial snapshot. The launcher did not
+  implement a readiness probe, so the correction required no owner
+  code change and is separate from the Cargo repair.
+- **Rerun scaffold:** Fix the prepared artifact
+  `target/release/harness-demo`, `HARNESS_DEMO_BIN` override, absolute
+  DB/assets paths, prerequisite errors and unrelated-cwd mock launch
+  before dispatch. Demand an actual release build/startup assertion in
+  addition to shell syntax and mock launch.
+- **Nudges and friction:** The owner observed no nudge firing. Extending
+  `CliOptions` first broke two test initializers; after repair, focused
+  checks reported 8 server matches/executions and 1 assets CLI
+  match/execution. A first mock-check fixture had a malformed temporary
+  shebang and failed; correcting the fixture let shell syntax and
+  unrelated-cwd/missing-binary mock checks pass. The release build was
+  deliberately not run during the owner's repair.
+
 ## Wave 12 root — 2026-09-25
 
 - **Tree cost and benefit:** Disjoint server, web and production-binary
