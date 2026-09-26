@@ -690,9 +690,7 @@ async fn run_deterministic_engine_completion(
     agent: AgentPath,
     answer_override: Option<String>,
 ) -> Result<EngineCompletion, String> {
-    let provider = Arc::new(BrowserProvider(CliProvider(DemoProvider::development(
-        ".", false,
-    ))));
+    let provider = Arc::new(BrowserProvider(DemoProvider::development(".", false)));
     let engine = Engine::<OfflineServerAuth, BrowserProvider, _>::with_transport(
         DeterministicServerTransport {
             command: command.to_owned(),
@@ -704,7 +702,7 @@ async fn run_deterministic_engine_completion(
         provider.clone(),
         EngineConfig {
             instructions: "Deterministic browser journey. Do not use tools.".into(),
-            tools: provider.all_tools(),
+            tools: Vec::new(),
             model: "deterministic-local".into(),
             effort: Effort::Low,
             session_id: format!("harness-demo-server-{command_id}"),
@@ -723,7 +721,7 @@ async fn run_deterministic_engine_completion(
 }
 
 /// Browser-only deterministic policy. The shared CLI provider remains Send/auto.
-struct BrowserProvider(CliProvider);
+struct BrowserProvider(DemoProvider);
 
 #[async_trait]
 impl Provider for BrowserProvider {
@@ -775,10 +773,14 @@ impl Provider for BrowserProvider {
         self.0.call_with_context(name, args, context).await
     }
     fn tools(&self) -> Vec<Value> {
-        self.0.tools()
+        self.0
+            .tools()
+            .into_iter()
+            .filter(|tool| tool["name"] != "run")
+            .collect()
     }
     fn all_tools(&self) -> Vec<Value> {
-        self.0.all_tools()
+        self.tools()
     }
 }
 
@@ -1842,8 +1844,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     #[tokio::test]
-    async fn browser_provider_restricts_advertised_sleep_only() {
-        let provider = BrowserProvider(CliProvider(DemoProvider::development(".", false)));
+    async fn browser_provider_restricts_echo_and_child_by_final_plan() {
+        let provider = BrowserProvider(DemoProvider::development(".", false));
         fn assert_send<T: Send>(_: &T) {}
         assert_send(&provider);
         let plan = harness::hooks::RequestPlan {
@@ -1853,22 +1855,17 @@ mod tests {
             tools_allowed: provider.all_tools(),
             effort: Effort::Low,
         };
-        assert!(
-            plan.tools_allowed
-                .iter()
-                .any(|tool| tool["name"] == "sleep")
-        );
-        assert!(!plan.tools_allowed.iter().any(|tool| tool["name"] == "ask"));
+        assert!(plan.tools_allowed.iter().any(|tool| tool["name"] == "ask"));
         let result = provider.before_request(&plan).await;
         assert_eq!(
             result.decision,
             harness::hooks::BeforeRequestDecision::SendRestricted {
-                tools_allowed: vec!["sleep".into()]
+                tools_allowed: vec!["ask".into()]
             }
         );
         assert_eq!(
             result.evidence,
-            Some(json!({"consumer":"standalone-browser","selection":"echo-sleep"}))
+            Some(json!({"consumer":"standalone-browser","selection":"echo-ask"}))
         );
         let child_plan = harness::hooks::RequestPlan {
             items: vec![harness::item::Item(json!({

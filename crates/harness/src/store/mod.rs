@@ -2214,6 +2214,49 @@ mod tests {
     }
 
     #[test]
+    fn restricted_before_request_decision_roundtrips_after_reopen() {
+        let path = std::env::temp_dir().join(format!(
+            "harness-before-request-restricted-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let expected_decision = crate::hooks::BeforeRequestDecision::SendRestricted {
+            tools_allowed: vec!["ask".into()],
+        };
+        let expected = Decision {
+            hook: "before-request".into(),
+            event_refs: vec!["echo-item".into()],
+            decision: serde_json::to_value(&expected_decision).unwrap(),
+            evidence: serde_json::json!({"consumer":"standalone-browser","selection":"echo-ask"}),
+            latency_ms: None,
+        };
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .write_request(
+                    &id("restricted-request"),
+                    None,
+                    "/root",
+                    &[],
+                    Usage::default(),
+                )
+                .unwrap();
+            store
+                .record_decision(Some(&id("restricted-request")), &expected)
+                .unwrap();
+        }
+        {
+            let store = Store::open(&path).unwrap();
+            let rows = store.decisions(Some(&id("restricted-request"))).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].decision, expected);
+            let typed: crate::hooks::BeforeRequestDecision =
+                serde_json::from_value(rows[0].decision.decision.clone()).unwrap();
+            assert_eq!(typed, expected_decision);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn migrates_v1_timestamps_and_usage_without_losing_requests() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE schema_version(version INTEGER NOT NULL); INSERT INTO schema_version VALUES(1); CREATE TABLE requests(id TEXT PRIMARY KEY,parent_id TEXT,branch TEXT,created_at INTEGER NOT NULL); INSERT INTO requests VALUES('old',NULL,'main',123); CREATE TABLE events(id INTEGER PRIMARY KEY,request_id TEXT,kind TEXT,payload TEXT,created_at INTEGER); INSERT INTO events VALUES(1,'old','x','{}',124);").unwrap();
