@@ -1,8 +1,9 @@
-# Current handoff — wave 11 complete; inter-wave preparation
+# Current assignment — wave 12 browser harness
 
-No new product-wave assignment is active. The supervisor is implementing the
-approved Tidepool/Exomonad inter-wave batch before choosing the next standalone
-harness milestone. Do not resume completed wave-11 obligations from old notices.
+Read [the wave-12 brief](docs/wave12-brief.md) and deliver its standalone browser
+journey over Tailscale. Simple deterministic echo, test and messaging behavior is
+sufficient; real model inference and shell tools are not required. Use the
+updated helper and review surfaces. Do not resume completed wave-11 obligations.
 
 ## Accepted product state
 
@@ -30,18 +31,12 @@ harness milestone. Do not resume completed wave-11 obligations from old notices.
   remaining differences were documentation only.
 - Durable `d6b9ab8`: redundant pending-envelope API rejected, not a pending gate.
 
-## Next preparation
+## Run preparation
 
-The approved inter-wave implementation is tracked in Tidepool
-`plans/rsi-iteration-4.md`: session helper modules and inheritance, Bash/Jev
-seeds, authoritative review submission, actor-managed review/repair, focused
-execution evidence, wrapper repair and prompting. Sol retains integration.
-Product work for the next wave will prove harness extension points with
-standalone stubs before any Exomonad adapter; its exact assignment is not yet set.
-
-The focused runner now supports `--expect N`, retained executable identity and
-full output evidence; see README.md. New prompt guidance distinguishes pending
-questions, terminal Blocked outcomes, and findings-only investigation.
+The inter-wave helper/review changes are built and the shared workspace is pinned.
+Use ordinary event-driven review; automatic review/repair convergence is deferred.
+The root owns integration and uses broad bounded Luna delegation with useful depth.
+See the brief for the helper composition experiment and acceptance evidence.
 
 ## Evidence and constraints
 
