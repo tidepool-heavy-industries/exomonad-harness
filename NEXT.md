@@ -31,10 +31,10 @@ as historical assignment, not ongoing authority.
   of `SessionHelpers/BrowserChecks.hs`; do not drop or silently merge
   it. The committed BrowserChecks and workspace pin remain the tested
   baseline. No stash/reset/path-checkout operation is authorized next.
-- The two wave17 frontier worker cleanup steps that returned
-  `StoppedReleasing` and the refused root cleanup plan for the
-  ReviewFlow-owned reviewer group remain resource-release uncertainties
-  until host confirmation; neither holds unmerged accepted code.
+- Later host notices confirmed the two wave17 frontier workers
+  (actors 4@1 and 5@1) stopped with resources released. The refused
+  root cleanup plan for the ReviewFlow-owned reviewer group remains a
+  separate resource-release uncertainty; it holds no unmerged accepted code.
 - Next owner: supervisor for launch identity, optional host observation
   and any separately authorized later scope. Do not infer scope from
   this handoff or start a timer.

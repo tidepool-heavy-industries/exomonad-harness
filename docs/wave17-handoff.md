@@ -121,9 +121,10 @@ The three Luna frontier workers and the ReviewFlow, final-doc and
 browser-test reviewers were interviewed. The first ordinary doc
 reviewer was retired after its typed finding; no separate interview
 was obtained from it. Workers and ordinary reviewers were retired
-through typed cleanup; two frontier worker stop steps
-initially returned `StoppedReleasing`, not immediate resource-release
-proof. The ReviewFlow record actor finished with its typed result;
+through typed cleanup. Two frontier worker stop steps initially returned
+`StoppedReleasing`; later host notices explicitly confirmed actors
+4@1 and 5@1 stopped **with resources released**, closing those
+two pending release facts. The ReviewFlow record actor finished with its typed result;
 its reviewer later returned `AlreadyStopped` to root's stop request,
 but root could not plan cleanup of that record actor's group
 (`actor 1@1 does not own fork group 2`). Host resource release for
