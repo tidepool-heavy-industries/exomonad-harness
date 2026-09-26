@@ -5,6 +5,9 @@ source. A commit or this menu alone does not install a module into a live run.
 Start with the compiled `Project/FocusedGateExample.hs` source for a complete
 focused-check workflow. Customize its inputs or callbacks in SessionHelpers;
 pass the callable helper and published source to children.
+Wait for completion and then handle its verdict; waiting specifically for green
+can turn an ordinary failure into endless polling. Unknown evidence is a result
+to investigate using the retained job.
 Keep the original response, `Cmd.Job`, source OID, or evidence path so a compact
 notice remains traceable. Choose useful helpers; no entry is mandatory.
 

@@ -61,11 +61,14 @@
     {
       "id": "repair_cycle",
       "purpose": "Carry this repair cycle",
-      "status": "implementation_pending",
+      "status": "validated_not_yet_exposed",
       "note": "Existing Project.Review remains the ordinary workflow; separate ReviewFlow end-to-end behavior is unproved",
       "first_exposed_wave": null,
       "waves": [],
-      "wave16_revision": "Bounded component trial planned: required sibling ancestry before review; one same-reviewer empty-findings correction; integration stays with root. Exposure starts only at launch."
+      "wave16_revision": "Bounded component trial planned: required sibling ancestry before review; one same-reviewer empty-findings correction; integration stays with root. Exposure starts only at launch.",
+      "entrypoint": "Project.ReviewFlow.reviewFlow",
+      "source_revision": "4266ad7e6d8d06dcc5b8e6f0a990574cbc0b6125",
+      "validation": "Source preflight 3/3, empty findings 2/2, exact-source review/repair 6/6, failure paths 2/2; offline resident recipes, no native reviewers or notification delivery claimed."
     },
     {
       "id": "assumption_watch",

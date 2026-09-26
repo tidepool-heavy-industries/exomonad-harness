@@ -2,8 +2,9 @@ For repeated focused Cargo checks, start from the compiled
 `Project.FocusedGateExample` composition (`startGate`, `readGate`) and specialize
 it in SessionHelpers. It owns the command, completion and count/source evidence;
 `scripts/cargo-focused-test` is its runner. Include expected and executed counts.
-Read `docs/agent-automation-menu.md` for inputs and the working example. A parent
-should pass the actual helper name and published source to children who need it.
+Wait for terminality, then branch on pass, failure or unknown evidence; never
+wait for a passing verdict to appear. Read `docs/agent-automation-menu.md` for the
+working example. A parent should pass the actual helper name and published source to children who need it.
 
 Read `NEXT.md` first. It names the current assignment, accepted constraints and
 required reading. Own delivery of that outcome through checked integration.
