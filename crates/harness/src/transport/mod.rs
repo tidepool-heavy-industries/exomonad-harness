@@ -17,6 +17,9 @@ pub struct ResponsesRequest {
     pub input: Vec<Item>,
     pub instructions: String,
     pub tools: Vec<Value>,
+    /// None keeps automatic choice; Some selects a subset, including empty.
+    #[serde(default)]
+    pub tools_allowed: Option<Vec<String>>,
     pub model: String,
     pub pinned_effort: Effort,
     pub session_id: String,

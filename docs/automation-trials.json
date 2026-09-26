@@ -5,7 +5,7 @@
     {
       "id": "check_watch",
       "purpose": "Watch my checks",
-      "status": "trialing",
+      "status": "trialed",
       "entrypoint": "Project.CheckResults.watchChecks",
       "source_revision": "d9537618cf8eba4c59d71cd2ac574c862f5f5c86",
       "validation": "Project.CheckResultsChecks.completionRouting: 13/13; notification attempts retained, delivery untested",
@@ -13,39 +13,20 @@
       "waves": [
         {
           "wave": 15,
-          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
-          "actor": "1@1",
-          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
-          "exposure": "root initial Automation trial menu",
-          "binding": "default notebook imports",
-          "evidence": "docs/wave15-launch.md",
-          "opportunities": null,
-          "attempts": [
-            {
-              "call": "call_LQRdIo6UnI3Js9xw5yFUvYbt",
-              "outcome": "compile refusal: Project.TestEvidence not explicitly imported; no command started"
-            },
-            {
-              "call": "call_maM0YIkFWSHBBhlekH2omTQQ",
-              "outcome": "explicit import and original focused job started",
-              "job": "049a8eea-5221-42f9-9edc-f607cba4a9a6"
-            },
-            {
-              "call": "call_kPJhNW98t6X0btcKPdEsQeOV",
-              "outcome": "rejected String/Text fallback; corrected before watcher admission"
-            },
-            {
-              "call": "call_RrI3nmwwNwyVcRw7k2wbB7vO",
-              "outcome": "watcher5@1 admitted"
-            },
-            {
-              "call": "call_03pktoqNhroZgbJpIMosl7ew",
-              "outcome": "CheckUnknown with one retained notice; not strict acceptance"
-            }
-          ],
-          "outcome": "watcher consumed; interpretation and final outcome pending"
+          "opportunity": "Run an existing transport default-auto regression while component owners work",
+          "attempt": "Project.TestEvidence.startFocused (GiB 3) then Project.CheckResults.watchChecks NotifyAllTerminal",
+          "source": "a61a9c6d5f36d7efd91bde779d07c114174e0007",
+          "check": "harness lib request_is_stateless_and_pins_effort --expect 1",
+          "job": "049a8eea-5221-42f9-9edc-f607cba4a9a6",
+          "evidence": "/tmp/exomonad-actor-workspace/.exomonad/build/cargo/debug/deps/focused-g91rvzh_/evidence.json",
+          "outcome": "Late command exit 0, 1 matched/runnable/executed/passed. Watcher notice reached root but summary was unknown: its initial cat of evidence exited 1, so it did not report counts or source. Later collectFocused on the original job read evidence successfully and observed source a61a9c6 plus two pre-existing dirty helper files. A bounded recoverRetained 1024-byte attempt on the same original job returned CommandUnavailable/HTTP 409 for both output streams after retention expiry; status still said exited 0. This is a failed automation summary and raw-output recovery, not a failed product check; no test was rerun.",
+          "fallback": "Use direct focused script for final integrated product gates; trial result is not integrated acceptance."
         }
-      ]
+      ],
+      "exposure_evidence": {
+        "wave": 15,
+        "record": "docs/wave15-launch.md: native root automation menu; exposure is not use"
+      }
     },
     {
       "id": "review_readiness",
@@ -55,20 +36,11 @@
       "source_revision": "98aad7bdea70a3085601110ccbca520e19d4df66",
       "validation": "Project.RoutingChecks.reviewReadiness: 4/4 on c40d68c; 98aad7b is its integration cherry-pick; does not run review",
       "first_exposed_wave": 15,
-      "waves": [
-        {
-          "wave": 15,
-          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
-          "actor": "1@1",
-          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
-          "exposure": "root initial Automation trial menu",
-          "binding": "default notebook imports",
-          "evidence": "docs/wave15-launch.md",
-          "opportunities": null,
-          "attempts": [],
-          "outcome": "pending"
-        }
-      ]
+      "waves": [],
+      "exposure_evidence": {
+        "wave": 15,
+        "record": "docs/wave15-launch.md: native root automation menu; exposure is not use"
+      }
     },
     {
       "id": "failure_diagnostics",
@@ -78,20 +50,11 @@
       "source_revision": "d9537618cf8eba4c59d71cd2ac574c862f5f5c86",
       "validation": "Project.CheckResultsChecks.completionRouting: 13/13, including selection, setup, assertion and short execution",
       "first_exposed_wave": 15,
-      "waves": [
-        {
-          "wave": 15,
-          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
-          "actor": "1@1",
-          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
-          "exposure": "root initial Automation trial menu",
-          "binding": "default notebook imports",
-          "evidence": "docs/wave15-launch.md",
-          "opportunities": null,
-          "attempts": [],
-          "outcome": "pending"
-        }
-      ]
+      "waves": [],
+      "exposure_evidence": {
+        "wave": 15,
+        "record": "docs/wave15-launch.md: native root automation menu; exposure is not use"
+      }
     },
     {
       "id": "repair_cycle",
@@ -109,20 +72,11 @@
       "source_revision": "a61c13e6492a4f7d5bd323f9b6f8686214b77b7d",
       "validation": "Project.AssumptionChecks.changes: 3/3 deterministic callbacks including unresolved; Project.AssumptionExamples.semanticImpact compiled, live Jev unvalidated",
       "first_exposed_wave": 15,
-      "waves": [
-        {
-          "wave": 15,
-          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
-          "actor": "1@1",
-          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
-          "exposure": "root initial Automation trial menu",
-          "binding": "default notebook imports",
-          "evidence": "docs/wave15-launch.md",
-          "opportunities": null,
-          "attempts": [],
-          "outcome": "pending"
-        }
-      ]
+      "waves": [],
+      "exposure_evidence": {
+        "wave": 15,
+        "record": "docs/wave15-launch.md: native root automation menu; exposure is not use"
+      }
     },
     {
       "id": "parallel_investigation",
@@ -132,20 +86,11 @@
       "source_revision": "2a860832afbe675f78188dbdfbeb775bd2dbce80",
       "validation": "Grouped definitions compiled; Project.AutomationRuntimeChecks.commandCustody: 5/5",
       "first_exposed_wave": 15,
-      "waves": [
-        {
-          "wave": 15,
-          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
-          "actor": "1@1",
-          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
-          "exposure": "root initial Automation trial menu",
-          "binding": "default notebook imports",
-          "evidence": "docs/wave15-launch.md",
-          "opportunities": null,
-          "attempts": [],
-          "outcome": "pending"
-        }
-      ]
+      "waves": [],
+      "exposure_evidence": {
+        "wave": 15,
+        "record": "docs/wave15-launch.md: native root automation menu; exposure is not use"
+      }
     },
     {
       "id": "interview_collection",
@@ -155,20 +100,11 @@
       "source_revision": "1e3e822aca9d374e2d6bbb557f918b819b5fc196",
       "validation": "Project.InterviewChecks.collectAnswers: 4/4, including empty input incomplete",
       "first_exposed_wave": 15,
-      "waves": [
-        {
-          "wave": 15,
-          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
-          "actor": "1@1",
-          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
-          "exposure": "root initial Automation trial menu",
-          "binding": "default notebook imports",
-          "evidence": "docs/wave15-launch.md",
-          "opportunities": null,
-          "attempts": [],
-          "outcome": "pending"
-        }
-      ]
+      "waves": [],
+      "exposure_evidence": {
+        "wave": 15,
+        "record": "docs/wave15-launch.md: native root automation menu; exposure is not use"
+      }
     },
     {
       "id": "prerequisite_preparation",
@@ -178,25 +114,16 @@
       "source_revision": "151e467ca4978121a45fa8ae4ca4531de9f5a784",
       "validation": "Project.PrepareContinueChecks.preparationCompletion: 6/6; late, failed and unready paths",
       "first_exposed_wave": 15,
-      "waves": [
-        {
-          "wave": 15,
-          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
-          "actor": "1@1",
-          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
-          "exposure": "root initial Automation trial menu",
-          "binding": "default notebook imports",
-          "evidence": "docs/wave15-launch.md",
-          "opportunities": null,
-          "attempts": [],
-          "outcome": "pending"
-        }
-      ]
+      "waves": [],
+      "exposure_evidence": {
+        "wave": 15,
+        "record": "docs/wave15-launch.md: native root automation menu; exposure is not use"
+      }
     },
     {
       "id": "command_evidence",
       "purpose": "Recover useful command evidence",
-      "status": "trialing",
+      "status": "trialed",
       "entrypoint": "Project.RetainedEvidence.recoverRetained",
       "source_revision": "151e467ca4978121a45fa8ae4ca4531de9f5a784",
       "validation": "Project.PrepareContinueChecks.preparationCompletion: 6/6, including failed-job reuse and four-byte cutoff",
@@ -204,44 +131,33 @@
       "waves": [
         {
           "wave": 15,
-          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
-          "actor": "1@1",
-          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
-          "exposure": "root initial Automation trial menu",
-          "binding": "default notebook imports",
-          "evidence": "docs/wave15-launch.md",
-          "opportunities": null,
-          "attempts": [],
-          "outcome": "pending"
+          "opportunity": "Recover raw output after CheckResults could not read the background focused evidence",
+          "attempt": "Project.RetainedEvidence.recoverRetained with a 1024-byte budget on original job 049a8eea-5221-42f9-9edc-f607cba4a9a6",
+          "outcome": "Retained status remained exited 0, but stdout and stderr reads each returned CommandUnavailable/HTTP 409 after output retention expiry; no output pages were recovered.",
+          "fallback": "Existing evidence.json had already been read by Project.TestEvidence.collectFocused without rerunning the test."
         }
-      ]
+      ],
+      "exposure_evidence": {
+        "wave": 15,
+        "record": "docs/wave15-launch.md: native root automation menu; exposure is not use"
+      }
     },
     {
       "id": "handoff_assembly",
       "purpose": "Assemble an evidence-backed handoff",
       "status": "trialing",
-      "note": "Project.HandoffExamples.handoffProposal has a combined compile and recipe gate pending",
       "first_exposed_wave": 15,
-      "waves": [
-        {
-          "wave": 15,
-          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
-          "actor": "1@1",
-          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
-          "exposure": "root initial Automation trial menu",
-          "binding": "explicit import documented; live import not yet observed",
-          "evidence": "docs/wave15-launch.md",
-          "opportunities": null,
-          "attempts": [],
-          "outcome": "pending"
-        }
-      ],
+      "waves": [],
       "entrypoint": "Project.HandoffExamples.handoffProposal",
       "validation": {
         "workspace_revision": "ce861b7acbd2743f03464c85700f842dd20043c7",
         "recipe": "Project.AutomationChecks.integration",
         "assertions_passed": 23,
         "evidence": "/tmp/automation-integration-validation/check.log"
+      },
+      "exposure_evidence": {
+        "wave": 15,
+        "record": "docs/wave15-launch.md: native root automation menu; exposure is not use"
       }
     },
     {
@@ -262,20 +178,11 @@
       "source_revision": "2a860832afbe675f78188dbdfbeb775bd2dbce80",
       "validation": "Grouped definitions compiled; Project.AutomationRuntimeChecks.commandCustody: 5/5",
       "first_exposed_wave": 15,
-      "waves": [
-        {
-          "wave": 15,
-          "run": "2518edd8-8a6c-439c-b823-5055b96096d9",
-          "actor": "1@1",
-          "workspace_revision": "d07eefb8ed8eeab078360a0c9a47b73c207e8b40",
-          "exposure": "root initial Automation trial menu",
-          "binding": "default notebook imports",
-          "evidence": "docs/wave15-launch.md",
-          "opportunities": null,
-          "attempts": [],
-          "outcome": "pending"
-        }
-      ]
+      "waves": [],
+      "exposure_evidence": {
+        "wave": 15,
+        "record": "docs/wave15-launch.md: native root automation menu; exposure is not use"
+      }
     }
   ]
 }

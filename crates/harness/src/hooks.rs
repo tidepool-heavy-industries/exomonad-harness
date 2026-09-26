@@ -1,5 +1,4 @@
-//! Typed before-request hook contract. This slice supports Send only; tool
-//! restriction and item injection are not represented until implemented.
+//! Typed before-request hook contract.
 use crate::{item::Item, model::Effort};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,6 +14,8 @@ pub struct RequestPlan {
 pub enum BeforeRequestDecision {
     #[default]
     Send,
+    /// Select names from the final advertised tool list for this attempt.
+    SendRestricted { tools_allowed: Vec<String> },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -47,5 +48,17 @@ mod tests {
                 .unwrap(),
             result
         );
+    }
+
+    #[test]
+    fn restricted_names_and_evidence_cross_serde_boundary() {
+        let result = BeforeRequestResult {
+            decision: BeforeRequestDecision::SendRestricted {
+                tools_allowed: vec!["echo".into()],
+            },
+            evidence: Some(json!({"opaque": [1, 2]})),
+        };
+        let encoded = serde_json::to_value(&result).unwrap();
+        assert_eq!(serde_json::from_value::<BeforeRequestResult>(encoded).unwrap(), result);
     }
 }

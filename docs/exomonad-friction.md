@@ -1,5 +1,57 @@
 # Exomonad friction — correction wave
 
+## Wave 15 — 2026-09-26 (checked integration)
+
+- `friction:` The bounded CheckResults watcher delivered a late notice for
+  a passing 1/1 transport check, but its evidence `cat` initially exited 1
+  and it summarized executed count/source as unknown. A separate read of
+  the original retained job recovered the evidence without rerunning.
+- `friction:` Acceptance first lacked an observable outgoing deterministic
+  request; root specified opt-in canonical request-body JSONL capture.
+  Its first focused browser test failed on absent `web/dist`, not the product
+  assertion. Root prepared assets, merged its test-only branch and obtained
+  the intended 1/1 expected-red missing-capture failure.
+- `friction:` Engine owner's first focused command exited 137 before test
+  execution and its invalid/cleanup test was absent. Provider owner's first
+  Candidate OID did not exist and its actual tip had not incorporated the
+  capture/echo/empty contract. Both were returned for repair rather than
+  reviewed as complete candidates.
+- `friction:` Provider repair `d4302cd` passed its own three focused
+  checks 1/1 but changed the browser wrapper to `DemoProvider`, which
+  re-advertised `ask` despite the agreed `CliProvider` boundary and
+  contradicted the corrected standalone expectation of `sleep`. Root
+  rejected this alternative registry/policy before review and returned
+  the exact consumer contract to the retained owner.
+- `friction:` Fresh provider review at `59bf6236` correctly observed
+  that its exact checkout, based on `a61a9c6`, still serialized
+  `tool_choice:"auto"`; it lacked the independently integrated
+  Engine/transport candidate `f616be77`. That blocks product review at
+  the provider-only tip but is not a defect in the provider-owned files.
+  Root returned the candidate to its owner for a safe rebase onto
+  integrated `37f9c74`, with pre-existing dirty helper work preserved,
+  before commissioning combined exact-tip review.
+- `friction:` Combined exact-tip review at rebased `8db250a5`
+  prepared web assets and executed standalone browser acceptance 1/1.
+  It failed at the child-empty assertion: actual child Engine command
+  `child-reply` plus claimed context defeated a policy inferred from
+  RequestPlan items, yielding echo-sleep. Root returned policy
+  classification to the production call site's explicit command and
+  agent context; the passing component policy test had not exercised
+  that real sequence.
+- `friction:` Final exact-tip reviewer at `5f31285c` reported an
+  unavailable combined Cargo handle and a later build exit 137, then
+  ran sequential focused checks with realistic memory; Store, policy,
+  capture and standalone browser each executed/passed 1/1. Root's
+  integrated source `40bd399e` independently passed nine named
+  focused checks 1/1 each, web 14/14, and browser journey 1/1.
+  Reviewer and root checks are separate observations.
+- `friction:` The CheckResults trial notice lacked count/source
+  after its first evidence read failed. Later `collectFocused`
+  recovered the on-disk evidence without rerun; a bounded
+  `recoverRetained` on the original job found raw output expired
+  with HTTP 409. The trial did not supply the compact evidence
+  promised by its hypothesis, although the underlying test passed.
+
 ## RSI iteration 3 / wave 11 — 2026-09-25 (interim)
 
 - `friction:` Durable lead settled `Blocked` immediately after admitting

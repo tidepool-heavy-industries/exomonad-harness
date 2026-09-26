@@ -1758,6 +1758,7 @@ mod tests {
             )],
             instructions: "reply by tool".into(),
             tools: vec![serde_json::json!({"type":"function","name":"cell"})],
+            tools_allowed: None,
             model: "offline-recording".into(),
             pinned_effort: Effort::Low,
             session_id: "recorded-session".into(),
@@ -2208,6 +2209,49 @@ mod tests {
             assert_eq!(rows[1].decision, legacy);
             let request = store.request(&id("request-1")).unwrap().unwrap();
             assert_eq!(request.branch, "/root");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn restricted_before_request_decision_roundtrips_after_reopen() {
+        let path = std::env::temp_dir().join(format!(
+            "harness-before-request-restricted-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let expected_decision = crate::hooks::BeforeRequestDecision::SendRestricted {
+            tools_allowed: vec!["sleep".into()],
+        };
+        let expected = Decision {
+            hook: "before-request".into(),
+            event_refs: vec!["echo-item".into()],
+            decision: serde_json::to_value(&expected_decision).unwrap(),
+            evidence: serde_json::json!({"consumer":"standalone-browser","selection":"echo-sleep"}),
+            latency_ms: None,
+        };
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .write_request(
+                    &id("restricted-request"),
+                    None,
+                    "/root",
+                    &[],
+                    Usage::default(),
+                )
+                .unwrap();
+            store
+                .record_decision(Some(&id("restricted-request")), &expected)
+                .unwrap();
+        }
+        {
+            let store = Store::open(&path).unwrap();
+            let rows = store.decisions(Some(&id("restricted-request"))).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].decision, expected);
+            let typed: crate::hooks::BeforeRequestDecision =
+                serde_json::from_value(rows[0].decision.decision.clone()).unwrap();
+            assert_eq!(typed, expected_decision);
         }
         let _ = std::fs::remove_file(path);
     }
