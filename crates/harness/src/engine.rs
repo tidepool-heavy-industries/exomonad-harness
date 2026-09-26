@@ -1508,7 +1508,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn before_request_send_is_persisted_before_transport_failure_and_readback() {
+    async fn before_request_send_persists_on_transport_failure() {
         let db_path = std::env::temp_dir().join(format!(
             "harness-before-request-{}.sqlite",
             uuid::Uuid::new_v4()
