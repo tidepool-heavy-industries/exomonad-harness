@@ -188,6 +188,13 @@ pub struct CliProvider(DemoProvider);
 
 #[async_trait]
 impl Provider for CliProvider {
+    async fn before_request(
+        &self,
+        plan: &harness::hooks::RequestPlan,
+    ) -> harness::hooks::BeforeRequestResult {
+        self.0.before_request(plan).await
+    }
+
     async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError> {
         self.0.call(name, args).await
     }
@@ -1578,6 +1585,16 @@ fn capped(bytes: &[u8]) -> (String, bool) {
 
 #[async_trait]
 impl Provider for DemoProvider {
+    async fn before_request(
+        &self,
+        _plan: &harness::hooks::RequestPlan,
+    ) -> harness::hooks::BeforeRequestResult {
+        harness::hooks::BeforeRequestResult {
+            decision: harness::hooks::BeforeRequestDecision::Send,
+            evidence: Some(json!({"consumer":"standalone-browser"})),
+        }
+    }
+
     async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError> {
         match name {
             "run" => self.run_command(&args).await,

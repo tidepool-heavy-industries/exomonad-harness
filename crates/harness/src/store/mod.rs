@@ -2163,6 +2163,38 @@ mod tests {
     }
 
     #[test]
+    fn before_request_decision_roundtrips_after_reopen() {
+        let path = std::env::temp_dir().join(format!(
+            "harness-before-request-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let expected = Decision {
+            hook: "before-request".into(),
+            event_refs: vec!["item-1".into()],
+            decision: serde_json::json!({"decision":"Send"}),
+            evidence: serde_json::json!({"consumer":"standalone-browser"}),
+            latency_ms: Some(3),
+        };
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .write_request(&id("request-1"), None, "/root", &[], Usage::default())
+                .unwrap();
+            store
+                .record_decision(Some(&id("request-1")), &expected)
+                .unwrap();
+        }
+        {
+            let store = Store::open(&path).unwrap();
+            let rows = store.decisions(Some(&id("request-1"))).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].request, Some(id("request-1")));
+            assert_eq!(rows[0].decision, expected);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn migrates_v1_timestamps_and_usage_without_losing_requests() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE schema_version(version INTEGER NOT NULL); INSERT INTO schema_version VALUES(1); CREATE TABLE requests(id TEXT PRIMARY KEY,parent_id TEXT,branch TEXT,created_at INTEGER NOT NULL); INSERT INTO requests VALUES('old',NULL,'main',123); CREATE TABLE events(id INTEGER PRIMARY KEY,request_id TEXT,kind TEXT,payload TEXT,created_at INTEGER); INSERT INTO events VALUES(1,'old','x','{}',124);").unwrap();
