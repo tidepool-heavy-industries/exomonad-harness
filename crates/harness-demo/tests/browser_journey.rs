@@ -1,4 +1,4 @@
-use std::{collections::HashSet, net::TcpListener, process::Stdio, time::Duration};
+use std::{net::TcpListener, process::Stdio, time::Duration};
 
 use serde_json::{Value, json};
 use tokio::{
@@ -129,6 +129,19 @@ impl Demo {
             .unwrap();
     }
 
+    async fn request_snapshot(socket: &mut BrowserSocket) {
+        let tokio_tungstenite::MaybeTlsStream::Plain(stream) = socket.get_mut() else {
+            panic!("loopback WebSocket unexpectedly negotiated TLS");
+        };
+        let text = json!({"type":"snapshot.request"}).to_string();
+        let bytes = text.as_bytes();
+        let mask = [0x35, 0xa1, 0x6c, 0x09];
+        let mut frame = vec![0x81, 0x80 | bytes.len() as u8];
+        frame.extend_from_slice(&mask);
+        frame.extend(bytes.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+        stream.write_all(&frame).await.unwrap();
+    }
+
     async fn submit(&self, command: &str) -> String {
         let response = self
             .client
@@ -170,31 +183,34 @@ async fn next_frame(socket: &mut BrowserSocket) -> Value {
         let tokio_tungstenite::MaybeTlsStream::Plain(stream) = socket.get_mut() else {
             panic!("loopback WebSocket unexpectedly negotiated TLS");
         };
-        let (header, length) = timeout(Duration::from_secs(5), async {
-            let mut header = [0; 2];
-            stream.read_exact(&mut header).await?;
-            let length = match header[1] & 0x7f {
-                126 => {
-                    let mut size = [0; 2];
-                    stream.read_exact(&mut size).await?;
-                    u16::from_be_bytes(size) as usize
-                }
-                127 => {
-                    let mut size = [0; 8];
-                    stream.read_exact(&mut size).await?;
-                    u64::from_be_bytes(size) as usize
-                }
-                size => size as usize,
-            };
-            Ok::<_, std::io::Error>((header, length))
-        })
-        .await
-        .expect("WebSocket response timeout")
-        .expect("WebSocket frame read");
-        let mut payload = vec![0; length];
-        timeout(Duration::from_secs(5), stream.read_exact(&mut payload))
+        let mut header = [0; 2];
+        stream
+            .read_exact(&mut header)
             .await
-            .expect("WebSocket payload timeout")
+            .expect("WebSocket frame header");
+        let length = match header[1] & 0x7f {
+            126 => {
+                let mut size = [0; 2];
+                stream
+                    .read_exact(&mut size)
+                    .await
+                    .expect("WebSocket frame length");
+                u16::from_be_bytes(size) as usize
+            }
+            127 => {
+                let mut size = [0; 8];
+                stream
+                    .read_exact(&mut size)
+                    .await
+                    .expect("WebSocket frame length");
+                u64::from_be_bytes(size) as usize
+            }
+            size => size as usize,
+        };
+        let mut payload = vec![0; length];
+        stream
+            .read_exact(&mut payload)
+            .await
             .expect("WebSocket payload read");
         if header[0] & 0x0f == 1 {
             return serde_json::from_slice(&payload).expect("JSON server frame");
@@ -202,11 +218,46 @@ async fn next_frame(socket: &mut BrowserSocket) -> Value {
     }
 }
 
-fn all_records(snapshot: &Value) -> Vec<&Value> {
-    ["conversations", "requests", "jobs", "envelopes"]
-        .into_iter()
-        .flat_map(|key| snapshot["snapshot"][key].as_array().into_iter().flatten())
-        .collect()
+fn command_record<'a>(snapshot: &'a Value, command_id: &str) -> Option<&'a Value> {
+    snapshot["snapshot"]["requests"]
+        .as_array()?
+        .iter()
+        .find(|request| request["commandId"] == command_id)
+}
+
+async fn wait_for_outcome(
+    socket: &mut BrowserSocket,
+    command_id: &str,
+    outcomes: &[&str],
+) -> Value {
+    Demo::request_snapshot(socket).await;
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let frame = next_frame(socket).await;
+            if frame["type"] == "snapshot" {
+                if let Some(request) = command_record(&frame, command_id) {
+                    if outcomes.contains(&request["outcome"].as_str().unwrap_or_default()) {
+                        return frame;
+                    }
+                }
+            } else if frame["type"] == "event"
+                && frame["event"]["event"]["kind"] == "request.upsert"
+            {
+                let request = &frame["event"]["event"]["value"];
+                assert!(
+                    request["commandId"].is_string() && request["outcome"].is_string(),
+                    "request.upsert omitted the contract's commandId/outcome fields"
+                );
+                if request["commandId"] == command_id
+                    && outcomes.contains(&request["outcome"].as_str().unwrap_or_default())
+                {
+                    return json!({"snapshot":{"requests":[request.clone()]}});
+                }
+            }
+        }
+    })
+    .await
+    .expect("command request did not reach required outcome before bounded observation deadline")
 }
 
 #[tokio::test]
@@ -236,14 +287,36 @@ async fn browser_journey_auth_pending_cancel_child_failure_and_reconnect() {
     assert_eq!(denied.status(), reqwest::StatusCode::UNAUTHORIZED);
 
     let mut ws = demo.websocket().await;
-    let initial = next_frame(&mut ws).await;
+    let initial = timeout(Duration::from_secs(5), next_frame(&mut ws))
+        .await
+        .expect("initial WebSocket snapshot timeout");
     assert_eq!(initial["type"], "snapshot");
 
     // A pending root command must not occupy the receiver: an independent
     // cancel command has to be accepted and produce a durable terminal state.
     let wait_id = Demo::submit_ws(&mut ws, "wait").await;
+    let pending = wait_for_outcome(&mut ws, &wait_id, &["pending"]).await;
+    assert_eq!(
+        command_record(&pending, &wait_id).unwrap()["command"],
+        "wait"
+    );
+    let message_id = demo.submit("message while-wait-is-pending").await;
+    let message = wait_for_outcome(&mut ws, &message_id, &["queued", "presented", "acted"]).await;
+    assert_eq!(
+        command_record(&message, &message_id).unwrap()["command"],
+        "message while-wait-is-pending"
+    );
+    // Cancellation is a server command, not a connection-lifetime side effect.
+    // Drop the submitting socket while wait is pending, then cancel over HTTP.
+    Demo::close_ws(&mut ws).await;
+    drop(ws);
     let cancel_id = demo.submit("cancel").await;
     assert_ne!(wait_id, cancel_id);
+    let mut ws = demo.websocket().await;
+    let after_cancel_disconnect = timeout(Duration::from_secs(5), next_frame(&mut ws))
+        .await
+        .expect("post-cancel reconnect snapshot timeout");
+    assert_eq!(after_cancel_disconnect["type"], "snapshot");
 
     // Exercise a child identity and its parent-message/reply path.
     let child_id = demo.submit("child browser-child-proof").await;
@@ -255,39 +328,126 @@ async fn browser_journey_auth_pending_cancel_child_failure_and_reconnect() {
     let success_id = demo.submit("echo browser-recovery-proof").await;
     assert_ne!(failed_id, success_id);
 
+    // Observe server-published request transitions, with a bounded frame
+    // timeout. The snapshot request is an explicit resync, not a sleep-based
+    // assumption that queued work has completed.
+    let _ = wait_for_outcome(&mut ws, &wait_id, &["cancelled"]).await;
+    let _ = wait_for_outcome(&mut ws, &cancel_id, &["completed"]).await;
+    let _ = wait_for_outcome(&mut ws, &child_id, &["completed"]).await;
+    let failed = wait_for_outcome(&mut ws, &failed_id, &["failed"]).await;
+    assert_eq!(
+        command_record(&failed, &failed_id).unwrap()["command"],
+        "fail"
+    );
+    let success = wait_for_outcome(&mut ws, &success_id, &["completed"]).await;
+    assert_eq!(
+        command_record(&success, &success_id).unwrap()["command"],
+        "echo browser-recovery-proof"
+    );
+
     // Reconnect is a snapshot resynchronization, not command replay.
     Demo::close_ws(&mut ws).await;
     let mut reconnected = demo.websocket().await;
-    let restored = next_frame(&mut reconnected).await;
+    let restored = timeout(Duration::from_secs(5), next_frame(&mut reconnected))
+        .await
+        .expect("reconnect WebSocket snapshot timeout");
     assert_eq!(restored["type"], "snapshot");
-    let records = all_records(&restored);
-    let ids: HashSet<&str> = records.iter().filter_map(|r| r["id"].as_str()).collect();
+    let requests = restored["snapshot"]["requests"].as_array().unwrap();
+    let by_id = |id: &str| requests.iter().find(|r| r["commandId"] == id).unwrap();
+    assert_eq!(by_id(&wait_id)["outcome"], "cancelled");
+    assert_eq!(by_id(&wait_id)["state"], "failed");
+    let jobs = restored["snapshot"]["jobs"].as_array().unwrap();
+    let wait_job = jobs
+        .iter()
+        .find(|job| job["id"] == wait_id)
+        .expect("cancelled wait has no associated durable job");
+    assert_eq!(wait_job["state"], "cancelled");
     assert!(
-        ids.contains(wait_id.as_str()),
-        "wait outcome missing from durable snapshot"
+        ["queued", "presented", "acted"].contains(&by_id(&message_id)["outcome"].as_str().unwrap())
+    );
+    assert_eq!(by_id(&cancel_id)["outcome"], "completed");
+    assert_eq!(by_id(&child_id)["outcome"], "completed");
+    assert_eq!(by_id(&failed_id)["outcome"], "failed");
+    assert_eq!(by_id(&success_id)["outcome"], "completed");
+    assert_eq!(by_id(&failed_id)["command"], "fail");
+    assert_ne!(
+        by_id(&failed_id)["commandId"],
+        by_id(&success_id)["commandId"]
+    );
+
+    let conversations = restored["snapshot"]["conversations"].as_array().unwrap();
+    let child_conversation = conversations
+        .iter()
+        .find(|row| {
+            row["id"] != "conversation/root"
+                && row["path"]
+                    .as_str()
+                    .is_some_and(|path| path.starts_with("/root/"))
+        })
+        .expect("child command did not create a distinct child conversation");
+    let envelopes = restored["snapshot"]["envelopes"].as_array().unwrap();
+    assert!(
+        envelopes
+            .iter()
+            .any(|row| { row["type"] == "PROGRESS" && row["ordinal"].as_u64().is_some() }),
+        "echo did not persist ordered progress"
     );
     assert!(
-        ids.contains(cancel_id.as_str()),
-        "cancel outcome missing from durable snapshot"
+        envelopes.iter().any(|row| {
+            row["type"] == "FINAL_ANSWER"
+                && row["payload"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("browser-recovery-proof"))
+        }),
+        "echo final answer did not include its submitted text"
+    );
+    let ordinals: Vec<u64> = envelopes
+        .iter()
+        .filter_map(|row| row["ordinal"].as_u64())
+        .collect();
+    assert!(ordinals.windows(2).all(|pair| pair[0] < pair[1]));
+    let child_path = child_conversation["path"].as_str().unwrap();
+    let parent_message = envelopes
+        .iter()
+        .find(|row| row["type"] == "MESSAGE" && row["recipient"] == child_path)
+        .expect("child is missing the delivered parent message");
+    let child_reply = envelopes
+        .iter()
+        .find(|row| {
+            (row["type"] == "MESSAGE" || row["type"] == "FINAL_ANSWER")
+                && row["sender"] == child_path
+        })
+        .expect("child is missing its sent reply");
+    assert!(
+        !parent_message["sender"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty()
+    );
+    assert_eq!(
+        parent_message["sender"], child_reply["recipient"],
+        "child reply is not addressed to the actual parent sender"
     );
     assert!(
-        ids.contains(failed_id.as_str()),
-        "failure missing from durable snapshot"
+        !parent_message["recipient"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty()
     );
     assert!(
-        ids.contains(success_id.as_str()),
-        "subsequent success missing from durable snapshot"
+        !child_reply["sender"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty()
     );
     assert!(
-        records.iter().any(|r| r["state"] == "cancelled"),
-        "cancel was not terminal"
+        !child_reply["recipient"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty()
     );
     assert!(
-        records.iter().any(|r| r["state"] == "failed"),
-        "controlled failure not represented"
-    );
-    assert!(
-        records.iter().any(|r| r["state"] == "completed"),
-        "recovery success not represented"
+        parent_message["ordinal"].as_u64() < child_reply["ordinal"].as_u64(),
+        "child reply appeared before its parent message"
     );
 }
