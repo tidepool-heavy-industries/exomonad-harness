@@ -29,13 +29,18 @@ pub fn request_body(request: &ResponsesRequest) -> Result<Value, TransportError>
         "instructions": request.instructions,
         "input": request.input,
         "tools": request.tools,
-        // TODO(correction-wave): `tool_choice` should come from the request as
-        // `allowed_tools`/`none` for per-request availability, never by editing
-        // `tools` (cache). Also missing: `prompt_cache_options: {ttl: "30m"}`
+        // Also missing: `prompt_cache_options: {ttl: "30m"}`
         // and explicit cache breakpoints at checkpoints. Cache counters read 0
         // on every live call so far; a findings-only probe (docs/tree.md) diffs
         // our body/headers against codex's before assuming the backend reports none.
-        "tool_choice": "auto",
+        "tool_choice": request.tools_allowed.as_ref().map_or_else(
+            || json!("auto"),
+            |names| if names.is_empty() {
+                json!("none")
+            } else {
+                json!({"type":"allowed_tools","mode":"auto","tools":names.iter().map(|name| json!({"type":"function","name":name})).collect::<Vec<_>>()})
+            }
+        ),
         "parallel_tool_calls": true,
         "reasoning": {"effort": request.pinned_effort},
         "stream": true,
@@ -184,6 +189,28 @@ mod tests {
         assert_eq!(body["instructions"], "fixed");
         assert_eq!(body["input"][0]["content"], "hello");
         assert!(body.get("previous_response_id").is_none());
+    }
+
+    #[test]
+    fn restricted_tools_serialize_exact_order_and_empty_as_none() {
+        let mut request = ResponsesRequest {
+            input: vec![],
+            instructions: String::new(),
+            tools: vec![
+                json!({"type":"function","name":"a","strict":true}),
+                json!({"type":"function","name":"b","strict":true}),
+            ],
+            tools_allowed: Some(vec!["b".into(), "a".into()]),
+            model: "gpt-6-sol".into(),
+            pinned_effort: Effort::Low,
+            session_id: "shared".into(),
+        };
+        let body = request_body(&request).unwrap();
+        assert_eq!(body["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(body["tool_choice"]["tools"][0]["name"], "b");
+        assert_eq!(body["tool_choice"]["tools"][1]["name"], "a");
+        request.tools_allowed = Some(vec![]);
+        assert_eq!(request_body(&request).unwrap()["tool_choice"], "none");
     }
 
     #[test]

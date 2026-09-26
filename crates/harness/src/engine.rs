@@ -65,6 +65,8 @@ pub enum EngineError {
     Finalize(#[from] FinalizeError),
     #[error("typed completion requires exactly one finalize call")]
     InvalidFinalizeCount,
+    #[error("invalid restricted tool selection: {0}")]
+    InvalidToolSelection(String),
     #[error("malformed Responses function_call item")]
     InvalidFunctionCall,
     #[error("request history has no harness-authored configuration_update")]
@@ -488,7 +490,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .iter()
                 .find_map(Item::configuration_effort)
                 .ok_or(EngineError::MissingEffortPin)?;
-            let req = ResponsesRequest {
+            let mut req = ResponsesRequest {
                 input: history,
                 instructions: self.config.instructions.clone(),
                 tools: self.tools(finalize_schema),
@@ -514,6 +516,40 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     continue;
                 }
             };
+            let selected_tools = match &before_request.decision {
+                crate::hooks::BeforeRequestDecision::Send => None,
+                crate::hooks::BeforeRequestDecision::SendRestricted { tools_allowed } => {
+                    let mut seen = std::collections::HashSet::new();
+                    let available = req
+                        .tools
+                        .iter()
+                        .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
+                        .collect::<std::collections::HashSet<_>>();
+                    let invalid = tools_allowed.iter().find(|name| {
+                        !seen.insert(name.as_str()) || !available.contains(name.as_str())
+                    });
+                    if let Some(name) = invalid {
+                        return Err(self
+                            .cleanup_pending(
+                                EngineError::InvalidToolSelection(name.clone()),
+                                &pending,
+                            )
+                            .await);
+                    }
+                    if finalize_schema.is_some() && !seen.contains(FINALIZE_TOOL_NAME) {
+                        return Err(self
+                            .cleanup_pending(
+                                EngineError::InvalidToolSelection(
+                                    "required typed completion tool excluded".into(),
+                                ),
+                                &pending,
+                            )
+                            .await);
+                    }
+                    Some(tools_allowed.clone())
+                }
+            };
+            req.tools_allowed = selected_tools;
             let decision = crate::store::Decision {
                 hook: "before-request".into(),
                 event_refs: req
