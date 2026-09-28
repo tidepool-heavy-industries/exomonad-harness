@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -59,8 +60,15 @@ class FocusedTestRunnerTests(unittest.TestCase):
             "base = pathlib.Path(__file__).parent\n"
             "with (base / 'cargo-calls').open('a') as log: log.write(' '.join(sys.argv[1:]) + '\\n')\n"
             "if sys.argv[1] == 'metadata':\n"
+            "    if os.environ.get('STUB_MODE') == 'metadata_failure':\n"
+            "        print('metadata unavailable', file=sys.stderr); sys.exit(11)\n"
             "    print(json.dumps({'packages': [{'name': 'harness', 'id': 'pkg', 'version': '0.1.0', 'manifest_path': str(base / 'Cargo.toml')}]}))\n"
             "else:\n"
+            "    if os.environ.get('STUB_MODE') in ('build_failure', 'build_long'):\n"
+            "        diagnostic = 'error[E0308]: mismatched types\\n --> crates/demo/src/lib.rs:12:3\\n'\n"
+            "        if os.environ.get('STUB_MODE') == 'build_long': diagnostic = 'A' * 10000 + diagnostic\n"
+            "        print(json.dumps({'reason': 'compiler-message', 'message': {'level': 'error', 'rendered': diagnostic}}))\n"
+            "        sys.exit(17)\n"
             "    args = sys.argv[1:]\n"
             "    kind = 'bin' if '--bin' in args else 'lib'\n"
             "    name = args[args.index('--bin') + 1] if kind == 'bin' else 'harness'\n"
@@ -68,6 +76,20 @@ class FocusedTestRunnerTests(unittest.TestCase):
             "    print(json.dumps({'reason': 'compiler-artifact', 'package_id': 'pkg', 'profile': {'test': True}, 'target': {'kind': [kind], 'name': name}, 'executable': str(base / 'test-artifact')}))\n"
         )
         self.stub.chmod(0o755)
+        git = self.bin_dir / "git"
+        git.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, pathlib, sys\n"
+            "base = pathlib.Path(__file__).parent\n"
+            "if sys.argv[1:3] == ['rev-parse', 'HEAD']:\n"
+            "    path = base / 'source-reads'\n"
+            "    count = int(path.read_text()) + 1 if path.exists() else 1\n"
+            "    path.write_text(str(count))\n"
+            "    print('after' if os.environ.get('STUB_MODE') == 'drift' and count > 1 else 'before')\n"
+            "elif sys.argv[1:3] == ['status', '--porcelain']:\n"
+            "    pass\n"
+        )
+        git.chmod(0o755)
         rustc = self.bin_dir / "rustc"
         rustc.write_text("#!/bin/sh\nprintf '%s\\n' /tmp\n")
         rustc.chmod(0o755)
@@ -186,6 +208,48 @@ class FocusedTestRunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("BIN_TARGET_SELECTED", result.stderr)
         self.assertIn("1 executed, 1 passed", result.stderr)
+
+    def record(self, result: subprocess.CompletedProcess[str]) -> dict:
+        marker = "focused test evidence: "
+        path = next(line[len(marker):] for line in reversed(result.stderr.splitlines())
+                    if line.startswith(marker))
+        return json.loads(Path(path).read_text())
+
+    def test_metadata_failure_retains_phase_without_test_counts(self) -> None:
+        result = self.invoke("metadata_failure")
+        record = self.record(result)
+        self.assertEqual(result.returncode, 11)
+        self.assertEqual(record["phase"], "metadata")
+        self.assertEqual(record["metadata_exit_code"], 11)
+        self.assertIn("metadata unavailable", record["metadata_diagnostic"])
+        self.assertNotIn("build_exit_code", record)
+        self.assertNotIn("runnable", record)
+
+    def test_compiler_failure_retains_diagnostic_without_fake_executable(self) -> None:
+        result = self.invoke("build_failure")
+        record = self.record(result)
+        self.assertEqual(result.returncode, 17)
+        self.assertEqual(record["phase"], "build")
+        self.assertEqual(record["build_exit_code"], 17)
+        self.assertEqual(record["compiler_error_count"], 1)
+        self.assertIn("error[E0308]", record["build_diagnostic"])
+        self.assertIsNone(record["executable"])
+        self.assertIsNone(record["output"])
+        self.assertNotIn("matched", record)
+        self.assertNotIn("summaries", record)
+
+    def test_source_drift_is_visible_after_execution(self) -> None:
+        record = self.record(self.invoke("drift"))
+        self.assertEqual(record["source_before"], "before")
+        self.assertEqual(record["source_after"], "after")
+
+    def test_truncated_compiler_diagnostic_names_full_log(self) -> None:
+        record = self.record(self.invoke("build_long"))
+        self.assertEqual(record["compiler_error_count"], 1)
+        self.assertTrue(record["build_diagnostic"].startswith("[earlier diagnostic omitted"))
+        self.assertIn("build.log", record["build_diagnostic"])
+        self.assertIn("error[E0308]", record["build_diagnostic"])
+        self.assertLessEqual(len(record["build_diagnostic"]), 8192)
 
 
 if __name__ == "__main__":

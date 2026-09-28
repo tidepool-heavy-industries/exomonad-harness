@@ -49,6 +49,22 @@ def cargo_command(package: str, target: str, filter_text: str) -> list[str]:
     return ["cargo", "test", "-p", package, *target_args, filter_text]
 
 
+def source_snapshot(directory: Path) -> tuple[str | None, str | None]:
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=directory,
+                          text=True, capture_output=True, check=False)
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=directory,
+                            text=True, capture_output=True, check=False)
+    return (head.stdout.strip() if head.returncode == 0 else None,
+            status.stdout if status.returncode == 0 else None)
+
+
+def bounded_diagnostic(value: str, artifact: Path) -> str:
+    if len(value) <= 8192:
+        return value
+    marker = f"[earlier diagnostic omitted; full output: {artifact}]\n"
+    return marker + value[-(8192 - len(marker)):]
+
+
 def run(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         description="Run a focused package test after checking its libtest match count."
@@ -76,19 +92,51 @@ def run(argv: Sequence[str]) -> int:
 
     build = cargo_command(args.package, args.target, args.filter)[:-1]
     build.extend(["--no-run", "--message-format=json"])
+    evidence = Path(tempfile.mkdtemp(prefix="focused-"))
+    source_before, status_before = source_snapshot(Path.cwd())
+    record = {"build_command": build, "package": args.package, "target": args.target,
+              "filter": args.filter, "expected": args.expect,
+              "source_before": source_before, "working_tree_status_before": status_before,
+              "source": source_before, "working_tree_status": status_before,
+              "phase": "metadata", "executable": None, "sha256": None,
+              "output": None}
+
+    def save() -> None:
+        (evidence / "evidence.json").write_text(json.dumps(record, indent=2) + "\n")
+
+    def finish(code: int) -> int:
+        source_after, status_after = source_snapshot(Path.cwd())
+        record.update(source_after=source_after, working_tree_status_after=status_after)
+        save()
+        return code
+
+    save()
+    print(f"focused test evidence: {evidence / 'evidence.json'}", file=sys.stderr)
     metadata = subprocess.run(
         ["cargo", "metadata", "--no-deps", "--format-version=1"],
         text=True, capture_output=True, check=False,
     )
+    record.update(metadata_exit_code=metadata.returncode,
+                  metadata_diagnostic=bounded_diagnostic(metadata.stderr, evidence / "metadata.log"))
+    (evidence / "metadata.log").write_text(metadata.stdout + metadata.stderr)
+    save()
     if metadata.returncode:
         sys.stderr.write(metadata.stderr)
-        return metadata.returncode
+        return finish(metadata.returncode)
     packages = [p for p in json.loads(metadata.stdout)["packages"] if p["name"] == args.package]
     if len(packages) != 1:
-        parser.error("--package must name exactly one workspace package")
+        record.update(phase="metadata_rejected",
+                      metadata_diagnostic="--package must name exactly one workspace package")
+        print("focused test rejected: --package must name exactly one workspace package", file=sys.stderr)
+        return finish(2)
     package = packages[0]
     cwd = Path(package["manifest_path"]).parent
+    record["phase"] = "build"
+    save()
     built = subprocess.run(build, text=True, capture_output=True, check=False)
+    rendered_diagnostics = []
+    compiler_error_count = 0
+    (evidence / "build.log").write_text(built.stdout + built.stderr)
     sys.stderr.write(built.stderr)
     artifacts = []
     library_paths = []
@@ -99,7 +147,11 @@ def run(argv: Sequence[str]) -> int:
             sys.stderr.write(line + "\n")
             continue
         if event.get("reason") == "compiler-message":
-            sys.stderr.write(event["message"].get("rendered") or event["message"]["message"])
+            rendered = event["message"].get("rendered") or event["message"]["message"]
+            rendered_diagnostics.append(rendered)
+            sys.stderr.write(rendered)
+            if event["message"].get("level") == "error":
+                compiler_error_count += 1
         if event.get("reason") == "build-script-executed":
             library_paths.append(event["out_dir"])
         if (event.get("reason") == "compiler-artifact"
@@ -113,14 +165,29 @@ def run(argv: Sequence[str]) -> int:
                 selected = kind in target["kind"] and name == target["name"]
             if selected:
                 artifacts.append(event["executable"])
+    record.update(build_exit_code=built.returncode,
+                  compiler_error_count=compiler_error_count,
+                  build_diagnostic=bounded_diagnostic(
+                      built.stderr + "\n" + "\n".join(rendered_diagnostics),
+                      evidence / "build.log"))
+    save()
     if built.returncode:
-        return built.returncode
+        return finish(built.returncode)
     if len(set(artifacts)) != 1:
         print("focused test rejected: expected exactly one libtest artifact", file=sys.stderr)
-        return 1
+        record["phase"] = "artifact_rejected"
+        return finish(1)
     original = Path(artifacts[0]).resolve()
+    previous_evidence = evidence
+    evidence = Path(shutil.move(str(evidence), str(original.parent / evidence.name)))
+    for key, log in (("metadata_diagnostic", "metadata.log"),
+                     ("build_diagnostic", "build.log")):
+        if key in record:
+            record[key] = record[key].replace(str(previous_evidence / log),
+                                              str(evidence / log))
+    save()
+    print(f"focused test evidence: {evidence / 'evidence.json'}", file=sys.stderr)
     # Keep the executable for self-spawning crash tests and later inspection.
-    evidence = Path(tempfile.mkdtemp(prefix="focused-", dir=original.parent))
     executable = evidence / original.name
     shutil.copy2(original, executable)
     digest = hashlib.sha256(executable.read_bytes()).hexdigest()
@@ -129,7 +196,9 @@ def run(argv: Sequence[str]) -> int:
     sysroot = subprocess.run(["rustc", "--print", "target-libdir"], text=True, capture_output=True, check=False)
     if sysroot.returncode:
         sys.stderr.write(sysroot.stderr)
-        return sysroot.returncode
+        record.update(phase="sysroot_failed", sysroot_exit_code=sysroot.returncode,
+                      sysroot_diagnostic=sysroot.stderr[-8192:])
+        return finish(sysroot.returncode)
     library_paths.append(sysroot.stdout.strip())
     library_key = "DYLD_FALLBACK_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
     if env.get(library_key):
@@ -139,15 +208,9 @@ def run(argv: Sequence[str]) -> int:
     env["CARGO_MANIFEST_PATH"] = package["manifest_path"]
     env["CARGO_PKG_NAME"] = package["name"]
     env["CARGO_PKG_VERSION"] = package["version"]
-    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd, text=True, capture_output=True, check=False)
-    status = subprocess.run(["git", "status", "--porcelain"], cwd=cwd, text=True, capture_output=True, check=False)
-    record = {"build_command": build, "package": args.package, "target": args.target,
-              "filter": args.filter, "expected": args.expect, "executable": str(executable),
-              "sha256": digest, "source": head.stdout.strip() if head.returncode == 0 else None,
-              "working_tree_status": status.stdout if status.returncode == 0 else None,
-              "output": str(evidence / "output.log")}
-    (evidence / "evidence.json").write_text(json.dumps(record, indent=2) + "\n")
-    print(f"focused test evidence: {evidence / 'evidence.json'}", file=sys.stderr)
+    record.update(phase="listing", executable=str(executable), sha256=digest,
+                  output=str(evidence / "output.log"))
+    save()
     command = [str(executable), args.filter]
     all_list = subprocess.run(
         [*command, "--list"], cwd=cwd, env=env, text=True, capture_output=True, check=False
@@ -155,7 +218,7 @@ def run(argv: Sequence[str]) -> int:
     if all_list.returncode != 0:
         sys.stderr.write(all_list.stdout)
         sys.stderr.write(all_list.stderr)
-        return all_list.returncode
+        return finish(all_list.returncode)
 
     ignored_list = subprocess.run(
         [*command, "--list", "--ignored"], cwd=cwd, env=env,
@@ -166,7 +229,7 @@ def run(argv: Sequence[str]) -> int:
     if ignored_list.returncode != 0:
         sys.stderr.write(ignored_list.stdout)
         sys.stderr.write(ignored_list.stderr)
-        return ignored_list.returncode
+        return finish(ignored_list.returncode)
 
     (evidence / "listed.log").write_text(all_list.stdout + all_list.stderr)
     (evidence / "ignored.log").write_text(ignored_list.stdout + ignored_list.stderr)
@@ -174,14 +237,14 @@ def run(argv: Sequence[str]) -> int:
     ignored = test_names(ignored_list.stdout)
     runnable = matched - ignored
     record.update(matched=sorted(matched), runnable=sorted(runnable), ignored=sorted(ignored))
-    (evidence / "evidence.json").write_text(json.dumps(record, indent=2) + "\n")
+    save()
     if not runnable:
         print(
             f"focused test rejected: {len(matched)} matched, "
             f"0 runnable, {len(ignored & matched)} ignored",
             file=sys.stderr,
         )
-        return 1
+        return finish(1)
 
     print(
         f"focused test selection: {len(matched)} matched, {len(runnable)} runnable, "
@@ -190,7 +253,9 @@ def run(argv: Sequence[str]) -> int:
     )
     if args.expect is not None and len(runnable) != args.expect:
         print(f"focused test rejected: expected {args.expect} runnable, selected {len(runnable)}", file=sys.stderr)
-        return 1
+        return finish(1)
+    record["phase"] = "execution"
+    save()
     completed = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, text=True, bufsize=1)
     output = (evidence / "output.log").open("w")
@@ -217,23 +282,23 @@ def run(argv: Sequence[str]) -> int:
             file=sys.stderr,
         )
     record.update(exit_code=returncode, summaries=summaries)
-    (evidence / "evidence.json").write_text(json.dumps(record, indent=2) + "\n")
+    save()
     if returncode != 0:
-        return returncode
+        return finish(returncode)
     if not summaries:
         print("focused test rejected: successful Cargo exit without a libtest result", file=sys.stderr)
-        return 1
+        return finish(1)
 
     if len(summaries) != 1:
         print("focused test rejected: multiple libtest summaries", file=sys.stderr)
-        return 1
+        return finish(1)
     if executed != len(runnable):
         print(f"focused test rejected: selected {len(runnable)} runnable but executed {executed}", file=sys.stderr)
-        return 1
+        return finish(1)
     if executed == 0:
         print("focused test rejected: successful Cargo exit ran zero tests", file=sys.stderr)
-        return 1
-    return 0
+        return finish(1)
+    return finish(0)
 
 
 if __name__ == "__main__":
