@@ -12,13 +12,9 @@ use tokio::sync::mpsc;
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct JobHandle(pub String);
 
-// TODO(correction-wave, allowed if a-c need it): PRD `provider trait` shape.
-// `CallContext` should carry `cancel: CancellationToken` (tokio-util) and
-// `verbs: JobVerbs`; `progress` must be a BOUNDED channel with an explicit
-// overflow policy (PRD `fast !`). Tool identity by `&str` and JSON in/out is
-// the wire boundary leaking into the trait; typed `Tools` with
-// `output_schema` is the target. Hooks (eleven typed points, one closed
-// Decision enum each) are wave1, not this wave.
+// TODO(adoption C0/H1; docs/daily-driver-plan.md): reconcile CallContext with
+// accepted bounded-progress/cancellation work before wiring a resident evaluator.
+// Extend the existing job owner; do not add a parallel provider-side job registry.
 /// Per-call metadata supplied by the harness. Progress is deliberately
 /// out-of-band: it is never appended to the model-visible item list.
 #[derive(Clone, Debug)]
@@ -56,11 +52,9 @@ pub trait Provider: Send + Sync {
         self.call(name, args).await
     }
 
-    // FIXME(correction-wave): agent verbs are crate-owned (PRD `agent verbs`);
-    // routing them through the provider inverts the dependency and forces every
-    // consumer to wire `StoreAgentToolService` by hand. The engine should
-    // dispatch verbs itself; the provider supplies tools and hooks only.
-    // Nudge `verbs_via_provider`.
+    // TODO(adoption C0/H2; docs/daily-driver-plan.md): decide the sole agent
+    // transition authority with the embedding host; route verbs to that owner
+    // rather than duplicating lifecycle state in each Provider implementation.
     /// Runtime hook for crate-provided agent verbs. A provider integrating
     /// durable sessions should route this to `dispatch_agent_verb`.
     async fn call_agent_verb(
@@ -76,11 +70,6 @@ pub trait Provider: Send + Sync {
 
     /// Complete stable model tool list (harness verbs plus provider-owned
     /// tools). The provider's existing `tools` method remains unchanged.
-    // TODO(correction-wave b): this is the ONE place to make
-    // `tests/correction_wave.rs` green: stamp `"async": true` on every tool
-    // here, crate verbs and provider tools alike, except `wait_agent`. a
-    // provider-supplied `async` is overridden, not trusted (PRD `provider
-    // trait`; fix the class, not each schema).
     fn all_tools(&self) -> Vec<Value> {
         let mut tools = verb_tool_schemas();
         tools.extend(self.tools());

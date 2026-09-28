@@ -1,5 +1,9 @@
 # Correction wave — execution contract
 
+Current delivery sequencing and acceptance gates: [daily-driver roadmap](daily-driver-plan.md).
+Historical wave scope below does not establish current implementation status.
+The roadmap does not silently amend the PRD contract.
+
 Source: `docs/tree.md` correction-wave and wave0-review bullets, PRD §§ provider
 trait, agent verbs, settings items, loop and compaction. Human correction
 received 2026-09-24; Q1–Q3 in `docs/questions.md` remain settled. This is a

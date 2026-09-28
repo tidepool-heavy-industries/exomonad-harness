@@ -1,5 +1,9 @@
 # exomonad-harness PRD
 
+Current delivery sequencing and acceptance gates: [daily-driver roadmap](docs/daily-driver-plan.md).
+Historical wave scope below does not establish current implementation status.
+The roadmap does not silently amend the PRD contract.
+
 fmt: compressed. `→` yields/then. `⊥` no dependency. `!` hard rule. `?` open, must be settled by experiment + written down.
 
 ## what

@@ -26,6 +26,9 @@ pub struct CellOutput {
     pub stderr: String,
 }
 
+// TODO(adoption H1; docs/daily-driver-plan.md): connect this seam to the
+// embedding resident workbench. Prove underlying execution/resource cancellation;
+// dropping this future is insufficient for work retained by another owner.
 /// A resident interpreter; a future is one cancellable, asynchronous cell Job.
 #[async_trait]
 pub trait CellJob: Send + Sync {

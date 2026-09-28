@@ -1182,6 +1182,9 @@ async fn serve(
         JobScheduler::new(4)
             .map_err(|_| "could not initialize server tool scheduler".to_owned())?,
     );
+    // TODO(adoption H3; docs/daily-driver-plan.md): compose the reusable server
+    // with the live tree driver in the embedding binary, preserving this explicit
+    // offline mode and sharing authoritative Engine/Store state with the browser.
     // --serve is the credential-free deterministic browser journey. The
     // interactive --ask path remains backed by CliDriver/Engine; browser
     // commands must never silently turn into model requests.

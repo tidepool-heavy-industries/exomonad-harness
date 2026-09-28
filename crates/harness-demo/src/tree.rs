@@ -50,6 +50,9 @@ impl Provider for TreeProvider {
         args: Value,
         context: CallContext,
     ) -> Result<Value, ProviderError> {
+        // TODO(adoption H2; docs/daily-driver-plan.md): replace this refusal only
+        // after the embedding host supplies a committed conversation/resident/source
+        // fork boundary. Store history alone does not establish a safe actor fork.
         // The store can represent inherited heads, but the demo has no
         // committed fork boundary yet. Never claim that stale parent history
         // was safely forked.

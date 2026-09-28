@@ -1,5 +1,9 @@
 # dogfood requirements (waves 5 + 6, 2026-09-24/25)
 
+Current delivery sequencing and acceptance gates: [daily-driver roadmap](daily-driver-plan.md).
+Historical wave scope below does not establish current implementation status.
+The roadmap does not silently amend the PRD contract.
+
 fmt: as PRD. `ev` = evidence (run, number, where). `PRD` = the section + rule that already covers it. `GAP` = what the PRD does not yet say and the evidence requires. amendments at the end are proposals; PRD.md is unchanged.
 
 sources: `~/dev/tidepool/plans/next-wave-inputs.md` (from "Delivery fence on a hosted input" onward), `~/dev/tidepool/plans/wave6-root-interview-digest.md`, `docs/exomonad-interviews.md` (wave 5 root, rounds 1+2), `docs/exomonad-friction.md` (wave 6 root). every problem below was seen on the Codex-hosted path; the question per row is whether this crate removes it by construction, covers it with a primitive, or still owes a rule.

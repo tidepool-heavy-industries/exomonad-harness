@@ -2,6 +2,9 @@ use super::{Auth, TransportError};
 use serde::Deserialize;
 use std::path::PathBuf;
 
+// TODO(adoption H4; docs/daily-driver-plan.md): provide coordinated refresh
+// and explicit reauthentication through Auth before removing the Codex credential
+// dependency. Keep this read-only implementation as an explicit bridge.
 /// Reads Codex-owned credentials for each request without writing or
 /// refreshing them. The returned strings live only for the request lifetime.
 #[derive(Clone)]

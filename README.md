@@ -2,7 +2,9 @@
 
 A standalone Rust harness for GPT-6 over the OpenAI Responses API: every tool call is asynchronous, agents form a tree with the verbs GPT-6 was trained on, the operator is a peer in the same mailbox, and the whole run is a content-addressed request tree in SQLite with a web view served from the binary. No dependency on Tidepool or Exomonad; Exomonad consumes it later through an adapter.
 
-Start at `NEXT.md`: where the last run stopped and where this one starts.
+Start at `NEXT.md` for current integration status and the
+[daily-driver adoption roadmap](docs/daily-driver-plan.md). Historical run
+assignments are retained separately; the main checkout may lag active run work.
 
 Read in this order:
 
