@@ -14,6 +14,32 @@ point, not a restriction on discovery. Preserve command handles and output paths
 After a restart, recover retained output before considering new execution;
 missing a local binding does not establish that the original command stopped.
 
+## Set up continuations at admission
+
+Choose the local flow before spawning: `unfoldWork` for independent work;
+`unfoldWorkWithDependencies` for declared producer/consumer edges and existing
+accepted-decision correspondence; checked review for a separate retained
+implementer under the unchanged Task. Pass the actual published helper names,
+inputs and acceptance to component owners. End the admission cell and continue
+independent work. Do not add a second watcher or review loop around the owner.
+See `CONTINUATIONS.md` in the shared workspace for the compiled compositions.
+
+A publication note binds an exact candidate and says what changed and who must
+act: “Cancelling a waiter leaves its job running; callers must cancel the job
+separately.” “Updated API” supplies no useful correspondence evidence. Attach
+notes to substantive ordinary progress; keep questions cumulative. A recipient
+checks applicability at its next relevant decision and reports incorporated OID
+and checks in normal progress. Do not create acknowledgment-only turns.
+
+Known failures branch deterministically; Jev selects only semantic alternatives
+from sufficient supplied evidence. Uncertainty uses declared delivery. Refused
+admission or a stopped flow needs its owner; neither is successful completion.
+Retain original handles and evidence. Read a snapshot for an actionable decision,
+not every intermediate stage. Drain the batch, handle refusal, then separately
+retire completed workers after their kaizen handoff. Report a concrete relay,
+reread or followup removed, or the exact fallback/manual repair; invocation counts
+alone do not establish savings.
+
 ## Evaluate the workflow while delivering
 
 When the launch brief assigns an Astra root, own both product delivery and an
