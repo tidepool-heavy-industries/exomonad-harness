@@ -45,3 +45,20 @@ CREATE TABLE IF NOT EXISTS agents (
        (parent_path IS NOT NULL AND path GLOB parent_path || '/*'))
 );
 CREATE INDEX IF NOT EXISTS agents_parent ON agents(parent_path,path);
+CREATE TABLE IF NOT EXISTS checkpoints (
+ id TEXT PRIMARY KEY, origin_agent TEXT NOT NULL REFERENCES agents(path),
+ source_request TEXT NOT NULL REFERENCES requests(id),
+ snapshot_request TEXT NOT NULL UNIQUE REFERENCES requests(id),
+ boundary_call TEXT NOT NULL, metadata TEXT NOT NULL, pending_claims TEXT NOT NULL,
+ created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS embedded_bindings (
+ agent_path TEXT PRIMARY KEY REFERENCES agents(path),
+ run_id TEXT NOT NULL, incarnation TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS embedded_inputs (
+ agent_path TEXT NOT NULL REFERENCES embedded_bindings(agent_path),
+ operation_id TEXT NOT NULL, envelope_id INTEGER NOT NULL REFERENCES envelopes(id),
+ item_hash TEXT NOT NULL REFERENCES items(hash),
+ PRIMARY KEY(agent_path, operation_id)
+);

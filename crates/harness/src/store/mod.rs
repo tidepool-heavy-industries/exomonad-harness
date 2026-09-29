@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::{
     path::Path,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -52,6 +52,14 @@ pub enum StoreError {
     ReplayOutputKindMismatch { call_id: String, expected: ToolKind },
     #[error("ambiguous durable invocation for call `{call_id}`")]
     AmbiguousReplayCall { call_id: String },
+    #[error("checkpoint boundary call {call_id} is not in request {request}")]
+    MissingCheckpointCall { request: String, call_id: String },
+    #[error("checkpoint boundary call {call_id} has no durable claim in request {request}")]
+    MissingCheckpointClaim { request: String, call_id: String },
+    #[error("checkpoint request {0} has no recorded effort setting")]
+    MissingCheckpointEffort(String),
+    #[error("checkpoint belongs to a different Store process")]
+    ForeignCheckpoint,
 }
 
 #[cfg(test)]
@@ -156,7 +164,7 @@ pub struct Agent {
     pub state: AgentState,
     pub created_at: i64,
 }
-fn utc_millis() -> i64 {
+pub(crate) fn utc_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -217,10 +225,11 @@ pub struct Decision {
 
 /// Clones share one serialized SQLite connection. Use separate Store::open handles for read concurrency.
 pub struct Store {
-    conn: Mutex<Connection>,
+    pub(crate) conn: Mutex<Connection>,
+    pub(crate) process_identity: Arc<()>,
 }
 impl Store {
-    fn validate_agent_path(path: &str, parent: Option<&str>) -> Result<()> {
+    pub(crate) fn validate_agent_path(path: &str, parent: Option<&str>) -> Result<()> {
         let valid = |s: &str| {
             !s.is_empty()
                 && s.bytes()
@@ -749,9 +758,10 @@ impl Store {
         schema::initialize(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            process_identity: Arc::new(()),
         })
     }
-    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
     }
     pub fn create_request(
@@ -950,7 +960,7 @@ impl Store {
             .optional()
             .map_err(Into::into)
     }
-    fn put_item_tx(tx: &Transaction<'_>, item: &Item) -> Result<ItemHash> {
+    pub(crate) fn put_item_tx(tx: &Transaction<'_>, item: &Item) -> Result<ItemHash> {
         let bytes = serde_json::to_vec(item)?;
         let hash = blake3::hash(&bytes).to_hex().to_string();
         let json = String::from_utf8(bytes).expect("serde_json emits UTF-8");
@@ -1028,7 +1038,7 @@ impl Store {
     // The single trusted positional-setting writer. Both the ordinary
     // Store::set_effort API and atomic pending-setting consumption route here;
     // model-authored items still cannot reach it through append_items.
-    fn set_effort_tx(
+    pub(crate) fn set_effort_tx(
         tx: &Transaction<'_>,
         request: &RequestId,
         effort: Effort,
@@ -2603,7 +2613,7 @@ mod tests {
         let version: u32 = conn
             .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         assert!(schema::initialize(&mut conn).is_ok());
     }
 
@@ -2627,7 +2637,7 @@ mod tests {
         let version: u32 = conn
             .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]

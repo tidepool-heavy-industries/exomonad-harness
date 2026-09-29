@@ -2,6 +2,7 @@
 pub mod agent_runtime;
 pub mod agents;
 pub mod cell_job;
+pub mod checkpoint;
 pub mod compaction;
 pub mod engine;
 pub mod finalize;
