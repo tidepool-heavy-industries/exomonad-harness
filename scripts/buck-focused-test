@@ -54,7 +54,7 @@ def main() -> int:
         parser.error("target package does not exist")
     command = [buck2(root), "build", args.target, "--show-full-simple-output", "-v", "0"]
     if args.local_only:
-        command.append("--local-only")
+        command.extend(["--local-only", "-c", "remote.enabled=false"])
     built = subprocess.run(command, cwd=root, text=True, capture_output=True, check=False)
     sys.stderr.write(built.stderr)
     if built.returncode:

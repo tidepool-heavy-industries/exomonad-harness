@@ -40,6 +40,8 @@
         buck-node = pkgs.nodejs_24;
         buck-bash = pkgs.bash;
         buck-coreutils = pkgs.coreutils;
+        buck-tar = pkgs.gnutar;
+        buck-gzip = pkgs.gzip;
         buck-python = pkgs.python3;
       } // pkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
         buck-reindeer = pkgs.runCommand "reindeer-2026.09.14.00" {
