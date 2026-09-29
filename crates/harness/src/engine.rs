@@ -6,7 +6,7 @@
 
 use crate::{
     compaction::{
-        CompactContext, CompactError, Compactor, Server, ServerCompactFuture, ToolName,
+        CompactContext, CompactError, Compactor, PlainText, Server, ServerCompactFuture, ToolName,
         TypedTurnFuture,
     },
     finalize::{FINALIZE_TOOL_NAME, FinalizeError, FinalizeParser},
@@ -27,7 +27,7 @@ use crate::{
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde_json::json;
-use std::sync::Arc;
+use std::{num::NonZeroU64, sync::Arc};
 use thiserror::Error;
 use tokio::sync::watch;
 
@@ -163,7 +163,14 @@ pub struct Engine<A: Auth, P: Provider, C: ResponsesTransport = ResponsesClient<
     provider: Arc<P>,
     config: EngineConfig,
     compact_at_input_tokens: Option<u64>,
+    compaction_strategy: CompactionStrategy,
     _auth: std::marker::PhantomData<fn() -> A>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompactionStrategy {
+    Server,
+    PlainText,
 }
 
 impl<A: Auth + Clone + 'static, P: Provider + 'static> Engine<A, P, ResponsesClient<A>> {
@@ -239,6 +246,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             provider,
             config,
             compact_at_input_tokens: None,
+            compaction_strategy: CompactionStrategy::Server,
             _auth: std::marker::PhantomData,
         }
     }
@@ -247,6 +255,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     /// reaches this threshold. No automatic API compaction is enabled.
     pub fn with_compaction_threshold(mut self, input_tokens: u64) -> Self {
         self.compact_at_input_tokens = (input_tokens > 0).then_some(input_tokens);
+        self.compaction_strategy = CompactionStrategy::Server;
+        self
+    }
+
+    /// Opt into plain-text handoffs near half the configured context capacity.
+    pub fn with_plain_text_compaction(mut self, context_capacity_tokens: NonZeroU64) -> Self {
+        self.compact_at_input_tokens = Some(context_capacity_tokens.get().div_ceil(2));
+        self.compaction_strategy = CompactionStrategy::PlainText;
         self
     }
 
@@ -571,6 +587,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let mut parent = id.clone();
         let mut compact_due = false;
         let mut previous_usage = Usage::default();
+        let mut last_text_compaction_attempt_bytes = None;
         loop {
             if *cancellation.borrow() {
                 return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
@@ -587,10 +604,22 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 Ok(history) => history,
                 Err(error) => return Err(self.cleanup_pending(error, &pending).await),
             };
-            let did_compact = compact_due;
+            let history_bytes = (compact_due
+                && self.compaction_strategy == CompactionStrategy::PlainText)
+                .then(|| {
+                    serde_json::to_vec(&history)
+                        .expect("Item serialization is infallible")
+                        .len()
+                });
+            let did_compact = compact_due
+                && (self.compaction_strategy == CompactionStrategy::Server
+                    || last_text_compaction_attempt_bytes.is_none_or(|previous: usize| {
+                        history_bytes
+                            .is_some_and(|bytes| bytes >= previous.saturating_add(previous / 4))
+                    }));
             if did_compact {
                 let compact = self.compact_window(&parent, &history, &pending, &previous_usage);
-                parent = match tokio::select! {
+                let successor = match tokio::select! {
                     result = compact => result,
                     changed = cancellation.changed() => {
                         if changed.is_err() || *cancellation.borrow() {
@@ -603,6 +632,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     Ok(request) => request,
                     Err(error) => return Err(self.cleanup_pending(error, &pending).await),
                 };
+                if self.compaction_strategy == CompactionStrategy::PlainText {
+                    last_text_compaction_attempt_bytes = history_bytes;
+                }
+                if let Some(request) = successor {
+                    parent = request;
+                }
             }
             if did_compact && admit_inbox {
                 if let Err(error) = self.append_unread_envelopes(&parent).await {
@@ -1676,15 +1711,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         history: &[Item],
         pending: &[PendingCall],
         usage: &Usage,
-    ) -> Result<RequestId, EngineError> {
+    ) -> Result<Option<RequestId>, EngineError> {
         let pending_items: Vec<Item> = pending
             .iter()
             .map(|call| {
                 history
                     .iter()
                     .find(|item| {
-                        item.0["type"] == "function_call"
-                            && item.0["call_id"].as_str() == Some(call.call_id.0.as_str())
+                        item.0["call_id"].as_str() == Some(call.call_id.0.as_str())
+                            && matches!(
+                                item.0["type"].as_str(),
+                                Some("function_call" | "custom_tool_call")
+                            )
                     })
                     .cloned()
                     .ok_or_else(|| {
@@ -1720,6 +1758,24 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 Ok(turn.items)
             })
         };
+        let text_turn = |items: Vec<Item>| -> ServerCompactFuture<'_> {
+            Box::pin(async move {
+                let turn = self
+                    .client
+                    .create(ResponsesRequest {
+                        input: items,
+                        instructions: self.config.instructions.clone(),
+                        tools: vec![],
+                        tools_allowed: Some(vec![]),
+                        model: self.config.model.clone(),
+                        pinned_effort: effective_effort,
+                        session_id: self.config.session_id.clone(),
+                    })
+                    .await
+                    .map_err(|error| CompactError::Failed(error.to_string()))?;
+                Ok(turn.items)
+            })
+        };
         // Server does not request typed turns; the capability is reserved for
         // other strategies and must not silently call an unforced model turn.
         let typed_turn = |_instructions: String,
@@ -1732,16 +1788,33 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 ))
             })
         };
-        let window = Server
-            .compact(CompactContext {
-                items: history,
-                usage,
-                pending_calls: &pending_items,
-                effort: effective_effort,
-                server_compact: &server_compact,
-                typed_turn: &typed_turn,
-            })
-            .await?;
+        let context = CompactContext {
+            items: history,
+            usage,
+            pending_calls: &pending_items,
+            effort: effective_effort,
+            server_compact: &server_compact,
+            typed_turn: &typed_turn,
+            text_turn: &text_turn,
+        };
+        let window = match self.compaction_strategy {
+            CompactionStrategy::Server => Server.compact(context).await?,
+            CompactionStrategy::PlainText => match PlainText.compact(context).await {
+                Ok(window) => window,
+                Err(_) => return Ok(None),
+            },
+        };
+        if self.compaction_strategy == CompactionStrategy::PlainText {
+            let old_bytes = serde_json::to_vec(history)
+                .expect("Item serialization is infallible")
+                .len();
+            let new_bytes = serde_json::to_vec(&window.items)
+                .expect("Item serialization is infallible")
+                .len();
+            if new_bytes.saturating_mul(5) > old_bytes.saturating_mul(4) {
+                return Ok(None);
+            }
+        }
         let request = RequestId(uuid::Uuid::new_v4().to_string());
         let store = self.store.clone();
         let source = source.clone();
@@ -1751,7 +1824,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             store.write_compaction_request(&successor, &source, &branch, &window.items)
         })
         .await?;
-        Ok(request)
+        Ok(Some(request))
     }
 }
 
