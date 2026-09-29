@@ -31,7 +31,7 @@ fmt: compressed. `→` yields/then. `⊥` no dependency. `!` hard rule. `?` open
 - models: gpt-6-astra | gpt-6-sol | gpt-6-luna. effort: low | medium | high. no xhigh/max/ultra (cost) !
 - effort mid-conversation via `configuration_update` item; request-level `reasoning.effort` pinned to first update in history (cache) !; two updates never adjacent !; after compaction: drop updates, re-pin with fresh update.
 - headless core + one event stream + one command channel. view = web page served by same binary, tailscale iface. no TUI (terminal client = trivial consumer of channel, later, if wanted).
-- codex = reference reading only ! copy nothing ! write from API docs + scaffolding.
+- Codex's local source is a reference for established behavior, especially plain-text compaction. Reuse that proven flow for embedded v1, retaining applicable notices if code or prompts are copied; do not recreate its process protocol or assume its cancellation behavior fits resident jobs.
 - primitives not helpers ! the standalone demo may expose handle/call, wait, cancel, spawn, checkpoint, effort and compaction verbs. Embedded mode does not make these mandatory model-facing tools: the host supplies the authorized tool surface and retains actor lifecycle authority. See the embedded contract.
 - one process owns run + whole tree of sessions.
 - Standalone demo may expose a model-facing agent tree. Embedded Exomonad tree operations are authorized Haskell effects/tools and kernel-owned lifecycle; the harness must not create a competing embedded tree authority. Both modes remain independent of hosted `multi_agent` mode.

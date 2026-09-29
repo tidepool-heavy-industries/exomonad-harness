@@ -154,8 +154,9 @@ mark unavailable work honestly and offer deliberate recovery.
 
 The embedded host is not accepted until one browser run demonstrates a Sol root
 managing two independent Haskell-directed workflows, each with Luna delegation,
-checks, exact-candidate independent review, at least one repair path, typed
-completion, integration, and deliberate resource cleanup. The browser must show
+checks, exact-candidate independent review, typed completion, integration, and
+deliberate resource cleanup. Exercise at least one repair across the two
+workflows. The browser must show
 model and Haskell-only workflow actors, pending work, progress, checkpoint
 provenance, retained results, and escalation. Refresh/reconnect must be
 observational and preserve the current run state.
