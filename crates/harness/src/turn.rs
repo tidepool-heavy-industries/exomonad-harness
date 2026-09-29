@@ -50,6 +50,8 @@ pub enum JobError {
     DuplicateCall,
     #[error("unknown call id")]
     UnknownCall,
+    #[error("operation origin does not match scheduler admission context")]
+    OperationContextMismatch,
     #[error("completed tool call item has invalid fields")]
     InvalidCallItem,
     #[error("agent verbs require function-call input")]
@@ -185,10 +187,14 @@ pub trait JobKey {
     fn operation(&self, scheduler: &JobScheduler) -> OperationId;
 }
 impl JobKey for OperationId {
-    fn operation(&self, _scheduler: &JobScheduler) -> OperationId { self.clone() }
+    fn operation(&self, _scheduler: &JobScheduler) -> OperationId {
+        self.clone()
+    }
 }
 impl JobKey for CallId {
-    fn operation(&self, scheduler: &JobScheduler) -> OperationId { scheduler.detached_operation(self) }
+    fn operation(&self, scheduler: &JobScheduler) -> OperationId {
+        scheduler.detached_operation(self)
+    }
 }
 
 // Existing JSON callers remain function calls at the typed dispatch boundary.
@@ -216,7 +222,8 @@ impl JobScheduler {
     fn detached_operation(&self, call: &CallId) -> OperationId {
         OperationId {
             origin: ConversationIdentity::Standalone {
-                store: self.detached_store.clone(), actor: AgentPath("/root".into()),
+                store: self.detached_store.clone(),
+                actor: AgentPath("/root".into()),
             },
             request: RequestId("detached".into()),
             call: call.clone(),
@@ -298,19 +305,26 @@ impl JobScheduler {
         input: ToolInput,
     ) -> Result<JobHandle, JobError> {
         let operation = self.detached_operation(&call_id);
-        self.start_operation(provider, operation, agent, request, name, input).await
+        self.start_operation(provider, operation, agent, request, name, input)
+            .await
     }
 
     /// Start an exact original operation; this is the shared Engine path.
-    pub async fn start_operation(
+    pub async fn start_operation<I: Into<ToolInput>>(
         &self,
         provider: Arc<dyn Provider>,
         operation: OperationId,
         agent: AgentPath,
         request: Option<RequestId>,
         name: String,
-        input: ToolInput,
+        input: I,
     ) -> Result<JobHandle, JobError> {
+        let input = input.into();
+        if !matches!(&operation.origin, ConversationIdentity::Standalone { store, .. } if store == &self.detached_store)
+            && (operation.origin.actor() != &agent || request.as_ref() != Some(&operation.request))
+        {
+            return Err(JobError::OperationContextMismatch);
+        }
         let call_id = operation.call.clone();
         if matches!(&input, ToolInput::Custom(_)) && crate::provider::is_harness_tool(&name) {
             return Err(JobError::AgentVerbRequiresFunction);
@@ -493,7 +507,14 @@ impl JobScheduler {
         claimant: AgentPath,
     ) -> Result<Option<JobOutput>, JobError> {
         let operation = self.detached_operation(call_id);
-        self.claim_exact(&operation, ConversationIdentity::Standalone { store: self.detached_store.clone(), actor: claimant }).await
+        self.claim_exact(
+            &operation,
+            ConversationIdentity::Standalone {
+                store: self.detached_store.clone(),
+                actor: claimant,
+            },
+        )
+        .await
     }
 
     pub async fn claim_exact(
@@ -519,7 +540,15 @@ impl JobScheduler {
         inherit: bool,
     ) -> Result<Option<JobOutput>, JobError> {
         let operation = self.detached_operation(call_id);
-        self.fork_claim_exact(&operation, ConversationIdentity::Standalone { store: self.detached_store.clone(), actor: claimant }, inherit).await
+        self.fork_claim_exact(
+            &operation,
+            ConversationIdentity::Standalone {
+                store: self.detached_store.clone(),
+                actor: claimant,
+            },
+            inherit,
+        )
+        .await
     }
     pub async fn fork_claim_exact(
         &self,
@@ -538,9 +567,17 @@ impl JobScheduler {
     }
 
     pub async fn settled_claimants(&self, call_id: &CallId) -> Result<Vec<AgentPath>, JobError> {
-        Ok(self.settled_claimants_exact(&self.detached_operation(call_id)).await?.into_iter().map(|c| c.actor().clone()).collect())
+        Ok(self
+            .settled_claimants_exact(&self.detached_operation(call_id))
+            .await?
+            .into_iter()
+            .map(|c| c.actor().clone())
+            .collect())
     }
-    pub async fn settled_claimants_exact(&self, operation: &OperationId) -> Result<Vec<ConversationIdentity>, JobError> {
+    pub async fn settled_claimants_exact(
+        &self,
+        operation: &OperationId,
+    ) -> Result<Vec<ConversationIdentity>, JobError> {
         Ok(self
             .jobs
             .lock()
@@ -627,7 +664,14 @@ impl JobScheduler {
                 .clone()
         };
         let _guard = gate.lock().await;
-        let handle = self.jobs.lock().await.get(&call_id).ok_or(JobError::UnknownCall)?.handle.clone();
+        let handle = self
+            .jobs
+            .lock()
+            .await
+            .get(&call_id)
+            .ok_or(JobError::UnknownCall)?
+            .handle
+            .clone();
         let owner = {
             let jobs = self.jobs.lock().await;
             let job = jobs.get(&call_id).ok_or(JobError::UnknownCall)?;
@@ -650,16 +694,13 @@ impl JobScheduler {
                 }
                 job.cancel.cancel();
             }
-            let ack = tokio::time::timeout(
-                JOB_CANCELLATION_GRACE,
-                owner.cancel(&handle),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                crate::provider::CancellationAcknowledgment::Unconfirmed(
-                    "owner acknowledgment timed out".into(),
-                )
-            });
+            let ack = tokio::time::timeout(JOB_CANCELLATION_GRACE, owner.cancel(&handle))
+                .await
+                .unwrap_or_else(|_| {
+                    crate::provider::CancellationAcknowledgment::Unconfirmed(
+                        "owner acknowledgment timed out".into(),
+                    )
+                });
             let (task, settlement) = {
                 let mut jobs = self.jobs.lock().await;
                 let job = jobs.get_mut(&call_id).ok_or(JobError::UnknownCall)?;
@@ -759,7 +800,14 @@ impl JobScheduler {
             return Ok(None);
         };
         let _guard = gate.lock().await;
-        let handle = self.jobs.lock().await.get(&call_id).ok_or(JobError::UnknownCall)?.handle.clone();
+        let handle = self
+            .jobs
+            .lock()
+            .await
+            .get(&call_id)
+            .ok_or(JobError::UnknownCall)?
+            .handle
+            .clone();
         {
             let jobs = self.jobs.lock().await;
             let job = jobs.get(&call_id).ok_or(JobError::UnknownCall)?;
@@ -776,16 +824,13 @@ impl JobScheduler {
                 Some(crate::provider::CancellationAcknowledgment::Unconfirmed(_)) => {}
             }
         }
-        let ack = tokio::time::timeout(
-            JOB_CANCELLATION_GRACE,
-            owner.cancel(&handle),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            crate::provider::CancellationAcknowledgment::Unconfirmed(
-                "owner acknowledgment timed out".into(),
-            )
-        });
+        let ack = tokio::time::timeout(JOB_CANCELLATION_GRACE, owner.cancel(&handle))
+            .await
+            .unwrap_or_else(|_| {
+                crate::provider::CancellationAcknowledgment::Unconfirmed(
+                    "owner acknowledgment timed out".into(),
+                )
+            });
         let task = {
             let mut jobs = self.jobs.lock().await;
             let job = jobs.get_mut(&call_id).ok_or(JobError::UnknownCall)?;
@@ -879,7 +924,10 @@ pub async fn wait_agent_and_drain_exact(
 ) -> Result<WaitAgentResultExact, JobError> {
     let resumed_by = wait_agent_exact(envelopes, jobs, cancelled, outstanding).await;
     let call_outputs = outputs_in_operation_order(jobs, outstanding).await?;
-    Ok(WaitAgentResultExact { call_outputs, resumed_by })
+    Ok(WaitAgentResultExact {
+        call_outputs,
+        resumed_by,
+    })
 }
 
 pub async fn wait_agent_exact(
@@ -888,7 +936,9 @@ pub async fn wait_agent_exact(
     cancelled: &mut tokio::sync::watch::Receiver<bool>,
     outstanding: &[OperationId],
 ) -> WaitResumeExact {
-    if *cancelled.borrow() { return WaitResumeExact::Cancelled; }
+    if *cancelled.borrow() {
+        return WaitResumeExact::Cancelled;
+    }
     let mut settlements = jobs.operation_settlements();
     for operation in outstanding {
         if jobs.output(operation).await.ok().flatten().is_some() {
@@ -968,7 +1018,11 @@ pub async fn wait_agent(
                 }
             }
             event = settlements.recv() => match event {
-                Ok(call_id) => return WaitResume::Job(call_id),
+                Ok(call_id) if outstanding_calls_in_order.contains(&call_id)
+                    && jobs.output(&call_id).await.ok().flatten().is_some() => {
+                    return WaitResume::Job(call_id);
+                }
+                Ok(_) => continue,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => {}
             },
@@ -1040,6 +1094,68 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn equal_wire_ids_from_distinct_stores_cancel_independently() {
+        let first_store = crate::store::Store::memory().unwrap();
+        let second_store = crate::store::Store::memory().unwrap();
+        let request = RequestId("same-request".into());
+        let call = CallId("same-call".into());
+        for store in [&first_store, &second_store] {
+            store.create_request(&request, None, "/root").unwrap();
+        }
+        let first = first_store.operation_for_request(&request, &call).unwrap();
+        let second = second_store.operation_for_request(&request, &call).unwrap();
+        assert_ne!(first, second);
+        let scheduler = JobScheduler::new(2).unwrap();
+        let provider: Arc<dyn Provider> = Arc::new(Slow);
+        let first_handle = scheduler
+            .start_operation(
+                provider.clone(),
+                first.clone(),
+                AgentPath("/root".into()),
+                Some(request.clone()),
+                "slow".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        let second_handle = scheduler
+            .start_operation(
+                provider,
+                second.clone(),
+                AgentPath("/root".into()),
+                Some(request),
+                "slow".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        assert_ne!(first_handle, second_handle);
+        assert!(matches!(
+            scheduler
+                .start_operation(
+                    Arc::new(Slow),
+                    first.clone(),
+                    AgentPath("/root".into()),
+                    Some(first.request.clone()),
+                    "slow".into(),
+                    json!({})
+                )
+                .await,
+            Err(JobError::DuplicateCall)
+        ));
+        scheduler.cancel(&first).await.unwrap();
+        assert_eq!(scheduler.wait(&first).await.unwrap(), JobOutput::Cancelled);
+        assert_eq!(
+            scheduler.wait(&second).await.unwrap(),
+            JobOutput::Completed(Ok(json!({"ok": true})))
+        );
+        assert!(matches!(
+            scheduler.output(&call).await,
+            Err(JobError::UnknownCall)
+        ));
+    }
+
     struct RawCustomCapture(std::sync::Mutex<Vec<String>>);
 
     #[async_trait]
@@ -1078,7 +1194,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(handle.0, "custom-raw");
+        assert!(handle.0.starts_with("job:"));
+        assert_ne!(handle.0, "custom-raw");
         assert_eq!(
             scheduler.wait(&CallId("custom-raw".into())).await.unwrap(),
             JobOutput::Completed(Ok(Value::String(raw.into())))
@@ -1263,7 +1380,7 @@ mod tests {
             }
         });
 
-        assert_eq!(start.await.unwrap().unwrap().0, call_id.0);
+        assert!(start.await.unwrap().unwrap().0.starts_with("job:"));
         let settlement = cancel.await.unwrap().unwrap().unwrap();
         assert_eq!(settlement.output, JobOutput::Cancelled);
         // Releasing provider code after cancellation must never perform the
@@ -1359,7 +1476,7 @@ mod tests {
         .unwrap();
         assert_eq!(from_active["request"], "active-request");
         assert_eq!(from_active["call_id"], "spawn-call");
-        assert_eq!(handle.0, "slow-call");
+        assert!(handle.0.starts_with("job:"));
         assert!(
             scheduler
                 .output(&CallId("slow-call".into()))

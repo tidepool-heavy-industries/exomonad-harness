@@ -252,8 +252,13 @@ async fn active_cell_survives_three_boundary_envelopes_and_finalizes_durably() {
     // response is still gated. Completing the cell now must not finish the
     // run until response 5 is released and request 6 strict-finalizes.
     cell.release(cell_output.clone());
+    let operation = store
+        .claims(&CallId("long-cell-call".into()))
+        .expect("load cell claim")[0]
+        .operation
+        .clone();
     let retained_cell_output = scheduler
-        .wait(&CallId("long-cell-call".into()))
+        .wait(&operation)
         .await
         .expect("cell Job settles before releasing gated response 5");
     assert_eq!(
@@ -404,15 +409,18 @@ async fn cancelling_pending_cell_releases_execution_without_success_output() {
         Err(harness::engine::EngineError::Cancelled)
     ));
 
-    assert_eq!(scheduler.wait(&call).await.unwrap(), JobOutput::Cancelled);
+    let claims = store.claims(&call).expect("load original call claims");
+    assert_eq!(claims.len(), 1);
     assert_eq!(
-        scheduler.output(&call).await.unwrap(),
+        scheduler.wait(&claims[0].operation).await.unwrap(),
+        JobOutput::Cancelled
+    );
+    assert_eq!(
+        scheduler.output(&claims[0].operation).await.unwrap(),
         Some(JobOutput::Cancelled)
     );
     cell.wait_dropped().await;
     assert_eq!(cell.drops.load(std::sync::atomic::Ordering::SeqCst), 1);
-    let claims = store.claims(&call).expect("load original call claims");
-    assert_eq!(claims.len(), 1);
     assert_eq!(
         claims[0].state,
         harness::store::ClaimState::Settled,

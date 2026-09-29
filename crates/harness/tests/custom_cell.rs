@@ -48,7 +48,8 @@ async fn custom_cell_preserves_exact_raw_input_through_item_scheduler_and_provid
         .await
         .unwrap()
         .expect("custom cell is admitted");
-    assert_eq!(handle.0, "raw-cell");
+    assert!(handle.0.starts_with("job:"));
+    assert_ne!(handle.0, "raw-cell");
     let output = scheduler.wait(&CallId("raw-cell".into())).await.unwrap();
     assert_eq!(
         output,

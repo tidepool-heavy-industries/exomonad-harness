@@ -980,7 +980,7 @@ impl Provider for AsyncScenarioProvider {
             ));
         }
         if name == "gate" {
-            self.gate.set_call_id(context.call_id);
+            self.gate.set_call_context(&context);
             self.gate.wait().await;
             return Ok(json!("A released"));
         }
@@ -1002,7 +1002,7 @@ impl Provider for AsyncScenarioProvider {
                 .call_custom_with_context(name, input, context)
                 .await;
         }
-        self.gate.set_call_id(context.call_id.clone());
+        self.gate.set_call_context(&context);
         let progress =
             json!({"event":"custom_started","callId":context.call_id.0,"inputLength":input.len()});
         context.progress.try_send(progress.clone()).map_err(|_| {
@@ -2036,8 +2036,8 @@ async fn serve(
                                 Some(gate) => {
                                     if matches!(command.as_str(), "async release" | "custom release") {
                                         gate.release();
-                                    } else if let Some(call_id) = gate.call_id() {
-                                        scheduler.cancel(&call_id).await
+                                    } else if let Some(operation) = gate.operation() {
+                                        scheduler.cancel(&operation).await
                                             .map_err(|_| "could not cancel async tool call")?;
                                         // Release the test gate after scheduler cancellation
                                         // to exercise that ordering. The aborted provider may
@@ -2879,7 +2879,9 @@ mod tests {
         let call_b = CallId("call-B".into());
         store.claim(&call_a, &parent).unwrap();
         store.claim(&call_b, &parent).unwrap();
-        store.settle_claims(&store.claims(&call_b).unwrap()[0].operation,
+        store
+            .settle_claims(
+                &store.claims(&call_b).unwrap()[0].operation,
                 &Item(json!({
                     "type":"function_call_output","call_id":"call-B","output":"\"B output\""
                 })),
@@ -3057,7 +3059,10 @@ mod tests {
             assert_eq!(a.output, None);
             assert!(!a.request_id.is_empty());
             if cancel_a {
-                scheduler.cancel(&CallId(a.call_id.clone())).await.unwrap();
+                let operation = store.claims(&CallId(a.call_id.clone())).unwrap()[0]
+                    .operation
+                    .clone();
+                scheduler.cancel(&operation).await.unwrap();
             } else {
                 gate.release();
             }
@@ -3141,7 +3146,8 @@ mod tests {
             .await
             .expect("scenario did not settle and deliver B");
             if cancel {
-                scheduler.cancel(&a_id).await.unwrap();
+                let operation = store.claims(&a_id).unwrap()[0].operation.clone();
+                scheduler.cancel(&operation).await.unwrap();
             } else {
                 gate.release();
             }
@@ -4255,7 +4261,9 @@ mod tests {
         let call_b = CallId("call-B".into());
         store.claim(&call_a, &parent).unwrap();
         store.claim(&call_b, &parent).unwrap();
-        store.settle_claims(&store.claims(&call_b).unwrap()[0].operation,
+        store
+            .settle_claims(
+                &store.claims(&call_b).unwrap()[0].operation,
                 &Item(json!({
                     "type":"function_call_output","call_id":"call-B","output":"{\"ok\":true}"
                 })),

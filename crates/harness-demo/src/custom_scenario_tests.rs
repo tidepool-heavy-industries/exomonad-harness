@@ -164,10 +164,10 @@ async fn deterministic_custom_scenario_retains_kind_concurrency_and_first_termin
         );
 
         if cancel {
-            scheduler
-                .cancel(&CallId(a_id.clone()))
-                .await
-                .expect("cancel A");
+            let operation = store.claims(&CallId(a_id.clone())).expect("load A claim")[0]
+                .operation
+                .clone();
+            scheduler.cancel(&operation).await.expect("cancel A");
             gate.release(); // A late release must not replace cancellation.
         } else {
             gate.release();

@@ -177,12 +177,19 @@ impl Store {
         let prefix = &stored[..=boundary];
         let mut call_kinds = HashMap::<(RequestId, CallId), ToolKind>::new();
         for (request, item) in prefix {
-            if let Some(call) = item.tool_call().map_err(|reason| StoreError::MalformedReplayCall {
-                request: request.0.clone(), call_id: item.0["call_id"].as_str().unwrap_or("").into(), reason: reason.into(),
-            })? {
+            if let Some(call) =
+                item.tool_call()
+                    .map_err(|reason| StoreError::MalformedReplayCall {
+                        request: request.0.clone(),
+                        call_id: item.0["call_id"].as_str().unwrap_or("").into(),
+                        reason: reason.into(),
+                    })?
+            {
                 let key = (request.clone(), call.call_id.clone());
                 if call_kinds.insert(key, call.input.kind()).is_some() {
-                    return Err(StoreError::AmbiguousReplayCall { call_id: call.call_id.0 });
+                    return Err(StoreError::AmbiguousReplayCall {
+                        call_id: call.call_id.0,
+                    });
                 }
             }
         }
@@ -217,8 +224,16 @@ impl Store {
                    JOIN lineage ON lineage.id=c.request_id ORDER BY lineage.depth ASC",
             )?;
             q.query_map([&source_request.0], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
-            })?.collect::<std::result::Result<Vec<_>, _>>()?
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
         };
         let mut pending_claims = Vec::new();
         let mut copied = std::collections::HashSet::new();
@@ -231,11 +246,19 @@ impl Store {
                 }
                 let identity: ConversationIdentity = serde_json::from_str(&origin)?;
                 let operation = OperationId {
-                    origin: identity, request: RequestId(original_request.clone()), call: CallId(call_id.clone()),
+                    origin: identity,
+                    request: RequestId(original_request.clone()),
+                    call: CallId(call_id.clone()),
                 };
-                if !copied.insert(operation.clone()) { continue; }
+                if !copied.insert(operation.clone()) {
+                    continue;
+                }
                 if state == "pending" {
-                    pending_claims.push(CheckpointClaim { operation, request: RequestId(claim_request), kind: *kind });
+                    pending_claims.push(CheckpointClaim {
+                        operation,
+                        request: RequestId(claim_request),
+                        kind: *kind,
+                    });
                 }
                 tx.execute(
                     "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash) VALUES (?1,?2,?3,?4,?5,?6)",
@@ -249,7 +272,13 @@ impl Store {
                 call_id: boundary_call.0.clone(),
             });
         }
-        pending_claims.sort_by(|a, b| a.operation.request.0.cmp(&b.operation.request.0).then_with(|| a.operation.call.0.cmp(&b.operation.call.0)));
+        pending_claims.sort_by(|a, b| {
+            a.operation
+                .request
+                .0
+                .cmp(&b.operation.request.0)
+                .then_with(|| a.operation.call.0.cmp(&b.operation.call.0))
+        });
         Self::set_effort_tx(&tx, &snapshot_request, effort)?;
         tx.execute(
             "INSERT INTO checkpoints(id,origin_agent,source_request,snapshot_request,boundary_call,metadata,pending_claims,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -323,7 +352,13 @@ impl Store {
             let mut q =
                 tx.prepare("SELECT origin,origin_request_id,call_id,state,output_hash FROM claims WHERE request_id=?1")?;
             q.query_map([&checkpoint.snapshot_request.0], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?
         };
@@ -543,7 +578,9 @@ mod tests {
         );
         let output =
             item(json!({"type":"custom_tool_call_output","call_id":raw.0,"output":"done"}));
-        store.settle_claims(&store.claims(&raw).unwrap()[0].operation, &output).unwrap();
+        store
+            .settle_claims(&store.claims(&raw).unwrap()[0].operation, &output)
+            .unwrap();
         assert!(
             store
                 .claims_on(second.head_request.as_ref().unwrap())
@@ -714,7 +751,13 @@ mod tests {
             )
             .await
             .unwrap();
-        scheduler.claim_exact(&store.operation_for_request(&source, &call).unwrap(), store.standalone_identity(root.clone())).await.unwrap();
+        scheduler
+            .claim_exact(
+                &store.operation_for_request(&source, &call).unwrap(),
+                store.standalone_identity(root.clone()),
+            )
+            .await
+            .unwrap();
         let checkpoint = store
             .capture_checkpoint(&root, &source, &call, &json!({}), Arc::new(()))
             .unwrap();
@@ -894,7 +937,13 @@ mod tests {
             )
             .await
             .unwrap();
-        scheduler.claim_exact(&store.operation_for_request(&source, &call).unwrap(), store.standalone_identity(root.clone())).await.unwrap();
+        scheduler
+            .claim_exact(
+                &store.operation_for_request(&source, &call).unwrap(),
+                store.standalone_identity(root.clone()),
+            )
+            .await
+            .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
             .await
             .unwrap();
@@ -903,11 +952,21 @@ mod tests {
             .capture_checkpoint(&root, &source, &call, &json!({}), attachment.clone())
             .unwrap();
         assert_eq!(
-            scheduler.cancel(&store.claims(&call).unwrap()[0].operation).await.unwrap().unwrap().output,
+            scheduler
+                .cancel(&store.claims(&call).unwrap()[0].operation)
+                .await
+                .unwrap()
+                .unwrap()
+                .output,
             JobOutput::Cancelled
         );
         let cancelled = Item::tool_output(&call, ToolKind::Function, &JobOutput::Cancelled);
-        assert_eq!(store.write_output(&store.claims(&call).unwrap()[0].operation, &cancelled).unwrap(), 2);
+        assert_eq!(
+            store
+                .write_output(&store.claims(&call).unwrap()[0].operation, &cancelled)
+                .unwrap(),
+            2
+        );
         assert_eq!(
             store.claims_on(checkpoint.snapshot_request()).unwrap()[0].state,
             ClaimState::Settled
@@ -1105,7 +1164,12 @@ mod tests {
         assert_eq!(
             checkpoint.pending_claims(),
             &[CheckpointClaim {
-                operation: store.operation_for_request(checkpoint.source_request(), &CallId("capture-call".into())).unwrap(),
+                operation: store
+                    .operation_for_request(
+                        checkpoint.source_request(),
+                        &CallId("capture-call".into())
+                    )
+                    .unwrap(),
                 request: checkpoint.source_request().clone(),
                 kind: ToolKind::Function,
             }]

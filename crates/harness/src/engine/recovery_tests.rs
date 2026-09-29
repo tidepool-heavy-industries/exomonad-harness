@@ -193,7 +193,12 @@ async fn engine_recovery_zero_row_interrupt_uses_durable_settlement_output() {
         "call_id":call.0,
         "output":"{\"result\":\"already settled\"}"
     }));
-    assert_eq!(store.settle_claims(&store.claims(&call).unwrap()[0].operation, &actual_output).unwrap(), 1);
+    assert_eq!(
+        store
+            .settle_claims(&store.claims(&call).unwrap()[0].operation, &actual_output)
+            .unwrap(),
+        1
+    );
 
     let engine = engine(store.clone(), Arc::new(Mutex::new(Vec::new())));
     let recovered = engine
@@ -235,7 +240,12 @@ async fn engine_recovery_zero_row_interrupt_uses_durable_custom_settlement_outpu
         "type":"custom_tool_call_output", "call_id":call.0,
         "output":"distinctive settled custom payload: λ / quote \" / slash \\"
     }));
-    assert_eq!(store.settle_claims(&store.claims(&call).unwrap()[0].operation, &actual_output).unwrap(), 1);
+    assert_eq!(
+        store
+            .settle_claims(&store.claims(&call).unwrap()[0].operation, &actual_output)
+            .unwrap(),
+        1
+    );
 
     let recovered = engine(store.clone(), Arc::new(Mutex::new(Vec::new())))
         .recover_missing_job(&stale_pending_claim)
@@ -371,7 +381,10 @@ async fn engine_cancelled_custom_job_rejects_late_success_at_barrier() {
         "durable claim exists before cancellation"
     );
     assert_eq!(
-        scheduler.output(&store.claims(&call).unwrap()[0].operation).await.unwrap(),
+        scheduler
+            .output(&store.claims(&call).unwrap()[0].operation)
+            .await
+            .unwrap(),
         None,
         "no result won before cancellation"
     );
@@ -385,7 +398,10 @@ async fn engine_cancelled_custom_job_rejects_late_success_at_barrier() {
         "Engine must await scheduler cancellation grace"
     );
     assert_eq!(
-        scheduler.output(&store.claims(&call).unwrap()[0].operation).await.unwrap(),
+        scheduler
+            .output(&store.claims(&call).unwrap()[0].operation)
+            .await
+            .unwrap(),
         Some(JobOutput::Cancelled),
         "cancellation is terminal before provider is released"
     );
@@ -404,7 +420,10 @@ async fn engine_cancelled_custom_job_rejects_late_success_at_barrier() {
         Err(EngineError::Cancelled)
     ));
     assert_eq!(
-        scheduler.output(&store.claims(&call).unwrap()[0].operation).await.unwrap(),
+        scheduler
+            .output(&store.claims(&call).unwrap()[0].operation)
+            .await
+            .unwrap(),
         Some(JobOutput::Cancelled)
     );
     let claims = store.claims(&call).unwrap();

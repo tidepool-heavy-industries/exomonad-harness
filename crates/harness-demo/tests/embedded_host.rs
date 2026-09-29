@@ -129,13 +129,19 @@ impl ResponsesTransport for ReloadDuringRequest {
                 json!({"type":"custom_tool_call","name":"haskell","call_id":"old-call","input":"λ x → x\n\"raw\""}),
             )]
         } else {
-            self.jobs.wait(&CallId("old-call".into())).await.unwrap();
+            let old = self.host.store.claims(&CallId("old-call".into())).unwrap()[0]
+                .operation
+                .clone();
+            self.jobs.wait(&old).await.unwrap();
             if round == 1 {
                 vec![Item(
                     json!({"type":"custom_tool_call","name":"haskell","call_id":"new-call","input":"new"}),
                 )]
             } else {
-                self.jobs.wait(&CallId("new-call".into())).await.unwrap();
+                let new = self.host.store.claims(&CallId("new-call".into())).unwrap()[0]
+                    .operation
+                    .clone();
+                self.jobs.wait(&new).await.unwrap();
                 vec![Item(
                     json!({"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"done"}]}),
                 )]
@@ -556,24 +562,24 @@ async fn structured_host_calls_retain_progress_and_admitted_input_survives_faile
         )
         .unwrap();
     let call = CallId("structured-call".into());
-    store.claim(&call, &request).unwrap();
+    let operation = store.claim(&call, &request).unwrap();
     let jobs = JobScheduler::new(1).unwrap();
-    jobs.start_for_agent(
+    jobs.start_operation(
         conversation.provider().request_snapshot().unwrap(),
+        operation.clone(),
         AgentPath("/root".into()),
         Some(request),
-        call.clone(),
         "echo".into(),
         json!({"answer":42}),
     )
     .await
     .unwrap();
     assert_eq!(
-        jobs.wait(&call).await.unwrap(),
+        jobs.wait(&operation).await.unwrap(),
         JobOutput::Completed(Ok(json!({"answer":42})))
     );
     assert_eq!(
-        jobs.progress(&call).await.unwrap(),
+        jobs.progress(&operation).await.unwrap(),
         vec![json!({"step":"admitted"})]
     );
 }

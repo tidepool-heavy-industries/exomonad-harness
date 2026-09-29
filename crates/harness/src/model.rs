@@ -13,8 +13,15 @@ pub struct RequestId(pub String);
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConversationIdentity {
-    Standalone { store: String, actor: AgentPath },
-    Embedded { run: String, actor: AgentPath, incarnation: String },
+    Standalone {
+        store: String,
+        actor: AgentPath,
+    },
+    Embedded {
+        run: String,
+        actor: AgentPath,
+        incarnation: String,
+    },
 }
 
 impl ConversationIdentity {

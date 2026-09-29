@@ -1,8 +1,8 @@
 //! Durable SQLite event and content-addressed request store.
 mod embedded;
-mod schema_migration;
 pub mod history;
 pub mod schema;
+mod schema_migration;
 
 use crate::{
     item::{Item, ItemHash, ToolKind},
@@ -42,6 +42,8 @@ pub enum StoreError {
     },
     #[error("claim already exists for call/request")]
     DuplicateClaim,
+    #[error("operation origin does not match its issuing request and Store binding")]
+    OperationOriginMismatch,
     #[error("invalid canonical agent path: {0}")]
     InvalidAgentPath(String),
     #[error("agent parent does not exist: {0}")]
@@ -68,8 +70,14 @@ pub enum StoreError {
     MissingCheckpointEffort(String),
     #[error("checkpoint belongs to a different Store process")]
     ForeignCheckpoint,
-    #[error("schema migration cannot determine origin of legacy claim {call_id} on request {request}: {reason}; preserve this database and repair its provenance before reopening")]
-    LegacyProvenance { request: String, call_id: String, reason: String },
+    #[error(
+        "schema migration cannot determine origin of legacy claim {call_id} on request {request}: {reason}; preserve this database and repair its provenance before reopening"
+    )]
+    LegacyProvenance {
+        request: String,
+        call_id: String,
+        reason: String,
+    },
 }
 
 #[cfg(test)]
@@ -225,7 +233,11 @@ fn decode_claim(r: &rusqlite::Row<'_>) -> rusqlite::Result<Claim> {
     let call_id = CallId(r.get(2)?);
     let state: String = r.get(4)?;
     Ok(Claim {
-        operation: OperationId { origin, request: RequestId(r.get(1)?), call: call_id.clone() },
+        operation: OperationId {
+            origin,
+            request: RequestId(r.get(1)?),
+            call: call_id.clone(),
+        },
         call_id,
         request,
         state: match state.as_str() {
@@ -574,10 +586,7 @@ impl Store {
                         call_id: call_id.0.clone(),
                     });
                 };
-                stored_history
-                    .into_iter()
-                    .take(end + 1)
-                    .collect()
+                stored_history.into_iter().take(end + 1).collect()
             } else {
                 stored_history
             };
@@ -592,13 +601,53 @@ impl Store {
                  JOIN lineage ON lineage.id=c.request_id
                  WHERE c.state='pending' ORDER BY c.request_id,c.call_id",
             )?;
-            let rows = q.query_map([&head.0], |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?,row.get::<_, String>(3)?)))?
+            let rows = q
+                .query_map([&head.0], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
+            let mut same_request_calls =
+                std::collections::HashMap::<(String, String), usize>::new();
+            for (_, _, call, claim_request) in &rows {
+                *same_request_calls
+                    .entry((claim_request.clone(), call.clone()))
+                    .or_default() += 1;
+            }
+            for ((claim_request, call), count) in same_request_calls {
+                if count <= 1 {
+                    continue;
+                }
+                let visible = history_pairs
+                    .iter()
+                    .filter(|(request, item)| {
+                        request.0 == claim_request
+                            && !Self::strip_from_here_snapshot(item)
+                            && item
+                                .tool_call()
+                                .ok()
+                                .flatten()
+                                .is_some_and(|tool| tool.call_id.0 == call)
+                    })
+                    .count();
+                if visible > 0 && visible < count {
+                    return Err(StoreError::AmbiguousReplayCall { call_id: call });
+                }
+            }
             let mut operations = HashSet::new();
             for (origin, original_request, call, claim_request) in rows {
                 if history_pairs.iter().any(|(request, item)| {
-                    request.0 == claim_request && !Self::strip_from_here_snapshot(item)
-                        && item.tool_call().ok().flatten().is_some_and(|tool| tool.call_id.0 == call)
+                    request.0 == claim_request
+                        && !Self::strip_from_here_snapshot(item)
+                        && item
+                            .tool_call()
+                            .ok()
+                            .flatten()
+                            .is_some_and(|tool| tool.call_id.0 == call)
                 }) {
                     operations.insert((origin, original_request, call));
                 }
@@ -811,7 +860,10 @@ impl Store {
         })
     }
     pub fn standalone_identity(&self, actor: AgentPath) -> ConversationIdentity {
-        ConversationIdentity::Standalone { store: self.store_id.clone(), actor }
+        ConversationIdentity::Standalone {
+            store: self.store_id.clone(),
+            actor,
+        }
     }
     pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
@@ -866,6 +918,7 @@ impl Store {
     }
     /// Install a trusted compacted window atomically. The parent edge keeps the
     /// source request and its claims queryable; history replay stops here.
+    #[cfg(test)]
     pub(crate) fn write_compaction_request(
         &self,
         request: &RequestId,
@@ -896,11 +949,24 @@ impl Store {
                 params![request.0, position as i64, hash.0],
             )?;
         }
+        let mut seen = HashSet::new();
         for operation in pending {
-            let matching = items.iter().filter_map(|item| item.tool_call().ok().flatten())
-                .filter(|call| call.call_id == operation.call).count();
-            if matching == 0 {
-                return Err(StoreError::AmbiguousReplayCall { call_id: operation.call.0.clone() });
+            if !seen.insert(operation) {
+                return Err(StoreError::DuplicateClaim);
+            }
+            let matching = items
+                .iter()
+                .filter_map(|item| item.tool_call().ok().flatten())
+                .filter(|call| call.call_id == operation.call)
+                .count();
+            let required = pending
+                .iter()
+                .filter(|other| other.call == operation.call)
+                .count();
+            if matching < required {
+                return Err(StoreError::AmbiguousReplayCall {
+                    call_id: operation.call.0.clone(),
+                });
             }
             let origin = serde_json::to_string(&operation.origin)?;
             tx.execute(
@@ -938,10 +1004,20 @@ impl Store {
         let mut q=c.prepare("SELECT origin,origin_request_id,call_id,request_id FROM claims WHERE state='pending' ORDER BY call_id,request_id")?;
         q.query_map([], |r| {
             let raw: String = r.get(0)?;
-            let origin = serde_json::from_str(&raw).map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+            let origin = serde_json::from_str(&raw).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
             let call_id = CallId(r.get(2)?);
             Ok(PendingCall {
-                operation: OperationId { origin, request: RequestId(r.get(1)?), call: call_id.clone() },
+                operation: OperationId {
+                    origin,
+                    request: RequestId(r.get(1)?),
+                    call: call_id.clone(),
+                },
                 call_id,
                 request: RequestId(r.get(3)?),
             })
@@ -986,10 +1062,20 @@ impl Store {
         let mut q=c.prepare("WITH RECURSIVE lineage(id,parent_id) AS (SELECT id,parent_id FROM requests WHERE id=?1 UNION ALL SELECT r.id,r.parent_id FROM requests r JOIN lineage l ON r.id=l.parent_id) SELECT c.origin,c.origin_request_id,c.call_id,c.request_id FROM claims c JOIN lineage l ON l.id=c.request_id WHERE c.state='pending' ORDER BY c.call_id,c.request_id")?;
         q.query_map([&request.0], |r| {
             let raw: String = r.get(0)?;
-            let origin = serde_json::from_str(&raw).map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+            let origin = serde_json::from_str(&raw).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
             let call_id = CallId(r.get(2)?);
             Ok(PendingCall {
-                operation: OperationId { origin, request: RequestId(r.get(1)?), call: call_id.clone() },
+                operation: OperationId {
+                    origin,
+                    request: RequestId(r.get(1)?),
+                    call: call_id.clone(),
+                },
                 call_id,
                 request: RequestId(r.get(3)?),
             })
@@ -1443,18 +1529,28 @@ impl Store {
     /// The durable settled output for one recorded provider call.
     pub fn replay_output_operation(&self, operation: &OperationId) -> Result<Option<Item>> {
         let kind = self.tool_invocation_kind(&operation.request, &operation.call)?;
-        let Some(kind) = kind else { return Ok(None); };
+        let Some(kind) = kind else {
+            return Ok(None);
+        };
         let origin = serde_json::to_string(&operation.origin)?;
         let c = self.lock();
         let raw: Option<String> = c.query_row(
             "SELECT i.json FROM claims c JOIN items i ON i.hash=c.output_hash WHERE c.origin=?1 AND c.origin_request_id=?2 AND c.call_id=?3 AND c.state='settled' LIMIT 1",
             params![origin,operation.request.0,operation.call.0], |row| row.get(0),
         ).optional()?;
-        let Some(raw) = raw else { return Ok(None); };
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
         let output: Item = serde_json::from_str(&raw)?;
-        let expected = match kind { ToolKind::Function => "function_call_output", ToolKind::Custom => "custom_tool_call_output" };
+        let expected = match kind {
+            ToolKind::Function => "function_call_output",
+            ToolKind::Custom => "custom_tool_call_output",
+        };
         if output.0["type"] != expected || output.0["call_id"] != operation.call.0 {
-            return Err(StoreError::ReplayOutputKindMismatch { call_id: operation.call.0.clone(), expected: kind });
+            return Err(StoreError::ReplayOutputKindMismatch {
+                call_id: operation.call.0.clone(),
+                expected: kind,
+            });
         }
         Ok(Some(output))
     }
@@ -1520,6 +1616,16 @@ impl Store {
         let Some(kind) = invocation_kind(&c, request, call)? else {
             return Ok(None);
         };
+        let claim_count: i64 = c.query_row(
+            "SELECT COUNT(*) FROM claims WHERE request_id=?1 AND call_id=?2",
+            params![request.0, call.0],
+            |row| row.get(0),
+        )?;
+        if claim_count > 1 {
+            return Err(StoreError::AmbiguousReplayCall {
+                call_id: call.0.clone(),
+            });
+        }
         let raw: Option<String> = c
             .query_row(
                 "SELECT i.json FROM claims c JOIN items i ON i.hash=c.output_hash
@@ -1717,17 +1823,34 @@ impl Store {
     }
     pub fn operation_for_request(&self, request: &RequestId, call: &CallId) -> Result<OperationId> {
         let c = self.lock();
-        let branch: String = c.query_row("SELECT branch FROM requests WHERE id=?1", [&request.0], |r| r.get(0))
-            .optional()?.ok_or_else(|| StoreError::MissingRequest(request.0.clone()))?;
-        let bound: Option<(String, String)> = c.query_row(
-            "SELECT run_id,incarnation FROM embedded_bindings WHERE agent_path=?1",
-            [&branch], |r| Ok((r.get(0)?,r.get(1)?)),
-        ).optional()?;
+        let branch: String = c
+            .query_row(
+                "SELECT branch FROM requests WHERE id=?1",
+                [&request.0],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::MissingRequest(request.0.clone()))?;
+        let bound: Option<(String, String)> = c
+            .query_row(
+                "SELECT run_id,incarnation FROM embedded_bindings WHERE agent_path=?1",
+                [&branch],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
         let origin = match bound {
-            Some((run, incarnation)) => ConversationIdentity::Embedded { run, actor: AgentPath(branch), incarnation },
+            Some((run, incarnation)) => ConversationIdentity::Embedded {
+                run,
+                actor: AgentPath(branch),
+                incarnation,
+            },
             None => self.standalone_identity(AgentPath(branch)),
         };
-        Ok(OperationId { origin, request: request.clone(), call: call.clone() })
+        Ok(OperationId {
+            origin,
+            request: request.clone(),
+            call: call.clone(),
+        })
     }
     /// Admit an original invocation at its exact request.
     pub fn claim(&self, call: &CallId, request: &RequestId) -> Result<OperationId> {
@@ -1735,8 +1858,13 @@ impl Store {
         self.claim_operation(&operation, request)?;
         Ok(operation)
     }
-    /// Attach a claimant to an existing operation without changing its origin.
+    /// Admit the original claimant under the request's exact conversation binding.
     pub fn claim_operation(&self, operation: &OperationId, request: &RequestId) -> Result<()> {
+        if request != &operation.request
+            || *operation != self.operation_for_request(request, &operation.call)?
+        {
+            return Err(StoreError::OperationOriginMismatch);
+        }
         let origin = serde_json::to_string(&operation.origin)?;
         self.lock().execute(
             "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES (?1,?2,?3,?4,'pending')",
@@ -1747,16 +1875,19 @@ impl Store {
         let c = self.lock();
         let mut q = c.prepare("SELECT origin,origin_request_id,call_id,request_id,state,output_hash FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 ORDER BY request_id")?;
         let origin = serde_json::to_string(&operation.origin)?;
-        Ok(q.query_map(params![origin,operation.request.0,operation.call.0], decode_claim)?
-            .collect::<std::result::Result<_, _>>()?)
+        Ok(q.query_map(
+            params![origin, operation.request.0, operation.call.0],
+            decode_claim,
+        )?
+        .collect::<std::result::Result<_, _>>()?)
     }
     /// Diagnostic enumeration only. A provider ID alone never selects an operation.
     pub fn claims(&self, call: &CallId) -> Result<Vec<Claim>> {
         let c = self.lock();
         let mut q=c.prepare("SELECT origin,origin_request_id,call_id,request_id,state,output_hash FROM claims WHERE call_id=?1 ORDER BY request_id")?;
         q.query_map([&call.0], decode_claim)?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
     /// Claims directly attached to one request, without following request
     /// ancestry. Here-fork startup uses this to distinguish a child-owned
@@ -1768,8 +1899,8 @@ impl Store {
              WHERE request_id=?1 ORDER BY call_id",
         )?;
         q.query_map([&request.0], decode_claim)?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
     /// Claims on the contiguous same-branch ancestry of `request`.
     ///
@@ -1797,15 +1928,25 @@ impl Store {
              ORDER BY c.call_id",
         )?;
         q.query_map(params![request.0, branch], decode_claim)?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
     pub fn settle_claims(&self, operation: &OperationId, output: &Item) -> Result<usize> {
-        let kind = self.tool_invocation_kind(&operation.request, &operation.call)?
-            .ok_or_else(|| StoreError::MissingCheckpointCall { request: operation.request.0.clone(), call_id: operation.call.0.clone() })?;
-        let expected = match kind { ToolKind::Function => "function_call_output", ToolKind::Custom => "custom_tool_call_output" };
+        let kind = self
+            .tool_invocation_kind(&operation.request, &operation.call)?
+            .ok_or_else(|| StoreError::MissingCheckpointCall {
+                request: operation.request.0.clone(),
+                call_id: operation.call.0.clone(),
+            })?;
+        let expected = match kind {
+            ToolKind::Function => "function_call_output",
+            ToolKind::Custom => "custom_tool_call_output",
+        };
         if output.0["type"] != expected || output.0["call_id"] != operation.call.0 {
-            return Err(StoreError::ReplayOutputKindMismatch { call_id: operation.call.0.clone(), expected: kind });
+            return Err(StoreError::ReplayOutputKindMismatch {
+                call_id: operation.call.0.clone(),
+                expected: kind,
+            });
         }
         let mut c = self.lock();
         let tx = c.transaction()?;
@@ -1818,15 +1959,30 @@ impl Store {
         tx.commit()?;
         Ok(n)
     }
-    pub fn interrupt_operation_claim(&self, operation: &OperationId, request: &RequestId) -> Result<usize> {
+    pub fn interrupt_operation_claim(
+        &self,
+        operation: &OperationId,
+        request: &RequestId,
+    ) -> Result<usize> {
         let origin = serde_json::to_string(&operation.origin)?;
         Ok(self.lock().execute("UPDATE claims SET state='interrupted' WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?4 AND state='pending'",params![origin,operation.request.0,operation.call.0,request.0])?)
     }
     /// Request-scoped legacy caller. Ambiguous same-ID claims are refused.
     pub fn interrupt_claim(&self, call: &CallId, request: &RequestId) -> Result<usize> {
-        let candidates: Vec<_> = self.claims_on(request)?.into_iter().filter(|c| c.call_id == *call).collect();
-        if candidates.len() > 1 { return Err(StoreError::AmbiguousReplayCall { call_id: call.0.clone() }); }
-        match candidates.first() { Some(claim) => self.interrupt_operation_claim(&claim.operation, request), None => Ok(0) }
+        let candidates: Vec<_> = self
+            .claims_on(request)?
+            .into_iter()
+            .filter(|c| c.call_id == *call)
+            .collect();
+        if candidates.len() > 1 {
+            return Err(StoreError::AmbiguousReplayCall {
+                call_id: call.0.clone(),
+            });
+        }
+        match candidates.first() {
+            Some(claim) => self.interrupt_operation_claim(&claim.operation, request),
+            None => Ok(0),
+        }
     }
     pub fn record_decision(&self, request: Option<&RequestId>, d: &Decision) -> Result<i64> {
         let c = self.lock();
@@ -2078,7 +2234,8 @@ mod tests {
             )
             .unwrap();
             s.claim(&call, &root).unwrap();
-            s.write_output(&s.claims(&call).unwrap()[0].operation, &output).unwrap();
+            s.write_output(&s.claims(&call).unwrap()[0].operation, &output)
+                .unwrap();
             s.append_items(&next, std::slice::from_ref(&output))
                 .unwrap();
             s.record_replay_turn(
@@ -2141,8 +2298,19 @@ mod tests {
                 .unwrap();
             store.claim(&custom_call, &request).unwrap();
             store.claim(&mismatch_call, &request).unwrap();
-            store.write_output(&store.claims(&custom_call).unwrap()[0].operation, &custom_output).unwrap();
-            store.write_output(&store.claims(&mismatch_call).unwrap()[0].operation, &wrong_output).unwrap();
+            store
+                .write_output(
+                    &store.claims(&custom_call).unwrap()[0].operation,
+                    &custom_output,
+                )
+                .unwrap();
+            assert!(matches!(
+                store.write_output(
+                    &store.claims(&mismatch_call).unwrap()[0].operation,
+                    &wrong_output
+                ),
+                Err(StoreError::ReplayOutputKindMismatch { .. })
+            ));
         }
         {
             let store = Store::open(&path).unwrap();
@@ -2155,13 +2323,11 @@ mod tests {
                 Some(custom_output),
                 "custom output bytes must remain the original persisted item"
             );
-            assert!(matches!(
-                store.replay_output(&mismatch_call),
-                Err(StoreError::ReplayOutputKindMismatch {
-                    expected: ToolKind::Custom,
-                    ..
-                })
-            ));
+            assert_eq!(store.replay_output(&mismatch_call).unwrap(), None);
+            assert_eq!(
+                store.claims(&mismatch_call).unwrap()[0].state,
+                ClaimState::Pending
+            );
         }
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
@@ -2186,7 +2352,10 @@ mod tests {
             .unwrap();
         store.append_items(&root, &[call_item]).unwrap();
         store.claim(&call, &child).unwrap();
-        store.write_output(&store.claims(&call).unwrap()[0].operation, &output).unwrap();
+        assert!(matches!(
+            store.write_output(&store.claims(&call).unwrap()[0].operation, &output),
+            Err(StoreError::MissingCheckpointCall { .. })
+        ));
 
         assert_eq!(
             store.replay_output(&call).unwrap(),
@@ -2218,7 +2387,9 @@ mod tests {
             )
             .unwrap();
         store.claim(&call, &request).unwrap();
-        store.write_output(&store.claims(&call).unwrap()[0].operation, &output).unwrap();
+        store
+            .write_output(&store.claims(&call).unwrap()[0].operation, &output)
+            .unwrap();
 
         assert_eq!(store.replay_output(&call).unwrap(), Some(output));
     }
@@ -2328,9 +2499,16 @@ mod tests {
             assert_eq!(s.children_of(&id("root")).unwrap().len(), 2);
             assert_eq!(s.seen_by(&id("left")).unwrap().len(), 1);
             let cid = CallId("c1".into());
+            s.append_items(&id("root"), &[item(serde_json::json!({"type":"function_call","call_id":"c1","name":"test","arguments":"{}"}))]).unwrap();
             s.claim(&cid, &id("root")).unwrap();
-            let output = item(serde_json::json!({"output":"ok"}));
-            assert_eq!(s.settle_claims(&s.claims(&cid).unwrap()[0].operation, &output).unwrap(), 1);
+            let output = item(
+                serde_json::json!({"type":"function_call_output","call_id":"c1","output":"ok"}),
+            );
+            assert_eq!(
+                s.settle_claims(&s.claims(&cid).unwrap()[0].operation, &output)
+                    .unwrap(),
+                1
+            );
             assert_eq!(s.claims(&cid).unwrap()[0].state, ClaimState::Settled);
             s.add_envelope("a", "b", "AtBoundary", &shared, None)
                 .unwrap();
@@ -2532,6 +2710,7 @@ mod tests {
                 }
             );
             let call = CallId("pending".into());
+            s.append_items(&id("a"), &[item(serde_json::json!({"type":"function_call","call_id":"pending","name":"test","arguments":"{}"}))]).unwrap();
             s.claim(&call, &id("a")).unwrap();
             assert_eq!(s.pending_at(&id("a")).unwrap().len(), 1);
             assert_eq!(s.recover_pending().unwrap().len(), 1);
@@ -2556,7 +2735,7 @@ mod tests {
             );
             let call = CallId("pending".into());
             assert_eq!(
-                s.write_output(&s.claims(&call).unwrap()[0].operation, &item(serde_json::json!({"ok":true})))
+                s.write_output(&s.claims(&call).unwrap()[0].operation, &item(serde_json::json!({"type":"function_call_output","call_id":"pending","output":"{\"ok\":true}"})))
                     .unwrap(),
                 1
             );
@@ -2724,7 +2903,7 @@ mod tests {
         let version: u32 = conn
             .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         assert!(schema::initialize(&mut conn).is_ok());
     }
 
@@ -2748,7 +2927,28 @@ mod tests {
         let version: u32 = conn
             .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
+    }
+
+    #[test]
+    fn standalone_operation_origin_survives_store_reopen() {
+        let path = std::env::temp_dir().join(format!(
+            "harness-operation-origin-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let request = id("stable-origin-request");
+        let call = CallId("stable-wire-call".into());
+        let original = {
+            let store = Store::open(&path).unwrap();
+            store.create_request(&request, None, "/root").unwrap();
+            store.operation_for_request(&request, &call).unwrap()
+        };
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened.operation_for_request(&request, &call).unwrap(),
+            original
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -2809,6 +3009,73 @@ mod tests {
         assert!(store.claims_on(&snapshot).unwrap().is_empty());
         assert!(store.unread(&child.0).unwrap().is_empty());
         assert_eq!(store.claims(&call).unwrap()[0].state, ClaimState::Pending);
+    }
+
+    #[test]
+    fn here_boundary_refuses_partial_same_id_copied_claims() {
+        let store = Store::memory().unwrap();
+        let first = id("first-origin");
+        let second = id("second-origin");
+        let source = id("copied-source");
+        let snapshot = id("partial-here-snapshot");
+        let call = CallId("reused-wire-id".into());
+        let tool = item(serde_json::json!({
+            "type":"function_call", "call_id":call.0, "name":"slow", "arguments":"{}"
+        }));
+        store.create_request(&first, None, "/root").unwrap();
+        store
+            .append_items(&first, std::slice::from_ref(&tool))
+            .unwrap();
+        let first_op = store.claim(&call, &first).unwrap();
+        store
+            .create_request(&second, Some(&first), "/root")
+            .unwrap();
+        store
+            .append_items(&second, std::slice::from_ref(&tool))
+            .unwrap();
+        let second_op = store.claim(&call, &second).unwrap();
+        let spawn = item(serde_json::json!({
+            "type":"function_call", "call_id":"spawn-boundary", "name":"spawn_agent", "arguments":"{}"
+        }));
+        store
+            .write_compaction_request_with_claims(
+                &source,
+                &second,
+                "/root",
+                &[tool.clone(), spawn, tool],
+                &[first_op, second_op],
+            )
+            .unwrap();
+        let root = AgentPath("/root".into());
+        store
+            .admit_agent(
+                &root,
+                None,
+                Some(&source),
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        let child = AgentPath("/root/child".into());
+        assert!(matches!(
+            store.admit_here_agent_from_invocation(
+                &child,
+                &root,
+                &snapshot,
+                &source,
+                &CallId("spawn-boundary".into()),
+                &serde_json::json!({}),
+                "/root",
+                &child.0,
+                "AtBoundary",
+                &item(
+                    serde_json::json!({"type":"message","role":"assistant","content":"NEW_TASK"})
+                ),
+            ),
+            Err(StoreError::AmbiguousReplayCall { .. })
+        ));
+        assert!(store.request(&snapshot).unwrap().is_none());
+        assert!(store.claims_on(&snapshot).unwrap().is_empty());
     }
 
     #[test]

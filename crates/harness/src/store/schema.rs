@@ -21,11 +21,17 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
             .collect::<Result<_, _>>()?
     };
     if versions.len() != 1 {
-        return Err(rusqlite::Error::InvalidParameterName("schema_version must contain exactly one row".into()).into());
+        return Err(rusqlite::Error::InvalidParameterName(
+            "schema_version must contain exactly one row".into(),
+        )
+        .into());
     }
     let version = versions[0];
     if version > VERSION {
-        return Err(rusqlite::Error::InvalidParameterName(format!("database schema {version} is newer than supported {VERSION}")).into());
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "database schema {version} is newer than supported {VERSION}"
+        ))
+        .into());
     }
     if version == VERSION {
         return Ok(());
@@ -64,10 +70,11 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
     }
     let legacy_claims: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='claims')",
-        [], |row| row.get(0),
+        [],
+        |row| row.get(0),
     )?;
     if legacy_claims {
-        tx.execute_batch("ALTER TABLE claims RENAME TO legacy_claims; DROP INDEX IF EXISTS claims_request;")?;
+        tx.execute_batch("ALTER TABLE claims RENAME TO legacy_claims; DROP INDEX IF EXISTS claims_request; DROP INDEX IF EXISTS claims_operation;")?;
     }
     tx.execute_batch(SQL)?;
     let store_id = super::schema_migration::ensure_store_id(&tx)?;

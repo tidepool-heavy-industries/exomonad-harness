@@ -276,13 +276,17 @@ impl PinnedProvider {
         if context.agent != self.host.identity().actor {
             return Err(fail("foreign actor call"));
         }
-        let operation = context.operation.as_ref().ok_or_else(|| fail("embedded call requires operation identity"))?;
+        let operation = context
+            .operation
+            .as_ref()
+            .ok_or_else(|| fail("embedded call requires operation identity"))?;
         let expected_origin = ConversationIdentity::Embedded {
             run: self.host.identity().run.clone(),
             actor: self.host.identity().actor.clone(),
             incarnation: self.host.identity().incarnation.clone(),
         };
-        if operation.origin != expected_origin || operation.call != context.call_id
+        if operation.origin != expected_origin
+            || operation.call != context.call_id
             || context.request.as_ref() != Some(&operation.request)
         {
             return Err(fail("foreign operation call"));

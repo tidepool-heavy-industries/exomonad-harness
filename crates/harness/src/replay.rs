@@ -33,7 +33,8 @@ type ReplayObserver = dyn Fn(&ResponsesRequest, &mut ResponsesTurn, usize) + Sen
 /// Turns are loaded from the selected request branch when constructed. Each
 /// transport request must exactly match the next recorded request before its
 /// response is consumed; a mismatch leaves the turn available for a corrected
-/// request. Provider calls are resolved by their durable call id.
+/// request. Provider calls are resolved by the recorded operation and the
+/// matched local request.
 pub struct ReplayProvider {
     store: Arc<Store>,
     turns: Mutex<VecDeque<RecordedReplayTurn>>,
@@ -77,10 +78,7 @@ impl ReplayProvider {
                         }
                     };
                     let id = store.operation_for_request(&turn.request, &call.call_id)?;
-                    if calls
-                        .insert(id.clone(), (call.name, kind, input))
-                        .is_some()
-                    {
+                    if calls.insert(id.clone(), (call.name, kind, input)).is_some() {
                         return Err(ReplayError::DuplicateCall(id.call.0));
                     }
                 }
@@ -95,13 +93,21 @@ impl ReplayProvider {
         })
     }
 
-    fn next_turn(&self, local: Option<&RequestId>, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    fn next_turn(
+        &self,
+        local: Option<&RequestId>,
+        request: ResponsesRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         let mut turns = lock(&self.turns);
         let Some(next) = turns.front() else {
-            return Err(TransportError::Stream("replay provider has no recorded model turns remaining".into()));
+            return Err(TransportError::Stream(
+                "replay provider has no recorded model turns remaining".into(),
+            ));
         };
         if let Some(field) = request_mismatch(&next.model_request, &request) {
-            return Err(TransportError::Stream(format!("replay request does not match the next recorded request ({field})")));
+            return Err(TransportError::Stream(format!(
+                "replay request does not match the next recorded request ({field})"
+            )));
         }
         let recorded = turns.pop_front().expect("front was present");
         if let Some(local) = local {
@@ -136,6 +142,23 @@ impl ResponsesTransport for ReplayProvider {
 }
 
 #[async_trait]
+impl ResponsesTransport for Arc<ReplayProvider> {
+    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        self.as_ref().create(request).await
+    }
+    async fn create_streaming_for_request(
+        &self,
+        local: &RequestId,
+        request: ResponsesRequest,
+        sink: tokio::sync::mpsc::Sender<StreamEvent>,
+    ) -> Result<ResponsesTurn, TransportError> {
+        self.as_ref()
+            .create_streaming_for_request(local, request, sink)
+            .await
+    }
+}
+
+#[async_trait]
 impl Provider for ReplayProvider {
     async fn call(
         &self,
@@ -153,9 +176,19 @@ impl Provider for ReplayProvider {
         args: serde_json::Value,
         context: CallContext,
     ) -> Result<serde_json::Value, ProviderError> {
-        let local = context.operation.as_ref().ok_or_else(|| ProviderError::Tool("replay call has no operation identity".into()))?;
-        let recorded_request = lock(&self.local_requests).get(&local.request).cloned().ok_or_else(|| ProviderError::Tool("replay call has no matched recorded model request".into()))?;
-        let recorded_operation = self.store.operation_for_request(&recorded_request, &context.call_id)
+        let local = context
+            .operation
+            .as_ref()
+            .ok_or_else(|| ProviderError::Tool("replay call has no operation identity".into()))?;
+        let recorded_request = lock(&self.local_requests)
+            .get(&local.request)
+            .cloned()
+            .ok_or_else(|| {
+                ProviderError::Tool("replay call has no matched recorded model request".into())
+            })?;
+        let recorded_operation = self
+            .store
+            .operation_for_request(&recorded_request, &context.call_id)
             .map_err(|error| ProviderError::Tool(format!("loading replay invocation: {error}")))?;
         let (recorded_name, kind, recorded_input) =
             self.calls.get(&recorded_operation).ok_or_else(|| {
@@ -215,9 +248,20 @@ impl Provider for ReplayProvider {
         input: String,
         context: CallContext,
     ) -> Result<serde_json::Value, ProviderError> {
-        let local = context.operation.as_ref().ok_or_else(|| ProviderError::Tool("replay custom call has no operation identity".into()))?;
-        let recorded_request = lock(&self.local_requests).get(&local.request).cloned().ok_or_else(|| ProviderError::Tool("replay custom call has no matched recorded model request".into()))?;
-        let recorded_operation = self.store.operation_for_request(&recorded_request, &context.call_id)
+        let local = context.operation.as_ref().ok_or_else(|| {
+            ProviderError::Tool("replay custom call has no operation identity".into())
+        })?;
+        let recorded_request = lock(&self.local_requests)
+            .get(&local.request)
+            .cloned()
+            .ok_or_else(|| {
+                ProviderError::Tool(
+                    "replay custom call has no matched recorded model request".into(),
+                )
+            })?;
+        let recorded_operation = self
+            .store
+            .operation_for_request(&recorded_request, &context.call_id)
             .map_err(|error| ProviderError::Tool(format!("loading replay invocation: {error}")))?;
         if !self
             .calls
@@ -624,7 +668,14 @@ mod tests {
         );
         CallContext {
             handle: JobHandle(format!("replay-{}", call_id.0)),
-            operation: None,
+            operation: Some(crate::model::OperationId {
+                origin: crate::model::ConversationIdentity::Standalone {
+                    store: "direct-replay-test".into(),
+                    actor: agent.clone(),
+                },
+                request: RequestId("replay-direct".into()),
+                call: call_id.clone(),
+            }),
             call_id,
             agent,
             request,
@@ -900,13 +951,12 @@ mod tests {
             assert_eq!(match_probe.turns_remaining(), 2);
         }
 
-        let replay_transport = ReplayProvider::new(reopened_store.clone(), &source_root).unwrap();
         let replay_provider =
             Arc::new(ReplayProvider::new(reopened_store.clone(), &source_root).unwrap());
         let replay_destination = Arc::new(Store::memory().unwrap());
         let replay_scheduler = Arc::new(JobScheduler::new(2).unwrap());
         let replay_engine = Engine::<OfflineAuth, ReplayProvider, _>::with_transport(
-            replay_transport,
+            replay_provider.clone(),
             replay_destination,
             replay_scheduler,
             replay_provider,
@@ -948,6 +998,7 @@ mod tests {
         let root = RequestId("replay-output-root".into());
         store.create_request(&root, None, "/root").unwrap();
         let provider = ReplayProvider::new(store.clone(), &root).unwrap();
+        lock(&provider.local_requests).insert(RequestId("replay-direct".into()), root.clone());
         let missing = provider
             .call_with_context("echo", json!({}), call_context(CallId("missing".into())))
             .await
@@ -955,8 +1006,11 @@ mod tests {
         assert!(missing.to_string().contains("no recorded tool call"));
 
         let malformed = CallId("malformed".into());
+        store.append_items(&root, &[Item(json!({"type":"function_call","call_id":malformed.0,"name":"echo","arguments":"{}"}))]).unwrap();
         store.claim(&malformed, &root).unwrap();
-        store.write_output(&store.claims(&malformed).unwrap()[0].operation,
+        store
+            .write_output(
+                &store.claims(&malformed).unwrap()[0].operation,
                 &Item(json!({
                     "type":"function_call_output",
                     "call_id":malformed.0,
@@ -971,8 +1025,8 @@ mod tests {
         assert!(invalid.to_string().contains("no recorded tool call"));
     }
 
-    #[test]
-    fn replay_provider_rejects_ambiguous_call_ids_across_descendant_turns() {
+    #[tokio::test]
+    async fn replay_provider_distinguishes_equal_call_ids_across_descendant_turns() {
         let store = Arc::new(Store::memory().unwrap());
         let root = RequestId("ambiguous-replay-root".into());
         let child = RequestId("ambiguous-replay-child".into());
@@ -990,6 +1044,19 @@ mod tests {
         store
             .append_items(&child, std::slice::from_ref(&call))
             .unwrap();
+        for (request, value) in [(&root, "first"), (&child, "second")] {
+            let operation = store
+                .claim(&CallId("ambiguous-id".into()), request)
+                .unwrap();
+            store
+                .write_output(
+                    &operation,
+                    &Item(json!({
+                        "type":"custom_tool_call_output", "call_id":"ambiguous-id", "output":value
+                    })),
+                )
+                .unwrap();
+        }
         store
             .record_replay_turn(
                 &root,
@@ -1013,10 +1080,28 @@ mod tests {
             )
             .unwrap();
 
-        assert!(matches!(
-            ReplayProvider::new(store, &root),
-            Err(ReplayError::DuplicateCall(id)) if id == "ambiguous-id"
-        ));
+        let provider = ReplayProvider::new(store, &root).unwrap();
+        assert_eq!(provider.calls.len(), 2);
+        for (local, session, expected) in [
+            ("local-first", "ambiguous-session", "first"),
+            ("local-second", "ambiguous-session-child", "second"),
+        ] {
+            let local = RequestId(local.into());
+            let (sink, _stream) = tokio::sync::mpsc::channel(4);
+            provider
+                .create_streaming_for_request(&local, request(session), sink)
+                .await
+                .unwrap();
+            let mut context = call_context(CallId("ambiguous-id".into()));
+            context.operation.as_mut().unwrap().request = local;
+            assert_eq!(
+                provider
+                    .call_custom_with_context("cell", "raw input".into(), context)
+                    .await
+                    .unwrap(),
+                serde_json::Value::String(expected.into())
+            );
+        }
     }
 
     #[test]

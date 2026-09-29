@@ -780,6 +780,7 @@ mod tests {
                 &[
                     Item(json!({"type":"function_call","call_id":"spawn-1","name":"spawn_agent"})),
                     Item(json!({"type":"function_call_output","call_id":"spawn-1","output":"child started"})),
+                    Item(json!({"type":"function_call","call_id":"inherited-work","name":"work","arguments":"{}"})),
                 ],
                 Default::default(),
             )
@@ -863,6 +864,7 @@ mod tests {
                 "message",
                 "function_call",
                 "function_call_output",
+                "function_call",
                 "configuration_update"
             ]
         );

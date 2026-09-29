@@ -6,7 +6,7 @@
 //! that can later be changed to success.
 
 use harness::{
-    model::{CallId, RequestId},
+    model::{CallId, OperationId, RequestId},
     provider::{CallContext, Provider, ProviderError},
     server::{ToolJobRecord, ToolJobState},
     store::Store,
@@ -30,6 +30,7 @@ pub(crate) struct GateControl {
     released: Arc<AtomicBool>,
     notify: Arc<Notify>,
     call_id: Arc<Mutex<Option<CallId>>>,
+    operation: Arc<Mutex<Option<OperationId>>>,
     progress: Arc<Mutex<Option<Value>>>,
     progress_notify: Arc<Notify>,
     inputs: Arc<Mutex<Vec<Vec<harness::item::Item>>>>,
@@ -42,9 +43,17 @@ impl GateControl {
         self.notify.notify_one();
     }
 
-    pub(crate) fn set_call_id(&self, call_id: CallId) {
-        *self.call_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(call_id);
+    pub(crate) fn set_call_context(&self, context: &CallContext) {
+        *self.call_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(context.call_id.clone());
+        *self.operation.lock().unwrap_or_else(|e| e.into_inner()) = context.operation.clone();
         self.notify.notify_one();
+    }
+
+    pub(crate) fn operation(&self) -> Option<OperationId> {
+        self.operation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub(crate) fn call_id(&self) -> Option<CallId> {
