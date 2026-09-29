@@ -22,6 +22,8 @@ pub const SQL: &str = schema::SQL;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("checkpoint child does not match its host binding")]
+    InvalidEmbeddedBinding,
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
     #[error(transparent)]

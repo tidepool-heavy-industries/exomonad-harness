@@ -1178,6 +1178,7 @@ async fn run_deterministic_engine_turn_from_head(
     Ok((answer, final_item, completion.head_request))
 }
 
+#[cfg(test)]
 async fn run_async_scenario_turn(
     store: Arc<Store>,
     scheduler: Arc<JobScheduler>,

@@ -77,14 +77,17 @@ pub struct ToolSurface {
 impl ToolSurface {
     pub fn new(
         version: String,
-        tools: Vec<Value>,
+        mut tools: Vec<Value>,
         dispatcher: Arc<dyn Provider>,
     ) -> Result<Self, EmbeddedError> {
         if version.is_empty() {
             return Err(EmbeddedError::Surface("empty version".into()));
         }
         let mut kinds = HashMap::new();
-        for tool in &tools {
+        for tool in &mut tools {
+            if let Some(object) = tool.as_object_mut() {
+                object.insert("async".into(), Value::Bool(true));
+            }
             let name = tool["name"]
                 .as_str()
                 .filter(|s| !s.is_empty())
@@ -151,6 +154,31 @@ impl Conversation {
         store.bind_embedded_actor(host.identity(), parent)?;
         Ok(Self { store, host })
     }
+    /// Attach checkpoint history and host identity in one Store transaction.
+    /// Host admission precedes every write; this does not start or supervise an actor.
+    pub fn from_checkpoint<T: ?Sized + Send + Sync + 'static>(
+        store: Arc<Store>,
+        host: Arc<dyn HostActor>,
+        parent: &AgentPath,
+        checkpoint: &crate::checkpoint::Checkpoint<T>,
+        contract: &Value,
+        checkout: &Value,
+    ) -> Result<Self, EmbeddedError> {
+        let _admission = host.admit()?;
+        store.attach_bound_checkpoint_child(
+            checkpoint,
+            crate::checkpoint::CheckpointChild {
+                path: &host.identity().actor,
+                parent,
+                contract,
+                checkout,
+                task: None,
+            },
+            host.identity(),
+        )?;
+        Ok(Self { store, host })
+    }
+
     /// Construct the model loop for this binding. The host manifest is the sole
     /// tool surface; the caller supplies shared Store/scheduler infrastructure.
     pub fn engine<A: crate::transport::Auth, C: crate::engine::ResponsesTransport>(

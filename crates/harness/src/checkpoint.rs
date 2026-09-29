@@ -280,6 +280,28 @@ impl Store {
         checkpoint: &Checkpoint<T>,
         child: CheckpointChild<'_>,
     ) -> Result<(Agent, Option<i64>)> {
+        self.attach_checkpoint_inner(checkpoint, child, None)
+    }
+
+    pub(crate) fn attach_bound_checkpoint_child<T: ?Sized + Send + Sync + 'static>(
+        &self,
+        checkpoint: &Checkpoint<T>,
+        child: CheckpointChild<'_>,
+        binding: &crate::embedding::HostIdentity,
+    ) -> Result<(Agent, Option<i64>)> {
+        if binding.actor != *child.path || binding.run.is_empty() || binding.incarnation.is_empty()
+        {
+            return Err(StoreError::InvalidEmbeddedBinding);
+        }
+        self.attach_checkpoint_inner(checkpoint, child, Some(binding))
+    }
+
+    fn attach_checkpoint_inner<T: ?Sized + Send + Sync + 'static>(
+        &self,
+        checkpoint: &Checkpoint<T>,
+        child: CheckpointChild<'_>,
+        binding: Option<&crate::embedding::HostIdentity>,
+    ) -> Result<(Agent, Option<i64>)> {
         if !Arc::ptr_eq(&self.process_identity, &checkpoint.process_identity) {
             return Err(StoreError::ForeignCheckpoint);
         }
@@ -327,6 +349,12 @@ impl Store {
             "INSERT INTO agents(path,parent_path,head_request,contract,fork_source,state,created_at) VALUES (?1,?2,?3,?4,?5,'active',?6)",
             params![child.path.0,child.parent.0,snapshot_request.0,serde_json::to_string(child.contract)?,source.to_string(),created_at],
         )?;
+        if let Some(binding) = binding {
+            tx.execute(
+                "INSERT INTO embedded_bindings(agent_path,run_id,incarnation) VALUES (?1,?2,?3)",
+                params![binding.actor.0, binding.run, binding.incarnation],
+            )?;
+        }
         let envelope_id = if let Some(task) = child.task {
             let hash = Self::put_item_tx(&tx, task.item)?;
             tx.execute(

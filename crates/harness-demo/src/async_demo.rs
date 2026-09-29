@@ -170,6 +170,7 @@ impl ToolJobs {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn start(
         &self,
         conversation_id: &str,

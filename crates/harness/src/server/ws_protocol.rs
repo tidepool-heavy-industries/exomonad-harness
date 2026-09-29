@@ -36,15 +36,7 @@ pub enum ToolJobState {
     Interrupted,
 }
 
-/// Host-owned actor incarnation. The harness only projects this identity; it
-/// does not issue or supervise it.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HostActorIdentity {
-    pub run: String,
-    pub actor: String,
-    pub incarnation: String,
-}
+pub use crate::embedding::HostIdentity as HostActorIdentity;
 
 impl HostActorIdentity {
     /// Stable key used by browser actor.upsert/entity.remove projections.
@@ -248,13 +240,13 @@ mod tests {
     fn host_actor_projection_keeps_exact_incarnation_and_workflow_kind() {
         let parent = HostActorIdentity {
             run: "run-1".into(),
-            actor: "root".into(),
+            actor: crate::model::AgentPath("root".into()),
             incarnation: "first".into(),
         };
         let child = HostActorProjection {
             identity: HostActorIdentity {
                 run: "run-1".into(),
-                actor: "reviewer".into(),
+                actor: crate::model::AgentPath("reviewer".into()),
                 incarnation: "second".into(),
             },
             parent: Some(parent.clone()),
