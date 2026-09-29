@@ -10,10 +10,11 @@ in parallel; it is not a reason to postpone the integration design.
 
 ## Current batch and settled defaults
 
-The 2026-09-28 batch is contracts/documentation only. Harness production work
-remains with its separate owner; Tidepool engine, concurrent resident execution
-and checkpoint changes are held pending investigation. Read the embedded-host
-PRD implementation handoff for source-grounded library deltas and acceptance.
+The standalone library batch has converged wave22 and implemented the deterministic
+embedding seams. See [the implementation handoff](embedding-ready-handoff.md)
+for exact interfaces, revisions and offline evidence. Tidepool engine, concurrent
+resident execution and real host checkpoint integration remain held pending its
+separate investigation. No deployment or live cutover is claimed.
 
 Initial operation uses the read-only Codex credential bridge and existing browser
 session login behind Tailscale HTTPS. Independent refresh and Tailscale identity
@@ -88,7 +89,8 @@ explicit migration decision; prefer clean internal APIs.
 
 ### H0 — finish and freeze standalone custom cells
 
-Owner: existing wave22 component owners and root. Reuse their candidates.
+Status: joined and checked in the embedding batch; retained candidates and
+combined evidence are listed in the implementation handoff.
 Deliver raw custom input, kind-aware Engine dispatch, Store/replay validation and
 production browser progress/cancel/reopen. Preserve exact text including Unicode.
 Malformed calls must produce explicit errors; stale/duplicate outputs must not be

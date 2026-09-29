@@ -1,67 +1,50 @@
-# Next: Exomonad's daily-driver harness
+# Next: connect the accepted harness library to Exomonad
 
-The [embedded-host contract](docs/embedded-host-prd.md) defines the accepted
-target; the [daily-driver roadmap](docs/daily-driver-plan.md) sequences it.
-Read both and the evidence below before assigning work. The outcome is a human
-operating real Exomonad agents and recursive worker trees through the browser,
-hosted by the main Exomonad binary with one shared harness instance. The
-standalone library remains independent of Tidepool.
+The standalone embedding batch is implemented. See
+[the implementation handoff](docs/embedding-ready-handoff.md) for revisions,
+interfaces, tests and limitations. Wave22 production candidates have been joined;
+their original branches and run evidence remain retained.
 
-## First: converge existing work
+## What is ready
 
-The source handback from wave22 is WIP and must converge separately from this
-design. Its run checkout is `/home/inanna/dev/exomonad-harness-runs/wave22`;
-read its `NEXT.md`, `docs/wave22-final-manifest.md`, component reviews and
-retained checks. Preserve candidate commits and evidence, and keep unresolved
-custom-cell Engine/Store/replay/browser work with its current owner until an
-explicit handback. Neither a component candidate nor these docs establish
-integrated acceptance.
+- Raw custom and structured calls, durable claims, scoped replay and browser recovery.
+- Host-bound conversations, immutable request tool surfaces, durable idempotent
+  input admission, and separate inclusion/cleanup evidence.
+- Reusable conversation checkpoints with opaque process-local host attachments.
+- Plain-text compaction near half configured context capacity, preserving pending
+  calls and recording failures/no-progress without repeatedly retrying them.
+- Authenticated browser views of model and workflow actors, retained request
+  history, and deterministic external-host acceptance through the public library.
 
-The Tidepool compiler/continuation batch is running separately. Coordinate with
-its integration owner before selecting a matched source/workspace baseline.
-Do not launch another wave, move a running checkout, or deploy from this document.
+This is offline library readiness. It is not real Haskell execution, accepted
+live-provider async behavior, or permission to migrate a running wave.
 
-## Current contract-only batch
+## Next work
 
-The host/library contract pass is documentation only. The Tidepool engine
-investigation holds compiler, resident scheduling/publication and checkpoint
-implementation; prerequisite code remains isolated. Harness production convergence
-stays with its existing owner. No builds, deployment or running-session changes
-are implied by this pass. The embedded-host PRD now lists concrete public-library
-deltas, a deterministic host-stub gate and the required exact-source handback.
+1. Complete harness operation-identity isolation before sharing a scheduler
+   across conversations. Preserve original provider IDs and the origin of
+   inherited pending claims; review Store/scheduler/replay keying together.
+   This work can proceed during the Tidepool engine foundation batch.
+2. Consume the exact accepted harness revision through its public embedding
+   interfaces. Keep actor lifecycle, custody and commands in their existing
+   Tidepool owners; keep conversation history and input envelopes in Store.
+3. First prove the embedded sequential resident path, including cancellation
+   and reconnect, once the engine foundation is accepted. Then implement and
+   prove concurrent cells, atomic publication, real source/checkpoint leases,
+   exact typed replies and acknowledged cleanup as a separate milestone.
+4. Host this library's Router in the main Exomonad process. Connect host actor
+   projection and control; do not install the standalone TreeDriver as a second
+   supervisor. Check Codex fallback independently.
+5. Exercise the browser-operated Sol/Luna worker tree specified in
+   [the embedded-host contract](docs/embedded-host-prd.md), then deliberately
+   choose a trial wave and record matched binaries, workspace and asset revisions.
 
-Settled initial defaults: read-only Codex credentials with explicit expiry recovery,
-existing browser-session login behind loopback/Tailscale HTTPS, and Codex as the
-development default. Do not reopen those choices during ordinary implementation.
+The [daily-driver roadmap](docs/daily-driver-plan.md) retains the larger sequence.
+Stock Codex stays installed. Read-only Codex credentials, existing browser login
+behind loopback/Tailscale HTTPS and one shared instance per run remain the initial
+operator profile. Deployment, live credentialed checks and default cutover need
+an operator assignment. No launch follows merely from passing these checks.
 
-## Then: adoption work
-
-1. Converge and review the standalone custom-cell work as a separate gate.
-2. Scaffold the agreed typed host boundary against a deterministic standalone
-   stub, preserving Tidepool as sole actor lifecycle authority.
-3. After the Tidepool engine hold is explicitly cleared, parallelize resident
-   concurrent cells/publication, checkpoint and lifecycle integration, and browser
-   composition after shared interfaces exist. Harness-only contract implementation
-   may proceed with its owner independently of the Tidepool runtime hold.
-4. Demonstrate the complete browser-operated recursive worker-tree acceptance
-   in [the embedded-host contract](docs/embedded-host-prd.md).
-
-The next brief must identify exact source, exclusive owned paths, prerequisite
-contracts, product acceptance and a stop/handoff boundary. Prefer useful parallel
-component trees; do not delegate consumers behind an undefined shared interface.
-Keep repairs with their owners and preserve source and review evidence.
-
-## Scope and authority
-
-Plan/scaffolding is authorized. Purchases, deployment, live credentialed checks
-and migration of running waves require the applicable operator assignment.
-The operator has ordered an OVH Rise-4 in Hillsboro; provisioning is separate
-from harness readiness. The server can first run the existing Exomonad setup.
-Production cutover follows the roadmap's gates and an explicit operator decision.
-
-Historical assignments and handoffs moved intact to
-[pre-adoption-next](docs/pre-adoption-next.md). Their old wave restrictions and
-"active" headings describe those runs, not this roadmap's remaining scope.
-PRD.md describes the generic standalone crate and demo. The embedded-host
-contract is authoritative for Exomonad embedding and explicitly supersedes
-conflicting standalone model-facing assumptions in that file.
+Server provisioning is separate; the OVH machine may first run the existing
+Exomonad setup. Historical assignments are in
+[pre-adoption-next](docs/pre-adoption-next.md).

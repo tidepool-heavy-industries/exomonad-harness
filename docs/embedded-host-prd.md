@@ -1,7 +1,10 @@
 # Embedded Exomonad host contract
 
-Status: accepted integration target, not an implementation or release claim
-(2026-09-28). This document defines how the generic harness library is embedded
+Status: accepted integration target (2026-09-28). Standalone C0/C1/C2
+implementation and offline evidence are recorded in
+[the implementation handoff](embedding-ready-handoff.md); joint runtime and live
+release acceptance remain outstanding. This document defines how the generic
+harness library is embedded
 by Exomonad. It does not make the standalone crate depend on Tidepool.
 
 Read with [the crate PRD](../PRD.md), which specifies the generic provider and
@@ -117,9 +120,13 @@ Only successful cell completion atomically publishes that cell's new bindings
 and declarations. It publishes a delta against the current environment, never
 its entire starting snapshot. If two successful cells publish the same name,
 completion order decides which definition future admissions see. Existing
-executions and checkpoints keep the snapshot they captured. A cell that fails
-or is cancelled publishes none of its new bindings, but completed effects and
-their receipts remain retained and observable. Retrying a call reads its
+executions and checkpoints keep the snapshot they captured. Individually valid private declarations may conflict when joined; an invalid
+public declaration join fails atomically. Publication has one runtime-owned
+commit point ordered against cancellation: cancellation winning first prevents
+publication; cancellation arriving afterward cannot undo committed definitions.
+A failed cell or rejected join publishes no new definitions. Independently
+retained captures survive, and completed effects and their receipts remain
+retained and observable. Retrying a call reads its
 recorded outcome; it does not rerun work to recreate a result.
 
 Dependent work belongs in one cell or in a later cell admitted after its
@@ -134,7 +141,9 @@ context remains a separate launch choice. A checkpoint is reusable for multiple
 children and captures a specific model conversation prefix, pending-call
 references, Haskell/helper source version, published notebook environment, and
 the issuing cell's completed private bindings. It records provenance and the
-authority context needed for a later admission.
+authority context needed for a later admission. This freezes lexical resolution,
+not mutable resources or arbitrary filesystem contents; their sharing and
+lifetime contracts remain with their owners.
 
 Checkpoint creation is an effect boundary. Once it succeeds, the checkpoint can
 be consumed while its issuing tool call is still pending and remains valid if
@@ -246,10 +255,11 @@ audit and accepted browser waves.
 
 ## Implementation handoff — 2026-09-28 contract pass
 
-This pass changes documentation only. Inspected canonical harness source:
+The earlier contract pass changed documentation only. Its inspected harness source:
 `6326ef680dc5824d60f321f34d2c6c79aaf7eea4`; Tidepool:
-`b2de366b2b52e9120ed07f200bae62501b5681e6`. Wave22 candidates remain unjoined
-until their existing owner supplies accepted source and combined evidence.
+`b2de366b2b52e9120ed07f200bae62501b5681e6`. At that point wave22 candidates were
+unjoined; their subsequent join and evidence are recorded in the implementation
+handoff.
 Tidepool compiler, resident scheduling/publication and checkpoint implementation
 are held pending its engine investigation. The Tidepool companion
 `plans/harness-integration.md` carries the production-consumer/dependency map and

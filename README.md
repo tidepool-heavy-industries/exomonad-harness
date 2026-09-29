@@ -1,12 +1,16 @@
 # exomonad-harness
 
-A standalone Rust harness for GPT-6 over the OpenAI Responses API: every tool call is asynchronous, agents form a tree with the verbs GPT-6 was trained on, the operator is a peer in the same mailbox, and the whole run is a content-addressed request tree in SQLite with a web view served from the binary. No dependency on Tidepool or Exomonad; Exomonad consumes it later through an adapter.
+A standalone Rust harness for GPT-6 over the OpenAI Responses API, with
+asynchronous tools, durable conversation history and an authenticated web view.
+The standalone demo manages its own agent tree. An embedding supplies admitted
+actor capabilities and tools while retaining lifecycle authority; the harness
+has no Tidepool dependency.
 
-Start at `NEXT.md` for current integration status. The
-[embedded-host contract](docs/embedded-host-prd.md) defines the Exomonad target;
-the [daily-driver adoption roadmap](docs/daily-driver-plan.md) sequences it.
-Historical run
-assignments are retained separately; the main checkout may lag active run work.
+Start at `NEXT.md` and the [implementation handoff](docs/embedding-ready-handoff.md).
+The [embedded-host contract](docs/embedded-host-prd.md) defines the Exomonad target;
+the [daily-driver roadmap](docs/daily-driver-plan.md) sequences real integration.
+The public consumer in `crates/harness-demo/tests/embedded_host.rs` exercises the
+embedding without credentials, Tidepool or a second actor supervisor.
 
 Read in this order:
 
