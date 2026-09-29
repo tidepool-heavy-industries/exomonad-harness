@@ -14,7 +14,11 @@ describe('web outcome integration', () => {
         id: 'request-1', conversationId: 'root', state: 'completed',
         commandId: 'cmd-7', command: 'echo hello', outcome: 'completed', detail: 'echoed hello',
       }],
-      jobs: [],
+      jobs: [{
+        id: 'job-9', conversationId: 'root', state: 'settled',
+        requestId: 'request-1', callId: 'call-3', toolName: 'slow_tool',
+        delivered: false, output: 'result pending delivery',
+      }],
       envelopes: [
         { id: 'reply', recipient: '/root', sender: '/root/helper', type: 'FINAL_ANSWER', payload: 'done', ordinal: 3 },
         { id: 'progress', recipient: '/root', sender: '/harness', type: 'PROGRESS', payload: 'working', ordinal: 1 },
@@ -24,6 +28,10 @@ describe('web outcome integration', () => {
     const view = toViewModel(normalizeSnapshot(snapshot))
     expect(view.timeline[0]).toMatchObject({
       commandId: 'cmd-7', command: 'echo hello', outcome: 'completed', detail: 'echoed hello',
+    })
+    expect(view.timeline.find(({ id }) => id === 'job-9')).toMatchObject({
+      id: 'job-9', state: 'settled', requestId: 'request-1', callId: 'call-3',
+      toolName: 'slow_tool', delivered: false, output: 'result pending delivery',
     })
     expect(view.inbox.map(({ id }) => id)).toEqual(['progress', 'message', 'reply'])
     expect(view.inbox[0]).toMatchObject({ state: 'PROGRESS', sender: '/harness', recipient: '/root' })

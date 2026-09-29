@@ -1517,6 +1517,47 @@ impl Store {
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
     }
+    /// Claims on the contiguous same-branch ancestry of `request`.
+    ///
+    /// This is intentionally distinct from `claims_on`: ordinary Engine runs
+    /// (including Here-fork starts) inspect only claims attached to their
+    /// supplied head. Process-restart recovery may opt into this query to find
+    /// claims on older requests of the same agent branch, without inheriting
+    /// claims across a fork boundary.
+    pub fn claims_on_branch_lineage(
+        &self,
+        request: &RequestId,
+        branch: &str,
+    ) -> Result<Vec<Claim>> {
+        let c = self.lock();
+        let mut q = c.prepare(
+            "WITH RECURSIVE lineage(id,parent_id,branch) AS (
+                 SELECT id,parent_id,branch FROM requests WHERE id=?1 AND branch=?2
+                 UNION ALL
+                 SELECT parent.id,parent.parent_id,parent.branch
+                 FROM requests parent JOIN lineage child ON parent.id=child.parent_id
+                 WHERE parent.branch=?2
+             )
+             SELECT c.call_id,c.request_id,c.state,c.output_hash
+             FROM claims c JOIN lineage l ON l.id=c.request_id
+             ORDER BY c.call_id",
+        )?;
+        q.query_map(params![request.0, branch], |r| {
+            let s: String = r.get(2)?;
+            Ok(Claim {
+                call_id: CallId(r.get(0)?),
+                request: RequestId(r.get(1)?),
+                state: match s.as_str() {
+                    "settled" => ClaimState::Settled,
+                    "interrupted" => ClaimState::Interrupted,
+                    _ => ClaimState::Pending,
+                },
+                output: r.get::<_, Option<String>>(3)?.map(ItemHash),
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+    }
     pub fn settle_claims(&self, call: &CallId, output: &Item) -> Result<usize> {
         let mut c = self.lock();
         let tx = c.transaction()?;

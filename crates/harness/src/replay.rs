@@ -505,12 +505,30 @@ mod tests {
     }
 
     fn call_context(call_id: CallId) -> CallContext {
-        let (progress, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let agent = AgentPath("/root".into());
+        let request = None;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (progress, _receiver) =
+            tokio::sync::mpsc::channel(crate::provider::JOB_PROGRESS_CAPACITY);
+        let verbs = crate::agents::JobVerbs::from_scheduler(
+            None,
+            agent.clone(),
+            request
+                .clone()
+                .map(|request| crate::agents::AgentInvocation {
+                    request,
+                    call_id: call_id.clone(),
+                }),
+            cancel.clone(),
+            progress.clone(),
+        );
         CallContext {
             handle: JobHandle(format!("replay-{}", call_id.0)),
             call_id,
-            agent: AgentPath("/root".into()),
-            request: None,
+            agent,
+            request,
+            cancel,
+            verbs,
             progress,
         }
     }
@@ -870,12 +888,31 @@ mod tests {
         let input = CellInput {
             source: "42".into(),
         };
-        let (progress, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let agent = AgentPath("/root".into());
+        let request = Some(RequestId("request".into()));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (progress, _receiver) =
+            tokio::sync::mpsc::channel(crate::provider::JOB_PROGRESS_CAPACITY);
+        let call_id = CallId("replay-cell".into());
+        let verbs = crate::agents::JobVerbs::from_scheduler(
+            None,
+            agent.clone(),
+            request
+                .as_ref()
+                .map(|request| crate::agents::AgentInvocation {
+                    request: request.clone(),
+                    call_id: call_id.clone(),
+                }),
+            cancel.clone(),
+            progress.clone(),
+        );
         let context = CallContext {
             handle: JobHandle("replay-cell".into()),
-            call_id: CallId("replay-cell".into()),
-            agent: AgentPath("/root".into()),
-            request: Some(RequestId("request".into())),
+            call_id,
+            agent,
+            request,
+            cancel,
+            verbs,
             progress,
         };
         let running = {
@@ -921,12 +958,31 @@ mod tests {
         let input = CellInput {
             source: "pending".into(),
         };
-        let (progress, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let agent = AgentPath("/root".into());
+        let request = None;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (progress, _receiver) =
+            tokio::sync::mpsc::channel(crate::provider::JOB_PROGRESS_CAPACITY);
+        let call_id = CallId("cancel-cell".into());
+        let verbs = crate::agents::JobVerbs::from_scheduler(
+            None,
+            agent.clone(),
+            request
+                .clone()
+                .map(|request| crate::agents::AgentInvocation {
+                    request,
+                    call_id: call_id.clone(),
+                }),
+            cancel.clone(),
+            progress.clone(),
+        );
         let context = CallContext {
             handle: JobHandle("cancel-cell".into()),
-            call_id: CallId("cancel-cell".into()),
-            agent: AgentPath("/root".into()),
-            request: None,
+            call_id,
+            agent,
+            request,
+            cancel,
+            verbs,
             progress,
         };
         let running = {

@@ -24,6 +24,10 @@ impl TreeProvider {
 
 #[async_trait]
 impl Provider for TreeProvider {
+    fn job_agent_service(&self) -> Option<Arc<dyn AgentToolService>> {
+        Some(self.agents.clone())
+    }
+
     async fn before_request(
         &self,
         plan: &harness::hooks::RequestPlan,
@@ -161,13 +165,12 @@ mod tests {
     }
 
     fn context(agent: &str) -> CallContext {
-        CallContext {
-            handle: harness::provider::JobHandle("test".into()),
-            call_id: harness::model::CallId("call".into()),
-            agent: AgentPath(agent.into()),
-            request: None,
-            progress: tokio::sync::mpsc::unbounded_channel().0,
-        }
+        CallContext::detached_for_test(
+            harness::provider::JobHandle("test".into()),
+            harness::model::CallId("call".into()),
+            AgentPath(agent.into()),
+        )
+        .0
     }
 
     #[test]

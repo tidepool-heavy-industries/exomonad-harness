@@ -230,6 +230,24 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .await
     }
 
+    /// Recover after process restart from a durable request head.
+    ///
+    /// Unlike `run`, this opts into reconciling outstanding claims on the
+    /// contiguous same-agent-branch ancestry of `head`. Missing in-memory jobs
+    /// are durably interrupted unless settlement already won; provider calls
+    /// are never replayed. Ordinary runs, especially Here-fork starts, retain
+    /// direct `claims_on` behavior.
+    pub async fn run_recovering(
+        &self,
+        head: Option<RequestId>,
+        new_items: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+        incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+    ) -> Result<EngineCompletion, EngineError> {
+        self.run_with_finalize_mode(head, new_items, cancellation, incoming, None, true)
+            .await
+    }
+
     /// Require a strict typed `finalize` call instead of an assistant final
     /// message. The call is persisted as an item but never scheduled as a Job.
     pub async fn run_finalized<T: JsonSchema + DeserializeOwned>(
@@ -278,8 +296,28 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         head: Option<RequestId>,
         new_items: Vec<Item>,
         cancellation: watch::Receiver<bool>,
+        incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+        finalize_schema: Option<serde_json::Value>,
+    ) -> Result<EngineCompletion, EngineError> {
+        self.run_with_finalize_mode(
+            head,
+            new_items,
+            cancellation,
+            incoming,
+            finalize_schema,
+            false,
+        )
+        .await
+    }
+
+    async fn run_with_finalize_mode(
+        &self,
+        head: Option<RequestId>,
+        new_items: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
         mut incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
         finalize_schema: Option<serde_json::Value>,
+        recovering: bool,
     ) -> Result<EngineCompletion, EngineError> {
         let (envelope_tx, envelopes) = tokio::sync::mpsc::unbounded_channel();
         let keepalive = envelope_tx.clone();
@@ -298,6 +336,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 envelopes,
                 true,
                 finalize_schema.as_ref(),
+                recovering,
             )
             .await;
         drop(keepalive);
@@ -313,6 +352,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         mut envelopes: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
         admit_inbox: bool,
         finalize_schema: Option<&serde_json::Value>,
+        recovering: bool,
     ) -> Result<EngineCompletion, EngineError> {
         self.await_here_invocation_output(&head, &mut cancellation)
             .await?;
@@ -324,7 +364,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             Some(head) => {
                 let store = self.store.clone();
                 let request = head.clone();
-                blocking(move || store.claims_on(&request)).await?
+                let branch = self.config.agent.0.clone();
+                blocking(move || {
+                    if recovering {
+                        store.claims_on_branch_lineage(&request, &branch)
+                    } else {
+                        store.claims_on(&request)
+                    }
+                })
+                .await?
             }
             None => Vec::new(),
         };
@@ -3340,6 +3388,208 @@ mod tests {
                 cache_write_tokens: 0,
             },
         }
+    }
+
+    struct PendingAProvider {
+        a_started: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        b_started: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release_b: tokio::sync::Mutex<tokio::sync::oneshot::Receiver<()>>,
+    }
+
+    #[async_trait]
+    impl Provider for PendingAProvider {
+        async fn call(&self, name: &str, _args: Value) -> Result<Value, ProviderError> {
+            match name {
+                "A" => {
+                    if let Some(started) = self.a_started.lock().await.take() {
+                        let _ = started.send(());
+                    }
+                    std::future::pending().await
+                }
+                "B" => {
+                    if let Some(started) = self.b_started.lock().await.take() {
+                        let _ = started.send(());
+                    }
+                    let mut release = self.release_b.lock().await;
+                    (&mut *release)
+                        .await
+                        .map_err(|_| ProviderError::Tool("B release dropped".into()))?;
+                    Ok(json!({"original":"B-result"}))
+                }
+                _ => Err(ProviderError::Tool(format!("unexpected tool {name}"))),
+            }
+        }
+
+        fn tools(&self) -> Vec<Value> {
+            Vec::new()
+        }
+    }
+
+    struct DeliverBWhileAPending {
+        requests: Arc<Mutex<Vec<ResponsesRequest>>>,
+        scheduler: Arc<JobScheduler>,
+        a_started: tokio::sync::Mutex<tokio::sync::oneshot::Receiver<()>>,
+        b_started: tokio::sync::Mutex<tokio::sync::oneshot::Receiver<()>>,
+        release_b: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        third_request: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl ResponsesTransport for DeliverBWhileAPending {
+        async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            let index = {
+                let mut requests = self.requests.lock().unwrap();
+                let index = requests.len();
+                requests.push(request);
+                index
+            };
+            match index {
+                0 => Ok(turn(
+                    "a-and-b",
+                    vec![
+                        Item(json!({
+                            "type":"function_call","call_id":"call-A","name":"A","arguments":"{}"
+                        })),
+                        Item(json!({
+                            "type":"function_call","call_id":"call-B","name":"B","arguments":"{}"
+                        })),
+                    ],
+                )),
+                1 => {
+                    let mut a_started = self.a_started.lock().await;
+                    tokio::time::timeout(std::time::Duration::from_secs(2), &mut *a_started)
+                        .await
+                        .map_err(|_| TransportError::Stream("A did not start".into()))?
+                        .map_err(|_| TransportError::Stream("A start signal dropped".into()))?;
+                    let mut b_started = self.b_started.lock().await;
+                    tokio::time::timeout(std::time::Duration::from_secs(2), &mut *b_started)
+                        .await
+                        .map_err(|_| TransportError::Stream("B did not start".into()))?
+                        .map_err(|_| TransportError::Stream("B start signal dropped".into()))?;
+                    self.release_b
+                        .lock()
+                        .await
+                        .take()
+                        .ok_or_else(|| TransportError::Stream("B already released".into()))?
+                        .send(())
+                        .map_err(|_| TransportError::Stream("B job stopped".into()))?;
+                    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                        loop {
+                            if self
+                                .scheduler
+                                .output(&CallId("call-B".into()))
+                                .await
+                                .ok()
+                                .flatten()
+                                .is_some()
+                            {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .map_err(|_| TransportError::Stream("B did not settle".into()))?;
+                    Ok(turn(
+                        "intermediate",
+                        vec![Item(json!({
+                            "type":"message","role":"assistant","content":"continue"
+                        }))],
+                    ))
+                }
+                2 => {
+                    self.third_request.notify_one();
+                    Ok(turn(
+                        "final",
+                        vec![Item(json!({
+                            "type":"message","role":"assistant","phase":"final_answer","content":"done"
+                        }))],
+                    ))
+                }
+                _ => Err(TransportError::Stream("unexpected extra request".into())),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn wave18_async_b_delivered_while_a_pending() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = Arc::new(JobScheduler::new(2).unwrap());
+        let (a_started_tx, a_started_rx) = tokio::sync::oneshot::channel();
+        let (b_started_tx, b_started_rx) = tokio::sync::oneshot::channel();
+        let (release_b_tx, release_b_rx) = tokio::sync::oneshot::channel();
+        let third_request = Arc::new(Notify::new());
+        let store = Arc::new(Store::memory().unwrap());
+        let engine = Engine::<FakeAuth, PendingAProvider, _>::with_transport(
+            DeliverBWhileAPending {
+                requests: requests.clone(),
+                scheduler: scheduler.clone(),
+                a_started: tokio::sync::Mutex::new(a_started_rx),
+                b_started: tokio::sync::Mutex::new(b_started_rx),
+                release_b: tokio::sync::Mutex::new(Some(release_b_tx)),
+                third_request: third_request.clone(),
+            },
+            store,
+            scheduler.clone(),
+            Arc::new(PendingAProvider {
+                a_started: tokio::sync::Mutex::new(Some(a_started_tx)),
+                b_started: tokio::sync::Mutex::new(Some(b_started_tx)),
+                release_b: tokio::sync::Mutex::new(release_b_rx),
+            }),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "wave18-async-b".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let run = tokio::spawn(async move {
+            engine
+                .run(
+                    None,
+                    vec![Item(json!({"role":"user","content":"go"}))],
+                    cancel_rx,
+                    empty_mailbox(),
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), third_request.notified())
+            .await
+            .expect("model received another request with B settled and A pending");
+        assert_eq!(
+            scheduler.output(&CallId("call-A".into())).await.unwrap(),
+            None,
+            "A is still pending when B is supplied"
+        );
+        cancel_tx.send(true).unwrap();
+        assert!(matches!(run.await.unwrap(), Err(EngineError::Cancelled)));
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        let delivered = requests[2]
+            .input
+            .iter()
+            .filter(|item| {
+                item.0["type"] == "function_call_output" && item.0["call_id"] == "call-B"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            delivered.len(),
+            1,
+            "B's original output is delivered exactly once"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(delivered[0].0["output"].as_str().unwrap()).unwrap()["original"],
+            "B-result"
+        );
+        assert!(
+            !requests[2].input.iter().any(|item| {
+                item.0["type"] == "function_call_output" && item.0["call_id"] == "call-A"
+            }),
+            "A remains unanswered while B is delivered"
+        );
     }
 
     #[tokio::test]

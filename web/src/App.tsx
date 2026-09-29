@@ -28,6 +28,11 @@ export type HarnessViewModel = {
     commandId?: string;
     command?: string;
     outcome?: "accepted" | "pending" | "queued" | "presented" | "acted" | "completed" | "cancelled" | "failed";
+    requestId?: string;
+    callId?: string;
+    toolName?: string;
+    delivered?: boolean;
+    output?: unknown;
   }>;
   inbox: Array<{
     id: string;
@@ -151,16 +156,28 @@ function Timeline({ data }: { data: HarnessViewModel }) {
         <span role="cell"><span className="mono">{item.kind}</span> · {item.label}</span>
         <span role="cell" className="state" data-state={item.state}>{item.state}</span>
         <span role="cell" className="meta">{[
+          `id ${item.id}`,
           item.nodeId,
           item.commandId ? `command ${item.commandId}` : undefined,
           item.outcome ? `outcome ${item.outcome}` : undefined,
+          item.requestId ? `request ${item.requestId}` : undefined,
+          item.callId ? `call ${item.callId}` : undefined,
+          item.toolName,
+          item.delivered === undefined ? undefined : `delivered ${item.delivered}`,
           item.startedAt,
           item.duration,
           item.detail,
+          item.output === undefined ? undefined : `output ${formatOutput(item.output)}`,
         ].filter(Boolean).join(" · ") || "—"}</span>
       </div>)}
     </div>
   );
+}
+
+function formatOutput(output: unknown): string {
+  if (typeof output === "string") return output;
+  try { return JSON.stringify(output) ?? String(output); }
+  catch { return String(output); }
 }
 
 function Inbox({ data }: { data: HarnessViewModel }) {

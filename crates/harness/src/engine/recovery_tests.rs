@@ -213,3 +213,131 @@ async fn engine_recovery_zero_row_interrupt_uses_durable_settlement_output() {
         "durable settlement output must not be replaced with Interrupted"
     );
 }
+
+#[tokio::test]
+async fn engine_recovering_reconciles_same_branch_ancestor_after_descendant_barrier() {
+    let store = Arc::new(Store::memory().unwrap());
+    let branch = AgentPath("/root".into());
+    let origin = RequestId("recovery-origin".into());
+    let barrier = RequestId("recovery-descendant-barrier".into());
+    let fork = RequestId("recovery-child-fork".into());
+    let call = CallId("ancestor-lost-call".into());
+    let call_item = Item(json!({
+        "type":"function_call",
+        "call_id":call.0,
+        "name":"must_not_replay",
+        "arguments":"{}"
+    }));
+    store
+        .write_request(
+            &origin,
+            None,
+            &branch.0,
+            &[call_item.clone()],
+            StoredUsage::default(),
+        )
+        .unwrap();
+    store.set_effort(&origin, Effort::Low).unwrap();
+    store.claim(&call, &origin).unwrap();
+    store
+        .write_request(
+            &barrier,
+            Some(&origin),
+            &branch.0,
+            &[],
+            StoredUsage::default(),
+        )
+        .unwrap();
+    store.set_effort(&barrier, Effort::Low).unwrap();
+    store
+        .write_request(
+            &fork,
+            Some(&origin),
+            "/root/child",
+            &[],
+            StoredUsage::default(),
+        )
+        .unwrap();
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    struct CountCalls(Arc<std::sync::atomic::AtomicUsize>);
+    #[async_trait]
+    impl Provider for CountCalls {
+        async fn call(&self, _name: &str, _args: Value) -> Result<Value, ProviderError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ProviderError::Tool(
+                "provider invocation was forbidden".into(),
+            ))
+        }
+
+        fn tools(&self) -> Vec<Value> {
+            vec![]
+        }
+    }
+    let engine = Engine::<TestAuth, CountCalls, Replay>::with_transport(
+        Replay {
+            requests: requests.clone(),
+            turn: Mutex::new(Some(ResponsesTurn {
+                response_id: "recovered-final".into(),
+                items: vec![Item(json!({
+                    "type":"message",
+                    "role":"assistant",
+                    "phase":"final_answer",
+                    "content":"done"
+                }))],
+                usage: Usage::default(),
+            })),
+        },
+        store.clone(),
+        Arc::new(JobScheduler::new(1).unwrap()),
+        Arc::new(CountCalls(provider_calls.clone())),
+        EngineConfig {
+            instructions: "Return the typed answer".into(),
+            tools: vec![],
+            model: "test".into(),
+            effort: Effort::Low,
+            session_id: "recovery-descendant".into(),
+            agent: branch.clone(),
+        },
+    );
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    let completion = engine
+        .run_recovering(Some(barrier.clone()), vec![], cancel_rx, empty_mailbox())
+        .await
+        .unwrap();
+
+    let claims = store.claims(&call).unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].request, origin);
+    assert_eq!(claims[0].state, crate::store::ClaimState::Interrupted);
+    let request_log = requests.lock().unwrap();
+    assert_eq!(request_log.len(), 1, "exactly one model request");
+    let outputs: Vec<_> = request_log[0]
+        .input
+        .iter()
+        .filter(|item| item.0["type"] == "function_call_output" && item.0["call_id"] == call.0)
+        .collect();
+    assert_eq!(outputs.len(), 1, "interrupted output is sent exactly once");
+    assert!(request_log[0].input.contains(&call_item));
+    assert_eq!(
+        provider_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "lost external calls are never replayed"
+    );
+    assert_eq!(
+        store
+            .claims_on_branch_lineage(&fork, &branch.0)
+            .unwrap()
+            .len(),
+        0,
+        "recovery lineage stops at a different-agent fork"
+    );
+    assert!(
+        store
+            .claims_on(&completion.head_request)
+            .unwrap()
+            .is_empty(),
+        "the recovery request does not claim the ancestor call again"
+    );
+}

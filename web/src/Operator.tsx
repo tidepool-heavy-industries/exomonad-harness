@@ -141,7 +141,14 @@ export function Operator() {
       </header>
       {failure && <p className="session-error" role="alert">{failure}</p>}
       {snapshotLoaded
-        ? <App data={toViewModel(state)} onCommand={sendCommand} acceptedCommandIds={acceptedCommandIds} />
+        ? <>
+          <section aria-labelledby="async-guidance-heading" className="command-guidance">
+            <h2 id="async-guidance-heading">Async command scenario</h2>
+            <p>Enter <code>async start</code> to start A. It automatically emits B on the next Engine turn while A remains pending; no second browser submission triggers B. <code>echo hello</code> is only an independent responsiveness check.</p>
+            <p>Use <code>async release</code> to release A, or <code>async cancel</code> to cancel A.</p>
+          </section>
+          <App data={toViewModel(state)} onCommand={sendCommand} acceptedCommandIds={acceptedCommandIds} />
+        </>
         : <main aria-busy="true"><p role="status">Loading authoritative harness snapshot…</p></main>}
     </>
   )

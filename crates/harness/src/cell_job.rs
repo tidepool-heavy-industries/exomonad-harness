@@ -108,7 +108,7 @@ mod tests {
             input: CellInput,
             context: CallContext,
         ) -> Result<CellOutput, ProviderError> {
-            context.progress.send(json!({"phase":"running"})).unwrap();
+            let _ = context.progress.try_send(json!({"phase":"running"}));
             if input.source == "never" {
                 std::future::pending::<()>().await;
             }

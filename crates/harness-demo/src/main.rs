@@ -1,5 +1,6 @@
 //! Reference provider for the harness. `run` intentionally invokes a local
 //! shell and is suitable only for trusted, development-time demonstrations.
+mod async_demo;
 pub mod driver;
 #[cfg(test)]
 mod process_restart_tests;
@@ -467,8 +468,31 @@ fn active_wait_request(requests: &[Value], history: &[Item]) -> Option<String> {
     })
 }
 
+fn active_async_request(requests: &[Value]) -> Option<String> {
+    requests.iter().find_map(|request| {
+        (request["state"] == "running" && request["command"] == "async start")
+            .then(|| request["id"].as_str().map(str::to_owned))
+            .flatten()
+    })
+}
+
 fn job_record(id: &str, state: &str) -> Value {
     json!({"id":id,"conversationId":ROOT_CONVERSATION_ID,"state":state})
+}
+
+fn persisted_epoch_ms() -> Option<i64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+}
+
+fn stamp_start(record: &mut Value, field: &str) {
+    if let Some(epoch_ms) = persisted_epoch_ms() {
+        record[field] = json!(epoch_ms);
+    } else {
+        record[field] = Value::Null;
+    }
 }
 
 fn conversation_rows(root: &Value, envelopes: &[Value]) -> Vec<Value> {
@@ -521,6 +545,30 @@ fn deterministic_command(
     command: &str,
     waiting: bool,
 ) -> (&'static str, &'static str, Option<String>) {
+    if command == "async start" {
+        return ("running", "pending", None);
+    }
+    if command == "async release" {
+        return (
+            "settled",
+            "completed",
+            Some("Async tool A released.".into()),
+        );
+    }
+    if command == "async cancel" {
+        return (
+            "settled",
+            "completed",
+            Some("Async tool A cancelled.".into()),
+        );
+    }
+    if command == "async recovery" {
+        return (
+            "settled",
+            "completed",
+            Some("Recovered interrupted async jobs.".into()),
+        );
+    }
     if command == "wait" {
         return if waiting {
             (
@@ -604,13 +652,52 @@ struct DeterministicServerTransport {
     command: String,
     waiting: bool,
     answer_override: Option<String>,
+    tool_jobs: async_demo::ToolJobs,
+    async_sequence: bool,
+    async_turn: Arc<std::sync::atomic::AtomicUsize>,
+    async_gate: Option<async_demo::GateControl>,
+    async_a_call_id: Option<String>,
+    async_b_call_id: Option<String>,
 }
 
 #[async_trait]
 impl harness::engine::ResponsesTransport for DeterministicServerTransport {
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        self.tool_jobs
+            .observe_input(&request.input)
+            .map_err(TransportError::Stream)?;
         if let Some(path) = std::env::var_os("HARNESS_DEMO_CAPTURE_REQUESTS") {
             capture_deterministic_request(&request, Path::new(&path))?;
+        }
+        if self.async_sequence {
+            if let Some(gate) = &self.async_gate {
+                gate.observe_request(&request);
+                gate.observe_input(&request.input);
+            }
+            let items = match self
+                .async_turn
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            {
+                0 => vec![Item(json!({
+                    "type":"function_call","call_id":self.async_a_call_id.as_deref().unwrap_or("missing-async-A"),"name":"gate","arguments":"{}","async":true
+                }))],
+                1 => vec![Item(json!({
+                    "type":"function_call","call_id":self.async_b_call_id.as_deref().unwrap_or("missing-async-B"),"name":"echo","arguments":"{}","async":true
+                }))],
+                _ => vec![Item(json!({
+                    "type":"message","role":"assistant","phase":"final_answer",
+                    "content":[{"type":"output_text","text":"Async scenario completed."}]
+                }))],
+            };
+            return Ok(ResponsesTurn {
+                response_id: format!(
+                    "async-{}-{}",
+                    request.session_id,
+                    self.async_turn.load(std::sync::atomic::Ordering::SeqCst)
+                ),
+                items,
+                usage: Usage::default(),
+            });
         }
         let (state, _outcome, answer) = deterministic_command(&self.command, self.waiting);
         if self.command == "wait" && state == "running" {
@@ -690,16 +777,52 @@ async fn run_deterministic_engine_completion(
     agent: AgentPath,
     answer_override: Option<String>,
 ) -> Result<EngineCompletion, String> {
+    run_deterministic_engine_completion_from_head(
+        store,
+        scheduler,
+        None,
+        async_demo::ToolJobs::default(),
+        command_id,
+        command,
+        waiting,
+        cancel_rx,
+        agent,
+        answer_override,
+        false,
+    )
+    .await
+}
+
+async fn run_deterministic_engine_completion_from_head(
+    store: Arc<Store>,
+    scheduler: Arc<JobScheduler>,
+    head: Option<harness::model::RequestId>,
+    tool_jobs: async_demo::ToolJobs,
+    _command_id: &str,
+    command: &str,
+    waiting: bool,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+    agent: AgentPath,
+    answer_override: Option<String>,
+    recovering: bool,
+) -> Result<EngineCompletion, String> {
     let policy = BrowserPolicy::for_invocation(command, &agent);
-    let provider = Arc::new(BrowserProvider(
-        CliProvider(DemoProvider::development(".", false)),
-        policy,
-    ));
-    let engine = Engine::<OfflineServerAuth, BrowserProvider, _>::with_transport(
+    let provider = Arc::new(async_demo::TrackedProvider {
+        inner: BrowserProvider(CliProvider(DemoProvider::development(".", false)), policy),
+        jobs: tool_jobs.clone(),
+        conversation_id: ROOT_CONVERSATION_ID.to_owned(),
+    });
+    let engine = Engine::<OfflineServerAuth, async_demo::TrackedProvider<BrowserProvider>, _>::with_transport(
         DeterministicServerTransport {
             command: command.to_owned(),
             waiting,
             answer_override,
+            tool_jobs,
+            async_sequence: false,
+            async_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            async_gate: None,
+            async_a_call_id: None,
+            async_b_call_id: None,
         },
         store,
         scheduler,
@@ -709,19 +832,46 @@ async fn run_deterministic_engine_completion(
             tools: Vec::new(),
             model: "deterministic-local".into(),
             effort: Effort::Low,
-            session_id: format!("harness-demo-server-{command_id}"),
+            session_id: "harness-demo-server:/root".into(),
             agent,
         },
     );
-    engine
-        .run(
-            None,
-            command_input(&[], command),
-            cancel_rx,
-            tokio::sync::mpsc::unbounded_channel().1,
-        )
-        .await
-        .map_err(|_| "deterministic engine request failed".to_owned())
+    let new_items = if command == "async recovery" {
+        Vec::new()
+    } else {
+        command_input(&[], command)
+    };
+    let incoming = tokio::sync::mpsc::unbounded_channel().1;
+    let completion = if recovering {
+        engine
+            .run_recovering(head, new_items, cancel_rx, incoming)
+            .await
+    } else {
+        engine.run(head, new_items, cancel_rx, incoming).await
+    };
+    completion.map_err(|error| format!("deterministic engine request failed: {error}"))
+}
+
+/// Session-state snapshots can lag request rows when the process dies during
+/// an Engine turn. Continue from the durable same-branch tip, not the saved
+/// parent, or recovery would try to insert a second child on that branch.
+fn durable_recovery_head(
+    store: &Store,
+    saved: harness::model::RequestId,
+    branch: &str,
+) -> Result<harness::model::RequestId, String> {
+    let mut head = saved;
+    loop {
+        let next = store
+            .children_of(&head)
+            .map_err(|error| format!("could not read durable recovery lineage: {error}"))?
+            .into_iter()
+            .find(|child| child.branch == branch);
+        match next {
+            Some(child) => head = child.id,
+            None => return Ok(head),
+        }
+    }
 }
 
 /// Browser-only deterministic policy. The shared CLI provider remains Send/auto.
@@ -748,6 +898,60 @@ impl BrowserPolicy {
 }
 
 struct BrowserProvider(CliProvider, BrowserPolicy);
+
+struct AsyncScenarioProvider {
+    delegate: BrowserProvider,
+    gate: async_demo::GateControl,
+}
+
+#[async_trait]
+impl Provider for AsyncScenarioProvider {
+    async fn before_request(
+        &self,
+        plan: &harness::hooks::RequestPlan,
+    ) -> harness::hooks::BeforeRequestResult {
+        self.delegate.before_request(plan).await
+    }
+
+    async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError> {
+        match name {
+            "gate" => {
+                self.gate.wait().await;
+                Ok(json!("A released"))
+            }
+            "echo" => Ok(json!("B output")),
+            _ => self.delegate.call(name, args).await,
+        }
+    }
+
+    async fn call_with_context(
+        &self,
+        name: &str,
+        args: Value,
+        context: CallContext,
+    ) -> Result<Value, ProviderError> {
+        if name == "gate" {
+            self.gate.set_call_id(context.call_id);
+            self.gate.wait().await;
+            return Ok(json!("A released"));
+        }
+        if name == "echo" {
+            return Ok(json!("B output"));
+        }
+        self.delegate.call_with_context(name, args, context).await
+    }
+
+    fn tools(&self) -> Vec<Value> {
+        vec![
+            json!({"type":"function","name":"gate","async":true,"strict":true,"parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}),
+            json!({"type":"function","name":"echo","async":true,"strict":true,"parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}),
+        ]
+    }
+
+    fn all_tools(&self) -> Vec<Value> {
+        self.tools()
+    }
+}
 
 #[async_trait]
 impl Provider for BrowserProvider {
@@ -810,6 +1014,7 @@ impl Provider for BrowserProvider {
     }
 }
 
+#[cfg(test)]
 async fn run_deterministic_engine_turn(
     store: Arc<Store>,
     scheduler: Arc<JobScheduler>,
@@ -846,6 +1051,132 @@ async fn run_deterministic_engine_turn(
         .cloned()
         .ok_or_else(|| "deterministic Engine final item is missing".to_owned())?;
     Ok((answer, final_item))
+}
+
+async fn run_deterministic_engine_turn_from_head(
+    store: Arc<Store>,
+    scheduler: Arc<JobScheduler>,
+    head: Option<harness::model::RequestId>,
+    tool_jobs: async_demo::ToolJobs,
+    command_id: &str,
+    command: &str,
+    waiting: bool,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+    agent: AgentPath,
+    answer_override: Option<String>,
+) -> Result<(String, Item, harness::model::RequestId), String> {
+    let completion = run_deterministic_engine_completion_from_head(
+        store,
+        scheduler,
+        head,
+        tool_jobs,
+        command_id,
+        command,
+        waiting,
+        cancel_rx,
+        agent,
+        answer_override,
+        false,
+    )
+    .await?;
+    let answer = final_text(&completion.turn.items)
+        .ok_or_else(|| "deterministic engine returned no final text".to_owned())?;
+    let final_item = completion
+        .turn
+        .items
+        .iter()
+        .rev()
+        .find(|item| {
+            item.0["type"] == "message"
+                && item.0["role"] == "assistant"
+                && item.0["phase"] == "final_answer"
+        })
+        .cloned()
+        .ok_or_else(|| "deterministic Engine final item is missing".to_owned())?;
+    Ok((answer, final_item, completion.head_request))
+}
+
+async fn run_async_scenario_turn(
+    store: Arc<Store>,
+    scheduler: Arc<JobScheduler>,
+    head: Option<harness::model::RequestId>,
+    command_id: &str,
+    tool_jobs: async_demo::ToolJobs,
+    gate: async_demo::GateControl,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+) -> Result<(String, Item, harness::model::RequestId), String> {
+    let transport_gate = gate.clone();
+    let (async_a_call_id, async_b_call_id) = async_scenario_call_ids(command_id);
+    let provider = Arc::new(async_demo::TrackedProvider {
+        inner: AsyncScenarioProvider {
+            delegate: BrowserProvider(
+                CliProvider(DemoProvider::development(".", false)),
+                BrowserPolicy::Send,
+            ),
+            gate,
+        },
+        jobs: tool_jobs.clone(),
+        conversation_id: ROOT_CONVERSATION_ID.to_owned(),
+    });
+    let engine = Engine::<
+        OfflineServerAuth,
+        async_demo::TrackedProvider<AsyncScenarioProvider>,
+        _,
+    >::with_transport(
+        DeterministicServerTransport {
+            command: "async start".to_owned(),
+            waiting: false,
+            answer_override: None,
+            tool_jobs,
+            async_sequence: true,
+            async_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            async_gate: Some(transport_gate),
+            async_a_call_id: Some(async_a_call_id),
+            async_b_call_id: Some(async_b_call_id),
+        },
+        store,
+        scheduler,
+        provider,
+        EngineConfig {
+            instructions: "Exercise the deterministic async job scenario.".into(),
+            tools: Vec::new(),
+            model: "deterministic-local".into(),
+            effort: Effort::Low,
+            session_id: "harness-demo-server:/root".into(),
+            agent: AgentPath(ROOT_PATH.into()),
+        },
+    );
+    let completion = engine
+        .run(
+            head,
+            command_input(&[], "async start"),
+            cancel_rx,
+            tokio::sync::mpsc::unbounded_channel().1,
+        )
+        .await
+        .map_err(|error| format!("async deterministic Engine request failed: {error}"))?;
+    let answer = final_text(&completion.turn.items)
+        .ok_or_else(|| "async Engine returned no final text".to_owned())?;
+    let final_item = completion
+        .turn
+        .items
+        .iter()
+        .rev()
+        .find(|item| {
+            item.0["type"] == "message"
+                && item.0["role"] == "assistant"
+                && item.0["phase"] == "final_answer"
+        })
+        .cloned()
+        .ok_or_else(|| "async Engine final item is missing".to_owned())?;
+    Ok((answer, final_item, completion.head_request))
+}
+
+fn async_scenario_call_ids(command_id: &str) -> (String, String) {
+    (
+        format!("async/{command_id}/A"),
+        format!("async/{command_id}/B"),
+    )
 }
 
 async fn run_deterministic_child_message(
@@ -1000,6 +1331,45 @@ fn persist_engine_final_envelope(
     }))
 }
 
+fn save_server_tool_jobs(
+    store: &Store,
+    records: Vec<harness::server::ToolJobRecord>,
+) -> Result<(), String> {
+    let saved = store
+        .session_state("harness-demo-server:/root")
+        .map_err(|_| "could not read server state for tool job update")?
+        .ok_or_else(|| "server status row is missing during tool job update".to_owned())?;
+    let mut state = serde_json::from_str::<Value>(&saved.state)
+        .map_err(|_| "server status row is malformed during tool job update")?;
+    let mut candidates = records
+        .iter()
+        .filter(|record| !record.request_id.is_empty())
+        .map(|record| harness::model::RequestId(record.request_id.clone()))
+        .collect::<Vec<_>>();
+    if let Some(head) = state["engineHead"].as_str() {
+        candidates.push(harness::model::RequestId(head.to_owned()));
+    }
+    let depth = |id: &harness::model::RequestId| -> usize {
+        let mut current = Some(id.clone());
+        let mut depth = 0;
+        while let Some(request_id) = current {
+            let Ok(Some(request)) = store.request(&request_id) else {
+                break;
+            };
+            depth += 1;
+            current = request.parent;
+        }
+        depth
+    };
+    if let Some(head) = candidates.into_iter().max_by_key(depth) {
+        state["engineHead"] = json!(head.0);
+    }
+    state["toolJobs"] = json!(records);
+    store
+        .save_session_state("harness-demo-server:/root", &state)
+        .map_err(|_| "could not persist server tool job update".to_owned())
+}
+
 #[derive(Debug)]
 struct PersistedServerState {
     history: Vec<Item>,
@@ -1007,6 +1377,8 @@ struct PersistedServerState {
     requests: Vec<Value>,
     envelopes: Vec<Value>,
     conversation: Value,
+    engine_head: Option<harness::model::RequestId>,
+    tool_jobs: Vec<harness::server::ToolJobRecord>,
 }
 
 fn restore_server_state(raw: &str) -> Result<PersistedServerState, String> {
@@ -1019,6 +1391,19 @@ fn restore_server_state(raw: &str) -> Result<PersistedServerState, String> {
     };
     let history = serde_json::from_value::<Vec<Item>>(required("history")?.clone())
         .map_err(|_| "persisted demo server history is malformed".to_owned())?;
+    let engine_head = value
+        .get("engineHead")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_str()
+                .map(|id| harness::model::RequestId(id.to_owned()))
+                .ok_or_else(|| "persisted demo server Engine head is malformed".to_owned())
+        })
+        .transpose()?;
+    let tool_jobs = value.get("toolJobs").cloned().unwrap_or_else(|| json!([]));
+    let tool_jobs = serde_json::from_value::<Vec<harness::server::ToolJobRecord>>(tool_jobs)
+        .map_err(|_| "persisted demo server tool jobs are malformed".to_owned())?;
     let records = |field: &str| -> Result<Vec<Value>, String> {
         required(field)?
             .as_array()
@@ -1056,6 +1441,7 @@ fn restore_server_state(raw: &str) -> Result<PersistedServerState, String> {
             job["state"] = json!("cancelled");
             job["status"] = json!("Interrupted");
             job["interrupted"] = json!(true);
+            job["endedAtMs"] = Value::Null;
         }
     }
     let mut requests = records("requests")?;
@@ -1071,6 +1457,7 @@ fn restore_server_state(raw: &str) -> Result<PersistedServerState, String> {
         }
         if request.get("state").and_then(Value::as_str) == Some("running") {
             request["state"] = json!("failed");
+            request["endedAtMs"] = Value::Null;
             if request.get("commandId").is_some() {
                 request["outcome"] = json!("failed");
                 request["detail"] = json!("Process restarted before this request settled.");
@@ -1113,6 +1500,8 @@ fn restore_server_state(raw: &str) -> Result<PersistedServerState, String> {
         requests,
         envelopes,
         conversation,
+        engine_head,
+        tool_jobs,
     })
 }
 
@@ -1134,11 +1523,12 @@ async fn serve(
     let secret = std::env::var("HARNESS_DEMO_SESSION_SECRET")
         .map_err(|_| "HARNESS_DEMO_SESSION_SECRET is required".to_owned())?;
     let secret = SessionSecret::new(secret)?;
-    let config = ServerConfig::new(asset_root)
-        .with_browser_session(secret, Duration::from_secs(8 * 60 * 60))?;
-    let (app, control, mut commands) = server::server_with_config(config);
     let status_store =
         Arc::new(Store::open(&db).map_err(|_| "could not open server status store".to_owned())?);
+    let config = ServerConfig::new(asset_root)
+        .with_browser_session(secret, Duration::from_secs(8 * 60 * 60))?
+        .with_history_store(status_store.clone());
+    let (app, control, mut commands) = server::server_with_config(config);
     let root_agent = AgentPath(ROOT_PATH.into());
     if status_store
         .agent(&root_agent)
@@ -1154,6 +1544,8 @@ async fn serve(
     let mut requests = Vec::new();
     let mut envelopes = Vec::new();
     let mut conversation = conversation_record("idle");
+    let mut engine_head: Option<harness::model::RequestId> = None;
+    let mut tool_jobs = async_demo::ToolJobs::default();
     if let Some(saved) = status_store
         .session_state("harness-demo-server:/root")
         .map_err(|_| "could not read server status".to_owned())?
@@ -1164,20 +1556,47 @@ async fn serve(
         requests = restored.requests;
         envelopes = restored.envelopes;
         conversation = restored.conversation;
+        engine_head = restored.engine_head;
+        tool_jobs = async_demo::ToolJobs::reopen(restored.tool_jobs);
         status_store
             .save_session_state(
                 "harness-demo-server:/root",
-                &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
+                &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation,"engineHead":engine_head.as_ref().map(|head| &head.0),"toolJobs":tool_jobs.records()}),
             )
             .map_err(|_| "could not persist recovered server status".to_owned())?;
     }
-    control.set_snapshot(Snapshot {
-        conversations: conversation_rows(&conversation, &envelopes),
-        requests: requests.clone(),
-        jobs: jobs.clone(),
-        envelopes: envelopes.clone(),
-        ..Snapshot::default()
-    });
+    let live_snapshot = Arc::new(std::sync::Mutex::new(Snapshot::default()));
+    let tool_job_store = status_store.clone();
+    let tool_job_control = control.clone();
+    let tool_job_snapshot = live_snapshot.clone();
+    tool_jobs =
+        async_demo::ToolJobs::reopened_with_persistence(tool_jobs.records(), move |records| {
+            save_server_tool_jobs(&tool_job_store, records.clone())?;
+            let snapshot = {
+                let mut snapshot = tool_job_snapshot.lock().unwrap_or_else(|e| e.into_inner());
+                snapshot
+                    .jobs
+                    .retain(|job| !job["id"].as_str().is_some_and(|id| id.starts_with("tool/")));
+                snapshot.jobs.extend(records.iter().map(projected_tool_job));
+                snapshot.clone()
+            };
+            tool_job_control.set_snapshot(snapshot);
+            for record in records {
+                tool_job_control.publish("job.upsert", projected_tool_job(&record));
+            }
+            Ok(())
+        });
+    set_live_server_snapshot(
+        &control,
+        &live_snapshot,
+        Snapshot {
+            conversations: conversation_rows(&conversation, &envelopes),
+            requests: requests.clone(),
+            jobs: projected_server_jobs(&jobs, &tool_jobs),
+            envelopes: envelopes.clone(),
+            ..Snapshot::default()
+        },
+    );
     let scheduler = Arc::new(
         JobScheduler::new(4)
             .map_err(|_| "could not initialize server tool scheduler".to_owned())?,
@@ -1185,6 +1604,43 @@ async fn serve(
     // TODO(adoption H3; docs/daily-driver-plan.md): compose the reusable server
     // with the live tree driver in the embedding binary, preserving this explicit
     // offline mode and sharing authoritative Engine/Store state with the browser.
+    if tool_jobs
+        .records()
+        .iter()
+        .any(|job| job.state == harness::server::ToolJobState::Running)
+    {
+        let saved_recovery_head = engine_head
+            .clone()
+            .ok_or_else(|| "running async jobs have no persisted Engine head".to_owned())?;
+        let recovery_head = durable_recovery_head(&status_store, saved_recovery_head, ROOT_PATH)?;
+        // Keep the cancellation channel open for the duration of recovery.
+        // A closed watch receiver is interpreted by Engine as cancellation.
+        let (_recovery_cancel_tx, recovery_cancel_rx) = tokio::sync::watch::channel(false);
+        let completion = run_deterministic_engine_completion_from_head(
+            status_store.clone(),
+            scheduler.clone(),
+            Some(recovery_head),
+            tool_jobs.clone(),
+            "async-recovery",
+            "async recovery",
+            false,
+            recovery_cancel_rx,
+            AgentPath(ROOT_PATH.into()),
+            None,
+            true,
+        )
+        .await?;
+        engine_head = Some(completion.head_request);
+        tool_jobs
+            .mark_interrupted_after_recovery()
+            .map_err(|_| "could not persist recovered async job state".to_owned())?;
+        status_store
+            .save_session_state(
+                "harness-demo-server:/root",
+                &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation,"engineHead":engine_head.as_ref().map(|head| &head.0),"toolJobs":tool_jobs.records()}),
+            )
+            .map_err(|_| "could not persist recovered async Engine head".to_owned())?;
+    }
     // --serve is the credential-free deterministic browser journey. The
     // interactive --ask path remains backed by CliDriver/Engine; browser
     // commands must never silently turn into model requests.
@@ -1216,14 +1672,101 @@ async fn serve(
     tokio::pin!(shutdown_signal);
     let mut pending_engine: Option<(
         tokio::sync::watch::Sender<bool>,
-        tokio::task::JoinHandle<Result<(String, Item), String>>,
+        tokio::task::JoinHandle<Result<(String, Item, harness::model::RequestId), String>>,
     )> = None;
+    let mut async_gate: Option<async_demo::GateControl> = None;
+    let mut async_start_command: Option<(String, String)> = None;
     loop {
         tokio::select! {
             _ = &mut shutdown_signal => break,
             result = &mut server_task => {
                 return result.map_err(|_| "server task failed".to_owned())?
                     .map_err(|_| "HTTP server failed".to_owned());
+            }
+            async_result = async {
+                match pending_engine.as_mut() {
+                    Some((_, task)) => task.await,
+                    None => std::future::pending().await,
+                }
+            }, if async_gate.is_some() => {
+                pending_engine.take();
+                async_gate = None;
+                let completion = match async_result {
+                    Ok(Ok((answer, item, head))) => {
+                        engine_head = Some(head);
+                        ("completed", "completed", Some(answer), Some(item))
+                    }
+                    Ok(Err(error)) => (
+                        "failed",
+                        "failed",
+                        Some(format!("Async Engine scenario failed: {error}")),
+                        None,
+                    ),
+                    Err(join_error) => (
+                        "failed",
+                        "failed",
+                        Some(format!("Async Engine task join failed: {join_error}")),
+                        None,
+                    ),
+                };
+                if let Some((command_id, request_id)) = async_start_command.take() {
+                    if let Some(item) = completion.3.as_ref() {
+                        let envelope = persist_engine_final_envelope(
+                            &status_store,
+                            item,
+                            next_envelope_ordinal(&envelopes),
+                        )?;
+                        envelopes.push(envelope.clone());
+                        control.publish("envelope.upsert", envelope);
+                    }
+                    if let Some(history_item) = history.iter_mut().find(|item| {
+                        item.0["request_id"] == request_id && item.0["command"] == "async start"
+                    }) {
+                        history_item.0["outcome"] = json!(completion.1);
+                        history_item.0["answer"] = json!(completion.2);
+                    }
+                    let request = command_request_record(
+                        &request_id,
+                        completion.0,
+                        &command_id,
+                        "async start",
+                        completion.1,
+                        completion.2.as_deref(),
+                    );
+                    let job = job_record(&command_id, "settled");
+                    let request = replace_by_id(&mut requests, request);
+                    let job = replace_by_id(&mut jobs, job);
+                    let next_conversation =
+                        if active_wait_request(&requests, &history).is_some() {
+                            conversation_record("requesting")
+                        } else {
+                            conversation_record("idle")
+                        };
+                    let conversation_changed = conversation != next_conversation;
+                    conversation = next_conversation;
+                    status_store
+                        .save_session_state(
+                            "harness-demo-server:/root",
+                            &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation,"engineHead":engine_head.as_ref().map(|head| &head.0),"toolJobs":tool_jobs.records()}),
+                        )
+                        .map_err(|_| "could not persist async scenario completion")?;
+                    set_live_server_snapshot(
+                        &control,
+                        &live_snapshot,
+                        Snapshot {
+                            conversations: conversation_rows(&conversation, &envelopes),
+                            requests: requests.clone(),
+                            jobs: projected_server_jobs(&jobs, &tool_jobs),
+                            envelopes: envelopes.clone(),
+                            ..Snapshot::default()
+                        },
+                    );
+                    control.publish("request.upsert", request);
+                    control.publish("job.upsert", job);
+                    if conversation_changed {
+                        control.publish("conversation.upsert", conversation.clone());
+                    }
+                }
             }
             command = commands.recv() => {
                 let Some(QueuedCommand { command_id, command }) = command else { break };
@@ -1232,20 +1775,22 @@ async fn serve(
                         let conversation_was_requesting = conversation["state"] == "requesting";
                         let request_id = format!("request/{command_id}");
                         let job_id = command_id.clone();
-                        let queued_job = job_record(&job_id, "running");
-                        let queued_request = command_request_record(
+                        let mut queued_job = job_record(&job_id, "running");
+                        stamp_start(&mut queued_job, "startedAtMs");
+                        let mut queued_request = command_request_record(
                             &request_id, "running", &command_id, &command, "accepted", None,
                         );
+                        stamp_start(&mut queued_request, "createdAtMs");
                         jobs.push(queued_job);
                         requests.push(queued_request);
                         conversation = conversation_record("requesting");
                         status_store
                             .save_session_state(
                                 "harness-demo-server:/root",
-                                &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
+                                &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation,"engineHead":engine_head.as_ref().map(|head| &head.0),"toolJobs":tool_jobs.records()}),
                             )
                             .map_err(|_| "could not persist accepted server command".to_owned())?;
-                        control.set_snapshot(Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+                        set_live_server_snapshot(&control, &live_snapshot, Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: projected_server_jobs(&jobs, &tool_jobs), envelopes: envelopes.clone(), ..Snapshot::default() });
                         if !conversation_was_requesting {
                             control.publish("conversation.upsert", conversation.clone());
                         }
@@ -1263,14 +1808,14 @@ async fn serve(
                                 "pending",
                                 Some("Waiting for a cancel command."),
                             );
-                            replace_by_id(&mut requests, pending_record.clone());
+                            let pending_record = replace_by_id(&mut requests, pending_record);
                             status_store
                                 .save_session_state(
                                     "harness-demo-server:/root",
-                                    &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
+                                    &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation,"engineHead":engine_head.as_ref().map(|head| &head.0),"toolJobs":tool_jobs.records()}),
                                 )
                                 .map_err(|_| "could not persist pending wait")?;
-                            control.set_snapshot(Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+                            set_live_server_snapshot(&control, &live_snapshot, Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: projected_server_jobs(&jobs, &tool_jobs), envelopes: envelopes.clone(), ..Snapshot::default() });
                             control.publish("request.upsert", pending_record);
                         }
                         if command.starts_with("message ") && waiting {
@@ -1287,10 +1832,10 @@ async fn serve(
                             status_store
                                 .save_session_state(
                                     "harness-demo-server:/root",
-                                    &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
+                                    &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation,"engineHead":engine_head.as_ref().map(|head| &head.0),"toolJobs":tool_jobs.records()}),
                                 )
                                 .map_err(|_| "could not persist queued browser message")?;
-                            control.set_snapshot(Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+                            set_live_server_snapshot(&control, &live_snapshot, Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: projected_server_jobs(&jobs, &tool_jobs), envelopes: envelopes.clone(), ..Snapshot::default() });
                             control.publish("envelope.upsert", message);
                         }
                         let progress = persist_browser_envelope(
@@ -1305,10 +1850,10 @@ async fn serve(
                         status_store
                             .save_session_state(
                                 "harness-demo-server:/root",
-                                &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
+                                &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation,"engineHead":engine_head.as_ref().map(|head| &head.0),"toolJobs":tool_jobs.records()}),
                             )
                             .map_err(|_| "could not persist server progress")?;
-                        control.set_snapshot(Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+                        set_live_server_snapshot(&control, &live_snapshot, Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: projected_server_jobs(&jobs, &tool_jobs), envelopes: envelopes.clone(), ..Snapshot::default() });
                         control.publish("envelope.upsert", progress);
                         let mut child_envelopes = Vec::new();
                         let child_result = if let Some(text) = command.strip_prefix("child ") {
@@ -1357,25 +1902,143 @@ async fn serve(
                                 format!("{} replied: {answer}", path.0)
                             })
                         });
-                        let engine_answer = if initial_state == "running" {
+                        let async_echo_check =
+                            async_gate.is_some() && command.starts_with("echo ");
+                        let async_control_command = command == "async release"
+                            || command == "async cancel";
+                        let duplicate_async_start =
+                            command == "async start" && async_gate.is_some();
+                        let scenario_conflict = async_gate.is_some()
+                            && !async_control_command
+                            && !async_echo_check
+                            && command != "async start";
+                        let engine_answer = if command == "async release"
+                            || command == "async cancel"
+                        {
+                            match async_gate.as_ref() {
+                                None => Some(Err("no async scenario is active".to_owned())),
+                                Some(gate) => {
+                                    if command == "async release" {
+                                        gate.release();
+                                    } else if let Some(call_id) = gate.call_id() {
+                                        scheduler.cancel(&call_id).await
+                                            .map_err(|_| "could not cancel async tool call")?;
+                                    } else {
+                                        return Err("async scenario has no active call A".into());
+                                    }
+                                    None
+                                }
+                            }
+                        } else if duplicate_async_start {
+                            Some(Err("an async scenario is already active".to_owned()))
+                        } else if scenario_conflict {
+                            Some(Err(
+                                "async scenario active; only echo checks and async release/cancel are accepted"
+                                    .to_owned(),
+                            ))
+                        } else if async_echo_check {
+                            None
+                        } else if initial_state == "running" {
                             let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
                             let engine_command_id = command_id.clone();
                             let engine_command = command.clone();
                             let engine_store = status_store.clone();
                             let engine_scheduler = scheduler.clone();
-                            let task = tokio::spawn(async move {
-                                run_deterministic_engine_turn(
-                                    engine_store,
-                                    engine_scheduler,
-                                    &engine_command_id,
-                                    &engine_command,
-                                    waiting,
-                                    cancel_rx,
-                                    AgentPath(ROOT_PATH.into()),
-                                    None,
-                                )
-                                .await
-                            });
+                            let engine_tool_jobs = tool_jobs.clone();
+                            let engine_head_for_task = engine_head.clone();
+                            let task = if command == "async start" {
+                                let gate = async_demo::GateControl::default();
+                                let task_gate = gate.clone();
+                                async_gate = Some(gate.clone());
+                                async_start_command =
+                                    Some((command_id.clone(), request_id.clone()));
+                                let (_, async_b_call_id) =
+                                    async_scenario_call_ids(&engine_command_id);
+                                let mut task = tokio::spawn(async move {
+                                    run_async_scenario_turn(
+                                        engine_store,
+                                        engine_scheduler,
+                                        engine_head_for_task,
+                                        &engine_command_id,
+                                        engine_tool_jobs,
+                                        task_gate,
+                                        cancel_rx,
+                                    )
+                                    .await
+                                });
+                                let early_result = tokio::select! {
+                                    _ = gate.wait_until_started() => None,
+                                    result = &mut task => Some(result),
+                                };
+                                let engine_completed_before_a = early_result.is_some();
+                                let task = match early_result {
+                                    None => task,
+                                    Some(Ok(Ok(completion))) => {
+                                        tokio::spawn(async move { Ok(completion) })
+                                    }
+                                    Some(Ok(Err(error))) => tokio::spawn(async move {
+                                        Err(format!(
+                                            "Engine task returned Err before GateControl saw A: {error}"
+                                        ))
+                                    }),
+                                    Some(Err(join_error)) => tokio::spawn(async move {
+                                        Err(format!(
+                                            "Engine JoinHandle failed before GateControl saw A: {join_error}"
+                                        ))
+                                    }),
+                                };
+                                if !engine_completed_before_a {
+                                    tokio::time::timeout(Duration::from_secs(2), async {
+                                        loop {
+                                            if tool_jobs.records().iter().any(|record| {
+                                                record.call_id == async_b_call_id
+                                                    && record.state
+                                                        == harness::server::ToolJobState::Settled
+                                                    && record.delivered
+                                            }) {
+                                                break;
+                                            }
+                                            tokio::time::sleep(Duration::from_millis(1)).await;
+                                        }
+                                    })
+                                    .await
+                                    .map_err(|_| "async scenario did not settle and deliver B")?;
+                                    if let Some(saved) = status_store
+                                        .session_state("harness-demo-server:/root")
+                                        .map_err(|_| "could not refresh persisted Engine head")?
+                                    {
+                                        let value: Value = serde_json::from_str(&saved.state)
+                                            .map_err(|_| "persisted server state is malformed")?;
+                                        engine_head = value["engineHead"]
+                                            .as_str()
+                                            .map(|id| harness::model::RequestId(id.to_owned()));
+                                    }
+                                    set_live_server_snapshot(&control, &live_snapshot, Snapshot {
+                                        conversations: conversation_rows(&conversation, &envelopes),
+                                        requests: requests.clone(),
+                                        jobs: projected_server_jobs(&jobs, &tool_jobs),
+                                        envelopes: envelopes.clone(),
+                                        ..Snapshot::default()
+                                    });
+                                }
+                                task
+                            } else {
+                                tokio::spawn(async move {
+                                    run_deterministic_engine_turn_from_head(
+                                        engine_store,
+                                        engine_scheduler,
+                                        engine_head_for_task,
+                                        engine_tool_jobs,
+                                        &engine_command_id,
+                                        &engine_command,
+                                        waiting,
+                                        cancel_rx,
+                                        AgentPath(ROOT_PATH.into()),
+                                        None,
+                                    )
+                                    .await
+                                })
+                            };
                             task_aborts
                                 .lock()
                                 .unwrap_or_else(|poison| poison.into_inner())
@@ -1389,9 +2052,11 @@ async fn serve(
                         } else {
                             let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
                             Some(
-                                run_deterministic_engine_turn(
+                                run_deterministic_engine_turn_from_head(
                                     status_store.clone(),
                                     scheduler.clone(),
+                                    engine_head.clone(),
+                                    tool_jobs.clone(),
                                     &command_id,
                                     &command,
                                     waiting,
@@ -1404,10 +2069,11 @@ async fn serve(
                         };
                         let (state, outcome, answer, final_item) = match engine_answer {
                             None => (initial_state, initial_outcome, fallback_answer, None),
-                            Some(Ok((answer, item))) => {
+                            Some(Ok((answer, item, completed_head))) => {
+                                engine_head = Some(completed_head);
                                 (initial_state, initial_outcome, Some(answer), Some(item))
                             }
-                            Some(Err(_)) => ("failed", "failed", fallback_answer, None),
+                            Some(Err(error)) => ("failed", "failed", Some(error), None),
                         };
                         history.push(Item(json!({"type":"demo_command","command_id":command_id,
                             "request_id":request_id,
@@ -1437,8 +2103,8 @@ async fn serve(
                                 answer.as_deref(),
                             );
                             let done_job = job_record(&job_id, own_job_state);
-                            replace_by_id(&mut requests, done_request.clone());
-                            replace_by_id(&mut jobs, done_job.clone());
+                            let done_request = replace_by_id(&mut requests, done_request);
+                            let done_job = replace_by_id(&mut jobs, done_job);
                             changed_requests.push(done_request);
                             changed_jobs.push(done_job);
                             if command == "cancel" && waiting {
@@ -1450,8 +2116,9 @@ async fn serve(
                                         "cancelled", Some("Request cancelled."),
                                     );
                                     let cancelled_job = job_record(pending_id.strip_prefix("request/").unwrap_or(&pending_id), "cancelled");
-                                    replace_by_id(&mut requests, cancelled_request.clone());
-                                    replace_by_id(&mut jobs, cancelled_job.clone());
+                                    let cancelled_request =
+                                        replace_by_id(&mut requests, cancelled_request);
+                                    let cancelled_job = replace_by_id(&mut jobs, cancelled_job);
                                     changed_requests.push(cancelled_request);
                                     changed_jobs.push(cancelled_job);
                                 }
@@ -1474,6 +2141,17 @@ async fn serve(
                                     )?;
                                     envelopes.push(queued.clone());
                                     changed_envelopes.push(queued);
+                                } else if async_echo_check || async_control_command {
+                                    let responsive = persist_browser_envelope(
+                                        &status_store,
+                                        ROOT_PATH,
+                                        "/operator",
+                                        "MESSAGE",
+                                        answer.as_deref().unwrap_or(""),
+                                        next_envelope_ordinal(&envelopes),
+                                    )?;
+                                    envelopes.push(responsive.clone());
+                                    changed_envelopes.push(responsive);
                                 }
                             } else if let Some(answer) = answer.as_deref() {
                                 let failure = persist_browser_envelope(
@@ -1491,7 +2169,9 @@ async fn serve(
                             // Keep the wait outstanding while the receiver is
                             // free to accept message/cancel frames.
                         }
-                        let next_conversation = if active_wait_request(&requests, &history).is_some() {
+                        let next_conversation = if active_wait_request(&requests, &history).is_some()
+                            || active_async_request(&requests).is_some()
+                        {
                             conversation_record("requesting")
                         } else {
                             conversation_record("idle")
@@ -1501,10 +2181,10 @@ async fn serve(
                         status_store
                             .save_session_state(
                                 "harness-demo-server:/root",
-                                &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation}),
+                                &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation,"engineHead":engine_head.as_ref().map(|head| &head.0),"toolJobs":tool_jobs.records()}),
                             )
                             .map_err(|_| "could not persist server job status".to_owned())?;
-                        control.set_snapshot(Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: jobs.clone(), envelopes: envelopes.clone(), ..Snapshot::default() });
+                        set_live_server_snapshot(&control, &live_snapshot, Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: projected_server_jobs(&jobs, &tool_jobs), envelopes: envelopes.clone(), ..Snapshot::default() });
                         for request in changed_requests {
                             control.publish("request.upsert", request);
                         }
@@ -1531,10 +2211,52 @@ async fn serve(
     Ok(())
 }
 
-fn replace_by_id(records: &mut Vec<Value>, replacement: Value) {
+fn replace_by_id(records: &mut Vec<Value>, mut replacement: Value) -> Value {
     let id = replacement.get("id").cloned();
+    if let Some(previous) = records
+        .iter()
+        .find(|record| record.get("id") == id.as_ref())
+    {
+        let (start_field, end_field) = if replacement.get("commandId").is_some() {
+            ("createdAtMs", "endedAtMs")
+        } else {
+            ("startedAtMs", "endedAtMs")
+        };
+        if let Some(start) = previous.get(start_field) {
+            replacement[start_field] = start.clone();
+        }
+        if let Some(end) = previous.get(end_field) {
+            replacement[end_field] = end.clone();
+        } else if previous["state"] == "running" && replacement["state"] != "running" {
+            replacement[end_field] = persisted_epoch_ms().map_or(Value::Null, |ms| json!(ms));
+        }
+    }
     records.retain(|record| record.get("id") != id.as_ref());
-    records.push(replacement);
+    records.push(replacement.clone());
+    replacement
+}
+
+fn projected_server_jobs(command_jobs: &[Value], tool_jobs: &async_demo::ToolJobs) -> Vec<Value> {
+    let mut projected = command_jobs.to_vec();
+    projected.extend(tool_jobs.records().iter().map(projected_tool_job));
+    projected
+}
+
+fn projected_tool_job(record: &harness::server::ToolJobRecord) -> Value {
+    let mut value = serde_json::to_value(record).expect("tool job record serializes");
+    if record.state == harness::server::ToolJobState::Interrupted && record.ended_at_ms.is_none() {
+        value["endedAtMs"] = Value::Null;
+    }
+    value
+}
+
+fn set_live_server_snapshot(
+    control: &harness::server::ServerControl,
+    live: &Arc<std::sync::Mutex<Snapshot>>,
+    snapshot: Snapshot,
+) {
+    *live.lock().unwrap_or_else(|e| e.into_inner()) = snapshot.clone();
+    control.set_snapshot(snapshot);
 }
 
 fn final_text(items: &[Item]) -> Option<String> {
@@ -1762,7 +2484,7 @@ impl Provider for DemoProvider {
                 .await
                 .map_err(|_| ProviderError::Tool("trace recording failed".into()))?;
             }
-            let _ = context.progress.send(
+            let _ = context.progress.try_send(
                 json!({"event":"sleep_started","handle":context.handle.0.clone(),"duration_ms":ms}),
             );
             tokio::time::sleep(Duration::from_millis(ms)).await;
@@ -1870,7 +2592,666 @@ mod tests {
     use harness::store::Store;
     use harness::transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, Usage};
     use harness::turn::JobScheduler;
-    use tokio::sync::mpsc;
+
+    #[test]
+    fn command_timing_replacement_preserves_persisted_start_and_single_terminal_end() {
+        let mut pending = command_request_record(
+            "request/c1",
+            "running",
+            "c1",
+            "async start",
+            "pending",
+            None,
+        );
+        pending["createdAtMs"] = json!(1_700_000_000_000_i64);
+        let mut records = vec![pending];
+        let still_pending = replace_by_id(
+            &mut records,
+            command_request_record(
+                "request/c1",
+                "running",
+                "c1",
+                "async start",
+                "pending",
+                None,
+            ),
+        );
+        assert_eq!(still_pending["createdAtMs"], json!(1_700_000_000_000_i64));
+        assert!(still_pending.get("endedAtMs").is_none());
+        let completed = replace_by_id(
+            &mut records,
+            command_request_record(
+                "request/c1",
+                "completed",
+                "c1",
+                "async start",
+                "completed",
+                None,
+            ),
+        );
+        let end = completed["endedAtMs"]
+            .as_i64()
+            .expect("observed terminal time");
+        assert!(end >= 1_700_000_000_000_i64);
+        let replayed = replace_by_id(
+            &mut records,
+            command_request_record(
+                "request/c1",
+                "completed",
+                "c1",
+                "async start",
+                "completed",
+                None,
+            ),
+        );
+        assert_eq!(replayed["createdAtMs"], json!(1_700_000_000_000_i64));
+        assert_eq!(replayed["endedAtMs"], json!(end));
+
+        let mut running_job = job_record("c1", "running");
+        running_job["startedAtMs"] = json!(1_700_000_000_001_i64);
+        let interrupted_job = replace_by_id(&mut vec![running_job], job_record("c1", "cancelled"));
+        assert_eq!(interrupted_job["startedAtMs"], json!(1_700_000_000_001_i64));
+        assert!(interrupted_job["endedAtMs"].as_i64().is_some());
+
+        let projected = projected_tool_job(&harness::server::ToolJobRecord {
+            id: "tool/conversation/root/call-a".into(),
+            conversation_id: ROOT_CONVERSATION_ID.into(),
+            request_id: "engine-request-a".into(),
+            call_id: "call-a".into(),
+            tool_name: "gate".into(),
+            state: harness::server::ToolJobState::Interrupted,
+            delivered: false,
+            started_at_ms: Some(1_700_000_000_002_i64),
+            ended_at_ms: None,
+            output: None,
+        });
+        assert_eq!(projected["startedAtMs"], json!(1_700_000_000_002_i64));
+        assert!(projected.get("endedAtMs").is_some_and(Value::is_null));
+    }
+
+    #[tokio::test]
+    async fn async_restart_uses_engine_inherited_claim_recovery() {
+        let store = Arc::new(Store::memory().unwrap());
+        let root = AgentPath(ROOT_PATH.into());
+        store
+            .admit_agent(&root, None, None, &json!({}), &json!({"kind":"root"}))
+            .unwrap();
+        let parent = harness::model::RequestId("async-parent".into());
+        store
+            .write_request(
+                &parent,
+                None,
+                ROOT_PATH,
+                &[
+                    Item(json!({
+                        "type":"function_call","call_id":"call-A","name":"gate","arguments":"{}","async":true
+                    })),
+                    Item(json!({
+                        "type":"function_call","call_id":"call-B","name":"echo","arguments":"{}","async":true
+                    })),
+                ],
+                harness::store::Usage::default(),
+            )
+            .unwrap();
+        assert!(
+            store
+                .advance_agent_head(&root, None, Some(&parent))
+                .unwrap()
+        );
+        let call_a = CallId("call-A".into());
+        let call_b = CallId("call-B".into());
+        store.claim(&call_a, &parent).unwrap();
+        store.claim(&call_b, &parent).unwrap();
+        store
+            .settle_claims(
+                &call_b,
+                &Item(json!({
+                    "type":"function_call_output","call_id":"call-B","output":"\"B output\""
+                })),
+            )
+            .unwrap();
+        let tool_jobs = async_demo::ToolJobs::reopen([
+            harness::server::ToolJobRecord {
+                id: "tool/conversation/call-A".into(),
+                conversation_id: ROOT_CONVERSATION_ID.into(),
+                request_id: parent.0.clone(),
+                call_id: call_a.0.clone(),
+                tool_name: "gate".into(),
+                state: harness::server::ToolJobState::Running,
+                delivered: false,
+                started_at_ms: None,
+                ended_at_ms: None,
+                output: None,
+            },
+            harness::server::ToolJobRecord {
+                id: "tool/conversation/call-B".into(),
+                conversation_id: ROOT_CONVERSATION_ID.into(),
+                request_id: parent.0.clone(),
+                call_id: call_b.0.clone(),
+                tool_name: "echo".into(),
+                state: harness::server::ToolJobState::Settled,
+                delivered: true,
+                started_at_ms: None,
+                ended_at_ms: None,
+                output: Some(json!("B output")),
+            },
+        ]);
+        assert_eq!(
+            tool_jobs.records()[0].state,
+            harness::server::ToolJobState::Running,
+            "reopen must not synthesize UI interruption before Engine recovery"
+        );
+        let scheduler = Arc::new(JobScheduler::new(2).unwrap());
+        let completion = run_deterministic_engine_completion_from_head(
+            store.clone(),
+            scheduler,
+            Some(parent.clone()),
+            tool_jobs.clone(),
+            "recovery",
+            "async recovery",
+            false,
+            tokio::sync::watch::channel(false).1,
+            root,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        tool_jobs.mark_interrupted_after_recovery().unwrap();
+        let claims_a = store.claims(&call_a).unwrap();
+        assert!(claims_a.iter().any(|claim| {
+            claim.request == parent && claim.state == harness::store::ClaimState::Interrupted
+        }));
+        let latest = store.items(&completion.head_request).unwrap();
+        assert!(latest.iter().any(|item| {
+            item.0["type"] == "function_call_output"
+                && item.0["call_id"] == "call-A"
+                && item.0["output"] == "{\"error\":\"job interrupted\"}"
+        }));
+        assert!(latest.iter().any(|item| {
+            item.0["type"] == "function_call_output"
+                && item.0["call_id"] == "call-B"
+                && item.0["output"] == "\"B output\""
+        }));
+        let records = tool_jobs.records();
+        assert!(records.iter().any(|job| {
+            job.call_id == "call-A" && job.state == harness::server::ToolJobState::Interrupted
+        }));
+        assert!(records.iter().any(|job| {
+            job.call_id == "call-B"
+                && job.state == harness::server::ToolJobState::Settled
+                && job.output == Some(json!("B output"))
+                && job.delivered
+        }));
+    }
+
+    #[tokio::test]
+    async fn served_async_scenario_release_and_cancel_control_only_call_a() {
+        async fn scenario(cancel_a: bool) -> (String, Vec<harness::server::ToolJobRecord>) {
+            let command_id = if cancel_a {
+                "served-cancel-scenario"
+            } else {
+                "served-release-scenario"
+            };
+            let (a_call_id, b_call_id) = async_scenario_call_ids(command_id);
+            let store = Arc::new(Store::memory().unwrap());
+            let root = AgentPath(ROOT_PATH.into());
+            store
+                .admit_agent(&root, None, None, &json!({}), &json!({"kind":"root"}))
+                .unwrap();
+            let scheduler = Arc::new(JobScheduler::new(2).unwrap());
+            let jobs = async_demo::ToolJobs::default();
+            let gate = async_demo::GateControl::default();
+            let task_gate = gate.clone();
+            let task_store = store.clone();
+            let task_scheduler = scheduler.clone();
+            let task_jobs = jobs.clone();
+            let task = tokio::spawn(async move {
+                run_async_scenario_turn(
+                    task_store,
+                    task_scheduler,
+                    None,
+                    command_id,
+                    task_jobs,
+                    task_gate,
+                    tokio::sync::watch::channel(false).1,
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(2), gate.wait_until_started())
+                .await
+                .expect("scenario did not start call A");
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let records = jobs.records();
+                    if records.iter().any(|job| {
+                        job.call_id == b_call_id
+                            && job.state == harness::server::ToolJobState::Settled
+                            && job.delivered
+                    }) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("B output was not delivered while A remained pending");
+            let seen_inputs = gate.inputs();
+            assert!(
+                seen_inputs.len() >= 3,
+                "expected A, B, and continuation turns"
+            );
+            for (turn, input) in seen_inputs.iter().enumerate().skip(1) {
+                assert!(
+                    input.iter().any(|item| {
+                        item.0["type"] == "function_call" && item.0["call_id"] == a_call_id
+                    }),
+                    "turn {turn} dropped original unanswered A: {input:#?}"
+                );
+                assert!(
+                    !input.iter().any(|item| {
+                        item.0["type"] == "function_call_output" && item.0["call_id"] == a_call_id
+                    }),
+                    "turn {turn} fabricated A output: {input:#?}"
+                );
+            }
+            let latest_input = seen_inputs.last().unwrap();
+            assert_eq!(
+                latest_input
+                    .iter()
+                    .filter(|item| {
+                        item.0["type"] == "function_call_output" && item.0["call_id"] == b_call_id
+                    })
+                    .count(),
+                1,
+                "B's serialized output must appear exactly once in the full input"
+            );
+            assert!(latest_input.iter().any(|item| {
+                item.0["type"] == "function_call_output"
+                    && item.0["call_id"] == b_call_id
+                    && item.0["output"] == "\"B output\""
+            }));
+            let a = jobs
+                .records()
+                .into_iter()
+                .find(|job| job.call_id == a_call_id)
+                .unwrap();
+            assert_eq!(a.state, harness::server::ToolJobState::Running);
+            assert_eq!(a.output, None);
+            assert!(!a.request_id.is_empty());
+            if cancel_a {
+                scheduler.cancel(&CallId(a.call_id.clone())).await.unwrap();
+            } else {
+                gate.release();
+            }
+            let (answer, _final_item, _head) = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            (answer, jobs.records())
+        }
+
+        let (released_answer, released) = scenario(false).await;
+        assert_eq!(released_answer, "Async scenario completed.");
+        assert!(released.iter().any(|job| {
+            job.call_id == async_scenario_call_ids("served-release-scenario").0
+                && job.state == harness::server::ToolJobState::Settled
+                && job.output == Some(json!("A released"))
+        }));
+        assert!(released.iter().any(|job| {
+            job.call_id == async_scenario_call_ids("served-release-scenario").1
+                && job.state == harness::server::ToolJobState::Settled
+                && job.delivered
+                && !job.request_id.is_empty()
+        }));
+
+        let (cancelled_answer, cancelled) = scenario(true).await;
+        assert_eq!(cancelled_answer, "Async scenario completed.");
+        assert!(cancelled.iter().any(|job| {
+            job.call_id == async_scenario_call_ids("served-cancel-scenario").0
+                && job.state == harness::server::ToolJobState::Cancelled
+                && job.output.is_none()
+        }));
+    }
+
+    #[tokio::test]
+    async fn repeated_async_scenarios_keep_unique_calls_on_same_store_and_scheduler() {
+        let store = Arc::new(Store::memory().unwrap());
+        let root = AgentPath(ROOT_PATH.into());
+        store
+            .admit_agent(&root, None, None, &json!({}), &json!({"kind":"root"}))
+            .unwrap();
+        let scheduler = Arc::new(JobScheduler::new(2).unwrap());
+        let jobs = async_demo::ToolJobs::default();
+        let mut head = None;
+        let mut a_ids = Vec::new();
+
+        for cancel in [false, true] {
+            let command_id = if cancel {
+                "repeat-scenario-cancel"
+            } else {
+                "repeat-scenario-release"
+            };
+            let (_, b_call_id) = async_scenario_call_ids(command_id);
+            let gate = async_demo::GateControl::default();
+            let task_gate = gate.clone();
+            let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+            let task = tokio::spawn(run_async_scenario_turn(
+                store.clone(),
+                scheduler.clone(),
+                head.clone(),
+                command_id,
+                jobs.clone(),
+                task_gate,
+                cancel_rx,
+            ));
+            let a_id = tokio::time::timeout(Duration::from_secs(2), gate.wait_until_started())
+                .await
+                .expect("scenario did not start A");
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if jobs.records().iter().any(|job| {
+                        job.call_id == b_call_id
+                            && job.state == harness::server::ToolJobState::Settled
+                            && job.delivered
+                    }) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("scenario did not settle and deliver B");
+            if cancel {
+                scheduler.cancel(&a_id).await.unwrap();
+            } else {
+                gate.release();
+            }
+            let (_, _, next_head) = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            cancel_tx.send(true).ok();
+            head = Some(next_head);
+            a_ids.push(a_id.0);
+        }
+
+        assert_ne!(a_ids[0], a_ids[1], "each accepted start needs unique A");
+        let records = jobs.records();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.tool_name == "gate")
+                .count(),
+            2,
+            "the second scenario must not overwrite the first A record"
+        );
+        assert!(records.iter().any(|record| {
+            record.call_id == a_ids[0]
+                && record.state == harness::server::ToolJobState::Settled
+                && record.output == Some(json!("A released"))
+        }));
+        assert!(records.iter().any(|record| {
+            record.call_id == a_ids[1]
+                && record.state == harness::server::ToolJobState::Cancelled
+                && record.output.is_none()
+        }));
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.tool_name == "echo")
+                .count(),
+            2,
+            "each scenario's B identity must coexist"
+        );
+    }
+
+    #[tokio::test]
+    async fn restarted_async_scenario_keeps_old_results_when_new_start_runs() {
+        let store = Arc::new(Store::memory().unwrap());
+        let root = AgentPath(ROOT_PATH.into());
+        store
+            .admit_agent(&root, None, None, &json!({}), &json!({"kind":"root"}))
+            .unwrap();
+        let scheduler = Arc::new(JobScheduler::new(2).unwrap());
+        let jobs = async_demo::ToolJobs::default();
+        let first_command_id = "restart-first-scenario";
+        let (_, first_b) = async_scenario_call_ids(first_command_id);
+        let gate = async_demo::GateControl::default();
+        let task_gate = gate.clone();
+        let (_first_cancel_tx, first_cancel_rx) = tokio::sync::watch::channel(false);
+        let mut task = tokio::spawn(run_async_scenario_turn(
+            store.clone(),
+            scheduler,
+            None,
+            first_command_id,
+            jobs.clone(),
+            task_gate,
+            first_cancel_rx,
+        ));
+        let first_a = tokio::select! {
+            result = &mut task => panic!("Engine run exited before GateControl saw A: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(2), gate.wait_until_started()) => {
+                result.expect("scenario did not start A")
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if jobs.records().iter().any(|job| {
+                    job.call_id == first_b
+                        && job.state == harness::server::ToolJobState::Settled
+                        && job.delivered
+                }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("scenario did not deliver B");
+        gate.release();
+        let (_, _, head) = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let first_records = jobs.records();
+        let restarted_jobs = async_demo::ToolJobs::reopen(first_records.clone());
+        let second_command_id = "restart-second-scenario";
+        let (_, second_b) = async_scenario_call_ids(second_command_id);
+        let second_scheduler = Arc::new(JobScheduler::new(2).unwrap());
+        let second_gate = async_demo::GateControl::default();
+        let task_gate = second_gate.clone();
+        let (_second_cancel_tx, second_cancel_rx) = tokio::sync::watch::channel(false);
+        let mut task = tokio::spawn(run_async_scenario_turn(
+            store,
+            second_scheduler,
+            Some(head),
+            second_command_id,
+            restarted_jobs.clone(),
+            task_gate,
+            second_cancel_rx,
+        ));
+        let second_a = tokio::select! {
+            result = &mut task => panic!("restarted Engine run exited before GateControl saw A: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(2), second_gate.wait_until_started()) => {
+                result.expect("restarted scenario did not start A")
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if restarted_jobs.records().iter().any(|job| {
+                    job.call_id == second_b
+                        && job.state == harness::server::ToolJobState::Settled
+                        && job.delivered
+                }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("restarted scenario did not deliver a new B");
+        second_gate.release();
+        tokio::time::timeout(Duration::from_secs(2), &mut task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        let records = restarted_jobs.records();
+        assert_ne!(
+            first_a, second_a,
+            "restart must not reuse the old A identity"
+        );
+        assert_eq!(records.len(), 4, "old A/B and new A/B must coexist");
+        assert!(records.iter().any(|record| {
+            record.call_id == first_a.0
+                && record.state == harness::server::ToolJobState::Settled
+                && record.output == Some(json!("A released"))
+        }));
+        assert!(records.iter().any(|record| {
+            record.call_id == second_a.0
+                && record.state == harness::server::ToolJobState::Settled
+                && record.output == Some(json!("A released"))
+        }));
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| {
+                    record.tool_name == "echo"
+                        && record.state == harness::server::ToolJobState::Settled
+                        && record.output == Some(json!("B output"))
+                        && record.delivered
+                })
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn wave18_async_scenario_advertises_native_async_metadata() {
+        let store = Arc::new(Store::memory().unwrap());
+        let root = AgentPath(ROOT_PATH.into());
+        store
+            .admit_agent(&root, None, None, &json!({}), &json!({"kind":"root"}))
+            .unwrap();
+        let scheduler = Arc::new(JobScheduler::new(2).unwrap());
+        let jobs = async_demo::ToolJobs::default();
+        let command_id = "async-metadata-command";
+        let (a_call_id, b_call_id) = async_scenario_call_ids(command_id);
+        let gate = async_demo::GateControl::default();
+        let task_gate = gate.clone();
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(run_async_scenario_turn(
+            store,
+            scheduler,
+            None,
+            command_id,
+            jobs.clone(),
+            task_gate,
+            cancel_rx,
+        ));
+        let started_a = tokio::time::timeout(Duration::from_secs(2), gate.wait_until_started())
+            .await
+            .expect("scenario did not start A");
+        assert_eq!(started_a.0, a_call_id);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if jobs.records().iter().any(|job| {
+                    job.call_id == b_call_id
+                        && job.state == harness::server::ToolJobState::Settled
+                        && job.delivered
+                }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("scenario did not deliver B while A was pending");
+        let requests = gate.requests();
+        assert!(
+            requests.len() >= 3,
+            "expected A, B and continuation requests"
+        );
+        for request in &requests {
+            for tool_name in ["gate", "echo"] {
+                let tool = request
+                    .tools
+                    .iter()
+                    .find(|tool| tool["name"] == tool_name)
+                    .unwrap_or_else(|| panic!("request omitted {tool_name}: {:?}", request.tools));
+                assert_eq!(
+                    tool["async"], true,
+                    "advertised tool {tool_name} must declare async:true"
+                );
+                assert_eq!(
+                    tool["strict"], true,
+                    "advertised tool {tool_name} must declare strict:true"
+                );
+                assert_eq!(
+                    tool["parameters"]["required"],
+                    json!([]),
+                    "advertised tool {tool_name} must require the complete empty argument shape"
+                );
+                assert_eq!(
+                    tool["parameters"]["additionalProperties"], false,
+                    "advertised tool {tool_name} must use a closed parameter schema"
+                );
+            }
+            for item in &request.input {
+                if (item.0["type"] == "function_call" && item.0["call_id"] == a_call_id)
+                    || (item.0["type"] == "function_call" && item.0["call_id"] == b_call_id)
+                {
+                    assert_eq!(
+                        item.0["async"], true,
+                        "pending async function call missing async:true: {item:#?}"
+                    );
+                }
+            }
+        }
+        let b_delivery_turn = requests
+            .iter()
+            .find(|request| {
+                request.input.iter().any(|item| {
+                    item.0["type"] == "function_call_output" && item.0["call_id"] == b_call_id
+                })
+            })
+            .expect("no full request delivered B output");
+        assert_eq!(
+            b_delivery_turn
+                .input
+                .iter()
+                .filter(|item| {
+                    item.0["type"] == "function_call_output" && item.0["call_id"] == b_call_id
+                })
+                .count(),
+            1,
+            "B output is delivered exactly once"
+        );
+        assert!(b_delivery_turn.input.iter().any(|item| {
+            item.0["type"] == "function_call_output"
+                && item.0["call_id"] == b_call_id
+                && item.0["output"] == "\"B output\""
+        }));
+        assert!(
+            b_delivery_turn.input.iter().any(|item| {
+                item.0["type"] == "function_call" && item.0["call_id"] == a_call_id
+            })
+        );
+        assert!(!b_delivery_turn.input.iter().any(|item| {
+            item.0["type"] == "function_call_output" && item.0["call_id"] == a_call_id
+        }));
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn browser_provider_policy_uses_explicit_invocation_classification() {
@@ -2464,6 +3845,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deterministic_server_continues_from_actual_durable_engine_head() {
+        let store = Arc::new(Store::memory().unwrap());
+        let scheduler = Arc::new(JobScheduler::new(2).unwrap());
+        let (first_answer, _, first_head) = run_deterministic_engine_turn_from_head(
+            store.clone(),
+            scheduler.clone(),
+            None,
+            async_demo::ToolJobs::default(),
+            "request-one",
+            "echo first",
+            false,
+            tokio::sync::watch::channel(false).1,
+            AgentPath(ROOT_PATH.into()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first_answer, "first");
+        let (second_answer, _, second_head) = run_deterministic_engine_turn_from_head(
+            store,
+            scheduler,
+            Some(first_head.clone()),
+            async_demo::ToolJobs::default(),
+            "request-two",
+            "echo second",
+            false,
+            tokio::sync::watch::channel(false).1,
+            AgentPath(ROOT_PATH.into()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(second_answer, "second");
+        assert_ne!(first_head, second_head);
+    }
+
+    #[test]
+    fn recovery_advances_stale_session_head_to_same_branch_store_tip() {
+        let store = Store::memory().unwrap();
+        let saved = harness::model::RequestId("saved".into());
+        let next = harness::model::RequestId("next".into());
+        let tip = harness::model::RequestId("tip".into());
+        let other = harness::model::RequestId("other-branch".into());
+        store
+            .write_request(
+                &saved,
+                None,
+                ROOT_PATH,
+                &[],
+                harness::store::Usage::default(),
+            )
+            .unwrap();
+        store
+            .write_request(
+                &next,
+                Some(&saved),
+                ROOT_PATH,
+                &[],
+                harness::store::Usage::default(),
+            )
+            .unwrap();
+        store
+            .write_request(
+                &tip,
+                Some(&next),
+                ROOT_PATH,
+                &[],
+                harness::store::Usage::default(),
+            )
+            .unwrap();
+        store
+            .write_request(
+                &other,
+                Some(&saved),
+                "/other",
+                &[],
+                harness::store::Usage::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            durable_recovery_head(&store, saved.clone(), ROOT_PATH).unwrap(),
+            tip
+        );
+        assert_eq!(
+            durable_recovery_head(&store, saved.clone(), "/other").unwrap(),
+            other
+        );
+        assert_eq!(
+            durable_recovery_head(&store, next.clone(), "/missing").unwrap(),
+            next
+        );
+    }
+
+    #[tokio::test]
     async fn deterministic_server_engine_wait_observes_cancellation() {
         let store = Arc::new(Store::memory().unwrap());
         let scheduler = Arc::new(JobScheduler::new(2).unwrap());
@@ -2528,8 +4004,8 @@ mod tests {
         assert_eq!(next_input.last().unwrap().0["content"], "follow-up");
     }
 
-    #[test]
-    fn malformed_persisted_state_fails_and_running_records_are_interrupted() {
+    #[tokio::test]
+    async fn malformed_persisted_state_fails_and_running_records_are_interrupted() {
         assert!(restore_server_state("{").is_err());
         assert!(
             restore_server_state(r#"{"jobs":[]}"#)
@@ -2537,7 +4013,7 @@ mod tests {
                 .contains("history")
         );
         let restored = restore_server_state(
-            r#"{"history":[],"jobs":[{"id":"j1","conversationId":"conversation/root","state":"running"}],"requests":[{"id":"r1","conversationId":"conversation/root","state":"running"}],"envelopes":[],"conversation":{"id":"conversation/root","path":"/root","state":"requesting"}}"#,
+            r#"{"history":[],"jobs":[{"id":"j1","conversationId":"conversation/root","state":"running"}],"requests":[{"id":"r1","conversationId":"conversation/root","state":"running"}],"envelopes":[],"engineHead":"actual-head-1","toolJobs":[{"id":"tool/conversation/root/call-A","conversationId":"conversation/root","requestId":"emitting-head-2","callId":"call-A","toolName":"sleep","state":"running","delivered":false},{"id":"tool/conversation/root/call-B","conversationId":"conversation/root","requestId":"emitting-head-1","callId":"call-B","toolName":"sleep","state":"settled","delivered":true,"output":{"ok":true}}],"conversation":{"id":"conversation/root","path":"/root","state":"requesting"}}"#,
         )
         .unwrap();
         assert_eq!(restored.jobs[0]["state"], "cancelled");
@@ -2545,6 +4021,135 @@ mod tests {
         assert_eq!(restored.jobs[0]["interrupted"], true);
         assert_eq!(restored.requests[0]["state"], "failed");
         assert_eq!(restored.conversation["state"], "idle");
+        assert_eq!(
+            restored.engine_head.as_ref().map(|head| head.0.as_str()),
+            Some("actual-head-1")
+        );
+        let jobs = async_demo::ToolJobs::reopen(restored.tool_jobs);
+        let store = Arc::new(Store::memory().unwrap());
+        let root = AgentPath(ROOT_PATH.into());
+        store
+            .admit_agent(&root, None, None, &json!({}), &json!({"kind":"root"}))
+            .unwrap();
+        let parent = harness::model::RequestId("actual-head-1".into());
+        store
+            .write_request(
+                &parent,
+                None,
+                ROOT_PATH,
+                &[
+                    Item(json!({
+                        "type":"function_call","call_id":"call-A","name":"gate","arguments":"{}","async":true
+                    })),
+                    Item(json!({
+                        "type":"function_call","call_id":"call-B","name":"echo","arguments":"{}","async":true
+                    })),
+                ],
+                harness::store::Usage::default(),
+            )
+            .unwrap();
+        assert!(
+            store
+                .advance_agent_head(&root, None, Some(&parent))
+                .unwrap()
+        );
+        let call_a = CallId("call-A".into());
+        let call_b = CallId("call-B".into());
+        store.claim(&call_a, &parent).unwrap();
+        store.claim(&call_b, &parent).unwrap();
+        store
+            .settle_claims(
+                &call_b,
+                &Item(json!({
+                    "type":"function_call_output","call_id":"call-B","output":"{\"ok\":true}"
+                })),
+            )
+            .unwrap();
+        assert_eq!(
+            jobs.records()
+                .iter()
+                .find(|job| job.call_id == "call-A")
+                .unwrap()
+                .state,
+            harness::server::ToolJobState::Running,
+            "reopen query must not itself manufacture Engine recovery"
+        );
+        let completion = run_deterministic_engine_completion_from_head(
+            store.clone(),
+            Arc::new(JobScheduler::new(2).unwrap()),
+            Some(parent.clone()),
+            jobs.clone(),
+            "recovery-command",
+            "async recovery",
+            false,
+            tokio::sync::watch::channel(false).1,
+            root,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        jobs.mark_interrupted_after_recovery().unwrap();
+        let records = jobs.records();
+        let interrupted = records.iter().find(|job| job.call_id == "call-A").unwrap();
+        assert_eq!(
+            interrupted.state,
+            harness::server::ToolJobState::Interrupted
+        );
+        assert!(!interrupted.delivered);
+        assert_eq!(interrupted.output, None);
+        assert!(
+            store.claims(&call_a).unwrap().iter().any(|claim| {
+                claim.request == parent && claim.state == harness::store::ClaimState::Interrupted
+            }),
+            "Engine inherited-claim recovery must classify the original claim"
+        );
+        let recovered_input = store.items(&completion.head_request).unwrap();
+        assert!(recovered_input.iter().any(|item| {
+            item.0["type"] == "function_call_output"
+                && item.0["call_id"] == "call-A"
+                && item.0["output"] == "{\"error\":\"job interrupted\"}"
+        }));
+        let completed = records.iter().find(|job| job.call_id == "call-B").unwrap();
+        assert_eq!(completed.state, harness::server::ToolJobState::Settled);
+        assert!(completed.delivered);
+        assert_eq!(completed.output, Some(json!({"ok":true})));
+        assert!(recovered_input.iter().any(|item| {
+            item.0["type"] == "function_call_output"
+                && item.0["call_id"] == "call-B"
+                && item.0["output"] == "{\"ok\":true}"
+        }));
+    }
+
+    #[test]
+    fn browser_tool_provenance_is_persisted_without_overwriting_completed_head() {
+        let store = Arc::new(Store::memory().unwrap());
+        store
+            .save_session_state(
+                "harness-demo-server:/root",
+                &json!({"history":[],"engineHead":"completed-head"}),
+            )
+            .unwrap();
+        let persistent_store = store.clone();
+        let jobs = async_demo::ToolJobs::reopened_with_persistence([], move |records| {
+            save_server_tool_jobs(&persistent_store, records)
+        });
+        jobs.start(
+            ROOT_CONVERSATION_ID,
+            Some(&harness::model::RequestId("emitting-request-actual".into())),
+            &harness::model::CallId("original-call-id".into()),
+            "sleep",
+        )
+        .unwrap();
+        let state = store
+            .session_state("harness-demo-server:/root")
+            .unwrap()
+            .unwrap();
+        let value: Value = serde_json::from_str(&state.state).unwrap();
+        assert_eq!(value["engineHead"], "completed-head");
+        assert_eq!(value["toolJobs"][0]["requestId"], "emitting-request-actual");
+        assert_eq!(value["toolJobs"][0]["callId"], "original-call-id");
+        assert_eq!(value["toolJobs"][0]["state"], "running");
     }
 
     #[test]
@@ -2646,14 +4251,11 @@ mod tests {
     #[tokio::test]
     async fn sleep_is_async_and_returns_output() {
         let provider = DemoProvider::development(".", false);
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let ctx = CallContext {
-            handle: harness::provider::JobHandle("sleep-1".into()),
-            call_id: CallId("c1".into()),
-            agent: harness::model::AgentPath("/root".into()),
-            request: None,
-            progress: tx,
-        };
+        let (ctx, mut rx) = CallContext::detached_for_test(
+            harness::provider::JobHandle("sleep-1".into()),
+            CallId("c1".into()),
+            harness::model::AgentPath("/root".into()),
+        );
         let value = provider
             .call_with_context("sleep", json!({"duration_ms": 2}), ctx)
             .await
@@ -2668,14 +4270,11 @@ mod tests {
         let path = root.join("sleep.jsonl");
         let sink = TraceSink::open(path.clone()).await.unwrap();
         let provider = DemoProvider::development(".", false).with_trace(sink.clone());
-        let (progress, _) = mpsc::unbounded_channel();
-        let context = CallContext {
-            handle: harness::provider::JobHandle("private-handle".into()),
-            call_id: CallId("private-call-id".into()),
-            agent: harness::model::AgentPath("/root".into()),
-            request: None,
-            progress,
-        };
+        let (context, _progress) = CallContext::detached_for_test(
+            harness::provider::JobHandle("private-handle".into()),
+            CallId("private-call-id".into()),
+            harness::model::AgentPath("/root".into()),
+        );
         assert_eq!(
             provider
                 .call_with_context("sleep", json!({"duration_ms": 1}), context)

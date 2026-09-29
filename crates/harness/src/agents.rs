@@ -1,7 +1,10 @@
 use crate::model::{AgentPath, CallId, Effort, RequestId};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::{error::Error, fmt, str::FromStr};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// Error returned when an agent path cannot be parsed.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -165,6 +168,171 @@ pub struct AgentVerbError(pub String);
 pub struct AgentInvocation {
     pub request: RequestId,
     pub call_id: CallId,
+}
+
+/// Distinguishes the local caller path without asserting durable Store
+/// provenance. Durable provenance is owned by the Engine/Store boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AgentOperationOrigin {
+    Job { request: RequestId, call_id: CallId },
+    ModelDispatch { request: RequestId, call_id: CallId },
+}
+
+/// Typed, in-memory identity for the established model-tool dispatch path.
+/// This is descriptive only; it is not a claim of persisted provenance.
+pub fn model_dispatch_origin(invocation: Option<&AgentInvocation>) -> Option<AgentOperationOrigin> {
+    invocation.map(|invocation| AgentOperationOrigin::ModelDispatch {
+        request: invocation.request.clone(),
+        call_id: invocation.call_id.clone(),
+    })
+}
+
+#[derive(Debug, thiserror::Error, Eq, PartialEq)]
+pub enum JobVerbError {
+    #[error("job agent operations require a durable request identity")]
+    MissingRequest,
+    #[error("job agent operations have no AgentToolService backend")]
+    MissingBackend,
+    #[error("job was cancelled")]
+    Cancelled,
+    #[error("job operation refused: {0}")]
+    Refused(String),
+    #[error("agent operation failed: {0}")]
+    Service(String),
+}
+
+/// Scheduler-created, request-scoped capability for agent operations from a
+/// running provider job. Its private identity cannot be minted by a Provider.
+#[derive(Clone)]
+pub struct JobVerbs {
+    backend: Option<Arc<dyn AgentToolService>>,
+    caller: AgentPath,
+    invocation: Option<AgentInvocation>,
+    cancel: CancellationToken,
+    progress: mpsc::Sender<serde_json::Value>,
+}
+
+impl fmt::Debug for JobVerbs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JobVerbs")
+            .field("caller", &self.caller)
+            .field("invocation", &self.invocation)
+            .field("has_backend", &self.backend.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl JobVerbs {
+    pub(crate) fn from_scheduler(
+        backend: Option<Arc<dyn AgentToolService>>,
+        caller: AgentPath,
+        invocation: Option<AgentInvocation>,
+        cancel: CancellationToken,
+        progress: mpsc::Sender<serde_json::Value>,
+    ) -> Self {
+        Self {
+            backend,
+            caller,
+            invocation,
+            cancel,
+            progress,
+        }
+    }
+
+    pub fn origin(&self) -> Option<AgentOperationOrigin> {
+        self.invocation
+            .as_ref()
+            .map(|invocation| AgentOperationOrigin::Job {
+                request: invocation.request.clone(),
+                call_id: invocation.call_id.clone(),
+            })
+    }
+
+    fn ready(&self) -> Result<(&dyn AgentToolService, &AgentInvocation), JobVerbError> {
+        if self.cancel.is_cancelled() {
+            return Err(JobVerbError::Cancelled);
+        }
+        let backend = self
+            .backend
+            .as_deref()
+            .ok_or(JobVerbError::MissingBackend)?;
+        let invocation = self
+            .invocation
+            .as_ref()
+            .ok_or(JobVerbError::MissingRequest)?;
+        Ok((backend, invocation))
+    }
+
+    async fn cancellable<T>(
+        &self,
+        operation: impl std::future::Future<Output = Result<T, AgentVerbError>>,
+    ) -> Result<T, JobVerbError> {
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => Err(JobVerbError::Cancelled),
+            result = operation => result.map_err(|error| JobVerbError::Service(error.to_string())),
+        }
+    }
+
+    /// Spawn beneath this job's agent path, preserving the scheduler's exact
+    /// request/call identity through the invocation-aware service path.
+    pub async fn spawn_agent(
+        &self,
+        task_name: &str,
+        from: SpawnSource,
+        contract: Contract,
+    ) -> Result<serde_json::Value, JobVerbError> {
+        let (backend, invocation) = self.ready()?;
+        let task_name = AgentPath::normalize_task_name(task_name)
+            .map_err(|error| JobVerbError::Refused(error.to_string()))?;
+        self.cancellable(backend.spawn_agent_from_invocation(
+            &self.caller,
+            &task_name,
+            from,
+            contract,
+            Some(invocation),
+        ))
+        .await
+    }
+
+    /// Message only this agent or one of its descendants; sibling and
+    /// ancestor targets are refused by this capability boundary.
+    pub async fn send_message(
+        &self,
+        target: AgentPath,
+        message: impl Into<String>,
+    ) -> Result<serde_json::Value, JobVerbError> {
+        let (backend, _) = self.ready()?;
+        let child_of = |parent: &AgentPath, child: &AgentPath| {
+            child
+                .0
+                .strip_prefix(&(parent.0.trim_end_matches('/').to_owned() + "/"))
+                .is_some_and(|suffix| !suffix.is_empty() && !suffix.contains('/'))
+        };
+        if !target.is_canonical()
+            || !(child_of(&self.caller, &target) || child_of(&target, &self.caller))
+        {
+            return Err(JobVerbError::Refused(
+                "target must be a directly related parent or child agent".into(),
+            ));
+        }
+        self.cancellable(backend.send_message(&self.caller, target, message.into()))
+            .await
+    }
+
+    /// Emit best-effort progress through the scheduler's bounded out-of-band
+    /// channel. Full channels reject rather than growing memory.
+    pub fn envelope(&self, value: serde_json::Value) -> Result<(), JobVerbError> {
+        if self.cancel.is_cancelled() {
+            return Err(JobVerbError::Cancelled);
+        }
+        self.progress.try_send(value).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => {
+                JobVerbError::Refused("progress queue is full".into())
+            }
+            mpsc::error::TrySendError::Closed(_) => JobVerbError::Cancelled,
+        })
+    }
 }
 
 /// Execution boundary for harness-owned agent operations. Implementations

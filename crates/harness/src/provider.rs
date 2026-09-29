@@ -7,6 +7,11 @@ use async_trait::async_trait;
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+/// Maximum number of progress events retained while a provider call runs.
+/// When full, the scheduler drops the newest event rather than blocking work.
+pub const JOB_PROGRESS_CAPACITY: usize = 64;
 
 /// Stable public identifier for asynchronous provider work.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -24,7 +29,51 @@ pub struct CallContext {
     pub agent: AgentPath,
     /// Durable request that emitted this call, when dispatched by Engine.
     pub request: Option<crate::model::RequestId>,
-    pub progress: mpsc::UnboundedSender<Value>,
+    /// Cooperative cancellation signal. Scheduler cancellation also aborts
+    /// the job task, but providers can observe this before cleanup.
+    pub cancel: CancellationToken,
+    /// Scheduler-created job authority. Providers cannot supply its identity.
+    pub verbs: crate::agents::JobVerbs,
+    /// Bounded, best-effort out-of-band progress; a full queue rejects sends.
+    pub progress: mpsc::Sender<Value>,
+}
+
+impl CallContext {
+    /// Construct a detached context for provider tests and probes which call
+    /// a provider directly, outside `JobScheduler`.
+    ///
+    /// This deliberately grants no agent-operation backend or request
+    /// identity: `verbs.origin()` is `None`, and identity-dependent JobVerbs
+    /// return typed refusals. Progress uses the same bounded channel policy
+    /// as scheduled calls. Production jobs must receive their context from
+    /// `JobScheduler`, which alone can mint job identity.
+    pub fn detached_for_test(
+        handle: JobHandle,
+        call_id: CallId,
+        agent: AgentPath,
+    ) -> (Self, mpsc::Receiver<Value>) {
+        let cancel = CancellationToken::new();
+        let (progress, receiver) = mpsc::channel(JOB_PROGRESS_CAPACITY);
+        let verbs = crate::agents::JobVerbs::from_scheduler(
+            None,
+            agent.clone(),
+            None,
+            cancel.clone(),
+            progress.clone(),
+        );
+        (
+            Self {
+                handle,
+                call_id,
+                agent,
+                request: None,
+                cancel,
+                verbs,
+                progress,
+            },
+            receiver,
+        )
+    }
 }
 
 #[derive(Debug, Error)]
@@ -36,6 +85,12 @@ pub enum ProviderError {
 /// A provider owns tool meaning; the harness owns scheduling and history.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Optional runtime backend used by the scheduler to construct the
+    /// call-scoped `JobVerbs`. Defaults to no job-side agent operations.
+    fn job_agent_service(&self) -> Option<std::sync::Arc<dyn crate::agents::AgentToolService>> {
+        None
+    }
+
     /// Invoked once before an Engine transport attempt. Default is pass-through.
     async fn before_request(&self, _plan: &RequestPlan) -> BeforeRequestResult {
         BeforeRequestResult::default()

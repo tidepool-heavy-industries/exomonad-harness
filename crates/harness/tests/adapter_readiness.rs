@@ -20,7 +20,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 #[derive(Clone)]
 struct OfflineAuth;
@@ -352,6 +352,141 @@ async fn active_cell_survives_three_boundary_envelopes_and_finalizes_durably() {
 
     drop(reopened);
     drop(cell);
+}
+
+#[tokio::test]
+async fn cancelling_pending_cell_releases_execution_without_success_output() {
+    let cell = Arc::new(CancelProbeCell::default());
+    let store = Arc::new(Store::memory().expect("memory Store"));
+    let agent = AgentPath("/root/cancel-barrier".into());
+    let call_item = Item(json!({
+        "type":"function_call",
+        "call_id":"cancelled-cell-call",
+        "name":"cell",
+        "arguments":"{\"source\":\"blocked source\"}"
+    }));
+    let replay = Arc::new(ReplayTransport::gated([
+        turn("cell-admitted", vec![call_item]),
+        turn("await-cell", vec![wait_call("await-cancel")]),
+    ]));
+    let scheduler = Arc::new(JobScheduler::new(1).expect("job scheduler"));
+    let engine = Engine::<OfflineAuth, CellJobProvider<SharedCancelProbe>, _>::with_transport(
+        SharedReplay(replay.clone()),
+        store.clone(),
+        scheduler.clone(),
+        Arc::new(CellJobProvider::new(SharedCancelProbe(cell.clone()))),
+        EngineConfig {
+            instructions: "offline cancellation barrier".into(),
+            tools: Vec::new(),
+            model: "offline-replay".into(),
+            effort: Effort::Low,
+            session_id: "adapter-cancel-session".into(),
+            agent,
+        },
+    );
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let (inbox_tx, inbox_rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(inbox_tx);
+    let running = tokio::spawn(async move {
+        engine
+            .run_finalized::<Reply>(None, vec![], cancel_rx, inbox_rx)
+            .await
+    });
+    let call = CallId("cancelled-cell-call".into());
+
+    replay.wait_requested(1).await;
+    replay.release_next();
+    cell.wait_started().await;
+    replay.wait_requested(2).await;
+    cancel_tx.send(true).expect("signal engine cancellation");
+    assert!(matches!(
+        running.await.expect("engine task joins"),
+        Err(harness::engine::EngineError::Cancelled)
+    ));
+
+    assert_eq!(scheduler.wait(&call).await.unwrap(), JobOutput::Cancelled);
+    assert_eq!(
+        scheduler.output(&call).await.unwrap(),
+        Some(JobOutput::Cancelled)
+    );
+    cell.wait_dropped().await;
+    assert_eq!(cell.drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let claims = store.claims(&call).expect("load original call claims");
+    assert_eq!(claims.len(), 1);
+    assert_eq!(
+        claims[0].state,
+        harness::store::ClaimState::Interrupted,
+        "cancellation interrupts the original request claim"
+    );
+    let original_request = store
+        .items(&claims[0].request)
+        .expect("read original claimed request");
+    assert!(
+        !original_request.iter().any(|item| {
+            item.0["type"] == "function_call_output" && item.0["call_id"] == call.0
+        }),
+        "cancel-before-release must not append success to the original request"
+    );
+    assert!(
+        !original_request
+            .iter()
+            .any(|item| item.0["name"] == "finalize"),
+        "cancelled call cannot yield a typed final result"
+    );
+}
+
+#[derive(Default)]
+struct CancelProbeCell {
+    started: Notify,
+    dropped: Notify,
+    drops: std::sync::atomic::AtomicUsize,
+}
+
+impl CancelProbeCell {
+    async fn wait_started(&self) {
+        self.started.notified().await;
+    }
+
+    async fn wait_dropped(&self) {
+        self.dropped.notified().await;
+    }
+}
+
+struct CancelDrop<'a>(&'a CancelProbeCell);
+
+struct SharedCancelProbe(Arc<CancelProbeCell>);
+
+impl Drop for CancelDrop<'_> {
+    fn drop(&mut self) {
+        self.0
+            .drops
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.dropped.notify_one();
+    }
+}
+
+#[async_trait]
+impl CellJob for CancelProbeCell {
+    async fn run(
+        &self,
+        _input: CellInput,
+        _context: CallContext,
+    ) -> Result<CellOutput, ProviderError> {
+        self.started.notify_one();
+        let _drop = CancelDrop(self);
+        std::future::pending().await
+    }
+}
+
+#[async_trait]
+impl CellJob for SharedCancelProbe {
+    async fn run(
+        &self,
+        input: CellInput,
+        context: CallContext,
+    ) -> Result<CellOutput, ProviderError> {
+        self.0.run(input, context).await
+    }
 }
 
 fn assert_request_contains(request: &ResponsesRequest, expected: &str) {

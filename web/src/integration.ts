@@ -36,6 +36,11 @@ export function toViewModel(state: NormalizedState): HarnessViewModel {
       label: 'Async job',
       kind: 'job' as const,
       state: job.state,
+      requestId: job.requestId,
+      callId: job.callId,
+      toolName: job.toolName,
+      delivered: job.delivered,
+      output: job.output,
     })),
   ]
   const envelopeRows = [...state.envelopes.values()]

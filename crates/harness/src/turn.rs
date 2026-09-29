@@ -15,12 +15,15 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::Duration,
 };
 use thiserror::Error;
 use tokio::{
     sync::{Mutex, Semaphore, broadcast},
     task::JoinHandle,
 };
+
+const JOB_CANCELLATION_GRACE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum JobOutput {
@@ -137,8 +140,17 @@ struct Job {
     settled_claimants: Vec<AgentPath>,
     output: Option<JobOutput>,
     progress: Vec<Value>,
+    cancel: tokio_util::sync::CancellationToken,
     settled: tokio::sync::watch::Sender<Option<JobOutput>>,
     task: Option<JoinHandle<()>>,
+}
+
+fn retain_progress(progress: &mut Vec<Value>, event: Value) {
+    let capacity = crate::provider::JOB_PROGRESS_CAPACITY;
+    if progress.len() == capacity {
+        progress.remove(0);
+    }
+    progress.push(event);
 }
 
 /// Owns in-flight provider work and makes settlement replayable.
@@ -206,6 +218,7 @@ impl JobScheduler {
                 settled_claimants: Vec::new(),
                 output: None,
                 progress: Vec::new(),
+                cancel: tokio_util::sync::CancellationToken::new(),
                 settled,
                 task: None,
             },
@@ -216,7 +229,13 @@ impl JobScheduler {
         let task_call_id = call_id.clone();
         let task_agent = agent;
         let task_request = request;
+        let task_cancel = registry
+            .get(&call_id)
+            .expect("job inserted before launch")
+            .cancel
+            .clone();
         let is_agent_verb = crate::provider::is_harness_tool(&name);
+        let verb_backend = provider.job_agent_service();
         let (launch, launch_gate) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
             // Do not enter provider code until its JoinHandle is installed in
@@ -229,12 +248,33 @@ impl JobScheduler {
                 Ok(p) => p,
                 Err(_) => return,
             };
-            let (progress, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+            if task_cancel.is_cancelled() {
+                drop(permit);
+                settle(&jobs, task_call_id.clone(), JobOutput::Cancelled).await;
+                let _ = events.send(task_call_id);
+                return;
+            }
+            let (progress, mut progress_rx) =
+                tokio::sync::mpsc::channel(crate::provider::JOB_PROGRESS_CAPACITY);
+            let verbs = crate::agents::JobVerbs::from_scheduler(
+                verb_backend,
+                task_agent.clone(),
+                task_request
+                    .as_ref()
+                    .map(|request| crate::agents::AgentInvocation {
+                        request: request.clone(),
+                        call_id: task_call_id.clone(),
+                    }),
+                task_cancel.clone(),
+                progress.clone(),
+            );
             let context = CallContext {
                 handle: JobHandle(task_call_id.0.clone()),
                 call_id: task_call_id.clone(),
                 agent: task_agent,
                 request: task_request,
+                cancel: task_cancel,
+                verbs,
                 progress,
             };
             let call = if is_agent_verb {
@@ -248,7 +288,7 @@ impl JobScheduler {
                     event = progress_rx.recv() => {
                         if let Some(event) = event {
                             if let Some(job) = jobs.lock().await.get_mut(&task_call_id) {
-                                job.progress.push(event);
+                                retain_progress(&mut job.progress, event);
                             }
                         }
                     }
@@ -257,7 +297,7 @@ impl JobScheduler {
             };
             while let Ok(event) = progress_rx.try_recv() {
                 if let Some(job) = jobs.lock().await.get_mut(&task_call_id) {
-                    job.progress.push(event);
+                    retain_progress(&mut job.progress, event);
                 }
             }
             drop(permit);
@@ -417,22 +457,42 @@ impl JobScheduler {
     /// Cancel an in-flight job. Cancellation is a typed terminal output; it
     /// is retained and delivered through the same claim mechanism.
     pub async fn cancel(&self, call_id: &CallId) -> Result<Option<JobSettlement>, JobError> {
-        let (task, was_pending) = {
+        let (mut task, cancel, settlement) = {
             let mut jobs = self.jobs.lock().await;
             let job = jobs.get_mut(call_id).ok_or(JobError::UnknownCall)?;
             if job.output.is_some() {
                 return Ok(None);
             }
-            (job.task.take(), true)
+            let output = JobOutput::Cancelled;
+            job.output = Some(output.clone());
+            job.settled_claimants = job.claimants.drain().collect();
+            job.settled.send_replace(Some(output.clone()));
+            (
+                job.task.take(),
+                job.cancel.clone(),
+                JobSettlement {
+                    call_id: call_id.clone(),
+                    output,
+                    claimants: job.settled_claimants.clone(),
+                },
+            )
         };
-        if !was_pending {
-            return Ok(None);
+        cancel.cancel();
+        let mut publish_event = task.is_none();
+        if let Some(task) = task.as_mut() {
+            match tokio::time::timeout(JOB_CANCELLATION_GRACE, &mut *task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => publish_event = true,
+                Err(_) => {
+                    task.abort();
+                    let _ = task.await;
+                    publish_event = true;
+                }
+            }
         }
-        if let Some(task) = task {
-            task.abort();
+        if publish_event {
+            let _ = self.events.send(call_id.clone());
         }
-        let settlement = settle(&self.jobs, call_id.clone(), JobOutput::Cancelled).await;
-        let _ = self.events.send(call_id.clone());
         Ok(Some(settlement))
     }
 
@@ -732,6 +792,32 @@ mod tests {
         release.notify_one();
         tokio::task::yield_now().await;
         assert_eq!(effects.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(
+            scheduler.output(&call_id).await.unwrap(),
+            Some(JobOutput::Cancelled)
+        );
+    }
+
+    #[tokio::test]
+    async fn wave18_cancelled_job_rejects_late_settlement() {
+        let scheduler = JobScheduler::new(1).unwrap();
+        let call_id = CallId("wave18-late-completion".into());
+        scheduler
+            .start(Arc::new(Slow), call_id.clone(), "slow".into(), json!({}))
+            .await
+            .unwrap();
+        assert_eq!(
+            scheduler.cancel(&call_id).await.unwrap().unwrap().output,
+            JobOutput::Cancelled
+        );
+        // Exercise the first-terminal-wins guard at the settlement boundary.
+        let late = settle(
+            &scheduler.jobs,
+            call_id.clone(),
+            JobOutput::Completed(Ok(json!({"late": true}))),
+        )
+        .await;
+        assert_eq!(late.output, JobOutput::Cancelled);
         assert_eq!(
             scheduler.output(&call_id).await.unwrap(),
             Some(JobOutput::Cancelled)

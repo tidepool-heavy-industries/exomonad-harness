@@ -137,3 +137,48 @@ fn restart_recovers_pending_claim_but_classifies_interrupted_claim_explicitly() 
     }
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn wave18_reopen_interrupts_pending_call_once() {
+    let path = temp_store_path("orphaned-claim");
+    let request = request_id("orphaned-request");
+    let call = CallId("orphaned-call".into());
+    let output = recovery_item(serde_json::json!({"result":"must not be successful"}));
+    {
+        let store = Store::open(&path).unwrap();
+        store.create_request(&request, None, "/root").unwrap();
+        store.claim(&call, &request).unwrap();
+    }
+    {
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.recover_pending().unwrap(),
+            vec![PendingCall {
+                call_id: call.clone(),
+                request: request.clone(),
+            }],
+            "read-only recovery discovers the orphaned call"
+        );
+        // The runtime has classified the orphan as UnknownCall; persist its
+        // terminal interruption rather than treating the claim as a success.
+        assert_eq!(store.interrupt_claim(&call, &request).unwrap(), 1);
+        let claims = store.claims_on(&request).unwrap();
+        assert_eq!(claims.len(), 1, "the orphaned claim remains recorded");
+        assert_eq!(claims[0].call_id, call);
+        assert_eq!(claims[0].state, ClaimState::Interrupted);
+        assert_eq!(claims[0].output, None, "interruption is not success");
+    }
+    {
+        let store = Store::open(&path).unwrap();
+        // Once persisted, the interrupted claim is neither rediscovered nor
+        // transitioned a second time.
+        assert!(store.recover_pending().unwrap().is_empty());
+        assert_eq!(store.interrupt_claim(&call, &request).unwrap(), 0);
+        assert_eq!(store.settle_claims(&call, &output).unwrap(), 0);
+        let claims = store.claims_on(&request).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].state, ClaimState::Interrupted);
+        assert_eq!(claims[0].output, None);
+    }
+    let _ = std::fs::remove_file(&path);
+}

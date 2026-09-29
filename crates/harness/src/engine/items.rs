@@ -1,37 +1,22 @@
-use crate::{item::Item, model::CallId, turn::JobOutput};
+use crate::{
+    item::{Item, ToolInput, ToolKind},
+    model::CallId,
+    turn::JobOutput,
+};
 use serde_json::{Value, json};
 
 /// Parse a Responses API function-call item.
 pub(super) fn function_call(item: &Item) -> Option<(CallId, String, Value)> {
-    let object = item.0.as_object()?;
-    if object.get("type")?.as_str()? != "function_call" {
+    let call = item.tool_call().ok()??;
+    let ToolInput::Function(arguments) = call.input else {
         return None;
-    }
-
-    let call_id = object.get("call_id")?.as_str()?.to_owned();
-    let name = object.get("name")?.as_str()?.to_owned();
-    let arguments = match object.get("arguments")? {
-        Value::String(arguments) => serde_json::from_str(arguments).ok()?,
-        Value::Object(arguments) => Value::Object(arguments.clone()),
-        _ => return None,
     };
-
-    Some((CallId(call_id), name, arguments))
+    Some((call.call_id, call.name, arguments))
 }
 
 /// Encode a settled job as a Responses API function-call output item.
 pub(super) fn function_output(call_id: &CallId, output: &JobOutput) -> Item {
-    let value = match output {
-        JobOutput::Completed(Ok(value)) => value.clone(),
-        JobOutput::Completed(Err(error)) => json!({ "error": error }),
-        JobOutput::Cancelled => json!({ "error": "job cancelled" }),
-        JobOutput::Interrupted => json!({ "error": "job interrupted" }),
-    };
-    Item(json!({
-        "type": "function_call_output",
-        "call_id": call_id.0,
-        "output": serde_json::to_string(&value).expect("JSON value serialization cannot fail"),
-    }))
+    Item::tool_output(call_id, ToolKind::Function, output)
 }
 
 #[cfg(test)]

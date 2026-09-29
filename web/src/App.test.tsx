@@ -68,4 +68,25 @@ describe('operator views', () => {
     expect(screen.getByText('PROGRESS · #1')).toBeInTheDocument()
     expect(screen.getByText('working')).toBeInTheDocument()
   })
+
+  it('shows authoritative async job identity, lifecycle, delivery, and output', () => {
+    const data: HarnessViewModel = {
+      nodes: [{ id: 'root', name: '/root', state: 'paused' }],
+      timeline: [{
+        id: 'job-9', nodeId: 'root', label: 'Async job', kind: 'job', state: 'settled',
+        requestId: 'request-1', callId: 'call-3', toolName: 'slow_tool',
+        delivered: false, output: 'result pending delivery',
+      }],
+      inbox: [],
+    }
+    render(<App data={data} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Timeline' }))
+    expect(screen.getByText(/job-9/)).toBeInTheDocument()
+    expect(screen.getByText(/settled/)).toBeInTheDocument()
+    expect(screen.getByText(/request request-1/)).toBeInTheDocument()
+    expect(screen.getByText(/call call-3/)).toBeInTheDocument()
+    expect(screen.getByText(/slow_tool/)).toBeInTheDocument()
+    expect(screen.getByText(/delivered false/)).toBeInTheDocument()
+    expect(screen.getByText(/result pending delivery/)).toBeInTheDocument()
+  })
 })

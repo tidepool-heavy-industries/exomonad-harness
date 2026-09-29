@@ -15,6 +15,9 @@ export interface Snapshot {
 export interface Conversation {
   readonly id: EntityId;
   readonly path: string;
+  /** Exact parent node identity, not a derived tree label. */
+  readonly parentId?: EntityId | null;
+  readonly forkSourceRequestId?: EntityId | null;
   readonly state: "idle" | "requesting" | "paused" | "cancelled";
   readonly version?: number;
 }
@@ -22,6 +25,9 @@ export interface Conversation {
 export interface RequestRecord {
   readonly id: EntityId;
   readonly conversationId: EntityId;
+  readonly parentId?: EntityId | null;
+  readonly createdAtMs?: number | null;
+  readonly endedAtMs?: number | null;
   readonly state: "running" | "completed" | "failed";
   readonly commandId?: EntityId;
   readonly command?: string;
@@ -33,7 +39,16 @@ export interface RequestRecord {
 export interface Job {
   readonly id: EntityId;
   readonly conversationId: EntityId;
-  readonly state: "running" | "settled" | "cancelled";
+  readonly startedAtMs?: number | null;
+  readonly endedAtMs?: number | null;
+  readonly state: "running" | "settled" | "cancelled" | "interrupted";
+  /** Present for real Engine tool calls; command-level jobs omit these fields. */
+  readonly requestId?: EntityId;
+  readonly callId?: string;
+  readonly toolName?: string;
+  /** Output is persisted in conversation input, not merely provider-ready. */
+  readonly delivered?: boolean;
+  readonly output?: unknown;
   readonly version?: number;
 }
 

@@ -4,10 +4,14 @@
 //! returned control handle. The module intentionally does not depend on a
 //! scheduler/store implementation so the crate owner can wire it independently.
 mod assets;
+pub mod history;
 mod ws_protocol;
 
-pub use ws_protocol::{Snapshot, WsClientFrame, WsEvent, WsEventPayload, WsServerFrame};
+pub use ws_protocol::{
+    Snapshot, ToolJobRecord, ToolJobState, WsClientFrame, WsEvent, WsEventPayload, WsServerFrame,
+};
 
+use crate::store::Store;
 use axum::extract::ws::{Message, WebSocket};
 use axum::{
     Json, Router,
@@ -111,6 +115,7 @@ impl SessionSecret {
 /// session, protected API routes fail closed.
 pub struct ServerConfig {
     pub asset_root: PathBuf,
+    history_store: Option<Arc<Store>>,
     bearer_secret: Option<BearerSecret>,
     session_secret: Option<SessionSecret>,
     session_lifetime: Duration,
@@ -121,11 +126,19 @@ impl ServerConfig {
     pub fn new(asset_root: PathBuf) -> Self {
         Self {
             asset_root,
+            history_store: None,
             bearer_secret: None,
             session_secret: None,
             session_lifetime: Duration::from_secs(8 * 60 * 60),
             public_origin_scheme: "http".into(),
         }
+    }
+
+    /// Attach the opened durable Store for protected, bounded history reads.
+    /// Without this attachment history endpoints must report unavailable.
+    pub fn with_history_store(mut self, store: Arc<Store>) -> Self {
+        self.history_store = Some(store);
+        self
     }
 
     pub fn with_bearer_secret(mut self, secret: BearerSecret) -> Self {
@@ -169,6 +182,7 @@ struct AppState {
     events: broadcast::Sender<ServerEvent>,
     asset_root: Arc<PathBuf>,
     snapshot: Arc<std::sync::RwLock<Snapshot>>,
+    history_store: Option<Arc<Store>>,
     public_origin_scheme: Arc<str>,
     auth: Arc<ApiAuthPolicy>,
 }
@@ -254,6 +268,7 @@ pub fn server_with_config(
 ) -> (Router, ServerControl, mpsc::Receiver<QueuedCommand>) {
     let ServerConfig {
         asset_root,
+        history_store,
         bearer_secret,
         session_secret,
         session_lifetime,
@@ -266,6 +281,7 @@ pub fn server_with_config(
         events: events.clone(),
         asset_root: Arc::new(asset_root),
         snapshot: Arc::new(std::sync::RwLock::new(Snapshot::default())),
+        history_store,
         public_origin_scheme: Arc::from(public_origin_scheme),
         auth: Arc::new(ApiAuthPolicy {
             bearer_secret: bearer_secret.clone(),
