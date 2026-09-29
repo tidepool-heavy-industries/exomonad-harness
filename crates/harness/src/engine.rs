@@ -394,6 +394,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_loop(
         &self,
         head: Option<RequestId>,
@@ -1276,11 +1277,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         tools
     }
 
-    // FIXME(correction-wave b): when the model continues past a pending call,
-    // the next request resends its `function_call` with no output. The API
-    // accepts that only for tools declared `async: true`; no tool or verb
-    // schema sets it yet (see agents.rs `function` and the demo `tools`). This
-    // path has only run against the mock transport. Prove item 2 live.
     #[cfg(test)]
     async fn dispatch_completed_item(
         &self,
@@ -2736,46 +2732,52 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, EngineError::Transport(_)));
 
-        let sent = requests.lock().unwrap();
-        assert_eq!(sent.len(), 1);
-        let sent = &sent[0];
-        let observed_plans = plans.lock().unwrap();
-        assert_eq!(observed_plans.len(), 1);
-        assert_eq!(observed_plans[0].items, sent.input);
-        assert_eq!(observed_plans[0].tools_allowed, sent.tools);
-        assert_eq!(observed_plans[0].effort, sent.pinned_effort);
-        assert!(sent.tools.contains(&tools[0]));
+        let request_id = {
+            let sent = requests.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            let sent = &sent[0];
+            let observed_plans = plans.lock().unwrap();
+            assert_eq!(observed_plans.len(), 1);
+            assert_eq!(observed_plans[0].items, sent.input);
+            assert_eq!(observed_plans[0].tools_allowed, sent.tools);
+            assert_eq!(observed_plans[0].effort, sent.pinned_effort);
+            assert!(sent.tools.contains(&tools[0]));
 
-        let decisions = store.decisions(None).unwrap();
-        assert_eq!(decisions.len(), 1);
-        let row = &decisions[0];
-        let request_id = row
-            .request
-            .as_ref()
-            .expect("decision correlated to request");
-        assert_eq!(store.request(request_id).unwrap().unwrap().branch, "/root");
-        assert_eq!(row.decision.hook, "before-request");
-        assert_eq!(
-            row.decision.event_refs,
-            sent.input
-                .iter()
-                .map(|item| blake3::hash(&serde_json::to_vec(item).unwrap())
-                    .to_hex()
-                    .to_string())
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(row.decision.decision, json!("Send"));
-        assert_eq!(
-            row.decision.evidence,
-            json!({"marker":"engine-before-request"})
-        );
+            let decisions = store.decisions(None).unwrap();
+            assert_eq!(decisions.len(), 1);
+            let row = &decisions[0];
+            let request_id = row
+                .request
+                .as_ref()
+                .expect("decision correlated to request");
+            assert_eq!(store.request(request_id).unwrap().unwrap().branch, "/root");
+            assert_eq!(row.decision.hook, "before-request");
+            assert_eq!(
+                row.decision.event_refs,
+                sent.input
+                    .iter()
+                    .map(|item| blake3::hash(&serde_json::to_vec(item).unwrap())
+                        .to_hex()
+                        .to_string())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(row.decision.decision, json!("Send"));
+            assert_eq!(
+                row.decision.evidence,
+                json!({"marker":"engine-before-request"})
+            );
+            request_id.clone()
+        };
 
         drop(engine);
         drop(store);
         let reopened = Store::open(&db_path).unwrap();
-        assert_eq!(reopened.decisions(Some(request_id)).unwrap().len(), 1);
-        assert_eq!(observed_plans.len(), 1, "readback does not invoke hook");
-        drop(observed_plans);
+        assert_eq!(reopened.decisions(Some(&request_id)).unwrap().len(), 1);
+        assert_eq!(
+            plans.lock().unwrap().len(),
+            1,
+            "readback does not invoke hook"
+        );
         drop(reopened);
         std::fs::remove_file(db_path).unwrap();
 
@@ -2916,13 +2918,12 @@ mod tests {
         let row = store.decisions(None).unwrap().pop().unwrap();
         assert_eq!(row.decision.event_refs.len(), sent[0].input.len() - 1);
         assert_eq!(row.decision.evidence, json!({"inject":"opaque"}));
-        assert_eq!(
+        assert!(
             store
                 .items(&snapshot)
                 .unwrap()
                 .iter()
-                .all(|item| item != &injected),
-            true
+                .all(|item| item != &injected)
         );
     }
 
@@ -3177,18 +3178,20 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(released.load(std::sync::atomic::Ordering::SeqCst));
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(
-            requests[1]
-                .input
-                .iter()
-                .filter(|item| item.0["type"] == "function_call_output"
-                    && item.0["call_id"] == call_id.0)
-                .count(),
-            1,
-            "resumed child request receives exactly one output for the original call"
-        );
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(
+                requests[1]
+                    .input
+                    .iter()
+                    .filter(|item| item.0["type"] == "function_call_output"
+                        && item.0["call_id"] == call_id.0)
+                    .count(),
+                1,
+                "resumed child request receives exactly one output for the original call"
+            );
+        }
         assert_eq!(
             completion
                 .transcript
@@ -3647,7 +3650,7 @@ mod tests {
         );
 
         store
-            .append_items(&invocation_request, &[output.clone()])
+            .append_items(&invocation_request, std::slice::from_ref(&output))
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
             .await

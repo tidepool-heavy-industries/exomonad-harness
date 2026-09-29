@@ -803,6 +803,7 @@ fn capture_deterministic_request(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_deterministic_engine_completion(
     store: Arc<Store>,
     scheduler: Arc<JobScheduler>,
@@ -829,6 +830,7 @@ async fn run_deterministic_engine_completion(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_deterministic_engine_completion_from_head(
     store: Arc<Store>,
     scheduler: Arc<JobScheduler>,
@@ -1097,6 +1099,7 @@ impl Provider for BrowserProvider {
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 async fn run_deterministic_engine_turn(
     store: Arc<Store>,
     scheduler: Arc<JobScheduler>,
@@ -1135,6 +1138,7 @@ async fn run_deterministic_engine_turn(
     Ok((answer, final_item))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_deterministic_engine_turn_from_head(
     store: Arc<Store>,
     scheduler: Arc<JobScheduler>,
@@ -1201,6 +1205,7 @@ async fn run_async_scenario_turn(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_async_scenario_turn_for_command(
     store: Arc<Store>,
     scheduler: Arc<JobScheduler>,
@@ -1780,10 +1785,12 @@ async fn serve(
         .push(server_task.abort_handle());
     let shutdown_signal = tokio::signal::ctrl_c();
     tokio::pin!(shutdown_signal);
-    let mut pending_engine: Option<(
+    type PendingEngineResult = Result<(String, Item, harness::model::RequestId), String>;
+    type PendingEngine = (
         tokio::sync::watch::Sender<bool>,
-        tokio::task::JoinHandle<Result<(String, Item, harness::model::RequestId), String>>,
-    )> = None;
+        tokio::task::JoinHandle<PendingEngineResult>,
+    );
+    let mut pending_engine: Option<PendingEngine> = None;
     let mut async_gate: Option<async_demo::GateControl> = None;
     let mut async_start_command: Option<(String, String, String)> = None;
     loop {
@@ -3375,8 +3382,8 @@ mod tests {
                 );
             }
             for item in &request.input {
-                if (item.0["type"] == "function_call" && item.0["call_id"] == a_call_id)
-                    || (item.0["type"] == "function_call" && item.0["call_id"] == b_call_id)
+                if item.0["type"] == "function_call"
+                    && (item.0["call_id"] == a_call_id || item.0["call_id"] == b_call_id)
                 {
                     assert_eq!(
                         item.0["async"], true,
@@ -3808,7 +3815,7 @@ mod tests {
         );
         assert!(matches!(
             parse(&["--db", "state.sqlite", "--serve", "127.0.0.1:0", "--assets", "/tmp/assets"]).unwrap(),
-            Mode::Serve { assets: Some(path), .. } if path == PathBuf::from("/tmp/assets")
+            Mode::Serve { assets: Some(path), .. } if path.to_str() == Some("/tmp/assets")
         ));
     }
 

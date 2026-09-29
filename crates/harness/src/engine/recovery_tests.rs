@@ -102,7 +102,7 @@ async fn engine_recovery_pending_claim_becomes_interrupted_and_completes_typed_r
             &head,
             None,
             &agent.0,
-            &[prefix.clone()],
+            std::slice::from_ref(&prefix),
             StoredUsage::default(),
         )
         .unwrap();
@@ -496,7 +496,7 @@ async fn engine_recovering_reconciles_same_branch_ancestor_after_descendant_barr
             &origin,
             None,
             &branch.0,
-            &[call_item.clone()],
+            std::slice::from_ref(&call_item),
             StoredUsage::default(),
         )
         .unwrap();

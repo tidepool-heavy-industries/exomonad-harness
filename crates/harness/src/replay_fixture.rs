@@ -308,7 +308,7 @@ mod tests {
                     &request,
                     None,
                     "/root",
-                    &[invocation.clone()],
+                    std::slice::from_ref(&invocation),
                     crate::store::Usage::default(),
                 )
                 .unwrap();
@@ -371,7 +371,7 @@ mod tests {
                     request,
                     parent,
                     branch,
-                    &[item.clone()],
+                    std::slice::from_ref(&item),
                     crate::store::Usage::default(),
                 )
                 .unwrap();

@@ -43,6 +43,12 @@ struct Replay {
     turns: Mutex<VecDeque<Result<ResponsesTurn, TransportError>>>,
 }
 
+type EngineFixture = (
+    Engine<OfflineAuth, Echo, Replay>,
+    Arc<Store>,
+    Arc<Mutex<Vec<ResponsesRequest>>>,
+);
+
 #[async_trait]
 impl ResponsesTransport for Replay {
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
@@ -74,13 +80,7 @@ fn final_answer() -> Item {
     Item(json!({"type":"message","role":"assistant","phase":"final_answer","content":"done"}))
 }
 
-fn engine(
-    turns: Vec<Result<ResponsesTurn, TransportError>>,
-) -> (
-    Engine<OfflineAuth, Echo, Replay>,
-    Arc<Store>,
-    Arc<Mutex<Vec<ResponsesRequest>>>,
-) {
+fn engine(turns: Vec<Result<ResponsesTurn, TransportError>>) -> EngineFixture {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let store = Arc::new(Store::memory().unwrap());
     let replay = Replay {

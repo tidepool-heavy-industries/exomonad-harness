@@ -370,43 +370,45 @@ mod tests {
         assert!(!answers[0].provenance.seen_envelopes.contains(&queued_id));
         assert!(answers[1].provenance.seen_envelopes.contains(&queued_id));
         assert!(!answers[1].provenance.unseen_envelopes.contains(&queued_id));
-        let input_guard = inputs.lock().unwrap();
-        let child_inputs = &input_guard[&child.0];
-        assert_eq!(child_inputs.len(), 2, "no duplicate concurrent child run");
-        assert!(
-            !first_input
-                .iter()
-                .any(|item| item.0.to_string().contains("followup-2"))
-        );
-        assert_eq!(
-            child_inputs[1]
-                .iter()
-                .filter(|item| item.0.to_string().contains("followup-2"))
-                .count(),
-            1,
-            "the next child request sees the follow-up exactly once"
-        );
-        assert_eq!(
-            store
-                .inbox(&child.0)
-                .unwrap()
-                .iter()
-                .find(|envelope| envelope.id == queued_id)
-                .unwrap()
-                .delivered_request
-                .as_ref(),
-            Some(&answers[1].provenance.final_request)
-        );
-        let child_head = store.agent(&child).unwrap().unwrap().head_request.unwrap();
-        assert_eq!(child_head, answers[1].provenance.final_request);
-        assert_eq!(
-            store.request(&child_head).unwrap().unwrap().parent,
-            Some(answers[0].provenance.final_request.clone())
-        );
+        {
+            let input_guard = inputs.lock().unwrap();
+            let child_inputs = &input_guard[&child.0];
+            assert_eq!(child_inputs.len(), 2, "no duplicate concurrent child run");
+            assert!(
+                !first_input
+                    .iter()
+                    .any(|item| item.0.to_string().contains("followup-2"))
+            );
+            assert_eq!(
+                child_inputs[1]
+                    .iter()
+                    .filter(|item| item.0.to_string().contains("followup-2"))
+                    .count(),
+                1,
+                "the next child request sees the follow-up exactly once"
+            );
+            assert_eq!(
+                store
+                    .inbox(&child.0)
+                    .unwrap()
+                    .iter()
+                    .find(|envelope| envelope.id == queued_id)
+                    .unwrap()
+                    .delivered_request
+                    .as_ref(),
+                Some(&answers[1].provenance.final_request)
+            );
+            let child_head = store.agent(&child).unwrap().unwrap().head_request.unwrap();
+            assert_eq!(child_head, answers[1].provenance.final_request);
+            assert_eq!(
+                store.request(&child_head).unwrap().unwrap().parent,
+                Some(answers[0].provenance.final_request.clone())
+            );
+        }
         let reopened = Store::open(&path).unwrap();
         assert_eq!(
             reopened.agent(&child).unwrap().unwrap().head_request,
-            Some(child_head)
+            Some(answers[1].provenance.final_request.clone())
         );
         let reopened_answers = reopened
             .inbox(&root.0)
@@ -780,9 +782,11 @@ mod tests {
             Ok(EngineCompletion {
                 turn: ResponsesTurn {
                     response_id: id.0.clone(),
-                    items: (engine.0 != "/root")
-                        .then(|| vec![function_call("bad-final", "finalize", json!({}))])
-                        .unwrap_or_default(),
+                    items: if engine.0 != "/root" {
+                        vec![function_call("bad-final", "finalize", json!({}))]
+                    } else {
+                        Vec::new()
+                    },
                     usage: TurnUsage::default(),
                 },
                 transcript: vec![],

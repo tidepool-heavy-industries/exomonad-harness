@@ -92,10 +92,10 @@ fn crash_at(stage: &str) -> PathBuf {
         .spawn()
         .unwrap();
     let stdout = helper.stdout.take().unwrap();
-    let mut lines = BufReader::new(stdout).lines();
+    let lines = BufReader::new(stdout).lines();
     let barrier = format!("CRASH_BARRIER_{stage}");
     let mut observed = false;
-    while let Some(line) = lines.next() {
+    for line in lines {
         if line.unwrap().contains(&barrier) {
             observed = true;
             break;

@@ -129,10 +129,12 @@ impl GateControl {
 /// Shared by the deterministic provider, server command loop and snapshot
 /// projection. Records are keyed by the original call id, not a generated
 /// browser-command id.
+type ToolJobPersistence = dyn Fn(Vec<ToolJobRecord>) -> Result<(), String> + Send + Sync;
+
 #[derive(Clone)]
 pub(crate) struct ToolJobs {
     records: Arc<Mutex<BTreeMap<String, ToolJobRecord>>>,
-    persist: Option<Arc<dyn Fn(Vec<ToolJobRecord>) -> Result<(), String> + Send + Sync>>,
+    persist: Option<Arc<ToolJobPersistence>>,
     delivery_revision: watch::Sender<u64>,
 }
 
@@ -903,48 +905,50 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(2), third_request.notified())
             .await
             .expect("Engine did not issue third request");
-        let observed = inputs.lock().unwrap_or_else(|e| e.into_inner());
-        assert!(
-            observed.len() >= 3,
-            "expected A, B, and continuation requests"
-        );
-        for (index, request_input) in observed.iter().enumerate().skip(1) {
+        {
+            let observed = inputs.lock().unwrap_or_else(|e| e.into_inner());
             assert!(
-                request_input.iter().any(|item| {
-                    item.0["type"] == "function_call" && item.0["call_id"] == "call-A"
+                observed.len() >= 3,
+                "expected A, B, and continuation requests"
+            );
+            for (index, request_input) in observed.iter().enumerate().skip(1) {
+                assert!(
+                    request_input.iter().any(|item| {
+                        item.0["type"] == "function_call" && item.0["call_id"] == "call-A"
+                    }),
+                    "request {index} omitted original unanswered A: {request_input:#?}"
+                );
+                assert!(
+                    !request_input.iter().any(|item| {
+                        item.0["type"] == "function_call_output" && item.0["call_id"] == "call-A"
+                    }),
+                    "request {index} fabricated A output: {request_input:#?}"
+                );
+            }
+            let latest = observed.last().expect("third request input");
+            assert!(
+                latest.iter().any(|item| {
+                    item.0["type"] == "function_call_output"
+                        && item.0["call_id"] == "call-B"
+                        && item.0["output"] == "\"B output\""
                 }),
-                "request {index} omitted original unanswered A: {request_input:#?}"
+                "third Engine input: {latest:#?}"
             );
             assert!(
-                !request_input.iter().any(|item| {
-                    item.0["type"] == "function_call_output" && item.0["call_id"] == "call-A"
-                }),
-                "request {index} fabricated A output: {request_input:#?}"
+                latest
+                    .iter()
+                    .filter(|item| {
+                        item.0["type"] == "function_call_output" && item.0["call_id"] == "call-B"
+                    })
+                    .count()
+                    == 1,
+                "B's settled output must be delivered exactly once in full input"
             );
+            assert!(!latest.iter().any(|item| {
+                item.0["type"] == "function_call_output" && item.0["call_id"] == "call-A"
+            }));
+            jobs.observe_input(latest).unwrap();
         }
-        let latest = observed.last().expect("third request input");
-        assert!(
-            latest.iter().any(|item| {
-                item.0["type"] == "function_call_output"
-                    && item.0["call_id"] == "call-B"
-                    && item.0["output"] == "\"B output\""
-            }),
-            "third Engine input: {latest:#?}"
-        );
-        assert_eq!(
-            latest
-                .iter()
-                .filter(|item| {
-                    item.0["type"] == "function_call_output" && item.0["call_id"] == "call-B"
-                })
-                .count(),
-            1,
-            "B's settled output must be delivered exactly once in full input"
-        );
-        assert!(!latest.iter().any(|item| {
-            item.0["type"] == "function_call_output" && item.0["call_id"] == "call-A"
-        }));
-        jobs.observe_input(latest).unwrap();
         let delivered_b = jobs
             .records()
             .into_iter()
@@ -958,7 +962,6 @@ mod tests {
             Some(harness::item::ToolKind::Function),
             "projection kind must come from B's persisted invocation"
         );
-        drop(observed);
         cancel_tx.send(true).unwrap();
         assert!(
             tokio::time::timeout(std::time::Duration::from_secs(2), run)

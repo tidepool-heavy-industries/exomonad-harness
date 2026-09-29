@@ -26,6 +26,8 @@ use std::{
 };
 use tokio::sync::Notify;
 
+type ReplayObserver = dyn Fn(&ResponsesRequest, &mut ResponsesTurn, usize) + Send + Sync;
+
 /// Replays recorded model requests and tool outputs from a durable Store.
 ///
 /// Turns are loaded from the selected request branch when constructed. Each
@@ -236,7 +238,7 @@ pub struct ReplayTransport {
     turns: Mutex<VecDeque<ResponsesTurn>>,
     requests: Mutex<Vec<ResponsesRequest>>,
     request_count: Mutex<usize>,
-    observer: Option<Arc<dyn Fn(&ResponsesRequest, &mut ResponsesTurn, usize) + Send + Sync>>,
+    observer: Option<Arc<ReplayObserver>>,
     gated: bool,
     response_permits: Mutex<usize>,
     changed: Notify,
@@ -270,10 +272,7 @@ impl ReplayTransport {
     /// returned (or released by a gated transport). The ordinal is 1-based
     /// and local to this transport, so factory tests can capture shared
     /// per-agent request logs and synthesize usage deterministically.
-    pub fn with_observer(
-        mut self,
-        observer: Arc<dyn Fn(&ResponsesRequest, &mut ResponsesTurn, usize) + Send + Sync>,
-    ) -> Self {
+    pub fn with_observer(mut self, observer: Arc<ReplayObserver>) -> Self {
         self.observer = Some(observer);
         self
     }
@@ -960,8 +959,12 @@ mod tests {
         }));
         store.create_request(&root, None, "/root").unwrap();
         store.create_request(&child, Some(&root), "/root").unwrap();
-        store.append_items(&root, &[call.clone()]).unwrap();
-        store.append_items(&child, &[call.clone()]).unwrap();
+        store
+            .append_items(&root, std::slice::from_ref(&call))
+            .unwrap();
+        store
+            .append_items(&child, std::slice::from_ref(&call))
+            .unwrap();
         store
             .record_replay_turn(
                 &root,

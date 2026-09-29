@@ -97,7 +97,7 @@ impl Demo {
     async fn login(&mut self) {
         let login = self
             .client
-            .post(&format!("{}/api/session", self.base))
+            .post(format!("{}/api/session", self.base))
             .header("origin", &self.base)
             .json(&json!({"secret": SESSION_SECRET}))
             .send()
