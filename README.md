@@ -34,7 +34,8 @@ The Buck2 graph compiles `harness` and `harness-demo` as native Rust targets.
 Reindeer generates the locked third-party Rust targets; Buck does not delegate
 the crate build to Cargo. The web `check`, `test`, and `dist` targets run pinned
 Node actions against a fixed-output offline npm cache. Cargo remains the
-publication and non-Linux development path.
+publication and non-Linux development path. The [server acceptance record](docs/buck2-acceptance.md)
+lists exact checks, resource use, and pending gates.
 
 ```sh
 nix build .#buck2 .#buck-rust .#buck-cc .#buck-binutils .#buck-node \
