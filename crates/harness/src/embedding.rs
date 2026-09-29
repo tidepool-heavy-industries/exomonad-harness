@@ -227,6 +227,7 @@ impl Conversation {
         let envelope_id =
             self.store
                 .admit_embedded_input(self.identity(), operation_id, sender, &item)?;
+        drop(_admission);
         let wake_error = match self.input_observation(envelope_id)? {
             InputObservation::Admitted => self.host.wake().await.err(),
             InputObservation::Included(_) => None,
@@ -271,8 +272,9 @@ impl PinnedProvider {
         name: &str,
         input: &ToolInput,
         context: &CallContext,
-    ) -> Result<Box<dyn AdmissionGuard>, ProviderError> {
+    ) -> Result<(), ProviderError> {
         let fail = |message: &str| ProviderError::Tool(message.to_owned());
+        let _admission = self.host.admit().map_err(|e| fail(&e.to_string()))?;
         if context.agent != self.host.identity().actor {
             return Err(fail("foreign actor call"));
         }
@@ -332,7 +334,7 @@ impl PinnedProvider {
         {
             return Err(fail("request did not publish this tool surface"));
         }
-        self.host.admit().map_err(|e| fail(&e.to_string()))
+        Ok(())
     }
 }
 #[async_trait]
@@ -396,7 +398,7 @@ impl Provider for PinnedProvider {
         args: Value,
         context: CallContext,
     ) -> Result<Value, ProviderError> {
-        let _admission = self.validate(name, &ToolInput::Function(args.clone()), &context)?;
+        self.validate(name, &ToolInput::Function(args.clone()), &context)?;
         self.surface
             .dispatcher
             .call_with_context(name, args, context)
@@ -408,7 +410,7 @@ impl Provider for PinnedProvider {
         input: String,
         context: CallContext,
     ) -> Result<Value, ProviderError> {
-        let _admission = self.validate(name, &ToolInput::Custom(input.clone()), &context)?;
+        self.validate(name, &ToolInput::Custom(input.clone()), &context)?;
         self.surface
             .dispatcher
             .call_custom_with_context(name, input, context)

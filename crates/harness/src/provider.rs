@@ -93,7 +93,11 @@ pub enum CancellationAcknowledgment {
 #[async_trait]
 pub trait CancellationOwner: Send + Sync {
     /// Stop or reconcile the exact admitted operation. A signal alone is not Stopped.
-    async fn cancel(&self, handle: &JobHandle) -> CancellationAcknowledgment;
+    async fn cancel(
+        &self,
+        operation: &OperationId,
+        handle: &JobHandle,
+    ) -> CancellationAcknowledgment;
 }
 
 /// A provider owns tool meaning; the harness owns scheduling and history.

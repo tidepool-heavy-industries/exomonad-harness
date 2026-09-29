@@ -694,7 +694,7 @@ impl JobScheduler {
                 }
                 job.cancel.cancel();
             }
-            let ack = tokio::time::timeout(JOB_CANCELLATION_GRACE, owner.cancel(&handle))
+            let ack = tokio::time::timeout(JOB_CANCELLATION_GRACE, owner.cancel(&call_id, &handle))
                 .await
                 .unwrap_or_else(|_| {
                     crate::provider::CancellationAcknowledgment::Unconfirmed(
@@ -824,7 +824,7 @@ impl JobScheduler {
                 Some(crate::provider::CancellationAcknowledgment::Unconfirmed(_)) => {}
             }
         }
-        let ack = tokio::time::timeout(JOB_CANCELLATION_GRACE, owner.cancel(&handle))
+        let ack = tokio::time::timeout(JOB_CANCELLATION_GRACE, owner.cancel(&call_id, &handle))
             .await
             .unwrap_or_else(|_| {
                 crate::provider::CancellationAcknowledgment::Unconfirmed(

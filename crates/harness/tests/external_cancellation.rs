@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use harness::{
-    model::CallId,
+    model::{CallId, OperationId},
     provider::{CancellationAcknowledgment, CancellationOwner, JobHandle, Provider, ProviderError},
     turn::{JobOutput, JobScheduler},
 };
@@ -29,7 +29,7 @@ impl Drop for DropMark {
 }
 #[async_trait]
 impl CancellationOwner for External {
-    async fn cancel(&self, _: &JobHandle) -> CancellationAcknowledgment {
+    async fn cancel(&self, _: &OperationId, _: &JobHandle) -> CancellationAcknowledgment {
         self.cancel_calls.fetch_add(1, Ordering::SeqCst);
         self.cancel_entered.notify_one();
         let barrier = self.cancel_barrier.lock().await.take();
