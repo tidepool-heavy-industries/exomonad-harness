@@ -1993,6 +1993,35 @@ mod tests {
         }
     }
 
+    struct EffortSettlementBarrier {
+        replay: Replay,
+        release_first_turn: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+    #[async_trait::async_trait]
+    impl ResponsesTransport for EffortSettlementBarrier {
+        async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            self.replay.create(request).await
+        }
+
+        async fn create_streaming(
+            &self,
+            request: ResponsesRequest,
+            sink: tokio::sync::mpsc::Sender<StreamEvent>,
+        ) -> Result<ResponsesTurn, TransportError> {
+            let turn = self.replay.create(request).await?;
+            for item in &turn.items {
+                let _ = sink.send(StreamEvent::ItemDone(item.clone())).await;
+            }
+            let release = { self.release_first_turn.lock().await.take() };
+            if let Some(release) = release {
+                release
+                    .await
+                    .map_err(|_| TransportError::Stream("effort turn gate dropped".into()))?;
+            }
+            Ok(turn)
+        }
+    }
+
     async fn inherited_claim_fixture() -> (Arc<Store>, RequestId, RequestId, CallId) {
         let store = Arc::new(Store::memory().unwrap());
         let parent = AgentPath("/root".into());
@@ -2969,6 +2998,7 @@ mod tests {
 
     struct SetEffortProvider {
         service: crate::agent_runtime::StoreAgentToolService,
+        completed: Arc<Notify>,
     }
     #[async_trait]
     impl Provider for SetEffortProvider {
@@ -2993,10 +3023,13 @@ mod tests {
                 Some("high") => Effort::High,
                 _ => return Err(ProviderError::Tool("invalid effort".into())),
             };
-            self.service
+            let result = self
+                .service
                 .set_effort(&context.agent, effort)
                 .await
-                .map_err(|error| ProviderError::Tool(error.to_string()))
+                .map_err(|error| ProviderError::Tool(error.to_string()))?;
+            self.completed.notify_one();
+            Ok(result)
         }
 
         fn tools(&self) -> Vec<Value> {
@@ -4733,28 +4766,32 @@ mod tests {
     #[tokio::test]
     async fn pending_set_effort_follows_tool_output_before_next_model_request() {
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let replay = Replay {
-            requests: requests.clone(),
-            turns: Mutex::new(
-                [
-                    turn(
-                        "effort-call",
-                        vec![Item(json!({
-                            "type":"function_call",
-                            "call_id":"set-effort-call",
-                            "name":"set_effort",
-                            "arguments":"{\"effort\":\"high\"}"
-                        }))],
-                    ),
-                    turn(
-                        "effort-final",
-                        vec![Item(json!({
-                            "type":"message","role":"assistant","phase":"final_answer","content":"done"
-                        }))],
-                    ),
-                ]
-                .into(),
-            ),
+        let (release_first_turn, release_first_turn_rx) = tokio::sync::oneshot::channel();
+        let replay = EffortSettlementBarrier {
+            replay: Replay {
+                requests: requests.clone(),
+                turns: Mutex::new(
+                    [
+                        turn(
+                            "effort-call",
+                            vec![Item(json!({
+                                "type":"function_call",
+                                "call_id":"set-effort-call",
+                                "name":"set_effort",
+                                "arguments":"{\"effort\":\"high\"}"
+                            }))],
+                        ),
+                        turn(
+                            "effort-final",
+                            vec![Item(json!({
+                                "type":"message","role":"assistant","phase":"final_answer","content":"done"
+                            }))],
+                        ),
+                    ]
+                    .into(),
+                ),
+            },
+            release_first_turn: tokio::sync::Mutex::new(Some(release_first_turn_rx)),
         };
         let store = Arc::new(Store::memory().unwrap());
         let head = RequestId("effort-tool-output-head".into());
@@ -4771,17 +4808,20 @@ mod tests {
                 &json!({"kind":"root"}),
             )
             .unwrap();
+        let completed = Arc::new(Notify::new());
         let provider = Arc::new(SetEffortProvider {
             service: crate::agent_runtime::StoreAgentToolService::new(
                 store.clone(),
                 AgentPath("/root".into()),
             ),
+            completed: completed.clone(),
         });
 
+        let scheduler = Arc::new(JobScheduler::new(1).unwrap());
         let engine = Engine::<FakeAuth, SetEffortProvider, _>::with_transport(
             replay,
             store.clone(),
-            Arc::new(JobScheduler::new(1).unwrap()),
+            scheduler.clone(),
             provider,
             EngineConfig {
                 instructions: "instruction".into(),
@@ -4793,10 +4833,33 @@ mod tests {
             },
         );
         let (_cancel_tx, cancel_rx) = watch::channel(false);
-        engine
-            .run(Some(head), vec![], cancel_rx, empty_mailbox())
+        let run = tokio::spawn(async move {
+            engine
+                .run(Some(head), vec![], cancel_rx, empty_mailbox())
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), completed.notified())
             .await
-            .unwrap();
+            .expect("set_effort updated the pending request boundary");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if scheduler
+                    .output(&CallId("set-effort-call".into()))
+                    .await
+                    .unwrap()
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("set_effort output settled before the model response completes");
+        release_first_turn
+            .send(())
+            .expect("release the response only after tool settlement");
+        run.await.unwrap().unwrap();
 
         let sent = requests.lock().unwrap();
         assert_eq!(sent.len(), 2);
