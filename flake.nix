@@ -28,22 +28,7 @@
         web = pkgs.mkShell { packages = [ pkgs.nodejs_24 ]; };
       });
 
-      packages = forSystems (pkgs: let
-        buckReindeer = pkgs.rustPlatform.buildRustPackage {
-          pname = "reindeer";
-          version = "2026.09.14.00";
-          src = pkgs.fetchFromGitHub {
-            owner = "facebookincubator";
-            repo = "reindeer";
-            rev = "v2026.09.14.00";
-            hash = "sha256-hVW+raZLZiZqOS0Qa+z9S/PWEyNpi2O05SVrmJOxG4c=";
-          };
-          cargoHash = "sha256-k4G7cZqtYLt0m0noIKhPl7B4rte5x8yMtcuWe1jFqsU=";
-          nativeBuildInputs = [ pkgs.pkg-config ];
-          buildInputs = [ pkgs.openssl ];
-          meta.mainProgram = "reindeer";
-        };
-      in {
+      packages = forSystems (pkgs: {
         prefetch-npm-deps = pkgs.prefetch-npm-deps;
         buck-npm-cache = pkgs.fetchNpmDeps {
           src = ./web;
@@ -56,8 +41,18 @@
         buck-bash = pkgs.bash;
         buck-coreutils = pkgs.coreutils;
         buck-python = pkgs.python3;
-        buck-reindeer = buckReindeer;
       } // pkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
+        buck-reindeer = pkgs.runCommand "reindeer-2026.09.14.00" {
+          src = pkgs.fetchurl {
+            url = "https://github.com/facebookincubator/reindeer/releases/download/v2026.09.14.00/reindeer-x86_64-unknown-linux-musl.zst";
+            hash = "sha256-YWqPwwLD2yuJ5yKGz3pTlpkRY7CI8BWHyb+c/css2qw=";
+          };
+          nativeBuildInputs = [ pkgs.zstd ];
+        } ''
+          mkdir -p "$out/bin"
+          zstd --decompress --stdout "$src" > "$out/bin/reindeer"
+          chmod +x "$out/bin/reindeer"
+        '';
         buck2 = pkgs.runCommand "buck2-snapshot-20260926-200119" {
           src = pkgs.fetchurl {
             url = "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20260926-200119/buck2-x86_64-unknown-linux-gnu.zst";
