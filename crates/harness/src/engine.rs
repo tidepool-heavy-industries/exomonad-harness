@@ -1758,7 +1758,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 Ok(turn.items)
             })
         };
+        let summary_response = std::sync::Mutex::new(None::<(String, Usage)>);
         let text_turn = |items: Vec<Item>| -> ServerCompactFuture<'_> {
+            let summary_response = &summary_response;
             Box::pin(async move {
                 let turn = self
                     .client
@@ -1773,6 +1775,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     })
                     .await
                     .map_err(|error| CompactError::Failed(error.to_string()))?;
+                *summary_response
+                    .lock()
+                    .expect("summary response lock poisoned") =
+                    Some((turn.response_id.clone(), turn.usage.clone()));
                 Ok(turn.items)
             })
         };
@@ -1801,7 +1807,19 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             CompactionStrategy::Server => Server.compact(context).await?,
             CompactionStrategy::PlainText => match PlainText.compact(context).await {
                 Ok(window) => window,
-                Err(_) => return Ok(None),
+                Err(error) => {
+                    let detail: String = error.to_string().chars().take(256).collect();
+                    self.record_text_compaction_attempt(
+                        source,
+                        "failed",
+                        history,
+                        None,
+                        &summary_response,
+                        Some(&detail),
+                    )
+                    .await?;
+                    return Ok(None);
+                }
             },
         };
         if self.compaction_strategy == CompactionStrategy::PlainText {
@@ -1812,19 +1830,78 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .expect("Item serialization is infallible")
                 .len();
             if new_bytes.saturating_mul(5) > old_bytes.saturating_mul(4) {
+                self.record_text_compaction_attempt(
+                    source,
+                    "no_progress",
+                    history,
+                    Some(new_bytes),
+                    &summary_response,
+                    None,
+                )
+                .await?;
                 return Ok(None);
             }
         }
         let request = RequestId(uuid::Uuid::new_v4().to_string());
+        let window_bytes = (self.compaction_strategy == CompactionStrategy::PlainText).then(|| {
+            serde_json::to_vec(&window.items)
+                .expect("Item serialization is infallible")
+                .len()
+        });
         let store = self.store.clone();
-        let source = source.clone();
+        let source_for_write = source.clone();
         let successor = request.clone();
         let branch = self.config.agent.0.clone();
         blocking(move || {
-            store.write_compaction_request(&successor, &source, &branch, &window.items)
+            store.write_compaction_request(&successor, &source_for_write, &branch, &window.items)
         })
         .await?;
+        if self.compaction_strategy == CompactionStrategy::PlainText {
+            self.record_text_compaction_attempt(
+                source,
+                "applied",
+                history,
+                window_bytes,
+                &summary_response,
+                None,
+            )
+            .await?;
+        }
         Ok(Some(request))
+    }
+
+    async fn record_text_compaction_attempt(
+        &self,
+        source: &RequestId,
+        outcome: &str,
+        history: &[Item],
+        window_bytes: Option<usize>,
+        summary_response: &std::sync::Mutex<Option<(String, Usage)>>,
+        error: Option<&str>,
+    ) -> Result<(), EngineError> {
+        let source_bytes = serde_json::to_vec(history)
+            .expect("Item serialization is infallible")
+            .len();
+        let response = summary_response
+            .lock()
+            .expect("summary response lock poisoned")
+            .clone();
+        let payload = json!({
+            "outcome": outcome,
+            "source_bytes": source_bytes,
+            "window_bytes": window_bytes,
+            "summary_response_id": response.as_ref().map(|(id, _)| id),
+            "summary_usage": response.as_ref().map(|(_, usage)| usage),
+            "error": error,
+        });
+        let store = self.store.clone();
+        let request = source.clone();
+        blocking(move || {
+            store
+                .record_event(Some(&request), "compaction_attempt", &payload)
+                .map(|_| ())
+        })
+        .await
     }
 }
 

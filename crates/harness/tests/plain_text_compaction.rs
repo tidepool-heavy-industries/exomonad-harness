@@ -121,6 +121,17 @@ fn compacted(store: &Store, head: &harness::model::RequestId) -> bool {
         .is_some()
 }
 
+fn attempt(store: &Store) -> Value {
+    let events: Vec<_> = store
+        .events(None)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "compaction_attempt")
+        .collect();
+    assert_eq!(events.len(), 1);
+    serde_json::from_str(&events[0].payload).unwrap()
+}
+
 async fn run(engine: &Engine<OfflineAuth, Echo, Replay>) -> harness::engine::EngineCompletion {
     let (_tx, rx) = watch::channel(false);
     let (_inbox_tx, inbox_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -176,6 +187,11 @@ async fn plain_text_handoff_keeps_instructions_recent_user_and_effort() {
         Some(Effort::Medium)
     );
     assert!(compacted(&store, &completion.head_request));
+    let event = attempt(&store);
+    assert_eq!(event["outcome"], "applied");
+    assert_eq!(event["summary_response_id"], "summary");
+    assert_eq!(event["summary_usage"]["input_tokens"], 500);
+    assert!(event["window_bytes"].as_u64().unwrap() < event["source_bytes"].as_u64().unwrap());
 }
 
 #[tokio::test]
@@ -196,6 +212,15 @@ async fn failed_summary_keeps_history_and_does_not_retry_without_growth() {
             .is_some_and(|text| text.starts_with("old history"))
     }));
     assert!(!compacted(&store, &completion.head_request));
+    let event = attempt(&store);
+    assert_eq!(event["outcome"], "failed");
+    assert!(event["summary_response_id"].is_null());
+    assert!(
+        event["error"]
+            .as_str()
+            .unwrap()
+            .contains("authentication expired")
+    );
 }
 
 #[tokio::test]
@@ -210,6 +235,9 @@ async fn tool_producing_summary_is_rejected_without_dispatch() {
     let completion = run(&engine).await;
     assert_eq!(requests.lock().unwrap().len(), 3);
     assert!(!compacted(&store, &completion.head_request));
+    let event = attempt(&store);
+    assert_eq!(event["outcome"], "failed");
+    assert_eq!(event["summary_response_id"], "invalid-summary");
     assert!(
         store
             .claims(&harness::model::CallId("forbidden".into()))
@@ -229,6 +257,9 @@ async fn ineffective_summary_keeps_history_and_suppresses_immediate_retry() {
     let completion = run(&engine).await;
     assert_eq!(requests.lock().unwrap().len(), 3);
     assert!(!compacted(&store, &completion.head_request));
+    let event = attempt(&store);
+    assert_eq!(event["outcome"], "no_progress");
+    assert_eq!(event["summary_response_id"], "oversize-summary");
 }
 
 struct SlowCustom {
