@@ -70,6 +70,35 @@ inclusion/claim state. Tidepool remains the authority for live actor messages,
 typed values, execution, and resource control. Browser reconnect reads current
 state; it does not resubmit work.
 
+### Required library seams
+
+Keep these in the existing Provider, Engine, Store, job and server owners. These
+are behavior requirements for their public interfaces, not a second runtime:
+
+| Boundary | Information and guarantee required by the embedding |
+| --- | --- |
+| Request construction | Exact conversation/request identity and host-supplied tool manifest/handler version; record the tool kind against the issuing request |
+| Call admission | Original request/call identity, raw text or structured arguments without conversion, bounded progress sink and cancellation signal |
+| Input delivery | Durable envelope ID, exact target incarnation, admission outcome and actual request-inclusion acknowledgment |
+| Checkpoint capture | Immutable conversation prefix with pending claims, plus opaque host attachment; return a usable handle before the enclosing call settles |
+| Child attachment | Host-admitted identity and checkpoint; register conversation history without independently admitting or supervising an actor |
+| Result settlement | One terminal call result, retained detail reference and host execution classification; distinguish a lost waiter from a stopped operation |
+| Browser control | Route control to the bound host owner; project its lifecycle and Haskell-only actors alongside conversations |
+
+Cancellation first requests action from the execution owner. The scheduler must
+not discard the only control handle by aborting a provider future and then
+claim resource cleanup. Preserve a way to obtain the owner's completion,
+acknowledged cancellation, or explicitly unconfirmed outcome. If completion
+wins the settlement race, keep that completion; if cancellation wins, late
+success cannot overwrite it. Browser/transport detachment alone does not cancel
+the admitted resident execution. Exercise this with a deterministic host stub
+whose external operation outlives a dropped result waiter.
+
+The host attachment in a checkpoint is an opaque capability, not serialized
+Haskell memory. Capture retains its source/scope leases while Store commits the
+conversation reference. Failed capture releases its provisional attachment;
+successful capture retains it independently of enclosing-call success.
+
 ## Concurrent notebook cells
 
 An actor may have multiple raw cells or installed Haskell tools active at once.
@@ -149,6 +178,13 @@ checkpoints retain their captured source and tool meaning. If reload fails, the
 last valid published surface remains active. After host loss, durable history
 and evidence may survive while live actor references and heap state do not;
 mark unavailable work honestly and offer deliberate recovery.
+
+Tool dispatch must honor the manifest/handler version exposed by the request
+that emitted the call. Publish a reloaded tool surface at the next model-request
+boundary; calls from an already issued request keep their original handler
+meaning. A notebook cell captures published bindings when admitted under that
+request's source view. Do not use an unrelated newer global tool declaration
+to reinterpret an old raw or structured call.
 
 ## Acceptance
 
