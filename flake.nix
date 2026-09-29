@@ -10,7 +10,7 @@
   # depend on whichever Node installation happens to be on the host.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/bfc1b8a4574108ceef22f02bafcf6611380c100d";
   inputs.rust-overlay = {
-    url = "github:oxalica/rust-overlay/860d7c835ab91bfc8972b67092f5f2db8e9390a0";
+    url = "github:oxalica/rust-overlay/c62195b3d6e1bb11e0c2fb2a494117d3b55d410f";
     inputs.nixpkgs.follows = "nixpkgs";
   };
 
