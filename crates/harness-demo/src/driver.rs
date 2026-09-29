@@ -171,6 +171,89 @@ mod tests {
         }
     }
 
+    struct FirstResponseGate {
+        release: StdMutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    #[derive(Clone)]
+    struct GatedReplayTransport {
+        replay: ReplayTransport,
+        first_response_gate: Option<Arc<FirstResponseGate>>,
+    }
+
+    #[async_trait]
+    impl ResponsesTransport for GatedReplayTransport {
+        async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            if let Some(gate) = &self.first_response_gate {
+                let release = gate.release.lock().unwrap().take();
+                if let Some(release) = release {
+                    release
+                        .await
+                        .map_err(|_| TransportError::Stream("response gate dropped".into()))?;
+                }
+            }
+            self.replay.create(request).await
+        }
+    }
+
+    struct GatedSpawnProvider {
+        inner: crate::tree::TreeProvider,
+        release_spawn: StdMutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait]
+    impl Provider for GatedSpawnProvider {
+        fn job_agent_service(&self) -> Option<Arc<dyn harness::agents::AgentToolService>> {
+            self.inner.job_agent_service()
+        }
+
+        async fn before_request(
+            &self,
+            plan: &harness::hooks::RequestPlan,
+        ) -> harness::hooks::BeforeRequestResult {
+            self.inner.before_request(plan).await
+        }
+
+        async fn call(
+            &self,
+            name: &str,
+            args: Value,
+        ) -> Result<Value, harness::provider::ProviderError> {
+            self.inner.call(name, args).await
+        }
+
+        async fn call_with_context(
+            &self,
+            name: &str,
+            args: Value,
+            context: harness::provider::CallContext,
+        ) -> Result<Value, harness::provider::ProviderError> {
+            self.inner.call_with_context(name, args, context).await
+        }
+
+        async fn call_agent_verb(
+            &self,
+            name: &str,
+            args: Value,
+            context: harness::provider::CallContext,
+        ) -> Result<Value, harness::provider::ProviderError> {
+            let result = self.inner.call_agent_verb(name, args, context).await?;
+            if name == "spawn_agent" {
+                let release = self.release_spawn.lock().unwrap().take();
+                if let Some(release) = release {
+                    release.await.map_err(|_| {
+                        harness::provider::ProviderError::Tool("spawn gate dropped".into())
+                    })?;
+                }
+            }
+            Ok(result)
+        }
+
+        fn tools(&self) -> Vec<Value> {
+            self.inner.tools()
+        }
+    }
+
     fn function_call(id: &str, name: &str, args: Value) -> Item {
         Item(json!({
             "type":"function_call","call_id":id,"name":name,
@@ -849,6 +932,7 @@ mod tests {
                         }),
                     )],
                     vec![function_call("wait-1", "wait_agent", json!({}))],
+                    vec![function_call("wait-2", "wait_agent", json!({}))],
                     vec![final_answer("root-result")],
                 ]),
             ),
@@ -859,10 +943,18 @@ mod tests {
         ])));
         let request_counts = Arc::new(StdMutex::new(HashMap::new()));
         let inputs = Arc::new(StdMutex::new(HashMap::new()));
-        let provider = Arc::new(crate::tree::TreeProvider::new(
-            crate::CliProvider(crate::DemoProvider::development(".", false)),
-            service.clone(),
-        ));
+        let (release_spawn, spawn_gate) = oneshot::channel();
+        let (release_child_response, child_response_gate) = oneshot::channel();
+        let child_response_gate = Arc::new(FirstResponseGate {
+            release: StdMutex::new(Some(child_response_gate)),
+        });
+        let provider = Arc::new(GatedSpawnProvider {
+            inner: crate::tree::TreeProvider::new(
+                crate::CliProvider(crate::DemoProvider::development(".", false)),
+                service.clone(),
+            ),
+            release_spawn: StdMutex::new(Some(spawn_gate)),
+        });
         let factory = Arc::new(HarnessEngineFactory {
             auth: Arc::new(ReplayAuth),
             store: store.clone(),
@@ -873,13 +965,18 @@ mod tests {
                 let responses = responses.clone();
                 let request_counts = request_counts.clone();
                 let inputs = inputs.clone();
+                let child_response_gate = child_response_gate.clone();
                 move |agent: &AgentPath| {
-                    Ok(ReplayTransport {
-                        agent: agent.0.clone(),
-                        responses: responses.clone(),
-                        request_counts: request_counts.clone(),
-                        inputs: inputs.clone(),
-                        compact_once: false,
+                    Ok(GatedReplayTransport {
+                        replay: ReplayTransport {
+                            agent: agent.0.clone(),
+                            responses: responses.clone(),
+                            request_counts: request_counts.clone(),
+                            inputs: inputs.clone(),
+                            compact_once: false,
+                        },
+                        first_response_gate: (agent.0 == "/root/child")
+                            .then(|| child_response_gate.clone()),
                     })
                 }
             },
@@ -894,6 +991,57 @@ mod tests {
             driver.start(vec![root_prompt.clone()]).await.is_err(),
             "a second start must not replace the live supervisor"
         );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let wait_claim_admitted = store
+                    .claims(&harness::model::CallId("wait-1".into()))
+                    .unwrap()
+                    .iter()
+                    .any(|claim| claim.state == harness::store::ClaimState::Pending);
+                if wait_claim_admitted {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first root wait is pending while spawn completion is gated");
+        release_spawn
+            .send(())
+            .expect("spawn completion is released after the first wait is admitted");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let wait_one_output_sent = inputs
+                    .lock()
+                    .unwrap()
+                    .get("/root")
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .any(|item| {
+                        item.0["type"] == "function_call_output"
+                            && item.0["call_id"] == "wait-1"
+                            && item.0["output"]
+                                .as_str()
+                                .and_then(|output| serde_json::from_str::<Value>(output).ok())
+                                .is_some_and(|output| output["resumed_by"]["job"] == "spawn-1")
+                    });
+                let wait_two_claim_admitted = store
+                    .claims(&harness::model::CallId("wait-2".into()))
+                    .unwrap()
+                    .iter()
+                    .any(|claim| claim.state == harness::store::ClaimState::Pending);
+                if wait_one_output_sent && wait_two_claim_admitted {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("second root wait follows the durable spawn-job wake");
+        release_child_response
+            .send(())
+            .expect("child final response is released after the second wait is admitted");
         let settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 let root_agent = store.agent(&root).unwrap().unwrap();
@@ -985,9 +1133,9 @@ mod tests {
         let wait_output = root_items
             .iter()
             .position(|item| {
-                item.0["type"] == "function_call_output" && item.0["call_id"] == "wait-1"
+                item.0["type"] == "function_call_output" && item.0["call_id"] == "wait-2"
             })
-            .expect("wait call has a persisted output");
+            .expect("second wait call has a persisted output");
         let durable_final = root_items
             .iter()
             .position(|item| {
@@ -1014,8 +1162,8 @@ mod tests {
         assert!(child_inbox[0].delivered_request.is_some());
         assert_eq!(
             request_counts.lock().unwrap()["/root"],
-            3,
-            "no spurious wait wake"
+            4,
+            "root first wakes for spawn completion, then for the child envelope"
         );
         assert_eq!(request_counts.lock().unwrap()["/root/child"], 1);
         assert_eq!(*driver.failure_receiver().borrow(), None);
