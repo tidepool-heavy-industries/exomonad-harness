@@ -2,18 +2,21 @@
 
 A standalone Rust harness for GPT-6 over the OpenAI Responses API: every tool call is asynchronous, agents form a tree with the verbs GPT-6 was trained on, the operator is a peer in the same mailbox, and the whole run is a content-addressed request tree in SQLite with a web view served from the binary. No dependency on Tidepool or Exomonad; Exomonad consumes it later through an adapter.
 
-Start at `NEXT.md` for current integration status and the
-[daily-driver adoption roadmap](docs/daily-driver-plan.md). Historical run
+Start at `NEXT.md` for current integration status. The
+[embedded-host contract](docs/embedded-host-prd.md) defines the Exomonad target;
+the [daily-driver adoption roadmap](docs/daily-driver-plan.md) sequences it.
+Historical run
 assignments are retained separately; the main checkout may lag active run work.
 
 Read in this order:
 
-1. `PRD.md` — the contract. Compressed format; `!` marks hard rules; every rule carries its reason.
-2. `docs/tree.md` — how the build runs: waves, the scaffold-then-spawn pattern at every node, labels, acceptance, the interview.
-3. `docs/model-facing.md` — the cached-prefix text: developer items, envelopes, tool descriptions, refusals, notices.
-4. `docs/web.md` — the design brief for the web view.
-5. `docs/nudges.md` — the watchdog packets the run installs on itself.
-6. `docs/ideas-later.md` — deferred ideas; not contract.
+1. `PRD.md` — generic crate and standalone demo contract. Compressed format; `!` marks hard rules; every rule carries its reason.
+2. `docs/embedded-host-prd.md` — Exomonad embedding contract and full browser-tree gate.
+3. `docs/tree.md` — how the standalone build runs: waves, scaffold-then-spawn, labels, acceptance, interview.
+4. `docs/model-facing.md` — the cached-prefix text: developer items, envelopes, tool descriptions, refusals, notices.
+5. `docs/web.md` — the design brief for the web view.
+6. `docs/nudges.md` — the watchdog packets the run installs on itself.
+7. `docs/ideas-later.md` — deferred ideas; not contract.
 
 Produced by the run: `docs/findings.md` (API facts measured live), `docs/questions.md` (every question asked of the operator and its answer), `docs/interviews.md` (one section per node, the interview from tree.md), `docs/principles.md` (web), `.exomonad/nudges/<label>.jsonl` (the nudge ledger).
 

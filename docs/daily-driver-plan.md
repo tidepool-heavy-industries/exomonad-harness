@@ -1,6 +1,8 @@
 # Daily-driver adoption roadmap
 
-Status: implementation scaffold, 2026-09-28. No acceptance or deployment claimed.
+Status: accepted integration target and implementation scaffold, 2026-09-28.
+No integrated acceptance or deployment is claimed. Embedded behavior is defined
+by [the embedded-host contract](embedded-host-prd.md).
 Goal: use Exomonad's main binary and browser to do real development waves through
 one shared exomonad-harness instance, without a Codex process per model actor.
 SSH remains an independent operator access path. Hardware provisioning proceeds
@@ -13,10 +15,12 @@ in parallel; it is not a reason to postpone the integration design.
 3. Tidepool `plans/harness-adoption-reconciliation.md` and the original
    `plans/harness-adoption.md` (read-only historical design input).
 
-Canonical harness inspected at `8224d1a8dc7c33d07b2861ad8ef6e6bd6f428aa1`.
-Wave22 inspected at `1b72450`; this is a moving run checkpoint, not an accepted
-release. Do not cherry-pick this plan's older implementation baseline over it.
-Reconcile comments and paths against the accepted newer source during integration.
+This roadmap was reconciled against harness source `d36ef10`. Wave22's final
+handback is a separate WIP convergence stream; read its run `NEXT.md` and
+`docs/wave22-final-manifest.md`, then preserve each candidate, review and check
+artifact separately. No component candidate or handback is an accepted
+integrated release. Do not replace its source/evidence with this roadmap or
+claim its open combined gate has passed.
 
 Verified from source in the canonical checkout:
 
@@ -37,7 +41,7 @@ Verified from source in the canonical checkout:
 These are source observations, not newly executed checks. Wave22's current handoff
 still has combined Engine/Store/custom-browser acceptance open. Recheck at freeze.
 
-## Workflow and ownership contract (gate C0)
+## Workflow and ownership contract (gate C0, settled)
 
 Trace one real operation before splitting implementation: browser input ->
 operator identity -> agent mailbox -> model request -> custom Haskell call ->
@@ -49,20 +53,24 @@ Codex's tmux/process protocol behind a new adapter.
 
 | Concern | Owner to retain / integration responsibility |
 | --- | --- |
-| Model requests, history, call outputs, mailbox persistence | harness Engine, Store, transport and existing mailbox |
-| Tools and hooks' meaning | embedding Provider; Haskell/Jev policy stays in Tidepool |
+| Model requests, history, pending call identities/claims and durable model-input envelopes | harness Engine and Store |
+| Actor identity/incarnation, lifecycle, supervision, authority and typed live-value mailbox | Tidepool actor kernel |
+| Tools and hooks' meaning | Exomonad's supplied tool manifest and provider; Haskell/Jev policy stays in Tidepool |
 | Resident admission, execution, compiler/source snapshot | Tidepool actor workbench and runtime session owners |
 | Worktree/source isolation and resource release | Tidepool managed checkout and resource owners |
-| Agent execution and lifecycle | decide a single transition authority at C0; map harness AgentPath and Exomonad actor incarnation explicitly |
+| Agent execution and lifecycle | Tidepool is the sole transition authority; map each harness conversation to an exact actor incarnation |
 | Browser protocol, snapshots, retained detail | existing harness server and web protocol; embed into main binary |
 | Host launch, configuration, prompts, effects, deployment | Tidepool facade composition root |
 | Credentials | transport Auth boundary; secret storage/refresh policy explicit |
 
-C0 artifact: a short ownership/transition table and compiling boundary scaffold.
-Specify pending-call fork semantics, actor incarnation reuse, acknowledgment,
-resource-release responsibilities and malformed-input behavior. Do not introduce
-another scheduler, call registry, history log or shadow actor lifecycle.
-Serialized changes require a version/migration decision; prefer clean internal APIs.
+C0 implementation artifact: compile the typed embedding boundary against a
+deterministic host stub. Harness Store owns durable model-input envelopes and
+their inclusion/claims; the kernel admits and authorizes those inputs. Do not
+mirror the same delivery into Tidepool's native durable inbox. Keep exact
+incarnation identity, typed live values, cancellation/cleanup evidence, and
+resource release with their current owners. Do not introduce a second scheduler,
+call registry, history log or actor lifecycle. Serialized changes require an
+explicit migration decision; prefer clean internal APIs.
 
 ## Work packages and acceptance
 
@@ -95,16 +103,20 @@ then substitute real resident execution rather than duplicating the harness loop
 
 ### H2 — shared model-actor lifecycle (joint integration lane)
 
-Depends: C0; fork acceptance also needs H1. Run all model conversations within one
-shared harness instance. Keep GHC workers/commands as separately owned processes.
-Use existing agent runtime/driver facilities in the accepted revision.
+Depends: C0 scaffold and shared execution identity. Run all model conversations
+within one shared harness instance. Keep GHC workers/commands as separately
+owned processes. Use existing lifecycle owners, not the standalone tree driver.
 
-Connect fresh, inherited and checkpoint admissions to the committed conversation,
-resident environment, source view, worktree and authority. A child cannot start
-from a partially committed parent cell. Multiple children from the same boundary
-must share the intended immutable prefix without sharing mutable authority.
-Maintain exact typed request/reply, progress, parent messaging, independent review
-and integration behavior through existing Haskell consumers.
+Connect fresh and checkpoint admissions to the exact conversation, captured
+resident source/bindings, separately selected worktree revision and narrowed
+authority. An explicit checkpoint may start children while its issuing cell is
+pending and carries that cell's completed private scaffold; it remains valid if
+the cell later fails. Ordinary unpublished cell bindings remain private. Multiple
+children can share immutable context without sharing mutable authority.
+Maintain exact typed request/reply, progress, parent messaging, independent
+review and integration through existing Haskell consumers. Embedded model tools
+come from Exomonad's supplied AgentSpec surface; do not expose the harness's
+standalone lifecycle verbs as a second authority.
 
 Gate: one Sol root, component owner, and parallel leaves complete real work.
 Demonstrate messages during pending work, follow-up to an idle actor, typed final

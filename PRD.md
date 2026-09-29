@@ -1,17 +1,21 @@
 # exomonad-harness PRD
 
 Current delivery sequencing and acceptance gates: [daily-driver roadmap](docs/daily-driver-plan.md).
-Historical wave scope below does not establish current implementation status.
-The roadmap does not silently amend the PRD contract.
+The [embedded Exomonad host contract](docs/embedded-host-prd.md) is normative for
+embedded mode. This file still specifies the standalone library and demo; older
+wave descriptions are historical and do not establish implementation status.
+Where a standalone model-facing behavior conflicts with the embedded contract,
+the embedded host contract wins. The harness crate remains generic and has no
+Tidepool dependency.
 
 fmt: compressed. `→` yields/then. `⊥` no dependency. `!` hard rule. `?` open, must be settled by experiment + written down.
 
 ## what
 - standalone rust crate. runs gpt-6 conversation vs OpenAI Responses API. dispatches tool calls → `Provider` (supplied by crate user).
-- crate owns: auth, transport, streaming, retries, item store, forks, resume, compaction strategy trait, effort pin, tool schemas, async dispatch + wait_agent, agent verbs + envelopes, typed hook points, usage, socket protocol, web view.
+- crate owns reusable model transport, streaming, retries, conversation item store, compaction strategy boundary, effort pin, async call tracking, typed extension points, usage, browser protocol and web view. Standalone mode may also use the demo's tree driver and model-facing verbs; embedded Exomonad supplies lifecycle, authority, typed Haskell tools, and its actual tool manifest.
 - provider owns: what tools + hooks mean. the crate knows nothing of any judgment service; it offers many well-typed hooks (see `hooks`) and stores every decision.
 - consumer#1 = exomonad via adapter crate on exomonad side. dep direction: exomonad→harness only. harness ⊥ tidepool ! compiles+tests in seconds !
-- wave1 output = the REAL tree-shaped harness (store, scheduler, agent verbs, mailbox, checkpoints, compaction trait, hooks, event stream, web view) w/ a demonstrator provider plugged in: minimal tools, each in a shape exomonad will need (see `demo provider`). not a toy, not a scripted transcript; it stays as the acceptance provider and the reference implementation of the trait.
+- Historical wave1 acceptance wording describes the standalone library/demo target. Current Exomonad embedding acceptance is defined in `docs/embedded-host-prd.md`; demo completion alone does not establish it.
 
 ## why
 - current: forked codex. no async tools, astra-only effort gate, subprocess/fork, relay socket for host tools, usage via rollout parsing, every feature = patch on moving upstream.
@@ -20,7 +24,7 @@ fmt: compressed. `→` yields/then. `⊥` no dependency. `!` hard rule. `?` open
 - **separate repo on purpose (strategy, not accident).** tidepool+exomonad = GHC worker + Cranelift + multi-crate workspace; a build/test cycle there is minutes and memory-heavy. this crate has no such dep ⇒ `cargo check -p` in seconds, tests in seconds ⇒ a swarm of models can build it by dogfooding (many small check/commit cycles) without the workspace's overhead. later it is consumed BY exomonad (adapter crate, dep direction exomonad→harness only; see `~/dev/tidepool/plans/harness-adoption.md`). nothing here waits on tidepool; nothing in tidepool changes until the adapter step.
 - **the builder is building its own next home.** the agents that run this wave run today inside the forked codex; what they build here is the harness they will run inside afterwards (their cells, their spawns, their wait, their compaction). every decision in this file therefore carries its reason (the `why` after each `!`, the `decided from open questions` and `hooks` notes, the api facts behind each rule) so a builder can derive an implementation strategy from the reason rather than the letter: when a rule and a reason pull apart in the code, the reason wins and the rule is amended in a commit that says so. read the reasons as requirements on YOUR future working conditions: a lost delta is a lost thought of yours, a blocking tool is your own stalled turn, a broken cache prefix is your own cost.
 
-## decisions (settled)
+## decisions (settled for standalone core)
 - own repo, generic crate, provider trait w/ assoc types. nothing exomonad-specific in crate.
 - ∀tool async ! run(tool) → Job (pollable, settles→Output, cancellable→typed Cancelled). job settled before next request ⇒ delivered in that request (reads sync). no sync path !
 - stateless conversations ! full item list each request. crate = only source of truth for item sequence. cache absorbs resend. (forks/resume/late outputs/effort pins reason cleanly only if we own exact bytes.)
@@ -28,15 +32,15 @@ fmt: compressed. `→` yields/then. `⊥` no dependency. `!` hard rule. `?` open
 - effort mid-conversation via `configuration_update` item; request-level `reasoning.effort` pinned to first update in history (cache) !; two updates never adjacent !; after compaction: drop updates, re-pin with fresh update.
 - headless core + one event stream + one command channel. view = web page served by same binary, tailscale iface. no TUI (terminal client = trivial consumer of channel, later, if wanted).
 - codex = reference reading only ! copy nothing ! write from API docs + scaffolding.
-- primitives not helpers ! crate ships: handle/call, wait_agent, cancel, spawn_agent (fork), checkpoint, set-effort, compaction strategy trait, event stream, queries. anything composable from these in few lines stays in provider.
+- primitives not helpers ! the standalone demo may expose handle/call, wait, cancel, spawn, checkpoint, effort and compaction verbs. Embedded mode does not make these mandatory model-facing tools: the host supplies the authorized tool surface and retains actor lifecycle authority. See the embedded contract.
 - one process owns run + whole tree of sessions.
-- **agent tree = model-facing, in the shape gpt-6 was trained on** (hosted Multi-agent mode + codex v2 use it; we implement it ourselves, see `agent verbs`). NOT the hosted `multi_agent` mode ! (rejects configuration_update, forces per-agent server compaction, one tool list + one fs for all agents, no worktrees, no provider tools, no hooks).
+- Standalone demo may expose a model-facing agent tree. Embedded Exomonad tree operations are authorized Haskell effects/tools and kernel-owned lifecycle; the harness must not create a competing embedded tree authority. Both modes remain independent of hosted `multi_agent` mode.
 - checkout: worktree per SUBTREE (lead). leaves share the lead's checkout w/ declared `owned`/`mustNot` paths; edit outside `owned` ⇒ veto at admission (deterministic, no jev); harness commits by pathspec on the child's behalf; `request_permissions`-style widening = ask parent.
 - transport: HTTP stateless first. WebSocket mode = later lane (`response.steer` mid-turn user input, `response.inject` settled output into a RUNNING response, ≤32 named `stream_id` lanes/connection, cross-lane fork by response id, `generate:false` warmup). loop delivery designed so a settlement CAN be injected into an in-flight response when transport allows; HTTP path delivers at next request.
 - streaming end to end ! no polling anywhere. transport streams SSE → scheduler emits deltas (text, reasoning summary, function-call args) as they arrive → event stream carries deltas → page renders them live. a job STARTS the moment its complete call item arrives, before the response finishes (API supports this). job progress/state changes stream the same way. store commits completed items only; deltas live on the event stream, never in the store. writer batches ≤ ~50ms so live queries follow within a frame or two.
 
 ## provider trait
-- every provider tool and every crate verb except `wait_agent` is declared `async: true` on the wire ! reason: the loop resends a `function_call` without its output whenever the model continues past a pending call; the API accepts that only for async tools. wave0 shipped tools without the flag and the continue path had only run against the mock transport.
+- every supplied asynchronous provider tool and standalone demo verb is declared `async: true` on the wire ! reason: the loop resends a `function_call` without its output whenever the model continues past a pending call; the API accepts that only for async tools. wave0 shipped tools without the flag and the continue path had only run against the mock transport. Embedded mode uses the host's actual manifest and does not append mandatory crate verbs.
 assoc types:
 - `Tools`: → tool schemas (name, description, typed args, `output_schema`). exomonad derives from protocol; demo writes by hand. output schemas validated at the boundary and the SAME source generates the web view's TS types.
 - `ReplayProvider` (crate, test support): answers model requests from the store and tool calls from recorded outputs ⇒ end-to-end tests w/o API; the same path lets a hook provider answer from stored `decision` evidence.
@@ -46,9 +50,14 @@ assoc types:
 - `State`: per-conversation, copied on fork, persisted.
 hooks (typed event in → typed decision out): full catalogue in `hooks`; wave1 implements tool-call-admission, model-stopped, tool-result, compaction; the rest are scaffolded as types + pass-through.
 `CallContext` = {handle, call_id, cancel: CancellationToken, progress: sink→event stream (never→model), verbs: JobVerbs}.
-`JobVerbs` = the harness verbs callable from INSIDE a running job, in Rust: `spawn_agent`, `send_message`, `followup_task`, `checkpoint`, `set_effort`, `envelope(progress)`. same closed result enums as the model-facing tools. this is the interface exomonad's cell effects will bind to. the crate ships them as Rust methods + a pluggable generic tool capability (a provider tool may forward to any JobVerb); the demo provider pipes them 1:1 (one model-facing tool each, which the crate already provides) and its `run` job uses only `envelope(progress)`. how a script inside a job would reach them is the consumer's business, not the crate's.
+`JobVerbs` in the standalone demo are not the embedded Exomonad lifecycle API. Embedded workers use Tidepool's typed actor/runtime owners; the harness may provide generic host-bound call tracking and progress transport but cannot mint or supervise Exomonad actors.
 
-## agent verbs (model-facing; crate-provided tools)
+## standalone demo agent verbs (not exposed as mandatory embedded tools)
+
+The following model-facing verbs describe the standalone demo profile only.
+Embedded mode supplies its tool manifest from the authorized host and routes
+actor operations through Tidepool's typed Haskell surface. Embedded checkpoint
+and cell semantics are defined in [the embedded host contract](docs/embedded-host-prd.md).
 - names: `/root`, children `/root/<task_name>/<task_name>`. task_name grammar = lowercase, digits, `_` (trained form) ! our kebab labels accepted on input, canonicalized to `_` in model-facing text. store keeps both.
 - `spawn_agent{task_name, from, task}`. `from ∈ {prompt | here | checkpoint(name)}` ! (= hosted `fork_turns: none | all`; no turn counts; checkpoint replaces N). returns `{task_name}` immediately. ONE primitive: from model (tool) and from a cell (effect `spawnAgent :: From -> Contract -> Eff es AgentRef`). retires unfold/errand/withContext.
   - `prompt`: fresh conversation = root instructions + rendered task.
@@ -58,7 +67,7 @@ hooks (typed event in → typed decision out): full catalogue in `hooks`; wave1 
   - `task` = contract as data: {clauses, acceptance, owned, mustNot, introduces, consumes, boundaries}. child sees a rendering (NEW_TASK envelope). admission veto derives from owned/mustNot (crate). the record is passed whole to every hook that concerns the child (see `hooks`); the crate never interprets clauses.
 - `send_message{target, message}`: envelope, class AtBoundary, no turn. `followup_task{target, task}`: envelope that starts a request if the target is idle, else AtBoundary; ONE FINAL_ANSWER per followup. (the two verbs = the two internal delivery classes with the same names, see `mailbox`.)
 - `wait_agent{}` (was "yield"; only non-async tool; no args): output withheld ! resumed by job settled | envelope | cancel. returns WHICH resumed you, never content ! next request order ! ALL function outputs first (settled jobs on own call_ids, then wait's own `{resumed_by: job <handle> | envelope <sender>}`), THEN envelopes in arrival order (user input is an envelope, so it is covered). matches api guidance "results first, then wait status". debounce ~1s.
-- **harness verbs** (crate tools, strict, w/ output schemas; exomonad later exposes the same three as effects — wave1 is standalone, see `integration`):
+- **standalone harness verbs** (demo-only model-facing tools with strict output schemas; embedded mode has host-owned Haskell effects and may call generic internals without exposing these tools):
   - `checkpoint{name}` → `{name, request, tokens, warm_until}`. a checkpoint is ONE thing seen four ways ! fork point (`spawn_agent from: checkpoint`) | explicit cache breakpoint write (root prefix + the 3 most recent checkpoints = the 4 allowed writes) | compaction boundary (`compact keep_since`) | named place in the tree view.
   - `compact{keep_since: <checkpoint>, strategy?}` → `{window_tokens, summary_ref, kept: N}`. summarizes everything BEFORE the checkpoint (provider strategy), keeps everything after it verbatim, re-pins effort. the model manages its own memory instead of hitting a threshold.
   - `set_effort{effort}` → `{effective}`. appends the positional update for the next request (adjacency rule enforced: a second call before a request replaces, never appends).
@@ -139,13 +148,13 @@ later iteration (not wave1): streaming outputs from one job (N items then the te
                 | server_compact() -> Vec<Item>                        // compaction_trigger path
   NewWindow { items: Vec<ItemRef | NewItem>, effort: Effort, carried: Vec<CallId> }
   ```
-  - `Server` (crate default): strip settings items → `compaction_trigger` last → returned window as-is (never pruned) → fresh configuration_update. opaque, keeps encrypted reasoning, cheapest.
-  - `Structured` (demo + exomonad): ONE forced call, no sub-turn ! demo: strict json `handoff` fn w/ params = Summary {progress, decisions, remaining, references}. exomonad: the CELL tool is the handoff; cell must evaluate to a value of the Summary type ⇒ GHC typecheck is the strictness; no standalone summary tool. provider `render(Summary) -> items`.
+  - `Server` (generic crate strategy): strip settings items → `compaction_trigger` last → returned window as-is (never pruned) → fresh configuration_update. opaque, keeps encrypted reasoning, cheapest.
+  - `Structured` (standalone demo experiment only): ONE forced call, no sub-turn ! demo: strict json `handoff` fn w/ params = Summary {progress, decisions, remaining, references}. Embedded Exomonad initially uses the plain-text summary flow in `docs/embedded-host-prd.md`; do not make a typed Haskell summary a launch requirement.
   - `Select`: keep items by address. crate ships code rules only (user messages, pending calls, settings, last N turns); a provider filter `items -> [ItemRef]` may narrow further (consumer note in `hooks`). composes: select → server.
-- deterministic context appended by CODE after the summary, never asked of the model ! bindings live in the resident Haskell env and survive compaction untouched; exomonad's render appends a generated item: live bindings w/ types, worktree OIDs, child paths + pending claims, contract clauses done/undone.
+- deterministic context appended by code after a summary is an optional host concern, not a serialized heap snapshot. Embedded mode keeps live Haskell state, pending call identities/claims, actor obligations and retained evidence separately from its plain-text summary; details are in the embedded contract.
 - invariants ∀strategy (harness enforces) ! no configuration_update in new window; fresh pin appended; user's own messages retained verbatim (codex does this; a `Select` rule applied before any strategy, bounded); pending `function_call` items for carried claims present verbatim so a late output on call_id stays valid; opening developer item (versioned text) = "context was compacted; you are the successor; summary follows; live state (bindings, worktrees, children) is listed after it"; trigger request recorded.
 - ? experiment kept: does the server-compacted window retain an unanswered function_call? if not, `Server` re-appends carried calls after the compaction item. → `docs/findings.md`.
-- codex reference: local path = ordinary turn w/ a prose summary prompt, shown to the successor as a USER message ("Another language model started to solve this problem…"), user messages kept verbatim; remote = compact endpoint; pending calls ⇒ synthetic `aborted`. we differ: typed summary, code-appended state, claims carried.
+- codex reference: local path = ordinary turn w/ a prose summary prompt, shown to the successor as a USER message ("Another language model started to solve this problem…"), user messages kept verbatim; remote = compact endpoint. Embedded v1 follows the local plain-text shape and retains pending identities without fabricating results.
 
 ## gpt-6 only, zero back-compat
 - one API, one wire shape: Responses items. no chat-completions, no legacy tool_calls, no per-model capability table. items enum = whole vocabulary.
@@ -212,15 +221,15 @@ cannot serve as this run's pre-flight or first transport.
 rust: tokio, tokio-util(cancel); reqwest(rustls)+eventsource-stream; serde/serde_json; schemars; blake3; rusqlite(bundled), WAL; axum(ws+static)+rust-embed; tracing; thiserror; clap; wiremock for API mocks; recorded transcripts as spot checks.
 web: vite, ts (`strict`, `noUncheckedIndexedAccess`), react. radix primitives + own tokens (never Radix Themes' default look); d3 for math (`d3-hierarchy`, `d3-shape`, `d3-zoom`, `d3-brush`, `d3-time`, `d3-quadtree`) w/ React rendering the DOM and a canvas backend past ~300 nodes (xyflow only if the hand-rolled lane layout proves worse; decide in web-principles, record why); `@tanstack/react-virtual` + table; react-jsonschema-form w/ our Radix theme; zustand or a reducer; generated protocol types. tooling: eslint (ts strict, jsx-a11y, react-hooks), prettier, vitest + testing-library, ladle (components vs fixtures), playwright (screenshots + axe), size-limit (≤300 kB gz initial). assets embedded ⇒ one binary. datasette beside page for raw queries.
 
-## demo provider (wave1 output = the REAL harness; only the tools are minimal)
-- wave1 produces the real tree-shaped harness: store, scheduler, agent verbs, mailbox, checkpoints, compaction trait, hooks, event stream, web view. the provider plugged in is a demonstrator: few tools, each chosen because it has a shape exomonad will need. NOT a throwaway ! it stays as the crate's acceptance provider and the reference implementation of the trait.
+## standalone demo provider
+- The demo is the standalone library's reference provider and acceptance surface for its own profile. It does not prove embedded Exomonad acceptance; that requires the full recursive browser tree in `docs/embedded-host-prd.md`.
 - tools (each = one exomonad shape):
   - `run{script}` freeform ASYNC custom tool (raw text, not json-escaped) executing a shell script as a job = the CELL shape: long-running, progress envelopes from `<path> call <handle>` via `JobVerbs::envelope`, single output at the end. (spawning from inside a job is a `JobVerbs` capability the crate provides and tests in Rust; the demo does not wire it into a script.)
   - `edit{path, patch}` strict, path-confined to `task.owned` = the admission-veto shape.
   - `sleep{duration}` async = pure timing: settles inline at 0, pending otherwise; exercises wait_agent, late delivery after stop, cancel.
   - `ask{question, schema?}` = form to `/operator` (`followup_task`); answer = operator FINAL_ANSWER; NoAnswer on dismiss.
-  - the harness verbs (`checkpoint`, `compact`, `set_effort`) + the agent six + `wait_agent` come from the crate, not the provider.
-- demo `Compactor` = `Structured` w/ a strict json `handoff` tool (Summary {progress, decisions, remaining, references}); `render` appends code-generated state (open jobs, children, checkpoints) after the summary — the same split exomonad uses for bindings/worktrees.
+  - standalone harness verbs (`checkpoint`, `compact`, `set_effort`) + demo agent verbs + `wait_agent` come from the crate, not the provider. Embedded mode does not automatically expose them.
+- demo may use the `Structured` strategy w/ a strict json `handoff` tool. Embedded v1 uses plain-text compaction; the demo choice is not its default.
 - demo hooks: tool-call-admission (owned/mustNot veto), tool-result (the watchdog nudge ledger), child-reply (pass-through + a `reply` schema check), compaction. all others pass-through.
 - demo children = the same provider at another effort or model; a demo run is a real tree (root → leads → leaves) doing a real multi-file task in a scratch git repo, not a scripted transcript.
 - shell/edit marked dev-only; no haskell in the picture; exomonad-blind !
@@ -251,7 +260,7 @@ custom tools w/ grammars (freeform custom tools are IN scope); hosted tools; pro
 - **claims.** a pending job has a set of claimants = conversations holding its call w/o output. fork inherits the parent's claims by default (option on fork: drop → settle `Interrupted` in the fork). settlement delivers the output to every claimant on the same call_id. a claim on an already-settled job delivers the stored output immediately (so forks from a checkpoint replay cleanly). alt considered: only the continued parent keeps the event, forks get nothing — subsumed by "drop claim".
 - **checkpoint** primitive: names a request as a fork point; exomonad exposes it as an effect so agents define their own fork points. fork-from-checkpoint = ordinary fork w/ claims rule above. (primitives line: + checkpoint.)
 - **request scheduler**: yes. capacity = 4th event source; cap is over ACTIVE requests (most nodes are paused/supervising at any moment, not requesting); shared 429 backoff; ordering root before leaves; per-request priority field. priority factors: depth (root first) | operator waiting on this node | prefix warmth (continue warm prefixes before they go cold). prewarm (`generate:false`, WebSocket lane later; HTTP: a `prompt_cache_options.prewarm` request) when a child is admitted while capacity is free.
-- **integration tension, decided**: the harness verbs and hooks will become tightly integrated with tidepool/exomonad (effects, resident env, worktrees). wave1 stays STANDALONE and exomonad-blind: verbs are crate tools the demo uses; hooks are typed pass-throughs; nothing imports tidepool. dogfooding well matters more than integration now; the adapter (`~/dev/tidepool/plans/harness-adoption.md`) maps tools → effects later w/o changing the crate's contract.
+- **integration boundary, settled**: the generic crate stays standalone and Exomonad-blind. Embedded Exomonad supplies its own typed Haskell tool surface and retains lifecycle/authority; the adapter composes the library with those host owners. The embedded contract may specialize how generic facilities are used without adding a Tidepool dependency or requiring the standalone demo to adopt Exomonad semantics.
 - **adapter**: breaking change, new architecture; new trait, not `InteractiveAgentBackend`.
 - **subscription auth**: yes, schedule early.
 
