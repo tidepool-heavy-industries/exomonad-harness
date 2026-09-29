@@ -3,8 +3,3 @@ cargo_env = ["CARGO_PKG_NAME", "CARGO_PKG_VERSION_MAJOR", "CARGO_PKG_VERSION_MIN
 [buildscript.run]
 rustc_link_lib = true
 rustc_link_search = true
-
-[buildscript.run.env]
-OPT_LEVEL = "0"
-DEBUG = "false"
-PROFILE = "release"
