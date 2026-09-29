@@ -58,7 +58,7 @@ pub enum HostControl {
 pub trait HostActor: Send + Sync {
     fn identity(&self) -> &HostIdentity;
     fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError>;
-    fn tool_surface(&self) -> Arc<ToolSurface>;
+    fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError>;
     /// Wake after the input transaction commits. Failure leaves the envelope
     /// admitted and retryable by its original operation ID.
     async fn wake(&self, envelope_id: i64) -> Result<(), String>;
@@ -339,15 +339,22 @@ impl PinnedProvider {
 }
 #[async_trait]
 impl Provider for BoundProvider {
-    fn request_snapshot(&self) -> Option<Arc<dyn Provider>> {
-        Some(Arc::new(PinnedProvider {
+    fn request_snapshot(&self) -> Result<Option<Arc<dyn Provider>>, ProviderError> {
+        let surface = self
+            .host
+            .tool_surface()
+            .map_err(|error| ProviderError::Tool(error.to_string()))?;
+        Ok(Some(Arc::new(PinnedProvider {
             store: self.store.clone(),
             host: self.host.clone(),
-            surface: self.host.tool_surface(),
-        }))
+            surface,
+        })))
     }
     fn tools(&self) -> Vec<Value> {
-        self.host.tool_surface().tools.clone()
+        self.host
+            .tool_surface()
+            .map(|surface| surface.tools.clone())
+            .unwrap_or_default()
     }
     fn all_tools(&self) -> Vec<Value> {
         self.tools()

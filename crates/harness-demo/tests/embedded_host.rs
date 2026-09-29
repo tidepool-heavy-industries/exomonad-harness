@@ -42,8 +42,8 @@ impl HostActor for Host {
             Err(EmbeddedError::Host("retired".into()))
         }
     }
-    fn tool_surface(&self) -> Arc<ToolSurface> {
-        self.surface.read().unwrap().clone()
+    fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+        Ok(self.surface.read().unwrap().clone())
     }
     async fn wake(&self, envelope_id: i64) -> Result<(), String> {
         assert!(
@@ -479,7 +479,7 @@ async fn embedded_binding_rejects_foreign_context_kind_and_retired_input() {
     store
         .write_request(&request, None, "/root", &[], Default::default())
         .unwrap();
-    let provider = conversation.provider().request_snapshot().unwrap();
+    let provider = conversation.provider().request_snapshot().unwrap().unwrap();
     let jobs = JobScheduler::new(1).unwrap();
     jobs.start_for_agent(
         provider.clone(),
@@ -743,7 +743,7 @@ async fn structured_host_calls_retain_progress_and_admitted_input_survives_faile
         fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
             self.0.admit()
         }
-        fn tool_surface(&self) -> Arc<ToolSurface> {
+        fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
             self.0.tool_surface()
         }
         async fn wake(&self, _: i64) -> Result<(), String> {
@@ -794,7 +794,7 @@ async fn structured_host_calls_retain_progress_and_admitted_input_survives_faile
     let operation = store.claim(&call, &request).unwrap();
     let jobs = JobScheduler::new(1).unwrap();
     jobs.start_operation(
-        conversation.provider().request_snapshot().unwrap(),
+        conversation.provider().request_snapshot().unwrap().unwrap(),
         operation.clone(),
         AgentPath("/root".into()),
         Some(request),

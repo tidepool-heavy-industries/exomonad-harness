@@ -727,10 +727,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .iter()
                 .find_map(Item::configuration_effort)
                 .ok_or(EngineError::MissingEffortPin)?;
-            let request_provider: Arc<dyn Provider> = self
-                .provider
-                .request_snapshot()
-                .unwrap_or_else(|| self.provider.clone());
+            let snapshot = match self.provider.request_snapshot() {
+                Ok(snapshot) => snapshot,
+                Err(error) => return Err(self.cleanup_pending(error.into(), &pending).await),
+            };
+            let request_provider: Arc<dyn Provider> =
+                snapshot.unwrap_or_else(|| self.provider.clone());
             let mut req = ResponsesRequest {
                 input: history,
                 instructions: self.config.instructions.clone(),
