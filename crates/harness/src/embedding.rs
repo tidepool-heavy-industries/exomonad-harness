@@ -1,7 +1,7 @@
 //! Conversations attached to an external actor owner. The host admits actors;
 //! this module binds their model history without creating a second supervisor.
 use crate::{
-    item::{Item, ToolKind},
+    item::{Item, ToolInput, ToolKind},
     model::{AgentPath, RequestId},
     provider::{CallContext, CancellationOwner, Provider, ProviderError},
     store::{Store, StoreError},
@@ -232,7 +232,7 @@ impl PinnedProvider {
     fn validate(
         &self,
         name: &str,
-        kind: ToolKind,
+        input: &ToolInput,
         context: &CallContext,
     ) -> Result<Box<dyn AdmissionGuard>, ProviderError> {
         let fail = |message: &str| ProviderError::Tool(message.to_owned());
@@ -251,8 +251,34 @@ impl PinnedProvider {
         if stored.branch != context.agent.0 {
             return Err(fail("foreign request call"));
         }
-        if self.surface.kinds.get(name) != Some(&kind) {
+        if self.surface.kinds.get(name) != Some(&input.kind()) {
             return Err(fail("call does not match issuing tool surface"));
+        }
+        let items = self
+            .store
+            .items(request)
+            .map_err(|e| fail(&e.to_string()))?;
+        let recorded = items
+            .iter()
+            .filter_map(|item| item.tool_call().ok().flatten())
+            .filter(|call| call.call_id == context.call_id)
+            .collect::<Vec<_>>();
+        if recorded.len() != 1 || recorded[0].name != name || &recorded[0].input != input {
+            return Err(fail("call does not match durable invocation"));
+        }
+        let events = self
+            .store
+            .events(Some(request))
+            .map_err(|e| fail(&e.to_string()))?;
+        let version = events
+            .iter()
+            .rev()
+            .find(|event| event.kind == "tool_surface")
+            .and_then(|event| serde_json::from_str::<Value>(&event.payload).ok());
+        if version.as_ref().and_then(|value| value["version"].as_str())
+            != Some(self.surface.version())
+        {
+            return Err(fail("request did not publish this tool surface"));
         }
         self.host.admit().map_err(|e| fail(&e.to_string()))
     }
@@ -318,7 +344,7 @@ impl Provider for PinnedProvider {
         args: Value,
         context: CallContext,
     ) -> Result<Value, ProviderError> {
-        let _admission = self.validate(name, ToolKind::Function, &context)?;
+        let _admission = self.validate(name, &ToolInput::Function(args.clone()), &context)?;
         self.surface
             .dispatcher
             .call_with_context(name, args, context)
@@ -330,7 +356,7 @@ impl Provider for PinnedProvider {
         input: String,
         context: CallContext,
     ) -> Result<Value, ProviderError> {
-        let _admission = self.validate(name, ToolKind::Custom, &context)?;
+        let _admission = self.validate(name, &ToolInput::Custom(input.clone()), &context)?;
         self.surface
             .dispatcher
             .call_custom_with_context(name, input, context)

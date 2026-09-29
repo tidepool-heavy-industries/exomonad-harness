@@ -5,7 +5,7 @@ use harness::{
         AdmissionGuard, Conversation, EmbeddedError, HostActor, HostControl, HostIdentity,
         InputObservation, ToolSurface,
     },
-    engine::{Engine, EngineConfig, ResponsesTransport},
+    engine::{EngineConfig, ResponsesTransport},
     item::Item,
     model::{AgentPath, CallId, Effort, RequestId},
     provider::{CallContext, Provider, ProviderError},
@@ -177,25 +177,26 @@ async fn embedded_requests_pin_dispatch_and_inputs_record_actual_inclusion() {
         InputObservation::Admitted
     );
     let jobs = Arc::new(JobScheduler::new(2).unwrap());
-    let engine = Engine::<Offline, _, _>::with_transport(
-        ReloadDuringRequest {
-            host: host.clone(),
-            seen: seen.clone(),
-            requests: AtomicUsize::new(0),
-            jobs: jobs.clone(),
-        },
-        store.clone(),
-        jobs,
-        conversation.provider(),
-        EngineConfig {
-            instructions: "instructions".into(),
-            tools: vec![],
-            model: "offline".into(),
-            effort: Effort::Medium,
-            session_id: "session".into(),
-            agent: host.identity.actor.clone(),
-        },
-    );
+    let engine = conversation
+        .engine::<Offline, _>(
+            ReloadDuringRequest {
+                host: host.clone(),
+                seen: seen.clone(),
+                requests: AtomicUsize::new(0),
+                jobs: jobs.clone(),
+            },
+            jobs,
+            EngineConfig {
+                instructions: "instructions".into(),
+                tools: vec![],
+                model: "offline".into(),
+                effort: Effort::Medium,
+                session_id: "session".into(),
+                agent: host.identity.actor.clone(),
+            },
+            std::num::NonZeroU64::new(200_000).unwrap(),
+        )
+        .unwrap();
     let (_cancel, rx) = tokio::sync::watch::channel(false);
     let (_send, incoming) = tokio::sync::mpsc::unbounded_channel();
     engine.run(None, vec![], rx, incoming).await.unwrap();
@@ -268,4 +269,70 @@ async fn embedded_binding_rejects_foreign_context_kind_and_retired_input() {
             .is_err()
     );
     assert!(store.inbox("/root").unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn embedded_browser_login_input_history_and_reconnect_use_external_owner() {
+    use futures_util::StreamExt;
+    use harness::server::{self, ClientCommand, HostActorIdentity, HostActorKind, HostActorLifecycle, HostActorProjection, ServerConfig, SessionSecret, Snapshot};
+    use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
+    let store=Arc::new(Store::memory().unwrap());
+    let seen=Arc::new(Mutex::new(vec![]));
+    let host=host(store.clone(),seen.clone());
+    let conversation=Conversation::attach(store.clone(),host.clone(),None).unwrap();
+    let secret="embedded-browser-offline-test-secret-32-bytes";
+    let assets=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/dist");
+    let (router,control,mut commands)=server::server_with_config(ServerConfig::new(assets).with_history_store(store.clone()).with_browser_session(SessionSecret::new(secret).unwrap(),std::time::Duration::from_secs(60)).unwrap());
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address=listener.local_addr().unwrap();
+    let (shutdown,stopped)=tokio::sync::oneshot::channel();
+    let serving=tokio::spawn(async move { axum::serve(listener,router).with_graceful_shutdown(async { let _=stopped.await; }).await.unwrap(); });
+    let origin=format!("http://{address}");
+    let client=reqwest::Client::new();
+    assert_eq!(client.get(format!("{origin}/")).send().await.unwrap().status(),200);
+    assert_eq!(client.get(format!("{origin}/api/history/absent")).send().await.unwrap().status(),401);
+    let login=client.post(format!("{origin}/api/session")).header("Origin",&origin).json(&json!({"secret":secret})).send().await.unwrap();
+    assert_eq!(login.status(),200);
+    let cookie=login.headers()["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_owned();
+    let response=client.post(format!("{origin}/api/commands")).header("Origin",&origin).header("Cookie",&cookie).json(&ClientCommand::Submit{command:"run deterministic cells".into()}).send().await.unwrap();
+    assert_eq!(response.status(),202);
+    let command=commands.recv().await.unwrap();
+    let ClientCommand::Submit{command:text}=command.command;
+    let receipt=conversation.input(&command.command_id,"operator",&text).await.unwrap();
+    assert_eq!(conversation.input_observation(receipt.envelope_id).unwrap(),InputObservation::Admitted);
+    let jobs=Arc::new(JobScheduler::new(2).unwrap());
+    let engine=conversation.engine::<Offline,_>(ReloadDuringRequest{host:host.clone(),seen:seen.clone(),requests:AtomicUsize::new(0),jobs:jobs.clone()},jobs,EngineConfig{instructions:"use the actual host tools".into(),tools:vec![],model:"offline".into(),effort:Effort::Medium,session_id:"browser".into(),agent:host.identity.actor.clone()},std::num::NonZeroU64::new(200_000).unwrap()).unwrap();
+    let (_cancel,cancelled)=tokio::sync::watch::channel(false);
+    let (_wake,incoming)=tokio::sync::mpsc::unbounded_channel();
+    let completion=engine.run(None,vec![],cancelled,incoming).await.unwrap();
+    let identity=HostActorIdentity {run:"run".into(),actor:AgentPath("/root".into()),incarnation:"one".into()};
+    control.set_snapshot(Snapshot{
+        actors:vec![
+            HostActorProjection{identity:identity.clone(),parent:None,kind:HostActorKind::Model,lifecycle:HostActorLifecycle::Waiting,model_conversation:Some("/root".into())},
+            HostActorProjection{identity:HostActorIdentity{run:"run".into(),actor:AgentPath("/root/workflow".into()),incarnation:"workflow-one".into()},parent:Some(identity),kind:HostActorKind::Workflow,lifecycle:HostActorLifecycle::Running,model_conversation:None},
+        ],
+        conversations:vec![json!({"id":"/root","path":"/root","state":"idle"})],
+        requests:vec![json!({"id":completion.head_request.0,"conversationId":"/root","state":"completed"})],
+        ..Snapshot::default()
+    });
+    for _ in 0..2 {
+        let mut request=format!("ws://{address}/api/ws").into_client_request().unwrap();
+        request.headers_mut().insert("Origin",origin.parse().unwrap());
+        request.headers_mut().insert("Cookie",cookie.parse().unwrap());
+        let (mut socket,_)=connect_async(request).await.unwrap();
+        let snapshot:Value=serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(snapshot["snapshot"]["actors"].as_array().unwrap().len(),2);
+        assert_eq!(snapshot["snapshot"]["actors"][1]["kind"],"workflow");
+        socket.close(None).await.unwrap();
+    }
+    assert_eq!(seen.lock().unwrap().len(),2,"reconnect never repeats tools");
+    let history=client.get(format!("{origin}/api/history/{}",completion.head_request.0)).header("Cookie",&cookie).send().await.unwrap();
+    assert_eq!(history.status(),200);
+    let history:Value=history.json().await.unwrap();
+    assert!(history.to_string().contains("done"));
+    assert!(matches!(conversation.input_observation(receipt.envelope_id).unwrap(),InputObservation::Included(_)));
+    conversation.control(HostControl::Retire).await.unwrap();
+    assert!(conversation.input("after","operator","no").await.is_err());
+    shutdown.send(()).unwrap();
+    serving.await.unwrap();
 }

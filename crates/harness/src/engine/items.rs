@@ -1,9 +1,12 @@
+#[cfg(test)]
+use crate::{item::ToolKind, turn::JobOutput};
 use crate::{
-    item::{Item, ToolInput, ToolKind},
+    item::{Item, ToolInput},
     model::CallId,
-    turn::JobOutput,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 
 /// Parse a Responses API function-call item.
 pub(super) fn function_call(item: &Item) -> Option<(CallId, String, Value)> {
@@ -15,6 +18,7 @@ pub(super) fn function_call(item: &Item) -> Option<(CallId, String, Value)> {
 }
 
 /// Encode a settled job as a Responses API function-call output item.
+#[cfg(test)]
 pub(super) fn function_output(call_id: &CallId, output: &JobOutput) -> Item {
     Item::tool_output(call_id, ToolKind::Function, output)
 }

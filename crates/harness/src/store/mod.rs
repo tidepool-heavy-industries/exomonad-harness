@@ -1,4 +1,5 @@
 //! Durable SQLite event and content-addressed request store.
+mod embedded;
 pub mod schema;
 
 use crate::{

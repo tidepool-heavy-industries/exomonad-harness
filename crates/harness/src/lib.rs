@@ -4,6 +4,7 @@ pub mod agents;
 pub mod cell_job;
 pub mod checkpoint;
 pub mod compaction;
+pub mod embedding;
 pub mod engine;
 pub mod finalize;
 pub mod history;

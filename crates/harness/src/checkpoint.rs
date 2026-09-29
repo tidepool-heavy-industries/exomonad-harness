@@ -2,7 +2,7 @@
 
 use crate::{
     item::{Item, ToolKind},
-    model::{AgentPath, CallId, Effort, RequestId},
+    model::{AgentPath, CallId, RequestId},
     store::{Agent, AgentState, Result, Store, StoreError, utc_millis},
 };
 use rusqlite::{OptionalExtension, params};
@@ -353,6 +353,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Effort;
     use crate::store::ClaimState;
 
     fn item(value: Value) -> Item {
