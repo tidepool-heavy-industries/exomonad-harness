@@ -241,6 +241,51 @@ impl Store {
         for (origin, original_request, call_id, claim_request, state, output_hash) in claims {
             let key = (RequestId(claim_request.clone()), CallId(call_id.clone()));
             if let Some(kind) = call_kinds.get(&key) {
+                let terminal = match state.as_str() {
+                    "settled" => {
+                        if let Some(hash) = &output_hash {
+                            let raw: String = tx.query_row(
+                                "SELECT json FROM items WHERE hash=?1",
+                                [hash],
+                                |row| row.get(0),
+                            )?;
+                            Some(serde_json::from_str::<Item>(&raw)?)
+                        } else {
+                            None
+                        }
+                    }
+                    "interrupted" => Some(Item::tool_output(
+                        &CallId(call_id.clone()),
+                        *kind,
+                        &crate::turn::JobOutput::Interrupted,
+                    )),
+                    _ => None,
+                };
+                if let Some(terminal) = terminal {
+                    if let Some(start) = prefix.iter().position(|(request, item)| {
+                        request.0 == claim_request
+                            && item
+                                .tool_call()
+                                .ok()
+                                .flatten()
+                                .is_some_and(|call| call.call_id.0 == call_id)
+                    }) {
+                        let before_next_call =
+                            prefix[start + 1..].iter().take_while(|(_, item)| {
+                                !item
+                                    .tool_call()
+                                    .ok()
+                                    .flatten()
+                                    .is_some_and(|call| call.call_id.0 == call_id)
+                            });
+                        if before_next_call
+                            .into_iter()
+                            .any(|(_, item)| *item == terminal)
+                        {
+                            continue;
+                        }
+                    }
+                }
                 if call_id == boundary_call.0 && claim_request == source_request.0 {
                     boundary_claimed = true;
                 }
@@ -422,6 +467,44 @@ mod tests {
 
     fn item(value: Value) -> Item {
         Item(value)
+    }
+
+    #[test]
+    fn checkpoint_omits_completed_earlier_equal_wire_id() {
+        let store = Store::memory().unwrap();
+        let root = AgentPath("/root".into());
+        let first = RequestId("first-equal-call".into());
+        let second = RequestId("second-equal-call".into());
+        let call = CallId("same-wire-id".into());
+        let invocation = item(json!({
+            "type":"function_call", "call_id":call.0, "name":"slow", "arguments":"{}"
+        }));
+        store.create_request(&first, None, &root.0).unwrap();
+        store.set_effort(&first, Effort::Medium).unwrap();
+        store
+            .append_items(&first, std::slice::from_ref(&invocation))
+            .unwrap();
+        let first_op = store.claim(&call, &first).unwrap();
+        let output = item(json!({
+            "type":"function_call_output", "call_id":call.0, "output":"\"first\""
+        }));
+        store.write_output(&first_op, &output).unwrap();
+        store.append_items(&first, &[output]).unwrap();
+        store
+            .create_request(&second, Some(&first), &root.0)
+            .unwrap();
+        store.append_items(&second, &[invocation]).unwrap();
+        let second_op = store.claim(&call, &second).unwrap();
+        store
+            .admit_agent(&root, None, Some(&second), &json!({}), &json!({}))
+            .unwrap();
+        let checkpoint = store
+            .capture_checkpoint(&root, &second, &call, &json!({}), Arc::new(()))
+            .unwrap();
+        let inherited = store.claims_on(checkpoint.snapshot_request()).unwrap();
+        assert_eq!(inherited.len(), 1);
+        assert_eq!(inherited[0].operation, second_op);
+        assert_eq!(checkpoint.pending_claims().len(), 1);
     }
 
     #[test]

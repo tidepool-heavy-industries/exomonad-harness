@@ -409,10 +409,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     ) -> Result<EngineCompletion, EngineError> {
         self.await_here_invocation_output(&head, &mut cancellation)
             .await?;
-        let inherited_history = match &head {
-            Some(head) => self.read_history(head).await?,
+        let inherited_pairs = match &head {
+            Some(head) => self.read_history_pairs(head).await?,
             None => Vec::new(),
         };
+        let inherited_history = inherited_pairs
+            .iter()
+            .map(|(_, item)| item.clone())
+            .collect::<Vec<_>>();
         let inherited_claims = match &head {
             Some(head) => {
                 let store = self.store.clone();
@@ -439,19 +443,42 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .store
                 .tool_invocation_kind(&claim.operation.request, &claim.call_id)?
                 .ok_or_else(|| EngineError::MissingInheritedOutput(claim.call_id.0.clone()))?;
-            // A provider may reuse a wire call ID in a later request. Only
-            // output after this invocation's last visible call can satisfy
-            // its inherited claim; earlier outputs belong to earlier calls.
-            let call_position = inherited_history
+            let same_call = |item: &Item| {
+                item.tool_call()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|call| call.call_id == claim.call_id)
+            };
+            let claimant_call_count = inherited_pairs
                 .iter()
-                .rposition(|item| {
-                    item.tool_call()
-                        .ok()
-                        .flatten()
-                        .is_some_and(|call| call.call_id == claim.call_id)
+                .filter(|(request, item)| request == &claim.request && same_call(item))
+                .count();
+            if claimant_call_count > 1 && claim.state != crate::store::ClaimState::Pending {
+                return Err(EngineError::MismatchedToolOutput(claim.call_id.0.clone()));
+            }
+            let call_position = inherited_pairs
+                .iter()
+                .enumerate()
+                .find(|(_, (request, item))| request == &claim.request && same_call(item))
+                .map(|(position, _)| position)
+                .or_else(|| {
+                    inherited_pairs
+                        .iter()
+                        .enumerate()
+                        .find(|(_, (request, item))| {
+                            request == &claim.operation.request && same_call(item)
+                        })
+                        .map(|(position, _)| position)
                 })
+                .or_else(|| inherited_history.iter().rposition(&same_call))
                 .ok_or_else(|| EngineError::MissingInheritedOutput(claim.call_id.0.clone()))?;
-            let already_output = inherited_history[call_position + 1..]
+            let next_call = inherited_history[call_position + 1..]
+                .iter()
+                .position(&same_call)
+                .map_or(inherited_history.len(), |relative| {
+                    call_position + 1 + relative
+                });
+            let already_output = inherited_history[call_position + 1..next_call]
                 .iter()
                 .filter(|item| {
                     (item.0["type"] == "function_call_output"
@@ -514,10 +541,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 ));
                 continue;
             }
-            if inherited_history[call_position..].iter().any(|item| {
-                items::function_call(item)
-                    .is_some_and(|(call, name, _)| call == claim.call_id && name == "wait_agent")
-            }) {
+            if inherited_history[call_position..next_call]
+                .iter()
+                .any(|item| {
+                    items::function_call(item).is_some_and(|(call, name, _)| {
+                        call == claim.call_id && name == "wait_agent"
+                    })
+                })
+            {
                 return Err(EngineError::UnresumableForkedWaitAgent);
             }
             // Validate every pending job before claiming any of them. The
@@ -1692,6 +1723,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         load_history(self.store.clone(), id.clone()).await
     }
 
+    async fn read_history_pairs(
+        &self,
+        id: &RequestId,
+    ) -> Result<Vec<(RequestId, Item)>, EngineError> {
+        load_history_pairs(self.store.clone(), id.clone()).await
+    }
+
     /// A model-facing Here child is admitted before its spawn tool returns.
     /// Do not send the child's first model request until the parent's actual
     /// function_call_output Item is durable in request history, then copy that
@@ -1955,6 +1993,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
 }
 
 async fn load_history(store: Arc<Store>, id: RequestId) -> Result<Vec<Item>, EngineError> {
+    Ok(load_history_pairs(store, id)
+        .await?
+        .into_iter()
+        .map(|(_, item)| item)
+        .collect())
+}
+
+async fn load_history_pairs(
+    store: Arc<Store>,
+    id: RequestId,
+) -> Result<Vec<(RequestId, Item)>, EngineError> {
     blocking(move || {
         let mut cursor = Some(id);
         let mut chain = Vec::new();
@@ -1962,7 +2011,13 @@ async fn load_history(store: Arc<Store>, id: RequestId) -> Result<Vec<Item>, Eng
             let Some(request) = store.request(&request_id)? else {
                 return Err(StoreError::MissingRequest(request_id.0));
             };
-            chain.push(store.items(&request_id)?);
+            chain.push(
+                store
+                    .items(&request_id)?
+                    .into_iter()
+                    .map(|item| (request_id.clone(), item))
+                    .collect::<Vec<_>>(),
+            );
             if store.is_compaction_boundary(&request_id)? {
                 break;
             }

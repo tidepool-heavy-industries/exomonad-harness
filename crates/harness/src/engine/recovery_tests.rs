@@ -500,6 +500,7 @@ async fn engine_recovery_scheduler_keeps_success_that_precedes_cancel() {
 async fn engine_recovering_reconciles_same_branch_ancestor_after_descendant_barrier() {
     let store = Arc::new(Store::memory().unwrap());
     let branch = AgentPath("/root".into());
+    let prior = RequestId("recovery-prior-completed".into());
     let origin = RequestId("recovery-origin".into());
     let barrier = RequestId("recovery-descendant-barrier".into());
     let fork = RequestId("recovery-child-fork".into());
@@ -512,8 +513,23 @@ async fn engine_recovering_reconciles_same_branch_ancestor_after_descendant_barr
     }));
     store
         .write_request(
-            &origin,
+            &prior,
             None,
+            &branch.0,
+            std::slice::from_ref(&call_item),
+            StoredUsage::default(),
+        )
+        .unwrap();
+    let prior_op = store.claim(&call, &prior).unwrap();
+    let prior_output = Item(json!({
+        "type":"function_call_output", "call_id":call.0, "output":"\"prior completed\""
+    }));
+    store.write_output(&prior_op, &prior_output).unwrap();
+    store.append_items(&prior, &[prior_output]).unwrap();
+    store
+        .write_request(
+            &origin,
+            Some(&prior),
             &branch.0,
             std::slice::from_ref(&call_item),
             StoredUsage::default(),
@@ -590,9 +606,9 @@ async fn engine_recovering_reconciles_same_branch_ancestor_after_descendant_barr
         .unwrap();
 
     let claims = store.claims(&call).unwrap();
-    assert_eq!(claims.len(), 1);
-    assert_eq!(claims[0].request, origin);
-    assert_eq!(claims[0].state, crate::store::ClaimState::Interrupted);
+    assert_eq!(claims.len(), 2);
+    let recovered = claims.iter().find(|claim| claim.request == origin).unwrap();
+    assert_eq!(recovered.state, crate::store::ClaimState::Interrupted);
     let request_log = requests.lock().unwrap();
     assert_eq!(request_log.len(), 1, "exactly one model request");
     let outputs: Vec<_> = request_log[0]
@@ -600,7 +616,20 @@ async fn engine_recovering_reconciles_same_branch_ancestor_after_descendant_barr
         .iter()
         .filter(|item| item.0["type"] == "function_call_output" && item.0["call_id"] == call.0)
         .collect();
-    assert_eq!(outputs.len(), 1, "interrupted output is sent exactly once");
+    assert_eq!(
+        outputs.len(),
+        2,
+        "prior completion and interruption each appear once"
+    );
+    assert_eq!(
+        outputs
+            .iter()
+            .filter(|item| item.0["output"]
+                .as_str()
+                .is_some_and(|value| value.contains("job interrupted")))
+            .count(),
+        1
+    );
     assert!(request_log[0].input.contains(&call_item));
     assert_eq!(
         provider_calls.load(std::sync::atomic::Ordering::SeqCst),
