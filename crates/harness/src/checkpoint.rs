@@ -19,6 +19,8 @@ pub struct CheckpointClaim {
 
 /// A captured host capability. The attachment is retained independently of
 /// the issuing call, and cloning the checkpoint retains it for another child.
+/// Pending calls retain their original execution owner: each child receives
+/// the same terminal outcome, including failure or cancellation.
 #[derive(Debug)]
 pub struct Checkpoint<T: ?Sized> {
     id: String,
@@ -271,7 +273,8 @@ impl Store {
 
     /// Register one host-authorized child from a reusable checkpoint. This
     /// copies the frozen prefix and the current settlement state of its claims.
-    /// It never waits for the checkpointing call to return.
+    /// It never waits for the checkpointing call to return. It does not start
+    /// or own another execution of a pending call.
     pub fn attach_checkpoint_child<T: ?Sized + Send + Sync + 'static>(
         &self,
         checkpoint: &Checkpoint<T>,
@@ -765,6 +768,192 @@ mod tests {
                 )
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_origin_call_replays_to_later_child_without_reexecution() {
+        use crate::{
+            engine::{Engine, EngineConfig, ResponsesTransport},
+            provider::{Provider, ProviderError},
+            transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, Usage},
+            turn::{JobOutput, JobScheduler},
+        };
+        use async_trait::async_trait;
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tokio::sync::{Notify, mpsc, watch};
+
+        #[derive(Clone)]
+        struct FakeAuth;
+        impl Auth for FakeAuth {
+            fn access(&self) -> std::result::Result<(String, String), TransportError> {
+                Ok(("unused".into(), "unused".into()))
+            }
+        }
+        struct Replay {
+            sent: Arc<Mutex<Vec<ResponsesRequest>>>,
+        }
+        #[async_trait]
+        impl ResponsesTransport for Replay {
+            async fn create(
+                &self,
+                request: ResponsesRequest,
+            ) -> std::result::Result<ResponsesTurn, TransportError> {
+                self.sent.lock().unwrap().push(request);
+                Ok(ResponsesTurn {
+                    response_id: "final".into(),
+                    items: vec![item(json!({
+                        "type":"message","role":"assistant","phase":"final_answer","content":"continued"
+                    }))],
+                    usage: Usage::default(),
+                })
+            }
+        }
+        struct PendingProvider {
+            started: Arc<Notify>,
+            calls: Arc<AtomicUsize>,
+        }
+        #[async_trait]
+        impl Provider for PendingProvider {
+            async fn call(
+                &self,
+                _name: &str,
+                _args: Value,
+            ) -> std::result::Result<Value, ProviderError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.started.notify_one();
+                std::future::pending().await
+            }
+            fn tools(&self) -> Vec<Value> {
+                vec![]
+            }
+        }
+        let store = Arc::new(Store::memory().unwrap());
+        let root = AgentPath("/root".into());
+        let child = AgentPath("/root/later".into());
+        let source = RequestId("cancelled-origin".into());
+        let call = CallId("shared-call".into());
+        store.create_request(&source, None, &root.0).unwrap();
+        store.set_effort(&source, Effort::Low).unwrap();
+        store
+            .admit_agent(&root, None, Some(&source), &json!({}), &json!({}))
+            .unwrap();
+        store
+            .append_items(
+                &source,
+                &[item(json!({
+                    "type":"function_call","call_id":call.0,"name":"slow","arguments":"{}"
+                }))],
+            )
+            .unwrap();
+        store.claim(&call, &source).unwrap();
+        let started = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(PendingProvider {
+            started: started.clone(),
+            calls: calls.clone(),
+        });
+        let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+        scheduler
+            .start_for_agent(
+                provider.clone(),
+                root.clone(),
+                Some(source.clone()),
+                call.clone(),
+                "slow".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        scheduler.claim(&call, root.clone()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        let attachment = Arc::new(String::from("kept source"));
+        let checkpoint = store
+            .capture_checkpoint(&root, &source, &call, &json!({}), attachment.clone())
+            .unwrap();
+        assert_eq!(
+            scheduler.cancel(&call).await.unwrap().unwrap().output,
+            JobOutput::Cancelled
+        );
+        let cancelled = Item::tool_output(&call, ToolKind::Function, &JobOutput::Cancelled);
+        assert_eq!(store.write_output(&call, &cancelled).unwrap(), 2);
+        assert_eq!(
+            store.claims_on(checkpoint.snapshot_request()).unwrap()[0].state,
+            ClaimState::Settled
+        );
+        let (attached, _) = store
+            .attach_checkpoint_child(
+                &checkpoint,
+                CheckpointChild {
+                    path: &child,
+                    parent: &root,
+                    contract: &json!({}),
+                    checkout: &json!({"revision":"later"}),
+                    task: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .claims_on(attached.head_request.as_ref().unwrap())
+                .unwrap()[0]
+                .state,
+            ClaimState::Settled
+        );
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::<FakeAuth, PendingProvider, _>::with_transport(
+            Replay { sent: sent.clone() },
+            store.clone(),
+            scheduler,
+            provider,
+            EngineConfig {
+                instructions: "child".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "cancelled-child".into(),
+                agent: child,
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let (_mail_tx, mail_rx) = mpsc::unbounded_channel();
+        let completion = engine
+            .run(attached.head_request, vec![], cancel_rx, mail_rx)
+            .await
+            .unwrap();
+        assert_eq!(completion.turn.response_id, "final");
+        let received = sent.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(
+            received[0]
+                .input
+                .iter()
+                .filter(|item| *item == &cancelled)
+                .count(),
+            1
+        );
+        assert_eq!(
+            completion
+                .transcript
+                .iter()
+                .filter(|item| *item == &cancelled)
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the child never reruns the source call"
+        );
+        assert_eq!(
+            Arc::strong_count(&attachment),
+            2,
+            "cancellation leaves the checkpoint attachment live"
         );
     }
 
