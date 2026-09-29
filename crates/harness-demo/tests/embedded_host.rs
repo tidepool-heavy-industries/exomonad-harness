@@ -756,7 +756,14 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
     let host = host(store.clone(), seen.clone());
     let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
     let secret = "embedded-browser-offline-test-secret-32-bytes";
-    let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/dist");
+    let assets = std::env::var_os("HARNESS_WEB_DIST")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(
+                option_env!("CARGO_MANIFEST_DIR").expect("manifest path is required"),
+            )
+            .join("../../web/dist")
+        });
     let (router, control, mut commands) = server::server_with_config(
         ServerConfig::new(assets)
             .with_history_store(store.clone())

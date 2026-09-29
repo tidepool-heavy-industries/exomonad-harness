@@ -1,0 +1,7 @@
+load("@prelude//:rules.bzl", "export_file")
+
+export_file(
+    name = "launch_browser_harness",
+    src = "launch-browser-harness",
+    visibility = ["PUBLIC"],
+)

@@ -1,0 +1,13 @@
+load(":web_rules.bzl", "web_action")
+
+WEB_SRCS = glob(["src/**/*"]) + [
+    "index.html",
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "vite.config.ts",
+]
+
+web_action(name = "check", script = "check", output = "check.txt", srcs = WEB_SRCS)
+web_action(name = "test", script = "test", output = "test.log", srcs = WEB_SRCS)
+web_action(name = "dist", script = "build", output = "dist", srcs = WEB_SRCS, is_directory = True)

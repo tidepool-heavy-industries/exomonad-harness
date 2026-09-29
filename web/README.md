@@ -1,5 +1,11 @@
 # Operator web view
 
+On x86_64 Linux, `buck2 build //web:check //web:test //web:dist` uses the
+flake-pinned Node and fixed-output npm cache. The actions declare the lockfile
+and web sources, install with `npm ci --offline`, and produce separate check,
+test log, and production asset outputs. Run `scripts/buck2-configure.sh` from
+the repository root after changing the flake inputs.
+
 For a reproducible browser journey check from the repository root, run
 `nix develop .#web -c scripts/verify-browser-journey` with the Rust toolchain
 available. The pinned Node 24 shell and package lock drive `npm ci`, typecheck,

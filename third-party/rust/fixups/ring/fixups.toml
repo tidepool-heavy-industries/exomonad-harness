@@ -1,0 +1,10 @@
+cargo_env = ["CARGO_PKG_NAME", "CARGO_PKG_VERSION_MAJOR", "CARGO_PKG_VERSION_MINOR", "CARGO_PKG_VERSION_PATCH", "CARGO_PKG_VERSION_PRE", "CARGO_MANIFEST_LINKS"]
+
+[buildscript.run]
+rustc_link_lib = true
+rustc_link_search = true
+
+[buildscript.run.env]
+OPT_LEVEL = "0"
+DEBUG = "false"
+PROFILE = "release"

@@ -1,0 +1,65 @@
+load("@prelude//:rules.bzl", "rust_binary", "rust_test")
+load("//:rust_tests.bzl", "integration_test")
+
+DEMO_DEPS = [
+    "//crates/harness:harness",
+    "//third-party/rust:async-trait",
+    "//third-party/rust:axum",
+    "//third-party/rust:serde_json",
+    "//third-party/rust:tokio",
+]
+
+TEST_DEPS = DEMO_DEPS + [
+    "//third-party/rust:futures-util",
+    "//third-party/rust:reqwest",
+    "//third-party/rust:tokio-tungstenite",
+]
+
+DEMO_SRCS = glob(["src/**/*.rs"])
+
+rust_binary(
+    name = "harness_demo",
+    crate = "harness_demo",
+    crate_root = "src/main.rs",
+    edition = "2024",
+    srcs = DEMO_SRCS,
+    deps = DEMO_DEPS,
+    visibility = ["PUBLIC"],
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = "harness_demo",
+    crate_root = "src/main.rs",
+    edition = "2024",
+    srcs = DEMO_SRCS,
+    deps = DEMO_DEPS,
+)
+
+integration_test(
+    name = "browser_journey",
+    deps = TEST_DEPS,
+    resources = [":harness_demo", "//web:dist"],
+    run_env = {
+        "HARNESS_DEMO_TEST_BIN": "$(location :harness_demo)",
+        "HARNESS_WEB_DIST": "$(location //web:dist)",
+    },
+)
+
+integration_test(
+    name = "embedded_host",
+    deps = TEST_DEPS,
+    resources = ["//web:dist"],
+    run_env = {"HARNESS_WEB_DIST": "$(location //web:dist)"},
+)
+
+integration_test(
+    name = "standalone_browser",
+    deps = TEST_DEPS,
+    resources = [":harness_demo", "//web:dist", "//scripts:launch_browser_harness"],
+    run_env = {
+        "HARNESS_DEMO_TEST_BIN": "$(location :harness_demo)",
+        "HARNESS_WEB_DIST": "$(location //web:dist)",
+        "HARNESS_LAUNCHER": "$(location //scripts:launch_browser_harness)",
+    },
+)

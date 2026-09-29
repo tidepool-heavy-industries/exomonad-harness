@@ -47,7 +47,35 @@ fn temp_path() -> PathBuf {
 fn binary() -> PathBuf {
     std::env::var_os("HARNESS_DEMO_TEST_BIN")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_harness-demo")))
+        .unwrap_or_else(|| {
+            PathBuf::from(
+                option_env!("CARGO_BIN_EXE_harness-demo").expect("demo binary is required"),
+            )
+        })
+        .canonicalize()
+        .expect("demo binary must exist")
+}
+
+fn launcher() -> PathBuf {
+    std::env::var_os("HARNESS_LAUNCHER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(option_env!("CARGO_MANIFEST_DIR").expect("manifest path is required"))
+                .join("../../scripts/launch-browser-harness")
+        })
+        .canonicalize()
+        .expect("browser launcher must exist")
+}
+
+fn web_assets() -> PathBuf {
+    std::env::var_os("HARNESS_WEB_DIST")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(option_env!("CARGO_MANIFEST_DIR").expect("manifest path is required"))
+                .join("../../web/dist")
+        })
+        .canonicalize()
+        .expect("web assets must be prepared before this test")
 }
 
 fn spawn(
@@ -58,9 +86,8 @@ fn spawn(
     phase: &str,
     binary_path: &Path,
 ) -> Child {
-    let launcher =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/launch-browser-harness");
-    Command::new(launcher)
+    let launcher = launcher();
+    Command::new(&launcher)
         .args([
             db.to_str().unwrap(),
             &format!("127.0.0.1:{port}"),
@@ -77,9 +104,7 @@ fn spawn(
         .unwrap_or_else(|error| {
             panic!(
                 "failed to spawn browser server: phase={phase} launcher={} binary={} database={} capture={} error={error}",
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../scripts/launch-browser-harness")
-                    .display(),
+                launcher.display(),
                 binary_path.display(),
                 db.display(),
                 capture.display(),
@@ -572,10 +597,7 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     );
     assert!(!db.exists(), "missing assets unexpectedly touched database");
 
-    let assets = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../web/dist")
-        .canonicalize()
-        .expect("web/dist must be prepared before this test");
+    let assets = web_assets();
     // A failed launch must leave the occupied listener with its original owner.
     let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
     let occupied_port = occupied.local_addr().unwrap().port();

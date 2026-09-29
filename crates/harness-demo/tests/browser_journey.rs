@@ -23,9 +23,22 @@ struct Demo {
 
 impl Demo {
     fn spawn_server(db: &std::path::Path, address: &str) -> Child {
-        Command::new(env!("CARGO_BIN_EXE_harness-demo"))
-            .args(["--db", db.to_str().unwrap(), "--serve", address])
-            .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        let binary = std::env::var_os("HARNESS_DEMO_TEST_BIN")
+            .or_else(|| option_env!("CARGO_BIN_EXE_harness-demo").map(Into::into))
+            .expect("Buck run_env or Cargo binary path is required");
+        let assets = std::env::var_os("HARNESS_WEB_DIST")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(
+                    option_env!("CARGO_MANIFEST_DIR").expect("Cargo manifest path is required"),
+                )
+                .join("../../web/dist")
+            })
+            .canonicalize()
+            .expect("built web assets are required");
+        Command::new(binary)
+            .args(["--db", db.to_str().unwrap(), "--serve", address, "--assets"])
+            .arg(assets)
             .env("HARNESS_DEMO_SESSION_SECRET", SESSION_SECRET)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
