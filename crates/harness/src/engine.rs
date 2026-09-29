@@ -11,7 +11,7 @@ use crate::{
     },
     finalize::{FINALIZE_TOOL_NAME, FinalizeError, FinalizeParser},
     item::{Item, ToolInput, ToolKind},
-    mailbox::{Envelope, MessageChannel},
+    mailbox::{DurableMailboxWake, Envelope, MailboxSignal, MessageChannel},
     model::{AgentPath, CallId, ConversationIdentity, Effort, OperationId, RequestId},
     provider::Provider,
     store::{Store, StoreError, Usage as StoredUsage},
@@ -269,8 +269,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     }
 
     /// Run from a durable request head, appending only new items and admitting
-    /// persisted mailbox envelopes before each model request. `incoming` is a
-    /// wake-hint stream; hosts must persist each envelope before signaling it.
+    /// persisted mailbox envelopes before each model request. `incoming`
+    /// carries standalone direct envelopes as content.
     pub async fn run(
         &self,
         head: Option<RequestId>,
@@ -279,6 +279,31 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
     ) -> Result<EngineCompletion, EngineError> {
         self.run_with_finalize(head, new_items, cancellation, incoming, None)
+            .await
+    }
+
+    /// Run an embedded conversation from Store-backed input. Hints carry only
+    /// committed envelope IDs; Store remains the sole content and delivery owner.
+    pub async fn run_embedded(
+        &self,
+        head: Option<RequestId>,
+        new_items: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+        incoming: tokio::sync::mpsc::UnboundedReceiver<DurableMailboxWake>,
+    ) -> Result<EngineCompletion, EngineError> {
+        self.run_with_finalize_mode(head, new_items, cancellation, incoming, None, false)
+            .await
+    }
+
+    /// Resume an embedded conversation without replaying uncertain jobs.
+    pub async fn run_recovering_embedded(
+        &self,
+        head: Option<RequestId>,
+        new_items: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+        incoming: tokio::sync::mpsc::UnboundedReceiver<DurableMailboxWake>,
+    ) -> Result<EngineCompletion, EngineError> {
+        self.run_with_finalize_mode(head, new_items, cancellation, incoming, None, true)
             .await
     }
 
@@ -362,12 +387,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         .await
     }
 
-    async fn run_with_finalize_mode(
+    async fn run_with_finalize_mode<I: Into<MailboxSignal> + Send + 'static>(
         &self,
         head: Option<RequestId>,
         new_items: Vec<Item>,
         cancellation: watch::Receiver<bool>,
-        mut incoming: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+        mut incoming: tokio::sync::mpsc::UnboundedReceiver<I>,
         finalize_schema: Option<serde_json::Value>,
         recovering: bool,
     ) -> Result<EngineCompletion, EngineError> {
@@ -375,7 +400,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let keepalive = envelope_tx.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(envelope) = incoming.recv().await {
-                if envelope_tx.send(envelope).is_err() {
+                if envelope_tx.send(envelope.into()).is_err() {
                     break;
                 }
             }
@@ -402,7 +427,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         head: Option<RequestId>,
         initial: Vec<Item>,
         mut cancellation: watch::Receiver<bool>,
-        mut envelopes: tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+        mut envelopes: tokio::sync::mpsc::UnboundedReceiver<MailboxSignal>,
         admit_inbox: bool,
         finalize_schema: Option<&serde_json::Value>,
         recovering: bool,
@@ -1620,7 +1645,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     async fn wait_for_resume(
         &self,
         pending: &[PendingCall],
-        envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+        envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<MailboxSignal>,
         cancellation: &mut watch::Receiver<bool>,
     ) -> Result<WaitAgentResultExact, EngineError> {
         let calls: Vec<_> = pending
@@ -1635,6 +1660,20 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             match &result.resumed_by {
                 WaitResumeExact::Job(operation) if calls.contains(operation) => return Ok(result),
                 WaitResumeExact::Envelope(_) | WaitResumeExact::Cancelled => return Ok(result),
+                WaitResumeExact::DurableWake(envelope_id) => {
+                    let store = self.store.clone();
+                    let recipient = self.config.agent.0.clone();
+                    let envelope_id = *envelope_id;
+                    let pending = blocking(move || {
+                        Ok(store.envelope(envelope_id)?.is_some_and(|envelope| {
+                            envelope.recipient == recipient && envelope.delivered_request.is_none()
+                        }))
+                    })
+                    .await?;
+                    if pending {
+                        return Ok(result);
+                    }
+                }
                 WaitResumeExact::Job(_) => continue,
             }
         }
@@ -1690,6 +1729,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 } else {
                     (Some(item), None, resumed)
                 }
+            }
+            WaitResumeExact::DurableWake(_) => {
+                // The next request atomically attaches the stored envelope.
+                // A wake never supplies or appends a second copy of its content.
+                (None, None, json!({"resumed_by":"user_input"}))
             }
             WaitResumeExact::Cancelled => return Err(EngineError::Cancelled),
         };

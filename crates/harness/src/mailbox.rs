@@ -5,6 +5,31 @@
 use crate::model::AgentPath;
 use serde::{Deserialize, Serialize};
 
+/// A committed Store envelope is only a wake hint. The Engine resolves its
+/// identity and lets Store attach its content once at the next request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DurableMailboxWake {
+    pub envelope_id: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MailboxSignal {
+    Direct(Envelope),
+    Durable(DurableMailboxWake),
+}
+
+impl From<Envelope> for MailboxSignal {
+    fn from(envelope: Envelope) -> Self {
+        Self::Direct(envelope)
+    }
+}
+
+impl From<DurableMailboxWake> for MailboxSignal {
+    fn from(wake: DurableMailboxWake) -> Self {
+        Self::Durable(wake)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum EnvelopeType {

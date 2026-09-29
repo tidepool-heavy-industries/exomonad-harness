@@ -6,7 +6,7 @@
 //! second time.
 use crate::{
     item::{Item, ToolInput},
-    mailbox::Envelope,
+    mailbox::{Envelope, MailboxSignal},
     model::{AgentPath, CallId, ConversationIdentity, OperationId, RequestId},
     provider::{CallContext, JobHandle, Provider, ProviderError},
 };
@@ -907,6 +907,7 @@ pub async fn outputs_in_operation_order(
 pub enum WaitResumeExact {
     Job(OperationId),
     Envelope(Envelope),
+    DurableWake(i64),
     Cancelled,
 }
 
@@ -916,8 +917,8 @@ pub struct WaitAgentResultExact {
     pub resumed_by: WaitResumeExact,
 }
 
-pub async fn wait_agent_and_drain_exact(
-    envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+pub async fn wait_agent_and_drain_exact<I: Into<MailboxSignal>>(
+    envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<I>,
     jobs: &JobScheduler,
     cancelled: &mut tokio::sync::watch::Receiver<bool>,
     outstanding: &[OperationId],
@@ -930,8 +931,8 @@ pub async fn wait_agent_and_drain_exact(
     })
 }
 
-pub async fn wait_agent_exact(
-    envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+pub async fn wait_agent_exact<I: Into<MailboxSignal>>(
+    envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<I>,
     jobs: &JobScheduler,
     cancelled: &mut tokio::sync::watch::Receiver<bool>,
     outstanding: &[OperationId],
@@ -948,7 +949,10 @@ pub async fn wait_agent_exact(
     loop {
         tokio::select! {
             envelope = envelopes.recv() => if let Some(envelope) = envelope {
-                return WaitResumeExact::Envelope(envelope);
+                return match envelope.into() {
+                    MailboxSignal::Direct(envelope) => WaitResumeExact::Envelope(envelope),
+                    MailboxSignal::Durable(wake) => WaitResumeExact::DurableWake(wake.envelope_id),
+                };
             },
             event = settlements.recv() => match event {
                 Ok(operation) if outstanding.contains(&operation) => return WaitResumeExact::Job(operation),

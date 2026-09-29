@@ -7,6 +7,7 @@ use harness::{
     },
     engine::{EngineConfig, ResponsesTransport},
     item::Item,
+    mailbox::DurableMailboxWake,
     model::{AgentPath, CallId, Effort, RequestId},
     provider::{CallContext, Provider, ProviderError},
     store::Store,
@@ -26,6 +27,7 @@ struct Host {
     surface: RwLock<Arc<ToolSurface>>,
     alive: AtomicBool,
     wakes: AtomicUsize,
+    wake_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<DurableMailboxWake>>>,
     store: Arc<Store>,
 }
 #[async_trait]
@@ -43,12 +45,19 @@ impl HostActor for Host {
     fn tool_surface(&self) -> Arc<ToolSurface> {
         self.surface.read().unwrap().clone()
     }
-    async fn wake(&self) -> Result<(), String> {
+    async fn wake(&self, envelope_id: i64) -> Result<(), String> {
         assert!(
             !self.store.inbox(&self.identity.actor.0).unwrap().is_empty(),
             "input committed before wake"
         );
         self.wakes.fetch_add(1, Ordering::SeqCst);
+        if let Some(sender) = self.wake_tx.lock().unwrap().as_ref() {
+            for _ in 0..2 {
+                sender
+                    .send(DurableMailboxWake { envelope_id })
+                    .map_err(|_| "embedded Engine wake receiver closed".to_string())?;
+            }
+        }
         Ok(())
     }
     async fn control(&self, _: HostControl) -> Result<Value, String> {
@@ -102,6 +111,7 @@ fn host(store: Arc<Store>, seen: Arc<Mutex<Vec<Value>>>) -> Arc<Host> {
         surface: RwLock::new(surface("old", seen)),
         alive: AtomicBool::new(true),
         wakes: AtomicUsize::new(0),
+        wake_tx: Mutex::new(None),
         store,
     })
 }
@@ -238,6 +248,225 @@ async fn embedded_requests_pin_dispatch_and_inputs_record_actual_inclusion() {
             .count(),
         3
     );
+}
+
+struct ParkUntilInput {
+    entered: tokio::sync::Notify,
+    requests: Mutex<Vec<ResponsesRequest>>,
+}
+
+#[async_trait]
+impl ResponsesTransport for Arc<ParkUntilInput> {
+    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        let mut requests = self.requests.lock().unwrap();
+        requests.push(request);
+        let round = requests.len();
+        drop(requests);
+        let items = if round == 1 {
+            self.entered.notify_one();
+            vec![Item(json!({
+                "type":"function_call", "call_id":"wait-for-input",
+                "name":"wait_agent", "arguments":"{}"
+            }))]
+        } else {
+            vec![Item(json!({
+                "type":"message", "role":"assistant", "phase":"final_answer",
+                "content":[{"type":"output_text","text":"done"}]
+            }))]
+        };
+        Ok(ResponsesTurn {
+            response_id: format!("park-{round}"),
+            items,
+            usage: Default::default(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn parked_embedded_input_wakes_once_from_durable_store() {
+    let store = Arc::new(Store::memory().unwrap());
+    let host = host(store.clone(), Arc::new(Mutex::new(vec![])));
+    let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+    let (wake_tx, wake_rx) = tokio::sync::mpsc::unbounded_channel();
+    *host.wake_tx.lock().unwrap() = Some(wake_tx);
+    let transport = Arc::new(ParkUntilInput {
+        entered: tokio::sync::Notify::new(),
+        requests: Mutex::new(vec![]),
+    });
+    let engine = conversation
+        .engine::<Offline, _>(
+            transport.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            EngineConfig {
+                instructions: "instructions".into(),
+                tools: vec![],
+                model: "offline".into(),
+                effort: Effort::Medium,
+                session_id: "session".into(),
+                agent: host.identity.actor.clone(),
+            },
+            std::num::NonZeroU64::new(200_000).unwrap(),
+        )
+        .unwrap();
+    let (_cancel, cancellation) = tokio::sync::watch::channel(false);
+    let running = tokio::spawn(async move {
+        engine
+            .run_embedded(
+                None,
+                vec![Item(
+                    json!({"type":"message","role":"user","content":"start"}),
+                )],
+                cancellation,
+                wake_rx,
+            )
+            .await
+    });
+    transport.entered.notified().await;
+    let first = conversation
+        .input("operator-1", "operator", "wake me")
+        .await
+        .unwrap();
+    let completion = tokio::time::timeout(std::time::Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let seen = transport.requests.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    let included = seen[1]
+        .input
+        .iter()
+        .filter(|item| item.0["type"] == "message" && item.0["content"] == "wake me")
+        .count();
+    assert_eq!(
+        included, 1,
+        "duplicate wake must not duplicate Store content"
+    );
+    assert_eq!(
+        conversation.input_observation(first.envelope_id).unwrap(),
+        InputObservation::Included(completion.head_request)
+    );
+}
+
+struct FinalOnly(Mutex<Vec<ResponsesRequest>>);
+
+#[async_trait]
+impl ResponsesTransport for Arc<FinalOnly> {
+    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        self.0.lock().unwrap().push(request);
+        Ok(ResponsesTurn {
+            response_id: "final".into(),
+            items: vec![Item(json!({
+                "type":"message", "role":"assistant", "phase":"final_answer",
+                "content":[{"type":"output_text","text":"done"}]
+            }))],
+            usage: Default::default(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn committed_input_survives_reconnect_without_a_wake_hint() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("embedded.sqlite");
+    let store = Arc::new(Store::open(&path).unwrap());
+    let host = host(store.clone(), Arc::new(Mutex::new(vec![])));
+    let conversation = Conversation::attach(store.clone(), host, None).unwrap();
+    let receipt = conversation
+        .input("before-reconnect", "operator", "retained")
+        .await
+        .unwrap();
+    drop(conversation);
+    drop(store);
+
+    let store = Arc::new(Store::open(&path).unwrap());
+    let host = host(store.clone(), Arc::new(Mutex::new(vec![])));
+    let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+    let transport = Arc::new(FinalOnly(Mutex::new(vec![])));
+    let engine = conversation
+        .engine::<Offline, _>(
+            transport.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            EngineConfig {
+                instructions: "instructions".into(),
+                tools: vec![],
+                model: "offline".into(),
+                effort: Effort::Medium,
+                session_id: "session".into(),
+                agent: host.identity.actor.clone(),
+            },
+            std::num::NonZeroU64::new(200_000).unwrap(),
+        )
+        .unwrap();
+    let (_cancel, cancellation) = tokio::sync::watch::channel(false);
+    let (_unused, incoming) = tokio::sync::mpsc::unbounded_channel();
+    let completion = engine
+        .run_recovering_embedded(None, vec![], cancellation, incoming)
+        .await
+        .unwrap();
+    let seen = transport.0.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0]
+            .input
+            .iter()
+            .filter(|item| item.0["content"] == "retained")
+            .count(),
+        1
+    );
+    assert_eq!(
+        conversation.input_observation(receipt.envelope_id).unwrap(),
+        InputObservation::Included(completion.head_request)
+    );
+}
+
+#[tokio::test]
+async fn parked_embedded_wait_observes_cancellation_without_input() {
+    let store = Arc::new(Store::memory().unwrap());
+    let host = host(store.clone(), Arc::new(Mutex::new(vec![])));
+    let conversation = Conversation::attach(store, host.clone(), None).unwrap();
+    let transport = Arc::new(ParkUntilInput {
+        entered: tokio::sync::Notify::new(),
+        requests: Mutex::new(vec![]),
+    });
+    let engine = conversation
+        .engine::<Offline, _>(
+            transport.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            EngineConfig {
+                instructions: "instructions".into(),
+                tools: vec![],
+                model: "offline".into(),
+                effort: Effort::Medium,
+                session_id: "session".into(),
+                agent: host.identity.actor.clone(),
+            },
+            std::num::NonZeroU64::new(200_000).unwrap(),
+        )
+        .unwrap();
+    let (cancel, cancellation) = tokio::sync::watch::channel(false);
+    let (_unused, incoming) = tokio::sync::mpsc::unbounded_channel();
+    let running = tokio::spawn(async move {
+        engine
+            .run_embedded(
+                None,
+                vec![Item(
+                    json!({"type":"message","role":"user","content":"start"}),
+                )],
+                cancellation,
+                incoming,
+            )
+            .await
+    });
+    transport.entered.notified().await;
+    cancel.send(true).unwrap();
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), running)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(harness::engine::EngineError::Cancelled)
+    ));
 }
 
 #[tokio::test]
@@ -517,7 +746,7 @@ async fn structured_host_calls_retain_progress_and_admitted_input_survives_faile
         fn tool_surface(&self) -> Arc<ToolSurface> {
             self.0.tool_surface()
         }
-        async fn wake(&self) -> Result<(), String> {
+        async fn wake(&self, _: i64) -> Result<(), String> {
             Err("host wake queue temporarily closed".into())
         }
         async fn control(&self, c: HostControl) -> Result<Value, String> {

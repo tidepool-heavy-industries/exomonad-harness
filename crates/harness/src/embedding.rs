@@ -61,7 +61,7 @@ pub trait HostActor: Send + Sync {
     fn tool_surface(&self) -> Arc<ToolSurface>;
     /// Wake after the input transaction commits. Failure leaves the envelope
     /// admitted and retryable by its original operation ID.
-    async fn wake(&self) -> Result<(), String>;
+    async fn wake(&self, envelope_id: i64) -> Result<(), String>;
     /// A request to the host owner, not proof that retirement has completed.
     async fn control(&self, control: HostControl) -> Result<Value, String>;
 }
@@ -229,7 +229,7 @@ impl Conversation {
                 .admit_embedded_input(self.identity(), operation_id, sender, &item)?;
         drop(_admission);
         let wake_error = match self.input_observation(envelope_id)? {
-            InputObservation::Admitted => self.host.wake().await.err(),
+            InputObservation::Admitted => self.host.wake(envelope_id).await.err(),
             InputObservation::Included(_) => None,
         };
         Ok(InputReceipt {
