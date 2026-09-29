@@ -1,0 +1,271 @@
+//! A consumer outside the library implementing the host capability directly.
+use async_trait::async_trait;
+use harness::{
+    embedding::{
+        AdmissionGuard, Conversation, EmbeddedError, HostActor, HostControl, HostIdentity,
+        InputObservation, ToolSurface,
+    },
+    engine::{Engine, EngineConfig, ResponsesTransport},
+    item::Item,
+    model::{AgentPath, CallId, Effort, RequestId},
+    provider::{CallContext, Provider, ProviderError},
+    store::Store,
+    transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError},
+    turn::{JobOutput, JobScheduler},
+};
+use serde_json::{Value, json};
+use std::sync::{
+    Arc, Mutex, RwLock,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+
+struct Permit;
+impl AdmissionGuard for Permit {}
+struct Host {
+    identity: HostIdentity,
+    surface: RwLock<Arc<ToolSurface>>,
+    alive: AtomicBool,
+    wakes: AtomicUsize,
+    store: Arc<Store>,
+}
+#[async_trait]
+impl HostActor for Host {
+    fn identity(&self) -> &HostIdentity {
+        &self.identity
+    }
+    fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+        if self.alive.load(Ordering::SeqCst) {
+            Ok(Box::new(Permit))
+        } else {
+            Err(EmbeddedError::Host("retired".into()))
+        }
+    }
+    fn tool_surface(&self) -> Arc<ToolSurface> {
+        self.surface.read().unwrap().clone()
+    }
+    async fn wake(&self) -> Result<(), String> {
+        assert!(
+            !self.store.inbox(&self.identity.actor.0).unwrap().is_empty(),
+            "input committed before wake"
+        );
+        self.wakes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    async fn control(&self, _: HostControl) -> Result<Value, String> {
+        self.alive.store(false, Ordering::SeqCst);
+        Ok(json!({"requested":true}))
+    }
+}
+struct Dispatch {
+    version: &'static str,
+    seen: Arc<Mutex<Vec<Value>>>,
+}
+#[async_trait]
+impl Provider for Dispatch {
+    fn tools(&self) -> Vec<Value> {
+        vec![]
+    }
+    async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+        panic!("identity required")
+    }
+    async fn call_custom_with_context(
+        &self,
+        _: &str,
+        input: String,
+        context: CallContext,
+    ) -> Result<Value, ProviderError> {
+        assert!(context.request.is_some());
+        self.seen
+            .lock()
+            .unwrap()
+            .push(json!({"version":self.version,"input":input,"call":context.call_id.0}));
+        Ok(json!(self.version))
+    }
+}
+fn surface(version: &'static str, seen: Arc<Mutex<Vec<Value>>>) -> Arc<ToolSurface> {
+    Arc::new(
+        ToolSurface::new(
+            version.into(),
+            vec![json!({"type":"custom","name":"haskell","format":{"type":"text"},"async":true})],
+            Arc::new(Dispatch { version, seen }),
+        )
+        .unwrap(),
+    )
+}
+fn host(store: Arc<Store>, seen: Arc<Mutex<Vec<Value>>>) -> Arc<Host> {
+    Arc::new(Host {
+        identity: HostIdentity {
+            run: "run".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "one".into(),
+        },
+        surface: RwLock::new(surface("old", seen)),
+        alive: AtomicBool::new(true),
+        wakes: AtomicUsize::new(0),
+        store,
+    })
+}
+#[derive(Clone)]
+struct Offline;
+impl Auth for Offline {
+    fn access(&self) -> Result<(String, String), TransportError> {
+        panic!("offline transport")
+    }
+}
+struct ReloadDuringRequest {
+    host: Arc<Host>,
+    seen: Arc<Mutex<Vec<Value>>>,
+    requests: AtomicUsize,
+    jobs: Arc<JobScheduler>,
+}
+#[async_trait]
+impl ResponsesTransport for ReloadDuringRequest {
+    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        assert_eq!(request.tools.len(), 1, "no mandatory lifecycle verbs");
+        let round = self.requests.fetch_add(1, Ordering::SeqCst);
+        let items = if round == 0 {
+            *self.host.surface.write().unwrap() = surface("new", self.seen.clone());
+            vec![Item(
+                json!({"type":"custom_tool_call","name":"haskell","call_id":"old-call","input":"λ x → x\n\"raw\""}),
+            )]
+        } else {
+            self.jobs.wait(&CallId("old-call".into())).await.unwrap();
+            if round == 1 {
+                vec![Item(
+                    json!({"type":"custom_tool_call","name":"haskell","call_id":"new-call","input":"new"}),
+                )]
+            } else {
+                self.jobs.wait(&CallId("new-call".into())).await.unwrap();
+                vec![Item(
+                    json!({"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"done"}]}),
+                )]
+            }
+        };
+        Ok(ResponsesTurn {
+            response_id: format!("r{round}"),
+            items,
+            usage: Default::default(),
+        })
+    }
+}
+#[tokio::test]
+async fn embedded_requests_pin_dispatch_and_inputs_record_actual_inclusion() {
+    let store = Arc::new(Store::memory().unwrap());
+    let seen = Arc::new(Mutex::new(vec![]));
+    let host = host(store.clone(), seen.clone());
+    let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+    let receipt = conversation
+        .input("message-1", "operator", "do work")
+        .await
+        .unwrap();
+    assert_eq!(
+        conversation
+            .input("message-1", "operator", "do work")
+            .await
+            .unwrap()
+            .envelope_id,
+        receipt.envelope_id
+    );
+    assert!(matches!(
+        conversation
+            .input("message-1", "operator", "different")
+            .await,
+        Err(EmbeddedError::ConflictingInput)
+    ));
+    assert_eq!(
+        conversation.input_observation(receipt.envelope_id).unwrap(),
+        InputObservation::Admitted
+    );
+    let jobs = Arc::new(JobScheduler::new(2).unwrap());
+    let engine = Engine::<Offline, _, _>::with_transport(
+        ReloadDuringRequest {
+            host: host.clone(),
+            seen: seen.clone(),
+            requests: AtomicUsize::new(0),
+            jobs: jobs.clone(),
+        },
+        store.clone(),
+        jobs,
+        conversation.provider(),
+        EngineConfig {
+            instructions: "instructions".into(),
+            tools: vec![],
+            model: "offline".into(),
+            effort: Effort::Medium,
+            session_id: "session".into(),
+            agent: host.identity.actor.clone(),
+        },
+    );
+    let (_cancel, rx) = tokio::sync::watch::channel(false);
+    let (_send, incoming) = tokio::sync::mpsc::unbounded_channel();
+    engine.run(None, vec![], rx, incoming).await.unwrap();
+    assert!(matches!(
+        conversation.input_observation(receipt.envelope_id).unwrap(),
+        InputObservation::Included(_)
+    ));
+    let observed = seen.lock().unwrap();
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0]["version"], "old");
+    assert_eq!(observed[0]["input"], "λ x → x\n\"raw\"");
+    assert_eq!(observed[1]["version"], "new");
+    assert_eq!(
+        store
+            .events(None)
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == "tool_surface")
+            .count(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn embedded_binding_rejects_foreign_context_kind_and_retired_input() {
+    let store = Arc::new(Store::memory().unwrap());
+    let seen = Arc::new(Mutex::new(vec![]));
+    let host = host(store.clone(), seen.clone());
+    let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+    let request = RequestId("request".into());
+    store
+        .write_request(&request, None, "/root", &[], Default::default())
+        .unwrap();
+    let provider = conversation.provider().request_snapshot().unwrap();
+    let jobs = JobScheduler::new(1).unwrap();
+    jobs.start_for_agent(
+        provider.clone(),
+        host.identity.actor.clone(),
+        Some(request.clone()),
+        CallId("wrong-kind".into()),
+        "haskell".into(),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        jobs.wait(&CallId("wrong-kind".into())).await.unwrap(),
+        JobOutput::Completed(Err(_))
+    ));
+    jobs.start_for_agent(
+        provider,
+        AgentPath("/root/foreign".into()),
+        Some(request),
+        CallId("foreign".into()),
+        "haskell".into(),
+        harness::item::ToolInput::Custom("no".into()),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        jobs.wait(&CallId("foreign".into())).await.unwrap(),
+        JobOutput::Completed(Err(_))
+    ));
+    assert!(seen.lock().unwrap().is_empty());
+    conversation.control(HostControl::Retire).await.unwrap();
+    assert!(
+        conversation
+            .input("after-retirement", "operator", "no")
+            .await
+            .is_err()
+    );
+    assert!(store.inbox("/root").unwrap().is_empty());
+}

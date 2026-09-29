@@ -108,6 +108,20 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Immutable host surface version retained with the issuing request.
+    fn tool_surface_version(&self) -> Option<&str> {
+        None
+    }
+
+    /// Validate a call before the Engine interprets any reserved operation.
+    fn validate_call(
+        &self,
+        _name: &str,
+        _kind: crate::item::ToolKind,
+    ) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
     /// Optional runtime backend used by the scheduler to construct the
     /// call-scoped `JobVerbs`. Defaults to no job-side agent operations.
     fn job_agent_service(&self) -> Option<std::sync::Arc<dyn crate::agents::AgentToolService>> {

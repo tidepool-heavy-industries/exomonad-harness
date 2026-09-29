@@ -70,6 +70,8 @@ pub enum EngineError {
     InvalidToolSelection(String),
     #[error("invalid before-request injected item")]
     InvalidInjectedItem,
+    #[error("call refused by issuing provider: {0}")]
+    ProviderCall(#[from] crate::provider::ProviderError),
     #[error("malformed Responses tool call item")]
     InvalidFunctionCall,
     #[error("durable output kind or call id does not match invocation {0}")]
@@ -631,6 +633,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 pinned_effort,
                 session_id: self.config.session_id.clone(),
             };
+            if let Some(version) = request_provider.tool_surface_version() {
+                let store = self.store.clone();
+                let request = parent.clone();
+                let evidence = json!({"version":version,"tools":req.tools});
+                if let Err(error) =
+                    blocking(move || store.record_event(Some(&request), "tool_surface", &evidence))
+                        .await
+                {
+                    return Err(self.cleanup_pending(error, &pending).await);
+                }
+            }
             let plan = crate::hooks::RequestPlan {
                 items: req.input.clone(),
                 tools_allowed: req.tools.clone(),
@@ -1263,6 +1276,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let name = call.name;
         let input = call.input;
         let tool_kind = input.kind();
+        provider.validate_call(&name, tool_kind)?;
         if tool_kind == ToolKind::Custom
             && (crate::provider::is_harness_tool(&name) || name == FINALIZE_TOOL_NAME)
         {
@@ -1285,7 +1299,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 cancel_job_on_cleanup: false,
             }));
         }
-        self.scheduler
+        // Admission is durable before the provider can execute or capture a
+        // checkpoint containing this call. Failure never cancels an unrelated
+        // job whose call ID happened to collide with this attempted admission.
+        let store = self.store.clone();
+        let call = call_id.clone();
+        let request_id = request.clone();
+        blocking(move || store.claim(&call, &request_id)).await?;
+        if let Err(error) = self
+            .scheduler
             .start_input_for_agent(
                 provider,
                 self.config.agent.clone(),
@@ -1294,21 +1316,25 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 name,
                 input,
             )
-            .await?;
+            .await
+        {
+            let store = self.store.clone();
+            let call = call_id.clone();
+            let request_id = request.clone();
+            blocking(move || store.interrupt_claim(&call, &request_id)).await?;
+            return Err(EngineError::Job(error));
+        }
         if let Err(error) = self
             .scheduler
             .claim(&call_id, self.config.agent.clone())
             .await
         {
             let _ = self.scheduler.cancel(&call_id).await;
+            let store = self.store.clone();
+            let call = call_id.clone();
+            let request_id = request.clone();
+            blocking(move || store.interrupt_claim(&call, &request_id)).await?;
             return Err(EngineError::Job(error));
-        }
-        let store = self.store.clone();
-        let call = call_id.clone();
-        let request_id = request.clone();
-        if let Err(error) = blocking(move || store.claim(&call, &request_id)).await {
-            let _ = self.scheduler.cancel(&call_id).await;
-            return Err(error);
         }
         Ok(Some(PendingCall {
             call_id,
