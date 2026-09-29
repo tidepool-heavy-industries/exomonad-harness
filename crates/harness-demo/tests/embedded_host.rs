@@ -131,9 +131,12 @@ struct ReloadDuringRequest {
 #[async_trait]
 impl ResponsesTransport for ReloadDuringRequest {
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
-        assert_eq!(request.tools.len(), 2, "only mailbox wait and host tools");
-        assert_eq!(request.tools[0]["name"], "wait_agent");
-        assert_eq!(request.tools[1]["name"], "haskell");
+        assert_eq!(
+            request.tools.len(),
+            1,
+            "only the host tool surface is exposed"
+        );
+        assert_eq!(request.tools[0]["name"], "haskell");
         let round = self.requests.fetch_add(1, Ordering::SeqCst);
         let items = if round == 0 {
             *self.host.surface.write().unwrap() = surface("new", self.seen.clone());
@@ -253,32 +256,101 @@ async fn embedded_requests_pin_dispatch_and_inputs_record_actual_inclusion() {
 }
 
 #[derive(Clone)]
-struct ParkUntilInput {
-    entered: Arc<tokio::sync::Notify>,
-    requests: Arc<Mutex<Vec<ResponsesRequest>>>,
+struct PendingDispatch {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
 }
 
 #[async_trait]
-impl ResponsesTransport for ParkUntilInput {
+impl Provider for PendingDispatch {
+    fn tools(&self) -> Vec<Value> {
+        vec![]
+    }
+    async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+        panic!("identity required")
+    }
+    async fn call_custom_with_context(
+        &self,
+        name: &str,
+        input: String,
+        _: CallContext,
+    ) -> Result<Value, ProviderError> {
+        assert_eq!(name, "haskell");
+        if input == "slow" {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        Ok(json!({"result":input}))
+    }
+}
+
+#[derive(Clone)]
+struct ResumeAfterInput {
+    requests: Arc<Mutex<Vec<ResponsesRequest>>>,
+    first_final: Arc<tokio::sync::Notify>,
+    second_request: Arc<tokio::sync::Notify>,
+    pending_final: Arc<tokio::sync::Notify>,
+    fourth_request: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl ResponsesTransport for ResumeAfterInput {
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        assert_eq!(
+            request.tools.len(),
+            1,
+            "only the host tool surface is exposed"
+        );
+        assert_eq!(request.tools[0]["name"], "haskell");
         let mut requests = self.requests.lock().unwrap();
         requests.push(request);
         let round = requests.len();
-        drop(requests);
-        let items = if round == 1 {
-            self.entered.notify_one();
-            vec![Item(json!({
-                "type":"function_call", "call_id":"wait-for-input",
-                "name":"wait_agent", "arguments":"{}"
-            }))]
-        } else {
-            vec![Item(json!({
-                "type":"message", "role":"assistant", "phase":"final_answer",
-                "content":[{"type":"output_text","text":"done"}]
-            }))]
+        let current = requests.last().unwrap();
+        let items = match round {
+            1 => {
+                self.first_final.notify_one();
+                vec![
+                    Item(json!({
+                        "type":"custom_tool_call", "call_id":"slow-cell",
+                        "name":"haskell", "input":"slow"
+                    })),
+                    Item(json!({
+                        "type":"message", "role":"assistant", "phase":"final_answer",
+                        "content":[{"type":"output_text","text":"waiting for cell"}]
+                    })),
+                ]
+            }
+            2 => {
+                self.second_request.notify_one();
+                let input_count = current
+                    .input
+                    .iter()
+                    .filter(|item| item.0["type"] == "message" && item.0["content"] == "wake me")
+                    .count();
+                assert_eq!(input_count, 1, "the durable wake attaches the input once");
+                vec![Item(json!({
+                    "type":"custom_tool_call", "call_id":"fast-cell",
+                    "name":"haskell", "input":"fast"
+                }))]
+            }
+            3 => {
+                self.pending_final.notify_one();
+                vec![Item(json!({
+                    "type":"message", "role":"assistant", "phase":"final_answer",
+                    "content":[{"type":"output_text","text":"waiting for remaining cell"}]
+                }))]
+            }
+            4 => {
+                self.fourth_request.notify_one();
+                vec![Item(json!({
+                    "type":"message", "role":"assistant", "phase":"final_answer",
+                    "content":[{"type":"output_text","text":"done"}]
+                }))]
+            }
+            _ => return Err(TransportError::Stream("unexpected extra request".into())),
         };
         Ok(ResponsesTurn {
-            response_id: format!("park-{round}"),
+            response_id: format!("resume-{round}"),
             items,
             usage: Default::default(),
         })
@@ -286,20 +358,36 @@ impl ResponsesTransport for ParkUntilInput {
 }
 
 #[tokio::test]
-async fn parked_embedded_input_wakes_once_from_durable_store() {
+async fn embedded_final_waits_internally_and_durable_input_resumes_once() {
     let store = Arc::new(Store::memory().unwrap());
     let host = host(store.clone(), Arc::new(Mutex::new(vec![])));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *host.surface.write().unwrap() = Arc::new(
+        ToolSurface::new(
+            "delayed".into(),
+            vec![json!({"type":"custom","name":"haskell","format":{"type":"text"}})],
+            Arc::new(PendingDispatch {
+                started: started.clone(),
+                release: release.clone(),
+            }),
+        )
+        .unwrap(),
+    );
     let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
     let (wake_tx, wake_rx) = tokio::sync::mpsc::unbounded_channel();
     *host.wake_tx.lock().unwrap() = Some(wake_tx);
-    let transport = ParkUntilInput {
-        entered: Arc::new(tokio::sync::Notify::new()),
+    let transport = ResumeAfterInput {
         requests: Arc::new(Mutex::new(vec![])),
+        first_final: Arc::new(tokio::sync::Notify::new()),
+        second_request: Arc::new(tokio::sync::Notify::new()),
+        pending_final: Arc::new(tokio::sync::Notify::new()),
+        fourth_request: Arc::new(tokio::sync::Notify::new()),
     };
     let engine = conversation
         .engine::<Offline, _>(
             transport.clone(),
-            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(JobScheduler::new(2).unwrap()),
             EngineConfig {
                 instructions: "instructions".into(),
                 tools: vec![],
@@ -316,39 +404,89 @@ async fn parked_embedded_input_wakes_once_from_durable_store() {
         engine
             .run_embedded(
                 None,
-                vec![Item(
-                    json!({"type":"message","role":"user","content":"start"}),
-                )],
+                vec![Item(json!({
+                    "type":"message","role":"user","content":"start"
+                }))],
                 cancellation,
                 wake_rx,
             )
             .await
     });
-    transport.entered.notified().await;
-    let first = conversation
+    started.notified().await;
+    transport.first_final.notified().await;
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(30),
+            transport.second_request.notified()
+        )
+        .await
+        .is_err(),
+        "a final response with pending work parks instead of spinning"
+    );
+
+    let receipt = conversation
         .input("operator-1", "operator", "wake me")
         .await
         .unwrap();
+    transport.second_request.notified().await;
+    transport.pending_final.notified().await;
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(30),
+            transport.fourth_request.notified()
+        )
+        .await
+        .is_err(),
+        "the next final also waits while its original operation is pending"
+    );
+    assert_eq!(transport.requests.lock().unwrap().len(), 3);
+    release.notify_one();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        transport.fourth_request.notified(),
+    )
+    .await
+    .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), running)
         .await
         .unwrap()
         .unwrap()
         .unwrap();
-    let seen = transport.requests.lock().unwrap();
-    assert_eq!(seen.len(), 2);
-    let included = seen[1]
-        .input
-        .iter()
-        .filter(|item| item.0["type"] == "message" && item.0["content"] == "wake me")
-        .count();
+
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    let final_inputs = &requests[3].input;
     assert_eq!(
-        included, 1,
-        "duplicate wake must not duplicate Store content"
+        final_inputs
+            .iter()
+            .filter(|item| {
+                item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == "slow-cell"
+            })
+            .count(),
+        1,
+        "the pending host operation settles on its original call identity"
     );
-    assert!(matches!(
-        conversation.input_observation(first.envelope_id).unwrap(),
-        InputObservation::Included(_)
-    ));
+    let InputObservation::Included(included_request) =
+        conversation.input_observation(receipt.envelope_id).unwrap()
+    else {
+        panic!("the durable input was not included");
+    };
+    assert_eq!(
+        store
+            .items(&included_request)
+            .unwrap()
+            .iter()
+            .filter(|item| item.0["content"] == "wake me")
+            .count(),
+        1,
+        "duplicate durable wake hints cannot duplicate Store content"
+    );
+    let wake_count = host.wakes.load(Ordering::SeqCst);
+    conversation
+        .input("operator-1", "operator", "wake me")
+        .await
+        .unwrap();
+    assert_eq!(host.wakes.load(Ordering::SeqCst), wake_count);
 }
 
 #[derive(Clone)]
@@ -452,7 +590,7 @@ async fn unavailable_host_snapshot_fails_before_model_request() {
         store.clone(),
         Arc::new(Mutex::new(vec![])),
     )));
-    let conversation = Conversation::attach(store, host.clone(), None).unwrap();
+    let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
     let transport = FinalOnly(Arc::new(Mutex::new(vec![])));
     let engine = conversation
         .engine::<Offline, _>(
@@ -488,15 +626,32 @@ async fn unavailable_host_snapshot_fails_before_model_request() {
     assert!(transport.0.lock().unwrap().is_empty());
 }
 
+#[derive(Clone)]
+struct NativeWaitAttempt(Arc<Mutex<Vec<ResponsesRequest>>>);
+
+#[async_trait]
+impl ResponsesTransport for NativeWaitAttempt {
+    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        assert_eq!(request.tools.len(), 1);
+        assert_eq!(request.tools[0]["name"], "haskell");
+        self.0.lock().unwrap().push(request);
+        Ok(ResponsesTurn {
+            response_id: "native-wait-attempt".into(),
+            items: vec![Item(json!({
+                "type":"function_call", "call_id":"native-wait-call",
+                "name":"wait_agent", "arguments":"{}"
+            }))],
+            usage: Default::default(),
+        })
+    }
+}
+
 #[tokio::test]
-async fn parked_embedded_wait_observes_cancellation_without_input() {
+async fn embedded_surface_does_not_advertise_or_accept_native_wait_agent() {
     let store = Arc::new(Store::memory().unwrap());
     let host = host(store.clone(), Arc::new(Mutex::new(vec![])));
-    let conversation = Conversation::attach(store, host.clone(), None).unwrap();
-    let transport = ParkUntilInput {
-        entered: Arc::new(tokio::sync::Notify::new()),
-        requests: Arc::new(Mutex::new(vec![])),
-    };
+    let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+    let transport = NativeWaitAttempt(Arc::new(Mutex::new(vec![])));
     let engine = conversation
         .engine::<Offline, _>(
             transport.clone(),
@@ -512,29 +667,29 @@ async fn parked_embedded_wait_observes_cancellation_without_input() {
             std::num::NonZeroU64::new(200_000).unwrap(),
         )
         .unwrap();
-    let (cancel, cancellation) = tokio::sync::watch::channel(false);
+    let (_cancel, cancellation) = tokio::sync::watch::channel(false);
     let (_unused, incoming) = tokio::sync::mpsc::unbounded_channel();
-    let running = tokio::spawn(async move {
-        engine
-            .run_embedded(
-                None,
-                vec![Item(
-                    json!({"type":"message","role":"user","content":"start"}),
-                )],
-                cancellation,
-                incoming,
-            )
-            .await
-    });
-    transport.entered.notified().await;
-    cancel.send(true).unwrap();
+    let result = engine
+        .run_embedded(
+            None,
+            vec![Item(
+                json!({"type":"message","role":"user","content":"start"}),
+            )],
+            cancellation,
+            incoming,
+        )
+        .await;
     assert!(matches!(
-        tokio::time::timeout(std::time::Duration::from_secs(5), running)
-            .await
-            .unwrap()
-            .unwrap(),
-        Err(harness::engine::EngineError::Cancelled)
+        result,
+        Err(harness::engine::EngineError::ProviderCall(_))
     ));
+    assert!(
+        store
+            .claims(&CallId("native-wait-call".into()))
+            .unwrap()
+            .is_empty(),
+        "undeclared native wait call fails before admission"
+    );
 }
 
 #[tokio::test]
