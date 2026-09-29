@@ -222,16 +222,6 @@ fn validate_tool_output(call_id: &CallId, kind: ToolKind, item: &Item) -> Result
 }
 
 impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
-    /// Hook invocation seam for the request-loop owner: call after the final
-    /// request is assembled and before transport, then persist against that
-    /// request's durable identity. A retry of transport is a new attempt, not
-    /// an exactly-once hook transaction.
-    async fn evaluate_before_request(
-        &self,
-        plan: &crate::hooks::RequestPlan,
-    ) -> crate::hooks::BeforeRequestResult {
-        self.provider.before_request(plan).await
-    }
     /// Alternate transport constructor, primarily for deterministic replay.
     pub fn with_transport(
         client: C,
@@ -626,10 +616,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .iter()
                 .find_map(Item::configuration_effort)
                 .ok_or(EngineError::MissingEffortPin)?;
+            let request_provider: Arc<dyn Provider> = self
+                .provider
+                .request_snapshot()
+                .unwrap_or_else(|| self.provider.clone());
             let mut req = ResponsesRequest {
                 input: history,
                 instructions: self.config.instructions.clone(),
-                tools: self.tools(finalize_schema),
+                tools: self.tools_from(finalize_schema, request_provider.as_ref()),
                 tools_allowed: None,
                 model: self.config.model.clone(),
                 // The request-level field is only the cache-preserving mirror
@@ -644,7 +638,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             };
             let started = std::time::Instant::now();
             let before_request = tokio::select! {
-                result = self.evaluate_before_request(&plan) => result,
+                result = request_provider.before_request(&plan) => result,
                 changed = cancellation.changed() => {
                     if changed.is_err() || *cancellation.borrow() {
                         return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
@@ -815,7 +809,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                     continue;
                                 }
                                 let call_item = item.clone();
-                                match self.dispatch_completed_item(item, &parent).await {
+                                match self.dispatch_with_provider(item, &parent, request_provider.clone()).await {
                                     Ok(Some(call)) => {
                                         if !pending.iter().any(|current| current.call_id == call.call_id) {
                                             if call.is_wait_agent && wait_call.is_some() {
@@ -882,7 +876,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         continue;
                     }
                     let call_item = item.clone();
-                    match self.dispatch_completed_item(item, &parent).await {
+                    match self
+                        .dispatch_with_provider(item, &parent, request_provider.clone())
+                        .await
+                    {
                         Ok(Some(call)) => {
                             if !pending
                                 .iter()
@@ -943,7 +940,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         Err(error) => return Err(self.cleanup_pending(error, &pending).await),
                     };
                     if !turn_call_ids.contains(&call_id) {
-                        match self.dispatch_completed_item(item.clone(), &parent).await {
+                        match self
+                            .dispatch_with_provider(item.clone(), &parent, request_provider.clone())
+                            .await
+                        {
                             Ok(Some(call)) => {
                                 if call.is_wait_agent && wait_call.is_some() {
                                     return Err(self
@@ -1197,6 +1197,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     }
 
     fn tools(&self, finalize_schema: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
+        self.tools_from(finalize_schema, self.provider.as_ref())
+    }
+
+    fn tools_from(
+        &self,
+        finalize_schema: Option<&serde_json::Value>,
+        provider: &dyn Provider,
+    ) -> Vec<serde_json::Value> {
         let mut tools = self.config.tools.clone();
         if let Some(schema) = finalize_schema {
             // Typed completion owns this name for this run. A caller may have
@@ -1207,7 +1215,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             });
             tools.push(schema.clone());
         }
-        for tool in self.provider.all_tools() {
+        for tool in provider.all_tools() {
             let name = tool.get("name").and_then(serde_json::Value::as_str);
             if name.is_none_or(|name| {
                 !tools.iter().any(|existing| {
@@ -1225,10 +1233,24 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     // accepts that only for tools declared `async: true`; no tool or verb
     // schema sets it yet (see agents.rs `function` and the demo `tools`). This
     // path has only run against the mock transport. Prove item 2 live.
+    #[cfg(test)]
     async fn dispatch_completed_item(
         &self,
         item: Item,
         request: &RequestId,
+    ) -> Result<Option<PendingCall>, EngineError> {
+        if item.0["type"] != "function_call" && item.0["type"] != "custom_tool_call" {
+            return Ok(None);
+        }
+        self.dispatch_with_provider(item, request, self.provider.clone())
+            .await
+    }
+
+    async fn dispatch_with_provider(
+        &self,
+        item: Item,
+        request: &RequestId,
+        provider: Arc<dyn Provider>,
     ) -> Result<Option<PendingCall>, EngineError> {
         if item.0["type"] != "function_call" && item.0["type"] != "custom_tool_call" {
             return Ok(None);
@@ -1263,7 +1285,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 cancel_job_on_cleanup: false,
             }));
         }
-        let provider: Arc<dyn Provider> = self.provider.clone();
         self.scheduler
             .start_input_for_agent(
                 provider,

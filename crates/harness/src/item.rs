@@ -97,6 +97,9 @@ impl Item {
             JobOutput::Completed(Err(error)) => json!({ "error": error }),
             JobOutput::Cancelled => json!({ "error": "job cancelled" }),
             JobOutput::Interrupted => json!({ "error": "job interrupted" }),
+            JobOutput::CancellationUnconfirmed(detail) => {
+                json!({ "error": "cancellation unconfirmed", "detail": detail })
+            }
         };
         match kind {
             ToolKind::Function => Self(json!({

@@ -17,9 +17,6 @@ pub const JOB_PROGRESS_CAPACITY: usize = 64;
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct JobHandle(pub String);
 
-// TODO(adoption C0/H1; docs/daily-driver-plan.md): reconcile CallContext with
-// accepted bounded-progress/cancellation work before wiring a resident evaluator.
-// Extend the existing job owner; do not add a parallel provider-side job registry.
 /// Per-call metadata supplied by the harness. Progress is deliberately
 /// out-of-band: it is never appended to the model-visible item list.
 #[derive(Clone, Debug)]
@@ -29,8 +26,8 @@ pub struct CallContext {
     pub agent: AgentPath,
     /// Durable request that emitted this call, when dispatched by Engine.
     pub request: Option<crate::model::RequestId>,
-    /// Cooperative cancellation signal. Scheduler cancellation also aborts
-    /// the job task, but providers can observe this before cleanup.
+    /// Cooperative cancellation signal. External work remains owned by its
+    /// CancellationOwner until that owner confirms cleanup.
     pub cancel: CancellationToken,
     /// Scheduler-created job authority. Providers cannot supply its identity.
     pub verbs: crate::agents::JobVerbs,
@@ -82,9 +79,35 @@ pub enum ProviderError {
     Tool(String),
 }
 
+/// Evidence from the owner of work that can outlive the provider future.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", content = "detail", rename_all = "snake_case")]
+pub enum CancellationAcknowledgment {
+    Stopped,
+    Unconfirmed(String),
+}
+
+#[async_trait]
+pub trait CancellationOwner: Send + Sync {
+    /// Stop or reconcile the exact admitted operation. A signal alone is not Stopped.
+    async fn cancel(&self, handle: &JobHandle) -> CancellationAcknowledgment;
+}
+
 /// A provider owns tool meaning; the harness owns scheduling and history.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// A stable view retained for an entire model request, including its later
+    /// tool calls. Reloadable providers return an immutable snapshot here.
+    fn request_snapshot(&self) -> Option<std::sync::Arc<dyn Provider>> {
+        None
+    }
+
+    /// None means all work is owned by the call future and stops when it drops.
+    /// Providers dispatching external work must supply its cancellation owner.
+    fn cancellation_owner(&self) -> Option<std::sync::Arc<dyn CancellationOwner>> {
+        None
+    }
+
     /// Optional runtime backend used by the scheduler to construct the
     /// call-scoped `JobVerbs`. Defaults to no job-side agent operations.
     fn job_agent_service(&self) -> Option<std::sync::Arc<dyn crate::agents::AgentToolService>> {

@@ -30,6 +30,7 @@ pub enum JobOutput {
     Completed(Result<Value, String>),
     Cancelled,
     Interrupted,
+    CancellationUnconfirmed(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -140,6 +141,10 @@ fn compare_priority(a: &(u64, RequestTicket), b: &(u64, RequestTicket)) -> Order
 }
 
 struct Job {
+    started: bool,
+    cancellation_owner: Option<Arc<dyn crate::provider::CancellationOwner>>,
+    cancellation_gate: Arc<Mutex<()>>,
+    cancellation_ack: Option<crate::provider::CancellationAcknowledgment>,
     claimants: HashSet<AgentPath>,
     settled_claimants: Vec<AgentPath>,
     output: Option<JobOutput>,
@@ -275,6 +280,10 @@ impl JobScheduler {
         registry.insert(
             call_id.clone(),
             Job {
+                started: false,
+                cancellation_owner: provider.cancellation_owner(),
+                cancellation_gate: Arc::new(Mutex::new(())),
+                cancellation_ack: None,
                 claimants: HashSet::new(),
                 settled_claimants: Vec::new(),
                 output: None,
@@ -309,7 +318,17 @@ impl JobScheduler {
                 Ok(p) => p,
                 Err(_) => return,
             };
-            if task_cancel.is_cancelled() {
+            let cancelled_before_start = {
+                let mut registry = jobs.lock().await;
+                let job = registry.get_mut(&task_call_id).expect("registered job");
+                if task_cancel.is_cancelled() {
+                    true
+                } else {
+                    job.started = true;
+                    false
+                }
+            };
+            if cancelled_before_start {
                 drop(permit);
                 settle(&jobs, task_call_id.clone(), JobOutput::Cancelled).await;
                 let _ = events.send(task_call_id);
@@ -497,6 +516,84 @@ impl JobScheduler {
     /// Cancel an in-flight job. Cancellation is a typed terminal output; it
     /// is retained and delivered through the same claim mechanism.
     pub async fn cancel(&self, call_id: &CallId) -> Result<Option<JobSettlement>, JobError> {
+        let gate = {
+            let jobs = self.jobs.lock().await;
+            jobs.get(call_id)
+                .ok_or(JobError::UnknownCall)?
+                .cancellation_gate
+                .clone()
+        };
+        let _guard = gate.lock().await;
+        let owner = {
+            let jobs = self.jobs.lock().await;
+            let job = jobs.get(call_id).ok_or(JobError::UnknownCall)?;
+            if job.output.is_some() {
+                return Ok(None);
+            }
+            job.cancel.cancel();
+            if job.started {
+                job.cancellation_owner.clone()
+            } else {
+                None
+            }
+        };
+        if let Some(owner) = owner {
+            {
+                let jobs = self.jobs.lock().await;
+                let job = jobs.get(call_id).ok_or(JobError::UnknownCall)?;
+                if job.output.is_some() {
+                    return Ok(None);
+                }
+                job.cancel.cancel();
+            }
+            let ack = tokio::time::timeout(
+                JOB_CANCELLATION_GRACE,
+                owner.cancel(&JobHandle(call_id.0.clone())),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                crate::provider::CancellationAcknowledgment::Unconfirmed(
+                    "owner acknowledgment timed out".into(),
+                )
+            });
+            let (task, settlement) = {
+                let mut jobs = self.jobs.lock().await;
+                let job = jobs.get_mut(call_id).ok_or(JobError::UnknownCall)?;
+                job.cancellation_ack = Some(ack.clone());
+                // Completion while the owner was answering wins unchanged.
+                if job.output.is_some() {
+                    return Ok(None);
+                }
+                let output = match &ack {
+                    crate::provider::CancellationAcknowledgment::Stopped => JobOutput::Cancelled,
+                    crate::provider::CancellationAcknowledgment::Unconfirmed(detail) => {
+                        JobOutput::CancellationUnconfirmed(detail.clone())
+                    }
+                };
+                job.output = Some(output.clone());
+                job.settled_claimants = job.claimants.drain().collect();
+                job.settled.send_replace(Some(output.clone()));
+                let task = if matches!(ack, crate::provider::CancellationAcknowledgment::Stopped) {
+                    job.task.take()
+                } else {
+                    None
+                };
+                (
+                    task,
+                    JobSettlement {
+                        call_id: call_id.clone(),
+                        output,
+                        claimants: job.settled_claimants.clone(),
+                    },
+                )
+            };
+            if let Some(task) = task {
+                task.abort();
+                let _ = task.await;
+            }
+            let _ = self.events.send(call_id.clone());
+            return Ok(Some(settlement));
+        }
         let (mut task, cancel, settlement) = {
             let mut jobs = self.jobs.lock().await;
             let job = jobs.get_mut(call_id).ok_or(JobError::UnknownCall)?;
@@ -534,6 +631,74 @@ impl JobScheduler {
             let _ = self.events.send(call_id.clone());
         }
         Ok(Some(settlement))
+    }
+
+    /// Ask the retained external owner again without rewriting an emitted result.
+    pub async fn retry_cancellation(
+        &self,
+        call_id: &CallId,
+    ) -> Result<Option<crate::provider::CancellationAcknowledgment>, JobError> {
+        let (owner, gate) = {
+            let jobs = self.jobs.lock().await;
+            let job = jobs.get(call_id).ok_or(JobError::UnknownCall)?;
+            (
+                job.cancellation_owner.clone(),
+                job.cancellation_gate.clone(),
+            )
+        };
+        let Some(owner) = owner else {
+            return Ok(None);
+        };
+        let _guard = gate.lock().await;
+        {
+            let jobs = self.jobs.lock().await;
+            let job = jobs.get(call_id).ok_or(JobError::UnknownCall)?;
+            match &job.cancellation_ack {
+                None => return Ok(None),
+                Some(crate::provider::CancellationAcknowledgment::Stopped) => {
+                    return Ok(job.cancellation_ack.clone());
+                }
+                Some(crate::provider::CancellationAcknowledgment::Unconfirmed(_)) => {}
+            }
+        }
+        let ack = tokio::time::timeout(
+            JOB_CANCELLATION_GRACE,
+            owner.cancel(&JobHandle(call_id.0.clone())),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            crate::provider::CancellationAcknowledgment::Unconfirmed(
+                "owner acknowledgment timed out".into(),
+            )
+        });
+        let task = {
+            let mut jobs = self.jobs.lock().await;
+            let job = jobs.get_mut(call_id).ok_or(JobError::UnknownCall)?;
+            job.cancellation_ack = Some(ack.clone());
+            if matches!(ack, crate::provider::CancellationAcknowledgment::Stopped) {
+                job.task.take()
+            } else {
+                None
+            }
+        };
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+        Ok(Some(ack))
+    }
+
+    /// Inspect cleanup evidence without sending another cancellation request.
+    pub async fn cancellation_acknowledgment(
+        &self,
+        call_id: &CallId,
+    ) -> Result<Option<crate::provider::CancellationAcknowledgment>, JobError> {
+        let jobs = self.jobs.lock().await;
+        Ok(jobs
+            .get(call_id)
+            .ok_or(JobError::UnknownCall)?
+            .cancellation_ack
+            .clone())
     }
 
     /// Subscribe to job-settlement signals for wait-agent coordination.
