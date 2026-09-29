@@ -222,9 +222,13 @@ impl Conversation {
         let envelope_id =
             self.store
                 .admit_embedded_input(self.identity(), operation_id, sender, &item)?;
+        let wake_error = match self.input_observation(envelope_id)? {
+            InputObservation::Admitted => self.host.wake().await.err(),
+            InputObservation::Included(_) => None,
+        };
         Ok(InputReceipt {
             envelope_id,
-            wake_error: self.host.wake().await.err(),
+            wake_error,
         })
     }
     pub fn input_observation(&self, envelope_id: i64) -> Result<InputObservation, EmbeddedError> {

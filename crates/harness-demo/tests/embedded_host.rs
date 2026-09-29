@@ -204,6 +204,20 @@ async fn embedded_requests_pin_dispatch_and_inputs_record_actual_inclusion() {
         conversation.input_observation(receipt.envelope_id).unwrap(),
         InputObservation::Included(_)
     ));
+    let wakes = host.wakes.load(Ordering::SeqCst);
+    assert_eq!(
+        conversation
+            .input("message-1", "operator", "do work")
+            .await
+            .unwrap()
+            .envelope_id,
+        receipt.envelope_id
+    );
+    assert_eq!(
+        host.wakes.load(Ordering::SeqCst),
+        wakes,
+        "an included input retry must not wake another model turn"
+    );
     let observed = seen.lock().unwrap();
     assert_eq!(observed.len(), 2);
     assert_eq!(observed[0]["version"], "old");
