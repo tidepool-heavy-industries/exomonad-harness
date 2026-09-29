@@ -2879,9 +2879,7 @@ mod tests {
         let call_b = CallId("call-B".into());
         store.claim(&call_a, &parent).unwrap();
         store.claim(&call_b, &parent).unwrap();
-        store
-            .settle_claims(
-                &call_b,
+        store.settle_claims(&store.claims(&call_b).unwrap()[0].operation,
                 &Item(json!({
                     "type":"function_call_output","call_id":"call-B","output":"\"B output\""
                 })),
@@ -4257,9 +4255,7 @@ mod tests {
         let call_b = CallId("call-B".into());
         store.claim(&call_a, &parent).unwrap();
         store.claim(&call_b, &parent).unwrap();
-        store
-            .settle_claims(
-                &call_b,
+        store.settle_claims(&store.claims(&call_b).unwrap()[0].operation,
                 &Item(json!({
                     "type":"function_call_output","call_id":"call-B","output":"{\"ok\":true}"
                 })),

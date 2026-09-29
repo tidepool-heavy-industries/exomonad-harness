@@ -2,7 +2,7 @@
 
 use crate::{
     item::{Item, ToolKind},
-    model::{AgentPath, CallId, RequestId},
+    model::{AgentPath, CallId, ConversationIdentity, OperationId, RequestId},
     store::{Agent, AgentState, Result, Store, StoreError, utc_millis},
 };
 use rusqlite::{OptionalExtension, params};
@@ -12,7 +12,7 @@ use std::{collections::HashMap, sync::Arc};
 /// Original identity of a call still pending when the checkpoint was captured.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CheckpointClaim {
-    pub call_id: CallId,
+    pub operation: OperationId,
     pub request: RequestId,
     pub kind: ToolKind,
 }
@@ -175,17 +175,17 @@ impl Store {
                 call_id: boundary_call.0.clone(),
             })?;
         let prefix = &stored[..=boundary];
-        let call_kinds: HashMap<&str, ToolKind> = prefix
-            .iter()
-            .filter_map(|(_, item)| {
-                let kind = match item.0["type"].as_str() {
-                    Some("function_call") => ToolKind::Function,
-                    Some("custom_tool_call") => ToolKind::Custom,
-                    _ => return None,
-                };
-                item.0["call_id"].as_str().map(|call_id| (call_id, kind))
-            })
-            .collect();
+        let mut call_kinds = HashMap::<(RequestId, CallId), ToolKind>::new();
+        for (request, item) in prefix {
+            if let Some(call) = item.tool_call().map_err(|reason| StoreError::MalformedReplayCall {
+                request: request.0.clone(), call_id: item.0["call_id"].as_str().unwrap_or("").into(), reason: reason.into(),
+            })? {
+                let key = (request.clone(), call.call_id.clone());
+                if call_kinds.insert(key, call.input.kind()).is_some() {
+                    return Err(StoreError::AmbiguousReplayCall { call_id: call.call_id.0 });
+                }
+            }
+        }
         let effort = prefix
             .iter()
             .rev()
@@ -208,40 +208,38 @@ impl Store {
                 params![snapshot_request.0, position as i64, hash.0],
             )?;
         }
-        let claims: Vec<(String, String, String, Option<String>)> = {
+        let claims: Vec<(String, String, String, String, String, Option<String>)> = {
             let mut q = tx.prepare(
                 "WITH RECURSIVE lineage(id,parent_id,depth) AS (
                      SELECT id,parent_id,0 FROM requests WHERE id=?1
                      UNION ALL SELECT r.id,r.parent_id,lineage.depth+1 FROM requests r JOIN lineage ON r.id=lineage.parent_id
-                 ) SELECT c.call_id,c.request_id,c.state,c.output_hash FROM claims c
+                 ) SELECT c.origin,c.origin_request_id,c.call_id,c.request_id,c.state,c.output_hash FROM claims c
                    JOIN lineage ON lineage.id=c.request_id ORDER BY lineage.depth ASC",
             )?;
             q.query_map([&source_request.0], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+            })?.collect::<std::result::Result<Vec<_>, _>>()?
         };
         let mut pending_claims = Vec::new();
         let mut copied = std::collections::HashSet::new();
         let mut boundary_claimed = false;
-        for (call_id, request, state, output_hash) in claims {
-            if let Some(kind) = call_kinds.get(call_id.as_str()) {
-                if call_id == boundary_call.0 && request == source_request.0 {
+        for (origin, original_request, call_id, claim_request, state, output_hash) in claims {
+            let key = (RequestId(claim_request.clone()), CallId(call_id.clone()));
+            if let Some(kind) = call_kinds.get(&key) {
+                if call_id == boundary_call.0 && claim_request == source_request.0 {
                     boundary_claimed = true;
                 }
-                if !copied.insert(call_id.clone()) {
-                    continue;
-                }
+                let identity: ConversationIdentity = serde_json::from_str(&origin)?;
+                let operation = OperationId {
+                    origin: identity, request: RequestId(original_request.clone()), call: CallId(call_id.clone()),
+                };
+                if !copied.insert(operation.clone()) { continue; }
                 if state == "pending" {
-                    pending_claims.push(CheckpointClaim {
-                        call_id: CallId(call_id.clone()),
-                        request: RequestId(request),
-                        kind: *kind,
-                    });
+                    pending_claims.push(CheckpointClaim { operation, request: RequestId(claim_request), kind: *kind });
                 }
                 tx.execute(
-                    "INSERT INTO claims(call_id,request_id,state,output_hash) VALUES (?1,?2,?3,?4)",
-                    params![call_id, snapshot_request.0, state, output_hash],
+                    "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash) VALUES (?1,?2,?3,?4,?5,?6)",
+                    params![origin,original_request,call_id,snapshot_request.0,state,output_hash],
                 )?;
             }
         }
@@ -251,7 +249,7 @@ impl Store {
                 call_id: boundary_call.0.clone(),
             });
         }
-        pending_claims.sort_by(|a, b| a.call_id.0.cmp(&b.call_id.0));
+        pending_claims.sort_by(|a, b| a.operation.request.0.cmp(&b.operation.request.0).then_with(|| a.operation.call.0.cmp(&b.operation.call.0)));
         Self::set_effort_tx(&tx, &snapshot_request, effort)?;
         tx.execute(
             "INSERT INTO checkpoints(id,origin_agent,source_request,snapshot_request,boundary_call,metadata,pending_claims,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -321,18 +319,18 @@ impl Store {
             "INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros) VALUES (?1,?2,?3,?4,0,0,0)",
             params![snapshot_request.0,checkpoint.snapshot_request.0,child.path.0,utc_millis()],
         )?;
-        let inherited_claims: Vec<(String, String, Option<String>)> = {
+        let inherited_claims: Vec<(String, String, String, String, Option<String>)> = {
             let mut q =
-                tx.prepare("SELECT call_id,state,output_hash FROM claims WHERE request_id=?1")?;
+                tx.prepare("SELECT origin,origin_request_id,call_id,state,output_hash FROM claims WHERE request_id=?1")?;
             q.query_map([&checkpoint.snapshot_request.0], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?
         };
-        for (call_id, state, output_hash) in inherited_claims {
+        for (origin, original_request, call_id, state, output_hash) in inherited_claims {
             tx.execute(
-                "INSERT INTO claims(call_id,request_id,state,output_hash) VALUES (?1,?2,?3,?4)",
-                params![call_id, snapshot_request.0, state, output_hash],
+                "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![origin,original_request,call_id,snapshot_request.0,state,output_hash],
             )?;
         }
         let source = json!({
@@ -460,12 +458,12 @@ mod tests {
             checkpoint.pending_claims(),
             &[
                 CheckpointClaim {
-                    call_id: raw.clone(),
+                    operation: store.operation_for_request(&source, &raw).unwrap(),
                     request: source.clone(),
                     kind: ToolKind::Custom
                 },
                 CheckpointClaim {
-                    call_id: typed.clone(),
+                    operation: store.operation_for_request(&source, &typed).unwrap(),
                     request: source.clone(),
                     kind: ToolKind::Function
                 },
@@ -545,7 +543,7 @@ mod tests {
         );
         let output =
             item(json!({"type":"custom_tool_call_output","call_id":raw.0,"output":"done"}));
-        store.settle_claims(&raw, &output).unwrap();
+        store.settle_claims(&store.claims(&raw).unwrap()[0].operation, &output).unwrap();
         assert!(
             store
                 .claims_on(second.head_request.as_ref().unwrap())
@@ -706,17 +704,17 @@ mod tests {
         });
         let scheduler = Arc::new(JobScheduler::new(2).unwrap());
         scheduler
-            .start_for_agent(
+            .start_operation(
                 provider.clone(),
+                store.operation_for_request(&source, &call).unwrap(),
                 root.clone(),
                 Some(source.clone()),
-                call.clone(),
                 "slow".into(),
                 json!({}),
             )
             .await
             .unwrap();
-        scheduler.claim(&call, root.clone()).await.unwrap();
+        scheduler.claim_exact(&store.operation_for_request(&source, &call).unwrap(), store.standalone_identity(root.clone())).await.unwrap();
         let checkpoint = store
             .capture_checkpoint(&root, &source, &call, &json!({}), Arc::new(()))
             .unwrap();
@@ -886,17 +884,17 @@ mod tests {
         });
         let scheduler = Arc::new(JobScheduler::new(1).unwrap());
         scheduler
-            .start_for_agent(
+            .start_operation(
                 provider.clone(),
+                store.operation_for_request(&source, &call).unwrap(),
                 root.clone(),
                 Some(source.clone()),
-                call.clone(),
                 "slow".into(),
                 json!({}),
             )
             .await
             .unwrap();
-        scheduler.claim(&call, root.clone()).await.unwrap();
+        scheduler.claim_exact(&store.operation_for_request(&source, &call).unwrap(), store.standalone_identity(root.clone())).await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
             .await
             .unwrap();
@@ -905,11 +903,11 @@ mod tests {
             .capture_checkpoint(&root, &source, &call, &json!({}), attachment.clone())
             .unwrap();
         assert_eq!(
-            scheduler.cancel(&call).await.unwrap().unwrap().output,
+            scheduler.cancel(&store.claims(&call).unwrap()[0].operation).await.unwrap().unwrap().output,
             JobOutput::Cancelled
         );
         let cancelled = Item::tool_output(&call, ToolKind::Function, &JobOutput::Cancelled);
-        assert_eq!(store.write_output(&call, &cancelled).unwrap(), 2);
+        assert_eq!(store.write_output(&store.claims(&call).unwrap()[0].operation, &cancelled).unwrap(), 2);
         assert_eq!(
             store.claims_on(checkpoint.snapshot_request()).unwrap()[0].state,
             ClaimState::Settled
@@ -1107,7 +1105,7 @@ mod tests {
         assert_eq!(
             checkpoint.pending_claims(),
             &[CheckpointClaim {
-                call_id: CallId("capture-call".into()),
+                operation: store.operation_for_request(checkpoint.source_request(), &CallId("capture-call".into())).unwrap(),
                 request: checkpoint.source_request().clone(),
                 kind: ToolKind::Function,
             }]

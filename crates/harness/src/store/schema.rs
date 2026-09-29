@@ -1,7 +1,7 @@
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 pub const SQL: &str = include_str!("schema.sql");
 
-pub fn initialize(conn: &mut rusqlite::Connection) -> rusqlite::Result<()> {
+pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
     let has_version: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version')",
         [],
@@ -11,6 +11,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> rusqlite::Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(SQL)?;
         tx.execute("INSERT INTO schema_version(version) VALUES (?1)", [VERSION])?;
+        super::schema_migration::ensure_store_id(&tx)?;
         tx.commit()?;
         return Ok(());
     }
@@ -20,15 +21,11 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> rusqlite::Result<()> {
             .collect::<Result<_, _>>()?
     };
     if versions.len() != 1 {
-        return Err(rusqlite::Error::InvalidParameterName(
-            "schema_version must contain exactly one row".into(),
-        ));
+        return Err(rusqlite::Error::InvalidParameterName("schema_version must contain exactly one row".into()).into());
     }
     let version = versions[0];
     if version > VERSION {
-        return Err(rusqlite::Error::InvalidParameterName(format!(
-            "database schema {version} is newer than supported {VERSION}"
-        )));
+        return Err(rusqlite::Error::InvalidParameterName(format!("database schema {version} is newer than supported {VERSION}")).into());
     }
     if version == VERSION {
         return Ok(());
@@ -65,7 +62,19 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> rusqlite::Result<()> {
             ))?;
         }
     }
+    let legacy_claims: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='claims')",
+        [], |row| row.get(0),
+    )?;
+    if legacy_claims {
+        tx.execute_batch("ALTER TABLE claims RENAME TO legacy_claims; DROP INDEX IF EXISTS claims_request;")?;
+    }
     tx.execute_batch(SQL)?;
+    let store_id = super::schema_migration::ensure_store_id(&tx)?;
+    if legacy_claims {
+        super::schema_migration::migrate_claims(&tx, &store_id)?;
+        tx.execute_batch("DROP TABLE legacy_claims")?;
+    }
     tx.execute("UPDATE schema_version SET version=?1", [VERSION])?;
-    tx.commit()
+    Ok(tx.commit()?)
 }

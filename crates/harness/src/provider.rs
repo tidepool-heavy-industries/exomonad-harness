@@ -1,7 +1,7 @@
 use crate::{
     agents::{is_agent_verb, verb_tool_schemas},
     hooks::{BeforeRequestResult, RequestPlan},
-    model::{AgentPath, CallId},
+    model::{AgentPath, CallId, OperationId},
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -22,6 +22,8 @@ pub struct JobHandle(pub String);
 #[derive(Clone, Debug)]
 pub struct CallContext {
     pub handle: JobHandle,
+    /// Exact scheduler operation. Detached direct-provider probes have none.
+    pub operation: Option<OperationId>,
     pub call_id: CallId,
     pub agent: AgentPath,
     /// Durable request that emitted this call, when dispatched by Engine.
@@ -61,6 +63,7 @@ impl CallContext {
         (
             Self {
                 handle,
+                operation: None,
                 call_id,
                 agent,
                 request: None,

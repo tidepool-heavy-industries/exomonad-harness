@@ -120,6 +120,7 @@ fn restart_recovers_pending_claim_but_classifies_interrupted_claim_explicitly() 
         assert_eq!(
             store.recover_pending().unwrap(),
             vec![PendingCall {
+                operation: store.operation_for_request(&request, &pending).unwrap(),
                 call_id: pending.clone(),
                 request: request.clone()
             }]
@@ -174,10 +175,8 @@ fn custom_replay_output_and_claim_identity_survive_reopen() {
             .unwrap();
         store.claim(&custom_call, &request).unwrap();
         store.claim(&mismatch_call, &request).unwrap();
-        store.write_output(&custom_call, &custom_output).unwrap();
-        store
-            .write_output(
-                &mismatch_call,
+        store.write_output(&store.claims(&custom_call).unwrap()[0].operation, &custom_output).unwrap();
+        store.write_output(&store.claims(&mismatch_call).unwrap()[0].operation,
                 &recovery_item(serde_json::json!({
                     "type": "function_call_output",
                     "call_id": mismatch_call.0,
@@ -253,7 +252,7 @@ fn replay_does_not_cross_from_child_claim_to_ancestor_tool_call() {
         // The child has a claim but no call Item of its own. Its durable
         // output must not acquire the ancestor's call identity by lineage.
         store.claim(&call, &child).unwrap();
-        store.write_output(&call, &output).unwrap();
+        store.write_output(&store.claims(&call).unwrap()[0].operation, &output).unwrap();
     }
     {
         let store = Store::open(&path).unwrap();
@@ -285,9 +284,7 @@ fn replay_rejects_duplicate_call_items_in_claim_request() {
         )
         .unwrap();
     store.claim(&call, &request).unwrap();
-    store
-        .write_output(
-            &call,
+    store.write_output(&store.claims(&call).unwrap()[0].operation,
             &recovery_item(serde_json::json!({
                 "type":"custom_tool_call_output","call_id":call.0,"output":"ambiguous"
             })),
@@ -324,9 +321,7 @@ fn replay_rejects_ambiguous_claims_across_agent_branches() {
             .unwrap();
         store.claim(&call, request).unwrap();
     }
-    store
-        .write_output(
-            &call,
+    store.write_output(&store.claims(&call).unwrap()[0].operation,
             &recovery_item(serde_json::json!({
                 "type":"custom_tool_call_output","call_id":call.0,"output":"result"
             })),
@@ -371,6 +366,7 @@ fn wave18_reopen_interrupts_pending_call_once() {
         assert_eq!(
             store.recover_pending().unwrap(),
             vec![PendingCall {
+                operation: store.operation_for_request(&request, &call).unwrap(),
                 call_id: call.clone(),
                 request: request.clone(),
             }],
@@ -391,7 +387,7 @@ fn wave18_reopen_interrupts_pending_call_once() {
         // transitioned a second time.
         assert!(store.recover_pending().unwrap().is_empty());
         assert_eq!(store.interrupt_claim(&call, &request).unwrap(), 0);
-        assert_eq!(store.settle_claims(&call, &output).unwrap(), 0);
+        assert_eq!(store.settle_claims(&store.claims(&call).unwrap()[0].operation, &output).unwrap(), 0);
         let claims = store.claims_on(&request).unwrap();
         assert_eq!(claims.len(), 1);
         assert_eq!(claims[0].state, ClaimState::Interrupted);

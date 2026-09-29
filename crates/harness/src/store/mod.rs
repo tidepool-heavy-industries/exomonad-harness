@@ -1,17 +1,19 @@
 //! Durable SQLite event and content-addressed request store.
 mod embedded;
+mod schema_migration;
 pub mod history;
 pub mod schema;
 
 use crate::{
     item::{Item, ItemHash, ToolKind},
     lifecycle::{CompletionCommit, CompletionProvenance},
-    model::{AgentPath, CallId, Effort, RequestId},
+    model::{AgentPath, CallId, ConversationIdentity, Effort, OperationId, RequestId},
     transport::{ResponsesRequest, ResponsesTurn},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     path::Path,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -66,6 +68,8 @@ pub enum StoreError {
     MissingCheckpointEffort(String),
     #[error("checkpoint belongs to a different Store process")]
     ForeignCheckpoint,
+    #[error("schema migration cannot determine origin of legacy claim {call_id} on request {request}: {reason}; preserve this database and repair its provenance before reopening")]
+    LegacyProvenance { request: String, call_id: String, reason: String },
 }
 
 #[cfg(test)]
@@ -129,6 +133,7 @@ pub struct Usage {
 pub struct PendingCall {
     pub call_id: CallId,
     pub request: RequestId,
+    pub operation: OperationId,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoredDecision {
@@ -207,8 +212,29 @@ pub struct Envelope {
 pub struct Claim {
     pub call_id: CallId,
     pub request: RequestId,
+    pub operation: OperationId,
     pub state: ClaimState,
     pub output: Option<ItemHash>,
+}
+fn decode_claim(r: &rusqlite::Row<'_>) -> rusqlite::Result<Claim> {
+    let raw: String = r.get(0)?;
+    let origin = serde_json::from_str(&raw).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    let request = RequestId(r.get(3)?);
+    let call_id = CallId(r.get(2)?);
+    let state: String = r.get(4)?;
+    Ok(Claim {
+        operation: OperationId { origin, request: RequestId(r.get(1)?), call: call_id.clone() },
+        call_id,
+        request,
+        state: match state.as_str() {
+            "settled" => ClaimState::Settled,
+            "interrupted" => ClaimState::Interrupted,
+            _ => ClaimState::Pending,
+        },
+        output: r.get::<_, Option<String>>(5)?.map(ItemHash),
+    })
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClaimState {
@@ -233,6 +259,7 @@ pub struct Decision {
 pub struct Store {
     pub(crate) conn: Mutex<Connection>,
     pub(crate) process_identity: Arc<()>,
+    store_id: String,
 }
 impl Store {
     pub(crate) fn validate_agent_path(path: &str, parent: Option<&str>) -> Result<()> {
@@ -533,7 +560,7 @@ impl Store {
         } else {
             Vec::new()
         };
-        let history: Vec<Item> =
+        let history_pairs: Vec<(RequestId, Item)> =
             if let (Some(request), Some(call_id)) = (invocation_request, invocation_call_id) {
                 let end = stored_history.iter().position(|(item_request, item)| {
                     item_request == request
@@ -550,27 +577,37 @@ impl Store {
                 stored_history
                     .into_iter()
                     .take(end + 1)
-                    .map(|(_, item)| item)
                     .collect()
             } else {
-                stored_history.into_iter().map(|(_, item)| item).collect()
+                stored_history
             };
-        let inherited_calls = if let Some(head) = source_head.as_ref() {
+        let inherited_operations = if let Some(head) = source_head.as_ref() {
             let mut q = tx.prepare(
                 "WITH RECURSIVE lineage(id,parent_id) AS (
                      SELECT id,parent_id FROM requests WHERE id=?1
                      UNION ALL
                      SELECT r.id,r.parent_id FROM requests r JOIN lineage ON r.id=lineage.parent_id
                  )
-                 SELECT DISTINCT c.call_id FROM claims c
+                 SELECT c.origin,c.origin_request_id,c.call_id,c.request_id FROM claims c
                  JOIN lineage ON lineage.id=c.request_id
-                 WHERE c.state='pending' ORDER BY c.call_id",
+                 WHERE c.state='pending' ORDER BY c.request_id,c.call_id",
             )?;
-            q.query_map([&head.0], |row| row.get::<_, String>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?
+            let rows = q.query_map([&head.0], |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?,row.get::<_, String>(3)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let mut operations = HashSet::new();
+            for (origin, original_request, call, claim_request) in rows {
+                if history_pairs.iter().any(|(request, item)| {
+                    request.0 == claim_request && !Self::strip_from_here_snapshot(item)
+                        && item.tool_call().ok().flatten().is_some_and(|tool| tool.call_id.0 == call)
+                }) {
+                    operations.insert((origin, original_request, call));
+                }
+            }
+            operations.into_iter().collect::<Vec<_>>()
         } else {
             Vec::new()
         };
+        let history: Vec<Item> = history_pairs.into_iter().map(|(_, item)| item).collect();
         let child_effort = history
             .iter()
             .rev()
@@ -599,10 +636,10 @@ impl Store {
                 params![snapshot_request.0, position as i64, hash.0],
             )?;
         }
-        for call_id in inherited_calls {
+        for (origin, original_request, call_id) in inherited_operations {
             tx.execute(
-                "INSERT INTO claims(call_id,request_id,state) VALUES (?1,?2,'pending')",
-                params![call_id, snapshot_request.0],
+                "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES (?1,?2,?3,?4,'pending')",
+                params![origin, original_request, call_id, snapshot_request.0],
             )?;
         }
         // The existing trusted writer is factored into a transaction helper,
@@ -762,10 +799,19 @@ impl Store {
         )?;
         let mut conn = conn;
         schema::initialize(&mut conn)?;
+        let store_id: String = conn.query_row(
+            "SELECT state FROM session_state WHERE session_id='harness:store-id'",
+            [],
+            |row| row.get(0),
+        )?;
         Ok(Self {
             conn: Mutex::new(conn),
             process_identity: Arc::new(()),
+            store_id,
         })
+    }
+    pub fn standalone_identity(&self, actor: AgentPath) -> ConversationIdentity {
+        ConversationIdentity::Standalone { store: self.store_id.clone(), actor }
     }
     pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
@@ -827,6 +873,16 @@ impl Store {
         branch: &str,
         items: &[Item],
     ) -> Result<()> {
+        self.write_compaction_request_with_claims(request, parent, branch, items, &[])
+    }
+    pub(crate) fn write_compaction_request_with_claims(
+        &self,
+        request: &RequestId,
+        parent: &RequestId,
+        branch: &str,
+        items: &[Item],
+        pending: &[OperationId],
+    ) -> Result<()> {
         let mut c = self.lock();
         let tx = c.transaction()?;
         tx.execute(
@@ -838,6 +894,18 @@ impl Store {
             tx.execute(
                 "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
                 params![request.0, position as i64, hash.0],
+            )?;
+        }
+        for operation in pending {
+            let matching = items.iter().filter_map(|item| item.tool_call().ok().flatten())
+                .filter(|call| call.call_id == operation.call).count();
+            if matching == 0 {
+                return Err(StoreError::AmbiguousReplayCall { call_id: operation.call.0.clone() });
+            }
+            let origin = serde_json::to_string(&operation.origin)?;
+            tx.execute(
+                "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES (?1,?2,?3,?4,'pending')",
+                params![origin,operation.request.0,operation.call.0,request.0],
             )?;
         }
         let key = format!("harness:compaction:{}", request.0);
@@ -861,17 +929,21 @@ impl Store {
         Ok(self.session_state(&key)?.is_some())
     }
     /// Store a completed output and settle all claimants atomically.
-    pub fn write_output(&self, call: &CallId, output: &Item) -> Result<usize> {
-        self.settle_claims(call, output)
+    pub fn write_output(&self, operation: &OperationId, output: &Item) -> Result<usize> {
+        self.settle_claims(operation, output)
     }
     /// Crash recovery exposes all still-pending durable claims for the caller's resumption policy.
     pub fn recover_pending(&self) -> Result<Vec<PendingCall>> {
         let c = self.lock();
-        let mut q=c.prepare("SELECT call_id,request_id FROM claims WHERE state='pending' ORDER BY call_id,request_id")?;
+        let mut q=c.prepare("SELECT origin,origin_request_id,call_id,request_id FROM claims WHERE state='pending' ORDER BY call_id,request_id")?;
         q.query_map([], |r| {
+            let raw: String = r.get(0)?;
+            let origin = serde_json::from_str(&raw).map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+            let call_id = CallId(r.get(2)?);
             Ok(PendingCall {
-                call_id: CallId(r.get(0)?),
-                request: RequestId(r.get(1)?),
+                operation: OperationId { origin, request: RequestId(r.get(1)?), call: call_id.clone() },
+                call_id,
+                request: RequestId(r.get(3)?),
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -911,11 +983,15 @@ impl Store {
     }
     pub fn pending_at(&self, request: &RequestId) -> Result<Vec<PendingCall>> {
         let c = self.lock();
-        let mut q=c.prepare("WITH RECURSIVE lineage(id,parent_id) AS (SELECT id,parent_id FROM requests WHERE id=?1 UNION ALL SELECT r.id,r.parent_id FROM requests r JOIN lineage l ON r.id=l.parent_id) SELECT c.call_id,c.request_id FROM claims c JOIN lineage l ON l.id=c.request_id WHERE c.state='pending' ORDER BY c.call_id,c.request_id")?;
+        let mut q=c.prepare("WITH RECURSIVE lineage(id,parent_id) AS (SELECT id,parent_id FROM requests WHERE id=?1 UNION ALL SELECT r.id,r.parent_id FROM requests r JOIN lineage l ON r.id=l.parent_id) SELECT c.origin,c.origin_request_id,c.call_id,c.request_id FROM claims c JOIN lineage l ON l.id=c.request_id WHERE c.state='pending' ORDER BY c.call_id,c.request_id")?;
         q.query_map([&request.0], |r| {
+            let raw: String = r.get(0)?;
+            let origin = serde_json::from_str(&raw).map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+            let call_id = CallId(r.get(2)?);
             Ok(PendingCall {
-                call_id: CallId(r.get(0)?),
-                request: RequestId(r.get(1)?),
+                operation: OperationId { origin, request: RequestId(r.get(1)?), call: call_id.clone() },
+                call_id,
+                request: RequestId(r.get(3)?),
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -1365,6 +1441,24 @@ impl Store {
     }
 
     /// The durable settled output for one recorded provider call.
+    pub fn replay_output_operation(&self, operation: &OperationId) -> Result<Option<Item>> {
+        let kind = self.tool_invocation_kind(&operation.request, &operation.call)?;
+        let Some(kind) = kind else { return Ok(None); };
+        let origin = serde_json::to_string(&operation.origin)?;
+        let c = self.lock();
+        let raw: Option<String> = c.query_row(
+            "SELECT i.json FROM claims c JOIN items i ON i.hash=c.output_hash WHERE c.origin=?1 AND c.origin_request_id=?2 AND c.call_id=?3 AND c.state='settled' LIMIT 1",
+            params![origin,operation.request.0,operation.call.0], |row| row.get(0),
+        ).optional()?;
+        let Some(raw) = raw else { return Ok(None); };
+        let output: Item = serde_json::from_str(&raw)?;
+        let expected = match kind { ToolKind::Function => "function_call_output", ToolKind::Custom => "custom_tool_call_output" };
+        if output.0["type"] != expected || output.0["call_id"] != operation.call.0 {
+            return Err(StoreError::ReplayOutputKindMismatch { call_id: operation.call.0.clone(), expected: kind });
+        }
+        Ok(Some(output))
+    }
+    /// Diagnostic lookup; refuses collisions instead of choosing an operation.
     pub fn replay_output(&self, call: &CallId) -> Result<Option<Item>> {
         let c = self.lock();
         // Claims can be inherited by Here/agent requests. A claim alone is
@@ -1621,25 +1715,46 @@ impl Store {
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
     }
-    pub fn claim(&self, call: &CallId, request: &RequestId) -> Result<()> {
-        self.lock().execute("INSERT INTO claims(call_id,request_id,state) VALUES (?1,?2,'pending')",params![call.0,request.0]).map(|_|()).map_err(|e|if matches!(e,rusqlite::Error::SqliteFailure(ref x,_) if x.extended_code==rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY){StoreError::DuplicateClaim}else{e.into()})
+    pub fn operation_for_request(&self, request: &RequestId, call: &CallId) -> Result<OperationId> {
+        let c = self.lock();
+        let branch: String = c.query_row("SELECT branch FROM requests WHERE id=?1", [&request.0], |r| r.get(0))
+            .optional()?.ok_or_else(|| StoreError::MissingRequest(request.0.clone()))?;
+        let bound: Option<(String, String)> = c.query_row(
+            "SELECT run_id,incarnation FROM embedded_bindings WHERE agent_path=?1",
+            [&branch], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).optional()?;
+        let origin = match bound {
+            Some((run, incarnation)) => ConversationIdentity::Embedded { run, actor: AgentPath(branch), incarnation },
+            None => self.standalone_identity(AgentPath(branch)),
+        };
+        Ok(OperationId { origin, request: request.clone(), call: call.clone() })
     }
+    /// Admit an original invocation at its exact request.
+    pub fn claim(&self, call: &CallId, request: &RequestId) -> Result<OperationId> {
+        let operation = self.operation_for_request(request, call)?;
+        self.claim_operation(&operation, request)?;
+        Ok(operation)
+    }
+    /// Attach a claimant to an existing operation without changing its origin.
+    pub fn claim_operation(&self, operation: &OperationId, request: &RequestId) -> Result<()> {
+        let origin = serde_json::to_string(&operation.origin)?;
+        self.lock().execute(
+            "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES (?1,?2,?3,?4,'pending')",
+            params![origin,operation.request.0,operation.call.0,request.0],
+        ).map(|_|()).map_err(|e| if matches!(e,rusqlite::Error::SqliteFailure(ref x,_) if x.extended_code==rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY) { StoreError::DuplicateClaim } else { e.into() })
+    }
+    pub fn claims_for_operation(&self, operation: &OperationId) -> Result<Vec<Claim>> {
+        let c = self.lock();
+        let mut q = c.prepare("SELECT origin,origin_request_id,call_id,request_id,state,output_hash FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 ORDER BY request_id")?;
+        let origin = serde_json::to_string(&operation.origin)?;
+        Ok(q.query_map(params![origin,operation.request.0,operation.call.0], decode_claim)?
+            .collect::<std::result::Result<_, _>>()?)
+    }
+    /// Diagnostic enumeration only. A provider ID alone never selects an operation.
     pub fn claims(&self, call: &CallId) -> Result<Vec<Claim>> {
         let c = self.lock();
-        let mut q=c.prepare("SELECT call_id,request_id,state,output_hash FROM claims WHERE call_id=?1 ORDER BY request_id")?;
-        q.query_map([&call.0], |r| {
-            let s: String = r.get(2)?;
-            Ok(Claim {
-                call_id: CallId(r.get(0)?),
-                request: RequestId(r.get(1)?),
-                state: match s.as_str() {
-                    "settled" => ClaimState::Settled,
-                    "interrupted" => ClaimState::Interrupted,
-                    _ => ClaimState::Pending,
-                },
-                output: r.get::<_, Option<String>>(3)?.map(ItemHash),
-            })
-        })?
+        let mut q=c.prepare("SELECT origin,origin_request_id,call_id,request_id,state,output_hash FROM claims WHERE call_id=?1 ORDER BY request_id")?;
+        q.query_map([&call.0], decode_claim)?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
     }
@@ -1649,22 +1764,10 @@ impl Store {
     pub fn claims_on(&self, request: &RequestId) -> Result<Vec<Claim>> {
         let c = self.lock();
         let mut q = c.prepare(
-            "SELECT call_id,request_id,state,output_hash FROM claims \
+            "SELECT origin,origin_request_id,call_id,request_id,state,output_hash FROM claims \
              WHERE request_id=?1 ORDER BY call_id",
         )?;
-        q.query_map([&request.0], |r| {
-            let s: String = r.get(2)?;
-            Ok(Claim {
-                call_id: CallId(r.get(0)?),
-                request: RequestId(r.get(1)?),
-                state: match s.as_str() {
-                    "settled" => ClaimState::Settled,
-                    "interrupted" => ClaimState::Interrupted,
-                    _ => ClaimState::Pending,
-                },
-                output: r.get::<_, Option<String>>(3)?.map(ItemHash),
-            })
-        })?
+        q.query_map([&request.0], decode_claim)?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
     }
@@ -1689,39 +1792,41 @@ impl Store {
                  FROM requests parent JOIN lineage child ON parent.id=child.parent_id
                  WHERE parent.branch=?2
              )
-             SELECT c.call_id,c.request_id,c.state,c.output_hash
+             SELECT c.origin,c.origin_request_id,c.call_id,c.request_id,c.state,c.output_hash
              FROM claims c JOIN lineage l ON l.id=c.request_id
              ORDER BY c.call_id",
         )?;
-        q.query_map(params![request.0, branch], |r| {
-            let s: String = r.get(2)?;
-            Ok(Claim {
-                call_id: CallId(r.get(0)?),
-                request: RequestId(r.get(1)?),
-                state: match s.as_str() {
-                    "settled" => ClaimState::Settled,
-                    "interrupted" => ClaimState::Interrupted,
-                    _ => ClaimState::Pending,
-                },
-                output: r.get::<_, Option<String>>(3)?.map(ItemHash),
-            })
-        })?
+        q.query_map(params![request.0, branch], decode_claim)?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
     }
-    pub fn settle_claims(&self, call: &CallId, output: &Item) -> Result<usize> {
+    pub fn settle_claims(&self, operation: &OperationId, output: &Item) -> Result<usize> {
+        let kind = self.tool_invocation_kind(&operation.request, &operation.call)?
+            .ok_or_else(|| StoreError::MissingCheckpointCall { request: operation.request.0.clone(), call_id: operation.call.0.clone() })?;
+        let expected = match kind { ToolKind::Function => "function_call_output", ToolKind::Custom => "custom_tool_call_output" };
+        if output.0["type"] != expected || output.0["call_id"] != operation.call.0 {
+            return Err(StoreError::ReplayOutputKindMismatch { call_id: operation.call.0.clone(), expected: kind });
+        }
         let mut c = self.lock();
         let tx = c.transaction()?;
         let h = Self::put_item_tx(&tx, output)?;
+        let origin = serde_json::to_string(&operation.origin)?;
         let n = tx.execute(
-            "UPDATE claims SET state='settled',output_hash=?2 WHERE call_id=?1 AND state='pending'",
-            params![call.0, h.0],
+            "UPDATE claims SET state='settled',output_hash=?4 WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND state='pending'",
+            params![origin,operation.request.0,operation.call.0,h.0],
         )?;
         tx.commit()?;
         Ok(n)
     }
+    pub fn interrupt_operation_claim(&self, operation: &OperationId, request: &RequestId) -> Result<usize> {
+        let origin = serde_json::to_string(&operation.origin)?;
+        Ok(self.lock().execute("UPDATE claims SET state='interrupted' WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?4 AND state='pending'",params![origin,operation.request.0,operation.call.0,request.0])?)
+    }
+    /// Request-scoped legacy caller. Ambiguous same-ID claims are refused.
     pub fn interrupt_claim(&self, call: &CallId, request: &RequestId) -> Result<usize> {
-        Ok(self.lock().execute("UPDATE claims SET state='interrupted' WHERE call_id=?1 AND request_id=?2 AND state='pending'",params![call.0,request.0])?)
+        let candidates: Vec<_> = self.claims_on(request)?.into_iter().filter(|c| c.call_id == *call).collect();
+        if candidates.len() > 1 { return Err(StoreError::AmbiguousReplayCall { call_id: call.0.clone() }); }
+        match candidates.first() { Some(claim) => self.interrupt_operation_claim(&claim.operation, request), None => Ok(0) }
     }
     pub fn record_decision(&self, request: Option<&RequestId>, d: &Decision) -> Result<i64> {
         let c = self.lock();
@@ -1973,7 +2078,7 @@ mod tests {
             )
             .unwrap();
             s.claim(&call, &root).unwrap();
-            s.write_output(&call, &output).unwrap();
+            s.write_output(&s.claims(&call).unwrap()[0].operation, &output).unwrap();
             s.append_items(&next, std::slice::from_ref(&output))
                 .unwrap();
             s.record_replay_turn(
@@ -2036,8 +2141,8 @@ mod tests {
                 .unwrap();
             store.claim(&custom_call, &request).unwrap();
             store.claim(&mismatch_call, &request).unwrap();
-            store.write_output(&custom_call, &custom_output).unwrap();
-            store.write_output(&mismatch_call, &wrong_output).unwrap();
+            store.write_output(&store.claims(&custom_call).unwrap()[0].operation, &custom_output).unwrap();
+            store.write_output(&store.claims(&mismatch_call).unwrap()[0].operation, &wrong_output).unwrap();
         }
         {
             let store = Store::open(&path).unwrap();
@@ -2081,7 +2186,7 @@ mod tests {
             .unwrap();
         store.append_items(&root, &[call_item]).unwrap();
         store.claim(&call, &child).unwrap();
-        store.write_output(&call, &output).unwrap();
+        store.write_output(&store.claims(&call).unwrap()[0].operation, &output).unwrap();
 
         assert_eq!(
             store.replay_output(&call).unwrap(),
@@ -2113,7 +2218,7 @@ mod tests {
             )
             .unwrap();
         store.claim(&call, &request).unwrap();
-        store.write_output(&call, &output).unwrap();
+        store.write_output(&store.claims(&call).unwrap()[0].operation, &output).unwrap();
 
         assert_eq!(store.replay_output(&call).unwrap(), Some(output));
     }
@@ -2225,7 +2330,7 @@ mod tests {
             let cid = CallId("c1".into());
             s.claim(&cid, &id("root")).unwrap();
             let output = item(serde_json::json!({"output":"ok"}));
-            assert_eq!(s.settle_claims(&cid, &output).unwrap(), 1);
+            assert_eq!(s.settle_claims(&s.claims(&cid).unwrap()[0].operation, &output).unwrap(), 1);
             assert_eq!(s.claims(&cid).unwrap()[0].state, ClaimState::Settled);
             s.add_envelope("a", "b", "AtBoundary", &shared, None)
                 .unwrap();
@@ -2451,7 +2556,7 @@ mod tests {
             );
             let call = CallId("pending".into());
             assert_eq!(
-                s.write_output(&call, &item(serde_json::json!({"ok":true})))
+                s.write_output(&s.claims(&call).unwrap()[0].operation, &item(serde_json::json!({"ok":true})))
                     .unwrap(),
                 1
             );

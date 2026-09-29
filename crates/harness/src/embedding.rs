@@ -2,7 +2,7 @@
 //! this module binds their model history without creating a second supervisor.
 use crate::{
     item::{Item, ToolInput, ToolKind},
-    model::{AgentPath, RequestId},
+    model::{AgentPath, ConversationIdentity, RequestId},
     provider::{CallContext, CancellationOwner, Provider, ProviderError},
     store::{Store, StoreError},
 };
@@ -200,6 +200,11 @@ impl Conversation {
             self.provider(),
             config,
         )
+        .with_origin(ConversationIdentity::Embedded {
+            run: self.identity().run.clone(),
+            actor: self.identity().actor.clone(),
+            incarnation: self.identity().incarnation.clone(),
+        })
         .with_plain_text_compaction(context_capacity))
     }
     pub fn identity(&self) -> &HostIdentity {
@@ -270,6 +275,17 @@ impl PinnedProvider {
         let fail = |message: &str| ProviderError::Tool(message.to_owned());
         if context.agent != self.host.identity().actor {
             return Err(fail("foreign actor call"));
+        }
+        let operation = context.operation.as_ref().ok_or_else(|| fail("embedded call requires operation identity"))?;
+        let expected_origin = ConversationIdentity::Embedded {
+            run: self.host.identity().run.clone(),
+            actor: self.host.identity().actor.clone(),
+            incarnation: self.host.identity().incarnation.clone(),
+        };
+        if operation.origin != expected_origin || operation.call != context.call_id
+            || context.request.as_ref() != Some(&operation.request)
+        {
+            return Err(fail("foreign operation call"));
         }
         let request = context
             .request

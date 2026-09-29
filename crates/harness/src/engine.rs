@@ -12,7 +12,7 @@ use crate::{
     finalize::{FINALIZE_TOOL_NAME, FinalizeError, FinalizeParser},
     item::{Item, ToolInput, ToolKind},
     mailbox::{Envelope, MessageChannel},
-    model::{AgentPath, CallId, Effort, RequestId},
+    model::{AgentPath, CallId, ConversationIdentity, Effort, OperationId, RequestId},
     provider::Provider,
     store::{Store, StoreError, Usage as StoredUsage},
     transport::{
@@ -20,8 +20,8 @@ use crate::{
         sse::StreamEvent,
     },
     turn::{
-        JobError, JobScheduler, WaitAgentResult, WaitResume, outputs_in_call_order,
-        wait_agent_and_drain,
+        JobError, JobScheduler, WaitAgentResultExact, WaitResumeExact, outputs_in_operation_order,
+        wait_agent_and_drain_exact,
     },
 };
 use schemars::JsonSchema;
@@ -36,6 +36,7 @@ mod items;
 
 #[derive(Clone, Debug)]
 struct PendingCall {
+    operation: OperationId,
     call_id: CallId,
     claim_request: RequestId,
     is_wait_agent: bool,
@@ -138,6 +139,15 @@ pub trait ResponsesTransport: Send + Sync {
         }
         Ok(turn)
     }
+    /// The local durable request is out-of-band and never enters provider wire JSON.
+    async fn create_streaming_for_request(
+        &self,
+        _request_id: &RequestId,
+        request: ResponsesRequest,
+        sink: tokio::sync::mpsc::Sender<StreamEvent>,
+    ) -> Result<ResponsesTurn, TransportError> {
+        self.create_streaming(request, sink).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -162,6 +172,7 @@ pub struct Engine<A: Auth, P: Provider, C: ResponsesTransport = ResponsesClient<
     scheduler: Arc<JobScheduler>,
     provider: Arc<P>,
     config: EngineConfig,
+    origin: ConversationIdentity,
     compact_at_input_tokens: Option<u64>,
     compaction_strategy: CompactionStrategy,
     _auth: std::marker::PhantomData<fn() -> A>,
@@ -189,21 +200,6 @@ impl<A: Auth + Clone + 'static, P: Provider + 'static> Engine<A, P, ResponsesCli
             config,
         )
     }
-}
-
-fn tool_kind_for_call(history: &[Item], call_id: &CallId) -> Result<ToolKind, EngineError> {
-    let mut kind = None;
-    for item in history {
-        let call = item
-            .tool_call()
-            .map_err(|_| EngineError::InvalidFunctionCall)?;
-        if let Some(call) = call.filter(|call| &call.call_id == call_id) {
-            if kind.replace(call.input.kind()).is_some() {
-                return Err(EngineError::InvalidFunctionCall);
-            }
-        }
-    }
-    kind.ok_or(EngineError::InvalidFunctionCall)
 }
 
 fn parsed_call_id(item: &Item) -> Result<Option<CallId>, EngineError> {
@@ -239,16 +235,22 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         provider: Arc<P>,
         config: EngineConfig,
     ) -> Self {
+        let origin = store.standalone_identity(config.agent.clone());
         Self {
             client,
             store,
             scheduler,
             provider,
             config,
+            origin,
             compact_at_input_tokens: None,
             compaction_strategy: CompactionStrategy::Server,
             _auth: std::marker::PhantomData,
         }
+    }
+    pub(crate) fn with_origin(mut self, origin: ConversationIdentity) -> Self {
+        self.origin = origin;
+        self
     }
 
     /// Opt into explicit server compaction after a turn whose input usage
@@ -430,10 +432,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let mut pending = Vec::<PendingCall>::new();
         let mut replay_items = Vec::<Item>::new();
         let mut replay_outputs =
-            Vec::<(CallId, crate::turn::JobOutput, ToolKind, RequestId)>::new();
+            Vec::<(OperationId, crate::turn::JobOutput, ToolKind, RequestId)>::new();
         let mut attachable = Vec::new();
         for claim in inherited_claims {
-            let tool_kind = tool_kind_for_call(&inherited_history, &claim.call_id)?;
+            let tool_kind = self.store.tool_invocation_kind(&claim.operation.request, &claim.call_id)?
+                .ok_or_else(|| EngineError::MissingInheritedOutput(claim.call_id.0.clone()))?;
             let already_output = inherited_history
                 .iter()
                 .filter(|item| {
@@ -505,8 +508,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
             // Validate every pending job before claiming any of them. The
             // scheduler retains jobs for the lifetime of this shared runtime.
-            let call_id = claim.call_id.clone();
-            match self.scheduler.output(&call_id).await {
+            match self.scheduler.output(&claim.operation).await {
                 Ok(_) => {}
                 // A pending durable claim with no in-memory job can only be
                 // resumed after process loss by replaying the external call,
@@ -524,13 +526,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         for (claim, tool_kind) in attachable {
             match self
                 .scheduler
-                .fork_claim(&claim.call_id, self.config.agent.clone(), true)
+                .fork_claim_exact(&claim.operation, self.origin.clone(), true)
                 .await?
             {
                 Some(output) => {
-                    replay_outputs.push((claim.call_id, output, tool_kind, claim.request))
+                    replay_outputs.push((claim.operation, output, tool_kind, claim.request))
                 }
                 None => pending.push(PendingCall {
+                    operation: claim.operation,
                     call_id: claim.call_id,
                     claim_request: claim.request,
                     is_wait_agent: false,
@@ -567,8 +570,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let agent = self.config.agent.clone();
             blocking(move || store.apply_pending_effort(&agent, &request)).await?;
         }
-        for (call_id, output, kind, claim_request) in replay_outputs {
-            self.persist_output(&call_id, kind, &output, &id, &claim_request)
+        for (operation, output, kind, claim_request) in replay_outputs {
+            self.persist_output(&operation, kind, &output, &id, &claim_request)
                 .await?;
         }
         if !replay_items.is_empty() {
@@ -810,7 +813,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
             let replay_request = req.clone();
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
-            let create = self.client.create_streaming(req, event_tx);
+            let model_request_id = parent.clone();
+            let create = self.client.create_streaming_for_request(&model_request_id, req, event_tx);
             tokio::pin!(create);
             let mut turn_call_ids = Vec::<CallId>::new();
             let mut turn_call_items = Vec::<(CallId, Item)>::new();
@@ -1058,9 +1062,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
 
             if let Some(wait_call_id) = wait_call {
                 let result = if let Some(call_id) = settled_this_turn.first() {
-                    WaitAgentResult {
+                    WaitAgentResultExact {
                         call_outputs: Vec::new(),
-                        resumed_by: WaitResume::Job(call_id.clone()),
+                        resumed_by: WaitResumeExact::Job(call_id.clone()),
                     }
                 } else {
                     match self
@@ -1071,14 +1075,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         Err(error) => return Err(self.cleanup_pending(error, &pending).await),
                     }
                 };
-                if matches!(&result.resumed_by, WaitResume::Cancelled) {
+                if matches!(&result.resumed_by, WaitResumeExact::Cancelled) {
                     return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
                 }
+                let wait_operation = OperationId { origin: self.origin.clone(), request: parent.clone(), call: wait_call_id };
                 if let Err(error) = self
                     .persist_wait_result(
                         &mut pending,
                         &parent,
-                        Some(&wait_call_id),
+                        Some(&wait_operation),
                         result,
                         admit_inbox,
                     )
@@ -1097,7 +1102,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     Ok(result) => result,
                     Err(error) => return Err(self.cleanup_pending(error, &pending).await),
                 };
-                if matches!(&result.resumed_by, WaitResume::Cancelled) {
+                if matches!(&result.resumed_by, WaitResumeExact::Cancelled) {
                     return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
                 }
                 if let Err(error) = self
@@ -1197,12 +1202,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     /// Turn a missing in-memory job into a durable interruption, unless a
     /// concurrent settlement already won and supplied the actual output.
     async fn recover_missing_job(&self, claim: &crate::store::Claim) -> Result<Item, EngineError> {
-        let history = self.read_history(&claim.request).await?;
-        let tool_kind = tool_kind_for_call(&history, &claim.call_id)?;
+        let tool_kind = self.store.tool_invocation_kind(&claim.operation.request, &claim.call_id)?
+            .ok_or_else(|| EngineError::MissingInheritedOutput(claim.call_id.0.clone()))?;
         let store = self.store.clone();
-        let call = claim.call_id.clone();
+        let call = claim.operation.clone();
         let request = claim.request.clone();
-        let interrupted = blocking(move || store.interrupt_claim(&call, &request)).await?;
+        let interrupted = blocking(move || store.interrupt_operation_claim(&call, &request)).await?;
         if interrupted > 0 {
             return Ok(Item::tool_output(
                 &claim.call_id,
@@ -1214,11 +1219,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         // A settlement may race the missing-job check. Never replace its
         // durable output with a synthetic interruption.
         let store = self.store.clone();
-        let call = claim.call_id.clone();
+        let call = claim.operation.clone();
         let request = claim.request.clone();
         let current = blocking(move || {
             store
-                .claims(&call)
+                .claims_for_operation(&call)
                 .map(|claims| claims.into_iter().find(|c| c.request == request))
         })
         .await?;
@@ -1304,6 +1309,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .map_err(|_| EngineError::InvalidFunctionCall)?
             .ok_or(EngineError::InvalidFunctionCall)?;
         let call_id = call.call_id;
+        let operation = OperationId { origin: self.origin.clone(), request: request.clone(), call: call_id.clone() };
         let name = call.name;
         let input = call.input;
         let tool_kind = input.kind();
@@ -1318,10 +1324,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             && matches!(&input, ToolInput::Function(args) if args["from"]["kind"].as_str() == Some("here"));
         if is_wait_agent {
             let store = self.store.clone();
-            let call = call_id.clone();
+            let call = operation.clone();
             let request_id = request.clone();
-            blocking(move || store.claim(&call, &request_id)).await?;
+            blocking(move || store.claim_operation(&call, &request_id)).await?;
             return Ok(Some(PendingCall {
+                operation,
                 call_id,
                 claim_request: request.clone(),
                 is_wait_agent,
@@ -1334,40 +1341,41 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         // checkpoint containing this call. Failure never cancels an unrelated
         // job whose call ID happened to collide with this attempted admission.
         let store = self.store.clone();
-        let call = call_id.clone();
+        let call = operation.clone();
         let request_id = request.clone();
-        blocking(move || store.claim(&call, &request_id)).await?;
+        blocking(move || store.claim_operation(&call, &request_id)).await?;
         if let Err(error) = self
             .scheduler
-            .start_input_for_agent(
+            .start_operation(
                 provider,
+                operation.clone(),
                 self.config.agent.clone(),
                 Some(request.clone()),
-                call_id.clone(),
                 name,
                 input,
             )
             .await
         {
             let store = self.store.clone();
-            let call = call_id.clone();
+            let call = operation.clone();
             let request_id = request.clone();
-            blocking(move || store.interrupt_claim(&call, &request_id)).await?;
+            blocking(move || store.interrupt_operation_claim(&call, &request_id)).await?;
             return Err(EngineError::Job(error));
         }
         if let Err(error) = self
             .scheduler
-            .claim(&call_id, self.config.agent.clone())
+            .claim_exact(&operation, self.origin.clone())
             .await
         {
-            let _ = self.scheduler.cancel(&call_id).await;
+            let _ = self.scheduler.cancel(&operation).await;
             let store = self.store.clone();
-            let call = call_id.clone();
+            let call = operation.clone();
             let request_id = request.clone();
-            blocking(move || store.interrupt_claim(&call, &request_id)).await?;
+            blocking(move || store.interrupt_operation_claim(&call, &request_id)).await?;
             return Err(EngineError::Job(error));
         }
         Ok(Some(PendingCall {
+            operation,
             call_id,
             claim_request: request.clone(),
             is_wait_agent,
@@ -1382,15 +1390,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         for call in pending {
             let mut persisted_terminal = false;
             if call.cancel_job_on_cleanup && !call.is_wait_agent {
-                if let Err(error) = self.scheduler.cancel(&call.call_id).await {
+                if let Err(error) = self.scheduler.cancel(&call.operation).await {
                     if !matches!(error, JobError::UnknownCall) {
                         first_error.get_or_insert_with(|| EngineError::Job(error));
                     }
                 }
-                match self.scheduler.output(&call.call_id).await {
+                match self.scheduler.output(&call.operation).await {
                     Ok(Some(output)) => match self
                         .retain_settled_output(
-                            &call.call_id,
+                            &call.operation,
                             call.tool_kind,
                             &output,
                             &call.claim_request,
@@ -1411,10 +1419,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
             if !persisted_terminal {
                 let store = self.store.clone();
-                let call_id = call.call_id.clone();
+                let operation = call.operation.clone();
                 let request = call.claim_request.clone();
                 if let Err(error) =
-                    blocking(move || store.interrupt_claim(&call_id, &request)).await
+                    blocking(move || store.interrupt_operation_claim(&operation, &request)).await
                 {
                     first_error.get_or_insert(error);
                 }
@@ -1437,18 +1445,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         &self,
         pending: &mut Vec<PendingCall>,
         request: &RequestId,
-    ) -> Result<Vec<CallId>, EngineError> {
+    ) -> Result<Vec<OperationId>, EngineError> {
         let calls: Vec<_> = pending
             .iter()
             .filter(|call| !call.is_wait_agent)
-            .map(|call| call.call_id.clone())
+            .map(|call| call.operation.clone())
             .collect();
-        let outputs = outputs_in_call_order(&self.scheduler, &calls).await?;
+        let outputs = outputs_in_operation_order(&self.scheduler, &calls).await?;
         let mut settled = Vec::with_capacity(outputs.len());
-        for (call_id, output) in outputs {
+        for (operation, output) in outputs {
             let call = pending
                 .iter()
-                .find(|call| call.call_id == call_id)
+                .find(|call| call.operation == operation)
                 .expect("scheduler output belongs to a pending call");
             let output_request = if call.persist_here_invocation_output {
                 call.claim_request.clone()
@@ -1456,36 +1464,37 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 request.clone()
             };
             self.persist_output(
-                &call_id,
+                &operation,
                 call.tool_kind,
                 &output,
                 &output_request,
                 &call.claim_request,
             )
             .await?;
-            pending.retain(|call| call.call_id != call_id);
-            settled.push(call_id);
+            pending.retain(|call| call.operation != operation);
+            settled.push(operation);
         }
         Ok(settled)
     }
 
     async fn persist_output(
         &self,
-        call_id: &CallId,
+        operation: &OperationId,
         kind: ToolKind,
         output: &crate::turn::JobOutput,
         request: &RequestId,
         claim_request: &RequestId,
     ) -> Result<(), EngineError> {
+        let call_id = &operation.call;
         let item = Item::tool_output(call_id, kind, output);
         let store = self.store.clone();
-        let call = call_id.clone();
+        let call = operation.clone();
         let request = request.clone();
         let claimed_at = claim_request.clone();
         let terminal = blocking(move || {
             store.write_output(&call, &item)?;
             let claim = store
-                .claims(&call)?
+                .claims_for_operation(&call)?
                 .into_iter()
                 .find(|claim| claim.request == claimed_at);
             let retained = match claim.as_ref().and_then(|claim| claim.output.as_ref()) {
@@ -1516,19 +1525,20 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     /// request history, avoiding mutation of a parent branch during cleanup.
     async fn retain_settled_output(
         &self,
-        call_id: &CallId,
+        operation: &OperationId,
         kind: ToolKind,
         output: &crate::turn::JobOutput,
         claim_request: &RequestId,
     ) -> Result<(), EngineError> {
+        let call_id = &operation.call;
         let item = Item::tool_output(call_id, kind, output);
         let store = self.store.clone();
-        let call = call_id.clone();
+        let call = operation.clone();
         let claimed_at = claim_request.clone();
         let terminal = blocking(move || {
             store.write_output(&call, &item)?;
             let claim = store
-                .claims(&call)?
+                .claims_for_operation(&call)?
                 .into_iter()
                 .find(|claim| claim.request == claimed_at);
             let retained = match claim.as_ref().and_then(|claim| claim.output.as_ref()) {
@@ -1554,19 +1564,19 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         pending: &[PendingCall],
         envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<Envelope>,
         cancellation: &mut watch::Receiver<bool>,
-    ) -> Result<WaitAgentResult, EngineError> {
+    ) -> Result<WaitAgentResultExact, EngineError> {
         let calls: Vec<_> = pending
             .iter()
             .filter(|call| !call.is_wait_agent)
-            .map(|call| call.call_id.clone())
+            .map(|call| call.operation.clone())
             .collect();
         loop {
             let result =
-                wait_agent_and_drain(envelopes, &self.scheduler, cancellation, &calls).await?;
+                wait_agent_and_drain_exact(envelopes, &self.scheduler, cancellation, &calls).await?;
             match &result.resumed_by {
-                WaitResume::Job(call_id) if calls.contains(call_id) => return Ok(result),
-                WaitResume::Envelope(_) | WaitResume::Cancelled => return Ok(result),
-                WaitResume::Job(_) => continue,
+                WaitResumeExact::Job(operation) if calls.contains(operation) => return Ok(result),
+                WaitResumeExact::Envelope(_) | WaitResumeExact::Cancelled => return Ok(result),
+                WaitResumeExact::Job(_) => continue,
             }
         }
     }
@@ -1575,14 +1585,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         &self,
         pending: &mut Vec<PendingCall>,
         request: &RequestId,
-        wait_call: Option<&CallId>,
-        result: WaitAgentResult,
+        wait_call: Option<&OperationId>,
+        result: WaitAgentResultExact,
         durable_mailbox: bool,
     ) -> Result<(), EngineError> {
-        for (call_id, output) in result.call_outputs {
+        for (operation, output) in result.call_outputs {
             let call = pending
                 .iter()
-                .find(|call| call.call_id == call_id)
+                .find(|call| call.operation == operation)
                 .expect("wait result belongs to a pending call");
             let output_request = if call.persist_here_invocation_output {
                 call.claim_request.clone()
@@ -1590,18 +1600,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 request.clone()
             };
             self.persist_output(
-                &call_id,
+                &operation,
                 call.tool_kind,
                 &output,
                 &output_request,
                 &call.claim_request,
             )
             .await?;
-            pending.retain(|call| call.call_id != call_id);
+            pending.retain(|call| call.operation != operation);
         }
         let (agent_envelope, user_envelope, output) = match result.resumed_by {
-            WaitResume::Job(call_id) => (None, None, json!({"resumed_by":{"job":call_id.0}})),
-            WaitResume::Envelope(envelope) => {
+            WaitResumeExact::Job(operation) => (None, None, json!({"resumed_by":{"job":operation.call.0}})),
+            WaitResumeExact::Envelope(envelope) => {
                 let (channel, content) = envelope.render();
                 let role = match channel {
                     MessageChannel::Assistant => "assistant",
@@ -1620,7 +1630,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     (Some(item), None, resumed)
                 }
             }
-            WaitResume::Cancelled => return Err(EngineError::Cancelled),
+            WaitResumeExact::Cancelled => return Err(EngineError::Cancelled),
         };
         if let Some(wait_call) = wait_call {
             self.persist_output(
@@ -1631,7 +1641,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 request,
             )
             .await?;
-            pending.retain(|call| call.call_id != *wait_call);
+            pending.retain(|call| call.operation != *wait_call);
         }
         if durable_mailbox {
             // The wake envelope is only a hint. Its persisted inbox row is
@@ -1711,7 +1721,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let pending_items: Vec<Item> = pending
             .iter()
             .map(|call| {
-                history
+                self.store.items(&call.operation.request).map_err(|e| CompactError::Failed(e.to_string()))?
                     .iter()
                     .find(|item| {
                         item.0["call_id"].as_str() == Some(call.call_id.0.as_str())
@@ -1848,8 +1858,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let source_for_write = source.clone();
         let successor = request.clone();
         let branch = self.config.agent.0.clone();
+        let pending_operations = pending.iter().filter(|call| !call.is_wait_agent).map(|call| call.operation.clone()).collect::<Vec<_>>();
         blocking(move || {
-            store.write_compaction_request(&successor, &source_for_write, &branch, &window.items)
+            store.write_compaction_request_with_claims(&successor, &source_for_write, &branch, &window.items, &pending_operations)
         })
         .await?;
         if self.compaction_strategy == CompactionStrategy::PlainText {
@@ -2351,7 +2362,7 @@ mod tests {
             &crate::turn::JobOutput::Cancelled,
         );
         assert_eq!(
-            store.write_output(&cancelled, &cancelled_output).unwrap(),
+            store.write_output(&store.claims(&cancelled).unwrap()[0].operation, &cancelled_output).unwrap(),
             1
         );
 
@@ -2376,7 +2387,7 @@ mod tests {
             assert!(matches!(
                 engine
                     .persist_output(
-                        call,
+                        &store.claims(call).unwrap()[0].operation,
                         ToolKind::Function,
                         &crate::turn::JobOutput::Completed(Ok(json!({"late":"success"}))),
                         &delivery,
@@ -2406,7 +2417,7 @@ mod tests {
         assert!(matches!(
             engine
                 .retain_settled_output(
-                    &interrupted,
+                    &store.claims(&interrupted).unwrap()[0].operation,
                     ToolKind::Function,
                     &crate::turn::JobOutput::Cancelled,
                     &origin,
@@ -2417,7 +2428,7 @@ mod tests {
         assert!(matches!(
             engine
                 .retain_settled_output(
-                    &cancelled,
+                    &store.claims(&cancelled).unwrap()[0].operation,
                     ToolKind::Function,
                     &crate::turn::JobOutput::Completed(Ok(json!({"late":"success"}))),
                     &origin,
@@ -2427,7 +2438,7 @@ mod tests {
         ));
         engine
             .retain_settled_output(
-                &cancelled,
+                &store.claims(&cancelled).unwrap()[0].operation,
                 ToolKind::Function,
                 &crate::turn::JobOutput::Cancelled,
                 &origin,
@@ -2436,7 +2447,7 @@ mod tests {
             .unwrap();
         engine
             .persist_output(
-                &cancelled,
+                &store.claims(&cancelled).unwrap()[0].operation,
                 ToolKind::Function,
                 &crate::turn::JobOutput::Cancelled,
                 &delivery,
@@ -2479,7 +2490,7 @@ mod tests {
             .unwrap();
         store.set_effort(&head, Effort::Low).unwrap();
         store.claim(&call, &head).unwrap();
-        assert_eq!(store.write_output(&call, &output).unwrap(), 1);
+        assert_eq!(store.write_output(&store.claims(&call).unwrap()[0].operation, &output).unwrap(), 1);
         let engine = Engine::<FakeAuth, Echo, _>::with_transport(
             Replay {
                 requests: Arc::new(Mutex::new(Vec::new())),
@@ -2666,9 +2677,11 @@ mod tests {
 
         let scheduler = Arc::new(JobScheduler::new(1).unwrap());
         scheduler
-            .start(
+            .start_operation(
                 Arc::new(NeverSettlingTool),
-                call_id.clone(),
+                store.operation_for_request(&source_head, &call_id).unwrap(),
+                AgentPath("/root".into()),
+                Some(source_head.clone()),
                 "never".into(),
                 json!({}),
             )
@@ -2717,7 +2730,7 @@ mod tests {
             "/root/child"
         );
 
-        scheduler.cancel(&call_id).await.unwrap();
+        scheduler.cancel(&store.claims(&call_id).unwrap()[0].operation).await.unwrap();
         drop(engine);
         drop(store);
         std::fs::remove_file(&db_path).unwrap();
@@ -3125,18 +3138,18 @@ mod tests {
         });
         let scheduler = Arc::new(JobScheduler::new(1).unwrap());
         scheduler
-            .start_for_agent(
+            .start_operation(
                 provider.clone(),
+                store.operation_for_request(&source_head, &call_id).unwrap(),
                 AgentPath("/root".into()),
-                None,
-                call_id.clone(),
+                Some(source_head.clone()),
                 "slow".into(),
                 json!({}),
             )
             .await
             .unwrap();
         scheduler
-            .claim(&call_id, AgentPath("/root".into()))
+            .claim_exact(&store.operation_for_request(&source_head, &call_id).unwrap(), store.standalone_identity(AgentPath("/root".into())))
             .await
             .unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -3236,7 +3249,7 @@ mod tests {
             "child history contains the late output exactly once"
         );
         assert_eq!(
-            scheduler.output(&call_id).await.unwrap(),
+            scheduler.output(&store.claims(&call_id).unwrap()[0].operation).await.unwrap(),
             Some(JobOutput::Completed(Ok(json!({"slow_done":true}))))
         );
         let claims = store.claims(&call_id).unwrap();
@@ -3251,9 +3264,9 @@ mod tests {
         assert_eq!(child_claims[0].state, crate::store::ClaimState::Settled);
         assert!(claims.iter().any(|claim| claim.request == source_head));
         assert!(claims.iter().any(|claim| claim.request == snapshot));
-        let settled = scheduler.settled_claimants(&call_id).await.unwrap();
-        assert!(settled.contains(&AgentPath("/root".into())));
-        assert!(settled.contains(&AgentPath("/root/child".into())));
+        let settled = scheduler.settled_claimants_exact(&store.claims(&call_id).unwrap()[0].operation).await.unwrap();
+        assert!(settled.contains(&store.standalone_identity(AgentPath("/root".into()))));
+        assert!(settled.contains(&store.standalone_identity(AgentPath("/root/child".into()))));
     }
 
     #[tokio::test]
@@ -3595,22 +3608,22 @@ mod tests {
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let scheduler = Arc::new(JobScheduler::new(1).unwrap());
         scheduler
-            .start_for_agent(
+            .start_operation(
                 Arc::new(SlowProvider {
                     started: started.clone(),
                     release: tokio::sync::Mutex::new(Some(release_rx)),
                     released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 }),
+                store.operation_for_request(&invocation_request, &other_call_id).unwrap(),
                 parent.clone(),
                 Some(invocation_request.clone()),
-                other_call_id.clone(),
                 "slow".into(),
                 json!({}),
             )
             .await
             .unwrap();
         scheduler
-            .claim(&other_call_id, parent.clone())
+            .claim_exact(&store.operation_for_request(&invocation_request, &other_call_id).unwrap(), store.standalone_identity(parent.clone()))
             .await
             .unwrap();
 
@@ -3668,7 +3681,7 @@ mod tests {
             "call_id":call_id.0,
             "output":"{\"spawned\":true}"
         }));
-        assert_eq!(store.write_output(&call_id, &output).unwrap(), 2);
+        assert_eq!(store.write_output(&store.claims(&call_id).unwrap()[0].operation, &output).unwrap(), 2);
         let claims = store.claims(&call_id).unwrap();
         assert_eq!(claims.len(), 2, "parent and child claims both settle");
         assert!(
@@ -3772,7 +3785,7 @@ mod tests {
             "call_id":call_id.0,
             "output":"{\"settled_before_start\":true}"
         }));
-        store.write_output(&call_id, &output).unwrap();
+        store.write_output(&store.claims(&call_id).unwrap()[0].operation, &output).unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let replay = Replay {
             requests: requests.clone(),
@@ -3918,18 +3931,18 @@ mod tests {
         let provider = Arc::new(PendingProvider);
         let scheduler = Arc::new(JobScheduler::new(1).unwrap());
         scheduler
-            .start_for_agent(
+            .start_operation(
                 provider.clone(),
+                store.operation_for_request(&source_head, &call_id).unwrap(),
                 AgentPath("/root".into()),
-                None,
-                call_id.clone(),
+                Some(source_head.clone()),
                 "slow".into(),
                 json!({}),
             )
             .await
             .unwrap();
         scheduler
-            .claim(&call_id, AgentPath("/root".into()))
+            .claim_exact(&store.operation_for_request(&source_head, &call_id).unwrap(), store.standalone_identity(AgentPath("/root".into())))
             .await
             .unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -3984,7 +3997,7 @@ mod tests {
                 .unwrap(),
             Err(EngineError::Cancelled)
         ));
-        assert_eq!(scheduler.output(&call_id).await.unwrap(), None);
+        assert_eq!(scheduler.output(&store.claims(&call_id).unwrap()[0].operation).await.unwrap(), None);
         let claims = store.claims(&call_id).unwrap();
         assert_eq!(claims.len(), 2);
         assert!(
@@ -5651,11 +5664,11 @@ mod tests {
         cancel_tx.send(true).unwrap();
         assert!(matches!(run.await.unwrap(), Err(EngineError::Cancelled)));
         assert_eq!(
-            scheduler.output(&first).await.unwrap(),
+            scheduler.output(&store.claims(&first).unwrap()[0].operation).await.unwrap(),
             Some(JobOutput::Cancelled)
         );
         assert_eq!(
-            scheduler.output(&second).await.unwrap(),
+            scheduler.output(&store.claims(&second).unwrap()[0].operation).await.unwrap(),
             Some(JobOutput::Cancelled)
         );
         assert_eq!(store.claims(&first).unwrap()[0].state, ClaimState::Settled);
@@ -5711,7 +5724,7 @@ mod tests {
         ));
         let call = CallId("transport-fail".into());
         assert_eq!(
-            scheduler.output(&call).await.unwrap(),
+            scheduler.output(&store.claims(&call).unwrap()[0].operation).await.unwrap(),
             Some(JobOutput::Cancelled)
         );
         assert_eq!(store.claims(&call).unwrap()[0].state, ClaimState::Settled);
@@ -5757,7 +5770,7 @@ mod tests {
         ));
         let call = CallId("before-malformed".into());
         assert_eq!(
-            scheduler.output(&call).await.unwrap(),
+            scheduler.output(&store.claims(&call).unwrap()[0].operation).await.unwrap(),
             Some(JobOutput::Cancelled)
         );
         assert_eq!(store.claims(&call).unwrap()[0].state, ClaimState::Settled);

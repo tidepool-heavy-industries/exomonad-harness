@@ -7,7 +7,7 @@
 use crate::{
     item::{Item, ToolInput},
     mailbox::Envelope,
-    model::{AgentPath, CallId, RequestId},
+    model::{AgentPath, CallId, ConversationIdentity, OperationId, RequestId},
     provider::{CallContext, JobHandle, Provider, ProviderError},
 };
 use serde_json::Value;
@@ -35,10 +35,11 @@ pub enum JobOutput {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct JobSettlement {
+    pub operation: OperationId,
     pub call_id: CallId,
     pub output: JobOutput,
     /// Conversations whose outstanding call is made ready by this settlement.
-    pub claimants: Vec<AgentPath>,
+    pub claimants: Vec<ConversationIdentity>,
 }
 
 #[derive(Debug, Error)]
@@ -141,12 +142,13 @@ fn compare_priority(a: &(u64, RequestTicket), b: &(u64, RequestTicket)) -> Order
 }
 
 struct Job {
+    handle: JobHandle,
     started: bool,
     cancellation_owner: Option<Arc<dyn crate::provider::CancellationOwner>>,
     cancellation_gate: Arc<Mutex<()>>,
     cancellation_ack: Option<crate::provider::CancellationAcknowledgment>,
-    claimants: HashSet<AgentPath>,
-    settled_claimants: Vec<AgentPath>,
+    claimants: HashSet<ConversationIdentity>,
+    settled_claimants: Vec<ConversationIdentity>,
     output: Option<JobOutput>,
     /// The actual provider-future result, retained independently from the
     /// terminal output that was already published to claimants.
@@ -171,8 +173,22 @@ fn retain_progress(progress: &mut Vec<Value>, event: Value) {
 /// the request loop and the agent tree; it does not own durable persistence.
 pub struct JobScheduler {
     capacity: Arc<Semaphore>,
-    jobs: Arc<Mutex<HashMap<CallId, Job>>>,
-    events: broadcast::Sender<CallId>,
+    jobs: Arc<Mutex<HashMap<OperationId, Job>>>,
+    events: broadcast::Sender<OperationId>,
+    legacy_events: broadcast::Sender<CallId>,
+    detached_store: String,
+}
+
+/// A bare provider ID addresses only the scheduler's detached local test API.
+/// Shared Engine calls always pass their full `OperationId`.
+pub trait JobKey {
+    fn operation(&self, scheduler: &JobScheduler) -> OperationId;
+}
+impl JobKey for OperationId {
+    fn operation(&self, _scheduler: &JobScheduler) -> OperationId { self.clone() }
+}
+impl JobKey for CallId {
+    fn operation(&self, scheduler: &JobScheduler) -> OperationId { scheduler.detached_operation(self) }
 }
 
 // Existing JSON callers remain function calls at the typed dispatch boundary.
@@ -188,11 +204,23 @@ impl JobScheduler {
             return Err(JobError::ZeroCapacity);
         }
         let (events, _) = broadcast::channel(64);
+        let (legacy_events, _) = broadcast::channel(64);
         Ok(Self {
             capacity: Arc::new(Semaphore::new(capacity)),
             jobs: Arc::new(Mutex::new(HashMap::new())),
             events,
+            legacy_events,
+            detached_store: format!("scheduler:{}", uuid::Uuid::new_v4()),
         })
+    }
+    fn detached_operation(&self, call: &CallId) -> OperationId {
+        OperationId {
+            origin: ConversationIdentity::Standalone {
+                store: self.detached_store.clone(), actor: AgentPath("/root".into()),
+            },
+            request: RequestId("detached".into()),
+            call: call.clone(),
+        }
     }
 
     /// Register and launch a tool call, returning immediately with its stable
@@ -269,6 +297,21 @@ impl JobScheduler {
         name: String,
         input: ToolInput,
     ) -> Result<JobHandle, JobError> {
+        let operation = self.detached_operation(&call_id);
+        self.start_operation(provider, operation, agent, request, name, input).await
+    }
+
+    /// Start an exact original operation; this is the shared Engine path.
+    pub async fn start_operation(
+        &self,
+        provider: Arc<dyn Provider>,
+        operation: OperationId,
+        agent: AgentPath,
+        request: Option<RequestId>,
+        name: String,
+        input: ToolInput,
+    ) -> Result<JobHandle, JobError> {
+        let call_id = operation.call.clone();
         if matches!(&input, ToolInput::Custom(_)) && crate::provider::is_harness_tool(&name) {
             return Err(JobError::AgentVerbRequiresFunction);
         }
@@ -276,13 +319,15 @@ impl JobScheduler {
             return Err(JobError::FinalizeRequiresFunction);
         }
         let mut registry = self.jobs.lock().await;
-        if registry.contains_key(&call_id) {
+        if registry.contains_key(&operation) {
             return Err(JobError::DuplicateCall);
         }
         let (settled, _) = tokio::sync::watch::channel(None);
+        let handle = JobHandle(format!("job:{}", uuid::Uuid::new_v4()));
         registry.insert(
-            call_id.clone(),
+            operation.clone(),
             Job {
+                handle: handle.clone(),
                 started: false,
                 cancellation_owner: provider.cancellation_owner(),
                 cancellation_gate: Arc::new(Mutex::new(())),
@@ -300,11 +345,14 @@ impl JobScheduler {
         let jobs = self.jobs.clone();
         let capacity = self.capacity.clone();
         let events = self.events.clone();
+        let legacy_events = self.legacy_events.clone();
+        let task_operation = operation.clone();
         let task_call_id = call_id.clone();
+        let task_handle = handle.clone();
         let task_agent = agent;
         let task_request = request;
         let task_cancel = registry
-            .get(&call_id)
+            .get(&operation)
             .expect("job inserted before launch")
             .cancel
             .clone();
@@ -324,7 +372,7 @@ impl JobScheduler {
             };
             let cancelled_before_start = {
                 let mut registry = jobs.lock().await;
-                let job = registry.get_mut(&task_call_id).expect("registered job");
+                let job = registry.get_mut(&task_operation).expect("registered job");
                 if task_cancel.is_cancelled() {
                     true
                 } else {
@@ -334,8 +382,9 @@ impl JobScheduler {
             };
             if cancelled_before_start {
                 drop(permit);
-                settle(&jobs, task_call_id.clone(), JobOutput::Cancelled, None).await;
-                let _ = events.send(task_call_id);
+                settle(&jobs, task_operation.clone(), JobOutput::Cancelled, None).await;
+                let _ = events.send(task_operation);
+                let _ = legacy_events.send(task_call_id);
                 return;
             }
             let (progress, mut progress_rx) =
@@ -353,7 +402,8 @@ impl JobScheduler {
                 progress.clone(),
             );
             let context = CallContext {
-                handle: JobHandle(task_call_id.0.clone()),
+                handle: task_handle,
+                operation: Some(task_operation.clone()),
                 call_id: task_call_id.clone(),
                 agent: task_agent,
                 request: task_request,
@@ -373,7 +423,7 @@ impl JobScheduler {
                 tokio::select! {
                     event = progress_rx.recv() => {
                         if let Some(event) = event {
-                            if let Some(job) = jobs.lock().await.get_mut(&task_call_id) {
+                            if let Some(job) = jobs.lock().await.get_mut(&task_operation) {
                                 retain_progress(&mut job.progress, event);
                             }
                         }
@@ -382,21 +432,22 @@ impl JobScheduler {
                 }
             };
             while let Ok(event) = progress_rx.try_recv() {
-                if let Some(job) = jobs.lock().await.get_mut(&task_call_id) {
+                if let Some(job) = jobs.lock().await.get_mut(&task_operation) {
                     retain_progress(&mut job.progress, event);
                 }
             }
             drop(permit);
             settle(
                 &jobs,
-                task_call_id.clone(),
+                task_operation.clone(),
                 JobOutput::Completed(result.clone()),
                 Some(result),
             )
             .await;
-            let _ = events.send(task_call_id);
+            let _ = events.send(task_operation);
+            let _ = legacy_events.send(task_call_id);
         });
-        if let Some(job) = registry.get_mut(&call_id) {
+        if let Some(job) = registry.get_mut(&operation) {
             job.task = Some(task);
         } else {
             task.abort();
@@ -404,7 +455,7 @@ impl JobScheduler {
         }
         drop(registry);
         let _ = launch.send(());
-        Ok(JobHandle(call_id.0))
+        Ok(handle)
     }
 
     /// Admit a tool as soon as a complete streamed function or custom call item is
@@ -441,8 +492,17 @@ impl JobScheduler {
         call_id: &CallId,
         claimant: AgentPath,
     ) -> Result<Option<JobOutput>, JobError> {
+        let operation = self.detached_operation(call_id);
+        self.claim_exact(&operation, ConversationIdentity::Standalone { store: self.detached_store.clone(), actor: claimant }).await
+    }
+
+    pub async fn claim_exact(
+        &self,
+        operation: &OperationId,
+        claimant: ConversationIdentity,
+    ) -> Result<Option<JobOutput>, JobError> {
         let mut jobs = self.jobs.lock().await;
-        let job = jobs.get_mut(call_id).ok_or(JobError::UnknownCall)?;
+        let job = jobs.get_mut(operation).ok_or(JobError::UnknownCall)?;
         if let Some(output) = &job.output {
             return Ok(Some(output.clone()));
         }
@@ -458,10 +518,19 @@ impl JobScheduler {
         claimant: AgentPath,
         inherit: bool,
     ) -> Result<Option<JobOutput>, JobError> {
+        let operation = self.detached_operation(call_id);
+        self.fork_claim_exact(&operation, ConversationIdentity::Standalone { store: self.detached_store.clone(), actor: claimant }, inherit).await
+    }
+    pub async fn fork_claim_exact(
+        &self,
+        operation: &OperationId,
+        claimant: ConversationIdentity,
+        inherit: bool,
+    ) -> Result<Option<JobOutput>, JobError> {
         if inherit {
-            self.claim(call_id, claimant).await
+            self.claim_exact(operation, claimant).await
         } else {
-            if !self.jobs.lock().await.contains_key(call_id) {
+            if !self.jobs.lock().await.contains_key(operation) {
                 return Err(JobError::UnknownCall);
             }
             Ok(Some(JobOutput::Interrupted))
@@ -469,22 +538,26 @@ impl JobScheduler {
     }
 
     pub async fn settled_claimants(&self, call_id: &CallId) -> Result<Vec<AgentPath>, JobError> {
+        Ok(self.settled_claimants_exact(&self.detached_operation(call_id)).await?.into_iter().map(|c| c.actor().clone()).collect())
+    }
+    pub async fn settled_claimants_exact(&self, operation: &OperationId) -> Result<Vec<ConversationIdentity>, JobError> {
         Ok(self
             .jobs
             .lock()
             .await
-            .get(call_id)
+            .get(operation)
             .ok_or(JobError::UnknownCall)?
             .settled_claimants
             .clone())
     }
 
-    pub async fn output(&self, call_id: &CallId) -> Result<Option<JobOutput>, JobError> {
+    pub async fn output<K: JobKey>(&self, call_id: &K) -> Result<Option<JobOutput>, JobError> {
+        let call_id = call_id.operation(self);
         Ok(self
             .jobs
             .lock()
             .await
-            .get(call_id)
+            .get(&call_id)
             .ok_or(JobError::UnknownCall)?
             .output
             .clone())
@@ -492,26 +565,28 @@ impl JobScheduler {
 
     /// Inspect the provider future's actual completion, even when a prior
     /// cancellation outcome remains the immutable result delivered to callers.
-    pub async fn provider_completion(
+    pub async fn provider_completion<K: JobKey>(
         &self,
-        call_id: &CallId,
+        call_id: &K,
     ) -> Result<Option<Result<Value, String>>, JobError> {
+        let call_id = call_id.operation(self);
         Ok(self
             .jobs
             .lock()
             .await
-            .get(call_id)
+            .get(&call_id)
             .ok_or(JobError::UnknownCall)?
             .provider_completion
             .clone())
     }
 
-    pub async fn progress(&self, call_id: &CallId) -> Result<Vec<Value>, JobError> {
+    pub async fn progress<K: JobKey>(&self, call_id: &K) -> Result<Vec<Value>, JobError> {
+        let call_id = call_id.operation(self);
         Ok(self
             .jobs
             .lock()
             .await
-            .get(call_id)
+            .get(&call_id)
             .ok_or(JobError::UnknownCall)?
             .progress
             .clone())
@@ -520,11 +595,12 @@ impl JobScheduler {
     /// Wait for this job's retained call output. The output remains readable
     /// after this future resolves and can therefore be delivered to every
     /// claimant on the same call id.
-    pub async fn wait(&self, call_id: &CallId) -> Result<JobOutput, JobError> {
+    pub async fn wait<K: JobKey>(&self, call_id: &K) -> Result<JobOutput, JobError> {
+        let call_id = call_id.operation(self);
         loop {
             let mut settled = {
                 let jobs = self.jobs.lock().await;
-                let job = jobs.get(call_id).ok_or(JobError::UnknownCall)?;
+                let job = jobs.get(&call_id).ok_or(JobError::UnknownCall)?;
                 if let Some(output) = &job.output {
                     return Ok(output.clone());
                 }
@@ -541,18 +617,20 @@ impl JobScheduler {
 
     /// Cancel an in-flight job. Cancellation is a typed terminal output; it
     /// is retained and delivered through the same claim mechanism.
-    pub async fn cancel(&self, call_id: &CallId) -> Result<Option<JobSettlement>, JobError> {
+    pub async fn cancel<K: JobKey>(&self, call_id: &K) -> Result<Option<JobSettlement>, JobError> {
+        let call_id = call_id.operation(self);
         let gate = {
             let jobs = self.jobs.lock().await;
-            jobs.get(call_id)
+            jobs.get(&call_id)
                 .ok_or(JobError::UnknownCall)?
                 .cancellation_gate
                 .clone()
         };
         let _guard = gate.lock().await;
+        let handle = self.jobs.lock().await.get(&call_id).ok_or(JobError::UnknownCall)?.handle.clone();
         let owner = {
             let jobs = self.jobs.lock().await;
-            let job = jobs.get(call_id).ok_or(JobError::UnknownCall)?;
+            let job = jobs.get(&call_id).ok_or(JobError::UnknownCall)?;
             if job.output.is_some() {
                 return Ok(None);
             }
@@ -566,7 +644,7 @@ impl JobScheduler {
         if let Some(owner) = owner {
             {
                 let jobs = self.jobs.lock().await;
-                let job = jobs.get(call_id).ok_or(JobError::UnknownCall)?;
+                let job = jobs.get(&call_id).ok_or(JobError::UnknownCall)?;
                 if job.output.is_some() {
                     return Ok(None);
                 }
@@ -574,7 +652,7 @@ impl JobScheduler {
             }
             let ack = tokio::time::timeout(
                 JOB_CANCELLATION_GRACE,
-                owner.cancel(&JobHandle(call_id.0.clone())),
+                owner.cancel(&handle),
             )
             .await
             .unwrap_or_else(|_| {
@@ -584,7 +662,7 @@ impl JobScheduler {
             });
             let (task, settlement) = {
                 let mut jobs = self.jobs.lock().await;
-                let job = jobs.get_mut(call_id).ok_or(JobError::UnknownCall)?;
+                let job = jobs.get_mut(&call_id).ok_or(JobError::UnknownCall)?;
                 job.cancellation_ack = Some(ack.clone());
                 // Completion while the owner was answering wins unchanged.
                 if job.output.is_some() {
@@ -607,7 +685,8 @@ impl JobScheduler {
                 (
                     task,
                     JobSettlement {
-                        call_id: call_id.clone(),
+                        operation: call_id.clone(),
+                        call_id: call_id.call.clone(),
                         output,
                         claimants: job.settled_claimants.clone(),
                     },
@@ -618,11 +697,12 @@ impl JobScheduler {
                 let _ = task.await;
             }
             let _ = self.events.send(call_id.clone());
+            let _ = self.legacy_events.send(call_id.call.clone());
             return Ok(Some(settlement));
         }
         let (mut task, cancel, settlement) = {
             let mut jobs = self.jobs.lock().await;
-            let job = jobs.get_mut(call_id).ok_or(JobError::UnknownCall)?;
+            let job = jobs.get_mut(&call_id).ok_or(JobError::UnknownCall)?;
             if job.output.is_some() {
                 return Ok(None);
             }
@@ -634,7 +714,8 @@ impl JobScheduler {
                 job.task.take(),
                 job.cancel.clone(),
                 JobSettlement {
-                    call_id: call_id.clone(),
+                    operation: call_id.clone(),
+                    call_id: call_id.call.clone(),
                     output,
                     claimants: job.settled_claimants.clone(),
                 },
@@ -655,18 +736,20 @@ impl JobScheduler {
         }
         if publish_event {
             let _ = self.events.send(call_id.clone());
+            let _ = self.legacy_events.send(call_id.call.clone());
         }
         Ok(Some(settlement))
     }
 
     /// Ask the retained external owner again without rewriting an emitted result.
-    pub async fn retry_cancellation(
+    pub async fn retry_cancellation<K: JobKey>(
         &self,
-        call_id: &CallId,
+        call_id: &K,
     ) -> Result<Option<crate::provider::CancellationAcknowledgment>, JobError> {
+        let call_id = call_id.operation(self);
         let (owner, gate) = {
             let jobs = self.jobs.lock().await;
-            let job = jobs.get(call_id).ok_or(JobError::UnknownCall)?;
+            let job = jobs.get(&call_id).ok_or(JobError::UnknownCall)?;
             (
                 job.cancellation_owner.clone(),
                 job.cancellation_gate.clone(),
@@ -676,9 +759,10 @@ impl JobScheduler {
             return Ok(None);
         };
         let _guard = gate.lock().await;
+        let handle = self.jobs.lock().await.get(&call_id).ok_or(JobError::UnknownCall)?.handle.clone();
         {
             let jobs = self.jobs.lock().await;
-            let job = jobs.get(call_id).ok_or(JobError::UnknownCall)?;
+            let job = jobs.get(&call_id).ok_or(JobError::UnknownCall)?;
             if matches!(job.provider_completion, Some(Ok(_))) {
                 return Ok(job.cancellation_ack.clone());
             }
@@ -694,7 +778,7 @@ impl JobScheduler {
         }
         let ack = tokio::time::timeout(
             JOB_CANCELLATION_GRACE,
-            owner.cancel(&JobHandle(call_id.0.clone())),
+            owner.cancel(&handle),
         )
         .await
         .unwrap_or_else(|_| {
@@ -704,7 +788,7 @@ impl JobScheduler {
         });
         let task = {
             let mut jobs = self.jobs.lock().await;
-            let job = jobs.get_mut(call_id).ok_or(JobError::UnknownCall)?;
+            let job = jobs.get_mut(&call_id).ok_or(JobError::UnknownCall)?;
             job.cancellation_ack = Some(ack.clone());
             if matches!(ack, crate::provider::CancellationAcknowledgment::Stopped)
                 && job.provider_completion.is_none()
@@ -722,22 +806,26 @@ impl JobScheduler {
     }
 
     /// Inspect cleanup evidence without sending another cancellation request.
-    pub async fn cancellation_acknowledgment(
+    pub async fn cancellation_acknowledgment<K: JobKey>(
         &self,
-        call_id: &CallId,
+        call_id: &K,
     ) -> Result<Option<crate::provider::CancellationAcknowledgment>, JobError> {
+        let call_id = call_id.operation(self);
         let jobs = self.jobs.lock().await;
         Ok(jobs
-            .get(call_id)
+            .get(&call_id)
             .ok_or(JobError::UnknownCall)?
             .cancellation_ack
             .clone())
     }
 
-    /// Subscribe to job-settlement signals for wait-agent coordination.
-    /// Consumers still read the authoritative retained output by call id.
-    pub fn settlements(&self) -> broadcast::Receiver<CallId> {
+    /// Subscribe to exact operation-settlement signals.
+    pub fn operation_settlements(&self) -> broadcast::Receiver<OperationId> {
         self.events.subscribe()
+    }
+    /// Detached local API events; shared Engine consumers use `operation_settlements`.
+    pub fn settlements(&self) -> broadcast::Receiver<CallId> {
+        self.legacy_events.subscribe()
     }
 }
 
@@ -755,6 +843,73 @@ pub async fn outputs_in_call_order(
         }
     }
     Ok(outputs)
+}
+
+pub async fn outputs_in_operation_order(
+    scheduler: &JobScheduler,
+    operations: &[OperationId],
+) -> Result<Vec<(OperationId, JobOutput)>, JobError> {
+    let mut outputs = Vec::new();
+    for operation in operations {
+        if let Some(output) = scheduler.output(operation).await? {
+            outputs.push((operation.clone(), output));
+        }
+    }
+    Ok(outputs)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum WaitResumeExact {
+    Job(OperationId),
+    Envelope(Envelope),
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WaitAgentResultExact {
+    pub call_outputs: Vec<(OperationId, JobOutput)>,
+    pub resumed_by: WaitResumeExact,
+}
+
+pub async fn wait_agent_and_drain_exact(
+    envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+    jobs: &JobScheduler,
+    cancelled: &mut tokio::sync::watch::Receiver<bool>,
+    outstanding: &[OperationId],
+) -> Result<WaitAgentResultExact, JobError> {
+    let resumed_by = wait_agent_exact(envelopes, jobs, cancelled, outstanding).await;
+    let call_outputs = outputs_in_operation_order(jobs, outstanding).await?;
+    Ok(WaitAgentResultExact { call_outputs, resumed_by })
+}
+
+pub async fn wait_agent_exact(
+    envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+    jobs: &JobScheduler,
+    cancelled: &mut tokio::sync::watch::Receiver<bool>,
+    outstanding: &[OperationId],
+) -> WaitResumeExact {
+    if *cancelled.borrow() { return WaitResumeExact::Cancelled; }
+    let mut settlements = jobs.operation_settlements();
+    for operation in outstanding {
+        if jobs.output(operation).await.ok().flatten().is_some() {
+            return WaitResumeExact::Job(operation.clone());
+        }
+    }
+    loop {
+        tokio::select! {
+            envelope = envelopes.recv() => if let Some(envelope) = envelope {
+                return WaitResumeExact::Envelope(envelope);
+            },
+            event = settlements.recv() => match event {
+                Ok(operation) if outstanding.contains(&operation) => return WaitResumeExact::Job(operation),
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return WaitResumeExact::Cancelled,
+            },
+            changed = cancelled.changed() => if changed.is_err() || *cancelled.borrow() {
+                return WaitResumeExact::Cancelled;
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -827,14 +982,14 @@ pub async fn wait_agent(
 }
 
 async fn settle(
-    jobs: &Mutex<HashMap<CallId, Job>>,
-    call_id: CallId,
+    jobs: &Mutex<HashMap<OperationId, Job>>,
+    operation: OperationId,
     output: JobOutput,
     provider_completion: Option<Result<Value, String>>,
 ) -> JobSettlement {
     let settlement = {
         let mut jobs = jobs.lock().await;
-        if let Some(job) = jobs.get_mut(&call_id) {
+        if let Some(job) = jobs.get_mut(&operation) {
             if let Some(completion) = provider_completion {
                 job.provider_completion = Some(completion);
             }
@@ -846,19 +1001,21 @@ async fn settle(
                 output
             };
             JobSettlement {
-                call_id,
+                call_id: operation.call.clone(),
+                operation,
                 output: final_output,
                 claimants: job.settled_claimants.clone(),
             }
         } else {
             JobSettlement {
-                call_id,
+                call_id: operation.call.clone(),
+                operation,
                 output,
                 claimants: Vec::new(),
             }
         }
     };
-    if let Some(job) = jobs.lock().await.get(&settlement.call_id) {
+    if let Some(job) = jobs.lock().await.get(&settlement.operation) {
         job.settled.send_replace(Some(settlement.output.clone()));
     }
     settlement
@@ -1136,7 +1293,7 @@ mod tests {
         // Exercise the first-terminal-wins guard at the settlement boundary.
         let late = settle(
             &scheduler.jobs,
-            call_id.clone(),
+            scheduler.detached_operation(&call_id),
             JobOutput::Completed(Ok(json!({"late": true}))),
             Some(Ok(json!({"late": true}))),
         )

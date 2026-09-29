@@ -22,11 +22,14 @@ CREATE TABLE IF NOT EXISTS envelopes (
 );
 CREATE INDEX IF NOT EXISTS envelopes_recipient ON envelopes(recipient, id);
 CREATE TABLE IF NOT EXISTS claims (
+ origin TEXT NOT NULL, origin_request_id TEXT NOT NULL REFERENCES requests(id),
  call_id TEXT NOT NULL, request_id TEXT NOT NULL REFERENCES requests(id),
  state TEXT NOT NULL CHECK(state IN ('pending','settled','interrupted')),
- output_hash TEXT REFERENCES items(hash), PRIMARY KEY(call_id, request_id)
+ output_hash TEXT REFERENCES items(hash),
+ PRIMARY KEY(origin, origin_request_id, call_id, request_id)
 );
 CREATE INDEX IF NOT EXISTS claims_request ON claims(request_id, state);
+CREATE INDEX IF NOT EXISTS claims_operation ON claims(origin, origin_request_id, call_id, state);
 CREATE TABLE IF NOT EXISTS decisions (
  id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT REFERENCES requests(id),
  hook TEXT NOT NULL, event_refs TEXT NOT NULL, decision TEXT NOT NULL,
