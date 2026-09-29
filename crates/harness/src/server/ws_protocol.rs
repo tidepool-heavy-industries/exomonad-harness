@@ -36,9 +36,57 @@ pub enum ToolJobState {
     Interrupted,
 }
 
+/// Host-owned actor incarnation. The harness only projects this identity; it
+/// does not issue or supervise it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostActorIdentity {
+    pub run: String,
+    pub actor: String,
+    pub incarnation: String,
+}
+
+impl HostActorIdentity {
+    /// Stable key used by browser actor.upsert/entity.remove projections.
+    pub fn wire_key(&self) -> String {
+        serde_json::to_string(&(&self.run, &self.actor, &self.incarnation))
+            .expect("actor identity strings serialize")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostActorKind {
+    Model,
+    Workflow,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostActorLifecycle {
+    Running,
+    Waiting,
+    Retiring,
+    Retired,
+    Lost,
+}
+
+/// A host-supplied browser row, including Haskell-only workflow actors.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostActorProjection {
+    pub identity: HostActorIdentity,
+    pub parent: Option<HostActorIdentity>,
+    pub kind: HostActorKind,
+    pub lifecycle: HostActorLifecycle,
+    pub model_conversation: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub seq: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actors: Vec<HostActorProjection>,
     pub conversations: Vec<serde_json::Value>,
     pub requests: Vec<serde_json::Value>,
     pub jobs: Vec<serde_json::Value>,
@@ -193,6 +241,54 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<WsClientFrame>(json!({"type":"snapshot.request"})).unwrap(),
             WsClientFrame::SnapshotRequest
+        );
+    }
+
+    #[test]
+    fn host_actor_projection_keeps_exact_incarnation_and_workflow_kind() {
+        let parent = HostActorIdentity {
+            run: "run-1".into(),
+            actor: "root".into(),
+            incarnation: "first".into(),
+        };
+        let child = HostActorProjection {
+            identity: HostActorIdentity {
+                run: "run-1".into(),
+                actor: "reviewer".into(),
+                incarnation: "second".into(),
+            },
+            parent: Some(parent.clone()),
+            kind: HostActorKind::Workflow,
+            lifecycle: HostActorLifecycle::Waiting,
+            model_conversation: None,
+        };
+        let frame = WsServerFrame::Snapshot {
+            snapshot: Snapshot {
+                actors: vec![child.clone()],
+                ..Snapshot::default()
+            },
+        };
+        let wire = serde_json::to_value(&frame).unwrap();
+        assert_eq!(
+            wire["snapshot"]["actors"][0]["identity"]["incarnation"],
+            "second"
+        );
+        assert_eq!(
+            wire["snapshot"]["actors"][0]["parent"]["incarnation"],
+            "first"
+        );
+        assert_eq!(wire["snapshot"]["actors"][0]["kind"], "workflow");
+        assert_eq!(
+            child.identity.wire_key(),
+            r#"["run-1","reviewer","second"]"#
+        );
+        assert_eq!(
+            wire["snapshot"]["actors"][0]["modelConversation"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            serde_json::from_value::<WsServerFrame>(wire).unwrap(),
+            frame
         );
     }
 }

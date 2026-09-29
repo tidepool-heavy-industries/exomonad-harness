@@ -3858,6 +3858,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Snapshot {
                 seq: 5,
+                actors: vec![],
                 conversations: vec![conversation],
                 requests: vec![request],
                 jobs: vec![job_record("j1", "settled")],

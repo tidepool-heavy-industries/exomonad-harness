@@ -7,6 +7,30 @@ import { customJobJourney, customSuccessJourney } from './fixture'
 import App from './App'
 
 describe('web outcome integration', () => {
+  it('shows Haskell-only host actors apart from model conversations', () => {
+    const snapshot: Snapshot = {
+      seq: 1,
+      actors: [
+        { identity: { run: 'run-1', actor: 'root', incarnation: 'first' }, parent: null,
+          kind: 'model', lifecycle: 'running', modelConversation: 'root-conversation' },
+        { identity: { run: 'run-1', actor: 'reviewer', incarnation: 'second' },
+          parent: { run: 'run-1', actor: 'root', incarnation: 'first' },
+          kind: 'workflow', lifecycle: 'waiting', modelConversation: null },
+      ],
+      conversations: [{ id: 'root-conversation', path: '/root', state: 'requesting' }],
+      requests: [], jobs: [], envelopes: [],
+    };
+    const view = toViewModel(normalizeSnapshot(snapshot));
+    expect(view.nodes).toHaveLength(1);
+    expect(view.actors).toHaveLength(2);
+    render(createElement(App, { data: view }));
+    const actorTable = screen.getByRole('table', { name: 'Host actor lifecycles' });
+    expect(actorTable.textContent).toContain('reviewer (workflow)');
+    expect(actorTable.textContent).toContain('incarnation second');
+    expect(actorTable.textContent).toContain('waiting');
+    expect(screen.getByRole('table', { name: 'Conversation tree' }).textContent).not.toContain('reviewer');
+  });
+
   it('reopens a settled custom job with progress and retained output in App', () => {
     const [running, settled, reopened] = customSuccessJourney
     expect(running).toBeDefined()

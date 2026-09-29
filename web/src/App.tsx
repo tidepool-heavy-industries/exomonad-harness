@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
+import NodeWindow from "./NodeWindow";
 
 /**
  * Presentation-only contract for the web views. The server/protocol adapter
@@ -6,6 +7,16 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
  * not import or re-declare wire types.
  */
 export type HarnessViewModel = {
+  actors?: Array<{
+    id: string;
+    name: string;
+    run: string;
+    incarnation: string;
+    parent?: string;
+    kind: "model" | "workflow";
+    lifecycle: string;
+    modelConversation?: string;
+  }>;
   nodes: Array<{
     id: string;
     parentId?: string;
@@ -97,6 +108,7 @@ const styles = `
   .command-form input { flex:1; min-width:0; padding:10px; color:var(--fg); background:var(--bg); border:1px solid var(--line); }
   .command-form button { padding:8px 14px; background:var(--fg); color:var(--bg); border:1px solid var(--fg); cursor:pointer; }
   .message { white-space:pre-wrap; overflow-wrap:anywhere; }
+  .message pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:4px 0 12px; }
   .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
   @media(max-width:600px) {
     .top { align-items:flex-start; flex-wrap:wrap; gap:4px; padding:8px; }
@@ -149,12 +161,34 @@ function Tree({ data }: { data: HarnessViewModel }) {
   );
 }
 
-function Timeline({ data }: { data: HarnessViewModel }) {
+function HostActors({ data }: { data: HarnessViewModel }) {
+  const actors = data.actors ?? [];
+  if (actors.length === 0) return null;
+  return <section aria-label="Host actors">
+    <h2>Host actors</h2>
+    <div role="table" aria-label="Host actor lifecycles" className="rows">
+      <div className="row" role="row"><strong role="columnheader">Actor</strong><strong role="columnheader">Lifecycle</strong><strong role="columnheader">Incarnation · relation</strong></div>
+      {actors.map((actor) => <div className="row" role="row" key={actor.id}>
+        <strong role="cell">{actor.name} <span className="hint">({actor.kind})</span></strong>
+        <span role="cell" className="state" data-state={actor.lifecycle}>{actor.lifecycle}</span>
+        <span role="cell" className="meta">{[
+          `run ${actor.run}`, `incarnation ${actor.incarnation}`,
+          actor.parent ? `parent ${actor.parent}` : undefined,
+          actor.modelConversation ? `conversation ${actor.modelConversation}` : undefined,
+        ].filter(Boolean).join(" · ")}</span>
+      </div>)}
+    </div>
+  </section>;
+}
+
+function Timeline({ data, onInspectRequest }: { data: HarnessViewModel; onInspectRequest?: (requestId: string) => void }) {
   return data.timeline.length === 0 ? <Empty title="No activity yet" help="Requests, jobs and waits will be listed as they happen." /> : (
     <div role="table" aria-label="Conversation activity timeline" className="rows">
       <div className="row" role="row"><strong role="columnheader">Activity</strong><strong role="columnheader">State</strong><strong role="columnheader">Node · start · duration</strong></div>
       {data.timeline.map((item) => <div className="row" role="row" key={item.id}>
-        <span role="cell"><span className="mono">{item.kind}</span> · {item.label}</span>
+        <span role="cell"><span className="mono">{item.kind}</span> · {item.label}
+          {item.kind === "request" && onInspectRequest && <button type="button" onClick={() => onInspectRequest(item.id)}>Inspect history</button>}
+        </span>
         <span role="cell" className="state" data-state={item.state}>{item.state}</span>
         <span role="cell" className="meta">{[
           `id ${item.id}`,
@@ -196,6 +230,7 @@ function Inbox({ data }: { data: HarnessViewModel }) {
 export default function App({ data = emptyData, onCommand, acceptedCommandIds = [] }: AppProps) {
   const [screen, setScreen] = useState<Screen>("tree");
   const [command, setCommand] = useState("");
+  const [inspectedRequest, setInspectedRequest] = useState<string>();
   useEffect(() => {
     let prefix = "";
     let timer = 0;
@@ -231,8 +266,9 @@ export default function App({ data = emptyData, onCommand, acceptedCommandIds = 
       </header>
       <main>
         <div className="toolbar"><h1>{screens.find((item) => item.id === screen)?.title}</h1><span className="hint">Keyboard: g then t / l / i / c</span></div>
-        {screen === "tree" && <Tree data={data} />}
-        {screen === "timeline" && <Timeline data={data} />}
+        {screen === "tree" && <><HostActors data={data} /><Tree data={data} /></>}
+        {screen === "timeline" && <><Timeline data={data} onInspectRequest={setInspectedRequest} />
+          {inspectedRequest && <NodeWindow key={inspectedRequest} requestId={inspectedRequest} onClose={() => setInspectedRequest(undefined)} />}</>}
         {screen === "inbox" && <Inbox data={data} />}
         {screen === "command" && <section aria-labelledby="command-heading">
           <h2 id="command-heading">Send a command</h2>
@@ -263,8 +299,9 @@ export default function App({ data = emptyData, onCommand, acceptedCommandIds = 
           {acceptedCommandIds.filter((id) => !data.timeline.some((item) => item.commandId === id)).map((id) => (
             <p className="hint" role="status" key={id}>Server accepted command {id}; this acknowledgment is not a terminal outcome.</p>
           ))}
-          <Timeline data={data} />
-          <h2>Conversation and child identities</h2><Tree data={data} />
+          <Timeline data={data} onInspectRequest={setInspectedRequest} />
+          {inspectedRequest && <NodeWindow key={inspectedRequest} requestId={inspectedRequest} onClose={() => setInspectedRequest(undefined)} />}
+          <HostActors data={data} /><h2>Conversation and child identities</h2><Tree data={data} />
           <h2>Messages and replies</h2><Inbox data={data} />
         </section>}
       </main>

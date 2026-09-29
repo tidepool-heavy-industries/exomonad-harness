@@ -1,8 +1,18 @@
 import type { HarnessViewModel } from './App'
-import type { NormalizedState } from './protocol'
+import { actorIdentityKey, type NormalizedState } from './protocol'
 
 /** Translate normalized wire state into the view-only contract. */
 export function toViewModel(state: NormalizedState): HarnessViewModel {
+  const actors = [...state.actors.values()].map((actor) => ({
+    id: actorIdentityKey(actor.identity),
+    name: actor.identity.actor,
+    run: actor.identity.run,
+    incarnation: actor.identity.incarnation,
+    parent: actor.parent ? `${actor.parent.actor} · incarnation ${actor.parent.incarnation} · run ${actor.parent.run}` : undefined,
+    kind: actor.kind,
+    lifecycle: actor.lifecycle,
+    modelConversation: actor.modelConversation ?? undefined,
+  }))
   const nodes = [...state.conversations.values()].map((conversation) => ({
     id: conversation.id,
     parentId: parentPath(conversation.path, state),
@@ -60,7 +70,7 @@ export function toViewModel(state: NormalizedState): HarnessViewModel {
       ? (left.ordinal ?? 0) - (right.ordinal ?? 0)
       : left.index - right.index)
     .map(({ index: _index, ...envelope }) => envelope)
-  return { nodes, timeline, inbox }
+  return { actors, nodes, timeline, inbox }
 }
 
 function parentPath(path: string, state: NormalizedState): string | undefined {

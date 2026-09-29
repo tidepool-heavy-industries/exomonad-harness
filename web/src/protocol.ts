@@ -6,10 +6,30 @@ export type EntityId = string;
 
 export interface Snapshot {
   readonly seq: number;
+  /** Absent in standalone snapshots written before host actor projection. */
+  readonly actors?: readonly HostActorProjection[];
   readonly conversations: readonly Conversation[];
   readonly requests: readonly RequestRecord[];
   readonly jobs: readonly Job[];
   readonly envelopes: readonly Envelope[];
+}
+
+export interface HostActorIdentity {
+  readonly run: string;
+  readonly actor: string;
+  readonly incarnation: string;
+}
+
+export interface HostActorProjection {
+  readonly identity: HostActorIdentity;
+  readonly parent: HostActorIdentity | null;
+  readonly kind: "model" | "workflow";
+  readonly lifecycle: "running" | "waiting" | "retiring" | "retired" | "lost";
+  readonly modelConversation: EntityId | null;
+}
+
+export function actorIdentityKey(identity: HostActorIdentity): string {
+  return JSON.stringify([identity.run, identity.actor, identity.incarnation]);
 }
 
 export interface Conversation {
@@ -65,11 +85,12 @@ export interface Envelope {
 }
 
 export type StateEvent =
+  | { readonly kind: "actor.upsert"; readonly value: HostActorProjection }
   | { readonly kind: "conversation.upsert"; readonly value: Conversation }
   | { readonly kind: "request.upsert"; readonly value: RequestRecord }
   | { readonly kind: "job.upsert"; readonly value: Job }
   | { readonly kind: "envelope.upsert"; readonly value: Envelope }
-  | { readonly kind: "entity.remove"; readonly entity: "conversation" | "request" | "job" | "envelope"; readonly id: EntityId };
+  | { readonly kind: "entity.remove"; readonly entity: "actor" | "conversation" | "request" | "job" | "envelope"; readonly id: EntityId };
 
 export interface SequencedEvent {
   readonly seq: number;
@@ -85,6 +106,7 @@ export interface DeltaEvent {
 
 export interface NormalizedState {
   readonly seq: number;
+  readonly actors: ReadonlyMap<EntityId, HostActorProjection>;
   readonly conversations: ReadonlyMap<EntityId, Conversation>;
   readonly requests: ReadonlyMap<EntityId, RequestRecord>;
   readonly jobs: ReadonlyMap<EntityId, Job>;
@@ -98,6 +120,7 @@ export type ApplyResult =
 export function normalizeSnapshot(snapshot: Snapshot): NormalizedState {
   return {
     seq: snapshot.seq,
+    actors: new Map((snapshot.actors ?? []).map((actor) => [actorIdentityKey(actor.identity), actor])),
     conversations: index(snapshot.conversations),
     requests: index(snapshot.requests),
     jobs: index(snapshot.jobs),
@@ -113,6 +136,8 @@ export function applyStateEvent(state: NormalizedState, message: SequencedEvent)
   }
   const next = { ...state, seq: message.seq };
   switch (message.event.kind) {
+    case "actor.upsert":
+      return { kind: "applied", state: { ...next, actors: setByKey(next.actors, actorIdentityKey(message.event.value.identity), message.event.value) } };
     case "conversation.upsert":
       return { kind: "applied", state: { ...next, conversations: set(next.conversations, message.event.value) } };
     case "request.upsert":
@@ -124,6 +149,10 @@ export function applyStateEvent(state: NormalizedState, message: SequencedEvent)
     case "entity.remove": {
       const { entity, id } = message.event;
       switch (entity) {
+        case "actor": {
+          const table = new Map(next.actors); table.delete(id);
+          return { kind: "applied", state: { ...next, actors: table } };
+        }
         case "conversation": {
           const table = new Map(next.conversations); table.delete(id);
           return { kind: "applied", state: { ...next, conversations: table } };
@@ -151,4 +180,8 @@ function index<T extends { readonly id: EntityId }>(values: readonly T[]): Reado
 
 function set<T extends { readonly id: EntityId }>(table: ReadonlyMap<EntityId, T>, value: T): ReadonlyMap<EntityId, T> {
   return new Map(table).set(value.id, value);
+}
+
+function setByKey<T>(table: ReadonlyMap<EntityId, T>, key: EntityId, value: T): ReadonlyMap<EntityId, T> {
+  return new Map(table).set(key, value);
 }

@@ -1,4 +1,4 @@
-import { applyStateEvent, normalizeSnapshot, type Snapshot } from "./protocol";
+import { actorIdentityKey, applyStateEvent, normalizeSnapshot, type Snapshot } from "./protocol";
 import { describe, expect, it } from "vitest";
 
 // Recorded-shaped fixture: consumers can replace this with captured server JSON
@@ -37,5 +37,27 @@ describe("stable JSON state adapter", () => {
     });
     expect(gap).toEqual({ kind: "resync", expected: 42, received: 43 });
     expect(initial.conversations.has("c/other")).toBe(false);
+  });
+
+  it("projects host workflow incarnations separately from conversations across reconnect", () => {
+    const identity = { run: "run-1", actor: "worker", incarnation: "second" };
+    const actor = {
+      identity, parent: { run: "run-1", actor: "root", incarnation: "first" },
+      kind: "workflow" as const, lifecycle: "waiting" as const, modelConversation: null,
+    };
+    const initial = normalizeSnapshot({ ...fixture, actors: [actor] });
+    const key = actorIdentityKey(identity);
+    expect(initial.actors.get(key)).toEqual(actor);
+    expect(initial.conversations.size).toBe(1);
+    const result = applyStateEvent(initial, {
+      seq: 42, event: { kind: "actor.upsert", value: { ...actor, lifecycle: "retired" } },
+    });
+    expect(result.kind).toBe("applied");
+    if (result.kind === "applied") {
+      expect(result.state.actors.get(key)?.lifecycle).toBe("retired");
+      expect(normalizeSnapshot({ ...fixture, seq: 42, actors: [{ ...actor, lifecycle: "retired" }] }).actors.get(key))
+        .toEqual(result.state.actors.get(key));
+    }
+    expect(initial.actors.get(key)?.lifecycle).toBe("waiting");
   });
 });

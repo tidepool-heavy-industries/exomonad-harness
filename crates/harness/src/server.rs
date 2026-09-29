@@ -8,7 +8,8 @@ pub mod history;
 mod ws_protocol;
 
 pub use ws_protocol::{
-    Snapshot, ToolJobRecord, ToolJobState, WsClientFrame, WsEvent, WsEventPayload, WsServerFrame,
+    HostActorIdentity, HostActorKind, HostActorLifecycle, HostActorProjection, Snapshot,
+    ToolJobRecord, ToolJobState, WsClientFrame, WsEvent, WsEventPayload, WsServerFrame,
 };
 
 use crate::store::Store;
@@ -305,6 +306,7 @@ pub fn server_with_config(
     let protected_api = Router::new()
         .route("/commands", post(submit_command))
         .route("/events", get(event_stream))
+        .route("/history/{request_id}", get(history::request_history))
         .route("/ws", get(websocket))
         .route_layer(middleware::from_fn_with_state(auth, authorize))
         .with_state(state.clone());

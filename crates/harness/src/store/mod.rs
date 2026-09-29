@@ -1,5 +1,6 @@
 //! Durable SQLite event and content-addressed request store.
 mod embedded;
+pub mod history;
 pub mod schema;
 
 use crate::{
@@ -27,6 +28,8 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("request not found: {0}")]
     MissingRequest(String),
+    #[error("history offset exceeds the supported range")]
+    InvalidHistoryOffset,
     #[error("request {request} belongs to agent {actual}, not {expected}")]
     RequestAgentMismatch {
         request: String,
