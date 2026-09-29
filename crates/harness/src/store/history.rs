@@ -96,12 +96,14 @@ impl Store {
                 usize::try_from(*byte_len).map_err(|_| StoreError::InvalidHistoryOffset)?;
             if byte_len > ITEM_BUDGET.saturating_sub(used) {
                 page.next_offset = Some(position);
-                page.oversized_item = Some(OversizedItem {
-                    position,
-                    hash: hash.clone(),
-                    byte_len,
-                    skip_offset: position + 1,
-                });
+                if byte_len > ITEM_BUDGET {
+                    page.oversized_item = Some(OversizedItem {
+                        position,
+                        hash: hash.clone(),
+                        byte_len,
+                        skip_offset: position + 1,
+                    });
+                }
                 break;
             }
             let raw: String =
@@ -198,5 +200,28 @@ mod tests {
         assert!(page.items.len() < 100);
         assert!(page.next_offset.is_some());
         assert!(serde_json::to_vec(&page).unwrap().len() <= MAX_HISTORY_BYTES);
+    }
+
+    #[test]
+    fn item_that_fits_a_fresh_page_is_not_marked_oversized() {
+        let store = Store::memory().unwrap();
+        let request = RequestId("fresh-page".into());
+        store.create_request(&request, None, "/root").unwrap();
+        let first = Item(json!({"type":"message","content":"a".repeat(150_000)}));
+        let second = Item(json!({"type":"message","content":"b".repeat(150_000)}));
+        store
+            .append_items(&request, &[first.clone(), second.clone()])
+            .unwrap();
+        let page = store.history_page(&request, 0, 100).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].item, first);
+        assert_eq!(page.next_offset, Some(1));
+        assert!(page.oversized_item.is_none());
+
+        let next = store.history_page(&request, 1, 100).unwrap();
+        assert_eq!(next.items.len(), 1);
+        assert_eq!(next.items[0].item, second);
+        assert_eq!(next.next_offset, None);
+        assert!(next.oversized_item.is_none());
     }
 }
