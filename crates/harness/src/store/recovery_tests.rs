@@ -300,18 +300,15 @@ fn replay_rejects_duplicate_call_items_in_claim_request() {
         )
         .unwrap();
     store.claim(&call, &request).unwrap();
-    store
-        .write_output(
+    assert!(matches!(
+        store.write_output(
             &store.claims(&call).unwrap()[0].operation,
             &recovery_item(serde_json::json!({
                 "type":"custom_tool_call_output","call_id":call.0,"output":"ambiguous"
             })),
-        )
-        .unwrap();
-    assert!(
-        store.replay_output(&call).is_err(),
-        "duplicate persisted invocation Items cannot be resolved by first-match order"
-    );
+        ),
+        Err(StoreError::AmbiguousReplayCall { .. })
+    ));
 }
 
 #[test]
@@ -371,7 +368,11 @@ fn wave18_reopen_interrupts_pending_call_once() {
     let path = temp_store_path("orphaned-claim");
     let request = request_id("orphaned-request");
     let call = CallId("orphaned-call".into());
-    let output = recovery_item(serde_json::json!({"result":"must not be successful"}));
+    let output = recovery_item(serde_json::json!({
+        "type":"custom_tool_call_output",
+        "call_id":"orphaned-call",
+        "output":"must not be successful"
+    }));
     {
         let store = Store::open(&path).unwrap();
         store.create_request(&request, None, "/root").unwrap();

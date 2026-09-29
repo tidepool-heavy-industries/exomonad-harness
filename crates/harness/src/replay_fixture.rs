@@ -9,7 +9,7 @@ mod tests {
     use crate::{
         item::{Item, ToolInput, ToolKind},
         model::{CallId, Effort, RequestId},
-        store::Store,
+        store::{Store, StoreError},
         transport::{ResponsesRequest, ResponsesTurn, Usage},
         turn::JobOutput,
     };
@@ -397,9 +397,13 @@ mod tests {
         assert_eq!(claims.len(), 3);
         assert_ne!(claims[0].operation, claims[1].operation);
         assert_ne!(claims[1].operation, claims[2].operation);
-        store
-            .write_output(&store.claims(&call).unwrap()[0].operation, &output)
-            .unwrap();
+        let root_operation = claims
+            .iter()
+            .find(|claim| claim.request == root)
+            .unwrap()
+            .operation
+            .clone();
+        store.write_output(&root_operation, &output).unwrap();
         assert_eq!(store.claims(&call).unwrap().len(), 3);
         let selected = store.replay_turns(&root).unwrap();
         assert_eq!(selected.len(), 1);
@@ -439,20 +443,17 @@ mod tests {
             )
             .unwrap();
         store.claim(&call, &request).unwrap();
-        store
-            .write_output(
+        assert!(matches!(
+            store.write_output(
                 &store.claims(&call).unwrap()[0].operation,
                 &Item(json!({
                     "type": "custom_tool_call_output",
                     "call_id": call.0,
                     "output": "ambiguous invocation"
                 })),
-            )
-            .unwrap();
-        assert!(
-            store.replay_output(&call).is_err(),
-            "duplicate invocation evidence must never be resolved by first-match order"
-        );
+            ),
+            Err(StoreError::AmbiguousReplayCall { .. })
+        ));
     }
 
     #[test]
