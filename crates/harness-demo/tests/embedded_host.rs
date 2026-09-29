@@ -6,7 +6,7 @@ use harness::{
         InputObservation, ToolSurface,
     },
     engine::{EngineConfig, ResponsesTransport},
-    item::Item,
+    item::{Item, ToolKind},
     mailbox::DurableMailboxWake,
     model::{AgentPath, CallId, Effort, RequestId},
     provider::{CallContext, Provider, ProviderError},
@@ -1037,7 +1037,7 @@ async fn structured_host_calls_retain_progress_and_admitted_input_survives_faile
 }
 
 #[tokio::test]
-async fn checkpoint_attachment_uses_host_admission_and_commits_binding_atomically() {
+async fn checkpoint_conversations_keep_independent_children_after_origin_failure() {
     let store = Arc::new(Store::memory().unwrap());
     let root = host(store.clone(), Arc::new(Mutex::new(vec![])));
     let root_conversation = Conversation::attach(store.clone(), root.clone(), None).unwrap();
@@ -1077,23 +1077,32 @@ async fn checkpoint_attachment_uses_host_admission_and_commits_binding_atomicall
         .unwrap()
         .head_request;
     let call = CallId("source-call".into());
-    store.append_items(&request,&[Item(json!({"type":"custom_tool_call","name":"haskell","call_id":call.0,"input":"checkpoint"}))]).unwrap();
-    store.claim(&call, &request).unwrap();
+    store
+        .append_items(
+            &request,
+            &[Item(json!({
+                "type":"custom_tool_call","name":"haskell",
+                "call_id":call.0,"input":"checkpoint"
+            }))],
+        )
+        .unwrap();
+    let operation = store.claim(&call, &request).unwrap();
+    let attachment = Arc::new("private scaffold");
     let checkpoint = store
         .capture_checkpoint(
             &root.identity.actor,
             &request,
             &call,
             &json!({"source":"immutable"}),
-            Arc::new("private scaffold"),
+            attachment.clone(),
         )
         .unwrap();
-    let make_child = |alive| {
+    let make_child = |actor: &str, incarnation: &str, alive| {
         Arc::new(Host {
             identity: HostIdentity {
                 run: "run".into(),
-                actor: AgentPath("/root/child".into()),
-                incarnation: "child-one".into(),
+                actor: AgentPath(actor.into()),
+                incarnation: incarnation.into(),
             },
             surface: RwLock::new(root.tool_surface().unwrap()),
             alive: AtomicBool::new(alive),
@@ -1102,40 +1111,165 @@ async fn checkpoint_attachment_uses_host_admission_and_commits_binding_atomicall
             store: store.clone(),
         })
     };
+    let child_a_host = make_child("/root/child_a", "child_a_incarnation", true);
+    let child_a = Conversation::from_checkpoint(
+        store.clone(),
+        child_a_host,
+        &root.identity.actor,
+        &checkpoint,
+        &json!({"task":"first"}),
+        &json!({"revision":"checkout-a"}),
+    )
+    .unwrap();
+    let child_a_record = store.agent(&child_a.identity().actor).unwrap().unwrap();
+    let child_a_head = child_a_record.head_request.clone().unwrap();
+    let child_b_host = make_child("/root/child_b", "child_b_incarnation", true);
+    let child_b = Conversation::from_checkpoint(
+        store.clone(),
+        child_b_host,
+        &root.identity.actor,
+        &checkpoint,
+        &json!({"task":"second"}),
+        &json!({"revision":"checkout-b"}),
+    )
+    .unwrap();
+    let child_b_record = store.agent(&child_b.identity().actor).unwrap().unwrap();
+    let child_b_head = child_b_record.head_request.clone().unwrap();
+
+    assert_ne!(child_a.identity().actor, child_b.identity().actor);
+    assert_ne!(
+        child_a.identity().incarnation,
+        child_b.identity().incarnation
+    );
+    assert_ne!(child_a_head, child_b_head);
+    assert_eq!(child_a_record.parent, Some(root.identity.actor.clone()));
+    assert_eq!(child_b_record.parent, Some(root.identity.actor.clone()));
+    assert_eq!(child_a_record.fork_source["checkpoint_id"], checkpoint.id());
+    assert_eq!(child_b_record.fork_source["checkpoint_id"], checkpoint.id());
+    assert_eq!(
+        child_a_record.fork_source["checkout"]["revision"],
+        "checkout-a"
+    );
+    assert_eq!(
+        child_b_record.fork_source["checkout"]["revision"],
+        "checkout-b"
+    );
+
+    root.control(HostControl::Retire).await.unwrap();
+    assert_eq!(
+        store
+            .write_output(
+                &operation,
+                &Item::tool_output(&call, ToolKind::Custom, &JobOutput::Interrupted),
+            )
+            .unwrap(),
+        4,
+        "the later origin failure settles its source, checkpoint and both child claims"
+    );
+    let retired_host = make_child("/root/retired", "retired_one", true);
+    retired_host.control(HostControl::Retire).await.unwrap();
     assert!(
         Conversation::from_checkpoint(
             store.clone(),
-            make_child(false),
+            retired_host,
             &root.identity.actor,
             &checkpoint,
             &json!({}),
-            &json!({"revision":"abc"})
+            &json!({"revision":"retired"})
         )
-        .is_err()
+        .is_err(),
+        "a released child host rejects a new checkpoint admission"
     );
     assert!(
         store
-            .agent(&AgentPath("/root/child".into()))
+            .agent(&AgentPath("/root/retired".into()))
             .unwrap()
-            .is_none()
+            .is_none(),
+        "rejected checkpoint admission leaves Store untouched"
     );
-    let child = Conversation::from_checkpoint(
-        store.clone(),
-        make_child(true),
-        &root.identity.actor,
-        &checkpoint,
-        &json!({}),
-        &json!({"revision":"abc"}),
-    )
-    .unwrap();
-    assert_eq!(child.identity().incarnation, "child-one");
-    assert_eq!(root_conversation.identity(), &root.identity);
+    let inherited_output = Item::tool_output(&call, ToolKind::Custom, &JobOutput::Interrupted);
+    for head in [&child_a_head, &child_b_head] {
+        let claims = store.claims_on(head).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].operation, operation);
+        assert_eq!(claims[0].state, harness::store::ClaimState::Settled);
+        assert_eq!(
+            store.get_item(claims[0].output.as_ref().unwrap()).unwrap(),
+            Some(inherited_output.clone())
+        );
+    }
+
+    let child_a_checkpoint = checkpoint.clone();
+    let child_b_checkpoint = checkpoint.clone();
+    assert_eq!(Arc::strong_count(&attachment), 4);
+    drop(checkpoint);
+    assert_eq!(Arc::strong_count(&attachment), 3);
     assert_eq!(
-        store
-            .agent(&child.identity().actor)
-            .unwrap()
-            .unwrap()
-            .fork_source["checkout"]["revision"],
-        "abc"
+        child_a_checkpoint.attachment().as_ref(),
+        child_b_checkpoint.attachment().as_ref()
+    );
+
+    let scheduler = Arc::new(JobScheduler::new(2).unwrap());
+    let requests = Arc::new(Mutex::new(vec![]));
+    for conversation in [&child_a, &child_b] {
+        let engine = conversation
+            .engine::<Offline, _>(
+                FinalOnly(requests.clone()),
+                scheduler.clone(),
+                EngineConfig {
+                    instructions: "child".into(),
+                    tools: vec![],
+                    model: "offline".into(),
+                    effort: Effort::Medium,
+                    session_id: conversation.identity().incarnation.clone(),
+                    agent: conversation.identity().actor.clone(),
+                },
+                std::num::NonZeroU64::new(200_000).unwrap(),
+            )
+            .unwrap();
+        let (_cancel, cancellation) = tokio::sync::watch::channel(false);
+        let (_wake, incoming) = tokio::sync::mpsc::unbounded_channel();
+        engine
+            .run_embedded(
+                Some(if conversation.identity() == child_a.identity() {
+                    child_a_head.clone()
+                } else {
+                    child_b_head.clone()
+                }),
+                vec![],
+                cancellation,
+                incoming,
+            )
+            .await
+            .unwrap();
+    }
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in requests.iter() {
+        assert_eq!(
+            request
+                .input
+                .iter()
+                .filter(|item| item.0["type"] == "custom_tool_call" && item.0["call_id"] == call.0)
+                .count(),
+            1,
+            "each child receives the frozen origin invocation once"
+        );
+        assert_eq!(
+            request
+                .input
+                .iter()
+                .filter(|item| item == &&inherited_output)
+                .count(),
+            1,
+            "each child independently receives the later origin failure"
+        );
+    }
+    assert_eq!(root_conversation.identity(), &root.identity);
+    drop(child_a_checkpoint);
+    assert_eq!(Arc::strong_count(&attachment), 2);
+    assert_eq!(
+        child_b_checkpoint.attachment().as_ref(),
+        &"private scaffold"
     );
 }
