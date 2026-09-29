@@ -16,6 +16,7 @@ struct External {
     release: Notify,
     dropped: Arc<AtomicBool>,
     stopped: AtomicBool,
+    fail_waiter: AtomicBool,
     cancel_calls: std::sync::atomic::AtomicUsize,
     cancel_entered: Notify,
     cancel_barrier: Mutex<Option<oneshot::Receiver<()>>>,
@@ -52,7 +53,11 @@ impl Provider for ExternalProvider {
         let _drop = DropMark(self.0.dropped.clone());
         self.0.started.notify_one();
         self.0.release.notified().await;
-        Ok(json!("completed"))
+        if self.0.fail_waiter.load(Ordering::SeqCst) {
+            Err(ProviderError::Tool("result waiter disconnected".into()))
+        } else {
+            Ok(json!("completed"))
+        }
     }
     fn tools(&self) -> Vec<Value> {
         vec![]
@@ -64,6 +69,7 @@ fn external() -> Arc<External> {
         release: Notify::new(),
         dropped: Arc::new(AtomicBool::new(false)),
         stopped: AtomicBool::new(false),
+        fail_waiter: AtomicBool::new(false),
         cancel_calls: std::sync::atomic::AtomicUsize::new(0),
         cancel_entered: Notify::new(),
         cancel_barrier: Mutex::new(None),
@@ -253,4 +259,39 @@ async fn queued_external_call_is_cancelled_before_admission() {
     );
     first.release.notify_one();
     jobs.wait(&CallId("first".into())).await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_result_waiter_does_not_remove_external_cleanup_authority() {
+    let jobs = JobScheduler::new(1).unwrap();
+    let owner = external();
+    owner.fail_waiter.store(true, Ordering::SeqCst);
+    let call = CallId("lost-waiter".into());
+    jobs.start(
+        Arc::new(ExternalProvider(owner.clone())),
+        call.clone(),
+        "run".into(),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    owner.started.notified().await;
+    let result = jobs.cancel(&call).await.unwrap().unwrap();
+    assert!(matches!(
+        result.output,
+        JobOutput::CancellationUnconfirmed(_)
+    ));
+    let mut events = jobs.settlements();
+    owner.release.notify_one();
+    assert_eq!(events.recv().await.unwrap(), call);
+    assert!(matches!(
+        jobs.provider_completion(&call).await.unwrap(),
+        Some(Err(_))
+    ));
+    owner.stopped.store(true, Ordering::SeqCst);
+    assert_eq!(
+        jobs.retry_cancellation(&call).await.unwrap(),
+        Some(CancellationAcknowledgment::Stopped)
+    );
+    assert_eq!(jobs.output(&call).await.unwrap(), Some(result.output));
 }

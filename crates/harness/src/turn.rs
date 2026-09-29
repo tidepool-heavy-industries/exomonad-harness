@@ -679,9 +679,11 @@ impl JobScheduler {
         {
             let jobs = self.jobs.lock().await;
             let job = jobs.get(call_id).ok_or(JobError::UnknownCall)?;
-            if job.provider_completion.is_some() {
+            if matches!(job.provider_completion, Some(Ok(_))) {
                 return Ok(job.cancellation_ack.clone());
             }
+            // A failed result waiter is not proof the external operation ended.
+            // Its owner remains available to acknowledge cleanup.
             match &job.cancellation_ack {
                 None => return Ok(None),
                 Some(crate::provider::CancellationAcknowledgment::Stopped) => {

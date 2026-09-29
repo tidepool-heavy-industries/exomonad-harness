@@ -61,9 +61,6 @@ pub struct ServerEvent {
     pub payload: serde_json::Value,
 }
 
-// TODO(adoption H3; docs/daily-driver-plan.md): reconcile browser sessions with
-// the embedding host's operator identity and trusted proxy boundary before live
-// network use. Retain authentication while that policy is decided and exercised.
 /// A bearer credential, intentionally redacted from Debug output.
 #[derive(Clone)]
 pub struct BearerSecret(Arc<str>);

@@ -144,9 +144,6 @@ pub trait Provider: Send + Sync {
         self.call(name, args).await
     }
 
-    // TODO(adoption C0/H2; docs/daily-driver-plan.md): decide the sole agent
-    // transition authority with the embedding host; route verbs to that owner
-    // rather than duplicating lifecycle state in each Provider implementation.
     /// Invoke a freeform custom tool. The input is not JSON: callers must
     /// preserve its exact text rather than parsing or re-serializing it.
     /// Custom calls deliberately do not enter the function-only agent-verb
