@@ -199,7 +199,9 @@ mod tests {
                 .record_replay_turn(&root, &request, &response)
                 .unwrap();
             store.claim(&call_id, &root).unwrap();
-            store.write_output(&store.claims(&call_id).unwrap()[0].operation, &output).unwrap();
+            store
+                .write_output(&store.claims(&call_id).unwrap()[0].operation, &output)
+                .unwrap();
 
             // Descendant-agent and Here-fork histories carry same-shaped
             // decoys, but neither is the root's durable invocation evidence.
@@ -313,7 +315,9 @@ mod tests {
                 )
                 .unwrap();
             store.claim(&call, &request).unwrap();
-            store.write_output(&store.claims(&call).unwrap()[0].operation, &output).unwrap();
+            store
+                .write_output(&store.claims(&call).unwrap()[0].operation, &output)
+                .unwrap();
         }
         {
             let store = Store::open(&path).unwrap();
@@ -389,7 +393,13 @@ mod tests {
                 .unwrap();
             store.claim(&call, request).unwrap();
         }
-        store.write_output(&store.claims(&call).unwrap()[0].operation, &output).unwrap();
+        let claims = store.claims(&call).unwrap();
+        assert_eq!(claims.len(), 3);
+        assert_ne!(claims[0].operation, claims[1].operation);
+        assert_ne!(claims[1].operation, claims[2].operation);
+        store
+            .write_output(&store.claims(&call).unwrap()[0].operation, &output)
+            .unwrap();
         assert_eq!(store.claims(&call).unwrap().len(), 3);
         let selected = store.replay_turns(&root).unwrap();
         assert_eq!(selected.len(), 1);
@@ -402,9 +412,15 @@ mod tests {
                 .input,
             ToolInput::Custom("root invocation".into())
         );
-        // A later scoped replay_call(root, call) assertion must use this
-        // selected invocation. Global replay_output(call) is not an isolation
-        // assertion when all three branches carry the same call ID.
+        assert_eq!(
+            store.replay_output_for_request(&root, &call).unwrap(),
+            Some(output)
+        );
+        assert_eq!(
+            store.replay_output_for_request(&agent, &call).unwrap(),
+            None
+        );
+        assert_eq!(store.replay_output_for_request(&here, &call).unwrap(), None);
     }
 
     #[test]
@@ -423,7 +439,9 @@ mod tests {
             )
             .unwrap();
         store.claim(&call, &request).unwrap();
-        store.write_output(&store.claims(&call).unwrap()[0].operation,
+        store
+            .write_output(
+                &store.claims(&call).unwrap()[0].operation,
                 &Item(json!({
                     "type": "custom_tool_call_output",
                     "call_id": call.0,
@@ -447,18 +465,19 @@ mod tests {
             .append_items(&request, &[custom_call(&distinct.0, "shell", "unique")])
             .unwrap();
         store.claim(&distinct, &request).unwrap();
-        store.write_output(&store.claims(&distinct).unwrap()[0].operation,
-                &Item(json!({
-                    "type": "custom_tool_call_output",
-                    "call_id": "not-wrong-output-id",
-                    "output": "mismatched output"
-                })),
-            )
-            .unwrap();
         assert!(
-            store.replay_output(&distinct).is_err(),
-            "output CallId must match its durable invocation"
+            store
+                .write_output(
+                    &store.claims(&distinct).unwrap()[0].operation,
+                    &Item(json!({
+                        "type": "custom_tool_call_output",
+                        "call_id": "not-wrong-output-id",
+                        "output": "mismatched output"
+                    })),
+                )
+                .is_err()
         );
+        assert_eq!(store.replay_output(&distinct).unwrap(), None);
     }
 
     #[test]
@@ -471,17 +490,18 @@ mod tests {
             .append_items(&request, &[custom_call(&wrong_kind.0, "shell", "unique")])
             .unwrap();
         store.claim(&wrong_kind, &request).unwrap();
-        store.write_output(&store.claims(&wrong_kind).unwrap()[0].operation,
-                &Item(json!({
-                    "type": "function_call_output",
-                    "call_id": wrong_kind.0,
-                    "output": "{}"
-                })),
-            )
-            .unwrap();
         assert!(
-            store.replay_output(&wrong_kind).is_err(),
-            "output kind must match its durable invocation"
+            store
+                .write_output(
+                    &store.claims(&wrong_kind).unwrap()[0].operation,
+                    &Item(json!({
+                        "type": "function_call_output",
+                        "call_id": wrong_kind.0,
+                        "output": "{}"
+                    })),
+                )
+                .is_err()
         );
+        assert_eq!(store.replay_output(&wrong_kind).unwrap(), None);
     }
 }

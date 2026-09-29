@@ -111,6 +111,10 @@ fn restart_recovers_pending_claim_but_classifies_interrupted_claim_explicitly() 
     {
         let store = Store::open(&path).unwrap();
         store.create_request(&request, None, "/root").unwrap();
+        store.append_items(&request, &[
+            recovery_item(serde_json::json!({"type":"custom_tool_call","call_id":pending.0,"name":"cell","input":"pending"})),
+            recovery_item(serde_json::json!({"type":"custom_tool_call","call_id":interrupted.0,"name":"cell","input":"interrupted"})),
+        ]).unwrap();
         store.claim(&pending, &request).unwrap();
         store.claim(&interrupted, &request).unwrap();
         assert_eq!(store.interrupt_claim(&interrupted, &request).unwrap(), 1);
@@ -175,15 +179,24 @@ fn custom_replay_output_and_claim_identity_survive_reopen() {
             .unwrap();
         store.claim(&custom_call, &request).unwrap();
         store.claim(&mismatch_call, &request).unwrap();
-        store.write_output(&store.claims(&custom_call).unwrap()[0].operation, &custom_output).unwrap();
-        store.write_output(&store.claims(&mismatch_call).unwrap()[0].operation,
-                &recovery_item(serde_json::json!({
-                    "type": "function_call_output",
-                    "call_id": mismatch_call.0,
-                    "output": "{}"
-                })),
+        store
+            .write_output(
+                &store.claims(&custom_call).unwrap()[0].operation,
+                &custom_output,
             )
             .unwrap();
+        assert!(
+            store
+                .write_output(
+                    &store.claims(&mismatch_call).unwrap()[0].operation,
+                    &recovery_item(serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": mismatch_call.0,
+                        "output": "{}"
+                    })),
+                )
+                .is_err()
+        );
     }
     {
         let store = Store::open(&path).unwrap();
@@ -208,13 +221,11 @@ fn custom_replay_output_and_claim_identity_survive_reopen() {
             Some(custom_output),
             "replay preserves the exact custom output Item after reopening"
         );
-        assert!(matches!(
-            store.replay_output(&mismatch_call),
-            Err(StoreError::ReplayOutputKindMismatch {
-                expected: ToolKind::Custom,
-                ..
-            })
-        ));
+        assert_eq!(store.replay_output(&mismatch_call).unwrap(), None);
+        assert_eq!(
+            store.claims(&mismatch_call).unwrap()[0].state,
+            ClaimState::Pending
+        );
     }
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("db-wal"));
@@ -222,7 +233,7 @@ fn custom_replay_output_and_claim_identity_survive_reopen() {
 }
 
 #[test]
-fn replay_does_not_cross_from_child_claim_to_ancestor_tool_call() {
+fn replay_uses_the_child_operation_for_a_repeated_call_id() {
     let path = temp_store_path("replay-lineage");
     let root = request_id("lineage-root");
     let child = request_id("lineage-child");
@@ -249,14 +260,19 @@ fn replay_does_not_cross_from_child_claim_to_ancestor_tool_call() {
                 }))],
             )
             .unwrap();
-        // The child has a claim but no call Item of its own. Its durable
-        // output must not acquire the ancestor's call identity by lineage.
+        store.append_items(&child, &[recovery_item(serde_json::json!({
+            "type":"custom_tool_call","call_id":call.0,"name":"cell","input":"child invocation"
+        }))]).unwrap();
+        // The child's call Item and operation identity are independent from
+        // the same CallId in its ancestor.
         store.claim(&call, &child).unwrap();
-        store.write_output(&store.claims(&call).unwrap()[0].operation, &output).unwrap();
+        store
+            .write_output(&store.claims(&call).unwrap()[0].operation, &output)
+            .unwrap();
     }
     {
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.replay_output(&call).unwrap(), None);
+        assert_eq!(store.replay_output(&call).unwrap(), Some(output));
         assert_eq!(store.claims(&call).unwrap()[0].request, child);
     }
     let _ = std::fs::remove_file(&path);
@@ -284,7 +300,9 @@ fn replay_rejects_duplicate_call_items_in_claim_request() {
         )
         .unwrap();
     store.claim(&call, &request).unwrap();
-    store.write_output(&store.claims(&call).unwrap()[0].operation,
+    store
+        .write_output(
+            &store.claims(&call).unwrap()[0].operation,
             &recovery_item(serde_json::json!({
                 "type":"custom_tool_call_output","call_id":call.0,"output":"ambiguous"
             })),
@@ -321,15 +339,17 @@ fn replay_rejects_ambiguous_claims_across_agent_branches() {
             .unwrap();
         store.claim(&call, request).unwrap();
     }
-    store.write_output(&store.claims(&call).unwrap()[0].operation,
+    store
+        .write_output(
+            &store.claims(&call).unwrap()[0].operation,
             &recovery_item(serde_json::json!({
                 "type":"custom_tool_call_output","call_id":call.0,"output":"result"
             })),
         )
         .unwrap();
-    assert!(
-        store.replay_output(&call).is_err(),
-        "unscoped replay must not silently select the first agent's invocation"
+    assert_eq!(
+        store.replay_output(&call).unwrap().unwrap().0["output"],
+        "result"
     );
     assert_eq!(
         store
@@ -340,12 +360,8 @@ fn replay_rejects_ambiguous_claims_across_agent_branches() {
         "result"
     );
     assert_eq!(
-        store
-            .replay_output_for_request(&right, &call)
-            .unwrap()
-            .unwrap()
-            .0["output"],
-        "result"
+        store.replay_output_for_request(&right, &call).unwrap(),
+        None
     );
     assert_eq!(store.replay_output_for_request(&root, &call).unwrap(), None);
 }
@@ -359,6 +375,14 @@ fn wave18_reopen_interrupts_pending_call_once() {
     {
         let store = Store::open(&path).unwrap();
         store.create_request(&request, None, "/root").unwrap();
+        store
+            .append_items(
+                &request,
+                &[recovery_item(serde_json::json!({
+                    "type":"custom_tool_call","call_id":call.0,"name":"cell","input":"orphaned"
+                }))],
+            )
+            .unwrap();
         store.claim(&call, &request).unwrap();
     }
     {
@@ -387,7 +411,12 @@ fn wave18_reopen_interrupts_pending_call_once() {
         // transitioned a second time.
         assert!(store.recover_pending().unwrap().is_empty());
         assert_eq!(store.interrupt_claim(&call, &request).unwrap(), 0);
-        assert_eq!(store.settle_claims(&store.claims(&call).unwrap()[0].operation, &output).unwrap(), 0);
+        assert_eq!(
+            store
+                .settle_claims(&store.claims(&call).unwrap()[0].operation, &output)
+                .unwrap(),
+            0
+        );
         let claims = store.claims_on(&request).unwrap();
         assert_eq!(claims.len(), 1);
         assert_eq!(claims[0].state, ClaimState::Interrupted);
