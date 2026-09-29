@@ -270,7 +270,7 @@ async fn active_cell_survives_three_boundary_envelopes_and_finalizes_durably() {
     assert_request_contains(&requests[5], "boundary-one");
     assert_request_contains(&requests[5], "boundary-two");
     assert_request_contains(&requests[5], "boundary-three");
-    assert_tool_flags(&requests[5], "cell", true, true);
+    assert_custom_cell_tool(&requests[5]);
     assert_tool_strict(&requests[5], "finalize");
     assert!(
         requests[5]
@@ -415,9 +415,16 @@ async fn cancelling_pending_cell_releases_execution_without_success_output() {
     assert_eq!(claims.len(), 1);
     assert_eq!(
         claims[0].state,
-        harness::store::ClaimState::Interrupted,
-        "cancellation interrupts the original request claim"
+        harness::store::ClaimState::Settled,
+        "confirmed cancellation retains a terminal output on the original claim"
     );
+    let retained = store
+        .get_item(claims[0].output.as_ref().expect("cancel output retained"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.0["type"], "function_call_output");
+    assert_eq!(retained.0["call_id"], call.0);
+    assert_eq!(retained.0["output"], "{\"error\":\"job cancelled\"}");
     let original_request = store
         .items(&claims[0].request)
         .expect("read original claimed request");
@@ -507,14 +514,23 @@ fn assert_request_lacks(request: &ResponsesRequest, unexpected: &str) {
     );
 }
 
-fn assert_tool_flags(request: &ResponsesRequest, name: &str, asynchronous: bool, strict: bool) {
+fn assert_custom_cell_tool(request: &ResponsesRequest) {
     let tool = request
         .tools
         .iter()
-        .find(|tool| tool["name"] == name)
-        .unwrap_or_else(|| panic!("request has no {name:?} tool schema"));
-    assert_eq!(tool["async"], json!(asynchronous), "{name} async flag");
-    assert_eq!(tool["strict"], json!(strict), "{name} strict flag");
+        .find(|tool| tool["name"] == "cell")
+        .expect("request has no cell tool schema");
+    assert_eq!(tool["type"], "custom");
+    assert_eq!(tool["format"], json!({"type":"text"}));
+    assert_eq!(tool["async"], true);
+    assert!(
+        tool.get("strict").is_none(),
+        "custom tools have no strict flag"
+    );
+    assert!(
+        tool.get("parameters").is_none(),
+        "custom tools have no JSON parameters"
+    );
 }
 
 fn assert_tool_strict(request: &ResponsesRequest, name: &str) {

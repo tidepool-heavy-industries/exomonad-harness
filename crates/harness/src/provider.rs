@@ -110,6 +110,21 @@ pub trait Provider: Send + Sync {
     // TODO(adoption C0/H2; docs/daily-driver-plan.md): decide the sole agent
     // transition authority with the embedding host; route verbs to that owner
     // rather than duplicating lifecycle state in each Provider implementation.
+    /// Invoke a freeform custom tool. The input is not JSON: callers must
+    /// preserve its exact text rather than parsing or re-serializing it.
+    /// Custom calls deliberately do not enter the function-only agent-verb
+    /// path in `JobScheduler`.
+    async fn call_custom_with_context(
+        &self,
+        name: &str,
+        _input: String,
+        _context: CallContext,
+    ) -> Result<Value, ProviderError> {
+        Err(ProviderError::Tool(format!(
+            "custom tool `{name}` is not supported by this provider"
+        )))
+    }
+
     /// Runtime hook for crate-provided agent verbs. A provider integrating
     /// durable sessions should route this to `dispatch_agent_verb`.
     async fn call_agent_verb(

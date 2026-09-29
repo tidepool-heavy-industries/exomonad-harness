@@ -9,15 +9,16 @@
 use crate::{
     cell_job::{CellInput, CellJob, CellOutput},
     engine::ResponsesTransport,
+    item::{ToolInput, ToolKind},
     model::RequestId,
     provider::{CallContext, Provider, ProviderError},
-    store::{RecordedReplayTurn, Store},
+    store::{RecordedReplayTurn, Store, StoreError},
     transport::{ResponsesRequest, ResponsesTurn, TransportError, sse::StreamEvent},
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -35,20 +36,58 @@ pub struct ReplayProvider {
     store: Arc<Store>,
     turns: Mutex<VecDeque<RecordedReplayTurn>>,
     tool_schemas: Vec<serde_json::Value>,
+    calls: HashMap<crate::model::CallId, (RequestId, String, ToolKind, serde_json::Value)>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReplayError {
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error("ambiguous recorded call id `{0}`")]
+    DuplicateCall(String),
+    #[error("recorded call `{0}` is not the persisted invocation")]
+    MissingInvocation(String),
+    #[error("malformed recorded tool call: {0}")]
+    MalformedCall(&'static str),
 }
 
 impl ReplayProvider {
     /// Load all recorded turns on `root`'s branch from the Store.
-    pub fn new(store: Arc<Store>, root: &RequestId) -> crate::store::Result<Self> {
+    pub fn new(store: Arc<Store>, root: &RequestId) -> Result<Self, ReplayError> {
         let turns = store.replay_turns(root)?;
         let tool_schemas = turns
             .first()
             .map(|turn| turn.model_request.tools.clone())
             .unwrap_or_default();
+        let mut calls = HashMap::new();
+        for turn in &turns {
+            let persisted = store.items(&turn.request)?;
+            for item in &turn.model_response.items {
+                if let Some(call) = item.tool_call().map_err(ReplayError::MalformedCall)? {
+                    if !persisted.iter().any(|saved| saved == item) {
+                        return Err(ReplayError::MissingInvocation(call.call_id.0));
+                    }
+                    let (kind, input) = match call.input {
+                        ToolInput::Function(arguments) => (ToolKind::Function, arguments),
+                        ToolInput::Custom(text) => {
+                            (ToolKind::Custom, serde_json::Value::String(text))
+                        }
+                    };
+                    let id = call.call_id.clone();
+                    if calls
+                        .insert(id.clone(), (turn.request.clone(), call.name, kind, input))
+                        .is_some()
+                    {
+                        return Err(ReplayError::DuplicateCall(id.0));
+                    }
+                }
+            }
+        }
         Ok(Self {
             store,
             turns: Mutex::new(turns.into()),
             tool_schemas,
+            calls,
         })
     }
 
@@ -90,13 +129,23 @@ impl Provider for ReplayProvider {
 
     async fn call_with_context(
         &self,
-        _name: &str,
-        _args: serde_json::Value,
+        name: &str,
+        args: serde_json::Value,
         context: CallContext,
     ) -> Result<serde_json::Value, ProviderError> {
+        let (recorded_request, recorded_name, kind, recorded_input) =
+            self.calls.get(&context.call_id).ok_or_else(|| {
+                ProviderError::Tool(format!("no recorded tool call for `{}`", context.call_id.0))
+            })?;
+        if recorded_name != name || recorded_input != &args {
+            return Err(ProviderError::Tool(format!(
+                "replay call `{}` does not match its recorded identity or input",
+                context.call_id.0
+            )));
+        }
         let output = self
             .store
-            .replay_output(&context.call_id)
+            .replay_output_for_request(recorded_request, &context.call_id)
             .map_err(|error| ProviderError::Tool(format!("loading replay output: {error}")))?
             .ok_or_else(|| {
                 ProviderError::Tool(format!(
@@ -104,9 +153,13 @@ impl Provider for ReplayProvider {
                     context.call_id.0
                 ))
             })?;
-        if output.0["type"] != "function_call_output" || output.0["call_id"] != context.call_id.0 {
+        let expected_type = match kind {
+            ToolKind::Function => "function_call_output",
+            ToolKind::Custom => "custom_tool_call_output",
+        };
+        if output.0["type"] != expected_type || output.0["call_id"] != context.call_id.0 {
             return Err(ProviderError::Tool(format!(
-                "stored replay output does not match call `{}`",
+                "stored replay output kind or identity does not match call `{}`",
                 context.call_id.0
             )));
         }
@@ -116,8 +169,11 @@ impl Provider for ReplayProvider {
                 context.call_id.0
             ))
         })?;
-        match value {
-            serde_json::Value::String(serialized) => {
+        match (kind, value) {
+            (ToolKind::Custom, serde_json::Value::String(text)) => {
+                Ok(serde_json::Value::String(text))
+            }
+            (ToolKind::Function, serde_json::Value::String(serialized)) => {
                 serde_json::from_str(&serialized).map_err(|error| {
                     ProviderError::Tool(format!(
                         "decoding replay output for call `{}`: {error}",
@@ -125,8 +181,27 @@ impl Provider for ReplayProvider {
                     ))
                 })
             }
-            value => Ok(value),
+            (_, value) => Ok(value),
         }
+    }
+
+    async fn call_custom_with_context(
+        &self,
+        name: &str,
+        input: String,
+        context: CallContext,
+    ) -> Result<serde_json::Value, ProviderError> {
+        if !self
+            .calls
+            .get(&context.call_id)
+            .is_some_and(|(_, _, kind, _)| *kind == ToolKind::Custom)
+        {
+            return Err(ProviderError::Tool(
+                "replay custom call kind mismatch".into(),
+            ));
+        }
+        self.call_with_context(name, serde_json::Value::String(input), context)
+            .await
     }
 
     fn tools(&self) -> Vec<serde_json::Value> {
@@ -851,7 +926,7 @@ mod tests {
             .call_with_context("echo", json!({}), call_context(CallId("missing".into())))
             .await
             .unwrap_err();
-        assert!(missing.to_string().contains("no settled replay output"));
+        assert!(missing.to_string().contains("no recorded tool call"));
 
         let malformed = CallId("malformed".into());
         store.claim(&malformed, &root).unwrap();
@@ -869,7 +944,78 @@ mod tests {
             .call_with_context("echo", json!({}), call_context(malformed))
             .await
             .unwrap_err();
-        assert!(invalid.to_string().contains("decoding replay output"));
+        assert!(invalid.to_string().contains("no recorded tool call"));
+    }
+
+    #[test]
+    fn replay_provider_rejects_ambiguous_call_ids_across_descendant_turns() {
+        let store = Arc::new(Store::memory().unwrap());
+        let root = RequestId("ambiguous-replay-root".into());
+        let child = RequestId("ambiguous-replay-child".into());
+        let call = Item(json!({
+            "type": "custom_tool_call",
+            "call_id": "ambiguous-id",
+            "name": "cell",
+            "input": "raw input"
+        }));
+        store.create_request(&root, None, "/root").unwrap();
+        store.create_request(&child, Some(&root), "/root").unwrap();
+        store.append_items(&root, &[call.clone()]).unwrap();
+        store.append_items(&child, &[call.clone()]).unwrap();
+        store
+            .record_replay_turn(
+                &root,
+                &request("ambiguous-session"),
+                &ResponsesTurn {
+                    response_id: "ambiguous-response".into(),
+                    items: vec![call.clone()],
+                    usage: Usage::default(),
+                },
+            )
+            .unwrap();
+        store
+            .record_replay_turn(
+                &child,
+                &request("ambiguous-session-child"),
+                &ResponsesTurn {
+                    response_id: "ambiguous-response-child".into(),
+                    items: vec![call],
+                    usage: Usage::default(),
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            ReplayProvider::new(store, &root),
+            Err(ReplayError::DuplicateCall(id)) if id == "ambiguous-id"
+        ));
+    }
+
+    #[test]
+    fn replay_provider_refuses_unpersisted_turn_invocation() {
+        let store = Arc::new(Store::memory().unwrap());
+        let root = RequestId("unpersisted-replay-root".into());
+        store.create_request(&root, None, "/root").unwrap();
+        store
+            .record_replay_turn(
+                &root,
+                &request("unpersisted-session"),
+                &ResponsesTurn {
+                    response_id: "unpersisted-response".into(),
+                    items: vec![Item(json!({
+                        "type": "custom_tool_call",
+                        "call_id": "unpersisted-call",
+                        "name": "cell",
+                        "input": "raw input"
+                    }))],
+                    usage: Usage::default(),
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            ReplayProvider::new(store, &root),
+            Err(ReplayError::MissingInvocation(id)) if id == "unpersisted-call"
+        ));
     }
 
     #[tokio::test]

@@ -5,7 +5,7 @@
 //! replay that output (notably after a fork) without invoking the provider a
 //! second time.
 use crate::{
-    item::Item,
+    item::{Item, ToolInput},
     mailbox::Envelope,
     model::{AgentPath, CallId, RequestId},
     provider::{CallContext, JobHandle, Provider, ProviderError},
@@ -48,8 +48,12 @@ pub enum JobError {
     DuplicateCall,
     #[error("unknown call id")]
     UnknownCall,
-    #[error("completed function call item has invalid fields")]
+    #[error("completed tool call item has invalid fields")]
     InvalidCallItem,
+    #[error("agent verbs require function-call input")]
+    AgentVerbRequiresFunction,
+    #[error("finalize requires function-call input")]
+    FinalizeRequiresFunction,
 }
 
 /// Inputs to the deterministic request priority policy: roots first, then
@@ -163,6 +167,13 @@ pub struct JobScheduler {
     events: broadcast::Sender<CallId>,
 }
 
+// Existing JSON callers remain function calls at the typed dispatch boundary.
+impl From<Value> for ToolInput {
+    fn from(args: Value) -> Self {
+        Self::Function(args)
+    }
+}
+
 impl JobScheduler {
     pub fn new(capacity: usize) -> Result<Self, JobError> {
         if capacity == 0 {
@@ -179,12 +190,12 @@ impl JobScheduler {
     /// Register and launch a tool call, returning immediately with its stable
     /// call id. A concurrency slot is acquired by the spawned work, so callers
     /// need not block their turn waiting for tool completion.
-    pub async fn start(
+    pub async fn start<I: Into<ToolInput>>(
         &self,
         provider: Arc<dyn Provider>,
         call_id: CallId,
         name: String,
-        args: Value,
+        input: I,
     ) -> Result<JobHandle, JobError> {
         self.start_for_agent(
             provider,
@@ -192,20 +203,70 @@ impl JobScheduler {
             None,
             call_id,
             name,
-            args,
+            input,
         )
         .await
     }
 
-    pub async fn start_for_agent(
+    pub async fn start_for_agent<I: Into<ToolInput>>(
         &self,
         provider: Arc<dyn Provider>,
         agent: AgentPath,
         request: Option<crate::model::RequestId>,
         call_id: CallId,
         name: String,
-        args: Value,
+        input: I,
     ) -> Result<JobHandle, JobError> {
+        self.start_input_for_agent(provider, agent, request, call_id, name, input.into())
+            .await
+    }
+
+    /// Start a freeform custom-tool call without converting its input to JSON.
+    pub async fn start_custom(
+        &self,
+        provider: Arc<dyn Provider>,
+        call_id: CallId,
+        name: String,
+        input: String,
+    ) -> Result<JobHandle, JobError> {
+        self.start_input(provider, call_id, name, ToolInput::Custom(input))
+            .await
+    }
+
+    pub async fn start_input(
+        &self,
+        provider: Arc<dyn Provider>,
+        call_id: CallId,
+        name: String,
+        input: ToolInput,
+    ) -> Result<JobHandle, JobError> {
+        self.start_input_for_agent(
+            provider,
+            AgentPath("/root".into()),
+            None,
+            call_id,
+            name,
+            input,
+        )
+        .await
+    }
+
+    /// Typed dispatch retains the function path and raw custom bytes.
+    pub async fn start_input_for_agent(
+        &self,
+        provider: Arc<dyn Provider>,
+        agent: AgentPath,
+        request: Option<RequestId>,
+        call_id: CallId,
+        name: String,
+        input: ToolInput,
+    ) -> Result<JobHandle, JobError> {
+        if matches!(&input, ToolInput::Custom(_)) && crate::provider::is_harness_tool(&name) {
+            return Err(JobError::AgentVerbRequiresFunction);
+        }
+        if matches!(&input, ToolInput::Custom(_)) && name == crate::finalize::FINALIZE_TOOL_NAME {
+            return Err(JobError::FinalizeRequiresFunction);
+        }
         let mut registry = self.jobs.lock().await;
         if registry.contains_key(&call_id) {
             return Err(JobError::DuplicateCall);
@@ -277,10 +338,12 @@ impl JobScheduler {
                 verbs,
                 progress,
             };
-            let call = if is_agent_verb {
-                provider.call_agent_verb(&name, args, context)
-            } else {
-                provider.call_with_context(&name, args, context)
+            let call = match input {
+                ToolInput::Function(args) if is_agent_verb => {
+                    provider.call_agent_verb(&name, args, context)
+                }
+                ToolInput::Function(args) => provider.call_with_context(&name, args, context),
+                ToolInput::Custom(raw) => provider.call_custom_with_context(&name, raw, context),
             };
             tokio::pin!(call);
             let result = loop {
@@ -315,10 +378,10 @@ impl JobScheduler {
         Ok(JobHandle(call_id.0))
     }
 
-    /// Admit a tool as soon as a complete streamed `function_call` item is
+    /// Admit a tool as soon as a complete streamed function or custom call item is
     /// observed (e.g. from `response.output_item.done`). Transport readers
     /// call this from the item-done callback, not after response completion.
-    /// Non-function items return `Ok(None)`.
+    /// Non-call items return `Ok(None)`; malformed calls are rejected.
     pub async fn start_completed_item(
         &self,
         provider: Arc<dyn Provider>,
@@ -334,35 +397,12 @@ impl JobScheduler {
         agent: AgentPath,
         item: &Item,
     ) -> Result<Option<JobHandle>, JobError> {
-        let value = &item.0;
-        if value.get("type").and_then(Value::as_str) != Some("function_call") {
+        let Some(call) = item.tool_call().map_err(|_| JobError::InvalidCallItem)? else {
             return Ok(None);
-        }
-        let call_id = value
-            .get("call_id")
-            .and_then(Value::as_str)
-            .ok_or(JobError::InvalidCallItem)?;
-        let name = value
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or(JobError::InvalidCallItem)?;
-        let args = match value.get("arguments") {
-            Some(Value::String(raw)) => {
-                serde_json::from_str(raw).map_err(|_| JobError::InvalidCallItem)?
-            }
-            Some(value) => value.clone(),
-            None => return Err(JobError::InvalidCallItem),
         };
-        self.start_for_agent(
-            provider,
-            agent,
-            None,
-            CallId(call_id.to_owned()),
-            name.to_owned(),
-            args,
-        )
-        .await
-        .map(Some)
+        self.start_input_for_agent(provider, agent, None, call.call_id, call.name, call.input)
+            .await
+            .map(Some)
     }
 
     /// Add a conversation's claim. A claim made after settlement replays the
@@ -639,6 +679,87 @@ mod tests {
         fn tools(&self) -> Vec<Value> {
             vec![]
         }
+    }
+
+    struct RawCustomCapture(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl Provider for RawCustomCapture {
+        async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+            Ok(json!({"function": true}))
+        }
+
+        async fn call_custom_with_context(
+            &self,
+            _: &str,
+            input: String,
+            _: CallContext,
+        ) -> Result<Value, ProviderError> {
+            self.0.lock().unwrap().push(input.clone());
+            Ok(Value::String(input))
+        }
+
+        fn tools(&self) -> Vec<Value> {
+            vec![]
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_custom_item_dispatches_raw_input_and_rejects_malformed() {
+        let scheduler = JobScheduler::new(1).unwrap();
+        let seen = Arc::new(RawCustomCapture(std::sync::Mutex::new(Vec::new())));
+        let provider: Arc<dyn Provider> = seen.clone();
+        let raw = "say \"hello\" \\\\path\n第二行 — λ 🪼";
+        let item = Item(json!({
+            "type": "custom_tool_call", "call_id": "custom-raw",
+            "name": "cell", "input": raw
+        }));
+        let handle = scheduler
+            .start_completed_item(provider.clone(), &item)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(handle.0, "custom-raw");
+        assert_eq!(
+            scheduler.wait(&CallId("custom-raw".into())).await.unwrap(),
+            JobOutput::Completed(Ok(Value::String(raw.into())))
+        );
+        assert_eq!(*seen.0.lock().unwrap(), vec![raw]);
+        let malformed = Item(json!({
+            "type": "custom_tool_call", "call_id": "bad", "name": "cell", "input": {"not":"raw"}
+        }));
+        assert!(matches!(
+            scheduler
+                .start_completed_item(provider.clone(), &malformed)
+                .await,
+            Err(JobError::InvalidCallItem)
+        ));
+        assert!(matches!(
+            scheduler
+                .start(
+                    provider.clone(),
+                    CallId("custom-agent-verb".into()),
+                    "wait_agent".into(),
+                    ToolInput::Custom("{}".into()),
+                )
+                .await,
+            Err(JobError::AgentVerbRequiresFunction)
+        ));
+        assert!(matches!(
+            scheduler
+                .start(
+                    provider,
+                    CallId("custom-finalize".into()),
+                    crate::finalize::FINALIZE_TOOL_NAME.into(),
+                    ToolInput::Custom("{}".into()),
+                )
+                .await,
+            Err(JobError::FinalizeRequiresFunction)
+        ));
+        assert!(matches!(
+            scheduler.output(&CallId("custom-finalize".into())).await,
+            Err(JobError::UnknownCall)
+        ));
     }
 
     struct SpawnOnly;

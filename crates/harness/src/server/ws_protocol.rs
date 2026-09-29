@@ -1,4 +1,5 @@
 //! Wire-stable WebSocket frames shared with the web client.
+use crate::item::ToolKind;
 use serde::{Deserialize, Serialize};
 
 /// Browser projection of an Engine-owned call, not a second job registry.
@@ -12,6 +13,10 @@ pub struct ToolJobRecord {
     pub request_id: String,
     pub call_id: String,
     pub tool_name: String,
+    /// Missing on historical projections; live Engine jobs derive this from
+    /// the scoped invocation persisted by Store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_kind: Option<ToolKind>,
     pub state: ToolJobState,
     pub delivered: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,6 +95,7 @@ mod tests {
             request_id: "request-7".into(),
             call_id: "command-7/a".into(),
             tool_name: "deterministic_gate".into(),
+            tool_kind: Some(ToolKind::Function),
             state: ToolJobState::Running,
             delivered: false,
             started_at_ms: None,
@@ -106,6 +112,7 @@ mod tests {
         let actual: ToolJobRecord = serde_json::from_value(snapshot.jobs[0].clone()).unwrap();
         assert_eq!(actual, pending);
         assert_eq!(snapshot.jobs[0]["callId"], "command-7/a");
+        assert_eq!(snapshot.jobs[0]["toolKind"], "function");
         assert!(snapshot.jobs[0].get("output").is_none());
         let cancelled = ToolJobRecord {
             state: ToolJobState::Cancelled,
@@ -117,6 +124,28 @@ mod tests {
         assert_eq!(wire["state"], "cancelled");
         assert_eq!(wire["callId"], "command-7/a");
         assert_eq!(wire["delivered"], true);
+    }
+
+    #[test]
+    fn custom_tool_kind_is_typed_and_legacy_record_without_kind_reopens() {
+        let mut legacy = json!({
+            "id":"tool/root/call", "conversationId":"root", "requestId":"request-1",
+            "callId":"call", "toolName":"run", "state":"running", "delivered":false
+        });
+        let restored: ToolJobRecord = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(restored.tool_kind, None);
+        assert!(
+            serde_json::to_value(&restored)
+                .unwrap()
+                .get("toolKind")
+                .is_none()
+        );
+        legacy["toolKind"] = json!("custom");
+        let custom: ToolJobRecord = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(custom.tool_kind, Some(ToolKind::Custom));
+        assert_eq!(serde_json::to_value(custom).unwrap()["toolKind"], "custom");
+        legacy["toolKind"] = json!("unknown");
+        assert!(serde_json::from_value::<ToolJobRecord>(legacy).is_err());
     }
 
     #[test]

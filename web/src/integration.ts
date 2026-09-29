@@ -38,6 +38,7 @@ export function toViewModel(state: NormalizedState): HarnessViewModel {
       state: job.state,
       requestId: job.requestId,
       callId: job.callId,
+      toolKind: job.toolKind,
       toolName: job.toolName,
       delivered: job.delivered,
       output: job.output,

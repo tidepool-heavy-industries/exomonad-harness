@@ -1,6 +1,8 @@
 //! Reference provider for the harness. `run` intentionally invokes a local
 //! shell and is suitable only for trusted, development-time demonstrations.
 mod async_demo;
+#[cfg(test)]
+mod custom_scenario_tests;
 pub mod driver;
 #[cfg(test)]
 mod process_restart_tests;
@@ -31,6 +33,9 @@ use trace::{JobEvent, TraceSink, TraceTransport};
 use tree::TreeProvider;
 
 const OUTPUT_LIMIT: usize = 16 * 1024;
+/// Exact raw browser acceptance fixture. The newline, quote, backslash and
+/// Unicode are model input bytes, never JSON-escaped function arguments.
+const BROWSER_CUSTOM_RAW: &str = "printf 'line\nquote\"slash\\雪'";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CliOptions {
@@ -209,32 +214,27 @@ impl Provider for CliProvider {
         self.0.call_with_context(name, args, context).await
     }
 
+    async fn call_custom_with_context(
+        &self,
+        name: &str,
+        input: String,
+        context: CallContext,
+    ) -> Result<Value, ProviderError> {
+        self.0.call_custom_with_context(name, input, context).await
+    }
+
     fn tools(&self) -> Vec<Value> {
         self.0
             .tools()
             .into_iter()
-            .filter_map(|mut tool| {
+            .filter(|tool| {
                 if matches!(tool["name"].as_str(), Some("ask" | "form")) {
-                    return None;
+                    return false;
                 }
                 if tool["name"] != "run" {
-                    return Some(tool);
+                    return true;
                 }
-                if !self.0.allow_shell {
-                    return None;
-                }
-                // The engine currently dispatches function_call items only;
-                // expose the opt-in shell as a strict function at this CLI
-                // adapter boundary rather than inventing another call loop.
-                tool["type"] = json!("function");
-                tool["strict"] = json!(true);
-                tool["parameters"] = json!({
-                    "type":"object",
-                    "properties":{"script":{"type":"string"}},
-                    "required":["script"],
-                    "additionalProperties":false
-                });
-                Some(tool)
+                self.0.allow_shell
             })
             .collect()
     }
@@ -457,10 +457,13 @@ fn next_envelope_ordinal(envelopes: &[Value]) -> u64 {
 
 fn active_wait_request(requests: &[Value], history: &[Item]) -> Option<String> {
     requests.iter().find_map(|request| {
-        if request["state"] != "running" {
+        if request["state"] != "running" || request["outcome"] == "accepted" {
             return None;
         }
         let request_id = request["id"].as_str()?;
+        if request["command"] == "wait" {
+            return Some(request_id.to_owned());
+        }
         history
             .iter()
             .any(|item| item.0["request_id"] == request_id && item.0["command"] == "wait")
@@ -470,9 +473,14 @@ fn active_wait_request(requests: &[Value], history: &[Item]) -> Option<String> {
 
 fn active_async_request(requests: &[Value]) -> Option<String> {
     requests.iter().find_map(|request| {
-        (request["state"] == "running" && request["command"] == "async start")
-            .then(|| request["id"].as_str().map(str::to_owned))
-            .flatten()
+        (request["state"] == "running"
+            && (request["command"] == "async start"
+                || request["command"].as_str().is_some_and(|command| {
+                    command.starts_with("custom ")
+                        && !matches!(command, "custom release" | "custom cancel")
+                })))
+        .then(|| request["id"].as_str().map(str::to_owned))
+        .flatten()
     })
 }
 
@@ -545,6 +553,30 @@ fn deterministic_command(
     command: &str,
     waiting: bool,
 ) -> (&'static str, &'static str, Option<String>) {
+    if command == "custom release" {
+        return ("settled", "completed", Some("Custom tool released.".into()));
+    }
+    if command == "custom cancel" {
+        return (
+            "settled",
+            "completed",
+            Some("Custom tool cancelled.".into()),
+        );
+    }
+    if command.starts_with("custom ") {
+        return if command
+            .strip_prefix("custom ")
+            .is_some_and(|raw| !raw.is_empty())
+        {
+            ("running", "pending", None)
+        } else {
+            (
+                "failed",
+                "failed",
+                Some("Custom input must not be empty.".into()),
+            )
+        };
+    }
     if command == "async start" {
         return ("running", "pending", None);
     }
@@ -654,6 +686,7 @@ struct DeterministicServerTransport {
     answer_override: Option<String>,
     tool_jobs: async_demo::ToolJobs,
     async_sequence: bool,
+    custom_sequence: bool,
     async_turn: Arc<std::sync::atomic::AtomicUsize>,
     async_gate: Option<async_demo::GateControl>,
     async_a_call_id: Option<String>,
@@ -678,6 +711,9 @@ impl harness::engine::ResponsesTransport for DeterministicServerTransport {
                 .async_turn
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             {
+                0 if self.custom_sequence => vec![Item(json!({
+                    "type":"custom_tool_call","call_id":self.async_a_call_id.as_deref().unwrap_or("missing-custom-A"),"name":"run","input":self.command.strip_prefix("custom ").unwrap_or_default(),"async":true
+                }))],
                 0 => vec![Item(json!({
                     "type":"function_call","call_id":self.async_a_call_id.as_deref().unwrap_or("missing-async-A"),"name":"gate","arguments":"{}","async":true
                 }))],
@@ -811,6 +847,7 @@ async fn run_deterministic_engine_completion_from_head(
         inner: BrowserProvider(CliProvider(DemoProvider::development(".", false)), policy),
         jobs: tool_jobs.clone(),
         conversation_id: ROOT_CONVERSATION_ID.to_owned(),
+        store: store.clone(),
     });
     let engine = Engine::<OfflineServerAuth, async_demo::TrackedProvider<BrowserProvider>, _>::with_transport(
         DeterministicServerTransport {
@@ -819,6 +856,7 @@ async fn run_deterministic_engine_completion_from_head(
             answer_override,
             tool_jobs,
             async_sequence: false,
+            custom_sequence: false,
             async_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             async_gate: None,
             async_a_call_id: None,
@@ -902,6 +940,7 @@ struct BrowserProvider(CliProvider, BrowserPolicy);
 struct AsyncScenarioProvider {
     delegate: BrowserProvider,
     gate: async_demo::GateControl,
+    custom: bool,
 }
 
 #[async_trait]
@@ -915,6 +954,9 @@ impl Provider for AsyncScenarioProvider {
 
     async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError> {
         match name {
+            "run" if self.custom => Err(ProviderError::Tool(
+                "custom run requires typed raw dispatch".into(),
+            )),
             "gate" => {
                 self.gate.wait().await;
                 Ok(json!("A released"))
@@ -930,6 +972,11 @@ impl Provider for AsyncScenarioProvider {
         args: Value,
         context: CallContext,
     ) -> Result<Value, ProviderError> {
+        if name == "run" && self.custom {
+            return Err(ProviderError::Tool(
+                "custom run requires typed raw dispatch".into(),
+            ));
+        }
         if name == "gate" {
             self.gate.set_call_id(context.call_id);
             self.gate.wait().await;
@@ -941,11 +988,38 @@ impl Provider for AsyncScenarioProvider {
         self.delegate.call_with_context(name, args, context).await
     }
 
+    async fn call_custom_with_context(
+        &self,
+        name: &str,
+        input: String,
+        context: CallContext,
+    ) -> Result<Value, ProviderError> {
+        if name != "run" || !self.custom {
+            return self
+                .delegate
+                .call_custom_with_context(name, input, context)
+                .await;
+        }
+        self.gate.set_call_id(context.call_id.clone());
+        let progress =
+            json!({"event":"custom_started","callId":context.call_id.0,"inputLength":input.len()});
+        context.progress.try_send(progress.clone()).map_err(|_| {
+            ProviderError::Tool("custom progress channel refused start event".into())
+        })?;
+        self.gate.record_progress(progress);
+        self.gate.wait().await;
+        Ok(json!(format!("custom completed: {input}")))
+    }
+
     fn tools(&self) -> Vec<Value> {
-        vec![
+        let mut tools = vec![
             json!({"type":"function","name":"gate","async":true,"strict":true,"parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}),
             json!({"type":"function","name":"echo","async":true,"strict":true,"parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}),
-        ]
+        ];
+        if self.custom {
+            tools.push(json!({"type":"custom","name":"run","description":"Deterministic raw custom scenario"}));
+        }
+        tools
     }
 
     fn all_tools(&self) -> Vec<Value> {
@@ -1005,6 +1079,14 @@ impl Provider for BrowserProvider {
         context: CallContext,
     ) -> Result<Value, ProviderError> {
         self.0.call_with_context(name, args, context).await
+    }
+    async fn call_custom_with_context(
+        &self,
+        name: &str,
+        input: String,
+        context: CallContext,
+    ) -> Result<Value, ProviderError> {
+        self.0.call_custom_with_context(name, input, context).await
     }
     fn tools(&self) -> Vec<Value> {
         self.0.tools()
@@ -1105,6 +1187,30 @@ async fn run_async_scenario_turn(
     gate: async_demo::GateControl,
     cancel_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(String, Item, harness::model::RequestId), String> {
+    run_async_scenario_turn_for_command(
+        store,
+        scheduler,
+        head,
+        command_id,
+        "async start",
+        tool_jobs,
+        gate,
+        cancel_rx,
+    )
+    .await
+}
+
+async fn run_async_scenario_turn_for_command(
+    store: Arc<Store>,
+    scheduler: Arc<JobScheduler>,
+    head: Option<harness::model::RequestId>,
+    command_id: &str,
+    command: &str,
+    tool_jobs: async_demo::ToolJobs,
+    gate: async_demo::GateControl,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+) -> Result<(String, Item, harness::model::RequestId), String> {
+    let custom = command.starts_with("custom ");
     let transport_gate = gate.clone();
     let (async_a_call_id, async_b_call_id) = async_scenario_call_ids(command_id);
     let provider = Arc::new(async_demo::TrackedProvider {
@@ -1114,9 +1220,11 @@ async fn run_async_scenario_turn(
                 BrowserPolicy::Send,
             ),
             gate,
+            custom,
         },
         jobs: tool_jobs.clone(),
         conversation_id: ROOT_CONVERSATION_ID.to_owned(),
+        store: store.clone(),
     });
     let engine = Engine::<
         OfflineServerAuth,
@@ -1124,11 +1232,12 @@ async fn run_async_scenario_turn(
         _,
     >::with_transport(
         DeterministicServerTransport {
-            command: "async start".to_owned(),
+            command: command.to_owned(),
             waiting: false,
             answer_override: None,
             tool_jobs,
             async_sequence: true,
+            custom_sequence: custom,
             async_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             async_gate: Some(transport_gate),
             async_a_call_id: Some(async_a_call_id),
@@ -1149,7 +1258,7 @@ async fn run_async_scenario_turn(
     let completion = engine
         .run(
             head,
-            command_input(&[], "async start"),
+            command_input(&[], command),
             cancel_rx,
             tokio::sync::mpsc::unbounded_channel().1,
         )
@@ -1675,7 +1784,7 @@ async fn serve(
         tokio::task::JoinHandle<Result<(String, Item, harness::model::RequestId), String>>,
     )> = None;
     let mut async_gate: Option<async_demo::GateControl> = None;
-    let mut async_start_command: Option<(String, String)> = None;
+    let mut async_start_command: Option<(String, String, String)> = None;
     loop {
         tokio::select! {
             _ = &mut shutdown_signal => break,
@@ -1709,7 +1818,7 @@ async fn serve(
                         None,
                     ),
                 };
-                if let Some((command_id, request_id)) = async_start_command.take() {
+                if let Some((command_id, request_id, original_command)) = async_start_command.take() {
                     if let Some(item) = completion.3.as_ref() {
                         let envelope = persist_engine_final_envelope(
                             &status_store,
@@ -1720,7 +1829,7 @@ async fn serve(
                         control.publish("envelope.upsert", envelope);
                     }
                     if let Some(history_item) = history.iter_mut().find(|item| {
-                        item.0["request_id"] == request_id && item.0["command"] == "async start"
+                        item.0["request_id"] == request_id && item.0["command"] == original_command
                     }) {
                         history_item.0["outcome"] = json!(completion.1);
                         history_item.0["answer"] = json!(completion.2);
@@ -1729,7 +1838,7 @@ async fn serve(
                         &request_id,
                         completion.0,
                         &command_id,
-                        "async start",
+                        &original_command,
                         completion.1,
                         completion.2.as_deref(),
                     );
@@ -1904,25 +2013,31 @@ async fn serve(
                         });
                         let async_echo_check =
                             async_gate.is_some() && command.starts_with("echo ");
-                        let async_control_command = command == "async release"
-                            || command == "async cancel";
+                        let async_control_command = matches!(command.as_str(), "async release" | "async cancel" | "custom release" | "custom cancel");
                         let duplicate_async_start =
-                            command == "async start" && async_gate.is_some();
+                            (command == "async start" || (command.starts_with("custom ") && !async_control_command)) && async_gate.is_some();
                         let scenario_conflict = async_gate.is_some()
                             && !async_control_command
                             && !async_echo_check
-                            && command != "async start";
-                        let engine_answer = if command == "async release"
-                            || command == "async cancel"
+                            && command != "async start"
+                            && !command.starts_with("custom ");
+                        let engine_answer = if async_control_command
                         {
                             match async_gate.as_ref() {
                                 None => Some(Err("no async scenario is active".to_owned())),
                                 Some(gate) => {
-                                    if command == "async release" {
+                                    if matches!(command.as_str(), "async release" | "custom release") {
                                         gate.release();
                                     } else if let Some(call_id) = gate.call_id() {
                                         scheduler.cancel(&call_id).await
                                             .map_err(|_| "could not cancel async tool call")?;
+                                        // Release the test gate after scheduler cancellation
+                                        // to exercise that ordering. The aborted provider may
+                                        // never return, so this is not proof that a late
+                                        // provider success was suppressed.
+                                        if command == "custom cancel" {
+                                            gate.release();
+                                        }
                                     } else {
                                         return Err("async scenario has no active call A".into());
                                     }
@@ -1946,20 +2061,23 @@ async fn serve(
                             let engine_scheduler = scheduler.clone();
                             let engine_tool_jobs = tool_jobs.clone();
                             let engine_head_for_task = engine_head.clone();
-                            let task = if command == "async start" {
+                            let task = if command == "async start" || (command.starts_with("custom ") && !async_control_command) {
+                                let auto_release_custom = command == "custom browser-journey-proof"
+                                    || command.strip_prefix("custom ") == Some(BROWSER_CUSTOM_RAW);
                                 let gate = async_demo::GateControl::default();
                                 let task_gate = gate.clone();
                                 async_gate = Some(gate.clone());
                                 async_start_command =
-                                    Some((command_id.clone(), request_id.clone()));
+                                    Some((command_id.clone(), request_id.clone(), command.clone()));
                                 let (_, async_b_call_id) =
                                     async_scenario_call_ids(&engine_command_id);
                                 let mut task = tokio::spawn(async move {
-                                    run_async_scenario_turn(
+                                    run_async_scenario_turn_for_command(
                                         engine_store,
                                         engine_scheduler,
                                         engine_head_for_task,
                                         &engine_command_id,
+                                        &engine_command,
                                         engine_tool_jobs,
                                         task_gate,
                                         cancel_rx,
@@ -1988,19 +2106,41 @@ async fn serve(
                                     }),
                                 };
                                 if !engine_completed_before_a {
-                                    tokio::time::timeout(Duration::from_secs(2), async {
-                                        loop {
-                                            if tool_jobs.records().iter().any(|record| {
-                                                record.call_id == async_b_call_id
-                                                    && record.state
-                                                        == harness::server::ToolJobState::Settled
-                                                    && record.delivered
-                                            }) {
-                                                break;
-                                            }
-                                            tokio::time::sleep(Duration::from_millis(1)).await;
-                                        }
-                                    })
+                                    if command.starts_with("custom ") {
+                                        let start_event = tokio::time::timeout(
+                                            Duration::from_secs(2),
+                                            gate.wait_until_progress(),
+                                        )
+                                        .await
+                                        .map_err(|_| "custom provider did not emit start progress")?;
+                                        let progress = persist_browser_envelope(
+                                            &status_store,
+                                            "/harness",
+                                            ROOT_PATH,
+                                            "PROGRESS",
+                                            &start_event.to_string(),
+                                            next_envelope_ordinal(&envelopes),
+                                        )?;
+                                        envelopes.push(progress.clone());
+                                        status_store
+                                            .save_session_state(
+                                                "harness-demo-server:/root",
+                                                &json!({"history":history,"jobs":jobs,"requests":requests,"envelopes":envelopes,"conversation":conversation,"engineHead":engine_head.as_ref().map(|head| &head.0),"toolJobs":tool_jobs.records()}),
+                                            )
+                                            .map_err(|_| "could not persist custom start progress")?;
+                                        set_live_server_snapshot(&control, &live_snapshot, Snapshot {
+                                            conversations: conversation_rows(&conversation, &envelopes),
+                                            requests: requests.clone(),
+                                            jobs: projected_server_jobs(&jobs, &tool_jobs),
+                                            envelopes: envelopes.clone(),
+                                            ..Snapshot::default()
+                                        });
+                                        control.publish("envelope.upsert", progress);
+                                    }
+                                    tokio::time::timeout(
+                                        Duration::from_secs(2),
+                                        tool_jobs.wait_for_delivered(&harness::model::CallId(async_b_call_id)),
+                                    )
                                     .await
                                     .map_err(|_| "async scenario did not settle and deliver B")?;
                                     if let Some(saved) = status_store
@@ -2020,6 +2160,9 @@ async fn serve(
                                         envelopes: envelopes.clone(),
                                         ..Snapshot::default()
                                     });
+                                    if auto_release_custom {
+                                        gate.release();
+                                    }
                                 }
                                 task
                             } else {
@@ -2073,7 +2216,14 @@ async fn serve(
                                 engine_head = Some(completed_head);
                                 (initial_state, initial_outcome, Some(answer), Some(item))
                             }
-                            Some(Err(error)) => ("failed", "failed", Some(error), None),
+                            Some(Err(error)) => {
+                                // A failed request is still durable. Continue from that exact
+                                // branch tip rather than trying to append beside it next time.
+                                if let Some(head) = engine_head.take() {
+                                    engine_head = Some(durable_recovery_head(&status_store, head, ROOT_PATH)?);
+                                }
+                                ("failed", "failed", Some(error), None)
+                            },
                         };
                         history.push(Item(json!({"type":"demo_command","command_id":command_id,
                             "request_id":request_id,
@@ -2339,12 +2489,18 @@ impl DemoProvider {
     }
 
     async fn run_command(&self, args: &Value) -> Result<Value, ProviderError> {
+        // Legacy direct/function probe only. A raw JSON string must not
+        // accidentally make the old function route serve native custom calls.
+        let script = string_arg(args, "script")?;
+        self.run_raw_command(script).await
+    }
+
+    async fn run_raw_command(&self, script: &str) -> Result<Value, ProviderError> {
         if !self.allow_shell {
             return Err(ProviderError::Tool(
                 "run is disabled; enable only for trusted development use".into(),
             ));
         }
-        let script = string_arg(args, "script")?;
         let output = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(script)
@@ -2500,6 +2656,18 @@ impl Provider for DemoProvider {
             return Ok(json!({"slept_ms":ms}));
         }
         self.call(name, args).await
+    }
+
+    async fn call_custom_with_context(
+        &self,
+        name: &str,
+        input: String,
+        _context: CallContext,
+    ) -> Result<Value, ProviderError> {
+        if name != "run" {
+            return Err(ProviderError::Tool(format!("unknown custom tool: {name}")));
+        }
+        self.run_raw_command(&input).await
     }
 
     // NOTE(correction-wave b): no per-tool `async` flags needed here; the
@@ -2659,6 +2827,7 @@ mod tests {
             request_id: "engine-request-a".into(),
             call_id: "call-a".into(),
             tool_name: "gate".into(),
+            tool_kind: Some(harness::item::ToolKind::Function),
             state: harness::server::ToolJobState::Interrupted,
             delivered: false,
             started_at_ms: Some(1_700_000_000_002_i64),
@@ -2717,6 +2886,7 @@ mod tests {
                 request_id: parent.0.clone(),
                 call_id: call_a.0.clone(),
                 tool_name: "gate".into(),
+                tool_kind: Some(harness::item::ToolKind::Function),
                 state: harness::server::ToolJobState::Running,
                 delivered: false,
                 started_at_ms: None,
@@ -2729,6 +2899,7 @@ mod tests {
                 request_id: parent.0.clone(),
                 call_id: call_b.0.clone(),
                 tool_name: "echo".into(),
+                tool_kind: Some(harness::item::ToolKind::Function),
                 state: harness::server::ToolJobState::Settled,
                 delivered: true,
                 started_at_ms: None,
@@ -3743,6 +3914,26 @@ mod tests {
     }
 
     #[test]
+    fn custom_pending_request_keeps_conversation_requesting() {
+        let pending = command_request_record(
+            "request/custom",
+            "running",
+            "command/custom",
+            "custom hold-for-cancel",
+            "pending",
+            None,
+        );
+        assert_eq!(
+            active_async_request(&[pending]),
+            Some("request/custom".into())
+        );
+        assert_eq!(
+            deterministic_command("custom hold-for-cancel", false),
+            ("running", "pending", None)
+        );
+    }
+
+    #[test]
     fn deterministic_server_commands_separate_failure_and_recovery_success() {
         assert_eq!(
             deterministic_command("fail", false),
@@ -4182,8 +4373,9 @@ mod tests {
             .into_iter()
             .find(|t| t["name"] == "run")
             .unwrap();
-        assert_eq!(run["type"], "function");
-        assert_eq!(run["strict"], true);
+        assert_eq!(run["type"], "custom");
+        assert!(run.get("strict").is_none());
+        assert!(run.get("parameters").is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 

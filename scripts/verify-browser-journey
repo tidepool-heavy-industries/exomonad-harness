@@ -25,4 +25,4 @@ test -f web/dist/index.html || { echo "verification prerequisite missing: web/di
 if [[ "$mode" == --prepare-only ]]; then exit 0; fi
 
 echo "verification assertion: browser_journey"
-scripts/cargo-focused-test --package harness-demo --target test:browser_journey --filter browser --expect 1
+scripts/cargo-focused-test --package harness-demo --target test:browser_journey --filter browser --expect 4

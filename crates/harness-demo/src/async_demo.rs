@@ -9,16 +9,18 @@ use harness::{
     model::{CallId, RequestId},
     provider::{CallContext, Provider, ProviderError},
     server::{ToolJobRecord, ToolJobState},
+    store::Store,
 };
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
+    future::Future,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 
 /// Control plane for the one deliberately blocked tool in the served async
 /// scenario.  It is separate from Engine cancellation so releasing/cancelling
@@ -28,6 +30,8 @@ pub(crate) struct GateControl {
     released: Arc<AtomicBool>,
     notify: Arc<Notify>,
     call_id: Arc<Mutex<Option<CallId>>>,
+    progress: Arc<Mutex<Option<Value>>>,
+    progress_notify: Arc<Notify>,
     inputs: Arc<Mutex<Vec<Vec<harness::item::Item>>>>,
     requests: Arc<Mutex<Vec<harness::transport::ResponsesRequest>>>,
 }
@@ -48,6 +52,26 @@ impl GateControl {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    pub(crate) fn record_progress(&self, event: Value) {
+        *self.progress.lock().unwrap_or_else(|e| e.into_inner()) = Some(event);
+        self.progress_notify.notify_one();
+    }
+
+    pub(crate) async fn wait_until_progress(&self) -> Value {
+        loop {
+            let notified = self.progress_notify.notified();
+            if let Some(event) = self
+                .progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
+                return event;
+            }
+            notified.await;
+        }
     }
 
     pub(crate) fn observe_input(&self, input: &[harness::item::Item]) {
@@ -109,6 +133,7 @@ impl GateControl {
 pub(crate) struct ToolJobs {
     records: Arc<Mutex<BTreeMap<String, ToolJobRecord>>>,
     persist: Option<Arc<dyn Fn(Vec<ToolJobRecord>) -> Result<(), String> + Send + Sync>>,
+    delivery_revision: watch::Sender<u64>,
 }
 
 impl Default for ToolJobs {
@@ -116,6 +141,7 @@ impl Default for ToolJobs {
         Self {
             records: Arc::new(Mutex::new(BTreeMap::new())),
             persist: None,
+            delivery_revision: watch::channel(0).0,
         }
     }
 }
@@ -151,12 +177,24 @@ impl ToolJobs {
         call_id: &CallId,
         tool_name: &str,
     ) -> Result<(), String> {
+        self.start_with_kind(conversation_id, request, call_id, tool_name, None)
+    }
+
+    fn start_with_kind(
+        &self,
+        conversation_id: &str,
+        request: Option<&RequestId>,
+        call_id: &CallId,
+        tool_name: &str,
+        tool_kind: Option<harness::item::ToolKind>,
+    ) -> Result<(), String> {
         let record = ToolJobRecord {
             id: format!("tool/{conversation_id}/{}", call_id.0),
             conversation_id: conversation_id.to_owned(),
             request_id: request.map(|id| id.0.clone()).unwrap_or_default(),
             call_id: call_id.0.clone(),
             tool_name: tool_name.to_owned(),
+            tool_kind,
             state: ToolJobState::Running,
             delivered: false,
             started_at_ms: Self::epoch_ms(),
@@ -196,6 +234,28 @@ impl ToolJobs {
         Ok(())
     }
 
+    /// Wait for the persisted output to appear in a later Engine input.
+    /// Subscribe before inspecting the record: watch broadcasts every change
+    /// and remembers it if delivery races the inspection.
+    pub(crate) async fn wait_for_delivered(&self, call_id: &CallId) {
+        let mut changes = self.delivery_revision.subscribe();
+        loop {
+            if self
+                .records
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&call_id.0)
+                .is_some_and(|record| record.delivered)
+            {
+                return;
+            }
+            changes
+                .changed()
+                .await
+                .expect("ToolJobs owns the delivery change sender");
+        }
+    }
+
     pub(crate) fn cancel(&self, call_id: &CallId) {
         let mut changed = false;
         if let Some(record) = self
@@ -216,10 +276,17 @@ impl ToolJobs {
     }
 
     /// An output is delivered only when it occurs in a later full model input.
+    /// The Engine/Store validate output kind against the durable invocation;
+    /// this projection only observes either accepted wire output shape.
     pub(crate) fn observe_input(&self, input: &[harness::item::Item]) -> Result<(), String> {
         let delivered: std::collections::HashSet<&str> = input
             .iter()
-            .filter(|item| item.0["type"] == "function_call_output")
+            .filter(|item| {
+                matches!(
+                    item.0["type"].as_str(),
+                    Some("function_call_output" | "custom_tool_call_output")
+                )
+            })
             .filter_map(|item| item.0["call_id"].as_str())
             .collect();
         let mut changed = false;
@@ -236,6 +303,9 @@ impl ToolJobs {
         drop(records);
         if changed {
             self.persist()?;
+            self.delivery_revision.send_modify(|revision| {
+                *revision = revision.wrapping_add(1);
+            });
         }
         Ok(())
     }
@@ -250,6 +320,7 @@ impl ToolJobs {
         Self {
             records: Arc::new(Mutex::new(records.collect())),
             persist: None,
+            delivery_revision: watch::channel(0).0,
         }
     }
 
@@ -289,6 +360,7 @@ pub(crate) struct TrackedProvider<P> {
     pub(crate) inner: P,
     pub(crate) jobs: ToolJobs,
     pub(crate) conversation_id: String,
+    pub(crate) store: Arc<Store>,
 }
 
 struct CancellationGuard {
@@ -302,6 +374,55 @@ impl Drop for CancellationGuard {
         if !self.completed {
             self.jobs.cancel(&self.call_id);
         }
+    }
+}
+
+impl<P: Provider> TrackedProvider<P> {
+    async fn track_call<F>(
+        &self,
+        name: &str,
+        context: &CallContext,
+        call: F,
+    ) -> Result<Value, ProviderError>
+    where
+        F: Future<Output = Result<Value, ProviderError>>,
+    {
+        let request = context.request.as_ref().ok_or_else(|| {
+            ProviderError::Tool("tool job has no invocation request provenance".into())
+        })?;
+        let kind = self
+            .store
+            .tool_invocation_kind(request, &context.call_id)
+            .map_err(|error| ProviderError::Tool(format!("scoped invocation kind: {error}")))?
+            .ok_or_else(|| {
+                ProviderError::Tool("tool job has no durable scoped invocation".into())
+            })?;
+        self.jobs
+            .start_with_kind(
+                &self.conversation_id,
+                context.request.as_ref(),
+                &context.call_id,
+                name,
+                Some(kind),
+            )
+            .map_err(ProviderError::Tool)?;
+        let mut guard = CancellationGuard {
+            jobs: self.jobs.clone(),
+            call_id: context.call_id.clone(),
+            completed: false,
+        };
+        let result = call.await;
+        if let Ok(value) = &result {
+            self.jobs
+                .settle(&context.call_id, json!(value))
+                .map_err(ProviderError::Tool)?;
+        } else if let Err(error) = &result {
+            self.jobs
+                .settle(&context.call_id, json!({"error":error.to_string()}))
+                .map_err(ProviderError::Tool)?;
+        }
+        guard.completed = true;
+        result
     }
 }
 
@@ -324,34 +445,27 @@ impl<P: Provider> Provider for TrackedProvider<P> {
         args: Value,
         context: CallContext,
     ) -> Result<Value, ProviderError> {
-        self.jobs
-            .start(
-                &self.conversation_id,
-                context.request.as_ref(),
-                &context.call_id,
-                name,
-            )
-            .map_err(ProviderError::Tool)?;
-        let mut guard = CancellationGuard {
-            jobs: self.jobs.clone(),
-            call_id: context.call_id.clone(),
-            completed: false,
-        };
-        let result = self
-            .inner
-            .call_with_context(name, args, context.clone())
-            .await;
-        if let Ok(value) = &result {
-            self.jobs
-                .settle(&context.call_id, json!(value))
-                .map_err(ProviderError::Tool)?;
-        } else if let Err(error) = &result {
-            self.jobs
-                .settle(&context.call_id, json!({"error":error.to_string()}))
-                .map_err(ProviderError::Tool)?;
-        }
-        guard.completed = true;
-        result
+        self.track_call(
+            name,
+            &context,
+            self.inner.call_with_context(name, args, context.clone()),
+        )
+        .await
+    }
+
+    async fn call_custom_with_context(
+        &self,
+        name: &str,
+        input: String,
+        context: CallContext,
+    ) -> Result<Value, ProviderError> {
+        self.track_call(
+            name,
+            &context,
+            self.inner
+                .call_custom_with_context(name, input, context.clone()),
+        )
+        .await
     }
 
     fn tools(&self) -> Vec<Value> {
@@ -394,6 +508,7 @@ mod tests {
             request_id: "request-9".into(),
             call_id: call_id.into(),
             tool_name: "gate".into(),
+            tool_kind: None,
             state,
             delivered: false,
             started_at_ms: None,
@@ -489,6 +604,180 @@ mod tests {
         assert!(jobs.records()[0].delivered);
     }
 
+    #[tokio::test]
+    async fn delivery_wait_barrier_requires_original_call_without_sleep() {
+        let jobs = ToolJobs::default();
+        let call_id = CallId("barrier".into());
+        jobs.start(
+            "conversation",
+            Some(&RequestId("request-9".into())),
+            &call_id,
+            "echo",
+        )
+        .unwrap();
+        jobs.settle(&call_id, json!("done")).unwrap();
+        jobs.observe_input(&[harness::item::Item(json!({
+            "type":"function_call_output","call_id":"other","output":"ignored"
+        }))])
+        .unwrap();
+        assert!(!jobs.records()[0].delivered);
+        jobs.observe_input(&[harness::item::Item(json!({
+            "type":"function_call_output","call_id":"barrier","output":"done"
+        }))])
+        .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            jobs.wait_for_delivered(&call_id),
+        )
+        .await
+        .expect("durable output delivery opens the barrier");
+    }
+
+    #[tokio::test]
+    async fn delivery_broadcast_wakes_only_the_matching_call_waiter() {
+        let jobs = ToolJobs::default();
+        let a = CallId("wait-a".into());
+        let b = CallId("wait-b".into());
+        for call in [&a, &b] {
+            jobs.start(
+                "conversation",
+                Some(&RequestId("request-9".into())),
+                call,
+                "echo",
+            )
+            .unwrap();
+            jobs.settle(call, json!("done")).unwrap();
+        }
+        let a_wait = {
+            let jobs = jobs.clone();
+            let a = a.clone();
+            tokio::spawn(async move { jobs.wait_for_delivered(&a).await })
+        };
+        let b_wait = {
+            let jobs = jobs.clone();
+            let b = b.clone();
+            tokio::spawn(async move { jobs.wait_for_delivered(&b).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while jobs.delivery_revision.receiver_count() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both call waiters subscribed");
+        jobs.observe_input(&[harness::item::Item(json!({
+            "type":"function_call_output","call_id":"wait-b","output":"done"
+        }))])
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), b_wait)
+            .await
+            .expect("B delivery must wake B's waiter")
+            .expect("B waiter task");
+        assert!(!a_wait.is_finished(), "B delivery cannot satisfy A");
+        jobs.observe_input(&[harness::item::Item(json!({
+            "type":"function_call_output","call_id":"wait-a","output":"done"
+        }))])
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), a_wait)
+            .await
+            .expect("A delivery must wake A's waiter")
+            .expect("A waiter task");
+    }
+
+    #[test]
+    fn custom_delivery_requires_original_output_and_survives_reopen() {
+        let jobs = ToolJobs::default();
+        let call_id = CallId("raw-custom".into());
+        jobs.start(
+            "conversation",
+            Some(&RequestId("request-9".into())),
+            &call_id,
+            "run",
+        )
+        .unwrap();
+        jobs.settle(&call_id, json!({"result":"done"})).unwrap();
+        jobs.observe_input(&[harness::item::Item(json!({
+            "type":"custom_tool_call_output","call_id":"different","output":"ignored"
+        }))])
+        .unwrap();
+        assert!(!jobs.records()[0].delivered);
+        jobs.observe_input(&[harness::item::Item(json!({
+            "type":"custom_tool_call_output","call_id":"raw-custom","output":"done"
+        }))])
+        .unwrap();
+        let reopened = ToolJobs::reopen(jobs.records());
+        let record = &reopened.records()[0];
+        assert_eq!(record.state, ToolJobState::Settled);
+        assert!(record.delivered);
+        assert_eq!(record.output, Some(json!({"result":"done"})));
+    }
+
+    #[tokio::test]
+    async fn tracked_jobs_take_kind_from_emitting_request_not_reused_call_id() {
+        let store = Arc::new(Store::memory().unwrap());
+        let shared_call = CallId("same-call-id".into());
+        let cases = [
+            (
+                RequestId("function-request".into()),
+                "/root/function",
+                Item(
+                    json!({"type":"function_call","call_id":"same-call-id","name":"echo","arguments":"{}"}),
+                ),
+                json!({}),
+                harness::item::ToolKind::Function,
+            ),
+            (
+                RequestId("custom-request".into()),
+                "/root/custom",
+                Item(
+                    json!({"type":"custom_tool_call","call_id":"same-call-id","name":"echo","input":"raw\n雪"}),
+                ),
+                json!("raw\n雪"),
+                harness::item::ToolKind::Custom,
+            ),
+        ];
+        for (request, branch, item, args, expected) in cases {
+            store
+                .write_request(
+                    &request,
+                    None,
+                    branch,
+                    &[item],
+                    harness::store::Usage::default(),
+                )
+                .unwrap();
+            let jobs = ToolJobs::default();
+            let tracked = TrackedProvider {
+                inner: SequenceProvider,
+                jobs: jobs.clone(),
+                conversation_id: format!("conversation/{branch}"),
+                store: store.clone(),
+            };
+            let (mut context, _progress) = CallContext::detached_for_test(
+                harness::provider::JobHandle(format!("job/{branch}")),
+                shared_call.clone(),
+                harness::model::AgentPath(branch.into()),
+            );
+            context.request = Some(request.clone());
+            match expected {
+                harness::item::ToolKind::Function => {
+                    tracked.call_with_context("echo", args, context).await
+                }
+                harness::item::ToolKind::Custom => {
+                    tracked
+                        .call_custom_with_context("echo", "raw\n雪".into(), context)
+                        .await
+                }
+            }
+            .expect("scoped invocation dispatch");
+            let records = jobs.records();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].request_id, request.0);
+            assert_eq!(records[0].call_id, shared_call.0);
+            assert_eq!(records[0].tool_kind, Some(expected));
+        }
+    }
+
     #[derive(Clone)]
     struct OfflineAuth;
     impl Auth for OfflineAuth {
@@ -543,6 +832,18 @@ mod tests {
                 _ => Err(ProviderError::Tool("unexpected tool".into())),
             }
         }
+        async fn call_custom_with_context(
+            &self,
+            name: &str,
+            input: String,
+            _context: CallContext,
+        ) -> Result<Value, ProviderError> {
+            if name == "echo" && input == "raw\n雪" {
+                Ok(json!("B output"))
+            } else {
+                Err(ProviderError::Tool("unexpected custom tool".into()))
+            }
+        }
         fn tools(&self) -> Vec<Value> {
             ["gate", "echo"]
                 .into_iter()
@@ -561,18 +862,20 @@ mod tests {
         let third_request = Arc::new(Notify::new());
         let scheduler = Arc::new(JobScheduler::new(2).unwrap());
         let jobs = ToolJobs::default();
+        let store = Arc::new(Store::memory().unwrap());
         let engine = Engine::<OfflineAuth, TrackedProvider<SequenceProvider>, _>::with_transport(
             SequenceTransport {
                 calls: AtomicUsize::new(0),
                 inputs: inputs.clone(),
                 third_request: third_request.clone(),
             },
-            Arc::new(Store::memory().unwrap()),
+            store.clone(),
             scheduler,
             Arc::new(TrackedProvider {
                 inner: SequenceProvider,
                 jobs: jobs.clone(),
                 conversation_id: "async-sequence".into(),
+                store,
             }),
             EngineConfig {
                 instructions: "sequence test".into(),
@@ -649,6 +952,11 @@ mod tests {
         assert_eq!(delivered_b.state, ToolJobState::Settled);
         assert!(delivered_b.delivered);
         assert!(!delivered_b.request_id.is_empty());
+        assert_eq!(
+            delivered_b.tool_kind,
+            Some(harness::item::ToolKind::Function),
+            "projection kind must come from B's persisted invocation"
+        );
         drop(observed);
         cancel_tx.send(true).unwrap();
         assert!(
@@ -665,6 +973,11 @@ mod tests {
             .unwrap();
         assert_eq!(cancelled_a.state, ToolJobState::Cancelled);
         assert_eq!(cancelled_a.output, None);
+        assert_eq!(
+            cancelled_a.tool_kind,
+            Some(harness::item::ToolKind::Function),
+            "cancellation must retain the original invocation kind"
+        );
         assert!(!cancelled_a.request_id.is_empty());
     }
 

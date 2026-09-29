@@ -10,7 +10,7 @@ use crate::{
         TypedTurnFuture,
     },
     finalize::{FINALIZE_TOOL_NAME, FinalizeError, FinalizeParser},
-    item::Item,
+    item::{Item, ToolInput, ToolKind},
     mailbox::{Envelope, MessageChannel},
     model::{AgentPath, CallId, Effort, RequestId},
     provider::Provider,
@@ -39,6 +39,7 @@ struct PendingCall {
     call_id: CallId,
     claim_request: RequestId,
     is_wait_agent: bool,
+    tool_kind: ToolKind,
     persist_here_invocation_output: bool,
     cancel_job_on_cleanup: bool,
 }
@@ -69,8 +70,10 @@ pub enum EngineError {
     InvalidToolSelection(String),
     #[error("invalid before-request injected item")]
     InvalidInjectedItem,
-    #[error("malformed Responses function_call item")]
+    #[error("malformed Responses tool call item")]
     InvalidFunctionCall,
+    #[error("durable output kind or call id does not match invocation {0}")]
+    MismatchedToolOutput(String),
     #[error("request history has no harness-authored configuration_update")]
     MissingEffortPin,
     #[error("a model response contained more than one wait_agent call")]
@@ -176,6 +179,45 @@ impl<A: Auth + Clone + 'static, P: Provider + 'static> Engine<A, P, ResponsesCli
             provider,
             config,
         )
+    }
+}
+
+fn tool_kind_for_call(history: &[Item], call_id: &CallId) -> Result<ToolKind, EngineError> {
+    let mut kind = None;
+    for item in history {
+        let call = item
+            .tool_call()
+            .map_err(|_| EngineError::InvalidFunctionCall)?;
+        if let Some(call) = call.filter(|call| &call.call_id == call_id) {
+            if kind.replace(call.input.kind()).is_some() {
+                return Err(EngineError::InvalidFunctionCall);
+            }
+        }
+    }
+    kind.ok_or(EngineError::InvalidFunctionCall)
+}
+
+fn parsed_call_id(item: &Item) -> Result<Option<CallId>, EngineError> {
+    item.tool_call()
+        .map(|call| call.map(|call| call.call_id))
+        .map_err(|_| EngineError::InvalidFunctionCall)
+}
+
+fn conflicting_call(seen: &[(CallId, Item)], call_id: &CallId, item: &Item) -> bool {
+    seen.iter()
+        .find(|(seen_id, _)| seen_id == call_id)
+        .is_some_and(|(_, previous)| previous.tool_call() != item.tool_call())
+}
+
+fn validate_tool_output(call_id: &CallId, kind: ToolKind, item: &Item) -> Result<(), EngineError> {
+    let expected = match kind {
+        ToolKind::Function => "function_call_output",
+        ToolKind::Custom => "custom_tool_call_output",
+    };
+    if item.0["type"] == expected && item.0["call_id"].as_str() == Some(&call_id.0) {
+        Ok(())
+    } else {
+        Err(EngineError::MismatchedToolOutput(call_id.0.clone()))
     }
 }
 
@@ -378,13 +420,51 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         };
         let mut pending = Vec::<PendingCall>::new();
         let mut replay_items = Vec::<Item>::new();
-        let mut replay_outputs = Vec::<(CallId, crate::turn::JobOutput)>::new();
+        let mut replay_outputs =
+            Vec::<(CallId, crate::turn::JobOutput, ToolKind, RequestId)>::new();
         let mut attachable = Vec::new();
         for claim in inherited_claims {
-            if inherited_history.iter().any(|item| {
-                item.0["type"] == "function_call_output"
-                    && item.0["call_id"].as_str() == Some(&claim.call_id.0)
-            }) {
+            let tool_kind = tool_kind_for_call(&inherited_history, &claim.call_id)?;
+            let already_output = inherited_history
+                .iter()
+                .filter(|item| {
+                    (item.0["type"] == "function_call_output"
+                        || item.0["type"] == "custom_tool_call_output")
+                        && item.0["call_id"].as_str() == Some(&claim.call_id.0)
+                })
+                .collect::<Vec<_>>();
+            for item in &already_output {
+                validate_tool_output(&claim.call_id, tool_kind, item)?;
+            }
+            if !already_output.is_empty() {
+                if already_output.len() != 1 {
+                    return Err(EngineError::MismatchedToolOutput(claim.call_id.0.clone()));
+                }
+                let expected = match claim.state {
+                    crate::store::ClaimState::Pending => {
+                        return Err(EngineError::ClaimRecoveryConflict(claim.call_id.0.clone()));
+                    }
+                    crate::store::ClaimState::Interrupted => Item::tool_output(
+                        &claim.call_id,
+                        tool_kind,
+                        &crate::turn::JobOutput::Interrupted,
+                    ),
+                    crate::store::ClaimState::Settled => {
+                        let hash = claim.output.as_ref().ok_or_else(|| {
+                            EngineError::MissingInheritedOutput(claim.call_id.0.clone())
+                        })?;
+                        let store = self.store.clone();
+                        let hash = hash.clone();
+                        blocking(move || store.get_item(&hash))
+                            .await?
+                            .ok_or_else(|| {
+                                EngineError::MissingInheritedOutput(claim.call_id.0.clone())
+                            })?
+                    }
+                };
+                if already_output[0] != &expected {
+                    return Err(EngineError::MismatchedToolOutput(claim.call_id.0.clone()));
+                }
                 continue;
             }
             if claim.state == crate::store::ClaimState::Settled {
@@ -396,12 +476,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 let Some(item) = item else {
                     return Err(EngineError::MissingInheritedOutput(claim.call_id.0));
                 };
+                validate_tool_output(&claim.call_id, tool_kind, &item)?;
                 replay_items.push(item);
                 continue;
             }
             if claim.state == crate::store::ClaimState::Interrupted {
-                replay_items.push(items::function_output(
+                replay_items.push(Item::tool_output(
                     &claim.call_id,
+                    tool_kind,
                     &crate::turn::JobOutput::Interrupted,
                 ));
                 continue;
@@ -428,19 +510,22 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
                 Err(error) => return Err(EngineError::Job(error)),
             }
-            attachable.push(claim);
+            attachable.push((claim, tool_kind));
         }
-        for claim in attachable {
+        for (claim, tool_kind) in attachable {
             match self
                 .scheduler
                 .fork_claim(&claim.call_id, self.config.agent.clone(), true)
                 .await?
             {
-                Some(output) => replay_outputs.push((claim.call_id, output)),
+                Some(output) => {
+                    replay_outputs.push((claim.call_id, output, tool_kind, claim.request))
+                }
                 None => pending.push(PendingCall {
                     call_id: claim.call_id,
                     claim_request: claim.request,
                     is_wait_agent: false,
+                    tool_kind,
                     persist_here_invocation_output: false,
                     cancel_job_on_cleanup: false,
                 }),
@@ -473,8 +558,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let agent = self.config.agent.clone();
             blocking(move || store.apply_pending_effort(&agent, &request)).await?;
         }
-        for (call_id, output) in replay_outputs {
-            self.persist_output(&call_id, &output, &id).await?;
+        for (call_id, output, kind, claim_request) in replay_outputs {
+            self.persist_output(&call_id, kind, &output, &id, &claim_request)
+                .await?;
         }
         if !replay_items.is_empty() {
             self.append(&id, replay_items).await?;
@@ -684,6 +770,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let create = self.client.create_streaming(req, event_tx);
             tokio::pin!(create);
             let mut turn_call_ids = Vec::<CallId>::new();
+            let mut turn_call_items = Vec::<(CallId, Item)>::new();
             let mut wait_call = None;
             let mut persisted_items = Vec::<Item>::new();
             let mut event_stream_open = true;
@@ -705,6 +792,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     event = event_rx.recv(), if event_stream_open => {
                         match event {
                             Some(StreamEvent::ItemDone(item)) => {
+                                let call_id = match parsed_call_id(&item) {
+                                    Ok(call_id) => call_id,
+                                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                                };
+                                if let Some(call_id) = call_id {
+                                    if turn_call_ids.contains(&call_id) {
+                                        if conflicting_call(&turn_call_items, &call_id, &item) {
+                                            return Err(self.cleanup_pending(EngineError::InvalidFunctionCall, &pending).await);
+                                        }
+                                        continue;
+                                    }
+                                }
                                 if let Err(error) = self.append(&parent, vec![item.clone()]).await {
                                     return Err(self.cleanup_pending(error, &pending).await);
                                 }
@@ -715,6 +814,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 if finalize_schema.is_some() && is_finalize_call(&item) {
                                     continue;
                                 }
+                                let call_item = item.clone();
                                 match self.dispatch_completed_item(item, &parent).await {
                                     Ok(Some(call)) => {
                                         if !pending.iter().any(|current| current.call_id == call.call_id) {
@@ -724,6 +824,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                             }
                                             if call.is_wait_agent { wait_call = Some(call.call_id.clone()); }
                                             turn_call_ids.push(call.call_id.clone());
+                                            turn_call_items.push((call.call_id.clone(), call_item));
                                             pending.push(call);
                                         }
                                     }
@@ -756,6 +857,20 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             // A completed response can race the buffered final item events.
             while let Ok(event) = event_rx.try_recv() {
                 if let StreamEvent::ItemDone(item) = event {
+                    let call_id = match parsed_call_id(&item) {
+                        Ok(call_id) => call_id,
+                        Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                    };
+                    if let Some(call_id) = call_id {
+                        if turn_call_ids.contains(&call_id) {
+                            if conflicting_call(&turn_call_items, &call_id, &item) {
+                                return Err(self
+                                    .cleanup_pending(EngineError::InvalidFunctionCall, &pending)
+                                    .await);
+                            }
+                            continue;
+                        }
+                    }
                     if let Err(error) = self.append(&parent, vec![item.clone()]).await {
                         return Err(self.cleanup_pending(error, &pending).await);
                     }
@@ -766,6 +881,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     if finalize_schema.is_some() && is_finalize_call(&item) {
                         continue;
                     }
+                    let call_item = item.clone();
                     match self.dispatch_completed_item(item, &parent).await {
                         Ok(Some(call)) => {
                             if !pending
@@ -781,6 +897,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                     wait_call = Some(call.call_id.clone());
                                 }
                                 turn_call_ids.push(call.call_id.clone());
+                                turn_call_items.push((call.call_id.clone(), call_item));
                                 pending.push(call);
                             }
                         }
@@ -794,6 +911,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             // Some injected transports may only return a turn, without emitting
             // item events. The production client emits every completed item.
             for item in &turn.items {
+                if let Some(call_id) = match parsed_call_id(item) {
+                    Ok(call_id) => call_id,
+                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                } {
+                    if conflicting_call(&turn_call_items, &call_id, item) {
+                        return Err(self
+                            .cleanup_pending(EngineError::InvalidFunctionCall, &pending)
+                            .await);
+                    }
+                }
                 if !remove_matching_item(&mut persisted_items, item) {
                     if let Err(error) = self.append(&parent, vec![item.clone()]).await {
                         return Err(self.cleanup_pending(error, &pending).await);
@@ -802,16 +929,20 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 if deferred_dispatch_error.is_some() {
                     continue;
                 }
-                if item.0["type"] == "function_call" {
+                if item.0["type"] == "function_call" || item.0["type"] == "custom_tool_call" {
                     if finalize_schema.is_some() && is_finalize_call(item) {
                         continue;
                     }
-                    let Some((call_id, _, _)) = items::function_call(item) else {
-                        return Err(self
-                            .cleanup_pending(EngineError::InvalidFunctionCall, &pending)
-                            .await);
+                    let call_id = match parsed_call_id(item) {
+                        Ok(Some(call_id)) => call_id,
+                        Ok(None) => {
+                            return Err(self
+                                .cleanup_pending(EngineError::InvalidFunctionCall, &pending)
+                                .await);
+                        }
+                        Err(error) => return Err(self.cleanup_pending(error, &pending).await),
                     };
-                    if !pending.iter().any(|current| current.call_id == call_id) {
+                    if !turn_call_ids.contains(&call_id) {
                         match self.dispatch_completed_item(item.clone(), &parent).await {
                             Ok(Some(call)) => {
                                 if call.is_wait_agent && wait_call.is_some() {
@@ -823,6 +954,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                     wait_call = Some(call_id.clone());
                                 }
                                 turn_call_ids.push(call_id.clone());
+                                turn_call_items.push((call_id.clone(), item.clone()));
                                 pending.push(call);
                             }
                             Ok(None) => {
@@ -1016,13 +1148,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     /// Turn a missing in-memory job into a durable interruption, unless a
     /// concurrent settlement already won and supplied the actual output.
     async fn recover_missing_job(&self, claim: &crate::store::Claim) -> Result<Item, EngineError> {
+        let history = self.read_history(&claim.request).await?;
+        let tool_kind = tool_kind_for_call(&history, &claim.call_id)?;
         let store = self.store.clone();
         let call = claim.call_id.clone();
         let request = claim.request.clone();
         let interrupted = blocking(move || store.interrupt_claim(&call, &request)).await?;
         if interrupted > 0 {
-            return Ok(items::function_output(
+            return Ok(Item::tool_output(
                 &claim.call_id,
+                tool_kind,
                 &crate::turn::JobOutput::Interrupted,
             ));
         }
@@ -1044,13 +1179,19 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     return Err(EngineError::MissingInheritedOutput(claim.call_id.0.clone()));
                 };
                 let store = self.store.clone();
-                blocking(move || store.get_item(&hash))
+                let item = blocking(move || store.get_item(&hash))
                     .await?
-                    .ok_or_else(|| EngineError::MissingInheritedOutput(claim.call_id.0.clone()))
+                    .ok_or_else(|| EngineError::MissingInheritedOutput(claim.call_id.0.clone()))?;
+                validate_tool_output(&claim.call_id, tool_kind, &item)?;
+                Ok(item)
             }
-            Some(current) if current.state == crate::store::ClaimState::Interrupted => Ok(
-                items::function_output(&claim.call_id, &crate::turn::JobOutput::Interrupted),
-            ),
+            Some(current) if current.state == crate::store::ClaimState::Interrupted => {
+                Ok(Item::tool_output(
+                    &claim.call_id,
+                    tool_kind,
+                    &crate::turn::JobOutput::Interrupted,
+                ))
+            }
             _ => Err(EngineError::ClaimRecoveryConflict(claim.call_id.0.clone())),
         }
     }
@@ -1089,14 +1230,25 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         item: Item,
         request: &RequestId,
     ) -> Result<Option<PendingCall>, EngineError> {
-        if item.0["type"] != "function_call" {
+        if item.0["type"] != "function_call" && item.0["type"] != "custom_tool_call" {
             return Ok(None);
         }
-        let Some((call_id, name, args)) = items::function_call(&item) else {
+        let call = item
+            .tool_call()
+            .map_err(|_| EngineError::InvalidFunctionCall)?
+            .ok_or(EngineError::InvalidFunctionCall)?;
+        let call_id = call.call_id;
+        let name = call.name;
+        let input = call.input;
+        let tool_kind = input.kind();
+        if tool_kind == ToolKind::Custom
+            && (crate::provider::is_harness_tool(&name) || name == FINALIZE_TOOL_NAME)
+        {
             return Err(EngineError::InvalidFunctionCall);
-        };
+        }
         let is_wait_agent = name == "wait_agent";
-        let is_here_spawn = name == "spawn_agent" && args["from"]["kind"].as_str() == Some("here");
+        let is_here_spawn = name == "spawn_agent"
+            && matches!(&input, ToolInput::Function(args) if args["from"]["kind"].as_str() == Some("here"));
         if is_wait_agent {
             let store = self.store.clone();
             let call = call_id.clone();
@@ -1106,19 +1258,20 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 call_id,
                 claim_request: request.clone(),
                 is_wait_agent,
+                tool_kind,
                 persist_here_invocation_output: false,
                 cancel_job_on_cleanup: false,
             }));
         }
         let provider: Arc<dyn Provider> = self.provider.clone();
         self.scheduler
-            .start_for_agent(
+            .start_input_for_agent(
                 provider,
                 self.config.agent.clone(),
                 Some(request.clone()),
                 call_id.clone(),
                 name,
-                args,
+                input,
             )
             .await?;
         if let Err(error) = self
@@ -1140,6 +1293,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             call_id,
             claim_request: request.clone(),
             is_wait_agent,
+            tool_kind,
             persist_here_invocation_output: is_here_spawn,
             cancel_job_on_cleanup: true,
         }))
@@ -1148,16 +1302,44 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     async fn cancel_pending(&self, pending: &[PendingCall]) -> Result<(), EngineError> {
         let mut first_error = None;
         for call in pending {
+            let mut persisted_terminal = false;
             if call.cancel_job_on_cleanup && !call.is_wait_agent {
                 if let Err(error) = self.scheduler.cancel(&call.call_id).await {
-                    first_error.get_or_insert_with(|| EngineError::Job(error));
+                    if !matches!(error, JobError::UnknownCall) {
+                        first_error.get_or_insert_with(|| EngineError::Job(error));
+                    }
+                }
+                match self.scheduler.output(&call.call_id).await {
+                    Ok(Some(output)) => match self
+                        .retain_settled_output(
+                            &call.call_id,
+                            call.tool_kind,
+                            &output,
+                            &call.claim_request,
+                        )
+                        .await
+                    {
+                        Ok(()) => persisted_terminal = true,
+                        Err(error) => {
+                            first_error.get_or_insert(error);
+                        }
+                    },
+                    Err(JobError::UnknownCall) => {}
+                    Ok(None) => {}
+                    Err(error) => {
+                        first_error.get_or_insert(EngineError::Job(error));
+                    }
                 }
             }
-            let store = self.store.clone();
-            let call_id = call.call_id.clone();
-            let request = call.claim_request.clone();
-            if let Err(error) = blocking(move || store.interrupt_claim(&call_id, &request)).await {
-                first_error.get_or_insert(error);
+            if !persisted_terminal {
+                let store = self.store.clone();
+                let call_id = call.call_id.clone();
+                let request = call.claim_request.clone();
+                if let Err(error) =
+                    blocking(move || store.interrupt_claim(&call_id, &request)).await
+                {
+                    first_error.get_or_insert(error);
+                }
             }
         }
         first_error.map_or(Ok(()), Err)
@@ -1186,14 +1368,23 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let outputs = outputs_in_call_order(&self.scheduler, &calls).await?;
         let mut settled = Vec::with_capacity(outputs.len());
         for (call_id, output) in outputs {
-            let output_request = pending
+            let call = pending
                 .iter()
                 .find(|call| call.call_id == call_id)
-                .filter(|call| call.persist_here_invocation_output)
-                .map(|call| call.claim_request.clone())
-                .unwrap_or_else(|| request.clone());
-            self.persist_output(&call_id, &output, &output_request)
-                .await?;
+                .expect("scheduler output belongs to a pending call");
+            let output_request = if call.persist_here_invocation_output {
+                call.claim_request.clone()
+            } else {
+                request.clone()
+            };
+            self.persist_output(
+                &call_id,
+                call.tool_kind,
+                &output,
+                &output_request,
+                &call.claim_request,
+            )
+            .await?;
             pending.retain(|call| call.call_id != call_id);
             settled.push(call_id);
         }
@@ -1203,19 +1394,81 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     async fn persist_output(
         &self,
         call_id: &CallId,
+        kind: ToolKind,
         output: &crate::turn::JobOutput,
         request: &RequestId,
+        claim_request: &RequestId,
     ) -> Result<(), EngineError> {
-        let item = items::function_output(call_id, output);
+        let item = Item::tool_output(call_id, kind, output);
         let store = self.store.clone();
         let call = call_id.clone();
         let request = request.clone();
-        blocking(move || {
+        let claimed_at = claim_request.clone();
+        let terminal = blocking(move || {
             store.write_output(&call, &item)?;
+            let claim = store
+                .claims(&call)?
+                .into_iter()
+                .find(|claim| claim.request == claimed_at);
+            let retained = match claim.as_ref().and_then(|claim| claim.output.as_ref()) {
+                Some(hash) => store.get_item(hash)?,
+                None => None,
+            };
+            Ok((claim, retained, item))
+        })
+        .await?;
+        let (claim, retained, item) = terminal;
+        if !matches!(
+            claim.as_ref().map(|claim| claim.state),
+            Some(crate::store::ClaimState::Settled)
+        ) || retained.as_ref() != Some(&item)
+        {
+            return Err(EngineError::ClaimRecoveryConflict(call_id.0.clone()));
+        }
+        let store = self.store.clone();
+        blocking(move || {
             store.append_items(&request, &[item])?;
             Ok(())
         })
         .await
+    }
+
+    /// Record terminal evidence without attaching it to an ancestor request.
+    /// A later Engine resume replays this durable claim output into its own
+    /// request history, avoiding mutation of a parent branch during cleanup.
+    async fn retain_settled_output(
+        &self,
+        call_id: &CallId,
+        kind: ToolKind,
+        output: &crate::turn::JobOutput,
+        claim_request: &RequestId,
+    ) -> Result<(), EngineError> {
+        let item = Item::tool_output(call_id, kind, output);
+        let store = self.store.clone();
+        let call = call_id.clone();
+        let claimed_at = claim_request.clone();
+        let terminal = blocking(move || {
+            store.write_output(&call, &item)?;
+            let claim = store
+                .claims(&call)?
+                .into_iter()
+                .find(|claim| claim.request == claimed_at);
+            let retained = match claim.as_ref().and_then(|claim| claim.output.as_ref()) {
+                Some(hash) => store.get_item(hash)?,
+                None => None,
+            };
+            Ok((claim, retained, item))
+        })
+        .await?;
+        let (claim, retained, item) = terminal;
+        if !matches!(
+            claim.as_ref().map(|claim| claim.state),
+            Some(crate::store::ClaimState::Settled)
+        ) || retained.as_ref() != Some(&item)
+        {
+            return Err(EngineError::ClaimRecoveryConflict(call_id.0.clone()));
+        }
+        Ok(())
     }
 
     async fn wait_for_resume(
@@ -1249,14 +1502,23 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         durable_mailbox: bool,
     ) -> Result<(), EngineError> {
         for (call_id, output) in result.call_outputs {
-            let output_request = pending
+            let call = pending
                 .iter()
                 .find(|call| call.call_id == call_id)
-                .filter(|call| call.persist_here_invocation_output)
-                .map(|call| call.claim_request.clone())
-                .unwrap_or_else(|| request.clone());
-            self.persist_output(&call_id, &output, &output_request)
-                .await?;
+                .expect("wait result belongs to a pending call");
+            let output_request = if call.persist_here_invocation_output {
+                call.claim_request.clone()
+            } else {
+                request.clone()
+            };
+            self.persist_output(
+                &call_id,
+                call.tool_kind,
+                &output,
+                &output_request,
+                &call.claim_request,
+            )
+            .await?;
             pending.retain(|call| call.call_id != call_id);
         }
         let (agent_envelope, user_envelope, output) = match result.resumed_by {
@@ -1285,7 +1547,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         if let Some(wait_call) = wait_call {
             self.persist_output(
                 wait_call,
+                ToolKind::Function,
                 &crate::turn::JobOutput::Completed(Ok(output)),
+                request,
                 request,
             )
             .await?;
@@ -1599,6 +1863,425 @@ mod tests {
         fn tools(&self) -> Vec<Value> {
             Vec::new()
         }
+    }
+
+    #[tokio::test]
+    async fn engine_custom_stream_and_final_copy_dispatch_once_with_matching_output() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountRaw {
+            calls: Arc<AtomicUsize>,
+            inputs: Arc<Mutex<Vec<Value>>>,
+        }
+        #[async_trait]
+        impl Provider for CountRaw {
+            async fn call(&self, _name: &str, _input: Value) -> Result<Value, ProviderError> {
+                unreachable!("custom input must not enter function dispatch")
+            }
+            async fn call_custom_with_context(
+                &self,
+                _name: &str,
+                input: String,
+                _context: crate::provider::CallContext,
+            ) -> Result<Value, ProviderError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.inputs.lock().unwrap().push(Value::String(input));
+                Ok(Value::String("raw result".into()))
+            }
+            fn tools(&self) -> Vec<Value> {
+                vec![]
+            }
+        }
+
+        let raw = "line 1\nquote \" slash \\ λ";
+        let call = Item(json!({
+            "type":"custom_tool_call", "call_id":"raw-call", "name":"cell", "input":raw
+        }));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let inputs = Arc::new(Mutex::new(Vec::new()));
+        let store = Arc::new(Store::memory().unwrap());
+        let engine = Engine::<FakeAuth, CountRaw, _>::with_transport(
+            Replay {
+                requests: requests.clone(),
+                turns: Mutex::new(
+                    [
+                        turn("raw-start", vec![call]),
+                        turn(
+                            "raw-finish",
+                            vec![Item(json!({
+                                "type":"message", "role":"assistant",
+                                "phase":"final_answer", "content":"done"
+                            }))],
+                        ),
+                    ]
+                    .into(),
+                ),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(CountRaw {
+                calls: calls.clone(),
+                inputs: inputs.clone(),
+            }),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "custom-once".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let completion = engine
+            .run(None, vec![], cancel_rx, empty_mailbox())
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(*inputs.lock().unwrap(), vec![Value::String(raw.into())]);
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(
+            sent[1]
+                .input
+                .iter()
+                .filter(|item| item.0["type"] == "custom_tool_call_output")
+                .count(),
+            1
+        );
+        assert!(
+            sent[1]
+                .input
+                .iter()
+                .any(|item| item.0["call_id"] == "raw-call"
+                    && item.0["type"] == "custom_tool_call_output"
+                    && item.0["output"] == "raw result")
+        );
+        assert_eq!(store.claims(&CallId("raw-call".into())).unwrap().len(), 1);
+        assert_eq!(completion.turn.response_id, "raw-finish");
+    }
+
+    #[tokio::test]
+    async fn engine_rejects_malformed_and_reserved_custom_calls_before_admission() {
+        let store = Arc::new(Store::memory().unwrap());
+        let request = RequestId("reject-custom".into());
+        store.create_request(&request, None, "/root").unwrap();
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            Replay {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                turns: Mutex::new(std::collections::VecDeque::new()),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "reject-custom".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        for item in [
+            Item(json!({"type":"custom_tool_call","call_id":"missing-input","name":"cell"})),
+            Item(json!({"type":"custom_tool_call","call_id":"bad-input","name":"cell","input":{}})),
+            Item(
+                json!({"type":"custom_tool_call","call_id":"reserved","name":"wait_agent","input":"{}"}),
+            ),
+            Item(
+                json!({"type":"custom_tool_call","call_id":"reserved-finalize","name":"finalize","input":"{}"}),
+            ),
+            Item(
+                json!({"type":"function_call","call_id":"bad-function","name":"echo","arguments":"{"}),
+            ),
+        ] {
+            assert!(matches!(
+                engine.dispatch_completed_item(item, &request).await,
+                Err(EngineError::InvalidFunctionCall)
+            ));
+        }
+        assert!(store.claims_on(&request).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn engine_stream_rejects_malformed_custom_call_explicitly() {
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            Replay {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                turns: Mutex::new(
+                    [turn(
+                        "malformed-custom",
+                        vec![Item(json!({
+                            "type":"custom_tool_call", "call_id":"bad", "name":"cell", "input":{}
+                        }))],
+                    )]
+                    .into(),
+                ),
+            },
+            Arc::new(Store::memory().unwrap()),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "malformed-custom".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        assert!(matches!(
+            engine.run(None, vec![], cancel_rx, empty_mailbox()).await,
+            Err(EngineError::InvalidFunctionCall)
+        ));
+    }
+
+    #[tokio::test]
+    async fn engine_rejects_conflicting_stream_and_final_custom_copy() {
+        struct MutatingCopy;
+        #[async_trait]
+        impl ResponsesTransport for MutatingCopy {
+            async fn create(
+                &self,
+                _request: ResponsesRequest,
+            ) -> Result<ResponsesTurn, TransportError> {
+                unreachable!("streaming entry point is used")
+            }
+            async fn create_streaming(
+                &self,
+                _request: ResponsesRequest,
+                sink: tokio::sync::mpsc::Sender<StreamEvent>,
+            ) -> Result<ResponsesTurn, TransportError> {
+                sink.send(StreamEvent::ItemDone(Item(json!({
+                    "type":"custom_tool_call","call_id":"same-id","name":"cell","input":"first"
+                }))))
+                .await
+                .unwrap();
+                Ok(turn(
+                    "conflicting-final",
+                    vec![Item(json!({
+                        "type":"custom_tool_call","call_id":"same-id","name":"cell","input":"changed"
+                    }))],
+                ))
+            }
+        }
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            MutatingCopy,
+            Arc::new(Store::memory().unwrap()),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "conflicting-copy".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        assert!(matches!(
+            engine.run(None, vec![], cancel_rx, empty_mailbox()).await,
+            Err(EngineError::InvalidFunctionCall)
+        ));
+    }
+
+    #[test]
+    fn engine_rejects_durable_output_kind_or_identity_mismatch() {
+        let call = CallId("custom-call".into());
+        let custom = Item(json!({
+            "type":"custom_tool_call_output","call_id":"custom-call","output":"raw result"
+        }));
+        assert!(validate_tool_output(&call, ToolKind::Custom, &custom).is_ok());
+        for item in [
+            Item(json!({"type":"function_call_output","call_id":"custom-call","output":"{}"})),
+            Item(
+                json!({"type":"custom_tool_call_output","call_id":"different","output":"raw result"}),
+            ),
+        ] {
+            assert!(matches!(
+                validate_tool_output(&call, ToolKind::Custom, &item),
+                Err(EngineError::MismatchedToolOutput(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_terminal_claim_guards_replay_and_cleanup_output() {
+        let store = Arc::new(Store::memory().unwrap());
+        let origin = RequestId("first-terminal-origin".into());
+        let delivery = RequestId("first-terminal-delivery".into());
+        store.create_request(&origin, None, "/root").unwrap();
+        store
+            .create_request(&delivery, Some(&origin), "/root")
+            .unwrap();
+        let interrupted = CallId("interrupted-call".into());
+        store.claim(&interrupted, &origin).unwrap();
+        assert_eq!(store.interrupt_claim(&interrupted, &origin).unwrap(), 1);
+        let cancelled = CallId("cancelled-call".into());
+        store.claim(&cancelled, &origin).unwrap();
+        let cancelled_output = Item::tool_output(
+            &cancelled,
+            ToolKind::Function,
+            &crate::turn::JobOutput::Cancelled,
+        );
+        assert_eq!(
+            store.write_output(&cancelled, &cancelled_output).unwrap(),
+            1
+        );
+
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            Replay {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                turns: Mutex::new(std::collections::VecDeque::new()),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "first-terminal".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        for call in [&interrupted, &cancelled] {
+            assert!(matches!(
+                engine
+                    .persist_output(
+                        call,
+                        ToolKind::Function,
+                        &crate::turn::JobOutput::Completed(Ok(json!({"late":"success"}))),
+                        &delivery,
+                        &origin,
+                    )
+                    .await,
+                Err(EngineError::ClaimRecoveryConflict(_))
+            ));
+        }
+        assert!(
+            store.items(&delivery).unwrap().is_empty(),
+            "no late success is appended"
+        );
+        assert_eq!(
+            store.claims(&interrupted).unwrap()[0].state,
+            crate::store::ClaimState::Interrupted
+        );
+        let cancelled_claims = store.claims(&cancelled).unwrap();
+        let cancelled_claim = &cancelled_claims[0];
+        assert_eq!(cancelled_claim.state, crate::store::ClaimState::Settled);
+        assert_eq!(
+            store
+                .get_item(cancelled_claim.output.as_ref().unwrap())
+                .unwrap(),
+            Some(cancelled_output)
+        );
+        assert!(matches!(
+            engine
+                .retain_settled_output(
+                    &interrupted,
+                    ToolKind::Function,
+                    &crate::turn::JobOutput::Cancelled,
+                    &origin,
+                )
+                .await,
+            Err(EngineError::ClaimRecoveryConflict(_))
+        ));
+        assert!(matches!(
+            engine
+                .retain_settled_output(
+                    &cancelled,
+                    ToolKind::Function,
+                    &crate::turn::JobOutput::Completed(Ok(json!({"late":"success"}))),
+                    &origin,
+                )
+                .await,
+            Err(EngineError::ClaimRecoveryConflict(_))
+        ));
+        engine
+            .retain_settled_output(
+                &cancelled,
+                ToolKind::Function,
+                &crate::turn::JobOutput::Cancelled,
+                &origin,
+            )
+            .await
+            .unwrap();
+        engine
+            .persist_output(
+                &cancelled,
+                ToolKind::Function,
+                &crate::turn::JobOutput::Cancelled,
+                &delivery,
+                &origin,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.items(&delivery).unwrap(),
+            vec![Item::tool_output(
+                &cancelled,
+                ToolKind::Function,
+                &crate::turn::JobOutput::Cancelled
+            )],
+            "replay may append the identical first-terminal output"
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_rejects_duplicate_inherited_terminal_outputs() {
+        let store = Arc::new(Store::memory().unwrap());
+        let head = RequestId("duplicate-inherited-output".into());
+        let call = CallId("duplicate-call".into());
+        let invocation = Item(json!({
+            "type":"custom_tool_call","call_id":call.0,"name":"cell","input":"raw"
+        }));
+        let output = Item::tool_output(
+            &call,
+            ToolKind::Custom,
+            &crate::turn::JobOutput::Completed(Ok(Value::String("value".into()))),
+        );
+        store
+            .write_request(
+                &head,
+                None,
+                "/root",
+                &[invocation, output.clone(), output.clone()],
+                StoredUsage::default(),
+            )
+            .unwrap();
+        store.set_effort(&head, Effort::Low).unwrap();
+        store.claim(&call, &head).unwrap();
+        assert_eq!(store.write_output(&call, &output).unwrap(), 1);
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            Replay {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                turns: Mutex::new(std::collections::VecDeque::new()),
+            },
+            store,
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "duplicate-output".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        assert!(matches!(
+            engine
+                .run(Some(head), vec![], cancel_rx, empty_mailbox())
+                .await,
+            Err(EngineError::MismatchedToolOutput(_))
+        ));
     }
 
     struct BeforeRequestRecorder {
@@ -3836,7 +4519,15 @@ mod tests {
         assert!(store.recover_pending().unwrap().is_empty());
         let claims = store.claims(&CallId("failed-compact".into())).unwrap();
         assert_eq!(claims.len(), 1);
-        assert_eq!(claims[0].state, crate::store::ClaimState::Interrupted);
+        assert_eq!(claims[0].state, crate::store::ClaimState::Settled);
+        let output = store
+            .get_item(&claims[0].output.clone().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(output.0["output"].as_str().unwrap()).unwrap(),
+            json!({"error":"job cancelled"})
+        );
     }
 
     #[tokio::test]
@@ -4704,14 +5395,17 @@ mod tests {
             scheduler.output(&second).await.unwrap(),
             Some(JobOutput::Cancelled)
         );
-        assert_eq!(
-            store.claims(&first).unwrap()[0].state,
-            ClaimState::Interrupted
-        );
-        assert_eq!(
-            store.claims(&second).unwrap()[0].state,
-            ClaimState::Interrupted
-        );
+        assert_eq!(store.claims(&first).unwrap()[0].state, ClaimState::Settled);
+        assert_eq!(store.claims(&second).unwrap()[0].state, ClaimState::Settled);
+        for call in [&first, &second] {
+            let claim = store.claims(call).unwrap().remove(0);
+            let output = store.get_item(&claim.output.unwrap()).unwrap().unwrap();
+            assert_eq!(output.0["type"], "function_call_output");
+            assert_eq!(
+                serde_json::from_str::<Value>(output.0["output"].as_str().unwrap()).unwrap(),
+                json!({"error":"job cancelled"})
+            );
+        }
     }
 
     #[tokio::test]
@@ -4757,10 +5451,7 @@ mod tests {
             scheduler.output(&call).await.unwrap(),
             Some(JobOutput::Cancelled)
         );
-        assert_eq!(
-            store.claims(&call).unwrap()[0].state,
-            ClaimState::Interrupted
-        );
+        assert_eq!(store.claims(&call).unwrap()[0].state, ClaimState::Settled);
     }
 
     #[tokio::test]
@@ -4806,10 +5497,7 @@ mod tests {
             scheduler.output(&call).await.unwrap(),
             Some(JobOutput::Cancelled)
         );
-        assert_eq!(
-            store.claims(&call).unwrap()[0].state,
-            ClaimState::Interrupted
-        );
+        assert_eq!(store.claims(&call).unwrap()[0].state, ClaimState::Settled);
         let request = store.claims(&call).unwrap()[0].request.clone();
         let recorded = store.replay_turns(&request).unwrap();
         assert_eq!(

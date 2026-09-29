@@ -42,6 +42,8 @@ export interface Job {
   readonly startedAtMs?: number | null;
   readonly endedAtMs?: number | null;
   readonly state: "running" | "settled" | "cancelled" | "interrupted";
+  /** Server-projected kind of the durable invocation; never inferred from name. */
+  readonly toolKind?: "function" | "custom";
   /** Present for real Engine tool calls; command-level jobs omit these fields. */
   readonly requestId?: EntityId;
   readonly callId?: string;

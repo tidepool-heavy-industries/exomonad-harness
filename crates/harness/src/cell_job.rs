@@ -3,8 +3,8 @@
 //! A `cell` tool call is admitted as a Job, not evaluated inline with a model
 //! request. Implementations must stop their work when the `run` future is
 //! dropped: JobScheduler cancellation aborts that future. The complete
-//! `CellOutput` is the retained Job output and is persisted as the ordinary
-//! function-call output by Engine; progress is only out-of-band.
+//! `CellOutput` is the retained Job output. For a native custom call, Engine
+//! must persist it as a custom tool-call output; progress is only out-of-band.
 use crate::provider::{CallContext, Provider, ProviderError};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -74,18 +74,29 @@ impl<E: CellJob> Provider for CellJobProvider<E> {
             .map_err(|error| ProviderError::Tool(format!("invalid cell output: {error}")))
     }
 
+    async fn call_custom_with_context(
+        &self,
+        name: &str,
+        input: String,
+        context: CallContext,
+    ) -> Result<Value, ProviderError> {
+        if name != CELL_TOOL {
+            return Err(ProviderError::Tool(format!("unknown cell tool `{name}`")));
+        }
+        let output = self
+            .evaluator
+            .run(CellInput { source: input }, context)
+            .await?;
+        serde_json::to_value(output)
+            .map_err(|error| ProviderError::Tool(format!("invalid cell output: {error}")))
+    }
+
     fn tools(&self) -> Vec<Value> {
         vec![json!({
-            "type": "function",
+            "type": "custom",
             "name": CELL_TOOL,
             "description": "Run one cell in the resident evaluator as a cancellable async Job.",
-            "parameters": {
-                "type": "object",
-                "properties": {"source": {"type": "string"}},
-                "required": ["source"],
-                "additionalProperties": false
-            },
-            "strict": true
+            "format": {"type": "text"}
         })]
     }
 }
@@ -94,7 +105,8 @@ impl<E: CellJob> Provider for CellJobProvider<E> {
 mod tests {
     use super::*;
     use crate::{
-        model::CallId,
+        model::{AgentPath, CallId},
+        provider::JobHandle,
         turn::{JobOutput, JobScheduler},
     };
     use std::sync::Arc;
@@ -121,9 +133,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cell_uses_retained_async_job_output_and_typed_cancellation() {
+    async fn cell_rejects_malformed_function_arguments_and_unknown_name() {
+        let provider = CellJobProvider::new(EchoCell);
+        for args in [
+            json!({"source": 3}),
+            json!({}),
+            json!({"source": "valid", "unexpected": true}),
+        ] {
+            let (context, _) = CallContext::detached_for_test(
+                JobHandle("cell-invalid".into()),
+                CallId("cell-invalid".into()),
+                AgentPath("/root".into()),
+            );
+            let error = provider
+                .call_with_context(CELL_TOOL, args, context)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, ProviderError::Tool(message) if message.starts_with("invalid cell input:")),
+                "malformed function arguments must be explicitly refused"
+            );
+        }
+        let (context, _) = CallContext::detached_for_test(
+            JobHandle("cell-unknown".into()),
+            CallId("cell-unknown".into()),
+            AgentPath("/root".into()),
+        );
+        let error = provider
+            .call_with_context("not_cell", json!({"source": "valid"}), context)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ProviderError::Tool(message) if message.contains("unknown cell tool"))
+        );
+    }
+
+    #[tokio::test]
+    async fn cell_custom_input_reaches_evaluator_exactly() {
+        let provider: Arc<dyn Provider> = Arc::new(CellJobProvider::new(EchoCell));
+        let raw = "line1\n\"quoted\" \\\\path 第二行 — λ 🪼";
+        let (context, _) = CallContext::detached_for_test(
+            JobHandle("cell-raw".into()),
+            CallId("cell-raw".into()),
+            AgentPath("/root".into()),
+        );
+        let result = provider
+            .call_custom_with_context(CELL_TOOL, raw.to_owned(), context)
+            .await
+            .unwrap();
+        assert_eq!(result["value"], json!({"source": raw}));
+
+        let (context, _) = CallContext::detached_for_test(
+            JobHandle("cell-unknown-custom".into()),
+            CallId("cell-unknown-custom".into()),
+            AgentPath("/root".into()),
+        );
+        let error = provider
+            .call_custom_with_context("not_cell", raw.to_owned(), context)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ProviderError::Tool(message) if message.contains("unknown cell tool"))
+        );
+    }
+
+    #[tokio::test]
+    async fn cell_legacy_function_job_retains_output_and_cancels() {
         let jobs = JobScheduler::new(2).unwrap();
         let provider: Arc<dyn Provider> = Arc::new(CellJobProvider::new(EchoCell));
+        assert_eq!(
+            provider.tools(),
+            vec![json!({
+                "type": "custom",
+                "name": CELL_TOOL,
+                "description": "Run one cell in the resident evaluator as a cancellable async Job.",
+                "format": {"type": "text"}
+            })]
+        );
         let done = CallId("cell-done".into());
         jobs.start(
             provider.clone(),

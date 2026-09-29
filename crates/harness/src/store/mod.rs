@@ -2,7 +2,7 @@
 pub mod schema;
 
 use crate::{
-    item::{Item, ItemHash},
+    item::{Item, ItemHash, ToolKind},
     lifecycle::{CompletionCommit, CompletionProvenance},
     model::{AgentPath, CallId, Effort, RequestId},
     transport::{ResponsesRequest, ResponsesTurn},
@@ -42,12 +42,62 @@ pub enum StoreError {
     MissingActiveSpawnCall { request: String, call_id: String },
     #[error("session state key uses the reserved harness namespace: {0}")]
     ReservedSessionStateNamespace(String),
+    #[error("malformed durable tool call `{call_id}` in request {request}: {reason}")]
+    MalformedReplayCall {
+        call_id: String,
+        request: String,
+        reason: String,
+    },
+    #[error("durable output for call `{call_id}` does not match its {expected:?} call kind")]
+    ReplayOutputKindMismatch { call_id: String, expected: ToolKind },
+    #[error("ambiguous durable invocation for call `{call_id}`")]
+    AmbiguousReplayCall { call_id: String },
 }
 
 #[cfg(test)]
 #[path = "recovery_tests.rs"]
 mod recovery_tests;
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+fn invocation_kind(c: &Connection, request: &RequestId, call: &CallId) -> Result<Option<ToolKind>> {
+    let mut items = c.prepare(
+        "SELECT i.json FROM request_items ri \
+         JOIN items i ON i.hash=ri.item_hash \
+         WHERE ri.request_id=?1 ORDER BY ri.position",
+    )?;
+    let evidence = items
+        .query_map([&request.0], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut kind = None;
+    for raw in evidence {
+        let item: Item = serde_json::from_str(&raw)?;
+        match item.tool_call() {
+            Ok(Some(tool_call)) if tool_call.call_id == *call => {
+                if kind.replace(tool_call.input.kind()).is_some() {
+                    return Err(StoreError::AmbiguousReplayCall {
+                        call_id: call.0.clone(),
+                    });
+                }
+            }
+            Ok(_) => {}
+            Err(reason)
+                if matches!(
+                    item.0.get("type").and_then(serde_json::Value::as_str),
+                    Some("function_call" | "custom_tool_call")
+                ) && item.0.get("call_id").and_then(serde_json::Value::as_str)
+                    == Some(call.0.as_str()) =>
+            {
+                return Err(StoreError::MalformedReplayCall {
+                    call_id: call.0.clone(),
+                    request: request.0.clone(),
+                    reason: reason.into(),
+                });
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(kind)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Request {
@@ -1301,16 +1351,101 @@ impl Store {
     /// The durable settled output for one recorded provider call.
     pub fn replay_output(&self, call: &CallId) -> Result<Option<Item>> {
         let c = self.lock();
-        let json: Option<String> = c
+        // Claims can be inherited by Here/agent requests. A claim alone is
+        // therefore not replay evidence: recognize a call only in the exact
+        // request that owns a settled claim, and never walk request ancestry.
+        let mut claims = c.prepare(
+            "SELECT c.request_id,c.output_hash FROM claims c \
+             WHERE c.call_id=?1 AND c.state='settled' AND c.output_hash IS NOT NULL \
+             ORDER BY c.request_id",
+        )?;
+        let claim_rows = claims
+            .query_map([&call.0], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(claims);
+
+        let mut matched = None;
+        for (request, output_hash) in claim_rows {
+            let Some(kind) = invocation_kind(&c, &RequestId(request), call)? else {
+                continue;
+            };
+            if matched.is_some() {
+                return Err(StoreError::AmbiguousReplayCall {
+                    call_id: call.0.clone(),
+                });
+            }
+            let raw: String = c.query_row(
+                "SELECT json FROM items WHERE hash=?1",
+                [&output_hash],
+                |row| row.get(0),
+            )?;
+            let output: Item = serde_json::from_str(&raw)?;
+            let expected_type = match kind {
+                ToolKind::Function => "function_call_output",
+                ToolKind::Custom => "custom_tool_call_output",
+            };
+            if output.0.get("type").and_then(serde_json::Value::as_str) != Some(expected_type)
+                || output.0.get("call_id").and_then(serde_json::Value::as_str)
+                    != Some(call.0.as_str())
+            {
+                return Err(StoreError::ReplayOutputKindMismatch {
+                    call_id: call.0.clone(),
+                    expected: kind,
+                });
+            }
+            matched = Some(output);
+        }
+        Ok(matched)
+    }
+
+    /// Resolve output only from the request that persisted this invocation.
+    pub fn replay_output_for_request(
+        &self,
+        request: &RequestId,
+        call: &CallId,
+    ) -> Result<Option<Item>> {
+        let c = self.lock();
+        let Some(kind) = invocation_kind(&c, request, call)? else {
+            return Ok(None);
+        };
+        let raw: Option<String> = c
             .query_row(
                 "SELECT i.json FROM claims c JOIN items i ON i.hash=c.output_hash
-                 WHERE c.call_id=?1 AND c.state='settled' ORDER BY c.request_id LIMIT 1",
-                [&call.0],
-                |r| r.get(0),
+             WHERE c.request_id=?1 AND c.call_id=?2 AND c.state='settled'",
+                params![request.0, call.0],
+                |row| row.get(0),
             )
             .optional()?;
-        json.map(|value| serde_json::from_str(&value).map_err(Into::into))
-            .transpose()
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let output: Item = serde_json::from_str(&raw)?;
+        let expected_type = match kind {
+            ToolKind::Function => "function_call_output",
+            ToolKind::Custom => "custom_tool_call_output",
+        };
+        if output.0.get("type").and_then(serde_json::Value::as_str) != Some(expected_type)
+            || output.0.get("call_id").and_then(serde_json::Value::as_str) != Some(call.0.as_str())
+        {
+            return Err(StoreError::ReplayOutputKindMismatch {
+                call_id: call.0.clone(),
+                expected: kind,
+            });
+        }
+        Ok(Some(output))
+    }
+
+    /// Kind of the invocation persisted in this exact request. Call IDs alone
+    /// cannot identify a tool across agent or Here branches.
+    pub fn tool_invocation_kind(
+        &self,
+        request: &RequestId,
+        call: &CallId,
+    ) -> Result<Option<ToolKind>> {
+        let c = self.lock();
+        invocation_kind(&c, request, call)
     }
     pub fn add_envelope(
         &self,
@@ -1852,6 +1987,119 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn custom_replay_preserves_wire_output_and_rejects_kind_mismatch_after_reopen() {
+        let path =
+            std::env::temp_dir().join(format!("harness-custom-replay-{}.db", uuid::Uuid::new_v4()));
+        let request = id("custom-replay-request");
+        let custom_call = CallId("custom-replay-call".into());
+        let mismatch_call = CallId("mismatch-replay-call".into());
+        let call_items = [
+            item(serde_json::json!({
+                "type":"custom_tool_call","call_id":custom_call.0,"name":"cell",
+                "input":"line one\nquotes: \" \\\\ snowman: ☃"
+            })),
+            item(serde_json::json!({
+                "type":"custom_tool_call","call_id":mismatch_call.0,"name":"cell",
+                "input":"raw custom input"
+            })),
+        ];
+        let custom_output = item(serde_json::json!({
+            "type":"custom_tool_call_output","call_id":custom_call.0,
+            "output":"original raw result\nwith \"quotes\" and \\\\ and ☃"
+        }));
+        let wrong_output = item(serde_json::json!({
+            "type":"function_call_output","call_id":mismatch_call.0,"output":"{}"
+        }));
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .write_request(&request, None, "/root", &call_items, Usage::default())
+                .unwrap();
+            store.claim(&custom_call, &request).unwrap();
+            store.claim(&mismatch_call, &request).unwrap();
+            store.write_output(&custom_call, &custom_output).unwrap();
+            store.write_output(&mismatch_call, &wrong_output).unwrap();
+        }
+        {
+            let store = Store::open(&path).unwrap();
+            let retained_claim = store.claims(&custom_call).unwrap();
+            assert_eq!(retained_claim.len(), 1);
+            assert_eq!(retained_claim[0].request, request);
+            assert_eq!(retained_claim[0].state, ClaimState::Settled);
+            assert_eq!(
+                store.replay_output(&custom_call).unwrap(),
+                Some(custom_output),
+                "custom output bytes must remain the original persisted item"
+            );
+            assert!(matches!(
+                store.replay_output(&mismatch_call),
+                Err(StoreError::ReplayOutputKindMismatch {
+                    expected: ToolKind::Custom,
+                    ..
+                })
+            ));
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn replay_does_not_follow_a_claim_to_ancestor_call_evidence() {
+        let store = Store::memory().unwrap();
+        let root = id("lineage-root");
+        let child = id("lineage-child");
+        let call = CallId("lineage-call".into());
+        let call_item = item(serde_json::json!({
+            "type":"custom_tool_call","call_id":call.0,"name":"cell","input":"root evidence"
+        }));
+        let output = item(serde_json::json!({
+            "type":"custom_tool_call_output","call_id":call.0,"output":"child settled output"
+        }));
+        store.create_request(&root, None, "/root").unwrap();
+        store
+            .create_request(&child, Some(&root), "/root/worker")
+            .unwrap();
+        store.append_items(&root, &[call_item]).unwrap();
+        store.claim(&call, &child).unwrap();
+        store.write_output(&call, &output).unwrap();
+
+        assert_eq!(
+            store.replay_output(&call).unwrap(),
+            None,
+            "a child claim cannot borrow its ancestor's tool-call evidence"
+        );
+    }
+
+    #[test]
+    fn replay_ignores_an_unrelated_malformed_tool_call_item() {
+        let store = Store::memory().unwrap();
+        let request = id("malformed-other-request");
+        let call = CallId("valid-requested-call".into());
+        let output = item(serde_json::json!({
+            "type":"custom_tool_call_output","call_id":call.0,"output":"expected"
+        }));
+        store.create_request(&request, None, "/root").unwrap();
+        store
+            .append_items(
+                &request,
+                &[
+                    item(serde_json::json!({
+                        "type":"custom_tool_call","call_id":call.0,"name":"cell","input":"valid"
+                    })),
+                    item(serde_json::json!({
+                        "type":"custom_tool_call","call_id":"other-call","input":"malformed"
+                    })),
+                ],
+            )
+            .unwrap();
+        store.claim(&call, &request).unwrap();
+        store.write_output(&call, &output).unwrap();
+
+        assert_eq!(store.replay_output(&call).unwrap(), Some(output));
     }
 
     #[test]

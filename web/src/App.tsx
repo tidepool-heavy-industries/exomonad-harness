@@ -27,6 +27,7 @@ export type HarnessViewModel = {
     detail?: string;
     commandId?: string;
     command?: string;
+    toolKind?: "function" | "custom";
     outcome?: "accepted" | "pending" | "queued" | "presented" | "acted" | "completed" | "cancelled" | "failed";
     requestId?: string;
     callId?: string;
@@ -162,6 +163,7 @@ function Timeline({ data }: { data: HarnessViewModel }) {
           item.outcome ? `outcome ${item.outcome}` : undefined,
           item.requestId ? `request ${item.requestId}` : undefined,
           item.callId ? `call ${item.callId}` : undefined,
+          item.toolKind ? `tool kind ${item.toolKind}` : undefined,
           item.toolName,
           item.delivered === undefined ? undefined : `delivered ${item.delivered}`,
           item.startedAt,

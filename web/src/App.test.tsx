@@ -74,7 +74,7 @@ describe('operator views', () => {
       nodes: [{ id: 'root', name: '/root', state: 'paused' }],
       timeline: [{
         id: 'job-9', nodeId: 'root', label: 'Async job', kind: 'job', state: 'settled',
-        requestId: 'request-1', callId: 'call-3', toolName: 'slow_tool',
+        requestId: 'request-1', callId: 'call-3', toolKind: 'function', toolName: 'slow_tool',
         delivered: false, output: 'result pending delivery',
       }],
       inbox: [],
@@ -85,8 +85,29 @@ describe('operator views', () => {
     expect(screen.getByText(/settled/)).toBeInTheDocument()
     expect(screen.getByText(/request request-1/)).toBeInTheDocument()
     expect(screen.getByText(/call call-3/)).toBeInTheDocument()
+    expect(screen.getByText(/tool kind function/)).toBeInTheDocument()
     expect(screen.getByText(/slow_tool/)).toBeInTheDocument()
     expect(screen.getByText(/delivered false/)).toBeInTheDocument()
     expect(screen.getByText(/result pending delivery/)).toBeInTheDocument()
+  })
+
+  it('presents raw custom job kind and retained terminal output', () => {
+    const data: HarnessViewModel = {
+      nodes: [{ id: 'root', name: '/root', state: 'cancelled' }],
+      timeline: [{
+        id: 'custom-job-4', nodeId: 'root', label: 'custom run', kind: 'job', state: 'cancelled',
+        requestId: 'request-4', callId: 'call-custom-4', toolKind: 'custom',
+        toolName: 'run', delivered: true, output: 'cancelled; retained result',
+      }],
+      inbox: [],
+    }
+    render(<App data={data} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Timeline' }))
+    expect(screen.getByText(/custom-job-4/)).toBeInTheDocument()
+    expect(screen.getByText(/tool kind custom/)).toBeInTheDocument()
+    expect(screen.getByText(/call-custom-4/)).toBeInTheDocument()
+    expect(screen.getByRole('cell', { name: /^cancelled$/ })).toBeInTheDocument()
+    expect(screen.getByText(/delivered true/)).toBeInTheDocument()
+    expect(screen.getByText(/cancelled; retained result/)).toBeInTheDocument()
   })
 })

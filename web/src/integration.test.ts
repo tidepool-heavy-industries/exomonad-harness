@@ -1,8 +1,155 @@
 import { describe, expect, it } from 'vitest'
+import { createElement } from 'react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { normalizeSnapshot, type Snapshot } from './protocol'
 import { toViewModel } from './integration'
+import { customJobJourney, customSuccessJourney } from './fixture'
+import App from './App'
 
 describe('web outcome integration', () => {
+  it('reopens a settled custom job with progress and retained output in App', () => {
+    const [running, settled, reopened] = customSuccessJourney
+    expect(running).toBeDefined()
+    expect(settled).toBeDefined()
+    expect(reopened).toBeDefined()
+    const runningView = toViewModel(normalizeSnapshot(running!))
+    expect(runningView.timeline.find(({ id }) => id === 'job-success')).toMatchObject({
+      state: 'running', callId: 'call-success-1', toolKind: 'custom',
+      toolName: 'run', delivered: false,
+    })
+    expect(runningView.inbox).toContainEqual(expect.objectContaining({
+      id: 'progress-success', state: 'PROGRESS', message: 'custom run evaluating',
+    }))
+    const settledView = toViewModel(normalizeSnapshot(settled!))
+    const reopenedView = toViewModel(normalizeSnapshot(reopened!))
+    const retained = settledView.timeline.find(({ id }) => id === 'job-success')
+    expect(retained).toMatchObject({
+      id: 'job-success', state: 'settled', requestId: 'request-success',
+      callId: 'call-success-1', toolKind: 'custom', toolName: 'run',
+      delivered: true, output: { status: 'ok', stdout: 'preview ready' },
+    })
+    expect(reopenedView.timeline.find(({ id }) => id === 'job-success')).toEqual(retained)
+    expect(reopenedView.inbox).toEqual(settledView.inbox)
+
+    const app = render(createElement(App, { data: runningView }))
+    fireEvent.click(screen.getByRole('button', { name: /timeline/i }))
+    let timeline = screen.getByRole('table', { name: 'Conversation activity timeline' })
+    expect(timeline.textContent).toContain('call call-success-1')
+    expect(timeline.textContent).toContain('tool kind custom')
+    expect(timeline.textContent).toContain('delivered false')
+    fireEvent.click(screen.getByRole('button', { name: /inbox/i }))
+    expect(screen.getByRole('list', { name: 'Inbox messages' }).textContent).toContain('custom run evaluating')
+
+    app.rerender(createElement(App, { data: settledView }))
+    fireEvent.click(screen.getByRole('button', { name: /timeline/i }))
+    timeline = screen.getByRole('table', { name: 'Conversation activity timeline' })
+    expect(timeline.textContent).toContain('settled')
+    expect(timeline.textContent).toContain('call call-success-1')
+    expect(timeline.textContent).toContain('tool kind custom')
+    expect(timeline.textContent).toContain('run')
+    expect(timeline.textContent).toContain('delivered true')
+    expect(timeline.textContent).toContain('preview ready')
+
+    app.rerender(createElement(App, { data: reopenedView }))
+    timeline = screen.getByRole('table', { name: 'Conversation activity timeline' })
+    expect(timeline.textContent).toContain('call call-success-1')
+    expect(timeline.textContent).toContain('tool kind custom')
+    expect(timeline.textContent).toContain('delivered true')
+    expect(timeline.textContent).toContain('preview ready')
+  })
+
+  it('reopens a cancelled custom job with its retained terminal output', () => {
+    const [running, cancelled, reopened, afterLateCompletion] = customJobJourney
+    expect(running).toBeDefined()
+    expect(cancelled).toBeDefined()
+    expect(reopened).toBeDefined()
+    expect(afterLateCompletion).toBeDefined()
+
+    const runningState = normalizeSnapshot(running!)
+    const runningJob = toViewModel(runningState).timeline.find(({ id }) => id === 'job-custom')
+    expect(runningJob).toMatchObject({
+      id: 'job-custom',
+      state: 'running',
+      callId: 'call-custom-1',
+      toolKind: 'custom',
+      toolName: 'custom:render_preview',
+    })
+    // The fixture supplies the discriminator as a server-projected field;
+    // this only tests projection, not the server's Store-backed derivation.
+    expect(runningState.jobs.get('job-custom')?.toolKind).toBe('custom')
+    expect(toViewModel(runningState).inbox).toMatchObject([{
+      state: 'PROGRESS',
+      message: 'custom run started',
+    }])
+
+    const cancelledState = normalizeSnapshot(cancelled!)
+    const cancelledView = toViewModel(cancelledState)
+    expect(cancelledView.timeline.find(({ id }) => id === 'request-custom')).toMatchObject({
+      outcome: 'cancelled',
+    })
+    const retained = cancelledView.timeline.find(({ id }) => id === 'job-custom')
+    expect(retained).toMatchObject({
+      id: 'job-custom',
+      state: 'cancelled',
+      callId: 'call-custom-1',
+      toolKind: 'custom',
+      toolName: 'custom:render_preview',
+      delivered: true,
+      output: { status: 'cancelled', reason: 'operator requested cancellation' },
+    })
+    expect(normalizeSnapshot(reopened!).jobs.get('job-custom')?.toolKind).toBe('custom')
+
+    const reopenedView = toViewModel(normalizeSnapshot(reopened!))
+    expect(reopenedView.timeline.find(({ id }) => id === 'job-custom')).toEqual(retained)
+    expect(reopenedView.inbox).toMatchObject([{
+      state: 'PROGRESS',
+      message: 'custom run started',
+    }])
+    expect(afterLateCompletion!.seq).toBe(reopened!.seq + 1)
+    const afterLateView = toViewModel(normalizeSnapshot(afterLateCompletion!))
+    expect(afterLateView.timeline.find(({ id }) => id === 'job-custom')).toMatchObject({
+      id: 'job-custom',
+      state: 'cancelled',
+      callId: 'call-custom-1',
+      toolKind: 'custom',
+      toolName: 'custom:render_preview',
+      delivered: true,
+      output: { status: 'cancelled', reason: 'operator requested cancellation' },
+    })
+    expect(afterLateView.inbox).toContainEqual(expect.objectContaining({
+      id: 'late-completion',
+      message: 'late provider success ignored; cancellation retained',
+    }))
+
+    // Exercise the actual App toolJobs/timeline presentation as the browser
+    // receives each deterministic server snapshot (including after reopen).
+    const app = render(createElement(App, { data: toViewModel(runningState) }))
+    fireEvent.click(screen.getByRole('button', { name: /timeline/i }))
+    expect(screen.getByRole('table', { name: 'Conversation activity timeline' }).textContent)
+      .toContain('custom:render_preview')
+    expect(screen.getByRole('table', { name: 'Conversation activity timeline' }).textContent)
+      .toContain('tool kind custom')
+
+    app.rerender(createElement(App, { data: cancelledView }))
+    let timeline = screen.getByRole('table', { name: 'Conversation activity timeline' })
+    expect(timeline.textContent).toContain('cancelled')
+    expect(timeline.textContent).toContain('operator requested cancellation')
+
+    app.rerender(createElement(App, { data: reopenedView }))
+    timeline = screen.getByRole('table', { name: 'Conversation activity timeline' })
+    expect(timeline.textContent).toContain('custom:render_preview')
+    expect(timeline.textContent).toContain('operator requested cancellation')
+
+    app.rerender(createElement(App, { data: afterLateView }))
+    timeline = screen.getByRole('table', { name: 'Conversation activity timeline' })
+    expect(timeline.textContent).toContain('call call-custom-1')
+    expect(timeline.textContent).toContain('tool kind custom')
+    expect(timeline.textContent).toContain('delivered true')
+    expect(timeline.textContent).toContain('cancelled')
+    expect(timeline.textContent).toContain('operator requested cancellation')
+    expect(timeline.textContent).not.toContain('late provider success')
+  })
+
   it('renders additive outcomes, ordered progress/messages, and distinct child identities', () => {
     const snapshot: Snapshot = {
       seq: 4,
