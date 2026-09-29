@@ -9,13 +9,16 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify, oneshot};
 
 struct External {
     started: Notify,
     release: Notify,
     dropped: Arc<AtomicBool>,
     stopped: AtomicBool,
+    cancel_calls: std::sync::atomic::AtomicUsize,
+    cancel_entered: Notify,
+    cancel_barrier: Mutex<Option<oneshot::Receiver<()>>>,
 }
 struct DropMark(Arc<AtomicBool>);
 impl Drop for DropMark {
@@ -26,6 +29,12 @@ impl Drop for DropMark {
 #[async_trait]
 impl CancellationOwner for External {
     async fn cancel(&self, _: &JobHandle) -> CancellationAcknowledgment {
+        self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+        self.cancel_entered.notify_one();
+        let barrier = self.cancel_barrier.lock().await.take();
+        if let Some(barrier) = barrier {
+            let _ = barrier.await;
+        }
         if self.stopped.load(Ordering::SeqCst) {
             CancellationAcknowledgment::Stopped
         } else {
@@ -55,6 +64,9 @@ fn external() -> Arc<External> {
         release: Notify::new(),
         dropped: Arc::new(AtomicBool::new(false)),
         stopped: AtomicBool::new(false),
+        cancel_calls: std::sync::atomic::AtomicUsize::new(0),
+        cancel_entered: Notify::new(),
+        cancel_barrier: Mutex::new(None),
     })
 }
 
@@ -121,6 +133,91 @@ async fn completed_external_work_wins_over_later_cancel() {
         JobOutput::Completed(Ok(_))
     ));
     assert!(jobs.cancel(&call).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn late_completion_is_retained_separately_and_stops_cancellation_retries() {
+    let jobs = JobScheduler::new(1).unwrap();
+    let owner = external();
+    let call = CallId("late-completion".into());
+    jobs.start(
+        Arc::new(ExternalProvider(owner.clone())),
+        call.clone(),
+        "run".into(),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    owner.started.notified().await;
+    let mut settlements = jobs.settlements();
+
+    let cancellation = jobs.cancel(&call).await.unwrap().unwrap();
+    assert!(matches!(
+        cancellation.output,
+        JobOutput::CancellationUnconfirmed(_)
+    ));
+    assert_eq!(settlements.recv().await.unwrap(), call);
+
+    owner.release.notify_one();
+    assert_eq!(settlements.recv().await.unwrap(), call);
+    assert_eq!(
+        jobs.provider_completion(&call).await.unwrap(),
+        Some(Ok(json!("completed")))
+    );
+    assert_eq!(
+        jobs.output(&call).await.unwrap(),
+        Some(cancellation.output.clone()),
+        "late completion is evidence, not a rewrite of the emitted result"
+    );
+
+    let cancel_calls = owner.cancel_calls.load(Ordering::SeqCst);
+    assert!(matches!(
+        jobs.retry_cancellation(&call).await.unwrap(),
+        Some(CancellationAcknowledgment::Unconfirmed(_))
+    ));
+    assert_eq!(
+        owner.cancel_calls.load(Ordering::SeqCst),
+        cancel_calls,
+        "known provider completion makes another owner cancellation stale"
+    );
+}
+
+#[tokio::test]
+async fn completion_wins_while_owner_acknowledgment_is_pending() {
+    let jobs = Arc::new(JobScheduler::new(1).unwrap());
+    let owner = external();
+    let (ack_tx, ack_rx) = oneshot::channel();
+    *owner.cancel_barrier.lock().await = Some(ack_rx);
+    owner.stopped.store(true, Ordering::SeqCst);
+    let call = CallId("completion-during-cancel".into());
+    jobs.start(
+        Arc::new(ExternalProvider(owner.clone())),
+        call.clone(),
+        "run".into(),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    owner.started.notified().await;
+    let mut settlements = jobs.settlements();
+
+    let cancel_jobs = jobs.clone();
+    let cancel_call = call.clone();
+    let cancel = tokio::spawn(async move { cancel_jobs.cancel(&cancel_call).await });
+    owner.cancel_entered.notified().await;
+    owner.release.notify_one();
+    assert_eq!(settlements.recv().await.unwrap(), call);
+    ack_tx.send(()).unwrap();
+
+    assert!(cancel.await.unwrap().unwrap().is_none());
+    assert_eq!(
+        jobs.output(&call).await.unwrap(),
+        Some(JobOutput::Completed(Ok(json!("completed"))))
+    );
+    assert_eq!(
+        jobs.provider_completion(&call).await.unwrap(),
+        Some(Ok(json!("completed")))
+    );
 }
 
 #[tokio::test]

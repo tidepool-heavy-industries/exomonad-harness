@@ -148,6 +148,9 @@ struct Job {
     claimants: HashSet<AgentPath>,
     settled_claimants: Vec<AgentPath>,
     output: Option<JobOutput>,
+    /// The actual provider-future result, retained independently from the
+    /// terminal output that was already published to claimants.
+    provider_completion: Option<Result<Value, String>>,
     progress: Vec<Value>,
     cancel: tokio_util::sync::CancellationToken,
     settled: tokio::sync::watch::Sender<Option<JobOutput>>,
@@ -287,6 +290,7 @@ impl JobScheduler {
                 claimants: HashSet::new(),
                 settled_claimants: Vec::new(),
                 output: None,
+                provider_completion: None,
                 progress: Vec::new(),
                 cancel: tokio_util::sync::CancellationToken::new(),
                 settled,
@@ -330,7 +334,7 @@ impl JobScheduler {
             };
             if cancelled_before_start {
                 drop(permit);
-                settle(&jobs, task_call_id.clone(), JobOutput::Cancelled).await;
+                settle(&jobs, task_call_id.clone(), JobOutput::Cancelled, None).await;
                 let _ = events.send(task_call_id);
                 return;
             }
@@ -383,7 +387,13 @@ impl JobScheduler {
                 }
             }
             drop(permit);
-            settle(&jobs, task_call_id.clone(), JobOutput::Completed(result)).await;
+            settle(
+                &jobs,
+                task_call_id.clone(),
+                JobOutput::Completed(result.clone()),
+                Some(result),
+            )
+            .await;
             let _ = events.send(task_call_id);
         });
         if let Some(job) = registry.get_mut(&call_id) {
@@ -477,6 +487,22 @@ impl JobScheduler {
             .get(call_id)
             .ok_or(JobError::UnknownCall)?
             .output
+            .clone())
+    }
+
+    /// Inspect the provider future's actual completion, even when a prior
+    /// cancellation outcome remains the immutable result delivered to callers.
+    pub async fn provider_completion(
+        &self,
+        call_id: &CallId,
+    ) -> Result<Option<Result<Value, String>>, JobError> {
+        Ok(self
+            .jobs
+            .lock()
+            .await
+            .get(call_id)
+            .ok_or(JobError::UnknownCall)?
+            .provider_completion
             .clone())
     }
 
@@ -653,6 +679,9 @@ impl JobScheduler {
         {
             let jobs = self.jobs.lock().await;
             let job = jobs.get(call_id).ok_or(JobError::UnknownCall)?;
+            if job.provider_completion.is_some() {
+                return Ok(job.cancellation_ack.clone());
+            }
             match &job.cancellation_ack {
                 None => return Ok(None),
                 Some(crate::provider::CancellationAcknowledgment::Stopped) => {
@@ -675,7 +704,9 @@ impl JobScheduler {
             let mut jobs = self.jobs.lock().await;
             let job = jobs.get_mut(call_id).ok_or(JobError::UnknownCall)?;
             job.cancellation_ack = Some(ack.clone());
-            if matches!(ack, crate::provider::CancellationAcknowledgment::Stopped) {
+            if matches!(ack, crate::provider::CancellationAcknowledgment::Stopped)
+                && job.provider_completion.is_none()
+            {
                 job.task.take()
             } else {
                 None
@@ -797,10 +828,14 @@ async fn settle(
     jobs: &Mutex<HashMap<CallId, Job>>,
     call_id: CallId,
     output: JobOutput,
+    provider_completion: Option<Result<Value, String>>,
 ) -> JobSettlement {
     let settlement = {
         let mut jobs = jobs.lock().await;
         if let Some(job) = jobs.get_mut(&call_id) {
+            if let Some(completion) = provider_completion {
+                job.provider_completion = Some(completion);
+            }
             let final_output = if let Some(existing) = &job.output {
                 existing.clone()
             } else {
@@ -1101,6 +1136,7 @@ mod tests {
             &scheduler.jobs,
             call_id.clone(),
             JobOutput::Completed(Ok(json!({"late": true}))),
+            Some(Ok(json!({"late": true}))),
         )
         .await;
         assert_eq!(late.output, JobOutput::Cancelled);
