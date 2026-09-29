@@ -126,6 +126,16 @@ impl ToolSurface {
     }
 }
 
+fn embedded_tools(mut hosted: Vec<Value>) -> Vec<Value> {
+    let wait = crate::agents::verb_tool_schemas()
+        .into_iter()
+        .find(|tool| tool["name"] == "wait_agent")
+        .expect("harness wait_agent declaration");
+    let mut tools = vec![wait];
+    tools.append(&mut hosted);
+    tools
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputReceipt {
     pub envelope_id: i64,
@@ -357,7 +367,7 @@ impl Provider for BoundProvider {
             .unwrap_or_default()
     }
     fn all_tools(&self) -> Vec<Value> {
-        self.tools()
+        embedded_tools(self.tools())
     }
     async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
         Err(ProviderError::Tool(
@@ -371,6 +381,9 @@ impl Provider for PinnedProvider {
         Some(self.surface.version())
     }
     fn validate_call(&self, name: &str, kind: ToolKind) -> Result<(), ProviderError> {
+        if name == "wait_agent" && kind == ToolKind::Function {
+            return Ok(());
+        }
         if self.surface.kinds.get(name) == Some(&kind) {
             Ok(())
         } else {
@@ -383,7 +396,7 @@ impl Provider for PinnedProvider {
         self.surface.tools.clone()
     }
     fn all_tools(&self) -> Vec<Value> {
-        self.tools()
+        embedded_tools(self.tools())
     }
     fn cancellation_owner(&self) -> Option<Arc<dyn CancellationOwner>> {
         self.surface.dispatcher.cancellation_owner()

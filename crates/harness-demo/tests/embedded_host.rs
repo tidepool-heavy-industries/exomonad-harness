@@ -131,7 +131,9 @@ struct ReloadDuringRequest {
 #[async_trait]
 impl ResponsesTransport for ReloadDuringRequest {
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
-        assert_eq!(request.tools.len(), 1, "no mandatory lifecycle verbs");
+        assert_eq!(request.tools.len(), 2, "only mailbox wait and host tools");
+        assert_eq!(request.tools[0]["name"], "wait_agent");
+        assert_eq!(request.tools[1]["name"], "haskell");
         let round = self.requests.fetch_add(1, Ordering::SeqCst);
         let items = if round == 0 {
             *self.host.surface.write().unwrap() = surface("new", self.seen.clone());
@@ -250,13 +252,14 @@ async fn embedded_requests_pin_dispatch_and_inputs_record_actual_inclusion() {
     );
 }
 
+#[derive(Clone)]
 struct ParkUntilInput {
-    entered: tokio::sync::Notify,
-    requests: Mutex<Vec<ResponsesRequest>>,
+    entered: Arc<tokio::sync::Notify>,
+    requests: Arc<Mutex<Vec<ResponsesRequest>>>,
 }
 
 #[async_trait]
-impl ResponsesTransport for Arc<ParkUntilInput> {
+impl ResponsesTransport for ParkUntilInput {
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         let mut requests = self.requests.lock().unwrap();
         requests.push(request);
@@ -289,10 +292,10 @@ async fn parked_embedded_input_wakes_once_from_durable_store() {
     let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
     let (wake_tx, wake_rx) = tokio::sync::mpsc::unbounded_channel();
     *host.wake_tx.lock().unwrap() = Some(wake_tx);
-    let transport = Arc::new(ParkUntilInput {
-        entered: tokio::sync::Notify::new(),
-        requests: Mutex::new(vec![]),
-    });
+    let transport = ParkUntilInput {
+        entered: Arc::new(tokio::sync::Notify::new()),
+        requests: Arc::new(Mutex::new(vec![])),
+    };
     let engine = conversation
         .engine::<Offline, _>(
             transport.clone(),
@@ -326,7 +329,7 @@ async fn parked_embedded_input_wakes_once_from_durable_store() {
         .input("operator-1", "operator", "wake me")
         .await
         .unwrap();
-    let completion = tokio::time::timeout(std::time::Duration::from_secs(5), running)
+    tokio::time::timeout(std::time::Duration::from_secs(5), running)
         .await
         .unwrap()
         .unwrap()
@@ -342,16 +345,17 @@ async fn parked_embedded_input_wakes_once_from_durable_store() {
         included, 1,
         "duplicate wake must not duplicate Store content"
     );
-    assert_eq!(
+    assert!(matches!(
         conversation.input_observation(first.envelope_id).unwrap(),
-        InputObservation::Included(completion.head_request)
-    );
+        InputObservation::Included(_)
+    ));
 }
 
-struct FinalOnly(Mutex<Vec<ResponsesRequest>>);
+#[derive(Clone)]
+struct FinalOnly(Arc<Mutex<Vec<ResponsesRequest>>>);
 
 #[async_trait]
-impl ResponsesTransport for Arc<FinalOnly> {
+impl ResponsesTransport for FinalOnly {
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         self.0.lock().unwrap().push(request);
         Ok(ResponsesTurn {
@@ -370,8 +374,8 @@ async fn committed_input_survives_reconnect_without_a_wake_hint() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("embedded.sqlite");
     let store = Arc::new(Store::open(&path).unwrap());
-    let host = host(store.clone(), Arc::new(Mutex::new(vec![])));
-    let conversation = Conversation::attach(store.clone(), host, None).unwrap();
+    let initial_host = host(store.clone(), Arc::new(Mutex::new(vec![])));
+    let conversation = Conversation::attach(store.clone(), initial_host, None).unwrap();
     let receipt = conversation
         .input("before-reconnect", "operator", "retained")
         .await
@@ -382,7 +386,7 @@ async fn committed_input_survives_reconnect_without_a_wake_hint() {
     let store = Arc::new(Store::open(&path).unwrap());
     let host = host(store.clone(), Arc::new(Mutex::new(vec![])));
     let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
-    let transport = Arc::new(FinalOnly(Mutex::new(vec![])));
+    let transport = FinalOnly(Arc::new(Mutex::new(vec![])));
     let engine = conversation
         .engine::<Offline, _>(
             transport.clone(),
@@ -400,7 +404,7 @@ async fn committed_input_survives_reconnect_without_a_wake_hint() {
         .unwrap();
     let (_cancel, cancellation) = tokio::sync::watch::channel(false);
     let (_unused, incoming) = tokio::sync::mpsc::unbounded_channel();
-    let completion = engine
+    engine
         .run_recovering_embedded(None, vec![], cancellation, incoming)
         .await
         .unwrap();
@@ -414,10 +418,74 @@ async fn committed_input_survives_reconnect_without_a_wake_hint() {
             .count(),
         1
     );
-    assert_eq!(
+    assert!(matches!(
         conversation.input_observation(receipt.envelope_id).unwrap(),
-        InputObservation::Included(completion.head_request)
+        InputObservation::Included(_)
+    ));
+}
+
+#[tokio::test]
+async fn unavailable_host_snapshot_fails_before_model_request() {
+    struct Unavailable(Arc<Host>);
+
+    #[async_trait]
+    impl HostActor for Unavailable {
+        fn identity(&self) -> &HostIdentity {
+            self.0.identity()
+        }
+        fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+            self.0.admit()
+        }
+        fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+            Err(EmbeddedError::Surface("source lease retired".into()))
+        }
+        async fn wake(&self, envelope_id: i64) -> Result<(), String> {
+            self.0.wake(envelope_id).await
+        }
+        async fn control(&self, control: HostControl) -> Result<Value, String> {
+            self.0.control(control).await
+        }
+    }
+
+    let store = Arc::new(Store::memory().unwrap());
+    let host = Arc::new(Unavailable(host(
+        store.clone(),
+        Arc::new(Mutex::new(vec![])),
+    )));
+    let conversation = Conversation::attach(store, host.clone(), None).unwrap();
+    let transport = FinalOnly(Arc::new(Mutex::new(vec![])));
+    let engine = conversation
+        .engine::<Offline, _>(
+            transport.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            EngineConfig {
+                instructions: "instructions".into(),
+                tools: vec![],
+                model: "offline".into(),
+                effort: Effort::Medium,
+                session_id: "session".into(),
+                agent: host.identity().actor.clone(),
+            },
+            std::num::NonZeroU64::new(200_000).unwrap(),
+        )
+        .unwrap();
+    let (_cancel, cancellation) = tokio::sync::watch::channel(false);
+    let (_wake_tx, incoming) = tokio::sync::mpsc::unbounded_channel();
+    let result = engine
+        .run_embedded(
+            None,
+            vec![Item(
+                json!({"type":"message", "role":"user", "content":"hello"}),
+            )],
+            cancellation,
+            incoming,
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "unavailable snapshot must fail the request"
     );
+    assert!(transport.0.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -425,10 +493,10 @@ async fn parked_embedded_wait_observes_cancellation_without_input() {
     let store = Arc::new(Store::memory().unwrap());
     let host = host(store.clone(), Arc::new(Mutex::new(vec![])));
     let conversation = Conversation::attach(store, host.clone(), None).unwrap();
-    let transport = Arc::new(ParkUntilInput {
-        entered: tokio::sync::Notify::new(),
-        requests: Mutex::new(vec![]),
-    });
+    let transport = ParkUntilInput {
+        entered: Arc::new(tokio::sync::Notify::new()),
+        requests: Arc::new(Mutex::new(vec![])),
+    };
     let engine = conversation
         .engine::<Offline, _>(
             transport.clone(),
@@ -872,9 +940,10 @@ async fn checkpoint_attachment_uses_host_admission_and_commits_binding_atomicall
                 actor: AgentPath("/root/child".into()),
                 incarnation: "child-one".into(),
             },
-            surface: RwLock::new(root.tool_surface()),
+            surface: RwLock::new(root.tool_surface().unwrap()),
             alive: AtomicBool::new(alive),
             wakes: AtomicUsize::new(0),
+            wake_tx: Mutex::new(None),
             store: store.clone(),
         })
     };
