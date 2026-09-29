@@ -243,3 +243,90 @@ automatic heap restoration, structured compaction, and hot replacement of the
 host executable are later work. Stock Codex stays available as an independent
 fallback during trials; removal of custom-fork dependencies follows a consumer
 audit and accepted browser waves.
+
+## Implementation handoff — 2026-09-28 contract pass
+
+This pass changes documentation only. Inspected canonical harness source:
+`6326ef680dc5824d60f321f34d2c6c79aaf7eea4`; Tidepool:
+`b2de366b2b52e9120ed07f200bae62501b5681e6`. Wave22 candidates remain unjoined
+until their existing owner supplies accepted source and combined evidence.
+Tidepool compiler, resident scheduling/publication and checkpoint implementation
+are held pending its engine investigation. The Tidepool companion
+`plans/harness-integration.md` carries the production-consumer/dependency map and
+integration parcels. These requirements do not claim current API acceptance.
+
+### Source-grounded library deltas
+
+| Existing owner | Required change and acceptance |
+| --- | --- |
+| `provider.rs`: Provider, CallContext, all_tools | Preserve raw text/structured arguments without conversion; embedded calls require exact request/call provenance, bounded progress and externally acknowledged cancellation. Override the existing tool-list hook rather than append mandatory native verbs. |
+| Engine and Store input/call owners | Persist envelopes before wake, distinguish admission from actual request inclusion, preserve original claims/results across detach and retry. Expose retained detail and honest execution outcomes; no second provider-side job registry. |
+| Agent lifecycle and server control | Attach conversations to host-admitted actor identities; route stop/interrupt through the host. Do not run demo TreeDriver/StoreAgentToolService as a competing embedded supervisor. Include Haskell-only actors in the host-backed browser projection. |
+| Checkpoint owner | Retain pending-call claims and opaque host attachment independently of enclosing-call success. Attachment failure releases provisional ownership; host loss makes stale live attachments unavailable. Immediate capture is gated on Tidepool runtime work. |
+| `compaction.rs`: Compactor and Engine strategy | Add the agreed plain-text summary operation through existing transport/Store owners. Current server-compaction endpoint and forced typed-turn capability are not evidence that text summarization exists. Preserve raw and structured pending calls outside summary text. |
+| `transport/auth.rs`: CodexFileAuth | Retain the explicit read-only credential bridge for first release; report expiry and preserve outstanding work instead of retrying indefinitely. Independent login/coordinated refresh comes later. |
+| `server.rs`, `server/ws_protocol.rs` | Reuse Router/assets/session authorization and origin checks. Reconnect reads snapshots/events without replaying commands; event retention gaps require authoritative resynchronization. |
+
+No Tidepool dependency is introduced into this library. The deterministic host
+stub must implement its public embedding interfaces and exercise the real
+Engine/Store/server, not duplicate their state machine in test code. Return the
+actual accepted public interface inventory with the implementation hash; the
+Tidepool adapter will consume that revision rather than guessed signatures.
+
+### Settled initial operator profile
+
+- One shared harness instance per Exomonad run. Codex remains the development
+  default; embedding is selected explicitly for a new run and recorded in run
+  metadata. No automatic backend switching or cross-backend side-effect replay.
+- Existing browser-session login behind loopback and Tailscale HTTPS, with
+  HTTP/WebSocket authorization and origin checks. Retain the eight-hour session
+  default and explicitly configured public scheme. Do not infer identity from
+  untrusted forwarding headers. Verify expiry and secret rotation in acceptance.
+- Explicitly configured read-only Codex credential source; the operator uses
+  Codex to refresh credentials when needed. Do not copy credentials implicitly.
+  Stock Codex remains installed, and independent credential lifecycle is a later
+  milestone rather than a first-release gate.
+- The facade supplies `run_root/harness/` under its existing private durable run
+  root. Store owns schema/migrations, the facade owns run identity and startup;
+  assets are immutable matched build artifacts. Incompatible schemas fail before
+  actor admission. No automatic Codex transcript migration or heap restoration.
+- Plain-text compaction at approximately 50% configured context capacity:
+  standing instructions, model-authored handoff and bounded recent user messages.
+  Pending claims and live resources remain separate. Failure/no-progress retains
+  valid history and prevents repeated compaction of unchanged input.
+- Initial host commands use existing confined Tidepool command/resource owners:
+  closed/piped stdin, bounded retained output, original offsets and explicit
+  cleanup outcomes. PTY requests are unsupported until that owner adds support;
+  do not silently substitute pipes. Browser terminals remain deferred.
+- Host readiness means configuration/schema/assets/tool host/server are ready;
+  it does not certify a provider request. Shutdown seals admissions and retains
+  unresolved work/cleanup evidence before closing shared services. A crash never
+  turns retained history into proof of live resident-state recovery.
+
+### Required handback and acceptance
+
+C0/C1/C2 below are integration contract parcels, not the roadmap H1-H6
+product milestones. C1 provides library seams; roadmap H1 is the later real
+resident integration. C2 contributes to transport and sustained-session milestones.
+
+
+1. **C0:** converge raw-call provider, Engine, Store/replay and browser candidates.
+   Report exact accepted hash, component joins, counted combined checks and
+   remaining uncertainty. Preserve the wave22 manifest as WIP evidence.
+2. **C1:** implement the required library seams against a deterministic host.
+   Cover raw Unicode/structured input, kind mismatch, exact retry, bounded
+   progress, input admission vs inclusion, dropped waiter and completion/cancel
+   races. Extend the production `tests/adapter_readiness.rs` foundation.
+3. **C2:** plain-text compaction and credential failure behavior, preserving
+   pending call kinds/claims; no tools or effects replayed to rebuild history.
+4. **Joint integration:** once Tidepool's runtime hold clears, prove real resident
+   execution and checkpoints, then browser operation and the full reviewed worker
+   tree specified above. A simulated evaluator is not real Haskell acceptance.
+5. **Compatibility/release:** Tidepool checks Codex launch/input/tools/commands/
+   fork/publication/cleanup alongside embedded tests. Record matched runtime,
+   worker, workspace, harness and asset revisions. Default cutover is separate.
+
+Each handback includes base/full commit, exclusive commit range, dependencies,
+owned interfaces, exact check commands and matched/executed counts, compiled-only
+work and unverified behavior. Distinguish mocked, replay, resident and live-provider
+evidence. No deployment or new wave is authorized merely by completing these docs.

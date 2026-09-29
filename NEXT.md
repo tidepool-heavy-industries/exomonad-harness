@@ -21,13 +21,28 @@ The Tidepool compiler/continuation batch is running separately. Coordinate with
 its integration owner before selecting a matched source/workspace baseline.
 Do not launch another wave, move a running checkout, or deploy from this document.
 
+## Current contract-only batch
+
+The host/library contract pass is documentation only. The Tidepool engine
+investigation holds compiler, resident scheduling/publication and checkpoint
+implementation; prerequisite code remains isolated. Harness production convergence
+stays with its existing owner. No builds, deployment or running-session changes
+are implied by this pass. The embedded-host PRD now lists concrete public-library
+deltas, a deterministic host-stub gate and the required exact-source handback.
+
+Settled initial defaults: read-only Codex credentials with explicit expiry recovery,
+existing browser-session login behind loopback/Tailscale HTTPS, and Codex as the
+development default. Do not reopen those choices during ordinary implementation.
+
 ## Then: adoption work
 
 1. Converge and review the standalone custom-cell work as a separate gate.
 2. Scaffold the agreed typed host boundary against a deterministic standalone
    stub, preserving Tidepool as sole actor lifecycle authority.
-3. Parallelize resident concurrent cells/publication, checkpoint and lifecycle
-   integration, and browser composition after shared interfaces exist.
+3. After the Tidepool engine hold is explicitly cleared, parallelize resident
+   concurrent cells/publication, checkpoint and lifecycle integration, and browser
+   composition after shared interfaces exist. Harness-only contract implementation
+   may proceed with its owner independently of the Tidepool runtime hold.
 4. Demonstrate the complete browser-operated recursive worker-tree acceptance
    in [the embedded-host contract](docs/embedded-host-prd.md).
 

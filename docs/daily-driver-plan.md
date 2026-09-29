@@ -8,6 +8,18 @@ one shared exomonad-harness instance, without a Codex process per model actor.
 SSH remains an independent operator access path. Hardware provisioning proceeds
 in parallel; it is not a reason to postpone the integration design.
 
+## Current batch and settled defaults
+
+The 2026-09-28 batch is contracts/documentation only. Harness production work
+remains with its separate owner; Tidepool engine, concurrent resident execution
+and checkpoint changes are held pending investigation. Read the embedded-host
+PRD implementation handoff for source-grounded library deltas and acceptance.
+
+Initial operation uses the read-only Codex credential bridge and existing browser
+session login behind Tailscale HTTPS. Independent refresh and Tailscale identity
+login are later work. Codex remains the development default; no runtime pins,
+backend selection, deployments or active sessions change in this batch.
+
 ## Evidence baseline and reading order
 
 1. NEXT.md, this plan, PRD.md, then the relevant owning implementation.
@@ -138,8 +150,8 @@ errors, interruption/stop and recoverable detail. Distinguish command admission,
 execution and completion in the UI. Reconnect obtains authoritative state without
 resubmitting commands. Reuse production rendering and truncation behavior.
 
-Before network use, decide operator authentication: retain a working baseline
-while reconciling shared-secret sessions with trusted Tailscale identity. Verify
+Initial operator authentication uses existing browser-session login behind
+loopback/Tailscale HTTPS; trusted Tailscale identity login is deferred. Verify
 session expiry/revocation, HTTP/WebSocket authorization, origin/CSRF handling,
 and permission to inspect/control a run. Never trust forwarded identity headers
 from arbitrary peers. Keep admin access and secrets outside disposable worktrees.
@@ -156,11 +168,11 @@ Prove async custom-call ordering, pending-call continuation, finalization,
 stream interruption, error/rate-limit behavior and bounded retry. Reuse existing
 redacted opt-in tracing; never retain auth headers/tokens in evidence.
 
-Choose an approved credential source through Auth. An initial explicit
-CodexFileAuth bridge is acceptable only with documented expiry and recovery;
+Use the approved explicit read-only CodexFileAuth bridge through Auth, with
+documented expiry and operator reauthentication;
 independent login/refresh is required before claiming no Codex dependency.
-Coordinate refresh across agents, surface reauthentication to the operator,
-and avoid retry storms. Do not copy credentials to the new host implicitly.
+Surface reauthentication to the operator and avoid retry storms. When independent
+refresh is implemented later, coordinate it across agents. Do not copy credentials to the new host implicitly.
 
 Gate: live one-root and child checks using the intended account/model/effort,
 plus deterministic replay of relevant failure cases. Distinguish mock, replay
@@ -176,8 +188,8 @@ Inspect existing compaction implementation before adding a strategy.
 Define restart semantics explicitly: SQLite history is durable; arbitrary resident
 heap state is not automatically restored. Mark interrupted/nonrecoverable work
 honestly, prevent blind replay of side effects, and provide a deliberate fresh
-session/recovery path retaining source, commits and evidence. Decide whether any
-safe reconstruction is needed; transparent heap restoration is not a launch goal.
+session/recovery path retaining source, commits and evidence. Automatic resident
+heap reconstruction is excluded from the initial release.
 
 Reload helper/AgentSpec source through the existing atomic publication owner.
 Rejected reload keeps the last valid surface. Identify which source version
@@ -229,17 +241,18 @@ run where resource budgets permit. No routine two-hour Tidepool gate per parcel.
 Each owner reports exact candidate/base, dependencies, review disposition, executed
 counts, compiled-only targets, failure evidence and remaining unverified behavior.
 
-## Decisions to take with Inanna
+## Settled decisions and later operator gates
 
-- Actor transition authority and how paths map to incarnations (C0).
-- Initial credential mode and independent login/refresh sequencing (H4).
-- Operator identity/session policy and scope of browser control (H3).
-- Acceptable loss/recovery of resident state across host restart (H5).
-- First live tree's scope, default cutover and retirement of the Codex backend (H6).
+The embedded-host PRD settles kernel lifecycle authority, exact-incarnation
+binding, initial credential bridge, browser-session login, and honest loss of
+resident state on restart. They are not open implementation choices.
 
-User direction already settled: browser operation, Haskell as primary tool surface,
-one shared harness instance, ordinary SSH, server provisioning now, no dependency
-from the standalone harness back to Tidepool. These need no repeated approval.
+The first connected acceptance is a browser Sol Medium root driving parallel
+Luna component workflows, review and repair, integration and cleanup. That test
+is separate from authorizing a production wave, provisioning or deployment.
+Operator decisions still required later: default cutover after observed embedded
+waves, removal of the custom Codex dependency after its consumer audit, and any
+expansion to independent credential refresh or server-wide management.
 
 ## Later extensions
 
