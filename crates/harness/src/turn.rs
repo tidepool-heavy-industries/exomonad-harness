@@ -711,6 +711,9 @@ impl JobScheduler {
                 }
                 let output = match &ack {
                     crate::provider::CancellationAcknowledgment::Stopped => JobOutput::Cancelled,
+                    crate::provider::CancellationAcknowledgment::Completed(result) => {
+                        JobOutput::Completed(result.clone())
+                    }
                     crate::provider::CancellationAcknowledgment::Unconfirmed(detail) => {
                         JobOutput::CancellationUnconfirmed(detail.clone())
                     }
@@ -819,6 +822,9 @@ impl JobScheduler {
             match &job.cancellation_ack {
                 None => return Ok(None),
                 Some(crate::provider::CancellationAcknowledgment::Stopped) => {
+                    return Ok(job.cancellation_ack.clone());
+                }
+                Some(crate::provider::CancellationAcknowledgment::Completed(_)) => {
                     return Ok(job.cancellation_ack.clone());
                 }
                 Some(crate::provider::CancellationAcknowledgment::Unconfirmed(_)) => {}

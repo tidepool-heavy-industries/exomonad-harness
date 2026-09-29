@@ -87,6 +87,8 @@ pub enum ProviderError {
 #[serde(tag = "state", content = "detail", rename_all = "snake_case")]
 pub enum CancellationAcknowledgment {
     Stopped,
+    /// The owner observed the operation's terminal result before cancellation won.
+    Completed(Result<Value, String>),
     Unconfirmed(String),
 }
 

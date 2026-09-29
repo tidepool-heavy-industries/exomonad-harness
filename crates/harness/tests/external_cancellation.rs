@@ -76,6 +76,72 @@ fn external() -> Arc<External> {
     })
 }
 
+struct CompletedDuringCancel {
+    started: Notify,
+    release_waiter: Notify,
+}
+
+#[async_trait]
+impl CancellationOwner for CompletedDuringCancel {
+    async fn cancel(&self, _: &OperationId, _: &JobHandle) -> CancellationAcknowledgment {
+        CancellationAcknowledgment::Completed(Ok(json!({"terminal": "success"})))
+    }
+}
+
+struct CompletedProvider(Arc<CompletedDuringCancel>);
+
+#[async_trait]
+impl Provider for CompletedProvider {
+    fn cancellation_owner(&self) -> Option<Arc<dyn CancellationOwner>> {
+        Some(self.0.clone())
+    }
+
+    async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+        self.0.started.notify_one();
+        self.0.release_waiter.notified().await;
+        Ok(json!({"waiter": "late"}))
+    }
+
+    fn tools(&self) -> Vec<Value> {
+        vec![]
+    }
+}
+
+#[tokio::test]
+async fn owner_completed_reply_wins_before_provider_waiter_resumes() {
+    let jobs = JobScheduler::new(1).unwrap();
+    let owner = Arc::new(CompletedDuringCancel {
+        started: Notify::new(),
+        release_waiter: Notify::new(),
+    });
+    let call = CallId("completed-at-owner".into());
+    jobs.start(
+        Arc::new(CompletedProvider(owner.clone())),
+        call.clone(),
+        "run".into(),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    owner.started.notified().await;
+    let settlement = jobs.cancel(&call).await.unwrap().unwrap();
+    let completed = JobOutput::Completed(Ok(json!({"terminal": "success"})));
+    assert_eq!(settlement.output, completed);
+    assert_eq!(jobs.output(&call).await.unwrap(), Some(completed.clone()));
+    owner.release_waiter.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if jobs.provider_completion(&call).await.unwrap().is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(jobs.output(&call).await.unwrap(), Some(completed));
+}
+
 #[tokio::test]
 async fn uncertain_external_cancellation_retains_waiter_until_owner_acknowledges() {
     let jobs = JobScheduler::new(1).unwrap();
