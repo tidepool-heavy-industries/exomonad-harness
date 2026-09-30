@@ -4,7 +4,7 @@ use crate::{
     item::{Item, ToolInput, ToolKind},
     model::{AgentPath, ConversationIdentity, RequestId},
     provider::{CallContext, CancellationOwner, Provider, ProviderError},
-    store::{Store, StoreError},
+    store::{EmbeddedInputState, Store, StoreError},
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
