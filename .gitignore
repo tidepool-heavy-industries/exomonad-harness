@@ -1,6 +1,6 @@
 /target/
 /.buckconfig.local
-/buck-out
+/buck-out/
 /.worktrees/
 /web/node_modules/
 /web/dist/

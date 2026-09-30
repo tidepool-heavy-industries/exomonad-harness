@@ -17,7 +17,10 @@ use harness::engine::{Engine, EngineCompletion, EngineConfig, EngineError};
 use harness::item::Item;
 use harness::model::{AgentPath, Effort};
 use harness::provider::{CallContext, Provider, ProviderError};
-use harness::server::{self, ClientCommand, QueuedCommand, ServerConfig, SessionSecret, Snapshot};
+use harness::server::{
+    self, ClientCommand, CommandReceipt, CommandReceiptOutcome, QueuedCommand, ServerConfig,
+    SessionSecret, Snapshot,
+};
 use harness::store::Store;
 use harness::transport::{
     Auth, ResponsesClient, ResponsesRequest, ResponsesTurn, TransportError, Usage,
@@ -1888,6 +1891,16 @@ async fn serve(
             command = commands.recv() => {
                 let Some(QueuedCommand { command_id, command }) = command else { break };
                 match command {
+                    ClientCommand::Host { .. } => {
+                        control.publish_command_receipt(CommandReceipt {
+                            command_id,
+                            outcome: CommandReceiptOutcome::Refused {
+                                target: None,
+                                reason: "This standalone server has no embedded host actor owner."
+                                    .into(),
+                            },
+                        });
+                    }
                     ClientCommand::Submit { command } => {
                         let conversation_was_requesting = conversation["state"] == "requesting";
                         let request_id = format!("request/{command_id}");
@@ -2455,7 +2468,7 @@ fn safe_transport_error(error: &TransportError) -> String {
 
 fn safe_engine_error(error: EngineError) -> String {
     match &error {
-        EngineError::Cancelled => "conversation cancelled during shutdown".into(),
+        EngineError::Cancelled { .. } => "conversation cancelled during shutdown".into(),
         EngineError::Transport(error) => safe_transport_error(error),
         EngineError::Store(_) => "conversation store operation failed".into(),
         EngineError::Job(_) => "provider job failed".into(),
@@ -3869,8 +3882,10 @@ mod tests {
         assert_eq!(envelope["type"], "FINAL_ANSWER");
         assert_eq!(
             serde_json::to_value(Snapshot {
+                host_run: None,
                 seq: 5,
                 actors: vec![],
+                command_receipts: vec![],
                 conversations: vec![conversation],
                 requests: vec![request],
                 jobs: vec![job_record("j1", "settled")],

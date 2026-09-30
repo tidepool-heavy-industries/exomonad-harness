@@ -64,6 +64,11 @@ pub trait HostActor: Send + Sync {
     async fn wake(&self, envelope_id: i64) -> Result<(), String>;
     /// A request to the host owner, not proof that retirement has completed.
     async fn control(&self, control: HostControl) -> Result<Value, String>;
+    /// The owning conversation has durably retained this operation's real result.
+    /// Retried acknowledgments must not repeat execution or lifecycle admission.
+    async fn output_committed(&self, _operation: &crate::model::OperationId) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Immutable manifest and dispatcher published together by the host. Reload
@@ -339,6 +344,25 @@ impl PinnedProvider {
 }
 #[async_trait]
 impl Provider for BoundProvider {
+    async fn output_committed(
+        &self,
+        operation: &crate::model::OperationId,
+    ) -> Result<(), ProviderError> {
+        let identity = self.host.identity();
+        let expected = ConversationIdentity::Embedded {
+            run: identity.run.clone(),
+            actor: identity.actor.clone(),
+            incarnation: identity.incarnation.clone(),
+        };
+        if operation.origin != expected {
+            return Err(ProviderError::Tool("foreign output acknowledgment".into()));
+        }
+        self.host
+            .output_committed(operation)
+            .await
+            .map_err(ProviderError::Tool)
+    }
+
     fn request_snapshot(&self) -> Result<Option<Arc<dyn Provider>>, ProviderError> {
         let surface = self
             .host

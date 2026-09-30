@@ -831,7 +831,9 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
         .unwrap();
     assert_eq!(response.status(), 202);
     let command = commands.recv().await.unwrap();
-    let ClientCommand::Submit { command: text } = command.command;
+    let ClientCommand::Submit { command: text } = command.command else {
+        panic!("expected standalone input command");
+    };
     let receipt = conversation
         .input(&command.command_id, "operator", &text)
         .await
@@ -1278,5 +1280,109 @@ async fn checkpoint_conversations_keep_independent_children_after_origin_failure
     assert_eq!(
         child_b_checkpoint.attachment().as_ref(),
         &"private scaffold"
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_attachment_uses_host_admission_and_commits_binding_atomically() {
+    let store = Arc::new(Store::memory().unwrap());
+    let root = host(store.clone(), Arc::new(Mutex::new(vec![])));
+    let root_conversation = Conversation::attach(store.clone(), root.clone(), None).unwrap();
+    struct Finished;
+    #[async_trait]
+    impl ResponsesTransport for Finished {
+        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            Ok(ResponsesTurn {
+                response_id: "source".into(),
+                items: vec![Item(
+                    json!({"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"scaffold ready"}]}),
+                )],
+                usage: Default::default(),
+            })
+        }
+    }
+    let engine = root_conversation
+        .engine::<Offline, _>(
+            Finished,
+            Arc::new(JobScheduler::new(1).unwrap()),
+            EngineConfig {
+                instructions: "test".into(),
+                tools: vec![],
+                model: "offline".into(),
+                effort: Effort::Medium,
+                session_id: "source".into(),
+                agent: root.identity.actor.clone(),
+            },
+            std::num::NonZeroU64::new(200_000).unwrap(),
+        )
+        .unwrap();
+    let (_cancel, rx) = tokio::sync::watch::channel(false);
+    let (_wake, incoming) = tokio::sync::mpsc::unbounded_channel();
+    let request = engine
+        .run(None, vec![], rx, incoming)
+        .await
+        .unwrap()
+        .head_request;
+    let call = CallId("source-call".into());
+    store.append_items(&request,&[Item(json!({"type":"custom_tool_call","name":"haskell","call_id":call.0,"input":"checkpoint"}))]).unwrap();
+    store.claim(&call, &request).unwrap();
+    let checkpoint = store
+        .capture_checkpoint(
+            &root.identity.actor,
+            &request,
+            &call,
+            &json!({"source":"immutable"}),
+            Arc::new("private scaffold"),
+        )
+        .unwrap();
+    let make_child = |alive| {
+        Arc::new(Host {
+            identity: HostIdentity {
+                run: "run".into(),
+                actor: AgentPath("/root/child".into()),
+                incarnation: "child-one".into(),
+            },
+            surface: RwLock::new(root.tool_surface().unwrap()),
+            alive: AtomicBool::new(alive),
+            wakes: AtomicUsize::new(0),
+            wake_tx: Mutex::new(None),
+            store: store.clone(),
+        })
+    };
+    assert!(
+        Conversation::from_checkpoint(
+            store.clone(),
+            make_child(false),
+            &root.identity.actor,
+            &checkpoint,
+            &json!({}),
+            &json!({"revision":"abc"})
+        )
+        .is_err()
+    );
+    assert!(
+        store
+            .agent(&AgentPath("/root/child".into()))
+            .unwrap()
+            .is_none()
+    );
+    let child = Conversation::from_checkpoint(
+        store.clone(),
+        make_child(true),
+        &root.identity.actor,
+        &checkpoint,
+        &json!({}),
+        &json!({"revision":"abc"}),
+    )
+    .unwrap();
+    assert_eq!(child.identity().incarnation, "child-one");
+    assert_eq!(root_conversation.identity(), &root.identity);
+    assert_eq!(
+        store
+            .agent(&child.identity().actor)
+            .unwrap()
+            .unwrap()
+            .fork_source["checkout"]["revision"],
+        "abc"
     );
 }

@@ -8,8 +8,9 @@ pub mod history;
 mod ws_protocol;
 
 pub use ws_protocol::{
-    HostActorIdentity, HostActorKind, HostActorLifecycle, HostActorProjection, Snapshot,
-    ToolJobRecord, ToolJobState, WsClientFrame, WsEvent, WsEventPayload, WsServerFrame,
+    CommandControl, CommandReceipt, CommandReceiptOutcome, HostActorIdentity, HostActorKind,
+    HostActorLifecycle, HostActorProjection, Snapshot, ToolJobRecord, ToolJobState, WsClientFrame,
+    WsEvent, WsEventPayload, WsServerFrame,
 };
 
 use crate::store::Store;
@@ -28,7 +29,7 @@ use axum::{
 use futures_util::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     convert::Infallible,
     path::PathBuf,
     sync::Arc,
@@ -38,12 +39,31 @@ use tokio::sync::{broadcast, mpsc};
 
 const COMMAND_CAPACITY: usize = 128;
 const EVENT_CAPACITY: usize = 512;
+const COMMAND_RECEIPT_CAPACITY: usize = 128;
 
 /// Stable command envelope accepted by `POST /api/commands`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientCommand {
     Submit { command: String },
+    Host { command: HostCommand },
+}
+
+/// Exact host address supplied by the authenticated operator. The host still
+/// validates live ownership and admission; this envelope grants no authority.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum HostCommand {
+    Input {
+        target: HostActorIdentity,
+        text: String,
+    },
+    Interrupt {
+        target: HostActorIdentity,
+    },
+    Retire {
+        target: HostActorIdentity,
+    },
 }
 
 /// Stable acknowledgement for an accepted command.
@@ -237,6 +257,39 @@ impl ServerControl {
         event
     }
 
+    /// Store and publish a bounded command handoff receipt atomically.
+    ///
+    /// Receipts describe admission or control routing, never command
+    /// completion. Durable input records remain in the owning store.
+    pub fn publish_command_receipt(&self, receipt: CommandReceipt) -> ServerEvent {
+        let payload = serde_json::to_value(&receipt).expect("command receipt serializes to JSON");
+        let mut next_sequence = self.next_sequence.lock().expect("sequence lock poisoned");
+        let mut snapshot = self.snapshot.write().expect("snapshot lock poisoned");
+        if let Some(existing) = snapshot
+            .command_receipts
+            .iter()
+            .position(|existing| existing.command_id == receipt.command_id)
+        {
+            snapshot.command_receipts.remove(existing);
+        }
+        snapshot.command_receipts.push(receipt);
+        if snapshot.command_receipts.len() > COMMAND_RECEIPT_CAPACITY {
+            let excess = snapshot.command_receipts.len() - COMMAND_RECEIPT_CAPACITY;
+            snapshot.command_receipts.drain(..excess);
+        }
+
+        let sequence = *next_sequence;
+        *next_sequence += 1;
+        snapshot.seq = sequence;
+        let event = ServerEvent {
+            sequence,
+            event: "command.receipt".into(),
+            payload,
+        };
+        let _ = self.events.send(event.clone());
+        event
+    }
+
     /// Replace the WebSocket snapshot with a store-backed view.
     ///
     /// The snapshot's `seq` is a watermark: subsequent published events have a
@@ -247,8 +300,130 @@ impl ServerControl {
         let current_sequence = next_sequence.saturating_sub(1);
         snapshot.seq = snapshot.seq.max(current_sequence);
         *next_sequence = (*next_sequence).max(snapshot.seq.saturating_add(1));
-        *self.snapshot.write().expect("snapshot lock poisoned") = snapshot;
+        let mut current = self.snapshot.write().expect("snapshot lock poisoned");
+        let mut receipts = std::mem::take(&mut current.command_receipts);
+        for receipt in snapshot.command_receipts.drain(..) {
+            if let Some(existing) = receipts
+                .iter()
+                .position(|existing| existing.command_id == receipt.command_id)
+            {
+                receipts.remove(existing);
+            }
+            receipts.push(receipt);
+        }
+        if receipts.len() > COMMAND_RECEIPT_CAPACITY {
+            let excess = receipts.len() - COMMAND_RECEIPT_CAPACITY;
+            receipts.drain(..excess);
+        }
+        snapshot.command_receipts = receipts;
+        *current = snapshot;
     }
+
+    /// Atomically replace the host-owned projection and publish its deltas.
+    ///
+    /// The event watermark is committed with the corresponding rows before
+    /// subscribers can observe those events. A reconnect therefore cannot see
+    /// a sequence that claims to include projection changes absent from its
+    /// snapshot. Requests, jobs, and envelopes remain owned by their existing
+    /// producers and are retained unchanged.
+    pub fn update_host_projection(
+        &self,
+        run: String,
+        actors: Vec<HostActorProjection>,
+        conversations: Vec<serde_json::Value>,
+    ) {
+        debug_assert!(actors.iter().all(|actor| actor.identity.run == run));
+
+        let mut next_sequence = self.next_sequence.lock().expect("sequence lock poisoned");
+        let mut snapshot = self.snapshot.write().expect("snapshot lock poisoned");
+
+        let previous_actors: BTreeMap<_, _> = snapshot
+            .actors
+            .iter()
+            .map(|actor| (actor.identity.wire_key(), actor.clone()))
+            .collect();
+        let next_actors: BTreeMap<_, _> = actors
+            .iter()
+            .map(|actor| (actor.identity.wire_key(), actor.clone()))
+            .collect();
+        let previous_conversations = conversation_rows_by_id(&snapshot.conversations);
+        let next_conversations = conversation_rows_by_id(&conversations);
+        let mut changes = Vec::<(String, serde_json::Value)>::new();
+
+        if snapshot.host_run.as_deref() != Some(run.as_str()) {
+            changes.push(("host_run.upsert".into(), serde_json::json!({"run":run})));
+        }
+
+        for (id, _) in previous_actors
+            .iter()
+            .filter(|(id, _)| !next_actors.contains_key(*id))
+        {
+            changes.push((
+                "entity.remove".into(),
+                serde_json::json!({"entity":"actor", "id":id}),
+            ));
+        }
+        for (id, actor) in &next_actors {
+            if previous_actors.get(id).is_some_and(|old| old == actor) {
+                continue;
+            }
+            changes.push((
+                "actor.upsert".into(),
+                serde_json::to_value(actor).expect("host actor projection serializes"),
+            ));
+        }
+        for (id, _) in previous_conversations
+            .iter()
+            .filter(|(id, _)| !next_conversations.contains_key(*id))
+        {
+            changes.push((
+                "entity.remove".into(),
+                serde_json::json!({"entity":"conversation", "id":id}),
+            ));
+        }
+        for (id, conversation) in &next_conversations {
+            if previous_conversations
+                .get(id)
+                .is_some_and(|old| old == conversation)
+            {
+                continue;
+            }
+            changes.push(("conversation.upsert".into(), conversation.clone()));
+        }
+
+        let mut events = Vec::with_capacity(changes.len());
+        let mut watermark = next_sequence.saturating_sub(1);
+        for (kind, payload) in changes {
+            let sequence = *next_sequence;
+            *next_sequence += 1;
+            watermark = sequence;
+            events.push(ServerEvent {
+                sequence,
+                event: kind,
+                payload,
+            });
+        }
+
+        snapshot.host_run = Some(run);
+        snapshot.actors = actors;
+        snapshot.conversations = conversations;
+        snapshot.seq = snapshot.seq.max(watermark);
+        for event in events {
+            let _ = self.events.send(event);
+        }
+    }
+}
+
+fn conversation_rows_by_id(rows: &[serde_json::Value]) -> BTreeMap<String, serde_json::Value> {
+    rows.iter()
+        .map(|row| {
+            let id = row
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .expect("host conversation projection has a string id");
+            (id.to_owned(), row.clone())
+        })
+        .collect()
 }
 
 /// Build a fail-closed server: public static assets work, but protected `/api/*`
@@ -457,6 +632,18 @@ async fn websocket_session(
                                 }
                                 let reply = WsServerFrame::CommandAccepted { command_id };
                                 if send_ws_frame(&mut socket, &reply).await.is_err() {
+                                    break;
+                                }
+                            }
+                            WsClientFrame::HostCommand { command } => {
+                                let command_id = uuid::Uuid::new_v4().to_string();
+                                if state.commands.send(QueuedCommand {
+                                    command_id: command_id.clone(),
+                                    command: ClientCommand::Host { command },
+                                }).await.is_err() {
+                                    break;
+                                }
+                                if send_ws_frame(&mut socket, &WsServerFrame::CommandAccepted { command_id }).await.is_err() {
                                     break;
                                 }
                             }
@@ -726,6 +913,20 @@ mod tests {
         server_with_config(config)
     }
 
+    fn projected_actor(run: &str, actor: &str, incarnation: &str) -> HostActorProjection {
+        HostActorProjection {
+            identity: HostActorIdentity {
+                run: run.into(),
+                actor: crate::model::AgentPath(actor.into()),
+                incarnation: incarnation.into(),
+            },
+            parent: None,
+            kind: HostActorKind::Workflow,
+            lifecycle: HostActorLifecycle::Waiting,
+            model_conversation: None,
+        }
+    }
+
     fn websocket(
         address: std::net::SocketAddr,
         origin: Option<&str>,
@@ -825,6 +1026,190 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ServerEvent>(&serde_json::to_string(&event).unwrap()).unwrap(),
             event
+        );
+    }
+
+    #[test]
+    fn host_projection_diffs_rows_and_preserves_other_snapshot_owners() {
+        let (_, control, _) = authorized_server(PathBuf::from("."));
+        let old_actor = projected_actor("run-old", "/root/worker", "inc-1");
+        control.set_snapshot(Snapshot {
+            seq: 7,
+            host_run: Some("run-old".into()),
+            command_receipts: vec![],
+            actors: vec![old_actor.clone()],
+            conversations: vec![json!({"id":"conversation-old","path":"/root/worker"})],
+            requests: vec![json!({"id":"request-1"})],
+            jobs: vec![json!({"id":"job-1"})],
+            envelopes: vec![json!({"id":"envelope-1"})],
+        });
+        let mut events = control.events.subscribe();
+
+        let new_actor = projected_actor("run-new", "/root/worker", "inc-2");
+        let new_conversation = json!({"id":"conversation-new", "path":"/root/worker"});
+        control.update_host_projection(
+            "run-new".into(),
+            vec![new_actor.clone()],
+            vec![new_conversation.clone()],
+        );
+
+        let snapshot = control.snapshot.read().unwrap().clone();
+        assert_eq!(snapshot.seq, 12);
+        assert_eq!(snapshot.host_run.as_deref(), Some("run-new"));
+        assert_eq!(snapshot.actors, vec![new_actor.clone()]);
+        assert_eq!(snapshot.conversations, vec![new_conversation]);
+        assert_eq!(snapshot.requests, vec![json!({"id":"request-1"})]);
+        assert_eq!(snapshot.jobs, vec![json!({"id":"job-1"})]);
+        assert_eq!(snapshot.envelopes, vec![json!({"id":"envelope-1"})]);
+
+        let observed: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert_eq!(
+            observed
+                .iter()
+                .map(|event| (event.sequence, event.event.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (8, "host_run.upsert"),
+                (9, "entity.remove"),
+                (10, "actor.upsert"),
+                (11, "entity.remove"),
+                (12, "conversation.upsert"),
+            ]
+        );
+        assert_eq!(observed[0].payload, json!({"run":"run-new"}));
+        assert_eq!(
+            observed[1].payload,
+            json!({"entity":"actor", "id":old_actor.identity.wire_key()})
+        );
+        assert_eq!(observed[2].payload["identity"]["incarnation"], "inc-2");
+        assert_eq!(
+            observed[3].payload,
+            json!({"entity":"conversation", "id":"conversation-old"})
+        );
+        assert_eq!(observed[4].payload["id"], "conversation-new");
+        assert_eq!(snapshot.seq, observed.last().unwrap().sequence);
+    }
+
+    #[test]
+    fn command_receipts_update_snapshot_and_publish_a_coherent_watermark() {
+        let (_, control, _) = authorized_server(PathBuf::from("."));
+        let mut events = control.events.subscribe();
+        let target = HostActorIdentity {
+            run: "run-1".into(),
+            actor: crate::model::AgentPath("/root/worker".into()),
+            incarnation: "inc-2".into(),
+        };
+        let receipt = CommandReceipt {
+            command_id: "cmd-1".into(),
+            outcome: CommandReceiptOutcome::Admitted {
+                target: Some(target.clone()),
+                envelope_id: "envelope-4".into(),
+                wake_error: None,
+            },
+        };
+        let event = control.publish_command_receipt(receipt.clone());
+        let snapshot = control.snapshot.read().unwrap().clone();
+        assert_eq!(event.event, "command.receipt");
+        assert_eq!(event.sequence, snapshot.seq);
+        assert_eq!(snapshot.command_receipts, vec![receipt]);
+        assert_eq!(event.payload["outcome"], "admitted");
+        assert_eq!(event.payload["envelopeId"], "envelope-4");
+
+        control.set_snapshot(Snapshot {
+            jobs: vec![json!({"id":"job-after-command"})],
+            ..Snapshot::default()
+        });
+        let snapshot = control.snapshot.read().unwrap().clone();
+        assert_eq!(snapshot.command_receipts.len(), 1);
+        assert_eq!(snapshot.jobs, vec![json!({"id":"job-after-command"})]);
+        let wire = serde_json::to_value(WsServerFrame::Snapshot { snapshot }).unwrap();
+        assert_eq!(wire["snapshot"]["commandReceipts"][0]["commandId"], "cmd-1");
+
+        let requested = CommandReceipt {
+            command_id: "cmd-control".into(),
+            outcome: CommandReceiptOutcome::ControlRequested {
+                target: target.clone(),
+                control: CommandControl::Interrupt,
+            },
+        };
+        let event = control.publish_command_receipt(requested.clone());
+        let snapshot = control.snapshot.read().unwrap();
+        assert_eq!(snapshot.seq, event.sequence);
+        assert_eq!(snapshot.command_receipts.last(), Some(&requested));
+        assert_eq!(event.payload["outcome"], "control_requested");
+        assert_eq!(event.payload["control"], "interrupt");
+        assert_ne!(event.payload["outcome"], "completed");
+        drop(snapshot);
+
+        for index in 0..=COMMAND_RECEIPT_CAPACITY {
+            control.publish_command_receipt(CommandReceipt {
+                command_id: format!("cmd-{index}"),
+                outcome: CommandReceiptOutcome::Refused {
+                    target: None,
+                    reason: "not admitted".into(),
+                },
+            });
+        }
+        let snapshot = control.snapshot.read().unwrap();
+        assert_eq!(snapshot.command_receipts.len(), COMMAND_RECEIPT_CAPACITY);
+        assert_eq!(
+            snapshot.command_receipts.first().unwrap().command_id,
+            "cmd-1"
+        );
+        assert_eq!(
+            snapshot.command_receipts.last().unwrap().command_id,
+            "cmd-128"
+        );
+        assert_eq!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .last()
+                .unwrap()
+                .sequence,
+            snapshot.seq
+        );
+    }
+
+    #[test]
+    fn reconnect_snapshot_reads_never_observe_a_partial_host_projection() {
+        let (_, control, _) = authorized_server(PathBuf::from("."));
+        let mut events = control.events.subscribe();
+        let writer_control = control.clone();
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let writer_start = start.clone();
+        let writer = std::thread::spawn(move || {
+            writer_start.wait();
+            for cycle in 0..64 {
+                let run = if cycle % 2 == 0 { "run-a" } else { "run-b" };
+                writer_control.update_host_projection(
+                    run.into(),
+                    vec![projected_actor(run, "/root/worker", &format!("inc-{cycle}"))],
+                    vec![json!({"id":format!("conversation-{run}"), "projectionRun":run, "cycle":cycle})],
+                );
+                std::thread::yield_now();
+            }
+        });
+        start.wait();
+        while !writer.is_finished() {
+            let snapshot = control.snapshot.read().unwrap().clone();
+            if let Some(run) = snapshot.host_run.as_deref() {
+                assert_eq!(snapshot.actors.len(), 1);
+                assert_eq!(snapshot.actors[0].identity.run, run);
+                assert_eq!(snapshot.conversations.len(), 1);
+                assert_eq!(snapshot.conversations[0]["projectionRun"], run);
+            }
+            std::thread::yield_now();
+        }
+        writer.join().unwrap();
+
+        let snapshot = control.snapshot.read().unwrap().clone();
+        let last_event = std::iter::from_fn(|| events.try_recv().ok())
+            .last()
+            .expect("host projection publishes events");
+        assert_eq!(snapshot.seq, last_event.sequence);
+        assert_eq!(snapshot.actors[0].identity.run, snapshot.host_run.unwrap());
+        assert_eq!(
+            snapshot.conversations[0]["projectionRun"],
+            snapshot.actors[0].identity.run
         );
     }
 
@@ -1216,6 +1601,27 @@ mod tests {
             }
         );
         assert_eq!(accepted["command_id"], queued.command_id);
+
+        let target = HostActorIdentity {
+            run: "run-7".into(),
+            actor: crate::model::AgentPath("/root/child".into()),
+            incarnation: "second".into(),
+        };
+        let input = HostCommand::Input {
+            target: target.clone(),
+            text: "  resume child  ".into(),
+        };
+        write_ws_text(
+            &mut socket,
+            &serde_json::to_string(&WsClientFrame::HostCommand {
+                command: input.clone(),
+            })
+            .unwrap(),
+        );
+        let accepted = read_ws_text(&mut socket);
+        let queued = commands.recv().await.unwrap();
+        assert_eq!(accepted["command_id"], queued.command_id);
+        assert_eq!(queued.command, ClientCommand::Host { command: input });
 
         control.publish("job.started", json!({"id":"job-1"}));
         assert_eq!(

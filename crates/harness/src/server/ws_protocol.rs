@@ -74,9 +74,61 @@ pub struct HostActorProjection {
     pub model_conversation: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandControl {
+    Interrupt,
+    Retire,
+}
+
+/// Bounded observation of a command handoff. It records admission or routing
+/// receipts only; durable input and completion remain owned elsewhere.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandReceipt {
+    pub command_id: String,
+    #[serde(flatten)]
+    pub outcome: CommandReceiptOutcome,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "outcome",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum CommandReceiptOutcome {
+    Admitted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<HostActorIdentity>,
+        envelope_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wake_error: Option<String>,
+    },
+    ControlRequested {
+        target: HostActorIdentity,
+        control: CommandControl,
+    },
+    Refused {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<HostActorIdentity>,
+        reason: String,
+    },
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub seq: u64,
+    /// Present only when this snapshot is projected from an embedded host run.
+    /// An empty actor list does not imply standalone mode.
+    #[serde(default, rename = "hostRun", skip_serializing_if = "Option::is_none")]
+    pub host_run: Option<String>,
+    #[serde(
+        default,
+        rename = "commandReceipts",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub command_receipts: Vec<CommandReceipt>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actors: Vec<HostActorProjection>,
     pub conversations: Vec<serde_json::Value>,
@@ -117,6 +169,9 @@ pub enum WsServerFrame {
 pub enum WsClientFrame {
     Command {
         command: String,
+    },
+    HostCommand {
+        command: super::HostCommand,
     },
     #[serde(rename = "snapshot.request")]
     SnapshotRequest,
@@ -281,6 +336,49 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<WsServerFrame>(wire).unwrap(),
             frame
+        );
+    }
+
+    #[test]
+    fn command_receipt_wire_shapes_distinguish_handoff_from_completion() {
+        let identity = HostActorIdentity {
+            run: "run-1".into(),
+            actor: crate::model::AgentPath("/root/worker".into()),
+            incarnation: "inc-2".into(),
+        };
+        let admitted = CommandReceipt {
+            command_id: "cmd-1".into(),
+            outcome: CommandReceiptOutcome::Admitted {
+                target: Some(identity.clone()),
+                envelope_id: "envelope-9".into(),
+                wake_error: None,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&admitted).unwrap(),
+            json!({
+                "commandId":"cmd-1",
+                "target":{"run":"run-1","actor":"/root/worker","incarnation":"inc-2"},
+                "outcome":"admitted",
+                "envelopeId":"envelope-9"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<CommandReceipt>(serde_json::to_value(&admitted).unwrap())
+                .unwrap(),
+            admitted
+        );
+
+        let requested = CommandReceipt {
+            command_id: "cmd-2".into(),
+            outcome: CommandReceiptOutcome::ControlRequested {
+                target: identity,
+                control: CommandControl::Interrupt,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(requested).unwrap()["outcome"],
+            "control_requested"
         );
     }
 }

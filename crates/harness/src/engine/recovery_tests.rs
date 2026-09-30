@@ -417,7 +417,7 @@ async fn engine_cancelled_custom_job_rejects_late_success_at_barrier() {
             .await
             .expect("Engine cancellation joins without deadlock")
             .unwrap(),
-        Err(EngineError::Cancelled)
+        Err(EngineError::Cancelled { .. })
     ));
     assert_eq!(
         scheduler

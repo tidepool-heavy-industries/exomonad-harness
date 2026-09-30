@@ -70,7 +70,14 @@ export function toViewModel(state: NormalizedState): HarnessViewModel {
       ? (left.ordinal ?? 0) - (right.ordinal ?? 0)
       : left.index - right.index)
     .map(({ index: _index, ...envelope }) => envelope)
-  return { actors, nodes, timeline, inbox }
+  return {
+    hostRun: state.hostRun,
+    actors,
+    commandReceipts: [...state.commandReceipts.values()],
+    nodes,
+    timeline,
+    inbox,
+  }
 }
 
 function parentPath(path: string, state: NormalizedState): string | undefined {

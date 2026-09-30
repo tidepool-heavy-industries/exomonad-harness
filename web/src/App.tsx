@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import NodeWindow from "./NodeWindow";
+import type { CommandReceipt, HostCommand } from "./protocol";
 
 /**
  * Presentation-only contract for the web views. The server/protocol adapter
@@ -7,6 +8,7 @@ import NodeWindow from "./NodeWindow";
  * not import or re-declare wire types.
  */
 export type HarnessViewModel = {
+  hostRun?: string;
   actors?: Array<{
     id: string;
     name: string;
@@ -17,6 +19,7 @@ export type HarnessViewModel = {
     lifecycle: string;
     modelConversation?: string;
   }>;
+  commandReceipts?: CommandReceipt[];
   nodes: Array<{
     id: string;
     parentId?: string;
@@ -59,18 +62,19 @@ export type HarnessViewModel = {
 
 export type AppProps = {
   data?: HarnessViewModel;
-  onCommand?: (command: string) => void;
+  onCommand?: (command: string | HostCommand) => void;
   acceptedCommandIds?: readonly string[];
 };
 
-type Screen = "tree" | "timeline" | "inbox" | "command";
+type Screen = "tree" | "timeline" | "inbox" | "command" | "host";
 const emptyData: HarnessViewModel = { nodes: [], timeline: [], inbox: [] };
-const screens: Array<{ id: Screen; title: string; shortcut: string }> = [
+const commonScreens: Array<{ id: Screen; title: string; shortcut: string }> = [
   { id: "tree", title: "Tree", shortcut: "g t" },
   { id: "timeline", title: "Timeline", shortcut: "g l" },
   { id: "inbox", title: "Inbox", shortcut: "g i" },
-  { id: "command", title: "Command", shortcut: "g c" },
 ];
+const standaloneScreens = [...commonScreens, { id: "command" as const, title: "Command", shortcut: "g c" }];
+const embeddedScreens = [...commonScreens, { id: "host" as const, title: "Host", shortcut: "g h" }];
 
 const styles = `
   :root { color-scheme: light dark; --bg:#fff; --fg:#171717; --muted:#595959; --line:#b8b8b8; --soft:#f2f2f2; --accent:#075fc7; --pending:#765000; --failed:#a31313; }
@@ -107,6 +111,11 @@ const styles = `
   .command-form { display:flex; gap:8px; max-width:760px; }
   .command-form input { flex:1; min-width:0; padding:10px; color:var(--fg); background:var(--bg); border:1px solid var(--line); }
   .command-form button { padding:8px 14px; background:var(--fg); color:var(--bg); border:1px solid var(--fg); cursor:pointer; }
+  .host-controls { max-width:760px; }
+  .host-controls label { display:block; margin:12px 0 4px; font-weight:600; }
+  .host-controls select,.host-controls textarea { width:100%; padding:9px; color:var(--fg); background:var(--bg); border:1px solid var(--line); }
+  .host-actions { display:flex; gap:8px; margin-top:10px; }
+  .host-actions button { padding:8px 12px; }
   .message { white-space:pre-wrap; overflow-wrap:anywhere; }
   .message pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:4px 0 12px; }
   .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
@@ -181,6 +190,89 @@ function HostActors({ data }: { data: HarnessViewModel }) {
   </section>;
 }
 
+function HostControls({ data, onCommand }: { data: HarnessViewModel; onCommand?: AppProps["onCommand"] }) {
+  const actors = (data.actors ?? []).filter((actor) => actor.run === data.hostRun);
+  const [selectedKey, setSelectedKey] = useState("");
+  const [text, setText] = useState("");
+  const selected = actors.find((actor) => actor.id === selectedKey);
+  const target = selected && {
+    run: selected.run,
+    actor: selected.name,
+    incarnation: selected.incarnation,
+  };
+  const canControl = Boolean(target && (selected?.lifecycle === "running" || selected?.lifecycle === "waiting") && onCommand);
+  const submitInput = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!target || !canControl || !text.trim()) return;
+    onCommand?.({ action: "input", target, text });
+    setText("");
+  };
+  const sendAction = (action: "interrupt" | "retire") => {
+    if (!target || !canControl) return;
+    onCommand?.({ action, target });
+  };
+  const selectedWasRemoved = selectedKey.length > 0 && !selected;
+  return <section className="host-controls" aria-labelledby="host-controls-heading">
+    <h2 id="host-controls-heading">Embedded host controls</h2>
+    <p className="hint">Run <span className="mono">{data.hostRun}</span>. Select an actor explicitly. Controls address its exact run, actor, and incarnation.</p>
+    {actors.length === 0 && <p role="status" className="hint">No actors are currently projected for this host run.</p>}
+    <label htmlFor="host-actor-target">Target actor</label>
+    <select id="host-actor-target" value={selectedKey} onChange={(event) => setSelectedKey(event.target.value)}>
+      <option value="">Choose an actor…</option>
+      {selectedWasRemoved && <option value={selectedKey}>Previously selected actor is no longer present</option>}
+      {actors.map((actor) => <option key={actor.id} value={actor.id}>
+        {actor.name} · {actor.kind} · {actor.lifecycle} · incarnation {actor.incarnation}
+      </option>)}
+    </select>
+    {selectedWasRemoved && <p role="status" className="hint">The selected actor disappeared or was replaced. Choose an actor again before sending a command.</p>}
+    {selected && selected.lifecycle !== "running" && selected.lifecycle !== "waiting" &&
+      <p role="status" className="hint">This actor is {selected.lifecycle}; host controls are unavailable.</p>}
+    {!onCommand && <p role="status" className="hint">Host command channel is not connected.</p>}
+    <form onSubmit={submitInput}>
+      <label htmlFor="host-actor-input">Message to selected actor</label>
+      <textarea id="host-actor-input" rows={4} value={text} onChange={(event) => setText(event.target.value)} disabled={!canControl} />
+      <div className="host-actions">
+        <button type="submit" disabled={!canControl || !text.trim()}>Send input</button>
+        <button type="button" disabled={!canControl} onClick={() => sendAction("interrupt")}>Interrupt</button>
+        <button type="button" disabled={!canControl} onClick={() => sendAction("retire")}>Retire</button>
+      </div>
+    </form>
+    <CommandReceipts receipts={data.commandReceipts ?? []} />
+    <HostActors data={data} />
+  </section>;
+}
+
+function CommandReceipts({ receipts }: { receipts: readonly CommandReceipt[] }) {
+  if (receipts.length === 0) return null;
+  return <section aria-labelledby="command-receipts-heading">
+    <h2 id="command-receipts-heading">Recent command handoffs</h2>
+    <div role="list" className="rows" aria-label="Command handoff receipts">
+      {receipts.map((receipt) => {
+        const outcome = receipt.outcome === "admitted"
+          ? "Admitted for processing"
+          : receipt.outcome === "control_requested"
+            ? `${receipt.control === "interrupt" ? "Interrupt" : "Retire"} requested`
+            : "Refused";
+        const detail = receipt.outcome === "admitted"
+          ? [`envelope ${receipt.envelopeId}`, receipt.wakeError ? `wake issue: ${receipt.wakeError}` : undefined].filter(Boolean).join(" · ")
+          : receipt.outcome === "control_requested"
+            ? "Request sent to the host; this does not report actor completion."
+            : receipt.reason;
+        return <article role="listitem" className="row" key={receipt.commandId}>
+          <strong>{outcome}</strong>
+          <span className="mono">{receipt.commandId}</span>
+          <span className="meta">{[
+            receipt.target
+              ? `${receipt.target.actor} · run ${receipt.target.run} · incarnation ${receipt.target.incarnation}`
+              : undefined,
+            detail,
+          ].filter(Boolean).join(" · ")}</span>
+        </article>;
+      })}
+    </div>
+  </section>;
+}
+
 function Timeline({ data, onInspectRequest }: { data: HarnessViewModel; onInspectRequest?: (requestId: string) => void }) {
   return data.timeline.length === 0 ? <Empty title="No activity yet" help="Requests, jobs and waits will be listed as they happen." /> : (
     <div role="table" aria-label="Conversation activity timeline" className="rows">
@@ -231,6 +323,9 @@ export default function App({ data = emptyData, onCommand, acceptedCommandIds = 
   const [screen, setScreen] = useState<Screen>("tree");
   const [command, setCommand] = useState("");
   const [inspectedRequest, setInspectedRequest] = useState<string>();
+  const embeddedMode = data.hostRun !== undefined;
+  const screens = embeddedMode ? embeddedScreens : standaloneScreens;
+  const activeScreen = screens.some((item) => item.id === screen) ? screen : "tree";
   useEffect(() => {
     let prefix = "";
     let timer = 0;
@@ -238,7 +333,9 @@ export default function App({ data = emptyData, onCommand, acceptedCommandIds = 
       if (event.altKey || event.ctrlKey || event.metaKey || event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || (event.target as HTMLElement).isContentEditable) return;
       if (event.key === "g") { prefix = "g"; window.clearTimeout(timer); timer = window.setTimeout(() => { prefix = ""; }, 900); return; }
       if (prefix === "g") {
-        const target: Record<string, Screen> = { t: "tree", l: "timeline", i: "inbox", c: "command" };
+        const target: Record<string, Screen> = embeddedMode
+          ? { t: "tree", l: "timeline", i: "inbox", h: "host" }
+          : { t: "tree", l: "timeline", i: "inbox", c: "command" };
         const nextScreen = target[event.key]
         if (nextScreen !== undefined) { event.preventDefault(); setScreen(nextScreen); }
         prefix = "";
@@ -246,7 +343,7 @@ export default function App({ data = emptyData, onCommand, acceptedCommandIds = 
     };
     window.addEventListener("keydown", handle);
     return () => { window.removeEventListener("keydown", handle); window.clearTimeout(timer); };
-  }, []);
+  }, [embeddedMode]);
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     // Preserve the payload exactly: whitespace after the verb is data in the
@@ -259,18 +356,19 @@ export default function App({ data = emptyData, onCommand, acceptedCommandIds = 
       <header className="top">
         <div className="brand">Harness <span className="hint">/ operator</span></div>
         <nav className="tabs" aria-label="Views">
-          {screens.map(({ id, title, shortcut }) => <button className="tab" key={id} type="button" aria-current={screen === id ? "page" : undefined} onClick={() => setScreen(id)}>
+          {screens.map(({ id, title, shortcut }) => <button className="tab" key={id} type="button" aria-current={activeScreen === id ? "page" : undefined} onClick={() => setScreen(id)}>
             {title}<kbd aria-hidden="true">{shortcut}</kbd>
           </button>)}
         </nav>
       </header>
       <main>
-        <div className="toolbar"><h1>{screens.find((item) => item.id === screen)?.title}</h1><span className="hint">Keyboard: g then t / l / i / c</span></div>
-        {screen === "tree" && <><HostActors data={data} /><Tree data={data} /></>}
-        {screen === "timeline" && <><Timeline data={data} onInspectRequest={setInspectedRequest} />
+        <div className="toolbar"><h1>{screens.find((item) => item.id === activeScreen)?.title}</h1><span className="hint">Keyboard: g then t / l / i / {embeddedMode ? "h" : "c"}</span></div>
+        {activeScreen === "tree" && <><HostActors data={data} /><Tree data={data} /></>}
+        {activeScreen === "host" && <HostControls data={data} onCommand={onCommand} />}
+        {activeScreen === "timeline" && <><Timeline data={data} onInspectRequest={setInspectedRequest} />
           {inspectedRequest && <NodeWindow key={inspectedRequest} requestId={inspectedRequest} onClose={() => setInspectedRequest(undefined)} />}</>}
-        {screen === "inbox" && <Inbox data={data} />}
-        {screen === "command" && <section aria-labelledby="command-heading">
+        {activeScreen === "inbox" && <Inbox data={data} />}
+        {activeScreen === "command" && <section aria-labelledby="command-heading">
           <h2 id="command-heading">Send a command</h2>
           <p className="hint">Deterministic mode · commands are sent to the authenticated host. Sending is not acceptance or completion; this client displays only state present in the server snapshot and events.</p>
           <div className="rows" aria-label="Command grammar">
@@ -301,6 +399,7 @@ export default function App({ data = emptyData, onCommand, acceptedCommandIds = 
           ))}
           <Timeline data={data} onInspectRequest={setInspectedRequest} />
           {inspectedRequest && <NodeWindow key={inspectedRequest} requestId={inspectedRequest} onClose={() => setInspectedRequest(undefined)} />}
+          <CommandReceipts receipts={data.commandReceipts ?? []} />
           <HostActors data={data} /><h2>Conversation and child identities</h2><Tree data={data} />
           <h2>Messages and replies</h2><Inbox data={data} />
         </section>}
