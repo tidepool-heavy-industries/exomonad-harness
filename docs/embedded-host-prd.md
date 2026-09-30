@@ -68,6 +68,21 @@ complete. Unknown external effects remain unknown until their owner reports an
 outcome; cancelling a future alone does not establish that a process or
 resident execution stopped.
 
+`Store::capture_checkpoint_cuts` captures two immutable capabilities in one
+transaction from an exact original pending operation. The deferred cut includes
+the boundary call and its original claim. The before-call cut ends immediately
+before that item, with no invented output and no current-call claim. Both retain
+the source operation as provenance; earlier calls and their original pending
+claims remain dependencies. Later items in the same response or future requests
+are absent. The embedding chooses the before-call capability only after its
+own captured group commits; ordinary unfold keeps its completion fence and the
+deferred capability. Provider history and the opaque runtime capture are
+independent snapshots. Neither capability admits or supervises an actor.
+
+Schema 6 wraps checkpoint host metadata with versioned cut provenance. Existing
+records migrate explicitly to deferred cuts; reopening refuses unknown cut or
+metadata versions and cannot restore a process-local host attachment.
+
 Harness Store is the durable owner of model conversation envelopes and their
 inclusion/claim state. Tidepool remains the authority for live actor messages,
 typed values, execution, and resource control. Browser reconnect reads current

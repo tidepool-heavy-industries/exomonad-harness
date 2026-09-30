@@ -1,4 +1,4 @@
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 pub const SQL: &str = include_str!("schema.sql");
 
 pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
@@ -34,7 +34,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
         .into());
     }
     if version == VERSION {
-        return Ok(());
+        return super::schema_migration::validate_checkpoint_metadata(conn);
     }
     let tx = conn.transaction()?;
     // v1 stored second-resolution Unix timestamps. Convert existing records once;
@@ -73,15 +73,16 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
         [],
         |row| row.get(0),
     )?;
-    if legacy_claims {
+    if legacy_claims && version < 5 {
         tx.execute_batch("ALTER TABLE claims RENAME TO legacy_claims; DROP INDEX IF EXISTS claims_request; DROP INDEX IF EXISTS claims_operation;")?;
     }
     tx.execute_batch(SQL)?;
     let store_id = super::schema_migration::ensure_store_id(&tx)?;
-    if legacy_claims {
+    if legacy_claims && version < 5 {
         super::schema_migration::migrate_claims(&tx, &store_id)?;
         tx.execute_batch("DROP TABLE legacy_claims")?;
     }
+    super::schema_migration::migrate_checkpoint_metadata(&tx)?;
     tx.execute("UPDATE schema_version SET version=?1", [VERSION])?;
     Ok(tx.commit()?)
 }
