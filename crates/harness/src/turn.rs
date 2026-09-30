@@ -372,6 +372,7 @@ impl JobScheduler {
             .clone();
         let is_agent_verb = crate::provider::is_harness_tool(&name);
         let verb_backend = provider.job_agent_service();
+        let holds_capacity = provider.holds_job_capacity();
         let (launch, launch_gate) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
             // Do not enter provider code until its JoinHandle is installed in
@@ -380,9 +381,13 @@ impl JobScheduler {
             if launch_gate.await.is_err() {
                 return;
             }
-            let permit = match capacity.acquire_owned().await {
-                Ok(p) => p,
-                Err(_) => return,
+            let permit = if holds_capacity {
+                match capacity.acquire_owned().await {
+                    Ok(p) => Some(p),
+                    Err(_) => return,
+                }
+            } else {
+                None
             };
             let cancelled_before_start = {
                 let mut registry = jobs.lock().await;

@@ -105,6 +105,21 @@ pub trait CancellationOwner: Send + Sync {
 /// A provider owns tool meaning; the harness owns scheduling and history.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Continuation bridges do not hold a scheduler slot while the host runs.
+    fn holds_job_capacity(&self) -> bool {
+        true
+    }
+
+    /// Optional projection of one durable item for model input. The durable
+    /// request identity prevents a replacement from affecting another call.
+    fn model_visible_item(
+        &self,
+        _request: &crate::model::RequestId,
+        _item: &crate::item::Item,
+    ) -> Option<crate::item::Item> {
+        None
+    }
+
     /// Acknowledge an exact operation after its real terminal output is durable.
     /// Recovery can repeat this notification; implementations must be idempotent.
     /// Failure leaves the retained output intact and never re-executes the call.

@@ -9,6 +9,7 @@ pub mod engine;
 pub mod finalize;
 pub mod history;
 pub mod hooks;
+pub mod invocation;
 pub mod item;
 pub mod lifecycle;
 pub mod mailbox;

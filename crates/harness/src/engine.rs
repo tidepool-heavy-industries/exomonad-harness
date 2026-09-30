@@ -178,6 +178,7 @@ pub struct Engine<A: Auth, P: Provider, C: ResponsesTransport = ResponsesClient<
     config: EngineConfig,
     origin: ConversationIdentity,
     compact_at_input_tokens: Option<u64>,
+    bounded_invocation: bool,
     compaction_strategy: CompactionStrategy,
     _auth: std::marker::PhantomData<fn() -> A>,
 }
@@ -248,6 +249,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             config,
             origin,
             compact_at_input_tokens: None,
+            bounded_invocation: false,
             compaction_strategy: CompactionStrategy::Server,
             _auth: std::marker::PhantomData,
         }
@@ -255,6 +257,34 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     pub(crate) fn with_origin(mut self, origin: ConversationIdentity) -> Self {
         self.origin = origin;
         self
+    }
+
+    /// Private program-driven profile: no mailbox, sequential cooperative callbacks.
+    pub(crate) fn bounded_invocation(mut self) -> Self {
+        self.bounded_invocation = true;
+        self
+    }
+
+    pub(crate) async fn run_invocation(
+        &self,
+        initial: Vec<Item>,
+        result_schema: Option<serde_json::Value>,
+    ) -> Result<EngineCompletion, EngineError> {
+        let schema = result_schema
+            .map(crate::finalize::tool_schema_from_result_schema)
+            .transpose()?;
+        let (_cancel, cancellation) = watch::channel(false);
+        let (_incoming, envelopes) = tokio::sync::mpsc::unbounded_channel();
+        self.run_loop(
+            None,
+            initial,
+            cancellation,
+            envelopes,
+            false,
+            schema.as_ref(),
+            false,
+        )
+        .await
     }
 
     /// Opt into explicit server compaction after a turn whose input usage
@@ -748,8 +778,21 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             };
             let request_provider: Arc<dyn Provider> =
                 snapshot.unwrap_or_else(|| self.provider.clone());
+            let model_input = if self.bounded_invocation {
+                self.read_history_pairs(&parent)
+                    .await?
+                    .into_iter()
+                    .map(|(request, item)| {
+                        request_provider
+                            .model_visible_item(&request, &item)
+                            .unwrap_or(item)
+                    })
+                    .collect()
+            } else {
+                history
+            };
             let mut req = ResponsesRequest {
-                input: history,
+                input: model_input,
                 instructions: self.config.instructions.clone(),
                 tools: self.tools_from(finalize_schema, request_provider.as_ref()),
                 tools_allowed: None,
@@ -966,6 +1009,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                     return Err(self.cleanup_pending(error, &pending).await);
                                 }
                                 persisted_items.push(item.clone());
+                                // Bounded callbacks are sequential continuations. Finish
+                                // receiving the provider round before awaiting one, so
+                                // its stream keeps progressing while items are retained.
+                                if self.bounded_invocation {
+                                    continue;
+                                }
                                 if deferred_dispatch_error.is_some() {
                                     continue;
                                 }
@@ -1033,6 +1082,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         return Err(self.cleanup_pending(error, &pending).await);
                     }
                     persisted_items.push(item.clone());
+                    if self.bounded_invocation {
+                        continue;
+                    }
                     if deferred_dispatch_error.is_some() {
                         continue;
                     }
@@ -1076,7 +1128,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     Ok(call_id) => call_id,
                     Err(error) => return Err(self.cleanup_pending(error, &pending).await),
                 } {
-                    if conflicting_call(&turn_call_items, &call_id, item) {
+                    if conflicting_call(&turn_call_items, &call_id, item)
+                        || (self.bounded_invocation
+                            && persisted_items.iter().any(|retained| {
+                                parsed_call_id(retained).ok().flatten().as_ref() == Some(&call_id)
+                                    && retained != item
+                            }))
+                    {
                         return Err(self
                             .cleanup_pending(EngineError::InvalidFunctionCall, &pending)
                             .await);
@@ -1151,7 +1209,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 "input_tokens":turn.usage.input_tokens,
                 "output_tokens":turn.usage.output_tokens,
                 "cached_tokens":turn.usage.cached_tokens,
-                "cache_write_tokens":turn.usage.cache_write_tokens
+                "cache_write_tokens":turn.usage.cache_write_tokens,
+                "reported":turn.usage.reported
             });
             let store = self.store.clone();
             let request = parent.clone();
@@ -1510,6 +1569,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             blocking(move || store.interrupt_operation_claim(&call, &request_id)).await?;
             return Err(EngineError::Job(error));
         }
+        if self.bounded_invocation {
+            let output = self.scheduler.wait(&operation).await?;
+            self.persist_output(&operation, tool_kind, &output, request, request)
+                .await?;
+        }
         Ok(Some(PendingCall {
             operation,
             call_id,
@@ -1599,14 +1663,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             } else {
                 request.clone()
             };
-            self.persist_output(
-                &operation,
-                call.tool_kind,
-                &output,
-                &output_request,
-                &call.claim_request,
-            )
-            .await?;
+            if !self.bounded_invocation {
+                self.persist_output(
+                    &operation,
+                    call.tool_kind,
+                    &output,
+                    &output_request,
+                    &call.claim_request,
+                )
+                .await?;
+            }
             pending.retain(|call| call.operation != operation);
             settled.push(operation);
         }
@@ -4598,6 +4664,7 @@ mod tests {
             response_id: id.into(),
             items,
             usage: Usage {
+                reported: true,
                 input_tokens: 3,
                 output_tokens: 2,
                 cached_tokens: 1,
