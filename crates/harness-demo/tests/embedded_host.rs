@@ -181,6 +181,18 @@ async fn embedded_requests_pin_dispatch_and_inputs_record_actual_inclusion() {
         .unwrap();
     assert_eq!(
         conversation
+            .input_observation_by_operation("missing")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        conversation
+            .input_observation_by_operation("message-1")
+            .unwrap(),
+        Some(InputObservation::Admitted)
+    );
+    assert_eq!(
+        conversation
             .input("message-1", "operator", "do work")
             .await
             .unwrap()
@@ -221,10 +233,17 @@ async fn embedded_requests_pin_dispatch_and_inputs_record_actual_inclusion() {
     let (_cancel, rx) = tokio::sync::watch::channel(false);
     let (_send, incoming) = tokio::sync::mpsc::unbounded_channel();
     engine.run(None, vec![], rx, incoming).await.unwrap();
-    assert!(matches!(
-        conversation.input_observation(receipt.envelope_id).unwrap(),
-        InputObservation::Included(_)
-    ));
+    let InputObservation::Included(included_request) =
+        conversation.input_observation(receipt.envelope_id).unwrap()
+    else {
+        panic!("the durable input was not included");
+    };
+    assert_eq!(
+        conversation
+            .input_observation_by_operation("message-1")
+            .unwrap(),
+        Some(InputObservation::Included(included_request.clone()))
+    );
     let wakes = host.wakes.load(Ordering::SeqCst);
     assert_eq!(
         conversation
@@ -239,6 +258,20 @@ async fn embedded_requests_pin_dispatch_and_inputs_record_actual_inclusion() {
         wakes,
         "an included input retry must not wake another model turn"
     );
+    conversation.control(HostControl::Retire).await.unwrap();
+    assert_eq!(
+        conversation
+            .input_observation_by_operation("message-1")
+            .unwrap(),
+        Some(InputObservation::Included(included_request))
+    );
+    assert!(
+        conversation
+            .input("after-retirement", "operator", "no")
+            .await
+            .is_err()
+    );
+    assert_eq!(host.wakes.load(Ordering::SeqCst), wakes);
     let observed = seen.lock().unwrap();
     assert_eq!(observed.len(), 2);
     assert_eq!(observed[0]["version"], "old");

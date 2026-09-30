@@ -254,6 +254,24 @@ impl Conversation {
             .delivered_request
             .map_or(InputObservation::Admitted, InputObservation::Included))
     }
+    /// Read whether this exact host operation has been admitted or included
+    /// in a request. Observation remains available after actor retirement and
+    /// never performs admission, wake, or redispatch.
+    pub fn input_observation_by_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<InputObservation>, EmbeddedError> {
+        Ok(
+            match self
+                .store
+                .embedded_input_state(self.identity(), operation_id)?
+            {
+                EmbeddedInputState::Missing => None,
+                EmbeddedInputState::Admitted => Some(InputObservation::Admitted),
+                EmbeddedInputState::Included(request) => Some(InputObservation::Included(request)),
+            },
+        )
+    }
     pub async fn control(&self, control: HostControl) -> Result<Value, EmbeddedError> {
         self.host
             .control(control)
