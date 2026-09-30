@@ -27,20 +27,30 @@ impl Store {
         operation_id: &str,
     ) -> std::result::Result<EmbeddedInputState, EmbeddedError> {
         let connection = self.lock();
-        let binding: Option<(String, String, Option<i64>, Option<String>)> = connection
-            .query_row(
-                "SELECT b.run_id,b.incarnation,e.id,e.delivered_request \
+        let binding: Option<(String, String, Option<i64>, Option<i64>, Option<String>)> =
+            connection
+                .query_row(
+                    "SELECT b.run_id,b.incarnation,ei.envelope_id,e.id,e.delivered_request \
                  FROM embedded_bindings b \
                  LEFT JOIN embedded_inputs ei \
                    ON ei.agent_path=b.agent_path AND ei.operation_id=?2 \
                  LEFT JOIN envelopes e \
                    ON e.id=ei.envelope_id AND e.recipient=b.agent_path \
                  WHERE b.agent_path=?1",
-                params![identity.actor.0, operation_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        let Some((run, incarnation, envelope, delivered_request)) = binding else {
+                    params![identity.actor.0, operation_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+        let Some((run, incarnation, operation_envelope, envelope, delivered_request)) = binding
+        else {
             return Err(EmbeddedError::Binding(
                 "input target is not bound to this host".into(),
             ));
@@ -50,12 +60,18 @@ impl Store {
                 "input target is not bound to this host".into(),
             ));
         }
-        match envelope {
-            None => Ok(EmbeddedInputState::Missing),
-            Some(_) => Ok(match delivered_request {
+        match (operation_envelope, envelope) {
+            (None, None) => Ok(EmbeddedInputState::Missing),
+            (Some(_), None) => Err(EmbeddedError::Binding(
+                "input operation is not owned by this host".into(),
+            )),
+            (Some(_), Some(_)) => Ok(match delivered_request {
                 None => EmbeddedInputState::Admitted,
                 Some(request) => EmbeddedInputState::Included(crate::model::RequestId(request)),
             }),
+            (None, Some(_)) => Err(EmbeddedError::Binding(
+                "input envelope has no matching host operation".into(),
+            )),
         }
     }
 
@@ -152,7 +168,7 @@ mod tests {
         let store = Store::memory().unwrap();
         let identity = HostIdentity {
             run: "run".into(),
-            actor: AgentPath("/root/worker".into()),
+            actor: AgentPath("/root".into()),
             incarnation: "first".into(),
         };
         store.bind_embedded_actor(&identity, None).unwrap();
@@ -182,6 +198,20 @@ mod tests {
         };
         assert!(matches!(
             store.embedded_input_state(&replacement, "operation-1"),
+            Err(EmbeddedError::Binding(_))
+        ));
+
+        store
+            .lock()
+            .execute(
+                "UPDATE envelopes SET recipient='/root/other' \
+                 WHERE id=(SELECT envelope_id FROM embedded_inputs \
+                           WHERE agent_path='/root' AND operation_id='operation-1')",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.embedded_input_state(&identity, "operation-1"),
             Err(EmbeddedError::Binding(_))
         ));
     }
