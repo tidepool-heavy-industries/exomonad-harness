@@ -1,0 +1,54 @@
+load("@prelude//:rules.bzl", "rust_library", "rust_test")
+load("//:rust_tests.bzl", "integration_test")
+
+# These are the direct dependencies in crates/harness/Cargo.toml. Reindeer
+# supplies one Buck alias for each root dependency from the locked graph.
+HARNESS_DEPS = [
+    "//third-party/rust:async-trait",
+    "//third-party/rust:axum",
+    "//third-party/rust:blake3",
+    "//third-party/rust:futures-util",
+    "//third-party/rust:reqwest",
+    "//third-party/rust:rusqlite",
+    "//third-party/rust:schemars",
+    "//third-party/rust:serde",
+    "//third-party/rust:serde_json",
+    "//third-party/rust:thiserror",
+    "//third-party/rust:tokio",
+    "//third-party/rust:tokio-util",
+    "//third-party/rust:uuid",
+]
+
+HARNESS_SRCS = glob(["src/**/*.rs"]) + ["src/store/schema.sql"]
+
+rust_library(
+    name = "harness",
+    crate = "harness",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    srcs = HARNESS_SRCS,
+    deps = HARNESS_DEPS,
+    visibility = ["PUBLIC"],
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = "harness",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    srcs = HARNESS_SRCS,
+    deps = HARNESS_DEPS,
+)
+
+# Integration tests are independent libtest binaries, as in Cargo. Keeping
+# them separate makes one suite selectable without rebuilding every test root.
+integration_test(name = "adapter_readiness", deps = [":harness"] + HARNESS_DEPS)
+integration_test(name = "correction_wave", deps = [":harness"] + HARNESS_DEPS)
+integration_test(name = "custom_cell", deps = [":harness"] + HARNESS_DEPS)
+integration_test(name = "external_cancellation", deps = [":harness"] + HARNESS_DEPS)
+integration_test(name = "first_request_delivery", deps = [":harness"] + HARNESS_DEPS)
+integration_test(name = "job_operations", deps = [":harness"] + HARNESS_DEPS)
+integration_test(name = "plain_text_compaction", deps = [":harness"] + HARNESS_DEPS)
+integration_test(name = "process_recovery", deps = [":harness"] + HARNESS_DEPS)
+integration_test(name = "progress_cancel", deps = [":harness"] + HARNESS_DEPS)
+integration_test(name = "tree_driver", deps = [":harness"] + HARNESS_DEPS)

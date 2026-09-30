@@ -28,6 +28,55 @@ Companion on the consumer side: `~/dev/tidepool/plans/harness-adoption.md`.
 
 ## Focused tests
 
+### Native Buck2 on x86_64 Linux
+
+The Buck2 graph compiles `harness` and `harness-demo` as native Rust targets.
+Reindeer generates the locked third-party Rust targets; Buck does not delegate
+the crate build to Cargo. The web `check`, `test`, and `dist` targets run pinned
+Node actions against a fixed-output offline npm cache. Cargo remains the
+publication and non-Linux development path. The [server acceptance record](docs/buck2-acceptance.md)
+lists exact checks, resource use, and pending gates.
+
+```sh
+nix build .#buck2 .#buck-rust .#buck-cc .#buck-binutils .#buck-node \
+  .#buck-python .#buck-npm-cache --no-link
+scripts/buck2-configure.sh
+BUCK2="$(nix eval --raw .#packages.x86_64-linux.buck2.outPath)/bin/buck2"
+"$BUCK2" build //crates/harness:harness --local-only
+"$BUCK2" build //web:check //web:test //web:dist --local-only
+scripts/buck-focused-test --target //crates/harness:unit_tests \
+  --filter hooks::tests::send_plan_and_opaque_evidence_cross_serde_boundary \
+  --exact --expect 1 --local-only
+```
+
+The script lists the selected libtest cases, rejects zero matches and count
+mismatches, then checks the executed count. Select a suite by its separate Buck
+target, for example `//crates/harness:adapter_readiness`; the demo suites are
+under `//crates/harness-demo:`. Browser tests declare the demo executable, web
+assets and launcher through Buck resources. Run those whole suites with
+`buck2 test` once the Buck test executor is configured; they exercise local
+listeners and spawned processes, so keep them on a host with those capabilities.
+The Rust unit and ordinary integration targets can run in an isolated worker.
+
+The Buck2 binary and bundled Prelude are pinned together in `flake.nix` and
+`.buckconfig`. `scripts/buck2-configure.sh` writes ignored `.buckconfig.local`
+from pinned Nix outputs; rerun it after changing `flake.lock`. To update Rust
+dependencies, keep the package manifests and root `Cargo.lock` authoritative,
+update `third-party/rust/Cargo.toml` and its lock to the same resolved versions,
+then regenerate from the repository root:
+
+```sh
+nix build .#buck-reindeer --no-link
+REINDEER="$(nix eval --raw .#packages.x86_64-linux.buck-reindeer.outPath)/bin/reindeer"
+(cd third-party/rust && "$REINDEER" --config reindeer.toml buckify)
+```
+
+Review generated `BUCK` and fixups before committing. The current Reindeer
+graph uses Buck's checksum-verified crate downloads; remote execution and
+worker network isolation still need acceptance on the configured executor.
+
+### Cargo path
+
 For the production browser journey, run
 `nix develop .#web -c scripts/verify-browser-journey`. This prepares the locked
 web dependencies and assets before the focused Cargo test; see `web/README.md`.

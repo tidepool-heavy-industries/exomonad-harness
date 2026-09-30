@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Build one Buck libtest target and require a nonempty, successful selection."""
+
+import argparse
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+
+
+TEST_LINE = re.compile(r"^(.+): test$")
+TEST_RESULT = re.compile(
+    r"^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; "
+    r"(\d+) ignored; (\d+) measured; (\d+) filtered out; finished in .+$"
+)
+
+
+def buck2(root: Path) -> str:
+    if path := os.environ.get("BUCK2") or shutil.which("buck2"):
+        return path
+    system = subprocess.check_output(
+        ["nix", "eval", "--raw", "--impure", "--expr", "builtins.currentSystem"],
+        cwd=root,
+        text=True,
+    )
+    output = subprocess.check_output(
+        ["nix", "eval", "--raw", f".#packages.{system}.buck2.outPath"],
+        cwd=root,
+        text=True,
+    )
+    return str(Path(output) / "bin/buck2")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target", required=True, help="One native rust_test label")
+    parser.add_argument("--filter", required=True, help="Libtest name substring")
+    parser.add_argument("--expect", type=int, help="Exact runnable and executed count")
+    parser.add_argument("--exact", action="store_true", help="Match the complete test name")
+    parser.add_argument("--local-only", action="store_true", help="Build without remote actions")
+    args = parser.parse_args()
+    if not args.target.startswith("//crates/") or ":" not in args.target:
+        parser.error("--target must be a //crates/...:NAME label")
+    if not args.filter.strip() or args.filter.startswith("-"):
+        parser.error("--filter must be nonempty and cannot start with '-'")
+    if args.expect is not None and args.expect < 1:
+        parser.error("--expect must be positive")
+
+    root = Path(__file__).resolve().parent.parent
+    package = root / args.target[2:].split(":", 1)[0]
+    if not package.is_dir():
+        parser.error("target package does not exist")
+    command = [buck2(root), "build", args.target, "--show-full-simple-output", "-v", "0"]
+    if args.local_only:
+        command.extend(["--local-only", "-c", "remote.enabled=false"])
+    built = subprocess.run(command, cwd=root, text=True, capture_output=True, check=False)
+    sys.stderr.write(built.stderr)
+    if built.returncode:
+        return built.returncode
+    outputs = [Path(line) for line in built.stdout.splitlines() if line.startswith("/")]
+    if len(outputs) != 1 or not outputs[0].is_file():
+        print("focused test rejected: expected one executable Buck output", file=sys.stderr)
+        return 1
+
+    executable = outputs[0]
+    env = os.environ.copy()
+    env["CARGO_MANIFEST_DIR"] = str(package)
+    selection = [str(executable), args.filter]
+    if args.exact:
+        selection.append("--exact")
+    listed = subprocess.run([*selection, "--list"], cwd=package, env=env,
+                            text=True, capture_output=True, check=False)
+    if listed.returncode:
+        sys.stderr.write(listed.stdout + listed.stderr)
+        return listed.returncode
+    names = [match.group(1) for line in listed.stdout.splitlines()
+             if (match := TEST_LINE.fullmatch(line.strip()))]
+    print(f"selected {len(names)} runnable test(s) in {args.target}: {', '.join(names)}")
+    if not names or (args.expect is not None and len(names) != args.expect):
+        print("focused test rejected: runnable selection count mismatch", file=sys.stderr)
+        return 1
+
+    run = subprocess.run([*selection, "--nocapture"], cwd=package, env=env,
+                         text=True, capture_output=True, check=False)
+    sys.stdout.write(run.stdout)
+    sys.stderr.write(run.stderr)
+    if run.returncode:
+        return run.returncode
+    summaries = [match for line in run.stdout.splitlines()
+                 if (match := TEST_RESULT.fullmatch(line.strip()))]
+    if len(summaries) != 1:
+        print("focused test rejected: missing libtest summary", file=sys.stderr)
+        return 1
+    passed, failed, ignored, _, _ = map(int, summaries[0].groups())
+    if passed != len(names) or failed or ignored:
+        print("focused test rejected: executed count differs from runnable selection", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

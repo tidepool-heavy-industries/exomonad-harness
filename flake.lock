@@ -36,7 +36,29 @@
     "root": {
       "inputs": {
         "jev-dsl": "jev-dsl",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "rust-overlay": "rust-overlay"
+      }
+    },
+    "rust-overlay": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1771211437,
+        "narHash": "sha256-lcNK438i4DGtyA+bPXXyVLHVmJjYpVKmpux9WASa3ro=",
+        "owner": "oxalica",
+        "repo": "rust-overlay",
+        "rev": "c62195b3d6e1bb11e0c2fb2a494117d3b55d410f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "oxalica",
+        "repo": "rust-overlay",
+        "rev": "c62195b3d6e1bb11e0c2fb2a494117d3b55d410f",
+        "type": "github"
       }
     }
   },
