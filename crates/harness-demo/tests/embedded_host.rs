@@ -824,7 +824,9 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
         .unwrap();
     assert_eq!(response.status(), 202);
     let command = commands.recv().await.unwrap();
-    let ClientCommand::Submit { command: text } = command.command;
+    let ClientCommand::Submit { command: text } = command.command else {
+        panic!("expected standalone input command");
+    };
     let receipt = conversation
         .input(&command.command_id, "operator", &text)
         .await

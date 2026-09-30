@@ -1888,6 +1888,12 @@ async fn serve(
             command = commands.recv() => {
                 let Some(QueuedCommand { command_id, command }) = command else { break };
                 match command {
+                    ClientCommand::Host { .. } => {
+                        control.publish("command.refused", json!({
+                            "commandId": command_id,
+                            "reason": "This standalone server has no embedded host actor owner.",
+                        }));
+                    }
                     ClientCommand::Submit { command } => {
                         let conversation_was_requesting = conversation["state"] == "requesting";
                         let request_id = format!("request/{command_id}");
@@ -3869,6 +3875,7 @@ mod tests {
         assert_eq!(envelope["type"], "FINAL_ANSWER");
         assert_eq!(
             serde_json::to_value(Snapshot {
+                host_run: None,
                 seq: 5,
                 actors: vec![],
                 conversations: vec![conversation],

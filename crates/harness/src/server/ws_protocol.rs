@@ -77,6 +77,10 @@ pub struct HostActorProjection {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub seq: u64,
+    /// Present only when this snapshot is projected from an embedded host run.
+    /// An empty actor list does not imply standalone mode.
+    #[serde(default, rename = "hostRun", skip_serializing_if = "Option::is_none")]
+    pub host_run: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actors: Vec<HostActorProjection>,
     pub conversations: Vec<serde_json::Value>,
@@ -117,6 +121,9 @@ pub enum WsServerFrame {
 pub enum WsClientFrame {
     Command {
         command: String,
+    },
+    HostCommand {
+        command: super::HostCommand,
     },
     #[serde(rename = "snapshot.request")]
     SnapshotRequest,

@@ -4,6 +4,7 @@ import {
   type NormalizedState,
   type SequencedEvent,
   type Snapshot,
+  type HostCommand,
 } from './protocol'
 
 /**
@@ -16,7 +17,7 @@ export function connectHarness(
   receive: (state: NormalizedState) => void,
   error: (message: string) => void,
   accepted: (commandId: string) => void = () => undefined,
-): (command: string) => void {
+): (command: string | HostCommand) => void {
   let current: NormalizedState | undefined
   socket.addEventListener('message', (message: MessageEvent<string>) => {
     try {
@@ -54,6 +55,6 @@ export function connectHarness(
       error('Command channel is disconnected; retry after reconnecting.')
       return
     }
-    socket.send(JSON.stringify({ type: 'command', command }))
+    socket.send(JSON.stringify({ type: typeof command === 'string' ? 'command' : 'host_command', command }))
   }
 }

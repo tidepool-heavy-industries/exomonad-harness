@@ -110,4 +110,83 @@ describe('operator views', () => {
     expect(screen.getByText(/delivered true/)).toBeInTheDocument()
     expect(screen.getByText(/cancelled; retained result/)).toBeInTheDocument()
   })
+
+  it('uses explicit hostRun to show embedded controls even when the actor list is empty', () => {
+    render(<App data={{ hostRun: 'run-7', actors: [], nodes: [], timeline: [], inbox: [] }} />)
+    expect(screen.getByRole('button', { name: 'Host' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Command' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Host' }))
+    expect(screen.getByRole('heading', { name: 'Embedded host controls' })).toBeInTheDocument()
+    expect(screen.getByText('No actors are currently projected for this host run.')).toBeInTheDocument()
+  })
+
+  it('sends input, interrupt, and retire to the explicitly selected exact actor', () => {
+    const onCommand = vi.fn()
+    const selected = {
+      id: '["run-7","/root/reviewer","inc-2"]', name: '/root/reviewer', run: 'run-7', incarnation: 'inc-2',
+      kind: 'workflow' as const, lifecycle: 'waiting',
+    }
+    const data: HarnessViewModel = {
+      hostRun: 'run-7',
+      actors: [
+        { ...selected, id: '["run-7","/root/other","inc-1"]', name: '/root/other', incarnation: 'inc-1', kind: 'model', lifecycle: 'running' },
+        selected,
+        { ...selected, id: '["different-run","/root/foreign","inc-1"]', name: '/root/foreign', run: 'different-run', incarnation: 'inc-1', kind: 'model', lifecycle: 'running' },
+      ],
+      nodes: [], timeline: [], inbox: [],
+    }
+    render(<App data={data} onCommand={onCommand} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Host' }))
+    const selector = screen.getByLabelText('Target actor')
+    expect(selector.querySelectorAll('option')).toHaveLength(3)
+    fireEvent.change(selector, { target: { value: selected.id } })
+    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'continue with care' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send input' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Interrupt' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Retire' }))
+    expect(onCommand.mock.calls.map(([command]) => command)).toEqual([
+      { action: 'input', target: { run: 'run-7', actor: '/root/reviewer', incarnation: 'inc-2' }, text: 'continue with care' },
+      { action: 'interrupt', target: { run: 'run-7', actor: '/root/reviewer', incarnation: 'inc-2' } },
+      { action: 'retire', target: { run: 'run-7', actor: '/root/reviewer', incarnation: 'inc-2' } },
+    ])
+  })
+
+  it('keeps a selected actor unavailable after an incarnation replacement until reselected', () => {
+    const onCommand = vi.fn()
+    const first = {
+      id: '["run-7","/root/reviewer","inc-1"]', name: '/root/reviewer', run: 'run-7', incarnation: 'inc-1',
+      kind: 'workflow' as const, lifecycle: 'waiting',
+    }
+    const replacement = { ...first, id: '["run-7","/root/reviewer","inc-2"]', incarnation: 'inc-2' }
+    const view = (actor: typeof first): HarnessViewModel => ({ hostRun: 'run-7', actors: [actor], nodes: [], timeline: [], inbox: [] })
+    const { rerender } = render(<App data={view(first)} onCommand={onCommand} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Host' }))
+    const selector = screen.getByLabelText('Target actor') as HTMLSelectElement
+    fireEvent.change(selector, { target: { value: first.id } })
+    rerender(<App data={view(replacement)} onCommand={onCommand} />)
+    expect(selector.value).toBe(first.id)
+    expect(screen.getByText(/selected actor disappeared or was replaced/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Send input' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Interrupt' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Retire' })).toBeDisabled()
+    expect(onCommand).not.toHaveBeenCalled()
+
+    fireEvent.change(selector, { target: { value: replacement.id } })
+    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'address replacement' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send input' }))
+    expect(onCommand).toHaveBeenCalledWith({
+      action: 'input', target: { run: 'run-7', actor: '/root/reviewer', incarnation: 'inc-2' }, text: 'address replacement',
+    })
+  })
+
+  it('retains the standalone command view when hostRun is absent', () => {
+    const onCommand = vi.fn()
+    render(<App data={{ actors: [], nodes: [], timeline: [], inbox: [] }} onCommand={onCommand} />)
+    expect(screen.getByRole('button', { name: 'Command' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Host' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Command' }))
+    expect(screen.getByText(/Deterministic mode/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Run test' }))
+    expect(onCommand).toHaveBeenCalledWith('test')
+  })
 })

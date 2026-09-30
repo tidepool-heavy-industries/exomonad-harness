@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import App from './App'
 import { toViewModel } from './integration'
-import { normalizeSnapshot, type NormalizedState, type Snapshot } from './protocol'
+import { normalizeSnapshot, type HostCommand, type NormalizedState, type Snapshot } from './protocol'
 import { getSessionStatus, login, logout } from './session-api'
 import { connectHarness } from './ws-client'
 
@@ -20,7 +20,7 @@ export function Operator() {
   const [secret, setSecret] = useState('')
   const [failure, setFailure] = useState('')
   const [checking, setChecking] = useState(true)
-  const [sendCommand, setSendCommand] = useState<(command: string) => void>()
+  const [sendCommand, setSendCommand] = useState<(command: string | HostCommand) => void>()
   const [acceptedCommandIds, setAcceptedCommandIds] = useState<string[]>([])
 
   const checkSession = useCallback(async () => {

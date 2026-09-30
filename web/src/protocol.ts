@@ -6,6 +6,8 @@ export type EntityId = string;
 
 export interface Snapshot {
   readonly seq: number;
+  /** Exact embedded host run; absent means this is the standalone demo UI. */
+  readonly hostRun?: string;
   /** Absent in standalone snapshots written before host actor projection. */
   readonly actors?: readonly HostActorProjection[];
   readonly conversations: readonly Conversation[];
@@ -19,6 +21,10 @@ export interface HostActorIdentity {
   readonly actor: string;
   readonly incarnation: string;
 }
+
+export type HostCommand =
+  | { readonly action: "input"; readonly target: HostActorIdentity; readonly text: string }
+  | { readonly action: "interrupt" | "retire"; readonly target: HostActorIdentity };
 
 export interface HostActorProjection {
   readonly identity: HostActorIdentity;
@@ -85,12 +91,13 @@ export interface Envelope {
 }
 
 export type StateEvent =
+  | { readonly kind: "host_run.upsert"; readonly value: { readonly run: string } }
   | { readonly kind: "actor.upsert"; readonly value: HostActorProjection }
   | { readonly kind: "conversation.upsert"; readonly value: Conversation }
   | { readonly kind: "request.upsert"; readonly value: RequestRecord }
   | { readonly kind: "job.upsert"; readonly value: Job }
   | { readonly kind: "envelope.upsert"; readonly value: Envelope }
-  | { readonly kind: "entity.remove"; readonly entity: "actor" | "conversation" | "request" | "job" | "envelope"; readonly id: EntityId };
+  | { readonly kind: "entity.remove"; readonly value: { readonly entity: "actor" | "conversation" | "request" | "job" | "envelope"; readonly id: EntityId } };
 
 export interface SequencedEvent {
   readonly seq: number;
@@ -106,6 +113,7 @@ export interface DeltaEvent {
 
 export interface NormalizedState {
   readonly seq: number;
+  readonly hostRun?: string;
   readonly actors: ReadonlyMap<EntityId, HostActorProjection>;
   readonly conversations: ReadonlyMap<EntityId, Conversation>;
   readonly requests: ReadonlyMap<EntityId, RequestRecord>;
@@ -120,6 +128,7 @@ export type ApplyResult =
 export function normalizeSnapshot(snapshot: Snapshot): NormalizedState {
   return {
     seq: snapshot.seq,
+    hostRun: snapshot.hostRun,
     actors: new Map((snapshot.actors ?? []).map((actor) => [actorIdentityKey(actor.identity), actor])),
     conversations: index(snapshot.conversations),
     requests: index(snapshot.requests),
@@ -136,6 +145,8 @@ export function applyStateEvent(state: NormalizedState, message: SequencedEvent)
   }
   const next = { ...state, seq: message.seq };
   switch (message.event.kind) {
+    case "host_run.upsert":
+      return { kind: "applied", state: { ...next, hostRun: message.event.value.run } };
     case "actor.upsert":
       return { kind: "applied", state: { ...next, actors: setByKey(next.actors, actorIdentityKey(message.event.value.identity), message.event.value) } };
     case "conversation.upsert":
@@ -147,7 +158,7 @@ export function applyStateEvent(state: NormalizedState, message: SequencedEvent)
     case "envelope.upsert":
       return { kind: "applied", state: { ...next, envelopes: set(next.envelopes, message.event.value) } };
     case "entity.remove": {
-      const { entity, id } = message.event;
+      const { entity, id } = message.event.value;
       switch (entity) {
         case "actor": {
           const table = new Map(next.actors); table.delete(id);

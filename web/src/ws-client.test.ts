@@ -38,7 +38,17 @@ describe('WebSocket API boundary', () => {
     dispatch({
       type: 'event',
       event: {
-        seq: fixtureSnapshot.seq + 3,
+        seq: fixtureSnapshot.seq + 2,
+        event: { kind: 'entity.remove', value: { entity: 'conversation', id: 'new' } },
+      },
+    })
+    expect(receive).toHaveBeenCalledTimes(3)
+    expect(receive.mock.lastCall?.[0].conversations.has('new')).toBe(false)
+
+    dispatch({
+      type: 'event',
+      event: {
+        seq: fixtureSnapshot.seq + 4,
         event: {
           kind: 'conversation.upsert',
           value: { id: 'skipped', path: '/root/skipped', state: 'idle' },
@@ -46,10 +56,13 @@ describe('WebSocket API boundary', () => {
       },
     })
     expect(socket.send).toHaveBeenLastCalledWith(JSON.stringify({ type: 'snapshot.request' }))
-    expect(receive).toHaveBeenCalledTimes(2)
+    expect(receive).toHaveBeenCalledTimes(3)
 
     sendCommand('wait_agent')
     expect(socket.send).toHaveBeenLastCalledWith(JSON.stringify({ type: 'command', command: 'wait_agent' }))
+    const addressed = { action: 'input' as const, target: { run: 'run-1', actor: '/root/child', incarnation: 'second' }, text: 'continue' }
+    sendCommand(addressed)
+    expect(socket.send).toHaveBeenLastCalledWith(JSON.stringify({ type: 'host_command', command: addressed }))
     expect(error).not.toHaveBeenCalled()
   })
 })

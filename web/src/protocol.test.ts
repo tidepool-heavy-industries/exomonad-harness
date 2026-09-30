@@ -60,4 +60,17 @@ describe("stable JSON state adapter", () => {
     }
     expect(initial.actors.get(key)?.lifecycle).toBe("waiting");
   });
+
+  it("updates explicit host mode from a host-run event even with no actor rows", () => {
+    const initial = normalizeSnapshot({ ...fixture, hostRun: undefined, actors: [] });
+    const result = applyStateEvent(initial, {
+      seq: 42,
+      event: { kind: "host_run.upsert", value: { run: "run-empty" } },
+    });
+    expect(result.kind).toBe("applied");
+    if (result.kind === "applied") {
+      expect(result.state.hostRun).toBe("run-empty");
+      expect(result.state.actors.size).toBe(0);
+    }
+  });
 });
