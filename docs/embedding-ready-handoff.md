@@ -138,22 +138,34 @@ target, action, text, expected round, state and retained receipt. Its public API
   returns the retained record for identical reuse, and returns
   `StoreError::ConflictingCommand` for different contents without changing it.
 - `queued_embedded_commands(run)` gives the existing host command loop retained
-  work. Drain at startup and on its existing periodic wake; channel notifications
-  are hints and can be lost between the Store commit and enqueue.
+  work in persisted insertion order (SQLite rowid for this nondeleting table).
+  Wall-clock timestamps and random operation IDs do not choose dispatch order.
+  Drain at startup and on its existing periodic wake; channel notifications are
+  hints and can be lost between the Store commit and enqueue.
 - `claim_embedded_command(run, operation)` moves only `Queued` to `Dispatching`
   and returns `None` to later claimants. Claim before any live host lookup/effect.
 - `Conversation::command_input(operation, text)` admits a claimed input with
   envelope, input identity and `InputAdmitted` receipt in one transaction. Wake
   follows commit; a reported wake error is retained without revoking admission.
   An admitted retry checks contents and reads its receipt before any live host
-  admission or wake, including after retirement. `InputObserver` independently
+  admission or wake, including after retirement. The admission transaction
+  distinguishes new from retained input, so overlapping duplicate callers wake
+  only the newly admitted envelope and cannot overwrite its wake diagnostics.
+  `InputObserver` independently
   reads admission versus actual request inclusion without retaining an actor.
 - `settle_embedded_command(run, operation, outcome)` records `ControlRequested`,
   `Refused` or `Unconfirmed` after a claim. Input admission uses its atomic path.
   A terminal receipt cannot be replaced with another outcome.
-- `embedded_command(run, operation)` reads the retained record. Reopening Store
-  changes outstanding `Dispatching` rows to `Unconfirmed`; it never automatically
-  redispatches them. Unclaimed `Queued` rows remain available to their owner.
+- `embedded_command(run, operation)` reads the retained record. Ordinary
+  `Store::open` is passive with respect to command claims; another opener cannot
+  rewrite a live owner's `Dispatching` command or prevent its settlement.
+- `recover_embedded_command_claims(run)` is a trusted host-owner startup
+  operation that changes outstanding `Dispatching` rows in that run to
+  `Unconfirmed` and returns a count. The embedding must hold its existing
+  exclusive process/run lease (Tidepool's `HostIncarnationLease` owns that lock)
+  and invoke it before actor admission or command dispatch. Do not invoke it
+  from ordinary reads or periodic drains. Claimed work is never automatically
+  redispatched; unclaimed `Queued` rows remain available to their owner.
 
 Authenticated `GET /api/commands/{operation_id}` returns the Store record for
 the current projected host run, or 404 when absent. HTTP submission and lookup
@@ -171,8 +183,11 @@ exact contents across an uncertain acknowledgment and offers explicit retry.
 The TypeScript `HostCommandSubmission` passed to `connectHarness` contains
 `{ operation_id, command }` and never allocates a replacement identity.
 
-Schema 6 to 7 adds the command table and index without rewriting old inputs,
-checkpoint metadata or history, and without fabricating historical controls.
+Schema 6 to 7 adds the command table and index and scopes `embedded_inputs` by
+exact run, actor path, incarnation and operation. The explicit migration copies
+old input identities from their existing embedded binding, verifies every row
+was copied, and preserves their envelopes and payload hashes. It preserves
+checkpoint metadata and history and never fabricates historical controls.
 An admitted envelope is durable evidence of admission; receipt acceptance,
 absence of a wake error, and input inclusion are distinct observations. Queued
 recovery does not reconstruct resident actor state after host loss.

@@ -76,7 +76,26 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
     if legacy_claims && version < 5 {
         tx.execute_batch("ALTER TABLE claims RENAME TO legacy_claims; DROP INDEX IF EXISTS claims_request; DROP INDEX IF EXISTS claims_operation;")?;
     }
+    let legacy_inputs: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='embedded_inputs')",
+        [],
+        |r| r.get(0),
+    )?;
+    if legacy_inputs && version < 7 {
+        tx.execute_batch("ALTER TABLE embedded_inputs RENAME TO legacy_embedded_inputs;")?;
+    }
     tx.execute_batch(SQL)?;
+    if legacy_inputs && version < 7 {
+        let old_count: i64 =
+            tx.query_row("SELECT COUNT(*) FROM legacy_embedded_inputs", [], |r| {
+                r.get(0)
+            })?;
+        let copied=tx.execute("INSERT INTO embedded_inputs(run_id,agent_path,incarnation,operation_id,envelope_id,item_hash) SELECT b.run_id,ei.agent_path,b.incarnation,ei.operation_id,ei.envelope_id,ei.item_hash FROM legacy_embedded_inputs ei JOIN embedded_bindings b ON b.agent_path=ei.agent_path",[])?;
+        if copied as i64 != old_count {
+            return Err(super::StoreError::InvalidEmbeddedBinding);
+        }
+        tx.execute_batch("DROP TABLE legacy_embedded_inputs;")?;
+    }
     let store_id = super::schema_migration::ensure_store_id(&tx)?;
     if legacy_claims && version < 5 {
         super::schema_migration::migrate_claims(&tx, &store_id)?;

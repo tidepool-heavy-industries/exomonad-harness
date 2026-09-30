@@ -1559,3 +1559,94 @@ async fn browser_command_wake_failure_retains_admission_and_retry_receipt() {
     );
     assert_eq!(host.wakes.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn overlapping_browser_input_admissions_wake_once_and_retain_first_wake_failure() {
+    use harness::{
+        embedding::ClientOperationId,
+        server::{CommandReceiptOutcome, HostCommand},
+    };
+    struct OverlapHost {
+        host: Arc<Host>,
+        admission_barrier: std::sync::Barrier,
+        enabled: AtomicBool,
+    }
+    #[async_trait]
+    impl HostActor for OverlapHost {
+        fn identity(&self) -> &HostIdentity {
+            self.host.identity()
+        }
+        fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+            let permit = self.host.admit()?;
+            if self.enabled.load(Ordering::SeqCst) {
+                self.admission_barrier.wait();
+            }
+            Ok(permit)
+        }
+        fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+            self.host.tool_surface()
+        }
+        async fn wake(&self, _: i64) -> Result<(), String> {
+            self.host.wakes.fetch_add(1, Ordering::SeqCst);
+            Err("first wake failed".into())
+        }
+        async fn control(&self, control: HostControl) -> Result<Value, HostControlError> {
+            self.host.control(control).await
+        }
+    }
+    let store = Arc::new(Store::memory().unwrap());
+    let host = host(store.clone(), Arc::new(Mutex::new(vec![])));
+    let overlap = Arc::new(OverlapHost {
+        host: host.clone(),
+        admission_barrier: std::sync::Barrier::new(2),
+        enabled: AtomicBool::new(false),
+    });
+    let conversation =
+        Arc::new(Conversation::attach(store.clone(), overlap.clone(), None).unwrap());
+    let operation: ClientOperationId =
+        serde_json::from_value(json!("72d54f4c-f168-47dd-bee7-c9018c4d636e")).unwrap();
+    store
+        .enqueue_embedded_command(
+            operation,
+            &HostCommand::Input {
+                target: host.identity.clone(),
+                text: "concurrent".into(),
+            },
+        )
+        .unwrap();
+    store
+        .claim_embedded_command(&host.identity.run, operation)
+        .unwrap()
+        .unwrap();
+    overlap.enabled.store(true, Ordering::SeqCst);
+    let one = conversation.clone();
+    let two = conversation.clone();
+    let first = tokio::spawn(async move { one.command_input(operation, "concurrent").await });
+    let second = tokio::spawn(async move { two.command_input(operation, "concurrent").await });
+    let first = first.await.unwrap().unwrap();
+    let second = second.await.unwrap().unwrap();
+    let envelope = |receipt: harness::server::CommandReceipt| match receipt.outcome {
+        CommandReceiptOutcome::Admitted { envelope_id, .. } => envelope_id,
+        _ => panic!("admitted receipt"),
+    };
+    assert_eq!(envelope(first), envelope(second));
+    assert_eq!(host.wakes.load(Ordering::SeqCst), 1);
+    assert_eq!(store.unread("/root").unwrap().len(), 1);
+    let receipt = store
+        .embedded_command(&host.identity.run, operation)
+        .unwrap()
+        .unwrap()
+        .receipt
+        .unwrap();
+    assert!(
+        matches!(&receipt.outcome,CommandReceiptOutcome::Admitted {wake_error:Some(error),..} if error=="first wake failed")
+    );
+    assert_eq!(
+        conversation
+            .command_input(operation, "concurrent")
+            .await
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(host.wakes.load(Ordering::SeqCst), 1);
+}

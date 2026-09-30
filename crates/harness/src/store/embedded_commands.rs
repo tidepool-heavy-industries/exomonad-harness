@@ -45,29 +45,41 @@ fn read(
     .transpose()
 }
 
-pub(super) fn recover_claims(c: &Connection) -> Result<()> {
-    let claimed = {
-        let mut stmt = c.prepare(
-            "SELECT run_id,operation_id FROM embedded_commands WHERE state='dispatching'",
+impl Store {
+    /// A trusted host-owner startup operation. The embedding must hold its
+    /// exclusive run/process lease and call this before admitting actors or
+    /// dispatching commands. Ordinary Store opening never takes over claims.
+    pub fn recover_embedded_command_claims(&self, run: &str) -> Result<usize> {
+        let mut c = self.lock();
+        let tx = c.transaction()?;
+        let claimed = {
+            let mut stmt = tx.prepare(
+            "SELECT run_id,operation_id FROM embedded_commands WHERE run_id=?1 AND state='dispatching'",
         )?;
-        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            stmt.query_map([run], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?
-    };
-    for (run, id) in claimed {
-        let operation: ClientOperationId = serde_json::from_value(serde_json::Value::String(id))?;
-        let record = read(c, &run, operation)?.ok_or(StoreError::InvalidCommandState)?;
-        let receipt = CommandReceipt {
-            command_id: operation.to_string(),
-            outcome: CommandReceiptOutcome::Unconfirmed {
-                target: record.command.target().clone(),
-                reason: "Host process lost after command claim; dispatch outcome is unknown."
-                    .into(),
-            },
         };
-        c.execute("UPDATE embedded_commands SET state='unconfirmed',outcome=?3 WHERE run_id=?1 AND operation_id=?2 AND state='dispatching'",
+        let count = claimed.len();
+        for (run, id) in claimed {
+            let operation: ClientOperationId =
+                serde_json::from_value(serde_json::Value::String(id))?;
+            let record = read(&tx, &run, operation)?.ok_or(StoreError::InvalidCommandState)?;
+            let receipt = CommandReceipt {
+                command_id: operation.to_string(),
+                outcome: CommandReceiptOutcome::Unconfirmed {
+                    target: record.command.target().clone(),
+                    reason: "Host process lost after command claim; dispatch outcome is unknown."
+                        .into(),
+                },
+            };
+            tx.execute("UPDATE embedded_commands SET state='unconfirmed',outcome=?3 WHERE run_id=?1 AND operation_id=?2 AND state='dispatching'",
             params![run,operation.to_string(),serde_json::to_string(&receipt)?])?;
+        }
+        tx.commit()?;
+        Ok(count)
     }
-    Ok(())
 }
 
 impl Store {
@@ -136,7 +148,7 @@ impl Store {
     /// wake. Channel notifications are hints; durable queued rows are the work.
     pub fn queued_embedded_commands(&self, run: &str) -> Result<Vec<EmbeddedCommandRecord>> {
         let c = self.lock();
-        let mut stmt = c.prepare("SELECT operation_id FROM embedded_commands WHERE run_id=?1 AND state='queued' ORDER BY created_at,operation_id")?;
+        let mut stmt = c.prepare("SELECT operation_id FROM embedded_commands WHERE run_id=?1 AND state='queued' ORDER BY rowid")?;
         let ids = stmt
             .query_map([run], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -327,15 +339,19 @@ mod tests {
         );
         assert!(store.unread("/root").unwrap().is_empty());
         store.claim_embedded_command("run", id).unwrap().unwrap();
-        let first = store
+        let super::CommandInputAdmission::New(first) = store
             .admit_embedded_command_input(&identity(), id, "hello")
-            .unwrap();
-        assert_eq!(
-            first,
-            store
-                .admit_embedded_command_input(&identity(), id, "hello")
-                .unwrap()
-        );
+            .unwrap()
+        else {
+            panic!("first admission is new");
+        };
+        let super::CommandInputAdmission::Retained(second) = store
+            .admit_embedded_command_input(&identity(), id, "hello")
+            .unwrap()
+        else {
+            panic!("duplicate admission is retained");
+        };
+        assert_eq!(first, second);
         assert_eq!(store.unread("/root").unwrap().len(), 1);
         let record = store.embedded_command("run", id).unwrap().unwrap();
         assert_eq!(record.state, EmbeddedCommandState::InputAdmitted);
@@ -395,6 +411,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![queued]
         );
+        // Reopening is passive while another owner could still be alive.
+        assert_eq!(
+            store
+                .embedded_command("run", claimed)
+                .unwrap()
+                .unwrap()
+                .state,
+            EmbeddedCommandState::Dispatching
+        );
+        assert_eq!(store.recover_embedded_command_claims("run").unwrap(), 1);
+        assert_eq!(store.recover_embedded_command_claims("run").unwrap(), 0);
         let record = store.embedded_command("run", claimed).unwrap().unwrap();
         assert_eq!(record.command, command);
         assert_eq!(record.state, EmbeddedCommandState::Unconfirmed);
@@ -418,6 +445,91 @@ mod tests {
         );
         drop(store);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn passive_second_store_open_cannot_overwrite_live_claim_or_settlement() {
+        let path = std::env::temp_dir().join(format!(
+            "harness-live-command-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let live = Store::open(&path).unwrap();
+        let id = operation();
+        live.enqueue_embedded_command(id, &HostCommand::Retire { target: identity() })
+            .unwrap();
+        live.claim_embedded_command("run", id).unwrap().unwrap();
+        let observer = Store::open(&path).unwrap();
+        assert_eq!(
+            observer.embedded_command("run", id).unwrap().unwrap().state,
+            EmbeddedCommandState::Dispatching
+        );
+        let receipt = live
+            .settle_embedded_command(
+                "run",
+                id,
+                CommandReceiptOutcome::ControlRequested {
+                    target: identity(),
+                    control: CommandControl::Retire,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            observer
+                .embedded_command("run", id)
+                .unwrap()
+                .unwrap()
+                .receipt,
+            Some(receipt)
+        );
+        drop(observer);
+        drop(live);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn queued_drain_preserves_admission_order_across_clock_ties_and_changes() {
+        let store = Store::memory().unwrap();
+        let first: ClientOperationId =
+            serde_json::from_value(serde_json::json!("ffffffff-ffff-4fff-bfff-ffffffffffff"))
+                .unwrap();
+        let second: ClientOperationId =
+            serde_json::from_value(serde_json::json!("00000000-0000-4000-8000-000000000001"))
+                .unwrap();
+        let third = operation();
+        for id in [first, second, third] {
+            store
+                .enqueue_embedded_command(id, &input("ordered"))
+                .unwrap();
+        }
+        store
+            .lock()
+            .execute("UPDATE embedded_commands SET created_at=17", [])
+            .unwrap();
+        assert_eq!(
+            store
+                .queued_embedded_commands("run")
+                .unwrap()
+                .iter()
+                .map(|r| r.operation_id)
+                .collect::<Vec<_>>(),
+            vec![first, second, third]
+        );
+        store
+            .lock()
+            .execute(
+                "UPDATE embedded_commands SET created_at=0 WHERE operation_id=?1",
+                [third.to_string()],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .queued_embedded_commands("run")
+                .unwrap()
+                .iter()
+                .map(|r| r.operation_id)
+                .collect::<Vec<_>>(),
+            vec![first, second, third]
+        );
     }
 
     #[test]

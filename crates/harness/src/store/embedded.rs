@@ -1,6 +1,11 @@
 use super::*;
 use crate::embedding::{EmbeddedError, HostIdentity};
 
+pub(crate) enum CommandInputAdmission {
+    New(crate::server::CommandReceipt),
+    Retained(crate::server::CommandReceipt),
+}
+
 pub(crate) enum EmbeddedInputState {
     Missing,
     Admitted,
@@ -33,7 +38,7 @@ impl Store {
                     "SELECT b.run_id,b.incarnation,ei.envelope_id,e.id,e.delivered_request \
                  FROM embedded_bindings b \
                  LEFT JOIN embedded_inputs ei \
-                   ON ei.agent_path=b.agent_path AND ei.operation_id=?2 \
+                   ON ei.agent_path=b.agent_path AND ei.run_id=b.run_id AND ei.incarnation=b.incarnation AND ei.operation_id=?2 \
                  LEFT JOIN envelopes e \
                    ON e.id=ei.envelope_id AND e.recipient=b.agent_path \
                  WHERE b.agent_path=?1",
@@ -153,7 +158,7 @@ impl Store {
             ));
         }
         let hash = Self::put_item_tx(tx, item)?;
-        let existing: Option<(i64,String,String)> = tx.query_row("SELECT ei.envelope_id,ei.item_hash,e.sender FROM embedded_inputs ei JOIN envelopes e ON e.id=ei.envelope_id WHERE ei.agent_path=?1 AND ei.operation_id=?2", params![identity.actor.0,operation_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        let existing: Option<(i64,String,String)> = tx.query_row("SELECT ei.envelope_id,ei.item_hash,e.sender FROM embedded_inputs ei JOIN envelopes e ON e.id=ei.envelope_id WHERE ei.run_id=?1 AND ei.agent_path=?2 AND ei.incarnation=?3 AND ei.operation_id=?4", params![identity.run,identity.actor.0,identity.incarnation,operation_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         if let Some((id, previous_hash, previous_sender)) = existing {
             if hash.0 != previous_hash || sender != previous_sender {
                 return Err(EmbeddedError::ConflictingInput);
@@ -162,7 +167,7 @@ impl Store {
         }
         tx.execute("INSERT INTO envelopes(sender,recipient,class,item_hash,delivered_request,created_at) VALUES (?1,?2,'user',?3,NULL,?4)", params![sender,identity.actor.0,hash.0,utc_millis()])?;
         let envelope = tx.last_insert_rowid();
-        tx.execute("INSERT INTO embedded_inputs(agent_path,operation_id,envelope_id,item_hash) VALUES (?1,?2,?3,?4)", params![identity.actor.0,operation_id,envelope,hash.0])?;
+        tx.execute("INSERT INTO embedded_inputs(run_id,agent_path,incarnation,operation_id,envelope_id,item_hash) VALUES (?1,?2,?3,?4,?5,?6)", params![identity.run,identity.actor.0,identity.incarnation,operation_id,envelope,hash.0])?;
         Ok(envelope)
     }
 
@@ -171,7 +176,7 @@ impl Store {
         identity: &HostIdentity,
         operation: crate::embedding::ClientOperationId,
         text: &str,
-    ) -> std::result::Result<crate::server::CommandReceipt, EmbeddedError> {
+    ) -> std::result::Result<CommandInputAdmission, EmbeddedError> {
         use crate::server::{CommandReceipt, CommandReceiptOutcome, HostCommand};
         let mut c = self.lock();
         let tx = c.transaction()?;
@@ -189,9 +194,9 @@ impl Store {
             return Err(StoreError::ConflictingCommand.into());
         }
         if state == "input_admitted" {
-            return Ok(serde_json::from_str(
+            return Ok(CommandInputAdmission::Retained(serde_json::from_str(
                 &outcome.ok_or(StoreError::InvalidCommandState)?,
-            )?);
+            )?));
         }
         if state != "dispatching" {
             return Err(StoreError::InvalidCommandState.into());
@@ -215,7 +220,7 @@ impl Store {
         tx.execute("UPDATE embedded_commands SET state='input_admitted',envelope_id=?3,outcome=?4 WHERE run_id=?1 AND operation_id=?2 AND state='dispatching'",
             params![identity.run,operation.to_string(),envelope,serde_json::to_string(&receipt)?])?;
         tx.commit()?;
-        Ok(receipt)
+        Ok(CommandInputAdmission::New(receipt))
     }
 }
 
@@ -224,6 +229,97 @@ mod tests {
     use super::*;
     use crate::{item::Item, model::AgentPath};
     use serde_json::json;
+
+    #[test]
+    fn input_identity_dedupe_is_exact_run_incarnation_and_operation() {
+        let store = Store::memory().unwrap();
+        let first = HostIdentity {
+            run: "old-run".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "old".into(),
+        };
+        store.bind_embedded_actor(&first, None).unwrap();
+        let item = Item(json!({"type":"message","role":"user","content":"same text"}));
+        let first_envelope = store
+            .admit_embedded_input(&first, "same-operation", "operator", &item)
+            .unwrap();
+        // Model a deliberately authorized binding transition in the fixture.
+        // Input history remains immutable and cannot become a new admission.
+        store.lock().execute("UPDATE embedded_bindings SET run_id='new-run',incarnation='new' WHERE agent_path='/root'",[]).unwrap();
+        let second = HostIdentity {
+            run: "new-run".into(),
+            actor: first.actor.clone(),
+            incarnation: "new".into(),
+        };
+        assert!(matches!(
+            store
+                .embedded_input_state(&second, "same-operation")
+                .unwrap(),
+            EmbeddedInputState::Missing
+        ));
+        let second_envelope = store
+            .admit_embedded_input(&second, "same-operation", "operator", &item)
+            .unwrap();
+        assert_ne!(first_envelope, second_envelope);
+        assert_eq!(
+            store
+                .admit_embedded_input(&second, "same-operation", "operator", &item)
+                .unwrap(),
+            second_envelope
+        );
+        assert_eq!(store.unread("/root").unwrap().len(), 2);
+        store
+            .lock()
+            .execute(
+                "UPDATE embedded_bindings SET incarnation='third' WHERE agent_path='/root'",
+                [],
+            )
+            .unwrap();
+        let third = HostIdentity {
+            incarnation: "third".into(),
+            ..second
+        };
+        let third_envelope = store
+            .admit_embedded_input(&third, "same-operation", "operator", &item)
+            .unwrap();
+        assert_ne!(second_envelope, third_envelope);
+    }
+
+    #[test]
+    fn schema_six_input_migration_preserves_exact_binding_and_envelope() {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::store::schema::initialize(&mut c).unwrap();
+        c.execute_batch("DROP TABLE embedded_commands; DROP TABLE embedded_inputs; CREATE TABLE embedded_inputs(agent_path TEXT NOT NULL REFERENCES embedded_bindings(agent_path),operation_id TEXT NOT NULL,envelope_id INTEGER NOT NULL REFERENCES envelopes(id),item_hash TEXT NOT NULL REFERENCES items(hash),PRIMARY KEY(agent_path,operation_id)); UPDATE schema_version SET version=6; INSERT INTO agents(path,parent_path,contract,fork_source,state,created_at) VALUES('/root',NULL,'{}','{}','active',17); INSERT INTO embedded_bindings VALUES('/root','legacy-run','legacy-incarnation'); INSERT INTO items VALUES('legacy-item','{}'); INSERT INTO envelopes(id,sender,recipient,class,item_hash,created_at) VALUES(7,'operator','/root','user','legacy-item',19); INSERT INTO embedded_inputs VALUES('/root','legacy-operation',7,'legacy-item');").unwrap();
+        crate::store::schema::initialize(&mut c).unwrap();
+        let row: (String, String, String, i64) = c
+            .query_row(
+                "SELECT run_id,incarnation,operation_id,envelope_id FROM embedded_inputs",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "legacy-run".into(),
+                "legacy-incarnation".into(),
+                "legacy-operation".into(),
+                7
+            )
+        );
+        assert_eq!(
+            c.query_row("SELECT COUNT(*) FROM embedded_commands", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            c.query_row("SELECT created_at FROM envelopes WHERE id=7", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            19
+        );
+    }
 
     #[test]
     fn embedded_input_state_requires_exact_incarnation_and_distinguishes_missing() {

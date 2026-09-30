@@ -60,10 +60,11 @@ CREATE TABLE IF NOT EXISTS embedded_bindings (
  run_id TEXT NOT NULL, incarnation TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS embedded_inputs (
- agent_path TEXT NOT NULL REFERENCES embedded_bindings(agent_path),
- operation_id TEXT NOT NULL, envelope_id INTEGER NOT NULL REFERENCES envelopes(id),
+ run_id TEXT NOT NULL, agent_path TEXT NOT NULL REFERENCES embedded_bindings(agent_path),
+ incarnation TEXT NOT NULL, operation_id TEXT NOT NULL,
+ envelope_id INTEGER NOT NULL REFERENCES envelopes(id),
  item_hash TEXT NOT NULL REFERENCES items(hash),
- PRIMARY KEY(agent_path, operation_id)
+ PRIMARY KEY(run_id, agent_path, incarnation, operation_id)
 );
 
 CREATE TABLE IF NOT EXISTS embedded_commands (

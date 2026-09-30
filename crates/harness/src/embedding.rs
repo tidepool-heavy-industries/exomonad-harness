@@ -339,10 +339,14 @@ impl Conversation {
             return Err(StoreError::InvalidCommandState.into());
         }
         let admission = self.host.admit()?;
-        let receipt = self
+        let admitted = self
             .store
             .admit_embedded_command_input(self.identity(), operation, text)?;
         drop(admission);
+        let receipt = match admitted {
+            crate::store::CommandInputAdmission::New(receipt) => receipt,
+            crate::store::CommandInputAdmission::Retained(receipt) => return Ok(receipt),
+        };
         let envelope = match &receipt.outcome {
             crate::server::CommandReceiptOutcome::Admitted { envelope_id, .. } => envelope_id
                 .parse::<i64>()

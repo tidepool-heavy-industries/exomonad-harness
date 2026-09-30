@@ -1,7 +1,7 @@
 //! Durable SQLite event and content-addressed request store.
 mod embedded;
 mod embedded_commands;
-pub(crate) use embedded::EmbeddedInputState;
+pub(crate) use embedded::{CommandInputAdmission, EmbeddedInputState};
 pub use embedded_commands::{EmbeddedCommandRecord, EmbeddedCommandState};
 pub mod history;
 pub mod schema;
@@ -875,7 +875,6 @@ impl Store {
         )?;
         let mut conn = conn;
         schema::initialize(&mut conn)?;
-        embedded_commands::recover_claims(&conn)?;
         let store_id: String = conn.query_row(
             "SELECT state FROM session_state WHERE session_id='harness:store-id'",
             [],
