@@ -1,4 +1,5 @@
 import type { EmbeddedCommandRecord } from './protocol'
+import { isCommandState, isHostCommand, isOperationId } from './pending-commands'
 
 export class SessionApiError extends Error {
   constructor(
@@ -60,16 +61,25 @@ export async function logout(): Promise<void> {
   if (!response.ok) throw new SessionApiError(response.status, 'logout')
 }
 
+export class CommandStatusError extends Error {
+  constructor(readonly status: number) {
+    super(`Command status lookup failed (HTTP ${status}).`)
+  }
+}
+
 export async function getCommandStatus(operationId: string): Promise<EmbeddedCommandRecord | undefined> {
+  if (!isOperationId(operationId)) throw new Error('The operation ID is invalid.')
   const response = await fetch(`/api/commands/${encodeURIComponent(operationId)}`, {
     method: 'GET', credentials: 'same-origin', headers: { Accept: 'application/json' },
   })
   if (response.status === 404) return undefined
-  if (!response.ok) throw new Error(`Command status lookup failed (HTTP ${response.status}).`)
+  if (!response.ok) throw new CommandStatusError(response.status)
   const value: unknown = await response.json()
   if (typeof value !== 'object' || value === null || !('operationId' in value) ||
       !('command' in value) || !('state' in value) || !('envelopeId' in value) || !('receipt' in value) ||
-      typeof value.operationId !== 'string' || typeof value.state !== 'string') {
+      value.operationId !== operationId || !isHostCommand(value.command) || !isCommandState(value.state) ||
+      (value.envelopeId !== null && (!Number.isSafeInteger(value.envelopeId) || (value.envelopeId as number) < 0)) ||
+      (value.receipt !== null && (typeof value.receipt !== 'object' || value.receipt === null))) {
     throw new Error('The command status endpoint returned an invalid record.')
   }
   return value as EmbeddedCommandRecord

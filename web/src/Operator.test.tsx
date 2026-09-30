@@ -27,7 +27,9 @@ function response(status: number, body?: unknown): Response {
 const fetchMock = vi.fn<typeof fetch>()
 beforeEach(() => {
   sockets.length = 0
+  sessionStorage.clear()
   fetchMock.mockReset()
+  vi.restoreAllMocks()
   vi.stubGlobal('fetch', fetchMock)
   vi.stubGlobal('WebSocket', FakeSocket)
 })
@@ -150,7 +152,7 @@ describe('optional browser session', () => {
           seq: 1,
           hostRun: 'run-1',
           actors: [{
-            identity: submission.command.target, parent: null, kind: 'workflow', lifecycle: 'waiting',
+            identity: { ...submission.command.target, incarnation: 'replacement' }, parent: null, kind: 'workflow', lifecycle: 'waiting',
             modelConversation: null, activeRound: 'round-1',
           }],
           conversations: [], requests: [], jobs: [], envelopes: [],
@@ -189,4 +191,66 @@ describe('optional browser session', () => {
     expect(screen.queryByRole('region', { name: 'Standalone async command scenario' })).not.toBeInTheDocument()
     expect(screen.queryByText('async start')).not.toBeInTheDocument()
   })
+})
+
+it('expires authentication on status refusal while preserving the operation and never sending it', async () => {
+  const submission = { operation_id: '11111111-1111-4111-8111-111111111111', command: { action: 'retire' as const, target: { run: 'run-1', actor: '/root', incarnation: 'old' } } }
+  writePendingCommands(retainCommand([], 'run-1', submission))
+  fetchMock.mockResolvedValueOnce(response(200, { authenticated: true })).mockResolvedValueOnce(response(401))
+  render(<Operator />)
+  await waitFor(() => expect(sockets).toHaveLength(1))
+  const socket = sockets[0]!
+  socket.readyState = FakeSocket.OPEN
+  socket.listeners.get('message')?.forEach((listener) => listener(new MessageEvent('message', { data: JSON.stringify({ type: 'snapshot', snapshot: { seq: 1, hostRun: 'run-1', conversations: [], requests: [], jobs: [], envelopes: [] } }) })))
+  expect(await screen.findByRole('heading', { name: 'Operator sign in' })).toBeInTheDocument()
+  expect(screen.getByRole('alert')).toHaveTextContent('HTTP 401')
+  expect(socket.send).not.toHaveBeenCalled()
+  expect(JSON.parse(sessionStorage.getItem('harness.embeddedCommands.v1')!)[0].submission).toEqual(submission)
+})
+
+it('keeps authentication when a host operation receives a typed refusal', async () => {
+  fetchMock.mockResolvedValueOnce(response(200, { authenticated: true }))
+  render(<Operator />)
+  await waitFor(() => expect(sockets).toHaveLength(1))
+  const socket = sockets[0]!
+  socket.listeners.get('message')?.forEach((listener) => listener(new MessageEvent('message', { data: JSON.stringify({ type: 'command.refused', code: 'conflict', reason: 'Operation contents conflict.' }) })))
+  expect(await screen.findByRole('alert')).toHaveTextContent('Operation contents conflict.')
+  expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument()
+  expect(screen.queryByRole('heading', { name: 'Operator sign in' })).not.toBeInTheDocument()
+})
+
+it('ignores a stale status response after sign out without changing retained input', async () => {
+  const submission = { operation_id: '11111111-1111-4111-8111-111111111111', command: { action: 'input' as const, target: { run: 'run-1', actor: '/root', incarnation: 'old' }, text: '  exact λ payload  ' } }
+  writePendingCommands(retainCommand([], 'run-1', submission))
+  let finishStatus!: (value: Response) => void
+  const pendingStatus = new Promise<Response>((resolve) => { finishStatus = resolve })
+  fetchMock.mockResolvedValueOnce(response(200, { authenticated: true })).mockImplementationOnce(() => pendingStatus).mockResolvedValueOnce(response(204))
+  render(<Operator />)
+  await waitFor(() => expect(sockets).toHaveLength(1))
+  const socket = sockets[0]!
+  socket.listeners.get('message')?.forEach((listener) => listener(new MessageEvent('message', { data: JSON.stringify({ type: 'snapshot', snapshot: { seq: 1, hostRun: 'run-1', conversations: [], requests: [], jobs: [], envelopes: [] } }) })))
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+  fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
+  expect(await screen.findByRole('heading', { name: 'Operator sign in' })).toBeInTheDocument()
+  finishStatus(response(401))
+  await pendingStatus
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  expect(socket.send).not.toHaveBeenCalled()
+  expect(JSON.parse(sessionStorage.getItem('harness.embeddedCommands.v1')!)[0].submission).toEqual(submission)
+})
+
+it('retains before sending and leaves host effects untouched when tab storage fails', async () => {
+  fetchMock.mockResolvedValueOnce(response(200, { authenticated: true }))
+  render(<Operator />)
+  await waitFor(() => expect(sockets).toHaveLength(1))
+  const socket = sockets[0]!
+  socket.readyState = FakeSocket.OPEN
+  socket.listeners.get('message')?.forEach((listener) => listener(new MessageEvent('message', { data: JSON.stringify({ type: 'snapshot', snapshot: { seq: 1, hostRun: 'run-1', actors: [{ identity: { run: 'run-1', actor: '/root', incarnation: 'one' }, parent: null, kind: 'model', lifecycle: 'waiting', modelConversation: '/root' }], conversations: [], requests: [], jobs: [], envelopes: [] } }) })))
+  fireEvent.click(await screen.findByRole('button', { name: 'Host' }))
+  fireEvent.change(screen.getByLabelText('Target actor'), { target: { value: '["run-1","/root","one"]' } })
+  fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: '  λ preserved  ' } })
+  vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('storage unavailable') })
+  fireEvent.click(screen.getByRole('button', { name: 'Send input' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('could not retain the operation update')
+  expect(socket.send).not.toHaveBeenCalled()
 })

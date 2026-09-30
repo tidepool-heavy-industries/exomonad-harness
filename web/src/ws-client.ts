@@ -17,6 +17,7 @@ export function connectHarness(
   receive: (state: NormalizedState) => void,
   error: (message: string) => void,
   accepted: (commandId: string) => void = () => undefined,
+  refused: (message: string) => void = error,
 ): (command: string | HostCommandSubmission) => void {
   let current: NormalizedState | undefined
   socket.addEventListener('message', (message: MessageEvent<string>) => {
@@ -44,7 +45,8 @@ export function connectHarness(
       } else if (frame.type === 'command.accepted') {
         if (typeof frame.command_id === 'string' && frame.command_id.length > 0) accepted(frame.command_id)
         else error('Invalid command acceptance frame from server.')
-      } else error(frame.reason)
+      } else if (frame.type === 'command.refused') refused(frame.reason)
+      else error(frame.reason)
     } catch {
       error('Invalid JSON event from server.')
     }

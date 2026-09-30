@@ -3,7 +3,7 @@ import App from './App'
 import { toViewModel } from './integration'
 import { normalizeSnapshot, type HostCommand, type HostCommandSubmission, type NormalizedState, type Snapshot } from './protocol'
 import { applyCommandStatus, allocateOperationId, readPendingCommands, retainCommand, writePendingCommands, type BrowserCommandRecord } from './pending-commands'
-import { getCommandStatus, getSessionStatus, login, logout } from './session-api'
+import { CommandStatusError, getCommandStatus, getSessionStatus, login, logout } from './session-api'
 import { connectHarness } from './ws-client'
 
 const emptySnapshot: Snapshot = {
@@ -30,7 +30,7 @@ export function Operator() {
     try {
       writePendingCommands(records)
     } catch {
-      setFailure('This browser could not retain the operation in this tab. The command was not sent.')
+      setFailure('This browser could not retain the operation update in this tab.')
       return false
     }
     pendingRef.current = records
@@ -83,6 +83,7 @@ export function Operator() {
         if (!active) return
         setAcceptedCommandIds((current) => current.includes(commandId) ? current : [...current, commandId])
       },
+      (message) => { if (active) setFailure(message) },
     )
     setSendCommand(() => send)
     socket.addEventListener('close', () => {
@@ -113,8 +114,14 @@ export function Operator() {
               ? { ...item, state: 'unconfirmed' as const }
               : item)
           updatePending(next)
-        } catch {
-          // Keep the retained operation available for an explicit same-ID retry.
+        } catch (error) {
+          if (!active) return
+          setFailure(error instanceof Error ? error.message : 'Command status is unavailable.')
+          if (error instanceof CommandStatusError && (error.status === 401 || error.status === 403)) {
+            setAuthenticated(false)
+            return
+          }
+          // Keep the exact operation for deliberate retry; lookup never sends.
         }
       }
     }
@@ -126,23 +133,25 @@ export function Operator() {
     if (typeof command === 'string') { sendCommand?.(command); return }
     const run = state.hostRun
     if (!run) { setFailure('The authoritative host run is not available.'); return }
-    const submission: HostCommandSubmission = { operation_id: allocateOperationId(), command }
-    // Commit the exact command and ID before sending, so transport uncertainty
-    // can be reconciled after reload without inventing a second operation.
-    if (!updatePending(retainCommand(pendingRef.current, run, submission))) return
-    sendCommand?.(submission)
+    try {
+      const submission: HostCommandSubmission = { operation_id: allocateOperationId(), command }
+      // Retain the exact ID and contents before sending any host command.
+      if (!updatePending(retainCommand(pendingRef.current, run, submission))) return
+      sendCommand?.(submission)
+    } catch (error) { setFailure(error instanceof Error ? error.message : 'The operation could not be retained.') }
   }
 
   const retryHostCommand = (submission: HostCommandSubmission) => {
-    const record = pendingRef.current.find((item) => item.submission.operation_id === submission.operation_id)
-    if (!record || record.hostRun !== state.hostRun) {
+    const run = state.hostRun
+    const record = pendingRef.current.find((item) => item.hostRun === run && item.submission.operation_id === submission.operation_id)
+    if (!record || record.submission.command.target.run !== run) {
       setFailure('This retained operation belongs to a different host run and cannot be retried here.')
       return
     }
-    if (!updatePending(pendingRef.current.map((item) => item.submission.operation_id === submission.operation_id
-      ? { ...item, state: 'dispatching' }
-      : item))) return
-    sendCommand?.(submission)
+    // Retry the retained payload, including its original incarnation and round.
+    // Presentation parameters cannot substitute a target or edit the input.
+    if (!updatePending(pendingRef.current)) return
+    sendCommand?.(record.submission)
   }
 
   const submitLogin = async (event: FormEvent<HTMLFormElement>) => {
