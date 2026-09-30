@@ -1,5 +1,6 @@
 //! Durable SQLite event and content-addressed request store.
 mod embedded;
+pub(crate) use embedded::EmbeddedInputState;
 pub mod history;
 pub mod schema;
 mod schema_migration;

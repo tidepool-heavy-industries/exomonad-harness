@@ -1,6 +1,12 @@
 use super::*;
 use crate::embedding::{EmbeddedError, HostIdentity};
 
+pub(crate) enum EmbeddedInputState {
+    Missing,
+    Admitted,
+    Included(crate::model::RequestId),
+}
+
 fn matches_binding(
     c: &Connection,
     identity: &HostIdentity,
@@ -15,6 +21,44 @@ fn matches_binding(
 }
 
 impl Store {
+    pub(crate) fn embedded_input_state(
+        &self,
+        identity: &HostIdentity,
+        operation_id: &str,
+    ) -> std::result::Result<EmbeddedInputState, EmbeddedError> {
+        let connection = self.lock();
+        let binding: Option<(String, String, Option<i64>, Option<String>)> = connection
+            .query_row(
+                "SELECT b.run_id,b.incarnation,e.id,e.delivered_request \
+                 FROM embedded_bindings b \
+                 LEFT JOIN embedded_inputs ei \
+                   ON ei.agent_path=b.agent_path AND ei.operation_id=?2 \
+                 LEFT JOIN envelopes e \
+                   ON e.id=ei.envelope_id AND e.recipient=b.agent_path \
+                 WHERE b.agent_path=?1",
+                params![identity.actor.0, operation_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((run, incarnation, envelope, delivered_request)) = binding else {
+            return Err(EmbeddedError::Binding(
+                "input target is not bound to this host".into(),
+            ));
+        };
+        if run != identity.run || incarnation != identity.incarnation {
+            return Err(EmbeddedError::Binding(
+                "input target is not bound to this host".into(),
+            ));
+        }
+        match envelope {
+            None => Ok(EmbeddedInputState::Missing),
+            Some(_) => Ok(match delivered_request {
+                None => EmbeddedInputState::Admitted,
+                Some(request) => EmbeddedInputState::Included(crate::model::RequestId(request)),
+            }),
+        }
+    }
+
     pub(crate) fn bind_embedded_actor(
         &self,
         identity: &HostIdentity,
@@ -94,5 +138,51 @@ impl Store {
         tx.execute("INSERT INTO embedded_inputs(agent_path,operation_id,envelope_id,item_hash) VALUES (?1,?2,?3,?4)", params![identity.actor.0,operation_id,envelope,hash.0])?;
         tx.commit()?;
         Ok(envelope)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{item::Item, model::AgentPath};
+    use serde_json::json;
+
+    #[test]
+    fn embedded_input_state_requires_exact_incarnation_and_distinguishes_missing() {
+        let store = Store::memory().unwrap();
+        let identity = HostIdentity {
+            run: "run".into(),
+            actor: AgentPath("/root/worker".into()),
+            incarnation: "first".into(),
+        };
+        store.bind_embedded_actor(&identity, None).unwrap();
+        assert!(matches!(
+            store.embedded_input_state(&identity, "absent").unwrap(),
+            EmbeddedInputState::Missing
+        ));
+
+        store
+            .admit_embedded_input(
+                &identity,
+                "operation-1",
+                "operator",
+                &Item(json!({"type":"message","role":"user","content":"hello"})),
+            )
+            .unwrap();
+        assert!(matches!(
+            store
+                .embedded_input_state(&identity, "operation-1")
+                .unwrap(),
+            EmbeddedInputState::Admitted
+        ));
+
+        let replacement = HostIdentity {
+            incarnation: "replacement".into(),
+            ..identity.clone()
+        };
+        assert!(matches!(
+            store.embedded_input_state(&replacement, "operation-1"),
+            Err(EmbeddedError::Binding(_))
+        ));
     }
 }
