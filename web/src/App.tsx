@@ -258,7 +258,7 @@ function PendingCommands({ commands, onRetry }: { commands: NonNullable<AppProps
   if (commands.length === 0) return null;
   return <section aria-labelledby="pending-commands-heading">
     <h2 id="pending-commands-heading">Retained browser operations</h2>
-    {commands.map(({ submission, state }) => <article className="row" key={submission.operation_id}>
+    {commands.map(({ submission, state }) => <article className="row" key={submission.operation_id} data-operation-id={submission.operation_id}>
       <span>{submission.command.action}</span>
       <span className="state" data-state={state}>{state}</span>
       <span className="meta mono">{submission.operation_id}</span>
