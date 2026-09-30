@@ -25,9 +25,19 @@ export interface HostActorIdentity {
   readonly incarnation: string;
 }
 
+export type ClientOperationId = string;
+export type EmbeddedRoundId = string;
+
+/** Allocate once for an explicit operation; retain across uncertain transport. */
+export interface HostCommandSubmission {
+  readonly operation_id: ClientOperationId;
+  readonly command: HostCommand;
+}
+
 export type HostCommand =
   | { readonly action: "input"; readonly target: HostActorIdentity; readonly text: string }
-  | { readonly action: "interrupt" | "retire"; readonly target: HostActorIdentity };
+  | { readonly action: "interrupt"; readonly target: HostActorIdentity; readonly expected_round: EmbeddedRoundId }
+  | { readonly action: "retire"; readonly target: HostActorIdentity };
 
 export interface HostActorProjection {
   readonly identity: HostActorIdentity;
@@ -35,9 +45,19 @@ export interface HostActorProjection {
   readonly kind: "model" | "workflow";
   readonly lifecycle: "running" | "waiting" | "retiring" | "retired" | "lost";
   readonly modelConversation: EntityId | null;
+  readonly activeRound?: EmbeddedRoundId;
+}
+
+export interface EmbeddedCommandRecord {
+  readonly operationId: ClientOperationId;
+  readonly command: HostCommand;
+  readonly state: "queued" | "dispatching" | "input_admitted" | "control_requested" | "refused" | "unconfirmed";
+  readonly envelopeId: number | null;
+  readonly receipt: CommandReceipt | null;
 }
 
 export type CommandReceipt =
+  | { readonly commandId: string; readonly outcome: "unconfirmed"; readonly target: HostActorIdentity; readonly reason: string }
   | {
       readonly commandId: string;
       readonly target?: HostActorIdentity;

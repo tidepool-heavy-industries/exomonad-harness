@@ -13,6 +13,7 @@ pub use ws_protocol::{
     WsEvent, WsEventPayload, WsServerFrame,
 };
 
+pub use crate::embedding::{ClientOperationId, EmbeddedRoundId};
 use crate::store::Store;
 use axum::extract::ws::{Message, WebSocket};
 use axum::{
@@ -45,8 +46,13 @@ const COMMAND_RECEIPT_CAPACITY: usize = 128;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientCommand {
-    Submit { command: String },
-    Host { command: HostCommand },
+    Submit {
+        command: String,
+    },
+    Host {
+        operation_id: ClientOperationId,
+        command: HostCommand,
+    },
 }
 
 /// Exact host address supplied by the authenticated operator. The host still
@@ -60,10 +66,103 @@ pub enum HostCommand {
     },
     Interrupt {
         target: HostActorIdentity,
+        expected_round: EmbeddedRoundId,
     },
     Retire {
         target: HostActorIdentity,
     },
+}
+
+impl HostCommand {
+    pub fn target(&self) -> &HostActorIdentity {
+        match self {
+            Self::Input { target, .. }
+            | Self::Interrupt { target, .. }
+            | Self::Retire { target } => target,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandRefusal {
+    InvalidCommand,
+    Conflict,
+    Unavailable,
+    WrongRun,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct RefusedCommand {
+    code: CommandRefusal,
+    reason: String,
+}
+
+fn refusal(code: CommandRefusal, reason: impl Into<String>) -> Response {
+    let status = match code {
+        CommandRefusal::InvalidCommand => StatusCode::BAD_REQUEST,
+        CommandRefusal::Conflict => StatusCode::CONFLICT,
+        CommandRefusal::WrongRun => StatusCode::FORBIDDEN,
+        CommandRefusal::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    (
+        status,
+        Json(RefusedCommand {
+            code,
+            reason: reason.into(),
+        }),
+    )
+        .into_response()
+}
+
+fn retain_host_command(
+    state: &AppState,
+    operation: ClientOperationId,
+    command: &HostCommand,
+) -> Result<(), (CommandRefusal, String)> {
+    let run = state
+        .snapshot
+        .read()
+        .map_err(|_| {
+            (
+                CommandRefusal::Unavailable,
+                "host projection unavailable".into(),
+            )
+        })?
+        .host_run
+        .clone();
+    if run.as_deref() != Some(command.target().run.as_str()) {
+        return Err((
+            CommandRefusal::WrongRun,
+            "command target is not in this embedded run".into(),
+        ));
+    }
+    let store = state.history_store.as_ref().ok_or((
+        CommandRefusal::Unavailable,
+        "command Store unavailable".into(),
+    ))?;
+    store
+        .enqueue_embedded_command(operation, command)
+        .map_err(|e| {
+            (
+                if matches!(e, crate::store::StoreError::ConflictingCommand) {
+                    CommandRefusal::Conflict
+                } else {
+                    CommandRefusal::Unavailable
+                },
+                e.to_string(),
+            )
+        })?;
+    // Notification only: the existing owner also drains queued Store rows at
+    // startup and on its periodic wake, closing the commit/enqueue crash gap.
+    let _ = state.commands.try_send(QueuedCommand {
+        command_id: operation.to_string(),
+        command: ClientCommand::Host {
+            operation_id: operation,
+            command: command.clone(),
+        },
+    });
+    Ok(())
 }
 
 /// Stable acknowledgement for an accepted command.
@@ -477,6 +576,7 @@ pub fn server_with_config(
     };
     let protected_api = Router::new()
         .route("/commands", post(submit_command))
+        .route("/commands/{operation_id}", get(command_status))
         .route("/events", get(event_stream))
         .route("/history/{request_id}", get(history::request_history))
         .route("/ws", get(websocket))
@@ -572,7 +672,7 @@ async fn websocket(
     // Subscribe before upgrading, so events published during the handshake are
     // buffered and delivered after the initial snapshot.
     let receiver = state.events.subscribe();
-    Ok(upgrade.on_upgrade(move |socket| websocket_session(socket, state, receiver)))
+    Ok(upgrade.on_upgrade(move |socket| websocket_session(socket, state, receiver, headers)))
 }
 
 fn same_origin(headers: &HeaderMap, expected_scheme: &str) -> bool {
@@ -610,6 +710,7 @@ async fn websocket_session(
     mut socket: WebSocket,
     state: AppState,
     mut receiver: broadcast::Receiver<ServerEvent>,
+    headers: HeaderMap,
 ) {
     let mut last_sent = send_snapshot(&mut socket, &state).await.unwrap_or(0);
     loop {
@@ -617,7 +718,15 @@ async fn websocket_session(
             incoming = socket.recv() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        let Ok(frame) = serde_json::from_str::<WsClientFrame>(&text) else { continue };
+                        if !bearer_authorized(&headers, &state.auth) && valid_session_from_headers(&headers, &state.auth).is_none() { break; }
+                        let frame = match serde_json::from_str::<WsClientFrame>(&text) {
+                            Ok(frame) => frame,
+                            Err(_) => {
+                                let reply = WsServerFrame::CommandRefused { operation_id: None, code: CommandRefusal::InvalidCommand, reason: "Malformed command: host operation UUID and interrupt round UUID are required.".into() };
+                                if send_ws_frame(&mut socket,&reply).await.is_err() { break; }
+                                continue;
+                            }
+                        };
                         match frame {
                             WsClientFrame::SnapshotRequest => {
                                 last_sent = send_snapshot(&mut socket, &state).await.unwrap_or(last_sent);
@@ -635,17 +744,12 @@ async fn websocket_session(
                                     break;
                                 }
                             }
-                            WsClientFrame::HostCommand { command } => {
-                                let command_id = uuid::Uuid::new_v4().to_string();
-                                if state.commands.send(QueuedCommand {
-                                    command_id: command_id.clone(),
-                                    command: ClientCommand::Host { command },
-                                }).await.is_err() {
-                                    break;
-                                }
-                                if send_ws_frame(&mut socket, &WsServerFrame::CommandAccepted { command_id }).await.is_err() {
-                                    break;
-                                }
+                            WsClientFrame::HostCommand { operation_id, command } => {
+                                let reply = match retain_host_command(&state, operation_id, &command) {
+                                    Ok(()) => WsServerFrame::CommandAccepted { command_id: operation_id.to_string() },
+                                    Err((code,reason)) => WsServerFrame::CommandRefused { operation_id: Some(operation_id), code, reason },
+                                };
+                                if send_ws_frame(&mut socket, &reply).await.is_err() { break; }
                             }
                         }
                     }
@@ -698,18 +802,66 @@ async fn send_ws_frame(socket: &mut WebSocket, frame: &WsServerFrame) -> Result<
 
 async fn submit_command(
     State(state): State<AppState>,
-    Json(command): Json<ClientCommand>,
-) -> Result<(StatusCode, Json<CommandAccepted>), StatusCode> {
-    let command_id = uuid::Uuid::new_v4().to_string();
-    state
-        .commands
-        .send(QueuedCommand {
-            command_id: command_id.clone(),
+    command: Result<Json<ClientCommand>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let command = match command {
+        Ok(Json(command)) => command,
+        Err(_) => {
+            return refusal(
+                CommandRefusal::InvalidCommand,
+                "Malformed command: host operation UUID and interrupt round UUID are required.",
+            );
+        }
+    };
+    let command_id = match &command {
+        ClientCommand::Host {
+            operation_id,
             command,
-        })
-        .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    Ok((StatusCode::ACCEPTED, Json(CommandAccepted { command_id })))
+        } => {
+            if let Err((code, reason)) = retain_host_command(&state, *operation_id, command) {
+                return refusal(code, reason);
+            }
+            operation_id.to_string()
+        }
+        ClientCommand::Submit { .. } => {
+            let command_id = uuid::Uuid::new_v4().to_string();
+            if state
+                .commands
+                .send(QueuedCommand {
+                    command_id: command_id.clone(),
+                    command,
+                })
+                .await
+                .is_err()
+            {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+            command_id
+        }
+    };
+    (StatusCode::ACCEPTED, Json(CommandAccepted { command_id })).into_response()
+}
+
+async fn command_status(
+    State(state): State<AppState>,
+    axum::extract::Path(raw): axum::extract::Path<String>,
+) -> Response {
+    let operation = match uuid::Uuid::parse_str(&raw) {
+        Ok(id) => ClientOperationId(id),
+        Err(_) => return refusal(CommandRefusal::InvalidCommand, "invalid operation UUID"),
+    };
+    let Some(store) = &state.history_store else {
+        return refusal(CommandRefusal::Unavailable, "command Store unavailable");
+    };
+    let run = state.snapshot.read().ok().and_then(|s| s.host_run.clone());
+    let Some(run) = run else {
+        return refusal(CommandRefusal::Unavailable, "embedded run unavailable");
+    };
+    match store.embedded_command(&run, operation) {
+        Ok(Some(record)) => Json(record).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => refusal(CommandRefusal::Unavailable, "command Store read failed"),
+    }
 }
 
 #[derive(Deserialize)]
@@ -924,6 +1076,7 @@ mod tests {
             kind: HostActorKind::Workflow,
             lifecycle: HostActorLifecycle::Waiting,
             model_conversation: None,
+            active_round: None,
         }
     }
 
@@ -1548,7 +1701,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn websocket_handshake_snapshot_resync_and_command() {
-        let (app, control, mut commands) = authorized_server(PathBuf::from("."));
+        let (app, control, mut commands) = server_with_config(
+            ServerConfig::new(PathBuf::from("."))
+                .with_history_store(Arc::new(Store::memory().unwrap()))
+                .with_bearer_secret(BearerSecret::new(TEST_SECRET).unwrap()),
+        );
         control.set_snapshot(Snapshot {
             seq: 4,
             conversations: vec![json!({"id":"root"})],
@@ -1602,6 +1759,9 @@ mod tests {
         );
         assert_eq!(accepted["command_id"], queued.command_id);
 
+        let mut snapshot = control.snapshot.read().unwrap().clone();
+        snapshot.host_run = Some("run-7".into());
+        control.set_snapshot(snapshot);
         let target = HostActorIdentity {
             run: "run-7".into(),
             actor: crate::model::AgentPath("/root/child".into()),
@@ -1614,6 +1774,7 @@ mod tests {
         write_ws_text(
             &mut socket,
             &serde_json::to_string(&WsClientFrame::HostCommand {
+                operation_id: ClientOperationId(uuid::Uuid::new_v4()),
                 command: input.clone(),
             })
             .unwrap(),
@@ -1621,7 +1782,7 @@ mod tests {
         let accepted = read_ws_text(&mut socket);
         let queued = commands.recv().await.unwrap();
         assert_eq!(accepted["command_id"], queued.command_id);
-        assert_eq!(queued.command, ClientCommand::Host { command: input });
+        assert!(matches!(queued.command, ClientCommand::Host { command, .. } if command == input));
 
         control.publish("job.started", json!({"id":"job-1"}));
         assert_eq!(
@@ -1663,5 +1824,170 @@ mod tests {
             "https://other.test".parse().unwrap(),
         );
         assert!(!same_origin(&headers, "https"));
+    }
+}
+
+#[cfg(test)]
+mod durable_command_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn host_http_lost_ack_lookup_conflict_and_receipt_eviction() {
+        let store = Arc::new(Store::memory().unwrap());
+        let secret = "retained-command-tests-only-secret-value";
+        let (router, control, _commands) = server_with_config(
+            ServerConfig::new(PathBuf::from("."))
+                .with_history_store(store.clone())
+                .with_bearer_secret(BearerSecret::new(secret).unwrap()),
+        );
+        control.set_snapshot(Snapshot {
+            host_run: Some("run".into()),
+            ..Snapshot::default()
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let endpoint = format!("http://{address}/api/commands");
+        let target = HostActorIdentity {
+            run: "run".into(),
+            actor: crate::model::AgentPath("/root".into()),
+            incarnation: "first".into(),
+        };
+        let operation = ClientOperationId(uuid::Uuid::new_v4());
+        let command = ClientCommand::Host {
+            operation_id: operation,
+            command: HostCommand::Input {
+                target: target.clone(),
+                text: "héllo".into(),
+            },
+        };
+        let unauthorized = client.post(&endpoint).json(&command).send().await.unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert!(store.embedded_command("run", operation).unwrap().is_none());
+        // The first acceptance is deliberately discarded, modeling lost ACK.
+        assert_eq!(
+            client
+                .post(&endpoint)
+                .bearer_auth(secret)
+                .json(&command)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        let duplicate: CommandAccepted = client
+            .post(&endpoint)
+            .bearer_auth(secret)
+            .json(&command)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(duplicate.command_id, operation.to_string());
+        assert_eq!(store.queued_embedded_commands("run").unwrap().len(), 1);
+        let mut different = serde_json::to_value(&command).unwrap();
+        different["command"]["text"] = json!("changed");
+        let conflict = client
+            .post(&endpoint)
+            .bearer_auth(secret)
+            .json(&different)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            conflict.json::<serde_json::Value>().await.unwrap()["code"],
+            "conflict"
+        );
+        let lookup = format!("{endpoint}/{operation}");
+        assert_eq!(
+            client.get(&lookup).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let record: crate::store::EmbeddedCommandRecord = client
+            .get(&lookup)
+            .bearer_auth(secret)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            record.command,
+            match command.clone() {
+                ClientCommand::Host { command, .. } => command,
+                _ => unreachable!(),
+            }
+        );
+        for raw in [
+            json!({"type":"host","command":{"action":"input","target":target,"text":"missing ID"}}),
+            json!({"type":"host","operation_id":operation,"command":{"action":"interrupt","target":target}}),
+        ] {
+            let response = client
+                .post(&endpoint)
+                .bearer_auth(secret)
+                .json(&raw)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                response.json::<serde_json::Value>().await.unwrap()["code"],
+                "invalid_command"
+            );
+        }
+        store
+            .claim_embedded_command("run", operation)
+            .unwrap()
+            .unwrap();
+        let receipt = store
+            .settle_embedded_command(
+                "run",
+                operation,
+                CommandReceiptOutcome::Refused {
+                    target: Some(target.clone()),
+                    reason: "retired".into(),
+                },
+            )
+            .unwrap();
+        control.publish_command_receipt(receipt.clone());
+        for _ in 0..129 {
+            control.publish_command_receipt(CommandReceipt {
+                command_id: uuid::Uuid::new_v4().to_string(),
+                outcome: CommandReceiptOutcome::Refused {
+                    target: Some(target.clone()),
+                    reason: "another operation".into(),
+                },
+            });
+        }
+        assert_eq!(control.snapshot.read().unwrap().command_receipts.len(), 128);
+        assert!(
+            !control
+                .snapshot
+                .read()
+                .unwrap()
+                .command_receipts
+                .iter()
+                .any(|r| r.command_id == operation.to_string())
+        );
+        let record: crate::store::EmbeddedCommandRecord = client
+            .get(&lookup)
+            .bearer_auth(secret)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(record.receipt, Some(receipt));
+        server.abort();
     }
 }

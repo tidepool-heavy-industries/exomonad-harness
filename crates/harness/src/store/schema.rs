@@ -1,4 +1,4 @@
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 pub const SQL: &str = include_str!("schema.sql");
 
 pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {

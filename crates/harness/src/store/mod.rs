@@ -1,6 +1,8 @@
 //! Durable SQLite event and content-addressed request store.
 mod embedded;
+mod embedded_commands;
 pub(crate) use embedded::EmbeddedInputState;
+pub use embedded_commands::{EmbeddedCommandRecord, EmbeddedCommandState};
 pub mod history;
 pub mod schema;
 mod schema_migration;
@@ -25,6 +27,10 @@ pub const SQL: &str = schema::SQL;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("operation ID already identifies a different host command")]
+    ConflictingCommand,
+    #[error("command does not have the required durable claim or outcome")]
+    InvalidCommandState,
     #[error("checkpoint child does not match its host binding")]
     InvalidEmbeddedBinding,
     #[error(transparent)]
@@ -869,6 +875,7 @@ impl Store {
         )?;
         let mut conn = conn;
         schema::initialize(&mut conn)?;
+        embedded_commands::recover_claims(&conn)?;
         let store_id: String = conn.query_row(
             "SELECT state FROM session_state WHERE session_id='harness:store-id'",
             [],

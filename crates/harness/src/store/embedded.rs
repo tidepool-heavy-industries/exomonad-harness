@@ -136,12 +136,23 @@ impl Store {
         }
         let mut connection = self.lock();
         let tx = connection.transaction()?;
-        if !matches_binding(&tx, identity)? {
+        let envelope = Self::admit_embedded_input_tx(&tx, identity, operation_id, sender, item)?;
+        tx.commit()?;
+        Ok(envelope)
+    }
+    pub(super) fn admit_embedded_input_tx(
+        tx: &Transaction<'_>,
+        identity: &HostIdentity,
+        operation_id: &str,
+        sender: &str,
+        item: &Item,
+    ) -> std::result::Result<i64, EmbeddedError> {
+        if !matches_binding(tx, identity)? {
             return Err(EmbeddedError::Binding(
                 "input target is not bound to this host".into(),
             ));
         }
-        let hash = Self::put_item_tx(&tx, item)?;
+        let hash = Self::put_item_tx(tx, item)?;
         let existing: Option<(i64,String,String)> = tx.query_row("SELECT ei.envelope_id,ei.item_hash,e.sender FROM embedded_inputs ei JOIN envelopes e ON e.id=ei.envelope_id WHERE ei.agent_path=?1 AND ei.operation_id=?2", params![identity.actor.0,operation_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         if let Some((id, previous_hash, previous_sender)) = existing {
             if hash.0 != previous_hash || sender != previous_sender {
@@ -152,8 +163,59 @@ impl Store {
         tx.execute("INSERT INTO envelopes(sender,recipient,class,item_hash,delivered_request,created_at) VALUES (?1,?2,'user',?3,NULL,?4)", params![sender,identity.actor.0,hash.0,utc_millis()])?;
         let envelope = tx.last_insert_rowid();
         tx.execute("INSERT INTO embedded_inputs(agent_path,operation_id,envelope_id,item_hash) VALUES (?1,?2,?3,?4)", params![identity.actor.0,operation_id,envelope,hash.0])?;
-        tx.commit()?;
         Ok(envelope)
+    }
+
+    pub(crate) fn admit_embedded_command_input(
+        &self,
+        identity: &HostIdentity,
+        operation: crate::embedding::ClientOperationId,
+        text: &str,
+    ) -> std::result::Result<crate::server::CommandReceipt, EmbeddedError> {
+        use crate::server::{CommandReceipt, CommandReceiptOutcome, HostCommand};
+        let mut c = self.lock();
+        let tx = c.transaction()?;
+        let expected = HostCommand::Input {
+            target: identity.clone(),
+            text: text.into(),
+        };
+        let row: Option<(String,String,Option<String>)> = tx.query_row(
+            "SELECT command,state,outcome FROM embedded_commands WHERE run_id=?1 AND operation_id=?2",
+            params![identity.run,operation.to_string()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        let Some((command, state, outcome)) = row else {
+            return Err(StoreError::InvalidCommandState.into());
+        };
+        if serde_json::from_str::<HostCommand>(&command)? != expected {
+            return Err(StoreError::ConflictingCommand.into());
+        }
+        if state == "input_admitted" {
+            return Ok(serde_json::from_str(
+                &outcome.ok_or(StoreError::InvalidCommandState)?,
+            )?);
+        }
+        if state != "dispatching" {
+            return Err(StoreError::InvalidCommandState.into());
+        }
+        let item = Item(serde_json::json!({"type":"message","role":"user","content":text}));
+        let envelope = Self::admit_embedded_input_tx(
+            &tx,
+            identity,
+            &operation.to_string(),
+            "operator",
+            &item,
+        )?;
+        let receipt = CommandReceipt {
+            command_id: operation.to_string(),
+            outcome: CommandReceiptOutcome::Admitted {
+                target: Some(identity.clone()),
+                envelope_id: envelope.to_string(),
+                wake_error: None,
+            },
+        };
+        tx.execute("UPDATE embedded_commands SET state='input_admitted',envelope_id=?3,outcome=?4 WHERE run_id=?1 AND operation_id=?2 AND state='dispatching'",
+            params![identity.run,operation.to_string(),envelope,serde_json::to_string(&receipt)?])?;
+        tx.commit()?;
+        Ok(receipt)
     }
 }
 

@@ -11,6 +11,27 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::HashMap, sync::Arc};
 
+/// Opaque identity of one browser operation. Possession grants no host authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ClientOperationId(pub uuid::Uuid);
+
+/// Opaque identity of the exact host execution round targeted by an interrupt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EmbeddedRoundId(pub uuid::Uuid);
+
+impl std::fmt::Display for ClientOperationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::fmt::Display for EmbeddedRoundId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostIdentity {
     pub run: String,
@@ -49,21 +70,32 @@ pub trait AdmissionGuard: Send {}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostControl {
-    Interrupt,
+    Interrupt { expected_round: EmbeddedRoundId },
     Retire,
+}
+
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum HostControlError {
+    #[error("host control refused: {0}")]
+    Refused(String),
+    #[error("host control outcome unconfirmed: {0}")]
+    Unconfirmed(String),
 }
 
 /// Capability supplied by the embedding, never selected by model arguments.
 #[async_trait]
 pub trait HostActor: Send + Sync {
     fn identity(&self) -> &HostIdentity;
+    fn active_round(&self) -> Option<EmbeddedRoundId> {
+        None
+    }
     fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError>;
     fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError>;
     /// Wake after the input transaction commits. Failure leaves the envelope
     /// admitted and retryable by its original operation ID.
     async fn wake(&self, envelope_id: i64) -> Result<(), String>;
     /// A request to the host owner, not proof that retirement has completed.
-    async fn control(&self, control: HostControl) -> Result<Value, String>;
+    async fn control(&self, control: HostControl) -> Result<Value, HostControlError>;
     /// The owning conversation has durably retained this operation's real result.
     /// Retried acknowledgments must not repeat execution or lifecycle admission.
     async fn output_committed(&self, _operation: &crate::model::OperationId) -> Result<(), String> {
@@ -239,6 +271,9 @@ impl Conversation {
         })
         .with_plain_text_compaction(context_capacity))
     }
+    pub fn active_round(&self) -> Option<EmbeddedRoundId> {
+        self.host.active_round()
+    }
     pub fn identity(&self) -> &HostIdentity {
         self.host.identity()
     }
@@ -277,6 +312,53 @@ impl Conversation {
             wake_error,
         })
     }
+    /// Admit a previously claimed browser command atomically with its input
+    /// envelope. Exact admitted retries read Store without live admission/wake.
+    pub async fn command_input(
+        &self,
+        operation: ClientOperationId,
+        text: &str,
+    ) -> Result<crate::server::CommandReceipt, EmbeddedError> {
+        if let Some(record) = self
+            .store
+            .embedded_command(&self.identity().run, operation)?
+        {
+            let expected = crate::server::HostCommand::Input {
+                target: self.identity().clone(),
+                text: text.into(),
+            };
+            if record.command != expected {
+                return Err(StoreError::ConflictingCommand.into());
+            }
+            if record.state == crate::store::EmbeddedCommandState::InputAdmitted {
+                return record
+                    .receipt
+                    .ok_or_else(|| StoreError::InvalidCommandState.into());
+            }
+        }
+        let admission = self.host.admit()?;
+        let receipt = self
+            .store
+            .admit_embedded_command_input(self.identity(), operation, text)?;
+        drop(admission);
+        let envelope = match &receipt.outcome {
+            crate::server::CommandReceiptOutcome::Admitted { envelope_id, .. } => envelope_id
+                .parse::<i64>()
+                .map_err(|_| StoreError::InvalidCommandState)?,
+            _ => return Err(StoreError::InvalidCommandState.into()),
+        };
+        // Wake is a best-effort hint after the durable atomic commit. The host's
+        // existing loop also drains admitted inputs on recovery.
+        if let Err(error) = self.host.wake(envelope).await {
+            return Ok(self.store.record_embedded_command_wake_error(
+                &self.identity().run,
+                operation,
+                error,
+            )?);
+        }
+        Ok(receipt)
+    }
+
     pub fn input_observation(&self, envelope_id: i64) -> Result<InputObservation, EmbeddedError> {
         let envelope = self
             .store
@@ -299,11 +381,8 @@ impl Conversation {
         self.input_observer()
             .input_observation_by_operation(operation_id)
     }
-    pub async fn control(&self, control: HostControl) -> Result<Value, EmbeddedError> {
-        self.host
-            .control(control)
-            .await
-            .map_err(EmbeddedError::Host)
+    pub async fn control(&self, control: HostControl) -> Result<Value, HostControlError> {
+        self.host.control(control).await
     }
 }
 

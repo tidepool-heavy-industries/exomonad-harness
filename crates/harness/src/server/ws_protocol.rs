@@ -72,6 +72,8 @@ pub struct HostActorProjection {
     pub kind: HostActorKind,
     pub lifecycle: HostActorLifecycle,
     pub model_conversation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_round: Option<crate::embedding::EmbeddedRoundId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -108,6 +110,10 @@ pub enum CommandReceiptOutcome {
     ControlRequested {
         target: HostActorIdentity,
         control: CommandControl,
+    },
+    Unconfirmed {
+        target: HostActorIdentity,
+        reason: String,
     },
     Refused {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -152,6 +158,12 @@ pub struct WsEventPayload {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsServerFrame {
+    #[serde(rename = "command.refused")]
+    CommandRefused {
+        operation_id: Option<crate::embedding::ClientOperationId>,
+        code: super::CommandRefusal,
+        reason: String,
+    },
     Snapshot {
         snapshot: Snapshot,
     },
@@ -171,6 +183,7 @@ pub enum WsClientFrame {
         command: String,
     },
     HostCommand {
+        operation_id: crate::embedding::ClientOperationId,
         command: super::HostCommand,
     },
     #[serde(rename = "snapshot.request")]
@@ -308,6 +321,7 @@ mod tests {
             kind: HostActorKind::Workflow,
             lifecycle: HostActorLifecycle::Waiting,
             model_conversation: None,
+            active_round: None,
         };
         let frame = WsServerFrame::Snapshot {
             snapshot: Snapshot {
@@ -379,6 +393,62 @@ mod tests {
         assert_eq!(
             serde_json::to_value(requested).unwrap()["outcome"],
             "control_requested"
+        );
+    }
+}
+
+#[cfg(test)]
+mod host_wire_tests {
+    use super::*;
+    use crate::{
+        embedding::{ClientOperationId, EmbeddedRoundId, HostControl},
+        server::{ClientCommand, HostCommand},
+    };
+    use serde_json::json;
+    #[test]
+    fn host_wire_requires_operation_and_interrupt_round_and_preserves_both() {
+        let operation = ClientOperationId(uuid::Uuid::new_v4());
+        let round = EmbeddedRoundId(uuid::Uuid::new_v4());
+        let target = HostActorIdentity {
+            run: "run".into(),
+            actor: crate::model::AgentPath("/root".into()),
+            incarnation: "one".into(),
+        };
+        let command = HostCommand::Interrupt {
+            target,
+            expected_round: round,
+        };
+        let frame = WsClientFrame::HostCommand {
+            operation_id: operation,
+            command: command.clone(),
+        };
+        let mut value = serde_json::to_value(&frame).unwrap();
+        assert_eq!(value["operation_id"], operation.to_string());
+        assert_eq!(value["command"]["expected_round"], round.to_string());
+        assert_eq!(
+            serde_json::from_value::<WsClientFrame>(value.clone()).unwrap(),
+            frame
+        );
+        value.as_object_mut().unwrap().remove("operation_id");
+        assert!(serde_json::from_value::<WsClientFrame>(value).is_err());
+        let mut value = serde_json::to_value(ClientCommand::Host {
+            operation_id: operation,
+            command,
+        })
+        .unwrap();
+        value["command"]
+            .as_object_mut()
+            .unwrap()
+            .remove("expected_round");
+        assert!(serde_json::from_value::<ClientCommand>(value).is_err());
+        assert!(serde_json::from_value::<ClientOperationId>(json!("not-a-UUID")).is_err());
+        assert!(serde_json::from_value::<EmbeddedRoundId>(json!("not-a-UUID")).is_err());
+        assert_eq!(
+            serde_json::to_value(HostControl::Interrupt {
+                expected_round: round
+            })
+            .unwrap()["expected_round"],
+            round.to_string()
         );
     }
 }

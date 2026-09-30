@@ -2,8 +2,8 @@
 use async_trait::async_trait;
 use harness::{
     embedding::{
-        AdmissionGuard, Conversation, EmbeddedError, HostActor, HostControl, HostIdentity,
-        InputObservation, ToolSurface,
+        AdmissionGuard, Conversation, EmbeddedError, HostActor, HostControl, HostControlError,
+        HostIdentity, InputObservation, ToolSurface,
     },
     engine::{EngineConfig, ResponsesTransport},
     item::{Item, ToolKind},
@@ -60,7 +60,7 @@ impl HostActor for Host {
         }
         Ok(())
     }
-    async fn control(&self, _: HostControl) -> Result<Value, String> {
+    async fn control(&self, _: HostControl) -> Result<Value, HostControlError> {
         self.alive.store(false, Ordering::SeqCst);
         Ok(json!({"requested":true}))
     }
@@ -623,7 +623,7 @@ async fn unavailable_host_snapshot_fails_before_model_request() {
         async fn wake(&self, envelope_id: i64) -> Result<(), String> {
             self.0.wake(envelope_id).await
         }
-        async fn control(&self, control: HostControl) -> Result<Value, String> {
+        async fn control(&self, control: HostControl) -> Result<Value, HostControlError> {
             self.0.control(control).await
         }
     }
@@ -922,6 +922,7 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
                 kind: HostActorKind::Model,
                 lifecycle: HostActorLifecycle::Waiting,
                 model_conversation: Some("/root".into()),
+                active_round: None,
             },
             HostActorProjection {
                 identity: HostActorIdentity {
@@ -933,6 +934,7 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
                 kind: HostActorKind::Workflow,
                 lifecycle: HostActorLifecycle::Running,
                 model_conversation: None,
+                active_round: None,
             },
         ],
         conversations: vec![json!({"id":"/root","path":"/root","state":"idle"})],
@@ -1024,7 +1026,7 @@ async fn structured_host_calls_retain_progress_and_admitted_input_survives_faile
         async fn wake(&self, _: i64) -> Result<(), String> {
             Err("host wake queue temporarily closed".into())
         }
-        async fn control(&self, c: HostControl) -> Result<Value, String> {
+        async fn control(&self, c: HostControl) -> Result<Value, HostControlError> {
             self.0.control(c).await
         }
     }
@@ -1428,4 +1430,61 @@ async fn checkpoint_attachment_uses_host_admission_and_commits_binding_atomicall
             .fork_source["checkout"]["revision"],
         "abc"
     );
+}
+
+#[tokio::test]
+async fn browser_command_admission_retry_after_retirement_never_wakes_or_readmits() {
+    use harness::{embedding::ClientOperationId, server::HostCommand, store::EmbeddedCommandState};
+    let store = Arc::new(Store::memory().unwrap());
+    let host = host(store.clone(), Arc::new(Mutex::new(vec![])));
+    let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+    let observer = conversation.input_observer();
+    let operation: ClientOperationId =
+        serde_json::from_value(json!("71546150-7b90-41d6-b06e-34b62df86058")).unwrap();
+    let command = HostCommand::Input {
+        target: host.identity.clone(),
+        text: "λ durable retry".into(),
+    };
+    store.enqueue_embedded_command(operation, &command).unwrap();
+    store
+        .claim_embedded_command(&host.identity.run, operation)
+        .unwrap()
+        .unwrap();
+    let first = conversation
+        .command_input(operation, "λ durable retry")
+        .await
+        .unwrap();
+    assert_eq!(host.wakes.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store
+            .embedded_command(&host.identity.run, operation)
+            .unwrap()
+            .unwrap()
+            .state,
+        EmbeddedCommandState::InputAdmitted
+    );
+    conversation.control(HostControl::Retire).await.unwrap();
+    assert!(!host.alive.load(Ordering::SeqCst));
+    assert_eq!(
+        conversation
+            .command_input(operation, "λ durable retry")
+            .await
+            .unwrap(),
+        first
+    );
+    assert_eq!(host.wakes.load(Ordering::SeqCst), 1);
+    assert!(
+        conversation
+            .command_input(operation, "changed")
+            .await
+            .is_err()
+    );
+    drop(conversation);
+    assert_eq!(
+        observer
+            .input_observation_by_operation(&operation.to_string())
+            .unwrap(),
+        Some(InputObservation::Admitted)
+    );
+    assert_eq!(store.unread(&host.identity.actor.0).unwrap().len(), 1);
 }
