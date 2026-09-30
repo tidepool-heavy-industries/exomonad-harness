@@ -1,11 +1,15 @@
 //! Reusable, process-local host checkpoints of a durable conversation boundary.
 
+#[cfg(test)]
+#[path = "checkpoint/captured_tests.rs"]
+mod captured_tests;
+
 use crate::{
     item::{Item, ToolKind},
     model::{AgentPath, CallId, ConversationIdentity, OperationId, RequestId},
     store::{Agent, AgentState, Result, Store, StoreError, utc_millis},
 };
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc};
 
@@ -15,6 +19,63 @@ pub struct CheckpointClaim {
     pub operation: OperationId,
     pub request: RequestId,
     pub kind: ToolKind,
+}
+
+/// Which immutable conversation prefix this capability retains.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointCut {
+    /// Includes the boundary call and its original claim.
+    #[default]
+    Deferred,
+    /// Ends immediately before the exact pending boundary call.
+    BeforeCall,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct CheckpointMetadata {
+    version: u32,
+    cut: CheckpointCut,
+    operation: Option<OperationId>,
+    host: Value,
+}
+
+impl CheckpointMetadata {
+    pub(crate) fn legacy(host: Value) -> Self {
+        Self {
+            version: 1,
+            cut: CheckpointCut::Deferred,
+            operation: None,
+            host,
+        }
+    }
+
+    pub(crate) fn decode(raw: &str) -> Result<Self> {
+        let value: Self = serde_json::from_str(raw)?;
+        if value.version != 1
+            || (value.cut == CheckpointCut::BeforeCall && value.operation.is_none())
+        {
+            return Err(StoreError::InvalidCheckpointMetadata);
+        }
+        Ok(value)
+    }
+}
+
+/// Two capabilities captured atomically at one exact pending operation.
+/// Constructors remain with Store; neither cut grants actor admission.
+#[derive(Debug)]
+pub struct CheckpointCuts<T: ?Sized> {
+    deferred: Checkpoint<T>,
+    before_call: Checkpoint<T>,
+}
+
+impl<T: ?Sized> CheckpointCuts<T> {
+    pub fn deferred(&self) -> &Checkpoint<T> {
+        &self.deferred
+    }
+    pub fn before_call(&self) -> &Checkpoint<T> {
+        &self.before_call
+    }
 }
 
 /// A captured host capability. The attachment is retained independently of
@@ -28,6 +89,8 @@ pub struct Checkpoint<T: ?Sized> {
     source_request: RequestId,
     snapshot_request: RequestId,
     boundary_call: CallId,
+    cut: CheckpointCut,
+    operation: Option<OperationId>,
     metadata: Value,
     pending_claims: Vec<CheckpointClaim>,
     attachment: Arc<T>,
@@ -42,6 +105,8 @@ impl<T: ?Sized> Clone for Checkpoint<T> {
             source_request: self.source_request.clone(),
             snapshot_request: self.snapshot_request.clone(),
             boundary_call: self.boundary_call.clone(),
+            cut: self.cut,
+            operation: self.operation.clone(),
             metadata: self.metadata.clone(),
             pending_claims: self.pending_claims.clone(),
             attachment: self.attachment.clone(),
@@ -65,6 +130,12 @@ impl<T: ?Sized> Checkpoint<T> {
     }
     pub fn boundary_call(&self) -> &CallId {
         &self.boundary_call
+    }
+    pub fn cut(&self) -> CheckpointCut {
+        self.cut
+    }
+    pub fn operation(&self) -> Option<&OperationId> {
+        self.operation.as_ref()
     }
     pub fn metadata(&self) -> &Value {
         &self.metadata
@@ -94,6 +165,14 @@ pub struct CheckpointChild<'a> {
     pub task: Option<CheckpointTask<'a>>,
 }
 
+struct CaptureBoundary<'a> {
+    origin: &'a AgentPath,
+    source_request: &'a RequestId,
+    boundary_call: &'a CallId,
+    cut: CheckpointCut,
+    operation: Option<&'a OperationId>,
+}
+
 impl Store {
     /// Freeze the prefix ending at an actual call item in `source_request`.
     /// The caller's Arc is provisional until this transaction commits; a
@@ -108,6 +187,112 @@ impl Store {
     ) -> Result<Checkpoint<T>> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
+        let checkpoint = self.capture_checkpoint_tx(
+            &tx,
+            CaptureBoundary {
+                origin,
+                source_request,
+                boundary_call,
+                cut: CheckpointCut::Deferred,
+                operation: None,
+            },
+            metadata,
+            attachment,
+        )?;
+        tx.commit()?;
+        Ok(checkpoint)
+    }
+
+    /// Retain both the ordinary prefix and an independent prefix before the
+    /// current invocation. Its exact original claim must still be pending.
+    /// Earlier pending calls remain honest dependencies of the before-call cut.
+    pub fn capture_checkpoint_cuts<T: ?Sized + Send + Sync + 'static>(
+        &self,
+        operation: &OperationId,
+        metadata: &Value,
+        attachment: Arc<T>,
+    ) -> Result<CheckpointCuts<T>> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let bound: Option<(String, String)> = tx
+            .query_row(
+                "SELECT run_id,incarnation FROM embedded_bindings WHERE agent_path=?1",
+                [&operation.origin.actor().0],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let expected_origin = match bound {
+            Some((run, incarnation)) => ConversationIdentity::Embedded {
+                run,
+                actor: operation.origin.actor().clone(),
+                incarnation,
+            },
+            None => self.standalone_identity(operation.origin.actor().clone()),
+        };
+        if operation.origin != expected_origin {
+            return Err(StoreError::OperationOriginMismatch);
+        }
+        let origin = serde_json::to_string(&operation.origin)?;
+        let state: Option<String> = tx.query_row(
+            "SELECT state FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?2",
+            params![origin, operation.request.0, operation.call.0],
+            |row| row.get(0),
+        ).optional()?;
+        match state.as_deref() {
+            Some("pending") => {}
+            Some(_) => return Err(StoreError::CheckpointBoundaryNotPending(operation.clone())),
+            None => {
+                return Err(StoreError::MissingCheckpointClaim {
+                    request: operation.request.0.clone(),
+                    call_id: operation.call.0.clone(),
+                });
+            }
+        }
+        let deferred = self.capture_checkpoint_tx(
+            &tx,
+            CaptureBoundary {
+                origin: operation.origin.actor(),
+                source_request: &operation.request,
+                boundary_call: &operation.call,
+                cut: CheckpointCut::Deferred,
+                operation: Some(operation),
+            },
+            metadata,
+            attachment.clone(),
+        )?;
+        let before_call = self.capture_checkpoint_tx(
+            &tx,
+            CaptureBoundary {
+                origin: operation.origin.actor(),
+                source_request: &operation.request,
+                boundary_call: &operation.call,
+                cut: CheckpointCut::BeforeCall,
+                operation: Some(operation),
+            },
+            metadata,
+            attachment,
+        )?;
+        tx.commit()?;
+        Ok(CheckpointCuts {
+            deferred,
+            before_call,
+        })
+    }
+
+    fn capture_checkpoint_tx<T: ?Sized + Send + Sync + 'static>(
+        &self,
+        tx: &Transaction<'_>,
+        boundary: CaptureBoundary<'_>,
+        metadata: &Value,
+        attachment: Arc<T>,
+    ) -> Result<Checkpoint<T>> {
+        let CaptureBoundary {
+            origin,
+            source_request,
+            boundary_call,
+            cut,
+            operation,
+        } = boundary;
         let source_branch: Option<String> = tx
             .query_row(
                 "SELECT branch FROM requests WHERE id=?1",
@@ -174,7 +359,10 @@ impl Store {
                 request: source_request.0.clone(),
                 call_id: boundary_call.0.clone(),
             })?;
-        let prefix = &stored[..=boundary];
+        let prefix = match cut {
+            CheckpointCut::Deferred => &stored[..=boundary],
+            CheckpointCut::BeforeCall => &stored[..boundary],
+        };
         let mut call_kinds = HashMap::<(RequestId, CallId), ToolKind>::new();
         for (request, item) in prefix {
             if let Some(call) =
@@ -237,7 +425,9 @@ impl Store {
         };
         let mut pending_claims = Vec::new();
         let mut copied = std::collections::HashSet::new();
-        let mut boundary_claimed = false;
+        let boundary_claimed = claims.iter().any(|(_, _, call, request, _, _)| {
+            call == &boundary_call.0 && request == &source_request.0
+        });
         for (origin, original_request, call_id, claim_request, state, output_hash) in claims {
             let key = (RequestId(claim_request.clone()), CallId(call_id.clone()));
             if let Some(kind) = call_kinds.get(&key) {
@@ -286,9 +476,6 @@ impl Store {
                         }
                     }
                 }
-                if call_id == boundary_call.0 && claim_request == source_request.0 {
-                    boundary_claimed = true;
-                }
                 let identity: ConversationIdentity = serde_json::from_str(&origin)?;
                 let operation = OperationId {
                     origin: identity,
@@ -327,15 +514,16 @@ impl Store {
         Self::set_effort_tx(&tx, &snapshot_request, effort)?;
         tx.execute(
             "INSERT INTO checkpoints(id,origin_agent,source_request,snapshot_request,boundary_call,metadata,pending_claims,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![id,origin.0,source_request.0,snapshot_request.0,boundary_call.0,serde_json::to_string(metadata)?,serde_json::to_string(&pending_claims)?,utc_millis()],
+            params![id,origin.0,source_request.0,snapshot_request.0,boundary_call.0,serde_json::to_string(&CheckpointMetadata { version: 1, cut, operation: operation.cloned(), host: metadata.clone() })?,serde_json::to_string(&pending_claims)?,utc_millis()],
         )?;
-        tx.commit()?;
         Ok(Checkpoint {
             id,
             origin: origin.clone(),
             source_request: source_request.clone(),
             snapshot_request,
             boundary_call: boundary_call.clone(),
+            cut,
+            operation: operation.cloned(),
             metadata: metadata.clone(),
             pending_claims,
             attachment,
@@ -420,6 +608,8 @@ impl Store {
             "source_request":checkpoint.source_request,
             "snapshot_request":checkpoint.snapshot_request,
             "boundary_call":checkpoint.boundary_call,
+            "cut":checkpoint.cut,
+            "operation":checkpoint.operation,
             "checkout":child.checkout,
         });
         let created_at = utc_millis();

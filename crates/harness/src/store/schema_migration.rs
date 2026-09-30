@@ -457,3 +457,30 @@ mod tests {
         assert_eq!(original, "source");
     }
 }
+
+/// Schema 5 checkpoint metadata is host data; its cut is always deferred.
+pub(super) fn migrate_checkpoint_metadata(tx: &Transaction<'_>) -> Result<()> {
+    let rows: Vec<(String, String)> = {
+        let mut q = tx.prepare("SELECT id,metadata FROM checkpoints")?;
+        q.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?
+    };
+    for (id, raw) in rows {
+        let host = serde_json::from_str(&raw)?;
+        let metadata = crate::checkpoint::CheckpointMetadata::legacy(host);
+        tx.execute(
+            "UPDATE checkpoints SET metadata=?1 WHERE id=?2",
+            params![serde_json::to_string(&metadata)?, id],
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn validate_checkpoint_metadata(conn: &rusqlite::Connection) -> Result<()> {
+    let mut q = conn.prepare("SELECT metadata FROM checkpoints")?;
+    let rows = q.query_map([], |row| row.get::<_, String>(0))?;
+    for row in rows {
+        crate::checkpoint::CheckpointMetadata::decode(&row?)?;
+    }
+    Ok(())
+}

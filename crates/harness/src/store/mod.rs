@@ -66,6 +66,10 @@ pub enum StoreError {
     MissingCheckpointCall { request: String, call_id: String },
     #[error("checkpoint boundary call {call_id} has no durable claim in request {request}")]
     MissingCheckpointClaim { request: String, call_id: String },
+    #[error("checkpoint boundary operation is no longer pending: {0:?}")]
+    CheckpointBoundaryNotPending(OperationId),
+    #[error("checkpoint metadata has unsupported version or missing cut provenance")]
+    InvalidCheckpointMetadata,
     #[error("checkpoint request {0} has no recorded effort setting")]
     MissingCheckpointEffort(String),
     #[error("checkpoint belongs to a different Store process")]
