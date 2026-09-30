@@ -124,7 +124,7 @@ describe('operator views', () => {
     const onCommand = vi.fn()
     const selected = {
       id: '["run-7","/root/reviewer","inc-2"]', name: '/root/reviewer', run: 'run-7', incarnation: 'inc-2',
-      kind: 'workflow' as const, lifecycle: 'waiting',
+      kind: 'workflow' as const, lifecycle: 'waiting', activeRound: 'round-8',
     }
     const data: HarnessViewModel = {
       hostRun: 'run-7',
@@ -146,7 +146,7 @@ describe('operator views', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retire' }))
     expect(onCommand.mock.calls.map(([command]) => command)).toEqual([
       { action: 'input', target: { run: 'run-7', actor: '/root/reviewer', incarnation: 'inc-2' }, text: 'continue with care' },
-      { action: 'interrupt', target: { run: 'run-7', actor: '/root/reviewer', incarnation: 'inc-2' } },
+      { action: 'interrupt', target: { run: 'run-7', actor: '/root/reviewer', incarnation: 'inc-2' }, expected_round: 'round-8' },
       { action: 'retire', target: { run: 'run-7', actor: '/root/reviewer', incarnation: 'inc-2' } },
     ])
   })

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import NodeWindow from "./NodeWindow";
-import type { CommandReceipt, HostCommand } from "./protocol";
+import type { CommandReceipt, HostCommand, HostCommandSubmission } from "./protocol";
 
 /**
  * Presentation-only contract for the web views. The server/protocol adapter
@@ -18,6 +18,7 @@ export type HarnessViewModel = {
     kind: "model" | "workflow";
     lifecycle: string;
     modelConversation?: string;
+    activeRound?: string;
   }>;
   commandReceipts?: CommandReceipt[];
   nodes: Array<{
@@ -63,6 +64,8 @@ export type HarnessViewModel = {
 export type AppProps = {
   data?: HarnessViewModel;
   onCommand?: (command: string | HostCommand) => void;
+  onRetry?: (submission: HostCommandSubmission) => void;
+  pendingCommands?: Array<{ submission: HostCommandSubmission; state: string }>;
   acceptedCommandIds?: readonly string[];
 };
 
@@ -190,7 +193,12 @@ function HostActors({ data }: { data: HarnessViewModel }) {
   </section>;
 }
 
-function HostControls({ data, onCommand }: { data: HarnessViewModel; onCommand?: AppProps["onCommand"] }) {
+function HostControls({ data, onCommand, pendingCommands, onRetry }: {
+  data: HarnessViewModel;
+  onCommand?: AppProps["onCommand"];
+  pendingCommands: NonNullable<AppProps["pendingCommands"]>;
+  onRetry?: AppProps["onRetry"];
+}) {
   const actors = (data.actors ?? []).filter((actor) => actor.run === data.hostRun);
   const [selectedKey, setSelectedKey] = useState("");
   const [text, setText] = useState("");
@@ -209,7 +217,10 @@ function HostControls({ data, onCommand }: { data: HarnessViewModel; onCommand?:
   };
   const sendAction = (action: "interrupt" | "retire") => {
     if (!target || !canControl) return;
-    onCommand?.({ action, target });
+    if (action === "interrupt") {
+      if (!selected?.activeRound) return;
+      onCommand?.({ action, target, expected_round: selected.activeRound });
+    } else onCommand?.({ action, target });
   };
   const selectedWasRemoved = selectedKey.length > 0 && !selected;
   return <section className="host-controls" aria-labelledby="host-controls-heading">
@@ -233,12 +244,27 @@ function HostControls({ data, onCommand }: { data: HarnessViewModel; onCommand?:
       <textarea id="host-actor-input" rows={4} value={text} onChange={(event) => setText(event.target.value)} disabled={!canControl} />
       <div className="host-actions">
         <button type="submit" disabled={!canControl || !text.trim()}>Send input</button>
-        <button type="button" disabled={!canControl} onClick={() => sendAction("interrupt")}>Interrupt</button>
+        <button type="button" disabled={!canControl || !selected?.activeRound} onClick={() => sendAction("interrupt")}>Interrupt</button>
         <button type="button" disabled={!canControl} onClick={() => sendAction("retire")}>Retire</button>
       </div>
     </form>
     <CommandReceipts receipts={data.commandReceipts ?? []} />
+    <PendingCommands commands={pendingCommands ?? []} onRetry={onRetry} />
     <HostActors data={data} />
+  </section>;
+}
+
+function PendingCommands({ commands, onRetry }: { commands: NonNullable<AppProps["pendingCommands"]>; onRetry?: AppProps["onRetry"] }) {
+  if (commands.length === 0) return null;
+  return <section aria-labelledby="pending-commands-heading">
+    <h2 id="pending-commands-heading">Retained browser operations</h2>
+    {commands.map(({ submission, state }) => <article className="row" key={submission.operation_id}>
+      <span>{submission.command.action}</span>
+      <span className="state" data-state={state}>{state}</span>
+      <span className="meta mono">{submission.operation_id}</span>
+      <button type="button" onClick={() => onRetry?.(submission)} disabled={!onRetry}>Retry same operation</button>
+    </article>)}
+    <p className="hint">Unconfirmed operations are retained across reloads and are never replayed automatically. Retry reuses the same operation ID.</p>
   </section>;
 }
 
@@ -319,7 +345,7 @@ function Inbox({ data }: { data: HarnessViewModel }) {
   );
 }
 
-export default function App({ data = emptyData, onCommand, acceptedCommandIds = [] }: AppProps) {
+export default function App({ data = emptyData, onCommand, onRetry, pendingCommands = [], acceptedCommandIds = [] }: AppProps) {
   const [screen, setScreen] = useState<Screen>("tree");
   const [command, setCommand] = useState("");
   const [inspectedRequest, setInspectedRequest] = useState<string>();
@@ -364,7 +390,7 @@ export default function App({ data = emptyData, onCommand, acceptedCommandIds = 
       <main>
         <div className="toolbar"><h1>{screens.find((item) => item.id === activeScreen)?.title}</h1><span className="hint">Keyboard: g then t / l / i / {embeddedMode ? "h" : "c"}</span></div>
         {activeScreen === "tree" && <><HostActors data={data} /><Tree data={data} /></>}
-        {activeScreen === "host" && <HostControls data={data} onCommand={onCommand} />}
+        {activeScreen === "host" && <HostControls data={data} onCommand={onCommand} pendingCommands={pendingCommands} onRetry={onRetry} />}
         {activeScreen === "timeline" && <><Timeline data={data} onInspectRequest={setInspectedRequest} />
           {inspectedRequest && <NodeWindow key={inspectedRequest} requestId={inspectedRequest} onClose={() => setInspectedRequest(undefined)} />}</>}
         {activeScreen === "inbox" && <Inbox data={data} />}

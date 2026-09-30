@@ -1,3 +1,5 @@
+import type { EmbeddedCommandRecord } from './protocol'
+
 export class SessionApiError extends Error {
   constructor(
     readonly status: number,
@@ -56,4 +58,19 @@ export async function logout(): Promise<void> {
     credentials: 'same-origin',
   })
   if (!response.ok) throw new SessionApiError(response.status, 'logout')
+}
+
+export async function getCommandStatus(operationId: string): Promise<EmbeddedCommandRecord | undefined> {
+  const response = await fetch(`/api/commands/${encodeURIComponent(operationId)}`, {
+    method: 'GET', credentials: 'same-origin', headers: { Accept: 'application/json' },
+  })
+  if (response.status === 404) return undefined
+  if (!response.ok) throw new Error(`Command status lookup failed (HTTP ${response.status}).`)
+  const value: unknown = await response.json()
+  if (typeof value !== 'object' || value === null || !('operationId' in value) ||
+      !('command' in value) || !('state' in value) || !('envelopeId' in value) || !('receipt' in value) ||
+      typeof value.operationId !== 'string' || typeof value.state !== 'string') {
+    throw new Error('The command status endpoint returned an invalid record.')
+  }
+  return value as EmbeddedCommandRecord
 }

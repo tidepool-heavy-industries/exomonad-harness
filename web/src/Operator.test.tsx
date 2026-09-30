@@ -1,11 +1,12 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Operator } from './Operator'
+import { writePendingCommands, retainCommand } from './pending-commands'
 
 const sockets: FakeSocket[] = []
 class FakeSocket {
   static readonly OPEN = 1
-  readonly readyState = 0
+  readyState = 0
   readonly listeners = new Map<string, EventListener[]>()
   close = vi.fn()
   send = vi.fn()
@@ -117,15 +118,75 @@ describe('optional browser session', () => {
     })))
 
     expect(await screen.findByText('/authoritative/live-root')).toBeInTheDocument()
-    const guidance = screen.getByRole('region', { name: 'Async command scenario' })
+    const guidance = screen.getByRole('region', { name: 'Standalone async command scenario' })
     expect(guidance).toHaveTextContent('async start')
-    expect(guidance).toHaveTextContent('automatically emits B on the next Engine turn while A remains pending; no second browser submission triggers B')
-    expect(guidance).toHaveTextContent('echo hello is only an independent responsiveness check')
     expect(guidance).toHaveTextContent('async release')
-    expect(guidance).toHaveTextContent('async cancel')
-    expect(guidance).not.toHaveTextContent('When supported by the producer')
-    expect(guidance).not.toHaveTextContent('--serve')
     expect(screen.queryByText('Loading authoritative harness snapshot…')).not.toBeInTheDocument()
     expect(screen.queryByText('/root/web_ui/web_ui')).not.toBeInTheDocument()
+  })
+
+  it('reconciles a retained operation after reload without replaying it automatically', async () => {
+    const submission = {
+      operation_id: '11111111-1111-4111-8111-111111111111',
+      command: { action: 'input' as const, target: { run: 'run-1', actor: '/root', incarnation: 'inc-1' }, text: 'continue' },
+    }
+    writePendingCommands(retainCommand([], 'run-1', submission))
+    fetchMock
+      .mockResolvedValueOnce(response(200, { authenticated: true }))
+      .mockResolvedValueOnce(response(200, {
+        operationId: submission.operation_id, command: submission.command,
+        state: 'input_admitted', envelopeId: 42, receipt: null,
+      }))
+    render(<Operator />)
+    const socket = await waitFor(() => {
+      expect(sockets).toHaveLength(1)
+      return sockets[0]!
+    })
+    socket.readyState = FakeSocket.OPEN
+    socket.listeners.get('message')?.forEach((listener) => listener(new MessageEvent('message', {
+      data: JSON.stringify({
+        type: 'snapshot',
+        snapshot: {
+          seq: 1,
+          hostRun: 'run-1',
+          actors: [{
+            identity: submission.command.target, parent: null, kind: 'workflow', lifecycle: 'waiting',
+            modelConversation: null, activeRound: 'round-1',
+          }],
+          conversations: [], requests: [], jobs: [], envelopes: [],
+        },
+      }),
+    })))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(`/api/commands/${submission.operation_id}`)
+    expect(await screen.findByRole('heading', { name: 'Tree' })).toBeInTheDocument()
+    expect(socket.send).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Host' }))
+    expect(await screen.findByText('input_admitted')).toBeInTheDocument()
+    expect(screen.getByText(/never replayed automatically/)).toBeInTheDocument()
+    expect(socket.send).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry same operation' }))
+    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({
+      type: 'host_command', operation_id: submission.operation_id, command: submission.command,
+    }))
+  })
+
+  it('does not show standalone async guidance in an embedded host session', async () => {
+    fetchMock.mockResolvedValueOnce(response(200, { authenticated: true }))
+    render(<Operator />)
+    const socket = await waitFor(() => {
+      expect(sockets).toHaveLength(1)
+      return sockets[0]!
+    })
+    socket.listeners.get('message')?.forEach((listener) => listener(new MessageEvent('message', {
+      data: JSON.stringify({
+        type: 'snapshot',
+        snapshot: { seq: 1, hostRun: 'run-1', conversations: [], requests: [], jobs: [], envelopes: [] },
+      }),
+    })))
+    expect(await screen.findByRole('button', { name: 'Host' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Standalone async command scenario' })).not.toBeInTheDocument()
+    expect(screen.queryByText('async start')).not.toBeInTheDocument()
   })
 })

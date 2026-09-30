@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import App from './App'
 import { toViewModel } from './integration'
-import { normalizeSnapshot, type HostCommand, type NormalizedState, type Snapshot } from './protocol'
-import { getSessionStatus, login, logout } from './session-api'
+import { normalizeSnapshot, type HostCommand, type HostCommandSubmission, type NormalizedState, type Snapshot } from './protocol'
+import { applyCommandStatus, allocateOperationId, readPendingCommands, retainCommand, writePendingCommands, type BrowserCommandRecord } from './pending-commands'
+import { getCommandStatus, getSessionStatus, login, logout } from './session-api'
 import { connectHarness } from './ws-client'
 
 const emptySnapshot: Snapshot = {
@@ -20,8 +21,22 @@ export function Operator() {
   const [secret, setSecret] = useState('')
   const [failure, setFailure] = useState('')
   const [checking, setChecking] = useState(true)
-  const [sendCommand, setSendCommand] = useState<(command: string | HostCommand) => void>()
+  const [sendCommand, setSendCommand] = useState<(command: string | HostCommandSubmission) => void>()
   const [acceptedCommandIds, setAcceptedCommandIds] = useState<string[]>([])
+  const [pendingCommands, setPendingCommands] = useState<BrowserCommandRecord[]>([])
+  const pendingRef = useRef<BrowserCommandRecord[]>([])
+
+  const updatePending = (records: BrowserCommandRecord[]) => {
+    try {
+      writePendingCommands(records)
+    } catch {
+      setFailure('This browser could not retain the operation in this tab. The command was not sent.')
+      return false
+    }
+    pendingRef.current = records
+    setPendingCommands(records)
+    return true
+  }
 
   const checkSession = useCallback(async () => {
     setChecking(true)
@@ -43,6 +58,9 @@ export function Operator() {
 
   useEffect(() => {
     if (authenticated !== true) return
+    const restored = readPendingCommands()
+    pendingRef.current = restored
+    setPendingCommands(restored)
     let active = true
     setState(normalizeSnapshot(emptySnapshot))
     setAcceptedCommandIds([])
@@ -78,6 +96,54 @@ export function Operator() {
       socket.close()
     }
   }, [authenticated])
+
+  useEffect(() => {
+    const run = state.hostRun
+    if (authenticated !== true || !snapshotLoaded || !run) return
+    let active = true
+    const reconcile = async () => {
+      const records = pendingRef.current.filter((record) => record.hostRun === run)
+      for (const record of records) {
+        try {
+          const status = await getCommandStatus(record.submission.operation_id)
+          if (!active) return
+          const next = status
+            ? applyCommandStatus(pendingRef.current, run, status)
+            : pendingRef.current.map((item) => item.hostRun === run && item.submission.operation_id === record.submission.operation_id
+              ? { ...item, state: 'unconfirmed' as const }
+              : item)
+          updatePending(next)
+        } catch {
+          // Keep the retained operation available for an explicit same-ID retry.
+        }
+      }
+    }
+    void reconcile()
+    return () => { active = false }
+  }, [authenticated, snapshotLoaded, state.hostRun])
+
+  const submitHostCommand = (command: string | HostCommand) => {
+    if (typeof command === 'string') { sendCommand?.(command); return }
+    const run = state.hostRun
+    if (!run) { setFailure('The authoritative host run is not available.'); return }
+    const submission: HostCommandSubmission = { operation_id: allocateOperationId(), command }
+    // Commit the exact command and ID before sending, so transport uncertainty
+    // can be reconciled after reload without inventing a second operation.
+    if (!updatePending(retainCommand(pendingRef.current, run, submission))) return
+    sendCommand?.(submission)
+  }
+
+  const retryHostCommand = (submission: HostCommandSubmission) => {
+    const record = pendingRef.current.find((item) => item.submission.operation_id === submission.operation_id)
+    if (!record || record.hostRun !== state.hostRun) {
+      setFailure('This retained operation belongs to a different host run and cannot be retried here.')
+      return
+    }
+    if (!updatePending(pendingRef.current.map((item) => item.submission.operation_id === submission.operation_id
+      ? { ...item, state: 'dispatching' }
+      : item))) return
+    sendCommand?.(submission)
+  }
 
   const submitLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -142,12 +208,13 @@ export function Operator() {
       {failure && <p className="session-error" role="alert">{failure}</p>}
       {snapshotLoaded
         ? <>
-          <section aria-labelledby="async-guidance-heading" className="command-guidance">
-            <h2 id="async-guidance-heading">Async command scenario</h2>
+          {state.hostRun === undefined && <section aria-labelledby="async-guidance-heading" className="command-guidance">
+            <h2 id="async-guidance-heading">Standalone async command scenario</h2>
             <p>Enter <code>async start</code> to start A. It automatically emits B on the next Engine turn while A remains pending; no second browser submission triggers B. <code>echo hello</code> is only an independent responsiveness check.</p>
             <p>Use <code>async release</code> to release A, or <code>async cancel</code> to cancel A.</p>
-          </section>
-          <App data={toViewModel(state)} onCommand={sendCommand} acceptedCommandIds={acceptedCommandIds} />
+          </section>}
+          <App data={toViewModel(state)} onCommand={submitHostCommand} onRetry={retryHostCommand}
+            pendingCommands={pendingCommands.filter((record) => record.hostRun === state.hostRun)} acceptedCommandIds={acceptedCommandIds} />
         </>
         : <main aria-busy="true"><p role="status">Loading authoritative harness snapshot…</p></main>}
     </>

@@ -12,6 +12,7 @@ export function toViewModel(state: NormalizedState): HarnessViewModel {
     kind: actor.kind,
     lifecycle: actor.lifecycle,
     modelConversation: actor.modelConversation ?? undefined,
+    activeRound: actor.activeRound,
   }))
   const nodes = [...state.conversations.values()].map((conversation) => ({
     id: conversation.id,
