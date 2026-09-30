@@ -310,9 +310,6 @@ impl Provider for CallbackProvider {
         if self.closed.load(Ordering::Acquire) {
             return Err(ProviderError::Tool("invocation closed".into()));
         }
-        if name == crate::finalize::FINALIZE_TOOL_NAME && kind == ToolKind::Function {
-            return Ok(());
-        }
         self.budget
             .admit(true)
             .map_err(|reason| ProviderError::Tool(format!("budget exhausted: {reason:?}")))?;
@@ -341,11 +338,12 @@ impl Provider for CallbackProvider {
         args: Value,
         context: crate::provider::CallContext,
     ) -> Result<Value, ProviderError> {
-        let schema = &self
+        let tool = self
             .tools
             .iter()
             .find(|tool| tool["name"].as_str() == Some(name))
-            .unwrap()["parameters"];
+            .ok_or_else(|| ProviderError::Tool(format!("undeclared callback {name}")))?;
+        let schema = &tool["parameters"];
         if let Err(error) = crate::finalize::validate_result(&args, schema, "$") {
             *self.failure.lock().unwrap() = Some(error.to_string());
             return Err(ProviderError::Tool(error.to_string()));
@@ -1357,6 +1355,28 @@ mod tests {
             finish(&mut invocation).await.outcome,
             Outcome::Text(_)
         ));
+    }
+    #[tokio::test]
+    async fn text_finalize_is_refused_without_waiting_for_callback() {
+        let mut invocation = start(
+            Arc::new(Store::memory().unwrap()),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            CellBudget::new(Limits::default()),
+            vec![turn(vec![Item(json!({
+                "type": "function_call", "name": "finalize",
+                "call_id": "final", "arguments": "{}"
+            }))])],
+            false,
+        );
+        let step = tokio::time::timeout(Duration::from_secs(2), invocation.next())
+            .await
+            .expect("undeclared finalize must settle promptly");
+        match step {
+            Step::Finished(receipt) => {
+                assert!(matches!(receipt.outcome, Outcome::Failed(_)));
+            }
+            _ => panic!("undeclared finalize must never reach the callback"),
+        }
     }
     #[tokio::test]
     async fn conflicting_streamed_call_is_refused_before_callback() {
