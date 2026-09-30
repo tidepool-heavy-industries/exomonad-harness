@@ -1,5 +1,6 @@
 pub const VERSION: u32 = 7;
 pub const SQL: &str = include_str!("schema.sql");
+const MODEL_TURN_RECENT_INDEX: &str = "CREATE INDEX IF NOT EXISTS events_model_turn_recent ON events(id DESC,request_id) WHERE kind='model_turn';";
 
 pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
     let has_version: bool = conn.query_row(
@@ -10,6 +11,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
     if !has_version {
         let tx = conn.transaction()?;
         tx.execute_batch(SQL)?;
+        tx.execute_batch(MODEL_TURN_RECENT_INDEX)?;
         tx.execute("INSERT INTO schema_version(version) VALUES (?1)", [VERSION])?;
         super::schema_migration::ensure_store_id(&tx)?;
         tx.commit()?;
@@ -34,7 +36,9 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
         .into());
     }
     if version == VERSION {
-        return super::schema_migration::validate_checkpoint_metadata(conn);
+        super::schema_migration::validate_checkpoint_metadata(conn)?;
+        conn.execute_batch(MODEL_TURN_RECENT_INDEX)?;
+        return Ok(());
     }
     let tx = conn.transaction()?;
     // v1 stored second-resolution Unix timestamps. Convert existing records once;
@@ -85,6 +89,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
         tx.execute_batch("ALTER TABLE embedded_inputs RENAME TO legacy_embedded_inputs;")?;
     }
     tx.execute_batch(SQL)?;
+    tx.execute_batch(MODEL_TURN_RECENT_INDEX)?;
     if legacy_inputs && version < 7 {
         let old_count: i64 =
             tx.query_row("SELECT COUNT(*) FROM legacy_embedded_inputs", [], |r| {

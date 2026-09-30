@@ -389,6 +389,57 @@ impl ServerControl {
         event
     }
 
+    /// Publish bounded completed model requests from their durable Store evidence.
+    /// Request metadata and its event watermark become visible together. Reconnect
+    /// retains the same bounded window of the last 128 model completion events;
+    /// older requests leave the projection through explicit removal events.
+    pub fn refresh_completed_model_requests(
+        &self,
+        store: &Store,
+    ) -> Result<(), crate::store::StoreError> {
+        let mut next_sequence = self.next_sequence.lock().expect("sequence lock poisoned");
+        let requests = store.completed_model_requests(128)?;
+        let mut snapshot = self.snapshot.write().expect("snapshot lock poisoned");
+        let rows = requests
+            .into_iter()
+            .map(|request| {
+                serde_json::json!({
+                    "id": request.id.0,
+                    "parentId": request.parent.map(|parent| parent.0),
+                    "conversationId": request.branch,
+                    "state": "completed",
+                })
+            })
+            .collect::<Vec<_>>();
+        let previous = conversation_rows_by_id(&snapshot.requests);
+        let current = conversation_rows_by_id(&rows);
+        let mut changes = Vec::new();
+        for id in previous.keys().filter(|id| !current.contains_key(*id)) {
+            changes.push((
+                "entity.remove",
+                serde_json::json!({"entity":"request", "id":id}),
+            ));
+        }
+        for row in &rows {
+            let id = row["id"].as_str().expect("request identity is a string");
+            if previous.get(id) != Some(row) {
+                changes.push(("request.upsert", row.clone()));
+            }
+        }
+        snapshot.requests = rows;
+        for (kind, payload) in changes {
+            let sequence = *next_sequence;
+            *next_sequence += 1;
+            snapshot.seq = sequence;
+            let _ = self.events.send(ServerEvent {
+                sequence,
+                event: kind.into(),
+                payload,
+            });
+        }
+        Ok(())
+    }
+
     /// Replace the WebSocket snapshot with a store-backed view.
     ///
     /// The snapshot's `seq` is a watermark: subsequent published events have a
@@ -1033,6 +1084,148 @@ async fn static_asset(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retained_model_requests_install_index_when_reopening_current_database() {
+        let path =
+            std::env::temp_dir().join(format!("harness-request-index-{}.db", uuid::Uuid::new_v4()));
+        {
+            let store = Store::open(&path).unwrap();
+            let request = crate::model::RequestId("retained".into());
+            store.create_request(&request, None, "/root").unwrap();
+            store
+                .record_event(Some(&request), "model_turn", &serde_json::json!({}))
+                .unwrap();
+            store
+                .lock()
+                .execute_batch("DROP INDEX events_model_turn_recent")
+                .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let index: bool = store.lock().query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='events_model_turn_recent')",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(
+            index,
+            "current-version databases also receive the additive index"
+        );
+        let (_, control, _) = server(PathBuf::from("."));
+        control.refresh_completed_model_requests(&store).unwrap();
+        assert_eq!(
+            control.snapshot.read().unwrap().requests[0]["id"],
+            "retained"
+        );
+        let conn = store.lock();
+        let mut query = conn.prepare(
+            "EXPLAIN QUERY PLAN SELECT id,request_id FROM events WHERE kind='model_turn' ORDER BY id DESC LIMIT 128",
+        ).unwrap();
+        let plans = query
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            plans
+                .iter()
+                .any(|plan| plan.contains("events_model_turn_recent")),
+            "{plans:?}"
+        );
+        drop(query);
+        drop(conn);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn retained_model_requests_follow_durable_completions_and_survive_resync() {
+        use crate::{
+            model::{Effort, RequestId},
+            transport::{ResponsesRequest, ResponsesTurn},
+        };
+        let store = Store::memory().unwrap();
+        let (_, control, _) = server(PathBuf::from("."));
+        let mut events = control.events.subscribe();
+        let pending = RequestId("pending".into());
+        store.create_request(&pending, None, "/root").unwrap();
+        control.refresh_completed_model_requests(&store).unwrap();
+        assert!(control.snapshot.read().unwrap().requests.is_empty());
+        let model_request = ResponsesRequest {
+            input: vec![],
+            instructions: String::new(),
+            tools: vec![],
+            tools_allowed: None,
+            model: "offline".into(),
+            pinned_effort: Effort::Low,
+            session_id: "session".into(),
+        };
+        for (id, branch) in [("z-first", "/root"), ("a-last", "/root/child")] {
+            let request = RequestId(id.into());
+            store
+                .create_request(&request, Some(&pending), branch)
+                .unwrap();
+            store
+                .record_replay_turn(
+                    &request,
+                    &model_request,
+                    &ResponsesTurn {
+                        response_id: id.into(),
+                        items: vec![],
+                        usage: Default::default(),
+                    },
+                )
+                .unwrap();
+        }
+        control.refresh_completed_model_requests(&store).unwrap();
+        let first = events.try_recv().unwrap();
+        let last = events.try_recv().unwrap();
+        assert_eq!(first.event, "request.upsert");
+        assert_eq!(first.payload["id"], "z-first");
+        assert_eq!(last.payload["id"], "a-last");
+        let snapshot = control.snapshot.read().unwrap().clone();
+        assert_eq!(snapshot.seq, last.sequence);
+        assert_eq!(snapshot.requests.len(), 2);
+        assert_eq!(snapshot.requests[1]["conversationId"], "/root/child");
+        assert_eq!(snapshot.requests[1]["state"], "completed");
+        control.refresh_completed_model_requests(&store).unwrap();
+        assert!(
+            events.try_recv().is_err(),
+            "unchanged evidence emits no duplicate updates"
+        );
+        let (_, fresh_control, _) = server(PathBuf::from("."));
+        fresh_control
+            .refresh_completed_model_requests(&store)
+            .unwrap();
+        assert_eq!(
+            fresh_control.snapshot.read().unwrap().requests,
+            snapshot.requests
+        );
+        for index in 0..130 {
+            let request = RequestId(format!("bounded-{index:03}"));
+            store.create_request(&request, None, "/root").unwrap();
+            store
+                .record_replay_turn(
+                    &request,
+                    &model_request,
+                    &ResponsesTurn {
+                        response_id: request.0.clone(),
+                        items: vec![],
+                        usage: Default::default(),
+                    },
+                )
+                .unwrap();
+        }
+        control.refresh_completed_model_requests(&store).unwrap();
+        let snapshot = control.snapshot.read().unwrap();
+        assert_eq!(snapshot.requests.len(), 128);
+        assert_eq!(snapshot.requests[0]["id"], "bounded-002");
+        assert_eq!(snapshot.requests[127]["id"], "bounded-129");
+        assert!(
+            snapshot
+                .requests
+                .iter()
+                .all(|row| row.get("input").is_none())
+        );
+    }
     use super::*;
     use serde_json::json;
     use std::{

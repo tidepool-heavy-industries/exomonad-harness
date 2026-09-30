@@ -40,6 +40,28 @@ pub struct HistoryPage {
 }
 
 impl Store {
+    /// Read only durable completion metadata, without loading model inputs or Items.
+    pub(crate) fn completed_model_requests(&self, limit: usize) -> Result<Vec<Request>> {
+        let c = self.lock();
+        let mut query = c.prepare(
+            "WITH recent AS (
+                SELECT request_id,MAX(id) AS sequence FROM (
+                    SELECT id,request_id FROM events WHERE kind='model_turn'
+                    ORDER BY id DESC LIMIT ?1
+                ) GROUP BY request_id
+             ) SELECT r.id,r.parent_id,r.branch FROM recent
+             JOIN requests r ON r.id=recent.request_id ORDER BY recent.sequence",
+        )?;
+        let rows = query.query_map([limit.clamp(1, 128) as i64], |row| {
+            Ok(Request {
+                id: RequestId(row.get(0)?),
+                parent: row.get::<_, Option<String>>(1)?.map(RequestId),
+                branch: row.get(2)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
     /// Read at most `MAX_HISTORY_ITEMS` and `MAX_HISTORY_BYTES` from one request.
     /// An oversized Item is identified by its content hash and position. It is
     /// never silently skipped, and a caller can explicitly request `skip_offset`.
