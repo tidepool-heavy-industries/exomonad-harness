@@ -2455,7 +2455,7 @@ fn safe_transport_error(error: &TransportError) -> String {
 
 fn safe_engine_error(error: EngineError) -> String {
     match &error {
-        EngineError::Cancelled => "conversation cancelled during shutdown".into(),
+        EngineError::Cancelled { .. } => "conversation cancelled during shutdown".into(),
         EngineError::Transport(error) => safe_transport_error(error),
         EngineError::Store(_) => "conversation store operation failed".into(),
         EngineError::Job(_) => "provider job failed".into(),

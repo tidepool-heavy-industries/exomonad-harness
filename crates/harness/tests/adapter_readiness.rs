@@ -406,7 +406,7 @@ async fn cancelling_pending_cell_releases_execution_without_success_output() {
     cancel_tx.send(true).expect("signal engine cancellation");
     assert!(matches!(
         running.await.expect("engine task joins"),
-        Err(harness::engine::EngineError::Cancelled)
+        Err(harness::engine::EngineError::Cancelled { .. })
     ));
 
     let claims = store.claims(&call).expect("load original call claims");

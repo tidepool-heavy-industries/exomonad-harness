@@ -27,7 +27,7 @@ use crate::{
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde_json::json;
-use std::{num::NonZeroU64, sync::Arc};
+use std::{collections::HashSet, num::NonZeroU64, sync::Arc};
 use thiserror::Error;
 use tokio::sync::watch;
 
@@ -49,6 +49,10 @@ struct PendingCall {
 #[path = "engine/recovery_tests.rs"]
 mod recovery_tests;
 
+#[cfg(test)]
+#[path = "engine/completion_tests.rs"]
+mod completion_tests;
+
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error(transparent)]
@@ -60,7 +64,7 @@ pub enum EngineError {
     #[error("blocking store task failed")]
     StoreTask,
     #[error("engine cancelled")]
-    Cancelled,
+    Cancelled { head_request: Option<RequestId> },
     #[error("Responses turn did not contain a terminal assistant answer")]
     MissingFinal,
     #[error(transparent)]
@@ -543,6 +547,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 if already_output[0] != &expected {
                     return Err(EngineError::MismatchedToolOutput(claim.call_id.0.clone()));
                 }
+                if claim.state == crate::store::ClaimState::Settled {
+                    self.acknowledge_output(&claim.operation).await?;
+                }
                 continue;
             }
             if claim.state == crate::store::ClaimState::Settled {
@@ -555,6 +562,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     return Err(EngineError::MissingInheritedOutput(claim.call_id.0));
                 };
                 validate_tool_output(&claim.call_id, tool_kind, &item)?;
+                self.acknowledge_output(&claim.operation).await?;
                 replay_items.push(item);
                 continue;
             }
@@ -664,7 +672,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let mut last_text_compaction_attempt_bytes = None;
         loop {
             if *cancellation.borrow() {
-                return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
+                return Err(self
+                    .cleanup_pending(
+                        EngineError::Cancelled {
+                            head_request: Some(parent.clone()),
+                        },
+                        &pending,
+                    )
+                    .await);
             }
             // AtBoundary is a property of *every* model request, not of a
             // completed turn. Admission is a Store transaction and neither
@@ -697,7 +712,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     result = compact => result,
                     changed = cancellation.changed() => {
                         if changed.is_err() || *cancellation.borrow() {
-                            Err(EngineError::Cancelled)
+                            Err(EngineError::Cancelled { head_request: Some(parent.clone()) })
                         } else {
                             continue;
                         }
@@ -765,7 +780,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 result = request_provider.before_request(&plan) => result,
                 changed = cancellation.changed() => {
                     if changed.is_err() || *cancellation.borrow() {
-                        return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
+                        return Err(self.cleanup_pending(EngineError::Cancelled { head_request: Some(parent.clone()) }, &pending).await);
                     }
                     continue;
                 }
@@ -885,6 +900,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
             let replay_request = req.clone();
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
+            // Retain completed calls while the provider is streaming. Their
+            // output enters model history after this response, without changing
+            // the already-issued request or delaying the host acknowledgment.
+            let mut settlements = self.scheduler.operation_settlements();
+            let mut retained_in_stream = HashSet::new();
+            let mut settlements_open = true;
+            if let Err(error) = self
+                .retain_pending_outputs(&pending, &mut retained_in_stream)
+                .await
+            {
+                return Err(self.cleanup_pending(error, &pending).await);
+            }
             let model_request_id = parent.clone();
             let create = self
                 .client
@@ -898,6 +925,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let mut deferred_dispatch_error = None;
             let turn = loop {
                 tokio::select! {
+                    settlement = settlements.recv(), if settlements_open => {
+                        match settlement {
+                            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                if let Err(error) = self.retain_pending_outputs(&pending, &mut retained_in_stream).await {
+                                    return Err(self.cleanup_pending(error, &pending).await);
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => settlements_open = false,
+                        }
+                    }
                     result = &mut create => match result {
                         Ok(turn) => break turn,
                         Err(error) => {
@@ -907,7 +944,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     },
                     changed = cancellation.changed() => {
                         if changed.is_err() || *cancellation.borrow() {
-                            return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
+                            return Err(self.cleanup_pending(EngineError::Cancelled { head_request: Some(parent.clone()) }, &pending).await);
                         }
                     }
                     event = event_rx.recv(), if event_stream_open => {
@@ -1150,7 +1187,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                 };
                 if matches!(&result.resumed_by, WaitResumeExact::Cancelled) {
-                    return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
+                    return Err(self
+                        .cleanup_pending(
+                            EngineError::Cancelled {
+                                head_request: Some(parent.clone()),
+                            },
+                            &pending,
+                        )
+                        .await);
                 }
                 let wait_operation = OperationId {
                     origin: self.origin.clone(),
@@ -1181,7 +1225,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     Err(error) => return Err(self.cleanup_pending(error, &pending).await),
                 };
                 if matches!(&result.resumed_by, WaitResumeExact::Cancelled) {
-                    return Err(self.cleanup_pending(EngineError::Cancelled, &pending).await);
+                    return Err(self
+                        .cleanup_pending(
+                            EngineError::Cancelled {
+                                head_request: Some(parent.clone()),
+                            },
+                            &pending,
+                        )
+                        .await);
                 }
                 if let Err(error) = self
                     .persist_wait_result(&mut pending, &parent, None, result, admit_inbox)
@@ -1562,6 +1613,28 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         Ok(settled)
     }
 
+    async fn retain_pending_outputs(
+        &self,
+        pending: &[PendingCall],
+        retained: &mut HashSet<OperationId>,
+    ) -> Result<(), EngineError> {
+        let operations = pending
+            .iter()
+            .filter(|call| !call.is_wait_agent && !retained.contains(&call.operation))
+            .map(|call| call.operation.clone())
+            .collect::<Vec<_>>();
+        for (operation, output) in outputs_in_operation_order(&self.scheduler, &operations).await? {
+            let call = pending
+                .iter()
+                .find(|call| call.operation == operation)
+                .expect("scheduler output belongs to a pending call");
+            self.retain_settled_output(&operation, call.tool_kind, &output, &call.claim_request)
+                .await?;
+            retained.insert(operation);
+        }
+        Ok(())
+    }
+
     async fn persist_output(
         &self,
         operation: &OperationId,
@@ -1576,8 +1649,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let call = operation.clone();
         let request = request.clone();
         let claimed_at = claim_request.clone();
+        let terminal_output = output.clone();
         let terminal = blocking(move || {
-            store.write_output(&call, &item)?;
+            store.write_job_output(&call, kind, &terminal_output)?;
             let claim = store
                 .claims_for_operation(&call)?
                 .into_iter()
@@ -1602,7 +1676,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             store.append_items(&request, &[item])?;
             Ok(())
         })
-        .await
+        .await?;
+        if matches!(output, crate::turn::JobOutput::Completed(_)) {
+            self.acknowledge_output(operation).await?;
+        }
+        Ok(())
     }
 
     /// Record terminal evidence without attaching it to an ancestor request.
@@ -1620,8 +1698,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let store = self.store.clone();
         let call = operation.clone();
         let claimed_at = claim_request.clone();
+        let terminal_output = output.clone();
         let terminal = blocking(move || {
-            store.write_output(&call, &item)?;
+            store.write_job_output(&call, kind, &terminal_output)?;
             let claim = store
                 .claims_for_operation(&call)?
                 .into_iter()
@@ -1640,6 +1719,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         ) || retained.as_ref() != Some(&item)
         {
             return Err(EngineError::ClaimRecoveryConflict(call_id.0.clone()));
+        }
+        if matches!(output, crate::turn::JobOutput::Completed(_)) {
+            self.acknowledge_output(operation).await?;
+        }
+        Ok(())
+    }
+
+    async fn acknowledge_output(&self, operation: &OperationId) -> Result<(), EngineError> {
+        // A fork replays its ancestor's result; only the issuing conversation
+        // can acknowledge the owner's live execution boundary.
+        if operation.origin == self.origin && self.store.has_completed_output(operation)? {
+            self.provider.output_committed(operation).await?;
         }
         Ok(())
     }
@@ -1737,7 +1828,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 // A wake never supplies or appends a second copy of its content.
                 (None, None, json!({"resumed_by":"user_input"}))
             }
-            WaitResumeExact::Cancelled => return Err(EngineError::Cancelled),
+            WaitResumeExact::Cancelled => {
+                return Err(EngineError::Cancelled {
+                    head_request: Some(request.clone()),
+                });
+            }
         };
         if let Some(wait_call) = wait_call {
             self.persist_output(
@@ -1818,7 +1913,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
                 changed = cancellation.changed() => {
                     if changed.is_err() || *cancellation.borrow() {
-                        return Err(EngineError::Cancelled);
+                        return Err(EngineError::Cancelled { head_request: Some(snapshot.clone()) });
                     }
                 }
             }
@@ -3014,7 +3109,7 @@ mod tests {
                 .await
                 .expect("cancel interrupts hook")
                 .unwrap(),
-            Err(EngineError::Cancelled)
+            Err(EngineError::Cancelled { .. })
         ));
     }
 
@@ -4181,7 +4276,7 @@ mod tests {
                 .await
                 .expect("child cleanup returns")
                 .unwrap(),
-            Err(EngineError::Cancelled)
+            Err(EngineError::Cancelled { .. })
         ));
         assert_eq!(
             scheduler
@@ -4694,7 +4789,10 @@ mod tests {
             "A is still pending when B is supplied"
         );
         cancel_tx.send(true).unwrap();
-        assert!(matches!(run.await.unwrap(), Err(EngineError::Cancelled)));
+        assert!(matches!(
+            run.await.unwrap(),
+            Err(EngineError::Cancelled { .. })
+        ));
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         let delivered = requests[2]
@@ -5862,7 +5960,10 @@ mod tests {
         .await
         .expect("both durable claims registered");
         cancel_tx.send(true).unwrap();
-        assert!(matches!(run.await.unwrap(), Err(EngineError::Cancelled)));
+        assert!(matches!(
+            run.await.unwrap(),
+            Err(EngineError::Cancelled { .. })
+        ));
         assert_eq!(
             scheduler
                 .output(&store.claims(&first).unwrap()[0].operation)

@@ -105,6 +105,13 @@ pub trait CancellationOwner: Send + Sync {
 /// A provider owns tool meaning; the harness owns scheduling and history.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Acknowledge an exact operation after its real terminal output is durable.
+    /// Recovery can repeat this notification; implementations must be idempotent.
+    /// Failure leaves the retained output intact and never re-executes the call.
+    async fn output_committed(&self, _operation: &OperationId) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
     /// A stable view retained for an entire model request, including its later
     /// tool calls. Reloadable providers return an immutable snapshot here.
     fn request_snapshot(&self) -> Result<Option<std::sync::Arc<dyn Provider>>, ProviderError> {
