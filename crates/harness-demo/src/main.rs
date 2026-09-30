@@ -17,7 +17,10 @@ use harness::engine::{Engine, EngineCompletion, EngineConfig, EngineError};
 use harness::item::Item;
 use harness::model::{AgentPath, Effort};
 use harness::provider::{CallContext, Provider, ProviderError};
-use harness::server::{self, ClientCommand, QueuedCommand, ServerConfig, SessionSecret, Snapshot};
+use harness::server::{
+    self, ClientCommand, CommandReceipt, CommandReceiptOutcome, QueuedCommand, ServerConfig,
+    SessionSecret, Snapshot,
+};
 use harness::store::Store;
 use harness::transport::{
     Auth, ResponsesClient, ResponsesRequest, ResponsesTurn, TransportError, Usage,
@@ -1889,10 +1892,14 @@ async fn serve(
                 let Some(QueuedCommand { command_id, command }) = command else { break };
                 match command {
                     ClientCommand::Host { .. } => {
-                        control.publish("command.refused", json!({
-                            "commandId": command_id,
-                            "reason": "This standalone server has no embedded host actor owner.",
-                        }));
+                        control.publish_command_receipt(CommandReceipt {
+                            command_id,
+                            outcome: CommandReceiptOutcome::Refused {
+                                target: None,
+                                reason: "This standalone server has no embedded host actor owner."
+                                    .into(),
+                            },
+                        });
                     }
                     ClientCommand::Submit { command } => {
                         let conversation_was_requesting = conversation["state"] == "requesting";
@@ -3878,6 +3885,7 @@ mod tests {
                 host_run: None,
                 seq: 5,
                 actors: vec![],
+                command_receipts: vec![],
                 conversations: vec![conversation],
                 requests: vec![request],
                 jobs: vec![job_record("j1", "settled")],

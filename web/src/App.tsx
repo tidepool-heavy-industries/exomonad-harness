@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import NodeWindow from "./NodeWindow";
-import type { HostCommand } from "./protocol";
+import type { CommandReceipt, HostCommand } from "./protocol";
 
 /**
  * Presentation-only contract for the web views. The server/protocol adapter
@@ -19,6 +19,7 @@ export type HarnessViewModel = {
     lifecycle: string;
     modelConversation?: string;
   }>;
+  commandReceipts?: CommandReceipt[];
   nodes: Array<{
     id: string;
     parentId?: string;
@@ -236,7 +237,39 @@ function HostControls({ data, onCommand }: { data: HarnessViewModel; onCommand?:
         <button type="button" disabled={!canControl} onClick={() => sendAction("retire")}>Retire</button>
       </div>
     </form>
+    <CommandReceipts receipts={data.commandReceipts ?? []} />
     <HostActors data={data} />
+  </section>;
+}
+
+function CommandReceipts({ receipts }: { receipts: readonly CommandReceipt[] }) {
+  if (receipts.length === 0) return null;
+  return <section aria-labelledby="command-receipts-heading">
+    <h2 id="command-receipts-heading">Recent command handoffs</h2>
+    <div role="list" className="rows" aria-label="Command handoff receipts">
+      {receipts.map((receipt) => {
+        const outcome = receipt.outcome === "admitted"
+          ? "Admitted for processing"
+          : receipt.outcome === "control_requested"
+            ? `${receipt.control === "interrupt" ? "Interrupt" : "Retire"} requested`
+            : "Refused";
+        const detail = receipt.outcome === "admitted"
+          ? [`envelope ${receipt.envelopeId}`, receipt.wakeError ? `wake issue: ${receipt.wakeError}` : undefined].filter(Boolean).join(" · ")
+          : receipt.outcome === "control_requested"
+            ? "Request sent to the host; this does not report actor completion."
+            : receipt.reason;
+        return <article role="listitem" className="row" key={receipt.commandId}>
+          <strong>{outcome}</strong>
+          <span className="mono">{receipt.commandId}</span>
+          <span className="meta">{[
+            receipt.target
+              ? `${receipt.target.actor} · run ${receipt.target.run} · incarnation ${receipt.target.incarnation}`
+              : undefined,
+            detail,
+          ].filter(Boolean).join(" · ")}</span>
+        </article>;
+      })}
+    </div>
   </section>;
 }
 
@@ -366,6 +399,7 @@ export default function App({ data = emptyData, onCommand, acceptedCommandIds = 
           ))}
           <Timeline data={data} onInspectRequest={setInspectedRequest} />
           {inspectedRequest && <NodeWindow key={inspectedRequest} requestId={inspectedRequest} onClose={() => setInspectedRequest(undefined)} />}
+          <CommandReceipts receipts={data.commandReceipts ?? []} />
           <HostActors data={data} /><h2>Conversation and child identities</h2><Tree data={data} />
           <h2>Messages and replies</h2><Inbox data={data} />
         </section>}

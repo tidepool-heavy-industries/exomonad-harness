@@ -8,8 +8,9 @@ pub mod history;
 mod ws_protocol;
 
 pub use ws_protocol::{
-    HostActorIdentity, HostActorKind, HostActorLifecycle, HostActorProjection, Snapshot,
-    ToolJobRecord, ToolJobState, WsClientFrame, WsEvent, WsEventPayload, WsServerFrame,
+    CommandControl, CommandReceipt, CommandReceiptOutcome, HostActorIdentity, HostActorKind,
+    HostActorLifecycle, HostActorProjection, Snapshot, ToolJobRecord, ToolJobState, WsClientFrame,
+    WsEvent, WsEventPayload, WsServerFrame,
 };
 
 use crate::store::Store;
@@ -38,6 +39,7 @@ use tokio::sync::{broadcast, mpsc};
 
 const COMMAND_CAPACITY: usize = 128;
 const EVENT_CAPACITY: usize = 512;
+const COMMAND_RECEIPT_CAPACITY: usize = 128;
 
 /// Stable command envelope accepted by `POST /api/commands`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -255,6 +257,39 @@ impl ServerControl {
         event
     }
 
+    /// Store and publish a bounded command handoff receipt atomically.
+    ///
+    /// Receipts describe admission or control routing, never command
+    /// completion. Durable input records remain in the owning store.
+    pub fn publish_command_receipt(&self, receipt: CommandReceipt) -> ServerEvent {
+        let payload = serde_json::to_value(&receipt).expect("command receipt serializes to JSON");
+        let mut next_sequence = self.next_sequence.lock().expect("sequence lock poisoned");
+        let mut snapshot = self.snapshot.write().expect("snapshot lock poisoned");
+        if let Some(existing) = snapshot
+            .command_receipts
+            .iter()
+            .position(|existing| existing.command_id == receipt.command_id)
+        {
+            snapshot.command_receipts.remove(existing);
+        }
+        snapshot.command_receipts.push(receipt);
+        if snapshot.command_receipts.len() > COMMAND_RECEIPT_CAPACITY {
+            let excess = snapshot.command_receipts.len() - COMMAND_RECEIPT_CAPACITY;
+            snapshot.command_receipts.drain(..excess);
+        }
+
+        let sequence = *next_sequence;
+        *next_sequence += 1;
+        snapshot.seq = sequence;
+        let event = ServerEvent {
+            sequence,
+            event: "command.receipt".into(),
+            payload,
+        };
+        let _ = self.events.send(event.clone());
+        event
+    }
+
     /// Replace the WebSocket snapshot with a store-backed view.
     ///
     /// The snapshot's `seq` is a watermark: subsequent published events have a
@@ -265,7 +300,23 @@ impl ServerControl {
         let current_sequence = next_sequence.saturating_sub(1);
         snapshot.seq = snapshot.seq.max(current_sequence);
         *next_sequence = (*next_sequence).max(snapshot.seq.saturating_add(1));
-        *self.snapshot.write().expect("snapshot lock poisoned") = snapshot;
+        let mut current = self.snapshot.write().expect("snapshot lock poisoned");
+        let mut receipts = std::mem::take(&mut current.command_receipts);
+        for receipt in snapshot.command_receipts.drain(..) {
+            if let Some(existing) = receipts
+                .iter()
+                .position(|existing| existing.command_id == receipt.command_id)
+            {
+                receipts.remove(existing);
+            }
+            receipts.push(receipt);
+        }
+        if receipts.len() > COMMAND_RECEIPT_CAPACITY {
+            let excess = receipts.len() - COMMAND_RECEIPT_CAPACITY;
+            receipts.drain(..excess);
+        }
+        snapshot.command_receipts = receipts;
+        *current = snapshot;
     }
 
     /// Atomically replace the host-owned projection and publish its deltas.
@@ -985,6 +1036,7 @@ mod tests {
         control.set_snapshot(Snapshot {
             seq: 7,
             host_run: Some("run-old".into()),
+            command_receipts: vec![],
             actors: vec![old_actor.clone()],
             conversations: vec![json!({"id":"conversation-old","path":"/root/worker"})],
             requests: vec![json!({"id":"request-1"})],
@@ -1036,6 +1088,85 @@ mod tests {
         );
         assert_eq!(observed[4].payload["id"], "conversation-new");
         assert_eq!(snapshot.seq, observed.last().unwrap().sequence);
+    }
+
+    #[test]
+    fn command_receipts_update_snapshot_and_publish_a_coherent_watermark() {
+        let (_, control, _) = authorized_server(PathBuf::from("."));
+        let mut events = control.events.subscribe();
+        let target = HostActorIdentity {
+            run: "run-1".into(),
+            actor: crate::model::AgentPath("/root/worker".into()),
+            incarnation: "inc-2".into(),
+        };
+        let receipt = CommandReceipt {
+            command_id: "cmd-1".into(),
+            outcome: CommandReceiptOutcome::Admitted {
+                target: Some(target.clone()),
+                envelope_id: "envelope-4".into(),
+                wake_error: None,
+            },
+        };
+        let event = control.publish_command_receipt(receipt.clone());
+        let snapshot = control.snapshot.read().unwrap().clone();
+        assert_eq!(event.event, "command.receipt");
+        assert_eq!(event.sequence, snapshot.seq);
+        assert_eq!(snapshot.command_receipts, vec![receipt]);
+        assert_eq!(event.payload["outcome"], "admitted");
+        assert_eq!(event.payload["envelopeId"], "envelope-4");
+
+        control.set_snapshot(Snapshot {
+            jobs: vec![json!({"id":"job-after-command"})],
+            ..Snapshot::default()
+        });
+        let snapshot = control.snapshot.read().unwrap().clone();
+        assert_eq!(snapshot.command_receipts.len(), 1);
+        assert_eq!(snapshot.jobs, vec![json!({"id":"job-after-command"})]);
+        let wire = serde_json::to_value(WsServerFrame::Snapshot { snapshot }).unwrap();
+        assert_eq!(wire["snapshot"]["commandReceipts"][0]["commandId"], "cmd-1");
+
+        let requested = CommandReceipt {
+            command_id: "cmd-control".into(),
+            outcome: CommandReceiptOutcome::ControlRequested {
+                target: target.clone(),
+                control: CommandControl::Interrupt,
+            },
+        };
+        let event = control.publish_command_receipt(requested.clone());
+        let snapshot = control.snapshot.read().unwrap();
+        assert_eq!(snapshot.seq, event.sequence);
+        assert_eq!(snapshot.command_receipts.last(), Some(&requested));
+        assert_eq!(event.payload["outcome"], "control_requested");
+        assert_eq!(event.payload["control"], "interrupt");
+        assert_ne!(event.payload["outcome"], "completed");
+        drop(snapshot);
+
+        for index in 0..=COMMAND_RECEIPT_CAPACITY {
+            control.publish_command_receipt(CommandReceipt {
+                command_id: format!("cmd-{index}"),
+                outcome: CommandReceiptOutcome::Refused {
+                    target: None,
+                    reason: "not admitted".into(),
+                },
+            });
+        }
+        let snapshot = control.snapshot.read().unwrap();
+        assert_eq!(snapshot.command_receipts.len(), COMMAND_RECEIPT_CAPACITY);
+        assert_eq!(
+            snapshot.command_receipts.first().unwrap().command_id,
+            "cmd-1"
+        );
+        assert_eq!(
+            snapshot.command_receipts.last().unwrap().command_id,
+            "cmd-128"
+        );
+        assert_eq!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .last()
+                .unwrap()
+                .sequence,
+            snapshot.seq
+        );
     }
 
     #[test]

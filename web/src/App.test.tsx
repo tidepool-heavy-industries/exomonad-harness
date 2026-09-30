@@ -189,4 +189,25 @@ describe('operator views', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Run test' }))
     expect(onCommand).toHaveBeenCalledWith('test')
   })
+
+  it('shows handoff outcomes without treating control requests as completed work', () => {
+    const data: HarnessViewModel = {
+      hostRun: 'run-7', actors: [], nodes: [], timeline: [], inbox: [],
+      commandReceipts: [
+        { commandId: 'cmd-input', outcome: 'admitted', envelopeId: 'env-8' },
+        {
+          commandId: 'cmd-interrupt', target: { run: 'run-7', actor: '/root/worker', incarnation: 'inc-2' },
+          outcome: 'control_requested', control: 'interrupt',
+        },
+        { commandId: 'cmd-refused', outcome: 'refused', reason: 'target actor is no longer live' },
+      ],
+    }
+    render(<App data={data} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Host' }))
+    expect(screen.getByText('Admitted for processing')).toBeInTheDocument()
+    expect(screen.getByText('Interrupt requested')).toBeInTheDocument()
+    expect(screen.getByText('Refused')).toBeInTheDocument()
+    expect(screen.getByText(/request sent to the host; this does not report actor completion/i)).toBeInTheDocument()
+    expect(screen.queryByText('Completed')).not.toBeInTheDocument()
+  })
 })

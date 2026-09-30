@@ -1,4 +1,4 @@
-import { actorIdentityKey, applyStateEvent, normalizeSnapshot, type Snapshot } from "./protocol";
+import { actorIdentityKey, applyStateEvent, normalizeSnapshot, type SequencedEvent, type Snapshot } from "./protocol";
 import { describe, expect, it } from "vitest";
 
 // Recorded-shaped fixture: consumers can replace this with captured server JSON
@@ -71,6 +71,70 @@ describe("stable JSON state adapter", () => {
     if (result.kind === "applied") {
       expect(result.state.hostRun).toBe("run-empty");
       expect(result.state.actors.size).toBe(0);
+    }
+  });
+
+  it("applies bounded command receipts as sequenced observable handoffs", () => {
+    const receipt = {
+      commandId: "cmd-4",
+      target: { run: "run-1", actor: "/root/worker", incarnation: "inc-2" },
+      outcome: "control_requested" as const,
+      control: "interrupt" as const,
+    };
+    const initial = normalizeSnapshot(fixture);
+    const applied = applyStateEvent(initial, {
+      seq: fixture.seq + 1,
+      event: { kind: "command.receipt", value: receipt },
+    });
+    expect(applied.kind).toBe("applied");
+    if (applied.kind === "applied") {
+      expect(applied.state.commandReceipts.get("cmd-4")).toEqual(receipt);
+      expect(applied.state.seq).toBe(fixture.seq + 1);
+    }
+  });
+
+  it("advances over a valid auxiliary event without requesting a false resync", () => {
+    const initial = normalizeSnapshot(fixture);
+    const result = applyStateEvent(initial, {
+      seq: fixture.seq + 1,
+      event: { kind: "control.requested", value: { commandId: "cmd-5" } },
+    } as unknown as SequencedEvent);
+    expect(result.kind).toBe("applied");
+    if (result.kind === "applied") expect(result.state.seq).toBe(fixture.seq + 1);
+  });
+
+  it("bounds live receipts and moves a replacement to the newest position", () => {
+    let state = normalizeSnapshot(fixture);
+    for (let index = 0; index < 129; index += 1) {
+      const result = applyStateEvent(state, {
+        seq: state.seq + 1,
+        event: {
+          kind: "command.receipt",
+          value: { commandId: `cmd-${index}`, outcome: "refused", reason: "not admitted" },
+        },
+      });
+      expect(result.kind).toBe("applied");
+      if (result.kind === "applied") state = result.state;
+    }
+    expect(state.commandReceipts.size).toBe(128);
+    expect([...state.commandReceipts.keys()][0]).toBe("cmd-1");
+    expect([...state.commandReceipts.keys()].at(-1)).toBe("cmd-128");
+
+    const replacement = applyStateEvent(state, {
+      seq: state.seq + 1,
+      event: {
+        kind: "command.receipt",
+        value: { commandId: "cmd-1", outcome: "admitted", envelopeId: "env-refreshed" },
+      },
+    });
+    expect(replacement.kind).toBe("applied");
+    if (replacement.kind === "applied") {
+      expect(replacement.state.commandReceipts.size).toBe(128);
+      expect([...replacement.state.commandReceipts.keys()][0]).toBe("cmd-2");
+      expect([...replacement.state.commandReceipts.keys()].at(-1)).toBe("cmd-1");
+      expect(replacement.state.commandReceipts.get("cmd-1")).toMatchObject({
+        outcome: "admitted", envelopeId: "env-refreshed",
+      });
     }
   });
 });
