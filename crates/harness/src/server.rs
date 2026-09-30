@@ -610,8 +610,12 @@ async fn authorize(State(auth): State<ApiAuth>, request: Request, next: Next) ->
         )
             .into_response();
     }
-    if request.method() == axum::http::Method::POST
-        && request.uri().path() == "/commands"
+    let submitting =
+        request.method() == axum::http::Method::POST && request.uri().path() == "/commands";
+    let command_lookup_with_origin = request.method() == axum::http::Method::GET
+        && request.uri().path().starts_with("/commands/")
+        && request.headers().contains_key(header::ORIGIN);
+    if (submitting || command_lookup_with_origin)
         && session_id.is_some()
         && !same_origin(request.headers(), &auth.public_origin_scheme)
     {
@@ -1773,6 +1777,14 @@ mod tests {
         };
         write_ws_text(
             &mut socket,
+            &serde_json::to_string(&json!({"type":"host_command","command":input})).unwrap(),
+        );
+        let refused = read_ws_text(&mut socket);
+        assert_eq!(refused["type"], "command.refused");
+        assert_eq!(refused["code"], "invalid_command");
+        assert!(commands.try_recv().is_err());
+        write_ws_text(
+            &mut socket,
             &serde_json::to_string(&WsClientFrame::HostCommand {
                 operation_id: ClientOperationId(uuid::Uuid::new_v4()),
                 command: input.clone(),
@@ -1839,6 +1851,11 @@ mod durable_command_tests {
         let (router, control, _commands) = server_with_config(
             ServerConfig::new(PathBuf::from("."))
                 .with_history_store(store.clone())
+                .with_browser_session(
+                    SessionSecret::new("retained-command-session-only-secret-value").unwrap(),
+                    Duration::from_secs(60),
+                )
+                .unwrap()
                 .with_bearer_secret(BearerSecret::new(secret).unwrap()),
         );
         control.set_snapshot(Snapshot {
@@ -1865,6 +1882,32 @@ mod durable_command_tests {
                 text: "héllo".into(),
             },
         };
+        let origin = format!("http://{address}");
+        let login = client
+            .post(format!("{origin}/api/session"))
+            .header("Origin", &origin)
+            .json(&json!({"secret":"retained-command-session-only-secret-value"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+        let cookie = login.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let foreign = client
+            .post(&endpoint)
+            .header("Cookie", &cookie)
+            .header("Origin", "http://foreign.example")
+            .json(&command)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
+        assert!(store.embedded_command("run", operation).unwrap().is_none());
         let unauthorized = client.post(&endpoint).json(&command).send().await.unwrap();
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
         assert!(store.embedded_command("run", operation).unwrap().is_none());
@@ -1910,6 +1953,31 @@ mod durable_command_tests {
         assert_eq!(
             client.get(&lookup).send().await.unwrap().status(),
             StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .get(&lookup)
+                .header("Cookie", &cookie)
+                .header("Origin", "http://foreign.example")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        // The operation ID is independent of the session credential. A valid
+        // cookie can observe and resubmit the bearer-issued exact operation.
+        assert_eq!(
+            client
+                .post(&endpoint)
+                .header("Cookie", &cookie)
+                .header("Origin", &origin)
+                .json(&command)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
         );
         let record: crate::store::EmbeddedCommandRecord = client
             .get(&lookup)

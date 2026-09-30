@@ -1488,3 +1488,74 @@ async fn browser_command_admission_retry_after_retirement_never_wakes_or_readmit
     );
     assert_eq!(store.unread(&host.identity.actor.0).unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn browser_command_wake_failure_retains_admission_and_retry_receipt() {
+    use harness::{
+        embedding::ClientOperationId,
+        server::{CommandReceiptOutcome, HostCommand},
+    };
+    struct FailedWake(Arc<Host>);
+    #[async_trait]
+    impl HostActor for FailedWake {
+        fn identity(&self) -> &HostIdentity {
+            self.0.identity()
+        }
+        fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+            self.0.admit()
+        }
+        fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+            self.0.tool_surface()
+        }
+        async fn wake(&self, _: i64) -> Result<(), String> {
+            self.0.wakes.fetch_add(1, Ordering::SeqCst);
+            Err("wake unavailable".into())
+        }
+        async fn control(&self, control: HostControl) -> Result<Value, HostControlError> {
+            self.0.control(control).await
+        }
+    }
+    let store = Arc::new(Store::memory().unwrap());
+    let host = host(store.clone(), Arc::new(Mutex::new(vec![])));
+    let conversation =
+        Conversation::attach(store.clone(), Arc::new(FailedWake(host.clone())), None).unwrap();
+    let operation: ClientOperationId =
+        serde_json::from_value(json!("efece25b-e375-4a0c-bfda-7a44a10720b9")).unwrap();
+    store
+        .enqueue_embedded_command(
+            operation,
+            &HostCommand::Input {
+                target: host.identity.clone(),
+                text: "hello".into(),
+            },
+        )
+        .unwrap();
+    store
+        .claim_embedded_command(&host.identity.run, operation)
+        .unwrap()
+        .unwrap();
+    let first = conversation
+        .command_input(operation, "hello")
+        .await
+        .unwrap();
+    assert!(
+        matches!(&first.outcome,CommandReceiptOutcome::Admitted {wake_error:Some(error),..} if error=="wake unavailable")
+    );
+    assert_eq!(
+        store
+            .embedded_command(&host.identity.run, operation)
+            .unwrap()
+            .unwrap()
+            .receipt,
+        Some(first.clone())
+    );
+    conversation.control(HostControl::Retire).await.unwrap();
+    assert_eq!(
+        conversation
+            .command_input(operation, "hello")
+            .await
+            .unwrap(),
+        first
+    );
+    assert_eq!(host.wakes.load(Ordering::SeqCst), 1);
+}

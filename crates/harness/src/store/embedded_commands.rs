@@ -281,10 +281,36 @@ mod tests {
         assert_eq!(
             workers
                 .into_iter()
-                .filter(|w| w.thread().id() != std::thread::current().id())
                 .map(|w| w.join().unwrap() as usize)
                 .sum::<usize>(),
             1
+        );
+    }
+
+    #[test]
+    fn interrupt_operation_reuse_requires_exact_round_and_action() {
+        let store = Store::memory().unwrap();
+        let id = operation();
+        let command = HostCommand::Interrupt {
+            target: identity(),
+            expected_round: EmbeddedRoundId(uuid::Uuid::new_v4()),
+        };
+        store.enqueue_embedded_command(id, &command).unwrap();
+        let changed = HostCommand::Interrupt {
+            target: identity(),
+            expected_round: EmbeddedRoundId(uuid::Uuid::new_v4()),
+        };
+        assert!(matches!(
+            store.enqueue_embedded_command(id, &changed),
+            Err(StoreError::ConflictingCommand)
+        ));
+        assert!(matches!(
+            store.enqueue_embedded_command(id, &HostCommand::Retire { target: identity() }),
+            Err(StoreError::ConflictingCommand)
+        ));
+        assert_eq!(
+            store.embedded_command("run", id).unwrap().unwrap().command,
+            command
         );
     }
 

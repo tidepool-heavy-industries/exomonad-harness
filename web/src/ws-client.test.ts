@@ -61,8 +61,11 @@ describe('WebSocket API boundary', () => {
     sendCommand('wait_agent')
     expect(socket.send).toHaveBeenLastCalledWith(JSON.stringify({ type: 'command', command: 'wait_agent' }))
     const addressed = { action: 'input' as const, target: { run: 'run-1', actor: '/root/child', incarnation: 'second' }, text: 'continue' }
-    sendCommand(addressed)
-    expect(socket.send).toHaveBeenLastCalledWith(JSON.stringify({ type: 'host_command', command: addressed }))
+    const operationId = '71546150-7b90-41d6-b06e-34b62df86058'
+    sendCommand({ operation_id: operationId, command: addressed })
+    expect(socket.send).toHaveBeenLastCalledWith(JSON.stringify({ type: 'host_command', operation_id: operationId, command: addressed }))
+    sendCommand({ operation_id: operationId, command: addressed })
+    expect(socket.send).toHaveBeenLastCalledWith(JSON.stringify({ type: 'host_command', operation_id: operationId, command: addressed }))
     expect(error).not.toHaveBeenCalled()
   })
 })

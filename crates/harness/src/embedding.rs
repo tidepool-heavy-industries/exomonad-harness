@@ -319,22 +319,24 @@ impl Conversation {
         operation: ClientOperationId,
         text: &str,
     ) -> Result<crate::server::CommandReceipt, EmbeddedError> {
-        if let Some(record) = self
+        let record = self
             .store
             .embedded_command(&self.identity().run, operation)?
-        {
-            let expected = crate::server::HostCommand::Input {
-                target: self.identity().clone(),
-                text: text.into(),
-            };
-            if record.command != expected {
-                return Err(StoreError::ConflictingCommand.into());
-            }
-            if record.state == crate::store::EmbeddedCommandState::InputAdmitted {
-                return record
-                    .receipt
-                    .ok_or_else(|| StoreError::InvalidCommandState.into());
-            }
+            .ok_or(StoreError::InvalidCommandState)?;
+        let expected = crate::server::HostCommand::Input {
+            target: self.identity().clone(),
+            text: text.into(),
+        };
+        if record.command != expected {
+            return Err(StoreError::ConflictingCommand.into());
+        }
+        if record.state == crate::store::EmbeddedCommandState::InputAdmitted {
+            return record
+                .receipt
+                .ok_or_else(|| StoreError::InvalidCommandState.into());
+        }
+        if record.state != crate::store::EmbeddedCommandState::Dispatching {
+            return Err(StoreError::InvalidCommandState.into());
         }
         let admission = self.host.admit()?;
         let receipt = self

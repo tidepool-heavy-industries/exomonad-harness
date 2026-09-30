@@ -107,3 +107,82 @@ browser page budget remain in Store with a visible hash; a large-artifact downlo
 route is deferred. Browser protocol tests use actual HTTP/WebSocket routes and
 deterministic model transport; they are not a live provider or full browser-engine
 performance measurement.
+
+## Durable browser command contract (schema 7)
+
+Candidate baseline: `44b48fdeafb35e9cc2335c9ccbd40b113821d41f`; API implementation:
+`1d055099c92b15f0f4cb7988cc5c0bab61d1c1a4`. This additive library change does
+not establish resident or live-provider acceptance.
+
+`embedding::ClientOperationId` and `EmbeddedRoundId` are transparent UUID
+newtypes. HTTP `ClientCommand::Host` and WebSocket `host_command` require
+`operation_id` outside `command`. Interrupts additionally require the exact
+`command.expected_round`. Missing or malformed identities return a typed
+`invalid_command` refusal; the server never substitutes a fresh identity.
+Standalone `submit`/WebSocket `command` behavior is unchanged. `command_id` in
+acceptance and receipts is the canonical supplied operation UUID.
+
+Host actors expose `HostActor::active_round` (default `None`), and
+`Conversation::active_round` delegates to that owner. Actor projections expose
+optional `activeRound`. `HostControl::Interrupt { expected_round }` carries the
+same opaque round through to the host. `HostControlError::Refused` records a
+known refusal; `Unconfirmed` records an unknown control effect. A successful
+control response establishes a request to the host owner, not completed cleanup.
+The host must compare the expected round with its actual execution slot before
+requesting an interrupt.
+
+Store owns `embedded_commands`, keyed by `(run_id, operation_id)`, with exact
+target, action, text, expected round, state and retained receipt. Its public API:
+
+- `enqueue_embedded_command(operation, &command)` commits before acceptance,
+  returns the retained record for identical reuse, and returns
+  `StoreError::ConflictingCommand` for different contents without changing it.
+- `queued_embedded_commands(run)` gives the existing host command loop retained
+  work. Drain at startup and on its existing periodic wake; channel notifications
+  are hints and can be lost between the Store commit and enqueue.
+- `claim_embedded_command(run, operation)` moves only `Queued` to `Dispatching`
+  and returns `None` to later claimants. Claim before any live host lookup/effect.
+- `Conversation::command_input(operation, text)` admits a claimed input with
+  envelope, input identity and `InputAdmitted` receipt in one transaction. Wake
+  follows commit; a reported wake error is retained without revoking admission.
+  An admitted retry checks contents and reads its receipt before any live host
+  admission or wake, including after retirement. `InputObserver` independently
+  reads admission versus actual request inclusion without retaining an actor.
+- `settle_embedded_command(run, operation, outcome)` records `ControlRequested`,
+  `Refused` or `Unconfirmed` after a claim. Input admission uses its atomic path.
+  A terminal receipt cannot be replaced with another outcome.
+- `embedded_command(run, operation)` reads the retained record. Reopening Store
+  changes outstanding `Dispatching` rows to `Unconfirmed`; it never automatically
+  redispatches them. Unclaimed `Queued` rows remain available to their owner.
+
+Authenticated `GET /api/commands/{operation_id}` returns the Store record for
+the current projected host run, or 404 when absent. HTTP submission and lookup
+are authorized before Store access; cookie submissions and cookie lookups with
+an Origin header enforce the configured same origin. WebSocket upgrade and
+command frames enforce authorization, including session expiry. IDs confer no
+authority and are independent of cookies. Exact actor/run/incarnation admission
+remains the host owner's responsibility.
+
+The snapshot's 128 receipts are presentation only. Eviction never removes the
+Store record; there is no command-record expiry during the retained run. Browser
+reconnect observes snapshots and explicitly queries its pending operation IDs;
+it does not automatically replay a command. The caller retains one UUID and
+exact contents across an uncertain acknowledgment and offers explicit retry.
+The TypeScript `HostCommandSubmission` passed to `connectHarness` contains
+`{ operation_id, command }` and never allocates a replacement identity.
+
+Schema 6 to 7 adds the command table and index without rewriting old inputs,
+checkpoint metadata or history, and without fabricating historical controls.
+An admitted envelope is durable evidence of admission; receipt acceptance,
+absence of a wake error, and input inclusion are distinct observations. Queued
+recovery does not reconstruct resident actor state after host loss.
+
+Focused deterministic evidence covers concurrent duplicates, exact-content and
+round conflicts, once-only claims, atomic input admission, queued recovery,
+claimed-control uncertainty, authenticated HTTP/WS wires, lost acceptance,
+receipt eviction, and retry after retirement without admission or wake. The
+external-host fixture also preserves a failed wake and its identical retry.
+Rust checks use the materialized pinned harness Rust 1.93 toolchain in the
+admitted user build slice; `cargo check --workspace --all-targets` compiles all
+consumers. Browser UI integration, exact Tidepool round matching and a real
+resident browser journey remain downstream integration checks.
