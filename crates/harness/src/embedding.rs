@@ -143,6 +143,33 @@ pub enum InputObservation {
     Included(RequestId),
 }
 
+/// Read-only access to durable input observations for one exact host binding.
+/// The observer does not retain the actor capability or perform admission.
+pub struct InputObserver {
+    store: Arc<Store>,
+    identity: HostIdentity,
+}
+impl InputObserver {
+    /// Read whether this exact host operation has been admitted or included
+    /// in a request. Missing operations return `None`; a mismatched binding
+    /// is an error.
+    pub fn input_observation_by_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<InputObservation>, EmbeddedError> {
+        Ok(
+            match self
+                .store
+                .embedded_input_state(&self.identity, operation_id)?
+            {
+                EmbeddedInputState::Missing => None,
+                EmbeddedInputState::Admitted => Some(InputObservation::Admitted),
+                EmbeddedInputState::Included(request) => Some(InputObservation::Included(request)),
+            },
+        )
+    }
+}
+
 pub struct Conversation {
     store: Arc<Store>,
     host: Arc<dyn HostActor>,
@@ -215,6 +242,14 @@ impl Conversation {
     pub fn identity(&self) -> &HostIdentity {
         self.host.identity()
     }
+    /// Derive a read-only observer for this exact host incarnation. It can
+    /// outlive the conversation without retaining the actor capability.
+    pub fn input_observer(&self) -> InputObserver {
+        InputObserver {
+            store: self.store.clone(),
+            identity: self.identity().clone(),
+        }
+    }
     pub fn provider(&self) -> Arc<BoundProvider> {
         Arc::new(BoundProvider {
             store: self.store.clone(),
@@ -261,16 +296,8 @@ impl Conversation {
         &self,
         operation_id: &str,
     ) -> Result<Option<InputObservation>, EmbeddedError> {
-        Ok(
-            match self
-                .store
-                .embedded_input_state(self.identity(), operation_id)?
-            {
-                EmbeddedInputState::Missing => None,
-                EmbeddedInputState::Admitted => Some(InputObservation::Admitted),
-                EmbeddedInputState::Included(request) => Some(InputObservation::Included(request)),
-            },
-        )
+        self.input_observer()
+            .input_observation_by_operation(operation_id)
     }
     pub async fn control(&self, control: HostControl) -> Result<Value, EmbeddedError> {
         self.host

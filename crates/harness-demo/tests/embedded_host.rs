@@ -175,6 +175,7 @@ async fn embedded_requests_pin_dispatch_and_inputs_record_actual_inclusion() {
     let seen = Arc::new(Mutex::new(vec![]));
     let host = host(store.clone(), seen.clone());
     let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+    let observer = conversation.input_observer();
     let receipt = conversation
         .input("message-1", "operator", "do work")
         .await
@@ -263,13 +264,22 @@ async fn embedded_requests_pin_dispatch_and_inputs_record_actual_inclusion() {
         conversation
             .input_observation_by_operation("message-1")
             .unwrap(),
-        Some(InputObservation::Included(included_request))
+        Some(InputObservation::Included(included_request.clone()))
     );
     assert!(
         conversation
             .input("after-retirement", "operator", "no")
             .await
             .is_err()
+    );
+    assert_eq!(host.wakes.load(Ordering::SeqCst), wakes);
+    drop(engine);
+    drop(conversation);
+    assert_eq!(
+        observer
+            .input_observation_by_operation("message-1")
+            .unwrap(),
+        Some(InputObservation::Included(included_request))
     );
     assert_eq!(host.wakes.load(Ordering::SeqCst), wakes);
     let observed = seen.lock().unwrap();
