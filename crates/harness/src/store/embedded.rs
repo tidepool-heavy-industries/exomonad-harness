@@ -1,5 +1,7 @@
 use super::*;
-use crate::embedding::{EmbeddedError, HostIdentity};
+use crate::embedding::{
+    BindingSuccessorAuthority, BindingSuccessorCommit, EmbeddedError, HostIdentity,
+};
 
 pub(crate) enum CommandInputAdmission {
     New(crate::server::CommandReceipt),
@@ -32,39 +34,31 @@ impl Store {
         operation_id: &str,
     ) -> std::result::Result<EmbeddedInputState, EmbeddedError> {
         let connection = self.lock();
-        let binding: Option<(String, String, Option<i64>, Option<i64>, Option<String>)> =
-            connection
-                .query_row(
-                    "SELECT b.run_id,b.incarnation,ei.envelope_id,e.id,e.delivered_request \
-                 FROM embedded_bindings b \
-                 LEFT JOIN embedded_inputs ei \
-                   ON ei.agent_path=b.agent_path AND ei.run_id=b.run_id AND ei.incarnation=b.incarnation AND ei.operation_id=?2 \
-                 LEFT JOIN envelopes e \
-                   ON e.id=ei.envelope_id AND e.recipient=b.agent_path \
-                 WHERE b.agent_path=?1",
-                    params![identity.actor.0, operation_id],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                        ))
-                    },
-                )
-                .optional()?;
-        let Some((run, incarnation, operation_envelope, envelope, delivered_request)) = binding
-        else {
-            return Err(EmbeddedError::Binding(
-                "input target is not bound to this host".into(),
-            ));
+        let observation: Option<(i64, Option<i64>, Option<String>)> = connection
+            .query_row(
+                "SELECT ei.envelope_id,e.id,e.delivered_request FROM embedded_inputs ei \
+             LEFT JOIN envelopes e ON e.id=ei.envelope_id AND e.recipient=ei.agent_path \
+             WHERE ei.run_id=?1 AND ei.agent_path=?2 AND ei.incarnation=?3 AND ei.operation_id=?4",
+                params![
+                    identity.run,
+                    identity.actor.0,
+                    identity.incarnation,
+                    operation_id
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let (operation_envelope, envelope, delivered_request) = match observation {
+            Some((operation, envelope, request)) => (Some(operation), envelope, request),
+            None if matches_binding(&connection, identity)? => {
+                return Ok(EmbeddedInputState::Missing);
+            }
+            None => {
+                return Err(EmbeddedError::Binding(
+                    "input target has no retained operation or current binding".into(),
+                ));
+            }
         };
-        if run != identity.run || incarnation != identity.incarnation {
-            return Err(EmbeddedError::Binding(
-                "input target is not bound to this host".into(),
-            ));
-        }
         match (operation_envelope, envelope) {
             (None, None) => Ok(EmbeddedInputState::Missing),
             (Some(_), None) => Err(EmbeddedError::Binding(
@@ -78,6 +72,63 @@ impl Store {
                 "input envelope has no matching host operation".into(),
             )),
         }
+    }
+
+    /// Transfer only the existing exact binding. Historical inputs and command
+    /// receipts keep their original identities; this does not enqueue work.
+    pub fn transfer_embedded_binding(
+        &self,
+        predecessor: &HostIdentity,
+        successor: &HostIdentity,
+        authority: &dyn BindingSuccessorAuthority,
+    ) -> std::result::Result<BindingSuccessorCommit, EmbeddedError> {
+        if predecessor.run.is_empty()
+            || predecessor.incarnation.is_empty()
+            || successor.incarnation.is_empty()
+            || predecessor.run != successor.run
+            || predecessor.actor != successor.actor
+            || predecessor.incarnation == successor.incarnation
+        {
+            return Err(EmbeddedError::Binding(
+                "invalid exact successor binding transition".into(),
+            ));
+        }
+        let mut connection = self.lock();
+        let tx = connection.transaction()?;
+        if !authority
+            .validate_successor(predecessor, successor)
+            .map_err(EmbeddedError::Host)?
+        {
+            return Err(EmbeddedError::Binding(
+                "successor binding lacks retained run and journal authority".into(),
+            ));
+        }
+        let outcome = if matches_binding(&tx, successor)? {
+            BindingSuccessorCommit::AlreadyInstalled
+        } else if matches_binding(&tx, predecessor)? {
+            let changed = tx.execute("UPDATE embedded_bindings SET incarnation=?1 WHERE agent_path=?2 AND run_id=?3 AND incarnation=?4",
+                params![successor.incarnation, predecessor.actor.0, predecessor.run, predecessor.incarnation])?;
+            if changed != 1 {
+                return Err(EmbeddedError::Binding(
+                    "successor binding compare-and-swap lost its exact predecessor".into(),
+                ));
+            }
+            BindingSuccessorCommit::Installed
+        } else {
+            return Err(EmbeddedError::Binding(
+                "successor binding conflicts with its exact predecessor".into(),
+            ));
+        };
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    /// Readback is evidence, not admission or authority to create a host.
+    pub fn embedded_binding_matches(
+        &self,
+        identity: &HostIdentity,
+    ) -> std::result::Result<bool, EmbeddedError> {
+        matches_binding(&self.lock(), identity)
     }
 
     pub(crate) fn bind_embedded_actor(
@@ -227,6 +278,114 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TransferAuthority(bool);
+    impl BindingSuccessorAuthority for TransferAuthority {
+        fn validate_successor(
+            &self,
+            _: &HostIdentity,
+            _: &HostIdentity,
+        ) -> std::result::Result<bool, String> {
+            Ok(self.0)
+        }
+    }
+
+    #[test]
+    fn successor_binding_is_exact_idempotent_and_preserves_historical_observation() {
+        let root = std::env::temp_dir().join(format!(
+            "harness-binding-successor-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("store.sqlite");
+        let store = Store::open(&path).unwrap();
+        let old = HostIdentity {
+            run: "run".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "1".into(),
+        };
+        let new = HostIdentity {
+            incarnation: "2".into(),
+            ..old.clone()
+        };
+        store.bind_embedded_actor(&old, None).unwrap();
+        let item = Item(serde_json::json!({"type":"message","role":"user","content":[]}));
+        let envelope = store
+            .admit_embedded_input(&old, "operation", "operator", &item)
+            .unwrap();
+        assert!(
+            store
+                .transfer_embedded_binding(&old, &new, &TransferAuthority(false))
+                .is_err()
+        );
+        assert!(store.embedded_binding_matches(&old).unwrap());
+        assert_eq!(
+            store
+                .transfer_embedded_binding(&old, &new, &TransferAuthority(true))
+                .unwrap(),
+            BindingSuccessorCommit::Installed
+        );
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .transfer_embedded_binding(&old, &new, &TransferAuthority(true))
+                .unwrap(),
+            BindingSuccessorCommit::AlreadyInstalled
+        );
+        assert!(matches!(
+            store.embedded_input_state(&old, "operation").unwrap(),
+            EmbeddedInputState::Admitted
+        ));
+        assert!(
+            store
+                .admit_embedded_input(&old, "later", "operator", &item)
+                .is_err()
+        );
+        assert!(
+            store
+                .transfer_embedded_binding(
+                    &old,
+                    &HostIdentity {
+                        incarnation: "3".into(),
+                        ..new.clone()
+                    },
+                    &TransferAuthority(true)
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .transfer_embedded_binding(
+                    &old,
+                    &HostIdentity {
+                        run: "other".into(),
+                        ..new.clone()
+                    },
+                    &TransferAuthority(true)
+                )
+                .is_err()
+        );
+        let connection = store.lock();
+        connection
+            .execute(
+                "INSERT INTO requests(id,branch) VALUES ('retained-request','main')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE envelopes SET delivered_request='retained-request' WHERE id=?1",
+                [envelope],
+            )
+            .unwrap();
+        drop(connection);
+        assert!(
+            matches!(store.embedded_input_state(&old, "operation").unwrap(), EmbeddedInputState::Included(request) if request.0 == "retained-request")
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use crate::{item::Item, model::AgentPath};
     use serde_json::json;
 

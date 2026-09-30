@@ -39,6 +39,22 @@ pub struct HostIdentity {
     pub incarnation: String,
 }
 
+/// Native composition retains the actual run lease and latest journal proof.
+/// Serialized identity fields alone never authorize replacing a live binding.
+pub trait BindingSuccessorAuthority: Send + Sync {
+    fn validate_successor(
+        &self,
+        predecessor: &HostIdentity,
+        successor: &HostIdentity,
+    ) -> Result<bool, String>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindingSuccessorCommit {
+    Installed,
+    AlreadyInstalled,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddedError {
     #[error(transparent)]
@@ -183,8 +199,8 @@ pub struct InputObserver {
 }
 impl InputObserver {
     /// Read whether this exact host operation has been admitted or included
-    /// in a request. Missing operations return `None`; a mismatched binding
-    /// is an error.
+    /// in a request. Historical operations remain readable after successor transfer. Missing
+    /// operations require the current binding and return `None`.
     pub fn input_observation_by_operation(
         &self,
         operation_id: &str,
