@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import App, { type HarnessViewModel } from './App'
+import App from './App'
+import type { HarnessViewModel } from './view-model'
 
 describe('operator views', () => {
   it('teaches the empty inbox and navigates between views by keyboard', () => {

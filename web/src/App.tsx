@@ -1,65 +1,8 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import NodeWindow from "./NodeWindow";
 import type { CommandReceipt, HostCommand, HostCommandSubmission } from "./protocol";
-
-/**
- * Presentation-only contract for the web views. The server/protocol adapter
- * owns conversion from protocol events into this view model; this module does
- * not import or re-declare wire types.
- */
-export type HarnessViewModel = {
-  hostRun?: string;
-  actors?: Array<{
-    id: string;
-    name: string;
-    run: string;
-    incarnation: string;
-    parent?: string;
-    kind: "model" | "workflow";
-    lifecycle: string;
-    modelConversation?: string;
-    activeRound?: string;
-  }>;
-  commandReceipts?: CommandReceipt[];
-  nodes: Array<{
-    id: string;
-    parentId?: string;
-    name: string;
-    model?: string;
-    effort?: string;
-    state: string;
-    detail?: string;
-    updatedAt?: string;
-  }>;
-  timeline: Array<{
-    id: string;
-    nodeId: string;
-    label: string;
-    kind: "request" | "job" | "wait";
-    state: string;
-    startedAt?: string;
-    duration?: string;
-    detail?: string;
-    commandId?: string;
-    command?: string;
-    toolKind?: "function" | "custom";
-    outcome?: "accepted" | "pending" | "queued" | "presented" | "acted" | "completed" | "cancelled" | "failed";
-    requestId?: string;
-    callId?: string;
-    toolName?: string;
-    delivered?: boolean;
-    output?: unknown;
-  }>;
-  inbox: Array<{
-    id: string;
-    sender: string;
-    recipient?: string;
-    message: string;
-    state: string;
-    receivedAt?: string;
-    ordinal?: number;
-  }>;
-};
+import type { HarnessViewModel } from "./view-model";
+import type { Screen } from "./client-contract";
 
 export type AppProps = {
   data?: HarnessViewModel;
@@ -69,7 +12,6 @@ export type AppProps = {
   acceptedCommandIds?: readonly string[];
 };
 
-type Screen = "tree" | "timeline" | "inbox" | "command" | "host";
 const emptyData: HarnessViewModel = { nodes: [], timeline: [], inbox: [] };
 const commonScreens: Array<{ id: Screen; title: string; shortcut: string }> = [
   { id: "tree", title: "Tree", shortcut: "g t" },
@@ -146,7 +88,10 @@ function Empty({ title, help }: { title: string; help: string }) {
 function Tree({ data }: { data: HarnessViewModel }) {
   const children = useMemo(() => {
     const byParent = new Map<string | undefined, HarnessViewModel["nodes"]>();
-    data.nodes.forEach((node) => byParent.set(node.parentId, [...(byParent.get(node.parentId) ?? []), node]));
+    data.nodes.forEach((node) => {
+      const parentId = node.parentId ?? undefined;
+      byParent.set(parentId, [...(byParent.get(parentId) ?? []), node]);
+    });
     return byParent;
   }, [data.nodes]);
   const rows: Array<{ node: HarnessViewModel["nodes"][number]; depth: number }> = [];

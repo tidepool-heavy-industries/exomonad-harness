@@ -1,4 +1,4 @@
-import type { HarnessViewModel } from './App'
+import type { HarnessViewModel } from './view-model'
 import { actorIdentityKey, type NormalizedState } from './protocol'
 
 /** Translate normalized wire state into the view-only contract. */

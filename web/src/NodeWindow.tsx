@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import type { NodeWindowProps } from './client-contract'
 
 interface HistoryItem {
   readonly position: number;
@@ -24,7 +25,7 @@ interface HistoryPage {
 }
 
 /** Reads retained request Items through the protected, bounded Store route. */
-export default function NodeWindow({ requestId, onClose }: { requestId: string; onClose: () => void }) {
+export default function NodeWindow({ requestId, onClose }: NodeWindowProps) {
   const [items, setItems] = useState<readonly HistoryItem[]>([])
   const [page, setPage] = useState<HistoryPage>()
   const [loading, setLoading] = useState(false)
