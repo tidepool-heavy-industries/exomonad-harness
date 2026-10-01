@@ -263,6 +263,7 @@ pub struct ServerConfig {
     bearer_secret: Option<BearerSecret>,
     browser_auth: BrowserAuthentication,
     public_origin_scheme: String,
+    public_origin_authority: Option<String>,
 }
 
 impl ServerConfig {
@@ -273,6 +274,7 @@ impl ServerConfig {
             bearer_secret: None,
             browser_auth: BrowserAuthentication::Disabled,
             public_origin_scheme: "http".into(),
+            public_origin_authority: None,
         }
     }
 
@@ -323,6 +325,30 @@ impl ServerConfig {
         Ok(self)
     }
 
+    /// Pin the complete browser-facing origin. Peer authentication requires
+    /// this authority on every API request to prevent DNS rebinding.
+    pub fn with_public_origin(mut self, origin: impl Into<String>) -> Result<Self, &'static str> {
+        let origin = origin.into();
+        let uri = origin.parse::<Uri>().map_err(|_| "invalid public origin")?;
+        let scheme = uri.scheme_str().ok_or("public origin requires a scheme")?;
+        let authority = uri
+            .authority()
+            .ok_or("public origin requires an authority")?;
+        if !matches!(scheme, "http" | "https")
+            || authority.as_str().contains('@')
+            || uri.path() != "/" && !uri.path().is_empty()
+            || uri.query().is_some()
+            || origin.contains('#')
+        {
+            return Err(
+                "public origin must be an http or https origin without credentials, path or query",
+            );
+        }
+        self.public_origin_scheme = scheme.into();
+        self.public_origin_authority = Some(authority.as_str().into());
+        Ok(self)
+    }
+
     /// Set the browser-facing scheme used by the WebSocket same-origin check.
     /// This is explicit configuration, never inferred from proxy headers.
     pub fn with_public_origin_scheme(
@@ -346,6 +372,7 @@ struct AppState {
     snapshot: Arc<std::sync::RwLock<Snapshot>>,
     history_store: Option<Arc<Store>>,
     public_origin_scheme: Arc<str>,
+    public_origin_authority: Option<Arc<str>>,
     auth: Arc<ApiAuthPolicy>,
 }
 
@@ -353,6 +380,7 @@ struct AppState {
 struct ApiAuth {
     policy: Arc<ApiAuthPolicy>,
     public_origin_scheme: Arc<str>,
+    public_origin_authority: Option<Arc<str>>,
 }
 
 struct ApiAuthPolicy {
@@ -648,6 +676,7 @@ pub fn server_with_config(
         bearer_secret,
         browser_auth,
         public_origin_scheme,
+        public_origin_authority,
     } = config;
     let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (events, _) = broadcast::channel(EVENT_CAPACITY);
@@ -658,6 +687,7 @@ pub fn server_with_config(
         snapshot: Arc::new(std::sync::RwLock::new(Snapshot::default())),
         history_store,
         public_origin_scheme: Arc::from(public_origin_scheme),
+        public_origin_authority: public_origin_authority.map(Arc::from),
         auth: Arc::new(ApiAuthPolicy {
             bearer_secret: bearer_secret.clone(),
             browser_auth,
@@ -672,6 +702,7 @@ pub fn server_with_config(
     let auth = ApiAuth {
         policy: state.auth.clone(),
         public_origin_scheme: state.public_origin_scheme.clone(),
+        public_origin_authority: state.public_origin_authority.clone(),
     };
     let protected_api = Router::new()
         .route("/commands", post(submit_command))
@@ -701,6 +732,15 @@ pub fn server_with_config(
 }
 
 async fn authorize(State(auth): State<ApiAuth>, request: Request, next: Next) -> Response {
+    if matches!(auth.policy.browser_auth, BrowserAuthentication::Peer(_))
+        && !pinned_authority_matches(request.headers(), auth.public_origin_authority.as_deref())
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            "configured browser authority required",
+        )
+            .into_response();
+    }
     let peer = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
@@ -724,7 +764,11 @@ async fn authorize(State(auth): State<ApiAuth>, request: Request, next: Next) ->
         && request.headers().contains_key(header::ORIGIN);
     if (submitting || command_lookup_with_origin)
         && ambient
-        && !same_origin(request.headers(), &auth.public_origin_scheme)
+        && !same_origin(
+            request.headers(),
+            &auth.public_origin_scheme,
+            auth.public_origin_authority.as_deref(),
+        )
     {
         return (StatusCode::FORBIDDEN, "same-origin request required").into_response();
     }
@@ -803,7 +847,11 @@ async fn websocket(
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     upgrade: WebSocketUpgrade,
 ) -> Result<axum::response::Response, StatusCode> {
-    if !same_origin(&headers, &state.public_origin_scheme) {
+    if !same_origin(
+        &headers,
+        &state.public_origin_scheme,
+        state.public_origin_authority.as_deref(),
+    ) {
         return Err(StatusCode::FORBIDDEN);
     }
     // Subscribe before upgrading, so events published during the handshake are
@@ -813,7 +861,23 @@ async fn websocket(
     Ok(upgrade.on_upgrade(move |socket| websocket_session(socket, state, receiver, headers, peer)))
 }
 
-fn same_origin(headers: &HeaderMap, expected_scheme: &str) -> bool {
+fn pinned_authority_matches(headers: &HeaderMap, authority: Option<&str>) -> bool {
+    match (
+        authority,
+        headers
+            .get(header::HOST)
+            .and_then(|host| host.to_str().ok()),
+    ) {
+        (Some(authority), Some(host)) => authority.eq_ignore_ascii_case(host),
+        _ => false,
+    }
+}
+
+fn same_origin(
+    headers: &HeaderMap,
+    expected_scheme: &str,
+    expected_authority: Option<&str>,
+) -> bool {
     let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
         return false;
     };
@@ -839,7 +903,11 @@ fn same_origin(headers: &HeaderMap, expected_scheme: &str) -> bool {
     else {
         return false;
     };
-    !authority.as_str().contains('@') && authority.as_str().eq_ignore_ascii_case(host)
+    !authority.as_str().contains('@')
+        && expected_authority.is_none_or(|expected| expected.eq_ignore_ascii_case(host))
+        && authority
+            .as_str()
+            .eq_ignore_ascii_case(expected_authority.unwrap_or(host))
 }
 
 async fn websocket_session(
@@ -881,13 +949,10 @@ async fn websocket_session(
                                 last_sent = send_snapshot(&mut socket, &state).await.unwrap_or(last_sent);
                             }
                             WsClientFrame::Command { command } => {
-                                let command_id = uuid::Uuid::new_v4().to_string();
-                                if state.commands.send(QueuedCommand {
-                                    command_id: command_id.clone(),
-                                    command: ClientCommand::Submit { command },
-                                }).await.is_err() {
-                                    break;
-                                }
+                                let command_id = match enqueue_submit(&state, &headers, peer, command).await {
+                                    Ok(command_id) => command_id,
+                                    Err(_) => break,
+                                };
                                 let reply = WsServerFrame::CommandAccepted { command_id };
                                 if send_ws_frame(&mut socket, &reply).await.is_err() {
                                     break;
@@ -951,8 +1016,31 @@ async fn send_ws_frame(socket: &mut WebSocket, frame: &WsServerFrame) -> Result<
         .map_err(|_| ())
 }
 
+async fn enqueue_submit(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    command: String,
+) -> Result<String, PeerAuthError> {
+    let permit = state
+        .commands
+        .reserve()
+        .await
+        .map_err(|_| PeerAuthError::Unavailable)?;
+    // Waiting for queue capacity must not retain admission after revocation.
+    authenticate_request(headers, peer, &state.auth).await?;
+    let command_id = uuid::Uuid::new_v4().to_string();
+    permit.send(QueuedCommand {
+        command_id: command_id.clone(),
+        command: ClientCommand::Submit { command },
+    });
+    Ok(command_id)
+}
+
 async fn submit_command(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     command: Result<Json<ClientCommand>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let command = match command {
@@ -964,30 +1052,26 @@ async fn submit_command(
             );
         }
     };
-    let command_id = match &command {
+    let peer = peer.map(|Extension(ConnectInfo(peer))| peer);
+    // Axum may wait for a request body after middleware authorization.
+    if let Err(error) = authenticate_request(&headers, peer, &state.auth).await {
+        return error.status().into_response();
+    }
+    let command_id = match command {
         ClientCommand::Host {
             operation_id,
             command,
         } => {
-            if let Err((code, reason)) = retain_host_command(&state, *operation_id, command) {
+            if let Err((code, reason)) = retain_host_command(&state, operation_id, &command) {
                 return refusal(code, reason);
             }
             operation_id.to_string()
         }
-        ClientCommand::Submit { .. } => {
-            let command_id = uuid::Uuid::new_v4().to_string();
-            if state
-                .commands
-                .send(QueuedCommand {
-                    command_id: command_id.clone(),
-                    command,
-                })
-                .await
-                .is_err()
-            {
-                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        ClientCommand::Submit { command } => {
+            match enqueue_submit(&state, &headers, peer, command).await {
+                Ok(command_id) => command_id,
+                Err(error) => return error.status().into_response(),
             }
-            command_id
         }
     };
     (StatusCode::ACCEPTED, Json(CommandAccepted { command_id })).into_response()
@@ -1040,12 +1124,18 @@ async fn session_status(
     headers: HeaderMap,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> Response {
-    let result = authenticate_request(
-        &headers,
-        peer.map(|Extension(ConnectInfo(peer))| peer),
-        &state.auth,
-    )
-    .await;
+    let result = if matches!(state.auth.browser_auth, BrowserAuthentication::Peer(_))
+        && !pinned_authority_matches(&headers, state.public_origin_authority.as_deref())
+    {
+        Err(PeerAuthError::Denied)
+    } else {
+        authenticate_request(
+            &headers,
+            peer.map(|Extension(ConnectInfo(peer))| peer),
+            &state.auth,
+        )
+        .await
+    };
     let authentication = match &state.auth.browser_auth {
         BrowserAuthentication::Disabled => AuthenticationMode::Disabled,
         BrowserAuthentication::Secret(_) => AuthenticationMode::Secret,
@@ -1070,7 +1160,11 @@ async fn session_login(
     headers: HeaderMap,
     Json(input): Json<SessionLoginRequest>,
 ) -> Result<Response, StatusCode> {
-    if !same_origin(&headers, &state.public_origin_scheme) {
+    if !same_origin(
+        &headers,
+        &state.public_origin_scheme,
+        state.public_origin_authority.as_deref(),
+    ) {
         return Err(StatusCode::FORBIDDEN);
     }
     let BrowserAuthentication::Secret(sessions) = &state.auth.browser_auth else {
@@ -1129,7 +1223,11 @@ async fn session_logout(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    if !same_origin(&headers, &state.public_origin_scheme) {
+    if !same_origin(
+        &headers,
+        &state.public_origin_scheme,
+        state.public_origin_authority.as_deref(),
+    ) {
         return Err(StatusCode::FORBIDDEN);
     }
     let BrowserAuthentication::Secret(sessions) = &state.auth.browser_auth else {
@@ -1822,11 +1920,14 @@ mod tests {
 
     fn peer_server(
         auth: Arc<TestPeerAuth>,
+        origin: String,
     ) -> (Router, ServerControl, mpsc::Receiver<QueuedCommand>) {
         server_with_config(
             ServerConfig::new(PathBuf::from("."))
                 .with_bearer_secret(BearerSecret::new(TEST_SECRET).unwrap())
                 .with_browser_peer_auth(auth)
+                .unwrap()
+                .with_public_origin(origin)
                 .unwrap(),
         )
     }
@@ -1856,12 +1957,223 @@ mod tests {
         );
     }
 
+    #[test]
+    fn browser_peer_auth_public_origin_requires_exact_http_authority() {
+        for origin in [
+            "http://harness.example:1234",
+            "https://harness.example",
+            "http://[::1]:1234/",
+        ] {
+            assert!(
+                ServerConfig::new(PathBuf::from("."))
+                    .with_public_origin(origin)
+                    .is_ok(),
+                "{origin}"
+            );
+        }
+        for origin in [
+            "harness.example",
+            "ftp://harness.example",
+            "https://operator@harness.example",
+            "https://harness.example/path",
+            "https://harness.example?query",
+            "https://harness.example/#fragment",
+        ] {
+            assert!(
+                ServerConfig::new(PathBuf::from("."))
+                    .with_public_origin(origin)
+                    .is_err(),
+                "{origin}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_peer_auth_rejects_rebound_host_and_unpinned_authority() {
+        let auth = Arc::new(TestPeerAuth::default());
+        for pinned in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let config = ServerConfig::new(PathBuf::from("."))
+                .with_browser_peer_auth(auth.clone())
+                .unwrap();
+            let config = if pinned {
+                config
+                    .with_public_origin(format!("http://{address}"))
+                    .unwrap()
+            } else {
+                config
+            };
+            let (app, _, mut commands) = server_with_config(config);
+            let server_task = tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                .unwrap()
+            });
+            let client = reqwest::Client::new();
+            let response = client
+                .post(format!("http://{address}/api/commands"))
+                .header(header::HOST, "attacker.invalid")
+                .header(header::ORIGIN, "http://attacker.invalid")
+                .json(&ClientCommand::Submit {
+                    command: "rebound".into(),
+                })
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                client
+                    .get(format!("http://{address}/api/history/any"))
+                    .header(header::HOST, "attacker.invalid")
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+            let status = client
+                .get(format!("http://{address}/api/session"))
+                .header(header::HOST, "attacker.invalid")
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap();
+            assert_eq!(status["authenticated"], false);
+            assert!(commands.try_recv().is_err());
+            server_task.abort();
+        }
+        assert!(auth.peers.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_peer_auth_revalidates_after_delayed_command_body() {
+        let auth = Arc::new(TestPeerAuth::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (app, _, mut commands) = peer_server(auth.clone(), format!("http://{address}"));
+        let server_task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap()
+        });
+        for outcome in [1, 2] {
+            auth.outcome.store(0, std::sync::atomic::Ordering::SeqCst);
+            let observed_before = auth.peers.lock().unwrap().len();
+            let body = serde_json::to_string(&ClientCommand::Submit {
+                command: "revoked after headers".into(),
+            })
+            .unwrap();
+            let mut socket = TcpStream::connect(address).unwrap();
+            let actual_peer = socket.local_addr().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            write!(socket, "POST /api/commands HTTP/1.1\r\nHost: {address}\r\nOrigin: http://{address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while auth.peers.lock().unwrap().len() == observed_before {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(auth.peers.lock().unwrap().last(), Some(&actual_peer));
+            auth.outcome
+                .store(outcome, std::sync::atomic::Ordering::SeqCst);
+            socket.write_all(body.as_bytes()).unwrap();
+            let response = tokio::task::spawn_blocking(move || {
+                let mut response = String::new();
+                socket.read_to_string(&mut response).unwrap();
+                response
+            })
+            .await
+            .unwrap();
+            let expected = if outcome == 1 {
+                "HTTP/1.1 401"
+            } else {
+                "HTTP/1.1 503"
+            };
+            assert!(response.starts_with(expected), "{response}");
+            assert!(commands.try_recv().is_err());
+        }
+        server_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_peer_auth_revalidates_after_waiting_for_command_capacity() {
+        let auth = Arc::new(TestPeerAuth::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (app, _, mut commands) = peer_server(auth.clone(), format!("http://{address}"));
+        let server_task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap()
+        });
+        let client = reqwest::Client::new();
+        let origin = format!("http://{address}");
+        for index in 0..COMMAND_CAPACITY {
+            assert_eq!(
+                client
+                    .post(format!("{origin}/api/commands"))
+                    .header(header::ORIGIN, &origin)
+                    .json(&ClientCommand::Submit {
+                        command: format!("fill-{index}")
+                    })
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::ACCEPTED
+            );
+        }
+        let observed_before = auth.peers.lock().unwrap().len();
+        let request_origin = origin.clone();
+        let waiting = tokio::spawn(async move {
+            client
+                .post(format!("{request_origin}/api/commands"))
+                .header(header::ORIGIN, &request_origin)
+                .json(&ClientCommand::Submit {
+                    command: "revoked while waiting".into(),
+                })
+                .send()
+                .await
+                .unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while auth.peers.lock().unwrap().len() < observed_before + 2 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        auth.outcome.store(1, std::sync::atomic::Ordering::SeqCst);
+        commands.recv().await.unwrap();
+        assert_eq!(waiting.await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        for _ in 1..COMMAND_CAPACITY {
+            commands.recv().await.unwrap();
+        }
+        assert!(commands.try_recv().is_err());
+        server_task.abort();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn browser_peer_auth_uses_transport_peer_and_retains_origin_checks() {
         let auth = Arc::new(TestPeerAuth::default());
-        let (app, _, mut commands) = peer_server(auth.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let (app, _, mut commands) = peer_server(auth.clone(), format!("http://{address}"));
         let server_task = tokio::spawn(async move {
             axum::serve(
                 listener,
@@ -2002,9 +2314,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn browser_peer_auth_missing_connect_info_fails_closed() {
         let auth = Arc::new(TestPeerAuth::default());
-        let (app, _, _) = peer_server(auth.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let (app, _, _) = peer_server(auth.clone(), format!("http://{address}"));
         let server_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = reqwest::Client::new();
         let response = client
@@ -2036,9 +2348,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn browser_peer_auth_revalidates_websocket_commands_and_snapshots() {
         let auth = Arc::new(TestPeerAuth::default());
-        let (app, _, mut commands) = peer_server(auth.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let (app, _, mut commands) = peer_server(auth.clone(), format!("http://{address}"));
         let server_task = tokio::spawn(async move {
             axum::serve(
                 listener,
@@ -2069,9 +2381,9 @@ mod tests {
     async fn browser_peer_auth_revokes_idle_websocket_and_sse() {
         use futures_util::StreamExt;
         let auth = Arc::new(TestPeerAuth::default());
-        let (app, _, _) = peer_server(auth.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let (app, _, _) = peer_server(auth.clone(), format!("http://{address}"));
         let server_task = tokio::spawn(async move {
             axum::serve(
                 listener,
@@ -2591,15 +2903,15 @@ mod tests {
             axum::http::header::ORIGIN,
             "https://example.test".parse().unwrap(),
         );
-        assert!(same_origin(&headers, "https"));
+        assert!(same_origin(&headers, "https", None));
         headers.insert("x-forwarded-proto", "attacker-controlled".parse().unwrap());
-        assert!(same_origin(&headers, "https"));
-        assert!(!same_origin(&headers, "http"));
+        assert!(same_origin(&headers, "https", None));
+        assert!(!same_origin(&headers, "http", None));
         headers.insert(
             axum::http::header::ORIGIN,
             "https://other.test".parse().unwrap(),
         );
-        assert!(!same_origin(&headers, "https"));
+        assert!(!same_origin(&headers, "https", None));
     }
 }
 
