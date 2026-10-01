@@ -1,86 +1,80 @@
-import type { EmbeddedCommandRecord } from './protocol'
-import { isCommandState, isHostCommand, isOperationId } from './pending-commands'
+import { canonicalOperationId, isEmbeddedCommandRecord, isObject, isOperationId, type EmbeddedCommandRecord } from './protocol'
 
 export class SessionApiError extends Error {
-  constructor(
-    readonly status: number,
-    operation: 'check' | 'login' | 'logout',
-  ) {
-    const message = status === 401
+  constructor(readonly status: number, operation: 'check' | 'login' | 'logout') {
+    super(status === 401 && operation === 'login'
       ? 'The supplied login secret was not accepted.'
-      : status === 404 && operation !== 'check'
-        ? 'Browser login is not enabled on this server.'
-        : `Session ${operation} failed (HTTP ${status}).`
-    super(message)
+      : status === 404 && operation !== 'check' ? 'Browser login is not enabled on this server.'
+        : `Session ${operation} failed (HTTP ${status}).`)
     this.name = 'SessionApiError'
   }
 }
 
-export interface SessionStatus {
-  authenticated: boolean
-}
+export interface SessionStatus { authenticated: boolean }
 
-const endpoint = '/api/session'
-
-export async function getSessionStatus(): Promise<SessionStatus> {
-  const response = await fetch(endpoint, {
-    method: 'GET',
-    credentials: 'same-origin',
-    headers: { Accept: 'application/json' },
+/** Every protected read has a deadline, including connection and JSON body. */
+async function request<T>(url: string, init: RequestInit, decode: (response: Response) => Promise<T>, signal?: AbortSignal): Promise<T> {
+  const controller = new AbortController()
+  let abort!: () => void
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const cancelled = new Promise<never>((_, reject) => {
+    abort = () => { controller.abort(); reject(new DOMException('The request was aborted.', 'AbortError')) }
+    if (signal?.aborted) { abort(); return }
+    signal?.addEventListener('abort', abort, { once: true })
+    timer = setTimeout(() => { controller.abort(); reject(new Error('The request timed out after 10 seconds.')) }, 10_000)
   })
-  if (!response.ok) throw new SessionApiError(response.status, 'check')
-  const result: unknown = await response.json()
-  if (typeof result !== 'object' || result === null || !('authenticated' in result) ||
-      typeof result.authenticated !== 'boolean') {
-    throw new Error('The session endpoint returned an invalid status.')
+  try {
+    return await Promise.race([
+      cancelled,
+      fetch(url, { credentials: 'same-origin', ...init, signal: controller.signal }).then(decode),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    signal?.removeEventListener('abort', abort)
   }
-  return { authenticated: result.authenticated }
 }
 
-export async function login(secret: string): Promise<SessionStatus> {
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ secret }),
-  })
-  if (!response.ok) throw new SessionApiError(response.status, 'login')
-  const result: unknown = await response.json()
-  if (typeof result !== 'object' || result === null || !('authenticated' in result) ||
-      result.authenticated !== true) {
-    throw new Error('The login endpoint did not confirm authentication.')
-  }
-  return { authenticated: true }
+export async function getSessionStatus(signal?: AbortSignal): Promise<SessionStatus> {
+  return request('/api/session', { method: 'GET', headers: { Accept: 'application/json' } }, async (response) => {
+    if (!response.ok) throw new SessionApiError(response.status, 'check')
+    const result: unknown = await response.json()
+    if (!isObject(result) || typeof result.authenticated !== 'boolean') throw new Error('The session endpoint returned an invalid status.')
+    return { authenticated: result.authenticated }
+  }, signal)
 }
 
-export async function logout(): Promise<void> {
-  const response = await fetch(endpoint, {
-    method: 'DELETE',
-    credentials: 'same-origin',
-  })
-  if (!response.ok) throw new SessionApiError(response.status, 'logout')
+export async function login(secret: string, signal?: AbortSignal): Promise<SessionStatus> {
+  return request('/api/session', {
+    method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ secret }),
+  }, async (response) => {
+    if (!response.ok) throw new SessionApiError(response.status, 'login')
+    const result: unknown = await response.json()
+    if (!isObject(result) || result.authenticated !== true) throw new Error('The login endpoint did not confirm authentication.')
+    return { authenticated: true }
+  }, signal)
+}
+
+export async function logout(signal?: AbortSignal): Promise<void> {
+  return request('/api/session', { method: 'DELETE' }, async (response) => {
+    if (!response.ok) throw new SessionApiError(response.status, 'logout')
+  }, signal)
 }
 
 export class CommandStatusError extends Error {
-  constructor(readonly status: number) {
-    super(`Command status lookup failed (HTTP ${status}).`)
-  }
+  constructor(readonly status: number) { super(`Command status lookup failed (HTTP ${status}).`) }
 }
 
-export async function getCommandStatus(operationId: string): Promise<EmbeddedCommandRecord | undefined> {
+export async function getCommandStatus(operationId: string, signal?: AbortSignal): Promise<EmbeddedCommandRecord | undefined> {
   if (!isOperationId(operationId)) throw new Error('The operation ID is invalid.')
-  const response = await fetch(`/api/commands/${encodeURIComponent(operationId)}`, {
-    method: 'GET', credentials: 'same-origin', headers: { Accept: 'application/json' },
-  })
-  if (response.status === 404) return undefined
-  if (!response.ok) throw new CommandStatusError(response.status)
-  const value: unknown = await response.json()
-  if (typeof value !== 'object' || value === null || !('operationId' in value) ||
-      !('command' in value) || !('state' in value) || !('envelopeId' in value) || !('receipt' in value) ||
-      value.operationId !== operationId || !isHostCommand(value.command) || !isCommandState(value.state) ||
-      (value.envelopeId !== null && (!Number.isSafeInteger(value.envelopeId) || (value.envelopeId as number) < 0)) ||
-      (value.receipt !== null && (typeof value.receipt !== 'object' || value.receipt === null))) {
-    throw new Error('The command status endpoint returned an invalid record.')
-  }
-  return value as EmbeddedCommandRecord
+  return request(`/api/commands/${encodeURIComponent(canonicalOperationId(operationId))}`, {
+    method: 'GET', headers: { Accept: 'application/json' },
+  }, async (response) => {
+    if (response.status === 404) return undefined
+    if (!response.ok) throw new CommandStatusError(response.status)
+    const value: unknown = await response.json()
+    if (!isEmbeddedCommandRecord(value) || canonicalOperationId(value.operationId) !== canonicalOperationId(operationId)) {
+      throw new Error('The command status endpoint returned an invalid record.')
+    }
+    return value
+  }, signal)
 }

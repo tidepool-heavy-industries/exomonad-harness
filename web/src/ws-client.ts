@@ -1,64 +1,125 @@
 import {
-  applyStateEvent,
-  normalizeSnapshot,
-  type NormalizedState,
-  type SequencedEvent,
-  type Snapshot,
-  type HostCommandSubmission,
+  applyStateEvent, isCommandRefusal, isHostCommand, isObject, isOperationId, isSequencedEvent,
+  isSnapshot, normalizeSnapshot, type HostCommandRefusal, type HostCommandSubmission, type NormalizedState,
 } from './protocol'
+import type { TransportPhase } from './client-contract'
 
-/**
- * Server integration boundary: accepts stable JSON frames
- * {type:"snapshot", snapshot} and {type:"event", event:{seq,event}}.
- * A gap is never applied; it requests a fresh snapshot on the same socket.
- */
-export function connectHarness(
-  socket: WebSocket,
-  receive: (state: NormalizedState) => void,
-  error: (message: string) => void,
-  accepted: (commandId: string) => void = () => undefined,
-  refused: (message: string) => void = error,
-): (command: string | HostCommandSubmission) => void {
+export type SendObservation = 'sent' | 'not_sent' | 'unknown'
+export interface HarnessConnection {
+  send(command: string | HostCommandSubmission): SendObservation
+  dispose(): void
+}
+
+/** One socket owns its fresh snapshot gate and coalesced gap request. */
+export function connectHarness(socket: WebSocket, callbacks: {
+  receive: (state: NormalizedState) => void
+  phase: (phase: TransportPhase) => void
+  error: (message: string) => void
+  accepted: (commandId: string) => void
+  refused: (refusal: HostCommandRefusal) => void
+  disconnected: () => void
+}): HarnessConnection {
   let current: NormalizedState | undefined
-  socket.addEventListener('message', (message: MessageEvent<string>) => {
+  let phase: TransportPhase = 'connecting'
+  let requestedSnapshot = false
+  let disposed = false
+  let lost = false
+  let resyncTimer: ReturnType<typeof setTimeout> | undefined
+  const listeners: [string, EventListener][] = []
+  const transition = (next: TransportPhase) => { phase = next; callbacks.phase(next) }
+  const requestSnapshot = () => {
+    if (disposed || requestedSnapshot) return
+    transition(current ? 'resync' : 'awaiting_snapshot')
+    if (socket.readyState !== WebSocket.OPEN) { disconnect(); return }
     try {
-      const frame = JSON.parse(message.data) as
-        | { type: 'snapshot'; snapshot: Snapshot }
-        | { type: 'event'; event: SequencedEvent }
-        | { type: 'command.accepted'; command_id: string }
-        | { type: 'error' | 'command.refused'; reason: string }
-      if (frame.type === 'snapshot') {
-        current = normalizeSnapshot(frame.snapshot)
-        receive(current)
-      } else if (frame.type === 'event') {
-        if (!current) {
-          socket.send(JSON.stringify({ type: 'snapshot.request' }))
-          return
-        }
-        const result = applyStateEvent(current, frame.event)
-        if (result.kind === 'resync') {
-          socket.send(JSON.stringify({ type: 'snapshot.request' }))
-          return
-        }
-        current = result.state
-        receive(current)
-      } else if (frame.type === 'command.accepted') {
-        if (typeof frame.command_id === 'string' && frame.command_id.length > 0) accepted(frame.command_id)
-        else error('Invalid command acceptance frame from server.')
-      } else if (frame.type === 'command.refused') refused(frame.reason)
-      else error(frame.reason)
-    } catch {
-      error('Invalid JSON event from server.')
+      socket.send(JSON.stringify({ type: 'snapshot.request' }))
+      requestedSnapshot = true
+      resyncTimer = setTimeout(() => {
+        if (disposed || lost || !requestedSnapshot) return
+        callbacks.error('The authoritative resync snapshot timed out after 10 seconds.')
+        disconnect()
+      }, 10_000)
     }
+    catch { disconnect() }
+  }
+  const disconnect = () => {
+    if (disposed || lost) return
+    lost = true
+    if (resyncTimer !== undefined) clearTimeout(resyncTimer)
+    transition('disconnected')
+    callbacks.disconnected()
+  }
+  const add = (type: string, listener: EventListener) => {
+    listeners.push([type, listener]); socket.addEventListener(type, listener)
+  }
+  add('open', () => { if (!disposed) transition('awaiting_snapshot') })
+  add('message', ((message: MessageEvent<string>) => {
+    if (disposed || lost) return
+    try {
+      const frame: unknown = JSON.parse(message.data)
+      if (!isObject(frame)) throw new Error('Invalid server frame.')
+      switch (frame.type) {
+        case 'snapshot':
+          if (!isSnapshot(frame.snapshot)) throw new Error('Invalid authoritative snapshot from server.')
+          if (current && frame.snapshot.hostRun === current.hostRun && frame.snapshot.seq < current.seq) break
+          current = normalizeSnapshot(frame.snapshot)
+          requestedSnapshot = false
+          if (resyncTimer !== undefined) { clearTimeout(resyncTimer); resyncTimer = undefined }
+          transition('ready')
+          callbacks.receive(current)
+          break
+        case 'event': {
+          if (!isSequencedEvent(frame.event)) throw new Error('Invalid projected event from server.')
+          if (!current || phase !== 'ready') { requestSnapshot(); break }
+          const result = applyStateEvent(current, frame.event)
+          if (result.kind === 'resync') { requestSnapshot(); break }
+          current = result.state
+          callbacks.receive(current)
+          break
+        }
+        case 'command.accepted':
+          if (typeof frame.command_id !== 'string' || !frame.command_id.length) throw new Error('Invalid command acceptance frame from server.')
+          callbacks.accepted(frame.command_id)
+          break
+        case 'command.refused':
+          if (!isCommandRefusal(frame)) throw new Error('Invalid command refusal frame from server.')
+          callbacks.refused(frame)
+          break
+        default: throw new Error('Unsupported server frame.')
+      }
+    } catch (error) {
+      callbacks.error(error instanceof Error ? error.message : 'Invalid JSON event from server.')
+      requestSnapshot()
+    }
+  }) as EventListener)
+  add('error', () => {
+    if (disposed) return
+    callbacks.error('WebSocket connection failed.')
+    disconnect()
   })
-  socket.addEventListener('error', () => error('WebSocket connection failed.'))
-  return (command) => {
-    if (socket.readyState !== WebSocket.OPEN) {
-      error('Command channel is disconnected; retry after reconnecting.')
-      return
-    }
-    socket.send(JSON.stringify(typeof command === 'string'
-      ? { type: 'command', command }
-      : { type: 'host_command', operation_id: command.operation_id, command: command.command }))
+  add('close', disconnect)
+  callbacks.phase(phase)
+
+  return {
+    send(command) {
+      if (disposed || lost || phase !== 'ready' || socket.readyState !== WebSocket.OPEN) return 'not_sent'
+      if (typeof command !== 'string' && (!isOperationId(command.operation_id) || !isHostCommand(command.command)
+        || current?.hostRun !== command.command.target.run)) return 'not_sent'
+      if (typeof command === 'string' && current?.hostRun !== undefined) return 'not_sent'
+      try {
+        socket.send(JSON.stringify(typeof command === 'string' ? { type: 'command', command }
+          : { type: 'host_command', operation_id: command.operation_id, command: command.command }))
+        return 'sent'
+      } catch {
+        // A throwing browser send does not prove whether bytes reached the transport.
+        disconnect()
+        return 'unknown'
+      }
+    },
+    dispose() {
+      disposed = true
+      if (resyncTimer !== undefined) clearTimeout(resyncTimer)
+      for (const [type, listener] of listeners) socket.removeEventListener?.(type, listener)
+    },
   }
 }
