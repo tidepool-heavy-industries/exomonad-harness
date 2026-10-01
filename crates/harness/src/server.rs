@@ -5,7 +5,9 @@
 //! scheduler/store implementation so the crate owner can wire it independently.
 mod assets;
 pub mod history;
+mod output;
 mod ws_protocol;
+pub use output::{HistoryRevision, LiveOutput};
 
 pub use ws_protocol::{
     CommandControl, CommandReceipt, CommandReceiptOutcome, HostActorIdentity, HostActorKind,
@@ -547,6 +549,8 @@ impl ServerControl {
             receipts.drain(..excess);
         }
         snapshot.command_receipts = receipts;
+        snapshot.live_output = std::mem::take(&mut current.live_output);
+        snapshot.history_revisions = std::mem::take(&mut current.history_revisions);
         *current = snapshot;
     }
 
@@ -1721,6 +1725,8 @@ mod tests {
         let old_actor = projected_actor("run-old", "/root/worker", "inc-1");
         control.set_snapshot(Snapshot {
             seq: 7,
+            live_output: Vec::new(),
+            history_revisions: Vec::new(),
             host_run: Some("run-old".into()),
             command_receipts: vec![],
             actors: vec![old_actor.clone()],

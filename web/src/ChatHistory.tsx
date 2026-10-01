@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { visibleOutput, outputKey, outputLabels, type LiveOutput, type HistoryRevision } from './live-output'
 import HistoryItem from './HistoryItem'
 import { HistoryReadError, MAX_HISTORY_BYTES, readHistoryPage, type HistoryPage } from './history-client'
 import type { HarnessViewModel } from './view-model'
@@ -41,7 +42,8 @@ function FailedExchange({ request }: { request: RequestStatus }) {
 }
 
 /** The store retains request-local items; only its parent edges establish lineage. */
-export default function ChatHistory({ requestId, requests, refreshKey, ready, onAuthExpired, cacheKey }: {
+export default function ChatHistory({ requestId, requests, refreshKey, ready, onAuthExpired, cacheKey, liveOutput = [], historyRevisions = [], active = true }: {
+  liveOutput?: readonly LiveOutput[]; historyRevisions?: readonly HistoryRevision[]; active?: boolean;
   requestId: string; requests: ReadonlyMap<string, RequestStatus>; refreshKey: string; ready: boolean; onAuthExpired?: () => void; cacheKey?: string
 }) {
   const initial = useRef(cacheKey ? retainedSlices.get(cacheKey) : undefined)
@@ -55,6 +57,22 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
   initial.current = undefined
   const auth = useRef(onAuthExpired)
   auth.current = onAuthExpired
+  // Remember proven request IDs across progressive loads; presentation changes
+  // must not restart those loads or relabel a predecessor's live output.
+  const provenLineage = useRef(new Set([cursor.requestId, ...pages.map(({page}) => page.requestId)]))
+  for (const id of [cursor.requestId, ...pages.map(({page}) => page.requestId)]) provenLineage.current.add(id)
+  while (provenLineage.current.size > MAX_REQUESTS + 1) provenLineage.current.delete(provenLineage.current.values().next().value!)
+  const observedRevisions = useRef(new Map(historyRevisions.map(revision => [revision.requestId, revision.version])))
+  useEffect(() => {
+    let changed = false
+    for (const revision of historyRevisions) {
+      const old = observedRevisions.current.get(revision.requestId)
+      if (revision.version > (old ?? 0) && provenLineage.current.has(revision.requestId)) changed = true
+      observedRevisions.current.set(revision.requestId, revision.version)
+    }
+    while (observedRevisions.current.size > 128) observedRevisions.current.delete(observedRevisions.current.keys().next().value!)
+    if (changed) setAttempt(value => value + 1)
+  }, [historyRevisions])
   useEffect(() => {
     if (!ready) { setLoading(false); return }
     const controller = new AbortController()
@@ -74,6 +92,8 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
         const pageBytes = page.items.reduce((total, entry) => total + entry.byteLen, 0)
         if (loaded.length && (bytes + pageBytes > MAX_HISTORY_BYTES || count + page.items.length > MAX_ITEMS)) break
         loaded.push({ cursor: next, page })
+        // Show the newest retained response before reading potentially slow ancestors.
+        setPages([...loaded].reverse())
         bytes += pageBytes
         count += page.items.length
         // Offset paging stays within one request. Never silently omit a large item.
@@ -89,6 +109,8 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
     }).finally(() => { if (!controller.signal.aborted) setLoading(false) })
     return () => controller.abort()
   }, [cursor.requestId, cursor.offset, refreshKey, ready, attempt])
+  const loadedHashes = new Map(pages.map(({page}) => [page.requestId, new Set(page.items.map(item => item.hash))]))
+  const output = browsing ? [] : visibleOutput(liveOutput.filter(item => item.requestId === requestId || loadedHashes.has(item.requestId)), loadedHashes)
   const oldest = pages[0]
   const paged = pages.find(({ page }) => page.nextOffset !== null)
   // Retain only evidence for the current slice and its exact cursor during an outage.
@@ -109,23 +131,33 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
       <button disabled={!ready || loading} onClick={() => setAttempt(value => value + 1)}>Refresh messages</button>
       {browsing && <button disabled={!ready || loading} onClick={() => go()}>Latest messages</button>}
     </div></div>
+    {oldest?.page.parentId && <div className="history-controls">
+      <button disabled={!ready || loading} onClick={() => go({ requestId: oldest.page.parentId!, offset: 0 })}>Earlier exchanges</button>
+      <span className="meta">Showing a recent slice; earlier exchanges remain in retained history.</span>
+    </div>}
     {!ready && <p role="status">Host unavailable; retained messages remain visible. Reconnect to refresh or reply.</p>}
     {error && <div role="alert"><p>{error}</p><button disabled={!ready || loading} onClick={() => setAttempt(value => value + 1)}>Retry messages</button></div>}
     {loading && <p role="status">Loading conversation messages…</p>}
     {cursorFailure && <FailedExchange request={cursorFailure} />}
     <div role="list" aria-label="Retained conversation items">
       {pages.map(({ page, cursor: source }) => <div className="chat-exchange" key={`${page.requestId}:${source.offset}`}>
-        <p className="meta">Exchange {page.requestId}{source.offset > 0 ? ` · offset ${source.offset}` : ''}</p>
+        <details className="meta"><summary>Exchange details</summary>Exchange {page.requestId}{source.offset > 0 ? ` · offset ${source.offset}` : ''}</details>
         {page.items.map(entry => <HistoryItem key={`${page.requestId}:${entry.position}:${entry.hash}`} entry={entry} />)}
         {retainedFailures.current.has(page.requestId) && <FailedExchange request={retainedFailures.current.get(page.requestId)!} />}
       </div>)}
     </div>
+    {output.length > 0 && <div role="list" aria-label="Live model output">
+      {output.map(item => <article role="listitem" className="message" key={outputKey(item)}>
+        <h3>{outputLabels[item.channel]}{item.committedHash ? '' : item.streaming && ready && active ? ' · streaming' : ' · incomplete'}</h3>
+        <pre className="history-content">{item.text}</pre>
+        {item.overflow && <p role="status">Live preview is partial after its size or active-item limit. Completed content remains available in retained history.</p>}
+      </article>)}
+    </div>}
     {!loading && !error && pages.length > 0 && pages.every(({ page }) => page.items.length === 0) && <p>No retained messages in this slice.</p>}
     {paged?.page.oversizedItem && <p role="status">Item {paged.page.oversizedItem.position} is too large to display ({paged.page.oversizedItem.byteLen} bytes).
       <button disabled={!ready || loading} onClick={() => go({ requestId: paged.page.requestId, offset: paged.page.oversizedItem!.skipOffset })}>Skip large item</button></p>}
     <div className="history-controls">
       {paged && !paged.page.oversizedItem && <button disabled={!ready || loading} onClick={() => go({ requestId: paged.page.requestId, offset: paged.page.nextOffset! })}>More items in this exchange</button>}
-      {oldest?.page.parentId && <button disabled={!ready || loading} onClick={() => go({ requestId: oldest.page.parentId!, offset: 0 })}>Earlier exchanges</button>}
     </div>
   </section>
 }

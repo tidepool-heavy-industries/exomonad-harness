@@ -4,6 +4,9 @@
 //! calls are started immediately and their settled outputs are appended under
 //! their original call ids before the next request.
 
+mod output;
+pub use output::{ModelOutput, ModelOutputObserver, ModelOutputUpdate};
+
 use crate::{
     compaction::{
         CompactContext, CompactError, Compactor, PlainText, Server, ServerCompactFuture, ToolName,
@@ -17,7 +20,7 @@ use crate::{
     store::{Store, StoreError, Usage as StoredUsage},
     transport::{
         Auth, ResponsesClient, ResponsesRequest, ResponsesTurn, TransportError, Usage,
-        sse::StreamEvent,
+        sse::{OutputChannel, StreamEvent},
     },
     turn::{
         JobError, JobScheduler, WaitAgentResultExact, WaitResumeExact, outputs_in_operation_order,
@@ -221,6 +224,7 @@ pub struct Engine<A: Auth, P: Provider, C: ResponsesTransport = ResponsesClient<
     origin: ConversationIdentity,
     compact_at_input_tokens: Option<u64>,
     bounded_invocation: bool,
+    output_observer: Option<Arc<dyn ModelOutputObserver>>,
     compaction_strategy: CompactionStrategy,
     _auth: std::marker::PhantomData<fn() -> A>,
 }
@@ -292,8 +296,34 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             origin,
             compact_at_input_tokens: None,
             bounded_invocation: false,
+            output_observer: None,
             compaction_strategy: CompactionStrategy::Server,
             _auth: std::marker::PhantomData,
+        }
+    }
+    pub fn with_output_observer(mut self, observer: Arc<dyn ModelOutputObserver>) -> Self {
+        self.output_observer = Some(observer);
+        self
+    }
+    fn observe_delta(
+        &self,
+        request: &RequestId,
+        item_id: String,
+        channel: OutputChannel,
+        index: u64,
+        text: String,
+    ) {
+        if let Some(observer) = &self.output_observer {
+            observer.observe(ModelOutput {
+                origin: self.origin.clone(),
+                request_id: request.clone(),
+                update: ModelOutputUpdate::Delta {
+                    item_id,
+                    channel,
+                    index,
+                    text,
+                },
+            });
         }
     }
     pub(crate) fn with_origin(mut self, origin: ConversationIdentity) -> Self {
@@ -1132,6 +1162,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 return Err(self.cleanup_pending(error, &pending).await);
             }
             let model_request_id = parent.clone();
+            let output_lifetime = output::OutputLifetime {
+                observer: self.output_observer.clone(),
+                origin: self.origin.clone(),
+                request_id: parent.clone(),
+            };
+            if let Some(observer) = &self.output_observer {
+                observer.observe(ModelOutput {
+                    origin: self.origin.clone(),
+                    request_id: parent.clone(),
+                    update: ModelOutputUpdate::Started,
+                });
+            }
             let create = self
                 .client
                 .create_streaming_for_request(&model_request_id, req, event_tx);
@@ -1229,7 +1271,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                     Err(error) => deferred_dispatch_error = Some(error),
                                 }
                             }
-                            Some(StreamEvent::Delta(_)) => {}
+                            Some(StreamEvent::Delta {item_id, channel, index, text}) => {
+                                self.observe_delta(&parent, item_id, channel, index, text);
+                            }
                             None => event_stream_open = false,
                         }
                     }
@@ -1252,6 +1296,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             };
             // A completed response can race the buffered final item events.
             while let Ok(event) = event_rx.try_recv() {
+                if let StreamEvent::Delta {
+                    item_id,
+                    channel,
+                    index,
+                    text,
+                } = event
+                {
+                    self.observe_delta(&parent, item_id, channel, index, text);
+                    continue;
+                }
                 if let StreamEvent::ItemDone(item) = event {
                     let call_id = match parsed_call_id(&item) {
                         Ok(call_id) => call_id,
@@ -1332,6 +1386,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                 }
             }
+            drop(output_lifetime);
             // Some injected transports may only return a turn, without emitting
             // item events. The production client emits every completed item.
             for item in &turn.items {
@@ -1708,12 +1763,35 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         items: Vec<Item>,
     ) -> Result<Vec<Item>, EngineError> {
         let store = self.store.clone();
-        let id = id.clone();
-        blocking(move || {
-            store.append_items(&id, &items)?;
-            Ok(items)
+        let request = id.clone();
+        let observing = self.output_observer.is_some();
+        let (items, hashes, origin) = blocking(move || {
+            let hashes = store.append_items(&request, &items)?;
+            let origin = if observing {
+                Some(store.request_output_origin(&request)?)
+            } else {
+                None
+            };
+            Ok((items, hashes, origin))
         })
-        .await
+        .await?;
+        if let (Some(observer), Some(origin)) = (&self.output_observer, origin) {
+            for (item, hash) in items
+                .iter()
+                .filter(|i| !i.is_configuration_update())
+                .zip(hashes)
+            {
+                observer.observe(ModelOutput {
+                    origin: origin.clone(),
+                    request_id: id.clone(),
+                    update: ModelOutputUpdate::Committed {
+                        item_id: item.0["id"].as_str().map(str::to_owned),
+                        hash,
+                    },
+                });
+            }
+        }
+        Ok(items)
     }
 
     async fn append_unread_envelopes(&self, request: &RequestId) -> Result<(), EngineError> {
@@ -2230,12 +2308,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         {
             return Err(EngineError::ClaimRecoveryConflict(call_id.0.clone()));
         }
-        let store = self.store.clone();
-        blocking(move || {
-            store.append_items(&request, &[item])?;
-            Ok(())
-        })
-        .await?;
+        self.append(&request, vec![item]).await?;
         if matches!(output, crate::turn::JobOutput::Completed(_)) {
             self.acknowledge_output(operation).await?;
         }
@@ -5629,6 +5702,235 @@ mod tests {
                 item.0["type"] == "function_call_output" && item.0["call_id"] == "call-A"
             }),
             "A remains unanswered while B is delivered"
+        );
+    }
+
+    struct OutputRecorder(tokio::sync::mpsc::UnboundedSender<ModelOutput>);
+    impl ModelOutputObserver for OutputRecorder {
+        fn observe(&self, output: ModelOutput) {
+            self.0.send(output).unwrap();
+        }
+    }
+    struct PartialForever;
+    #[async_trait::async_trait]
+    impl ResponsesTransport for PartialForever {
+        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            unreachable!()
+        }
+        async fn create_streaming(
+            &self,
+            _: ResponsesRequest,
+            sink: tokio::sync::mpsc::Sender<StreamEvent>,
+        ) -> Result<ResponsesTurn, TransportError> {
+            sink.send(StreamEvent::Delta {
+                item_id: "partial".into(),
+                channel: OutputChannel::Assistant,
+                index: 0,
+                text: "incomplete".into(),
+            })
+            .await
+            .unwrap();
+            std::future::pending().await
+        }
+    }
+    #[tokio::test]
+    async fn live_output_provider_cancellation_stops_incomplete_partial() {
+        let (outputs, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            PartialForever,
+            Arc::new(Store::memory().unwrap()),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "partial-test".into(),
+                agent: AgentPath("/root".into()),
+            },
+        )
+        .with_output_observer(Arc::new(OutputRecorder(outputs)));
+        let (cancel, cancellation) = watch::channel(false);
+        let running = tokio::spawn(async move {
+            engine
+                .run(None, vec![], cancellation, empty_mailbox())
+                .await
+        });
+        let scope = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let output = received.recv().await.unwrap();
+                if matches!(output.update, ModelOutputUpdate::Delta { .. }) {
+                    break output.request_id;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        cancel.send_replace(true);
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), running)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(EngineError::Cancelled { .. })
+        ));
+        assert!(
+            matches!(received.recv().await.unwrap(),ModelOutput {request_id,update:ModelOutputUpdate::Stopped,..} if request_id == scope)
+        );
+    }
+    struct OutputBeforeTool {
+        stream_release: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+    #[async_trait::async_trait]
+    impl ResponsesTransport for OutputBeforeTool {
+        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            unreachable!()
+        }
+        async fn create_streaming(
+            &self,
+            _: ResponsesRequest,
+            sink: tokio::sync::mpsc::Sender<StreamEvent>,
+        ) -> Result<ResponsesTurn, TransportError> {
+            let release = self.stream_release.lock().await.take();
+            if let Some(release) = release {
+                sink.send(StreamEvent::Delta {
+                    item_id: "assistant-live".into(),
+                    channel: OutputChannel::Assistant,
+                    index: 0,
+                    text: "Before tool".into(),
+                })
+                .await
+                .unwrap();
+                let message = Item(
+                    json!({"id":"assistant-live","type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Before tool"}]}),
+                );
+                let call = Item(
+                    json!({"id":"tool-live","type":"function_call","call_id":"slow-live","name":"slow","arguments":"{}"}),
+                );
+                sink.send(StreamEvent::ItemDone(message.clone()))
+                    .await
+                    .unwrap();
+                sink.send(StreamEvent::ItemDone(call.clone()))
+                    .await
+                    .unwrap();
+                release.await.unwrap();
+                Ok(turn("streamed", vec![message, call]))
+            } else {
+                Ok(turn(
+                    "finished",
+                    vec![Item(
+                        json!({"id":"final-live","type":"message","role":"assistant","phase":"final_answer","content":"After tool"}),
+                    )],
+                ))
+            }
+        }
+    }
+    #[tokio::test]
+    async fn live_output_is_visible_before_provider_and_tool_complete() {
+        let (stream_release, stream_wait) = tokio::sync::oneshot::channel();
+        let (tool_release, tool_wait) = tokio::sync::oneshot::channel();
+        let started = Arc::new(Notify::new());
+        let provider = Arc::new(SlowProvider {
+            started: started.clone(),
+            release: tokio::sync::Mutex::new(Some(tool_wait)),
+            released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        let (outputs, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let store = Arc::new(Store::memory().unwrap());
+        let engine = Engine::<FakeAuth, SlowProvider, _>::with_transport(
+            OutputBeforeTool {
+                stream_release: tokio::sync::Mutex::new(Some(stream_wait)),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            provider,
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "live-test".into(),
+                agent: AgentPath("/root".into()),
+            },
+        )
+        .with_output_observer(Arc::new(OutputRecorder(outputs)));
+        let (_cancel, cancellation) = watch::channel(false);
+        let running = tokio::spawn(async move {
+            engine
+                .run(None, vec![], cancellation, empty_mailbox())
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        assert!(
+            !running.is_finished(),
+            "provider and tool gates remain closed"
+        );
+        let mut delta = None;
+        let committed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let output = received.recv().await.unwrap();
+                match &output.update {
+                    ModelOutputUpdate::Delta { text, item_id, .. } => {
+                        assert_eq!(text, "Before tool");
+                        assert_eq!(item_id, "assistant-live");
+                        delta = Some(output.request_id);
+                    }
+                    ModelOutputUpdate::Committed {
+                        item_id: Some(id),
+                        hash,
+                    } if id == "assistant-live" => break (output.request_id, hash.clone()),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(delta.as_ref(), Some(&committed.0));
+        assert_eq!(
+            store.get_item(&committed.1).unwrap().unwrap().0["id"],
+            "assistant-live"
+        );
+        assert!(
+            store
+                .items(&committed.0)
+                .unwrap()
+                .iter()
+                .any(|i| i.0["id"] == "assistant-live")
+        );
+        tool_release.send(()).unwrap();
+        stream_release.send(()).unwrap();
+        let completion = tokio::time::timeout(std::time::Duration::from_secs(2), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            completion
+                .transcript
+                .iter()
+                .any(|i| i.0["type"] == "function_call_output")
+        );
+        let tool_output = completion
+            .transcript
+            .iter()
+            .find(|i| i.0["type"] == "function_call_output")
+            .unwrap();
+        let tool_hash = blake3::hash(&serde_json::to_vec(tool_output).unwrap())
+            .to_hex()
+            .to_string();
+        let mut saw_tool_commit = false;
+        while let Ok(output) = received.try_recv() {
+            if matches!(output.update, ModelOutputUpdate::Committed {hash, ..} if hash.0 == tool_hash)
+            {
+                saw_tool_commit = true;
+            }
+        }
+        assert!(
+            saw_tool_commit,
+            "tool output storage also invalidates retained history"
         );
     }
 

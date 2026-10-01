@@ -1,3 +1,5 @@
+import { appendOutput, commitOutput, setRevision, outputKey, revisionKey, isLiveOutput, isOutputUpdate, isOutputScope, isOutputItem, isOutputCommit, isHistoryRevision,
+  type LiveOutput, type HistoryRevision, type OutputScope, type OutputItem, type OutputUpdate, type OutputCommit } from './live-output';
 /**
  * Stable browser-facing JSON contract. These shapes intentionally describe the
  * server API, not Rust structs; wire adapters may evolve independently.
@@ -7,6 +9,8 @@ const commandReceiptLimit = 128;
 
 export interface Snapshot {
   readonly seq: number;
+  readonly liveOutput?: readonly LiveOutput[];
+  readonly historyRevisions?: readonly HistoryRevision[];
   /** Exact embedded host run; absent means this is the standalone demo UI. */
   readonly hostRun?: string;
   /** Absent in standalone snapshots written before host actor projection. */
@@ -148,6 +152,11 @@ export interface Envelope {
 }
 
 export type StateEvent =
+  | { readonly kind: "model.output.stopped"; readonly value: OutputScope }
+  | { readonly kind: "model.output.started"; readonly value: OutputScope }
+  | { readonly kind: "model.output.delta"; readonly value: OutputUpdate }
+  | { readonly kind: "model.output.committed"; readonly value: OutputCommit }
+  | { readonly kind: "model.output.remove"; readonly value: OutputItem }
   | { readonly kind: "host_run.upsert"; readonly value: { readonly run: string } }
   | { readonly kind: "command.receipt"; readonly value: CommandReceipt }
   | { readonly kind: "actor.upsert"; readonly value: HostActorProjection }
@@ -170,6 +179,8 @@ export interface DeltaEvent {
 }
 
 export interface NormalizedState {
+  readonly liveOutput?: ReadonlyMap<string, LiveOutput>;
+  readonly historyRevisions?: ReadonlyMap<string, HistoryRevision>;
   readonly seq: number;
   readonly hostRun?: string;
   readonly actors: ReadonlyMap<EntityId, HostActorProjection>;
@@ -187,6 +198,8 @@ export type ApplyResult =
 export function normalizeSnapshot(snapshot: Snapshot): NormalizedState {
   return {
     seq: snapshot.seq,
+    liveOutput: new Map((snapshot.liveOutput ?? []).map(item => [outputKey(item), item])),
+    historyRevisions: new Map((snapshot.historyRevisions ?? []).map(item => [revisionKey(item), item])),
     hostRun: snapshot.hostRun,
     actors: new Map((snapshot.actors ?? []).map((actor) => [actorIdentityKey(actor.identity), actor])),
     commandReceipts: (snapshot.commandReceipts ?? []).reduce<ReadonlyMap<EntityId, CommandReceipt>>(
@@ -208,6 +221,25 @@ export function applyStateEvent(state: NormalizedState, message: SequencedEvent)
   }
   const next = { ...state, seq: message.seq };
   switch (message.event.kind) {
+    case "model.output.stopped": {
+      const outputs = new Map(next.liveOutput);
+      for (const [key, item] of outputs) if (revisionKey(item) === revisionKey(message.event.value)) outputs.set(key, {...item, streaming:false});
+      return {kind:'applied', state:{...next, liveOutput:outputs}};
+    }
+    case "model.output.started": {
+      const output = message.event.value;
+      if (output.origin.kind !== 'embedded') return {kind:'applied', state:next};
+      const key = actorIdentityKey(output.origin);
+      const actor = next.actors.get(key);
+      return {kind:'applied', state: actor ? {...next, actors:setByKey(next.actors, key, {...actor, modelHeadRequest:output.requestId})} : next};
+    }
+    case "model.output.delta": return {kind:'applied', state:{...next, liveOutput:appendOutput(next.liveOutput, message.event.value)}};
+    case "model.output.committed": return {kind:'applied', state:{...next,
+      liveOutput:commitOutput(next.liveOutput, message.event.value), historyRevisions:setRevision(next.historyRevisions, message.event.value)}};
+    case "model.output.remove": {
+      const outputs = new Map(next.liveOutput); outputs.delete(outputKey(message.event.value));
+      return {kind:'applied', state:{...next, liveOutput:outputs}};
+    }
     case "host_run.upsert":
       return { kind: "applied", state: { ...next, hostRun: message.event.value.run } };
     case "command.receipt":
@@ -401,13 +433,18 @@ function validRequestFailure(value: unknown): boolean {
 }
 
 function validProjection(kind: string, value: unknown): boolean {
-  const projected = ['host_run.upsert', 'command.receipt', 'actor.upsert', 'conversation.upsert',
+  const projected = ['model.output.stopped', 'model.output.started', 'model.output.delta', 'model.output.committed', 'model.output.remove', 'host_run.upsert', 'command.receipt', 'actor.upsert', 'conversation.upsert',
     'request.upsert', 'job.upsert', 'envelope.upsert', 'entity.remove'];
   if (!projected.includes(kind)) return true; // Auxiliary events only occupy sequence numbers.
   if (!isObject(value)) return false;
   const id = () => text(value.id) && value.id.length > 0;
   const version = () => optional(value, 'version', count);
   switch (kind) {
+    case 'model.output.stopped': return isOutputScope(value);
+    case 'model.output.started': return isOutputScope(value);
+    case 'model.output.delta': return isOutputUpdate(value);
+    case 'model.output.committed': return isOutputCommit(value);
+    case 'model.output.remove': return isOutputItem(value);
     case 'host_run.upsert': return text(value.run) && value.run.length > 0;
     case 'command.receipt': return isCommandReceipt(value);
     case 'actor.upsert': return isHostIdentity(value.identity) && (value.parent === null || isHostIdentity(value.parent))
@@ -447,7 +484,9 @@ export function isSnapshot(value: unknown): value is Snapshot {
     const rows = value[table];
     if (!Array.isArray(rows) || !rows.every((row) => validProjection(kind, row))) return false;
   }
-  return (value.actors === undefined || (Array.isArray(value.actors) && value.actors.every((row) => validProjection('actor.upsert', row))))
+  return (value.liveOutput === undefined || (Array.isArray(value.liveOutput) && value.liveOutput.length <= 128 && value.liveOutput.every(isLiveOutput)))
+    && (value.historyRevisions === undefined || (Array.isArray(value.historyRevisions) && value.historyRevisions.length <= 128 && value.historyRevisions.every(isHistoryRevision)))
+    && (value.actors === undefined || (Array.isArray(value.actors) && value.actors.every((row) => validProjection('actor.upsert', row))))
     && (value.commandReceipts === undefined || (Array.isArray(value.commandReceipts) && value.commandReceipts.every(isCommandReceipt)));
 }
 

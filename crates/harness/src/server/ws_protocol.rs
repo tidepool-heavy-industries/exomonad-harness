@@ -128,6 +128,14 @@ pub enum CommandReceiptOutcome {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub seq: u64,
+    #[serde(default, rename = "liveOutput", skip_serializing_if = "Vec::is_empty")]
+    pub live_output: Vec<super::LiveOutput>,
+    #[serde(
+        default,
+        rename = "historyRevisions",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub history_revisions: Vec<super::HistoryRevision>,
     /// Present only when this snapshot is projected from an embedded host run.
     /// An empty actor list does not imply standalone mode.
     #[serde(default, rename = "hostRun", skip_serializing_if = "Option::is_none")]

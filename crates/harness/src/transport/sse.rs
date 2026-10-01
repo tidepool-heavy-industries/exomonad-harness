@@ -1,5 +1,6 @@
 use super::{ResponsesTurn, TransportError, Usage};
 use crate::item::Item;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Completed output items are carried by SSE `response.output_item.done`;
@@ -10,10 +11,26 @@ pub struct ResponseAssembly {
     completed: Option<(String, Usage)>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputChannel {
+    Assistant,
+    ReasoningSummary,
+    Reasoning,
+    ToolArguments,
+    ToolInput,
+    Refusal,
+}
+
 #[derive(Debug)]
 pub enum StreamEvent {
     ItemDone(Item),
-    Delta(String),
+    Delta {
+        item_id: String,
+        channel: OutputChannel,
+        index: u64,
+        text: String,
+    },
 }
 
 impl ResponseAssembly {
@@ -31,10 +48,44 @@ impl ResponseAssembly {
                 self.items.push(Item(item.clone()));
                 Ok(Some(StreamEvent::ItemDone(Item(item))))
             }
-            Some("response.output_text.delta") => Ok(event
-                .get("delta")
-                .and_then(Value::as_str)
-                .map(|s| StreamEvent::Delta(s.to_owned()))),
+            Some(
+                kind @ ("response.output_text.delta"
+                | "response.reasoning_summary_text.delta"
+                | "response.function_call_arguments.delta"
+                | "response.custom_tool_call_input.delta"
+                | "response.refusal.delta"
+                | "response.reasoning_text.delta"),
+            ) => {
+                let item_id = event
+                    .get("item_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| TransportError::Stream("delta missing item_id".into()))?;
+                Ok(event
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .map(|text| StreamEvent::Delta {
+                        item_id: item_id.to_owned(),
+                        channel: match kind {
+                            "response.output_text.delta" => OutputChannel::Assistant,
+                            "response.reasoning_summary_text.delta" => {
+                                OutputChannel::ReasoningSummary
+                            }
+                            "response.reasoning_text.delta" => OutputChannel::Reasoning,
+                            "response.function_call_arguments.delta" => {
+                                OutputChannel::ToolArguments
+                            }
+                            "response.custom_tool_call_input.delta" => OutputChannel::ToolInput,
+                            "response.refusal.delta" => OutputChannel::Refusal,
+                            _ => unreachable!("matched channel"),
+                        },
+                        index: event
+                            .get("content_index")
+                            .or_else(|| event.get("summary_index"))
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                        text: text.to_owned(),
+                    }))
+            }
             Some("response.completed") => {
                 let response = event
                     .get("response")
@@ -108,6 +159,49 @@ mod tests {
         assert_eq!(turn.usage.output_tokens, 2);
         assert_eq!(turn.usage.cached_tokens, 3);
         assert_eq!(turn.usage.cache_write_tokens, 4);
+    }
+
+    #[test]
+    fn live_output_deltas_keep_item_channel_and_block_identity() {
+        let mut assembly = ResponseAssembly::default();
+        for (channel, expected) in [
+            ("response.output_text.delta", OutputChannel::Assistant),
+            (
+                "response.reasoning_summary_text.delta",
+                OutputChannel::ReasoningSummary,
+            ),
+            ("response.reasoning_text.delta", OutputChannel::Reasoning),
+            (
+                "response.function_call_arguments.delta",
+                OutputChannel::ToolArguments,
+            ),
+            (
+                "response.custom_tool_call_input.delta",
+                OutputChannel::ToolInput,
+            ),
+            ("response.refusal.delta", OutputChannel::Refusal),
+        ] {
+            let data = serde_json::json!({"type":channel,"item_id":"message-2","content_index":3,"delta":"λ"});
+            match assembly.accept(&data.to_string()).unwrap().unwrap() {
+                StreamEvent::Delta {
+                    item_id,
+                    channel: actual,
+                    index,
+                    text,
+                } => {
+                    assert_eq!(item_id, "message-2");
+                    assert_eq!(actual, expected);
+                    assert_eq!(index, 3);
+                    assert_eq!(text, "λ");
+                }
+                _ => panic!("expected delta"),
+            }
+        }
+        assert!(
+            assembly
+                .accept(r#"{"type":"response.output_text.delta","delta":"unscoped"}"#)
+                .is_err()
+        );
     }
 
     #[test]

@@ -5,6 +5,8 @@ import type { CommandReceipt, Envelope, HostActorIdentity, RequestFailure } from
  * adapter owns projection; command receipts preserve their wire outcome union.
  */
 export type HarnessViewModel = {
+  liveOutput?: readonly import('./live-output').LiveOutput[];
+  historyRevisions?: readonly import('./live-output').HistoryRevision[];
   hostRun?: string;
   actors?: Array<{
     id: string;

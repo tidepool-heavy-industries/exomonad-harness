@@ -19,8 +19,9 @@ function blocks(value: unknown, types: readonly string[]): { texts: string[]; un
   const texts: string[] = []
   let unknownBlocks = false
   for (const block of value) {
-    if (object(block) && typeof block.type === 'string' && types.includes(block.type) && typeof block.text === 'string') {
-      texts.push(block.text)
+    if (object(block) && typeof block.type === 'string' && types.includes(block.type)
+      && typeof (block.type === 'refusal' ? block.refusal : block.text) === 'string') {
+      texts.push((block.type === 'refusal' ? block.refusal : block.text) as string)
     } else unknownBlocks = true
   }
   return { texts, unknownBlocks }
@@ -29,14 +30,16 @@ function blocks(value: unknown, types: readonly string[]): { texts: string[]; un
 function readable(value: unknown): ReadableItem | undefined {
   if (!object(value) || typeof value.type !== 'string') return undefined
   if (value.type === 'message' && typeof value.role === 'string') {
-    const content = blocks(value.content, ['input_text', 'output_text'])
-    return { label: `Message · ${value.role}${typeof value.phase === 'string' ? ` · ${value.phase}` : ''}`,
+    const content = blocks(value.content, ['input_text', 'output_text', 'refusal'])
+    return { label: value.role === 'assistant' ? 'Assistant' : value.role === 'user' ? 'You' : `Message · ${value.role}`,
       texts: content.texts.map((text) => ({ label: 'Text', text })), unknownBlocks: content.unknownBlocks }
   }
   if (value.type === 'reasoning') {
     const summary = blocks(value.summary, ['summary_text'])
-    return { label: 'Reasoning summary', texts: summary.texts.map((text) => ({ label: 'Summary', text })),
-      unknownBlocks: summary.unknownBlocks }
+    const content = value.content === undefined ? {texts:[],unknownBlocks:false} : blocks(value.content, ['reasoning_text', 'text'])
+    return { label: summary.texts.length ? 'Reasoning summary' : 'Reasoning',
+      texts: [...summary.texts.map(text => ({label:'Summary',text})), ...content.texts.map(text => ({label:'Reasoning',text}))],
+      unknownBlocks: summary.unknownBlocks || content.unknownBlocks }
   }
   if ((value.type === 'function_call' || value.type === 'custom_tool_call')
     && typeof value.name === 'string' && typeof value.call_id === 'string') {
@@ -75,13 +78,14 @@ export default function HistoryItem({ entry }: { readonly entry: HistoryEntry })
   const [showRaw, setShowRaw] = useState(false)
   const rawVisible = showRaw || !view
   const raw = useMemo(() => rawVisible ? JSON.stringify(entry.item, null, 2) : undefined, [entry.item, rawVisible])
+  // Opaque reasoning items contain no readable summary and add no chat content.
+  if (object(entry.item) && entry.item.type === 'reasoning' && view?.texts.length === 0) return null
   return <article role="listitem" className="message">
-    <strong>Item {entry.position}</strong> <span className="meta">hash {entry.hash} · {entry.byteLen} bytes</span>
     {view ? <>
       <h3>{view.label}</h3>
       {view.texts.map((part, index) => <TextPreview key={index} text={part.text} label={`${part.label} item ${entry.position}${view.texts.length > 1 ? ` block ${index + 1}` : ''}`} />)}
       {view.unknownBlocks && <p>Unknown content is retained. Open Raw to inspect all blocks.</p>}
-      <div className="history-controls"><button type="button" aria-expanded={showRaw} onClick={() => setShowRaw(!showRaw)}>{showRaw ? 'Hide' : 'Show'} Raw item {entry.position}</button></div>
+      <details className="history-controls"><summary>Message details</summary><p className="meta">Item {entry.position} · hash {entry.hash} · {entry.byteLen} bytes</p><button type="button" aria-expanded={showRaw} onClick={() => setShowRaw(!showRaw)}>{showRaw ? 'Hide' : 'Show'} Raw item {entry.position}</button></details>
     </> : <p>Unrecognized item · Raw data</p>}
     {rawVisible && <TextPreview key="raw" text={raw ?? 'Raw data could not be represented as JSON.'} label={`Raw item ${entry.position}`} />}
   </article>
