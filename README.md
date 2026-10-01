@@ -77,9 +77,17 @@ worker network isolation still need acceptance on the configured executor.
 
 ### Cargo path
 
-For the production browser journey, run
-`nix develop .#web -c scripts/verify-browser-journey`. This prepares the locked
-web dependencies and assets before the focused Cargo test; see `web/README.md`.
+For production-rendered GUI checks, run
+`nix build .#buck-npm-cache .#web-chromium --no-link`, then
+`nix develop .#web -c scripts/verify-frontend-browser`. This runs pinned offline
+frontend checks and Playwright/axe against a synthetic loopback HTTP/WebSocket
+transport, without Cargo or provider calls. See `web/README.md` for evidence and
+resource bounds.
+
+`nix develop .#web -c scripts/verify-browser-journey` prepares frontend assets
+before four focused native HTTP/WebSocket contract tests. Its backend phase
+requires Rust; `--prepare-only` requires only pinned Node. Those native checks
+are separate from rendered browser evidence.
 
 Use `scripts/cargo-focused-test` for a named Cargo test target. It reports
 selection and execution counts separately, refuses zero runnable matches or a

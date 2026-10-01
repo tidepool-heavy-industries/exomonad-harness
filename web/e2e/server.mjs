@@ -84,7 +84,7 @@ const server = createServer(async (request, response) => {
       if (config.historyStatus) return json(response, {}, config.historyStatus);
       if (config.historyUnavailable) return json(response, {error:'Fixture history unavailable'}, 503);
       const result = history(id, offset);
-      if (config.historyOversized && offset === 50) { result.items = []; result.nextOffset = null; result.oversizedItem = {position:50,hash:createHash('sha256').update('oversized-fixture').digest('hex'),byteLen:3000000,skipOffset:51}; }
+      if (config.historyOversized && offset === 50) { result.items = []; result.nextOffset = 50; result.oversizedItem = {position:50,hash:createHash('sha256').update('oversized-fixture').digest('hex'),byteLen:3000000,skipOffset:51}; }
       return json(response, result, result.oversizedItem ? 413 : 200);
     }
     if (url.pathname.startsWith('/api/')) return json(response, {error:'Fixture route not found'}, 404);
