@@ -166,6 +166,22 @@ impl Store {
         matches_binding(&self.lock(), identity).map_err(Into::into)
     }
 
+    /// Observe the logical agent head only under its exact current host binding.
+    /// Binding and head share the connection lock, preventing successor races.
+    pub fn embedded_agent_head(&self, identity: &HostIdentity) -> Result<Option<RequestId>> {
+        let connection = self.lock();
+        if !matches_binding(&connection, identity)? {
+            return Err(StoreError::InvalidEmbeddedBinding);
+        }
+        Ok(connection
+            .query_row(
+                "SELECT head_request FROM agents WHERE path=?1",
+                [&identity.actor.0],
+                |row| row.get::<_, Option<String>>(0),
+            )?
+            .map(RequestId))
+    }
+
     pub(crate) fn bind_embedded_actor(
         &self,
         identity: &HostIdentity,
@@ -437,6 +453,68 @@ mod tests {
                 .is_err()
         );
         assert!(!standalone.embedded_binding_matches(&identity).unwrap());
+    }
+
+    #[test]
+    fn exact_head_read_refuses_stale_binding_and_preserves_retained_history() {
+        let store = Store::memory().unwrap();
+        let identity = root_identity();
+        store.bind_embedded_actor(&identity, None).unwrap();
+        assert_eq!(store.embedded_agent_head(&identity).unwrap(), None);
+        let head = RequestId("old-head".into());
+        store
+            .create_request(&head, None, &identity.actor.0)
+            .unwrap();
+        store
+            .append_items(
+                &head,
+                &[Item(
+                    serde_json::json!({"type":"message","role":"assistant","content":"old worker"}),
+                )],
+            )
+            .unwrap();
+        assert!(
+            store
+                .advance_agent_head(&identity.actor, None, Some(&head))
+                .unwrap()
+        );
+        assert_eq!(
+            store.embedded_agent_head(&identity).unwrap(),
+            Some(head.clone())
+        );
+        let successor = HostIdentity {
+            incarnation: "2".into(),
+            ..identity.clone()
+        };
+        store
+            .transfer_embedded_binding(&identity, &successor, &TransferAuthority(true))
+            .unwrap();
+        let new_head = RequestId("new-head".into());
+        store
+            .create_request(&new_head, Some(&head), &identity.actor.0)
+            .unwrap();
+        assert!(
+            store
+                .advance_agent_head(&identity.actor, Some(&head), Some(&new_head))
+                .unwrap()
+        );
+        assert!(matches!(
+            store.embedded_agent_head(&identity),
+            Err(StoreError::InvalidEmbeddedBinding)
+        ));
+        assert_eq!(
+            store.embedded_agent_head(&successor).unwrap(),
+            Some(new_head)
+        );
+        assert_eq!(store.history_page(&head, 0, 100).unwrap().items.len(), 1);
+        let foreign = HostIdentity {
+            run: "foreign".into(),
+            ..successor
+        };
+        assert!(matches!(
+            store.embedded_agent_head(&foreign),
+            Err(StoreError::InvalidEmbeddedBinding)
+        ));
     }
 
     #[test]

@@ -45,6 +45,7 @@ export interface HostActorProjection {
   readonly kind: "model" | "workflow";
   readonly lifecycle: "running" | "waiting" | "retiring" | "retired" | "lost";
   readonly modelConversation: EntityId | null;
+  readonly modelHeadRequest?: EntityId | null;
   readonly activeRound?: EmbeddedRoundId;
 }
 

@@ -922,6 +922,7 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
                 kind: HostActorKind::Model,
                 lifecycle: HostActorLifecycle::Waiting,
                 model_conversation: Some("/root".into()),
+                model_head_request: None,
                 active_round: None,
             },
             HostActorProjection {
@@ -934,6 +935,7 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
                 kind: HostActorKind::Workflow,
                 lifecycle: HostActorLifecycle::Running,
                 model_conversation: None,
+                model_head_request: None,
                 active_round: None,
             },
         ],

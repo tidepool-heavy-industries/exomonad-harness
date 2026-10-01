@@ -72,6 +72,9 @@ pub struct HostActorProjection {
     pub kind: HostActorKind,
     pub lifecycle: HostActorLifecycle,
     pub model_conversation: Option<String>,
+    /// Exact actor-owned history entrypoint, independent of the activity rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_head_request: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_round: Option<crate::embedding::EmbeddedRoundId>,
 }
@@ -305,6 +308,36 @@ mod tests {
     }
 
     #[test]
+    fn model_actor_projection_roundtrips_optional_exact_head() {
+        let mut actor = HostActorProjection {
+            identity: HostActorIdentity {
+                run: "run".into(),
+                actor: crate::model::AgentPath("/root/old".into()),
+                incarnation: "1".into(),
+            },
+            parent: None,
+            kind: HostActorKind::Model,
+            lifecycle: HostActorLifecycle::Retired,
+            model_conversation: Some("/root/old".into()),
+            model_head_request: None,
+            active_round: None,
+        };
+        let old_wire = serde_json::to_value(&actor).unwrap();
+        assert!(old_wire.get("modelHeadRequest").is_none());
+        assert_eq!(
+            serde_json::from_value::<HostActorProjection>(old_wire).unwrap(),
+            actor
+        );
+        actor.model_head_request = Some("retained-head".into());
+        let wire = serde_json::to_value(&actor).unwrap();
+        assert_eq!(wire["modelHeadRequest"], "retained-head");
+        assert_eq!(
+            serde_json::from_value::<HostActorProjection>(wire).unwrap(),
+            actor
+        );
+    }
+
+    #[test]
     fn host_actor_projection_keeps_exact_incarnation_and_workflow_kind() {
         let parent = HostActorIdentity {
             run: "run-1".into(),
@@ -321,6 +354,7 @@ mod tests {
             kind: HostActorKind::Workflow,
             lifecycle: HostActorLifecycle::Waiting,
             model_conversation: None,
+            model_head_request: None,
             active_round: None,
         };
         let frame = WsServerFrame::Snapshot {

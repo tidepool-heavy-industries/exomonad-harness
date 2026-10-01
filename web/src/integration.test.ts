@@ -7,6 +7,17 @@ import { customJobJourney, customSuccessJourney } from './fixture'
 import App from './App'
 
 describe('web outcome integration', () => {
+  it('projects an exact retired actor head without any activity rows', () => {
+    const snapshot: Snapshot = { seq: 1, hostRun: 'run', actors: [{
+      identity: { run: 'run', actor: '/root/old', incarnation: '1' }, parent: null,
+      kind: 'model', lifecycle: 'retired', modelConversation: '/root/old',
+      modelHeadRequest: 'old-exact-head',
+    }], conversations: [], requests: [], jobs: [], envelopes: [] }
+    const view = toViewModel(normalizeSnapshot(snapshot))
+    expect(view.timeline).toEqual([])
+    expect(view.actors?.[0]).toMatchObject({ modelHeadRequest: 'old-exact-head', lifecycle: 'retired' })
+  })
+
   it('shows Haskell-only host actors apart from model conversations', () => {
     const snapshot: Snapshot = {
       seq: 1,

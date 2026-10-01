@@ -16,6 +16,7 @@ export type HarnessViewModel = {
     kind: "model" | "workflow";
     lifecycle: string;
     modelConversation?: string;
+    modelHeadRequest?: string;
     activeRound?: string;
   }>;
   commandReceipts?: CommandReceipt[];

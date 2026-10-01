@@ -1188,6 +1188,59 @@ mod tests {
     }
 
     #[test]
+    fn retired_actor_head_survives_global_activity_eviction_and_fresh_snapshot() {
+        let store = Store::memory().unwrap();
+        let (_, control, _) = server(PathBuf::from("."));
+        let head = crate::model::RequestId("retired-head".into());
+        store.create_request(&head, None, "/root/old").unwrap();
+        store
+            .append_items(
+                &head,
+                &[crate::item::Item(serde_json::json!({
+                    "type":"message", "role":"assistant", "content":"retained worker reply"
+                }))],
+            )
+            .unwrap();
+        store
+            .record_event(Some(&head), "model_turn", &serde_json::json!({}))
+            .unwrap();
+        let mut actor = projected_actor("run", "/root/old", "1");
+        actor.kind = HostActorKind::Model;
+        actor.lifecycle = HostActorLifecycle::Retired;
+        actor.model_conversation = Some("/root/old".into());
+        actor.model_head_request = Some(head.0.clone());
+        control.update_host_projection("run".into(), vec![actor.clone()], vec![]);
+        control.refresh_completed_model_requests(&store).unwrap();
+        for index in 0..130 {
+            let request = crate::model::RequestId(format!("sibling-{index}"));
+            store
+                .create_request(&request, None, "/root/sibling")
+                .unwrap();
+            store
+                .record_event(Some(&request), "model_turn", &serde_json::json!({}))
+                .unwrap();
+        }
+        control.refresh_completed_model_requests(&store).unwrap();
+        let fresh_snapshot = control.snapshot.read().unwrap().clone();
+        assert_eq!(fresh_snapshot.requests.len(), 128);
+        assert!(
+            fresh_snapshot
+                .requests
+                .iter()
+                .all(|request| request["id"] != head.0)
+        );
+        assert_eq!(fresh_snapshot.actors, vec![actor]);
+        let wire = serde_json::to_value(WsServerFrame::Snapshot {
+            snapshot: fresh_snapshot,
+        })
+        .unwrap();
+        assert_eq!(wire["snapshot"]["actors"][0]["modelHeadRequest"], head.0);
+        let page = store.history_page(&head, 0, 100).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].item.0["content"], "retained worker reply");
+    }
+
+    #[test]
     fn retained_model_requests_follow_durable_completions_and_survive_resync() {
         use crate::{
             model::{Effort, RequestId},
@@ -1324,6 +1377,7 @@ mod tests {
             kind: HostActorKind::Workflow,
             lifecycle: HostActorLifecycle::Waiting,
             model_conversation: None,
+            model_head_request: None,
             active_round: None,
         }
     }
