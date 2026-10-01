@@ -412,7 +412,8 @@ function validProjection(kind: string, value: unknown): boolean {
     case 'actor.upsert': return isHostIdentity(value.identity) && (value.parent === null || isHostIdentity(value.parent))
       && ['model', 'workflow'].includes(value.kind as string)
       && ['running', 'waiting', 'retiring', 'retired', 'lost'].includes(value.lifecycle as string)
-      && nullableId(value.modelConversation) && optional(value, 'activeRound', isOperationId);
+      && nullableId(value.modelConversation) && optional(value, 'modelHeadRequest', nullableId)
+      && optional(value, 'activeRound', isOperationId);
     case 'conversation.upsert': return id() && text(value.path) && version()
       && ['idle', 'requesting', 'paused', 'cancelled'].includes(value.state as string)
       && optional(value, 'parentId', nullableId) && optional(value, 'forkSourceRequestId', nullableId);

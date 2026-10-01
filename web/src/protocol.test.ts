@@ -11,6 +11,21 @@ const fixture: Snapshot = {
   envelopes: [{ id: "e/2", recipient: "/root", sender: "/operator", type: "MESSAGE", payload: "continue" }],
 };
 
+describe('actor history head wire validation', () => {
+  const actor = { identity: { run: 'run', actor: '/root/old', incarnation: '1' },
+    parent: null, kind: 'model', lifecycle: 'retired', modelConversation: '/root/old' }
+  it.each([undefined, null, 'exact-old-head'])('accepts an optional exact head: %j', modelHeadRequest => {
+    const value = { ...actor, ...(modelHeadRequest === undefined ? {} : { modelHeadRequest }) }
+    expect(isSnapshot({ ...fixture, actors: [value] })).toBe(true)
+    expect(isSequencedEvent({ seq: 42, event: { kind: 'actor.upsert', value } })).toBe(true)
+  })
+  it.each([12, {}, [], ''])('rejects malformed head entrypoints: %j', modelHeadRequest => {
+    const value = { ...actor, modelHeadRequest }
+    expect(isSnapshot({ ...fixture, actors: [value] })).toBe(false)
+    expect(isSequencedEvent({ seq: 42, event: { kind: 'actor.upsert', value } })).toBe(false)
+  })
+})
+
 describe('request failure wire validation', () => {
   it.each([
     null,
