@@ -1,0 +1,208 @@
+use super::HttpDiagnostic;
+use futures_util::{Stream, StreamExt};
+use serde_json::Value;
+use std::time::Duration;
+
+const BODY_LIMIT: usize = 16 * 1024;
+const READ_TIMEOUT: Duration = Duration::from_millis(500);
+const FIELD_LIMIT: usize = 256;
+const MESSAGE_LIMIT: usize = 2048;
+
+pub(super) async fn read(
+    response: reqwest::Response,
+    token: &str,
+    account: &str,
+) -> Option<HttpDiagnostic> {
+    read_stream(response.bytes_stream(), token, account).await
+}
+
+async fn read_stream<S, E, B>(stream: S, token: &str, account: &str) -> Option<HttpDiagnostic>
+where
+    S: Stream<Item = Result<B, E>>,
+    B: AsRef<[u8]>,
+{
+    // The deadline covers the entire body, including a peer that keeps sending
+    // small chunks. Partial, oversized and invalid JSON bodies give status only.
+    tokio::time::timeout(READ_TIMEOUT, async {
+        futures_util::pin_mut!(stream);
+        let mut body = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.ok()?;
+            let chunk = chunk.as_ref();
+            if chunk.len() > BODY_LIMIT.saturating_sub(body.len()) {
+                return None;
+            }
+            body.extend_from_slice(chunk);
+        }
+        parse(&body, token, account)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+fn parse(body: &[u8], token: &str, account: &str) -> Option<HttpDiagnostic> {
+    if body.len() > BODY_LIMIT {
+        return None;
+    }
+    let document: Value = serde_json::from_slice(body).ok()?;
+    let error = document.get("error")?.as_object()?;
+    let field = |name: &str, limit| {
+        error.get(name)?.as_str().map(|text| {
+            // Redact before truncation, so a cutoff cannot leave a credential
+            // prefix visible. Unrecognized fields never enter the diagnostic.
+            redact(text, token, account).chars().take(limit).collect()
+        })
+    };
+    let diagnostic = HttpDiagnostic {
+        code: field("code", FIELD_LIMIT),
+        error_type: field("type", FIELD_LIMIT),
+        param: field("param", FIELD_LIMIT),
+        message: field("message", MESSAGE_LIMIT),
+    };
+    (diagnostic != HttpDiagnostic::default()).then_some(diagnostic)
+}
+
+fn redact(text: &str, token: &str, account: &str) -> String {
+    let mut text = text.to_owned();
+    for secret in [token, account] {
+        if !secret.is_empty() {
+            text = text.replace(secret, "[redacted]");
+        }
+    }
+    // Common credential shapes are removed even when they differ from the
+    // active request's token. Keep punctuation and schema paths readable.
+    let mut output = String::new();
+    let mut bearer = false;
+    for part in text.split_inclusive(|c: char| !c.is_ascii_alphanumeric() && !"_-./+=".contains(c))
+    {
+        let word =
+            part.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && !"_-./+=".contains(c));
+        let delimiter = &part[word.len()..];
+        if word.is_empty() {
+            output.extend(
+                delimiter
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c }),
+            );
+            continue;
+        }
+        let secret_shape = word.starts_with("sk-")
+            || word.starts_with("acct_")
+            || word.starts_with("account-")
+            || word.starts_with("org-")
+            || (word.starts_with("eyJ") && word.matches('.').count() == 2);
+        if bearer || secret_shape {
+            output.push_str("[redacted]");
+        } else {
+            output.extend(word.chars().map(|c| if c.is_control() { ' ' } else { c }));
+        }
+        bearer = word.eq_ignore_ascii_case("bearer");
+        output.extend(
+            delimiter
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c }),
+        );
+    }
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::stream;
+    use serde_json::json;
+
+    #[test]
+    fn diagnostics_allowlist_fields_and_redact_before_bounds() {
+        let token = "test-request-token";
+        let account = "test-request-account";
+        let body = serde_json::to_vec(&json!({"error": {
+            "code": "invalid_function_parameters",
+            "type": "invalid_request_error",
+            "param": "tools[1].parameters",
+            "message": format!("view missing required; {token} {account} Bearer alternate-token sk-alternate eyJheader.payload.signature acct_other {}{token}", "x".repeat(2040)),
+            "request": {"token": token}, "unknown": account
+        }})).unwrap();
+        let diagnostic = parse(&body, token, account).unwrap();
+        assert_eq!(
+            diagnostic.code.as_deref(),
+            Some("invalid_function_parameters")
+        );
+        assert_eq!(diagnostic.param.as_deref(), Some("tools[1].parameters"));
+        let serialized = serde_json::to_string(&diagnostic).unwrap();
+        for secret in [
+            token,
+            account,
+            "alternate-token",
+            "sk-alternate",
+            "eyJheader",
+            "acct_other",
+        ] {
+            assert!(!serialized.contains(secret), "credential was retained");
+        }
+        assert_eq!(
+            diagnostic.message.as_ref().unwrap().chars().count(),
+            MESSAGE_LIMIT
+        );
+        assert!(!serialized.contains("unknown"));
+        assert!(
+            serde_json::to_value(&diagnostic)
+                .unwrap()
+                .get("request")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn diagnostics_fall_back_without_retaining_unstructured_bodies() {
+        for body in [
+            b"secret HTML page".as_slice(),
+            b"{\"error\":\"secret\"}",
+            b"{\"error\":{\"unknown\":\"secret\",\"message\":42}}",
+            b"{\"error\":{\"message\":\"partial\"}",
+        ] {
+            assert!(parse(body, "", "").is_none());
+        }
+        assert!(parse(&vec![b'x'; BODY_LIMIT + 1], "", "").is_none());
+        let body = serde_json::to_vec(
+            &json!({"error":{"message":"λ\n".repeat(1500), "param":"p".repeat(400)}}),
+        )
+        .unwrap();
+        let diagnostic = parse(&body, "", "").unwrap();
+        assert_eq!(diagnostic.param.unwrap().chars().count(), FIELD_LIMIT);
+        assert_eq!(
+            diagnostic.message.as_ref().unwrap().chars().count(),
+            MESSAGE_LIMIT
+        );
+        assert!(!diagnostic.message.unwrap().contains('\n'));
+    }
+
+    #[tokio::test]
+    async fn diagnostics_bound_stream_size_errors_and_read_time() {
+        let bytes = b"{\"error\":{\"code\":\"bad\"}}".to_vec();
+        let diagnostic = read_stream(stream::iter([Ok::<_, ()>(bytes)]), "", "")
+            .await
+            .unwrap();
+        assert_eq!(diagnostic.code.as_deref(), Some("bad"));
+        assert!(
+            read_stream(
+                stream::iter([Ok::<_, ()>(vec![b'x'; BODY_LIMIT + 1])]),
+                "",
+                ""
+            )
+            .await
+            .is_none()
+        );
+        assert!(
+            read_stream(stream::iter([Err::<Vec<u8>, _>(())]), "", "")
+                .await
+                .is_none()
+        );
+        assert!(
+            read_stream(stream::pending::<Result<Vec<u8>, ()>>(), "", "")
+                .await
+                .is_none()
+        );
+    }
+}

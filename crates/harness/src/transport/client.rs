@@ -176,8 +176,8 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
         .map_err(|_| TransportError::Stream("HTTP client initialization failed".into()))?;
     let response = http
         .post(ENDPOINT)
-        .bearer_auth(token)
-        .header("chatgpt-account-id", account)
+        .bearer_auth(&token)
+        .header("chatgpt-account-id", &account)
         .header("version", CODEX_VERSION)
         .header("originator", "codex_cli_rs")
         .header("session-id", &request.session_id)
@@ -191,7 +191,8 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
         return Err(TransportError::Authentication);
     }
     if status != 200 {
-        return Err(TransportError::Http(status));
+        let diagnostic = super::http_error::read(response, &token, &account).await;
+        return Err(TransportError::Http { status, diagnostic });
     }
     let mut stream = response.bytes_stream();
     let mut framer = SseFramer::new();

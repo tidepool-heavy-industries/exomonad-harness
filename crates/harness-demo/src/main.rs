@@ -2459,7 +2459,7 @@ fn safe_transport_error(error: &TransportError) -> String {
             "authentication failed; check ~/.codex/auth.json (credentials were not displayed)"
                 .into()
         }
-        harness::transport::TransportError::Http(status) => {
+        harness::transport::TransportError::Http { status, .. } => {
             format!("API returned HTTP status {status}")
         }
         harness::transport::TransportError::Stream(_) => "API request or response failed".into(),

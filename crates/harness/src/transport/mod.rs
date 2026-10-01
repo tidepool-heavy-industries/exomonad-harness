@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod client;
+mod http_error;
 pub mod sse;
 
 use crate::item::Item;
@@ -114,12 +115,29 @@ pub struct ResponsesTurn {
 pub enum TransportError {
     #[error("authentication expired; operator action required")]
     Authentication,
-    #[error("terminal HTTP status {0}")]
-    Http(u16),
+    #[error("terminal HTTP status {status}: {diagnostic:?}")]
+    Http {
+        status: u16,
+        diagnostic: Option<HttpDiagnostic>,
+    },
     #[error("stream failed: {0}")]
     Stream(String),
     #[error("replay request {request:?} already has a recorded owner")]
     ReplayRequestReuse { request: crate::model::RequestId },
+}
+
+/// Allowlisted, bounded provider error fields. The transport removes credentials
+/// before constructing this value; it never retains the provider's raw body.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct HttpDiagnostic {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub param: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Read-only credential source. An implementation must never refresh Codex's
