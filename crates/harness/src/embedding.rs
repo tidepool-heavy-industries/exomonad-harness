@@ -130,19 +130,18 @@ pub trait HostActor: Send + Sync {
 /// replaces this value; requests retain the old value until their calls end.
 pub struct ToolSurface {
     version: String,
-    tools: Vec<Value>,
-    kinds: HashMap<String, ToolKind>,
+    manifest: Arc<EmbeddedToolManifest>,
     dispatcher: Arc<dyn Provider>,
 }
-impl ToolSurface {
-    pub fn new(
-        version: String,
-        mut tools: Vec<Value>,
-        dispatcher: Arc<dyn Provider>,
-    ) -> Result<Self, EmbeddedError> {
-        if version.is_empty() {
-            return Err(EmbeddedError::Surface("empty version".into()));
-        }
+
+/// Validated declarations shared by requests from one immutable installation.
+pub struct EmbeddedToolManifest {
+    tools: crate::transport::ToolManifest,
+    kinds: HashMap<String, ToolKind>,
+}
+
+impl EmbeddedToolManifest {
+    pub fn new(mut tools: Vec<Value>) -> Result<Self, EmbeddedError> {
         let mut kinds = HashMap::new();
         for tool in &mut tools {
             if let Some(object) = tool.as_object_mut() {
@@ -172,9 +171,40 @@ impl ToolSurface {
             }
         }
         Ok(Self {
-            version,
-            tools,
+            tools: tools.into(),
             kinds,
+        })
+    }
+
+    pub fn tools(&self) -> &crate::transport::ToolManifest {
+        &self.tools
+    }
+}
+
+impl ToolSurface {
+    pub fn new(
+        version: String,
+        tools: Vec<Value>,
+        dispatcher: Arc<dyn Provider>,
+    ) -> Result<Self, EmbeddedError> {
+        Self::from_manifest(
+            version,
+            Arc::new(EmbeddedToolManifest::new(tools)?),
+            dispatcher,
+        )
+    }
+
+    pub fn from_manifest(
+        version: String,
+        manifest: Arc<EmbeddedToolManifest>,
+        dispatcher: Arc<dyn Provider>,
+    ) -> Result<Self, EmbeddedError> {
+        if version.is_empty() {
+            return Err(EmbeddedError::Surface("empty version".into()));
+        }
+        Ok(Self {
+            version,
+            manifest,
             dispatcher,
         })
     }
@@ -182,7 +212,7 @@ impl ToolSurface {
         &self.version
     }
     pub fn tools(&self) -> &[Value] {
-        &self.tools
+        self.manifest.tools()
     }
 }
 
@@ -463,30 +493,20 @@ impl PinnedProvider {
         if stored.branch != context.agent.0 {
             return Err(fail("foreign request call"));
         }
-        if self.surface.kinds.get(name) != Some(&input.kind()) {
+        if self.surface.manifest.kinds.get(name) != Some(&input.kind()) {
             return Err(fail("call does not match issuing tool surface"));
         }
-        let items = self
+        let recorded = self
             .store
-            .items(request)
+            .invocation_item(request, &context.call_id)
             .map_err(|e| fail(&e.to_string()))?;
-        let recorded = items
-            .iter()
-            .filter_map(|item| item.tool_call().ok().flatten())
-            .filter(|call| call.call_id == context.call_id)
-            .collect::<Vec<_>>();
-        if recorded.len() != 1 || recorded[0].name != name || &recorded[0].input != input {
+        if !recorded.is_some_and(|call| call.name == name && &call.input == input) {
             return Err(fail("call does not match durable invocation"));
         }
-        let events = self
+        let version = self
             .store
-            .events(Some(request))
+            .latest_tool_surface(request)
             .map_err(|e| fail(&e.to_string()))?;
-        let version = events
-            .iter()
-            .rev()
-            .find(|event| event.kind == "tool_surface")
-            .and_then(|event| serde_json::from_str::<Value>(&event.payload).ok());
         if version.as_ref().and_then(|value| value["version"].as_str())
             != Some(self.surface.version())
         {
@@ -530,7 +550,7 @@ impl Provider for BoundProvider {
     fn tools(&self) -> Vec<Value> {
         self.host
             .tool_surface()
-            .map(|surface| surface.tools.clone())
+            .map(|surface| surface.tools().to_vec())
             .unwrap_or_default()
     }
     fn all_tools(&self) -> Vec<Value> {
@@ -544,11 +564,14 @@ impl Provider for BoundProvider {
 }
 #[async_trait]
 impl Provider for PinnedProvider {
+    fn tool_manifest(&self) -> crate::transport::ToolManifest {
+        self.surface.manifest.tools.clone()
+    }
     fn tool_surface_version(&self) -> Option<&str> {
         Some(self.surface.version())
     }
     fn validate_call(&self, name: &str, kind: ToolKind) -> Result<(), ProviderError> {
-        if self.surface.kinds.get(name) == Some(&kind) {
+        if self.surface.manifest.kinds.get(name) == Some(&kind) {
             Ok(())
         } else {
             Err(ProviderError::Tool(
@@ -557,7 +580,7 @@ impl Provider for PinnedProvider {
         }
     }
     fn tools(&self) -> Vec<Value> {
-        self.surface.tools.clone()
+        self.surface.tools().to_vec()
     }
     fn all_tools(&self) -> Vec<Value> {
         self.tools()
@@ -572,7 +595,7 @@ impl Provider for PinnedProvider {
     }
     async fn before_request(
         &self,
-        plan: &crate::hooks::RequestPlan,
+        plan: &crate::hooks::RequestPlanView<'_>,
     ) -> crate::hooks::BeforeRequestResult {
         self.surface.dispatcher.before_request(plan).await
     }

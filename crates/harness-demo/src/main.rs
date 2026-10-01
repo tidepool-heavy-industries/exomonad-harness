@@ -199,7 +199,7 @@ pub struct CliProvider(DemoProvider);
 impl Provider for CliProvider {
     async fn before_request(
         &self,
-        plan: &harness::hooks::RequestPlan,
+        plan: &harness::hooks::RequestPlanView<'_>,
     ) -> harness::hooks::BeforeRequestResult {
         self.0.before_request(plan).await
     }
@@ -952,7 +952,7 @@ struct AsyncScenarioProvider {
 impl Provider for AsyncScenarioProvider {
     async fn before_request(
         &self,
-        plan: &harness::hooks::RequestPlan,
+        plan: &harness::hooks::RequestPlanView<'_>,
     ) -> harness::hooks::BeforeRequestResult {
         self.delegate.before_request(plan).await
     }
@@ -1036,7 +1036,7 @@ impl Provider for AsyncScenarioProvider {
 impl Provider for BrowserProvider {
     async fn before_request(
         &self,
-        plan: &harness::hooks::RequestPlan,
+        plan: &harness::hooks::RequestPlanView<'_>,
     ) -> harness::hooks::BeforeRequestResult {
         let mut result = self.0.before_request(plan).await;
         let advertised = plan
@@ -2605,7 +2605,7 @@ fn capped(bytes: &[u8]) -> (String, bool) {
 impl Provider for DemoProvider {
     async fn before_request(
         &self,
-        _plan: &harness::hooks::RequestPlan,
+        _plan: &harness::hooks::RequestPlanView<'_>,
     ) -> harness::hooks::BeforeRequestResult {
         harness::hooks::BeforeRequestResult {
             decision: harness::hooks::BeforeRequestDecision::Send,
@@ -3475,12 +3475,12 @@ mod tests {
                 .any(|tool| tool["name"] == "sleep")
         );
         assert!(!plan.tools_allowed.iter().any(|tool| tool["name"] == "ask"));
-        let result = provider.before_request(&plan).await;
+        let result = provider.before_request(&plan.as_view()).await;
         let inject_provider = BrowserProvider(
             CliProvider(DemoProvider::development(".", false)),
             BrowserPolicy::for_invocation("echo inject-context", &AgentPath(ROOT_PATH.into())),
         );
-        let injected = inject_provider.before_request(&plan).await;
+        let injected = inject_provider.before_request(&plan.as_view()).await;
         assert_eq!(
             injected.decision,
             harness::hooks::BeforeRequestDecision::Inject {
@@ -3513,7 +3513,7 @@ mod tests {
             tools_allowed: vec![],
             effort: Effort::Low,
         };
-        let missing_sleep = provider.before_request(&missing_sleep_plan).await;
+        let missing_sleep = provider.before_request(&missing_sleep_plan.as_view()).await;
         assert_eq!(
             missing_sleep.decision,
             harness::hooks::BeforeRequestDecision::SendRestricted {
@@ -3537,7 +3537,9 @@ mod tests {
             CliProvider(DemoProvider::development(".", false)),
             BrowserPolicy::for_invocation("status", &AgentPath(ROOT_PATH.into())),
         );
-        let incidental_words = send_provider.before_request(&incidental_words_plan).await;
+        let incidental_words = send_provider
+            .before_request(&incidental_words_plan.as_view())
+            .await;
         assert_eq!(
             incidental_words.decision,
             harness::hooks::BeforeRequestDecision::Send
@@ -3559,7 +3561,7 @@ mod tests {
             tools_allowed: child_provider.all_tools(),
             effort: Effort::Low,
         };
-        let child = child_provider.before_request(&child_plan).await;
+        let child = child_provider.before_request(&child_plan.as_view()).await;
         assert_eq!(
             child.decision,
             harness::hooks::BeforeRequestDecision::SendRestricted {
@@ -3573,7 +3575,7 @@ mod tests {
             )
         );
         let cli = CliProvider(DemoProvider::development(".", false));
-        let cli_result = cli.before_request(&plan).await;
+        let cli_result = cli.before_request(&plan.as_view()).await;
         assert_eq!(
             cli_result.decision,
             harness::hooks::BeforeRequestDecision::Send
@@ -3592,7 +3594,8 @@ mod tests {
             instructions: "capture-test".into(),
             tools: vec![json!({"type":"function","name":"sleep","strict":true,
                 "parameters":{"type":"object","properties":{"duration_ms":{"type":"integer"}},
-                    "required":["duration_ms"],"additionalProperties":false}})],
+                    "required":["duration_ms"],"additionalProperties":false}})]
+            .into(),
             tools_allowed: Some(vec!["sleep".into()]),
             model: "deterministic-local".into(),
             pinned_effort: Effort::Low,

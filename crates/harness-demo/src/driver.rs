@@ -209,7 +209,7 @@ mod tests {
 
         async fn before_request(
             &self,
-            plan: &harness::hooks::RequestPlan,
+            plan: &harness::hooks::RequestPlanView<'_>,
         ) -> harness::hooks::BeforeRequestResult {
             self.inner.before_request(plan).await
         }

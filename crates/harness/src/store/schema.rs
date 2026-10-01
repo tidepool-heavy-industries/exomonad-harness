@@ -12,6 +12,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(SQL)?;
         tx.execute_batch(MODEL_TURN_RECENT_INDEX)?;
+        tx.execute_batch(super::validation::INDEXES)?;
         tx.execute("INSERT INTO schema_version(version) VALUES (?1)", [VERSION])?;
         super::schema_migration::ensure_store_id(&tx)?;
         tx.commit()?;
@@ -38,6 +39,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
     if version == VERSION {
         super::schema_migration::validate_checkpoint_metadata(conn)?;
         conn.execute_batch(MODEL_TURN_RECENT_INDEX)?;
+        conn.execute_batch(super::validation::INDEXES)?;
         return Ok(());
     }
     let tx = conn.transaction()?;
@@ -90,6 +92,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
     }
     tx.execute_batch(SQL)?;
     tx.execute_batch(MODEL_TURN_RECENT_INDEX)?;
+    tx.execute_batch(super::validation::INDEXES)?;
     if legacy_inputs && version < 7 {
         let old_count: i64 =
             tx.query_row("SELECT COUNT(*) FROM legacy_embedded_inputs", [], |r| {

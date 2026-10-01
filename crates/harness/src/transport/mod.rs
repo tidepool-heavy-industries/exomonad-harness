@@ -10,13 +10,64 @@ use crate::item::Item;
 use crate::model::Effort;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::{ops::Deref, sync::Arc};
 use thiserror::Error;
+
+/// Immutable advertised tools. Cloning a manifest retains the same schema bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolManifest(Arc<ManifestData>);
+
+#[derive(Debug, PartialEq, Eq)]
+struct ManifestData {
+    tools: Vec<Value>,
+    json: String,
+    hash: crate::item::ItemHash,
+}
+
+impl Default for ToolManifest {
+    fn default() -> Self {
+        Vec::new().into()
+    }
+}
+
+impl ToolManifest {
+    pub(crate) fn encoded(&self) -> (&crate::item::ItemHash, &str) {
+        (&self.0.hash, &self.0.json)
+    }
+}
+
+impl From<Vec<Value>> for ToolManifest {
+    fn from(tools: Vec<Value>) -> Self {
+        let json = serde_json::to_string(&tools).expect("tool Values serialize");
+        let hash = crate::item::ItemHash(blake3::hash(json.as_bytes()).to_hex().to_string());
+        Self(Arc::new(ManifestData { tools, json, hash }))
+    }
+}
+
+impl Deref for ToolManifest {
+    type Target = [Value];
+    fn deref(&self) -> &[Value] {
+        &self.0.tools
+    }
+}
+
+impl Serialize for ToolManifest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.tools.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolManifest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Vec::<Value>::deserialize(deserializer)?.into())
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ResponsesRequest {
     pub input: Vec<Item>,
     pub instructions: String,
-    pub tools: Vec<Value>,
+    pub tools: ToolManifest,
     /// None keeps automatic choice; Some selects a subset, including empty.
     #[serde(default)]
     pub tools_allowed: Option<Vec<String>>,

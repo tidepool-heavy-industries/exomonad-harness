@@ -10,7 +10,7 @@ use crate::{
         TypedTurnFuture,
     },
     finalize::{FINALIZE_TOOL_NAME, FinalizeError, FinalizeParser},
-    item::{Item, ToolInput, ToolKind},
+    item::{Item, ItemHash, ToolInput, ToolKind},
     mailbox::{DurableMailboxWake, Envelope, MailboxSignal, MessageChannel},
     model::{AgentPath, CallId, ConversationIdentity, Effort, OperationId, RequestId},
     provider::Provider,
@@ -33,6 +33,11 @@ use tokio::sync::watch;
 
 #[path = "engine/items.rs"]
 mod items;
+
+struct HistoryWindow {
+    items: Vec<Item>,
+    provenance: Vec<(RequestId, ItemHash)>,
+}
 
 #[derive(Clone, Debug)]
 struct PendingCall {
@@ -700,6 +705,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let mut compact_due = false;
         let mut previous_usage = Usage::default();
         let mut last_text_compaction_attempt_bytes = None;
+        let mut request_tools: Option<(
+            crate::transport::ToolManifest,
+            crate::transport::ToolManifest,
+        )> = None;
+        let store = self.store.clone();
+        let instructions = self.config.instructions.clone();
+        let replay_instructions =
+            match blocking(move || store.intern_replay_instructions(&instructions)).await {
+                Ok(hash) => hash,
+                Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+            };
         loop {
             if *cancellation.borrow() {
                 return Err(self
@@ -719,14 +735,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     return Err(self.cleanup_pending(error, &pending).await);
                 }
             }
-            let history = match self.read_history(&parent).await {
+            let history = match load_history_window(self.store.clone(), parent.clone()).await {
                 Ok(history) => history,
                 Err(error) => return Err(self.cleanup_pending(error, &pending).await),
             };
             let history_bytes = (compact_due
                 && self.compaction_strategy == CompactionStrategy::PlainText)
                 .then(|| {
-                    serde_json::to_vec(&history)
+                    serde_json::to_vec(&history.items)
                         .expect("Item serialization is infallible")
                         .len()
                 });
@@ -737,7 +753,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             .is_some_and(|bytes| bytes >= previous.saturating_add(previous / 4))
                     }));
             if did_compact {
-                let compact = self.compact_window(&parent, &history, &pending, &previous_usage);
+                let compact =
+                    self.compact_window(&parent, &history.items, &pending, &previous_usage);
                 let successor = match tokio::select! {
                     result = compact => result,
                     changed = cancellation.changed() => {
@@ -764,11 +781,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
             }
             let history = if did_compact {
-                self.read_history(&parent).await?
+                match load_history_window(self.store.clone(), parent.clone()).await {
+                    Ok(history) => history,
+                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                }
             } else {
                 history
             };
             let pinned_effort = history
+                .items
                 .iter()
                 .find_map(Item::configuration_effort)
                 .ok_or(EngineError::MissingEffortPin)?;
@@ -778,23 +799,40 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             };
             let request_provider: Arc<dyn Provider> =
                 snapshot.unwrap_or_else(|| self.provider.clone());
-            let model_input = if self.bounded_invocation {
-                self.read_history_pairs(&parent)
-                    .await?
-                    .into_iter()
-                    .map(|(request, item)| {
-                        request_provider
-                            .model_visible_item(&request, &item)
-                            .unwrap_or(item)
-                    })
-                    .collect()
-            } else {
-                history
-            };
+            let provider_tools = request_provider.tool_manifest();
+            if request_tools
+                .as_ref()
+                .is_none_or(|(previous, _)| previous != &provider_tools)
+            {
+                let tools = self.compose_tools(finalize_schema, &provider_tools);
+                request_tools = Some((provider_tools, tools));
+            }
+            let mut input_hashes = Vec::with_capacity(history.items.len());
+            let model_input = history
+                .items
+                .into_iter()
+                .zip(history.provenance)
+                .map(|(item, (request, hash))| {
+                    if self.bounded_invocation {
+                        if let Some(projected) =
+                            request_provider.model_visible_item(&request, &item)
+                        {
+                            input_hashes.push(None);
+                            return projected;
+                        }
+                    }
+                    input_hashes.push(Some(hash));
+                    item
+                })
+                .collect();
             let mut req = ResponsesRequest {
                 input: model_input,
                 instructions: self.config.instructions.clone(),
-                tools: self.tools_from(finalize_schema, request_provider.as_ref()),
+                tools: request_tools
+                    .as_ref()
+                    .expect("request tools installed")
+                    .1
+                    .clone(),
                 tools_allowed: None,
                 model: self.config.model.clone(),
                 // The request-level field is only the cache-preserving mirror
@@ -805,7 +843,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             if let Some(version) = request_provider.tool_surface_version() {
                 let store = self.store.clone();
                 let request = parent.clone();
-                let evidence = json!({"version":version,"tools":req.tools});
+                let evidence = json!({"version":version});
                 if let Err(error) =
                     blocking(move || store.record_event(Some(&request), "tool_surface", &evidence))
                         .await
@@ -813,9 +851,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     return Err(self.cleanup_pending(error, &pending).await);
                 }
             }
-            let plan = crate::hooks::RequestPlan {
-                items: req.input.clone(),
-                tools_allowed: req.tools.clone(),
+            let plan = crate::hooks::RequestPlanView {
+                items: &req.input,
+                tools_allowed: &req.tools,
                 effort: req.pinned_effort,
             };
             let started = std::time::Instant::now();
@@ -828,6 +866,20 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     continue;
                 }
             };
+            let event_refs = plan
+                .items
+                .iter()
+                .zip(&input_hashes)
+                .map(|(item, hash)| {
+                    hash.as_ref().map(|hash| hash.0.clone()).unwrap_or_else(|| {
+                        blake3::hash(
+                            &serde_json::to_vec(item).expect("Item serialization is infallible"),
+                        )
+                        .to_hex()
+                        .to_string()
+                    })
+                })
+                .collect();
             let selected_tools = match &before_request.decision {
                 crate::hooks::BeforeRequestDecision::Send => None,
                 crate::hooks::BeforeRequestDecision::SendRestricted { tools_allowed } => {
@@ -909,23 +961,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         }
                     }
                     req.input.push(item.clone());
+                    input_hashes.push(None);
                     tools_allowed.clone()
                 }
             };
             req.tools_allowed = selected_tools;
             let decision = crate::store::Decision {
                 hook: "before-request".into(),
-                event_refs: plan
-                    .items
-                    .iter()
-                    .map(|item| {
-                        blake3::hash(
-                            &serde_json::to_vec(item).expect("Item serialization is infallible"),
-                        )
-                        .to_hex()
-                        .to_string()
-                    })
-                    .collect(),
+                event_refs,
                 decision: serde_json::to_value(&before_request.decision)
                     .expect("typed hook decision serializes"),
                 evidence: before_request
@@ -941,7 +984,21 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             {
                 return Err(self.cleanup_pending(error, &pending).await);
             }
-            let replay_request = req.clone();
+            let store = self.store.clone();
+            let instructions = replay_instructions.clone();
+            let (req, replay_request) = match blocking(move || {
+                let issued = store.seal_replay_request_with_hashes(
+                    &req,
+                    &input_hashes,
+                    Some(&instructions),
+                )?;
+                Ok((req, issued))
+            })
+            .await
+            {
+                Ok(sealed) => sealed,
+                Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+            };
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
             // Retain completed calls while the provider is streaming. Their
             // output enters model history after this response, without changing
@@ -1047,20 +1104,19 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             };
             // Once transport completed, its exact request/response pair is
             // durable even if a subsequent dispatch or output step fails.
-            {
+            let turn = {
                 let store = self.store.clone();
                 let request = parent.clone();
-                let recorded = turn.clone();
-                if let Err(error) = blocking(move || {
-                    store
-                        .record_replay_turn(&request, &replay_request, &recorded)
-                        .map(|_| ())
+                match blocking(move || {
+                    store.record_issued_replay_turn(&request, replay_request, &turn)?;
+                    Ok(turn)
                 })
                 .await
                 {
-                    return Err(self.cleanup_pending(error, &pending).await);
+                    Ok(turn) => turn,
+                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
                 }
-            }
+            };
             // A completed response can race the buffered final item events.
             while let Ok(event) = event_rx.try_recv() {
                 if let StreamEvent::ItemDone(item) = event {
@@ -1441,15 +1497,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         }
     }
 
-    fn tools(&self, finalize_schema: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
-        self.tools_from(finalize_schema, self.provider.as_ref())
+    fn tools(&self, finalize_schema: Option<&serde_json::Value>) -> crate::transport::ToolManifest {
+        self.compose_tools(finalize_schema, &self.provider.tool_manifest())
     }
 
-    fn tools_from(
+    fn compose_tools(
         &self,
         finalize_schema: Option<&serde_json::Value>,
-        provider: &dyn Provider,
-    ) -> Vec<serde_json::Value> {
+        manifest: &crate::transport::ToolManifest,
+    ) -> crate::transport::ToolManifest {
+        if self.config.tools.is_empty() && finalize_schema.is_none() {
+            return manifest.clone();
+        }
         let mut tools = self.config.tools.clone();
         if let Some(schema) = finalize_schema {
             // Typed completion owns this name for this run. A caller may have
@@ -1460,17 +1519,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             });
             tools.push(schema.clone());
         }
-        for tool in provider.all_tools() {
+        for tool in manifest.iter() {
             let name = tool.get("name").and_then(serde_json::Value::as_str);
             if name.is_none_or(|name| {
                 !tools.iter().any(|existing| {
                     existing.get("name").and_then(serde_json::Value::as_str) == Some(name)
                 })
             }) {
-                tools.push(tool);
+                tools.push(tool.clone());
             }
         }
-        tools
+        tools.into()
     }
 
     #[cfg(test)]
@@ -2050,7 +2109,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     .create(ResponsesRequest {
                         input: items,
                         instructions: self.config.instructions.clone(),
-                        tools: vec![],
+                        tools: vec![].into(),
                         tools_allowed: Some(vec![]),
                         model: self.config.model.clone(),
                         pinned_effort: effective_effort,
@@ -2200,17 +2259,26 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
 }
 
 async fn load_history(store: Arc<Store>, id: RequestId) -> Result<Vec<Item>, EngineError> {
-    Ok(load_history_pairs(store, id)
-        .await?
-        .into_iter()
-        .map(|(_, item)| item)
-        .collect())
+    Ok(load_history_window(store, id).await?.items)
 }
 
 async fn load_history_pairs(
     store: Arc<Store>,
     id: RequestId,
 ) -> Result<Vec<(RequestId, Item)>, EngineError> {
+    let history = load_history_window(store, id).await?;
+    Ok(history
+        .provenance
+        .into_iter()
+        .zip(history.items)
+        .map(|((request, _), item)| (request, item))
+        .collect())
+}
+
+async fn load_history_window(
+    store: Arc<Store>,
+    id: RequestId,
+) -> Result<HistoryWindow, EngineError> {
     blocking(move || {
         let mut cursor = Some(id);
         let mut chain = Vec::new();
@@ -2220,9 +2288,9 @@ async fn load_history_pairs(
             };
             chain.push(
                 store
-                    .items(&request_id)?
+                    .items_with_hashes(&request_id)?
                     .into_iter()
-                    .map(|item| (request_id.clone(), item))
+                    .map(|(hash, item)| (request_id.clone(), hash, item))
                     .collect::<Vec<_>>(),
             );
             if store.is_compaction_boundary(&request_id)? {
@@ -2231,7 +2299,13 @@ async fn load_history_pairs(
             cursor = request.parent;
         }
         chain.reverse();
-        Ok(chain.into_iter().flatten().collect())
+        let mut items = Vec::new();
+        let mut provenance = Vec::new();
+        for (request, hash, item) in chain.into_iter().flatten() {
+            items.push(item);
+            provenance.push((request, hash));
+        }
+        Ok(HistoryWindow { items, provenance })
     })
     .await
 }
@@ -2844,7 +2918,7 @@ mod tests {
     impl Provider for InjectSelection {
         async fn before_request(
             &self,
-            _plan: &crate::hooks::RequestPlan,
+            _plan: &crate::hooks::RequestPlanView<'_>,
         ) -> crate::hooks::BeforeRequestResult {
             crate::hooks::BeforeRequestResult {
                 decision: crate::hooks::BeforeRequestDecision::Inject {
@@ -2865,7 +2939,7 @@ mod tests {
     impl Provider for RestrictedSelection {
         async fn before_request(
             &self,
-            _plan: &crate::hooks::RequestPlan,
+            _plan: &crate::hooks::RequestPlanView<'_>,
         ) -> crate::hooks::BeforeRequestResult {
             crate::hooks::BeforeRequestResult {
                 decision: crate::hooks::BeforeRequestDecision::SendRestricted {
@@ -2887,9 +2961,9 @@ mod tests {
     impl Provider for BeforeRequestRecorder {
         async fn before_request(
             &self,
-            plan: &crate::hooks::RequestPlan,
+            plan: &crate::hooks::RequestPlanView<'_>,
         ) -> crate::hooks::BeforeRequestResult {
-            self.plans.lock().unwrap().push(plan.clone());
+            self.plans.lock().unwrap().push(plan.to_owned());
             crate::hooks::BeforeRequestResult {
                 decision: crate::hooks::BeforeRequestDecision::Send,
                 evidence: Some(json!({"marker":"engine-before-request"})),
@@ -2914,7 +2988,7 @@ mod tests {
     impl Provider for PausingBeforeRequest {
         async fn before_request(
             &self,
-            _plan: &crate::hooks::RequestPlan,
+            _plan: &crate::hooks::RequestPlanView<'_>,
         ) -> crate::hooks::BeforeRequestResult {
             self.started.notify_one();
             std::future::pending().await
@@ -3102,7 +3176,7 @@ mod tests {
             let observed_plans = plans.lock().unwrap();
             assert_eq!(observed_plans.len(), 1);
             assert_eq!(observed_plans[0].items, sent.input);
-            assert_eq!(observed_plans[0].tools_allowed, sent.tools);
+            assert_eq!(observed_plans[0].tools_allowed.as_slice(), &*sent.tools);
             assert_eq!(observed_plans[0].effort, sent.pinned_effort);
             assert!(sent.tools.contains(&tools[0]));
 
@@ -5372,6 +5446,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(history, expected_history);
+        let recorded = reopened.replay_turns(&first.id).unwrap();
+        let sent = requests.lock().unwrap();
+        assert_eq!(recorded.len(), sent.len());
+        for (recorded, sent) in recorded.iter().zip(sent.iter()) {
+            assert_eq!(
+                crate::transport::client::request_body(&recorded.model_request).unwrap(),
+                crate::transport::client::request_body(sent).unwrap(),
+            );
+        }
         drop(reopened);
         let _ = std::fs::remove_file(&path);
     }
@@ -6566,7 +6649,12 @@ mod tests {
         }));
         let replay = Replay {
             requests: requests.clone(),
-            turns: Mutex::new([turn("typed-final", vec![final_call.clone()])].into()),
+            turns: Mutex::new([
+                turn("typed-tool", vec![Item(json!({
+                    "type":"function_call","call_id":"before-final","name":"echo","arguments":"{}"
+                }))]),
+                turn("typed-final", vec![final_call.clone()]),
+            ].into()),
         };
         let store = Arc::new(Store::memory().unwrap());
         let engine = Engine::<FakeAuth, Echo, _>::with_transport(
@@ -6612,7 +6700,11 @@ mod tests {
         );
         assert!(completion.transcript.contains(&final_call));
         let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 1);
+        assert_eq!(requests.len(), 2);
+        assert!(std::ptr::eq(
+            requests[0].tools.as_ptr(),
+            requests[1].tools.as_ptr()
+        ));
         assert_eq!(
             requests[0]
                 .tools

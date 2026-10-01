@@ -3,7 +3,10 @@ use super::{
     sse::{ResponseAssembly, StreamEvent},
 };
 use futures_util::StreamExt;
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use std::time::Duration;
 
 pub const ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
@@ -13,6 +16,64 @@ pub const CODEX_VERSION: &str = "0.155.1";
 /// shared with prompt_cache_key, while caller controls the complete stateless
 /// item window. Never send previous_response_id or store:true.
 pub fn request_body(request: &ResponsesRequest) -> Result<Value, TransportError> {
+    serde_json::to_value(normalized_request(request)?)
+        .map_err(|_| TransportError::Stream("request serialization failed".into()))
+}
+
+#[derive(Serialize)]
+struct RequestBody<'a> {
+    model: &'a str,
+    instructions: &'a str,
+    input: &'a [crate::item::Item],
+    tools: &'a [Value],
+    tool_choice: ToolChoice<'a>,
+    parallel_tool_calls: bool,
+    reasoning: Reasoning,
+    stream: bool,
+    store: bool,
+    prompt_cache_key: &'a str,
+    include: [&'static str; 1],
+}
+
+#[derive(Serialize)]
+struct Reasoning {
+    effort: crate::model::Effort,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ToolChoice<'a> {
+    Automatic(&'static str),
+    Allowed {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        mode: &'static str,
+        tools: AllowedTools<'a>,
+    },
+}
+
+struct AllowedTools<'a>(&'a [String]);
+impl Serialize for AllowedTools<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        #[derive(Serialize)]
+        struct AllowedTool<'a> {
+            #[serde(rename = "type")]
+            kind: &'static str,
+            name: &'a str,
+        }
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for name in self.0 {
+            sequence.serialize_element(&AllowedTool {
+                kind: "function",
+                name,
+            })?;
+        }
+        sequence.end()
+    }
+}
+
+fn normalized_request(request: &ResponsesRequest) -> Result<RequestBody<'_>, TransportError> {
     if request.model.is_empty() || request.session_id.is_empty() {
         return Err(TransportError::Stream("empty model or session id".into()));
     }
@@ -24,30 +85,29 @@ pub fn request_body(request: &ResponsesRequest) -> Result<Value, TransportError>
             "all function tools must be strict".into(),
         ));
     }
-    Ok(json!({
-        "model": request.model,
-        "instructions": request.instructions,
-        "input": request.input,
-        "tools": request.tools,
-        // Also missing: `prompt_cache_options: {ttl: "30m"}`
-        // and explicit cache breakpoints at checkpoints. Cache counters read 0
-        // on every live call so far; a findings-only probe (docs/tree.md) diffs
-        // our body/headers against codex's before assuming the backend reports none.
-        "tool_choice": request.tools_allowed.as_ref().map_or_else(
-            || json!("auto"),
-            |names| if names.is_empty() {
-                json!("none")
-            } else {
-                json!({"type":"allowed_tools","mode":"auto","tools":names.iter().map(|name| json!({"type":"function","name":name})).collect::<Vec<_>>()})
-            }
-        ),
-        "parallel_tool_calls": true,
-        "reasoning": {"effort": request.pinned_effort},
-        "stream": true,
-        "store": false,
-        "prompt_cache_key": request.session_id,
-        "include": ["reasoning.encrypted_content"]
-    }))
+    Ok(RequestBody {
+        model: &request.model,
+        instructions: &request.instructions,
+        input: &request.input,
+        tools: &request.tools,
+        tool_choice: match request.tools_allowed.as_deref() {
+            None => ToolChoice::Automatic("auto"),
+            Some([]) => ToolChoice::Automatic("none"),
+            Some(names) => ToolChoice::Allowed {
+                kind: "allowed_tools",
+                mode: "auto",
+                tools: AllowedTools(names),
+            },
+        },
+        parallel_tool_calls: true,
+        reasoning: Reasoning {
+            effort: request.pinned_effort,
+        },
+        stream: true,
+        store: false,
+        prompt_cache_key: &request.session_id,
+        include: ["reasoning.encrypted_content"],
+    })
 }
 
 /// A small SSE framer for the Codex endpoint. We keep it here rather than
@@ -105,7 +165,7 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
     request: ResponsesRequest,
     sink: Option<tokio::sync::mpsc::Sender<StreamEvent>>,
 ) -> Result<ResponsesTurn, TransportError> {
-    let body = request_body(&request)?;
+    let body = normalized_request(&request)?;
     let (token, account) = tokio::task::spawn_blocking(move || auth.access())
         .await
         .map_err(|_| TransportError::Authentication)??;
@@ -175,7 +235,7 @@ mod tests {
         let request = ResponsesRequest {
             input: vec![Item(json!({"role":"user","content":"hello"}))],
             instructions: "fixed".into(),
-            tools: vec![],
+            tools: vec![].into(),
             tools_allowed: None,
             model: "gpt-6-sol".into(),
             pinned_effort: Effort::Low,
@@ -200,7 +260,8 @@ mod tests {
             tools: vec![
                 json!({"type":"function","name":"a","strict":true}),
                 json!({"type":"function","name":"b","strict":true}),
-            ],
+            ]
+            .into(),
             tools_allowed: Some(vec!["b".into(), "a".into()]),
             model: "gpt-6-sol".into(),
             pinned_effort: Effort::Low,
@@ -219,7 +280,7 @@ mod tests {
         let request = ResponsesRequest {
             input: vec![],
             instructions: String::new(),
-            tools: vec![json!({"type":"function","name":"bad"})],
+            tools: vec![json!({"type":"function","name":"bad"})].into(),
             tools_allowed: None,
             model: "gpt-6-sol".into(),
             pinned_effort: Effort::Low,
@@ -233,7 +294,8 @@ mod tests {
         let request = ResponsesRequest {
             input: vec![],
             instructions: String::new(),
-            tools: vec![json!({"type":"custom","name":"run","description":"Freeform script"})],
+            tools: vec![json!({"type":"custom","name":"run","description":"Freeform script"})]
+                .into(),
             tools_allowed: None,
             model: "gpt-6-sol".into(),
             pinned_effort: Effort::Low,
@@ -265,7 +327,7 @@ mod tests {
                 json!({"role":"user","content":"Reply with exactly: TRANSPORT_OK"}),
             )],
             instructions: "This is a transport smoke test. Reply briefly.".into(),
-            tools: vec![],
+            tools: vec![].into(),
             tools_allowed: None,
             model: "gpt-6-sol".into(),
             pinned_effort: Effort::Low,

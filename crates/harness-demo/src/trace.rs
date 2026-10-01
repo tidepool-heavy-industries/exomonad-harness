@@ -531,7 +531,7 @@ mod tests {
         let request = ResponsesRequest {
             input: vec![],
             instructions: "not traced".into(),
-            tools: vec![],
+            tools: vec![].into(),
             tools_allowed: None,
             model: "safe-model".into(),
             pinned_effort: harness::model::Effort::Low,
@@ -568,7 +568,7 @@ mod tests {
         let request = ResponsesRequest {
             input: vec![],
             instructions: "not traced".into(),
-            tools: vec![],
+            tools: vec![].into(),
             tools_allowed: None,
             model: "safe-model".into(),
             pinned_effort: harness::model::Effort::Low,
@@ -593,7 +593,7 @@ mod tests {
         let request = ResponsesRequest {
             input: vec![],
             instructions: String::new(),
-            tools: vec![],
+            tools: vec![].into(),
             tools_allowed: None,
             model: String::new(),
             pinned_effort: harness::model::Effort::Low,

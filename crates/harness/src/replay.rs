@@ -61,7 +61,7 @@ impl ReplayProvider {
         let turns = store.replay_turns(root)?;
         let tool_schemas = turns
             .first()
-            .map(|turn| turn.model_request.tools.clone())
+            .map(|turn| turn.model_request.tools.to_vec())
             .unwrap_or_default();
         let mut calls = HashMap::new();
         for turn in &turns {
@@ -291,6 +291,8 @@ fn request_mismatch(
         Some("instructions")
     } else if expected.tools != actual.tools {
         Some("tools")
+    } else if expected.tools_allowed != actual.tools_allowed {
+        Some("tools_allowed")
     } else if expected.model != actual.model {
         Some("model")
     } else if expected.pinned_effort != actual.pinned_effort {
@@ -729,7 +731,7 @@ mod tests {
         ResponsesRequest {
             input: vec![Item(json!({"type":"message","role":"user","content":[]}))],
             instructions: "offline".into(),
-            tools: vec![],
+            tools: vec![].into(),
             tools_allowed: None,
             model: "test-model".into(),
             pinned_effort: Effort::Medium,
@@ -932,13 +934,17 @@ mod tests {
         let mut mismatched_instructions = recorded_turns[0].model_request.clone();
         mismatched_instructions.instructions.push_str(" different");
         let mut mismatched_tools = recorded_turns[0].model_request.clone();
-        mismatched_tools.tools.push(json!({"name":"unexpected"}));
+        let mut tools = mismatched_tools.tools.to_vec();
+        tools.push(json!({"name":"unexpected"}));
+        mismatched_tools.tools = tools.into();
         let mut mismatched_model = recorded_turns[0].model_request.clone();
         mismatched_model.model.push_str("-different");
         let mut mismatched_effort = recorded_turns[0].model_request.clone();
         mismatched_effort.pinned_effort = Effort::High;
         let mut mismatched_session = recorded_turns[0].model_request.clone();
         mismatched_session.session_id.push_str("-different");
+        let mut mismatched_allowed = recorded_turns[0].model_request.clone();
+        mismatched_allowed.tools_allowed = Some(vec![]);
         for mismatched in [
             mismatched_input,
             mismatched_instructions,
@@ -946,6 +952,7 @@ mod tests {
             mismatched_model,
             mismatched_effort,
             mismatched_session,
+            mismatched_allowed,
         ] {
             assert!(match_probe.create(mismatched).await.is_err());
             assert_eq!(match_probe.turns_remaining(), 2);

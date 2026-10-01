@@ -10,6 +10,34 @@ pub struct RequestPlan {
     pub effort: Effort,
 }
 
+impl RequestPlan {
+    pub fn as_view(&self) -> RequestPlanView<'_> {
+        RequestPlanView {
+            items: &self.items,
+            tools_allowed: &self.tools_allowed,
+            effort: self.effort,
+        }
+    }
+}
+
+/// A hook observes the existing input and manifest without copying either.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct RequestPlanView<'a> {
+    pub items: &'a [Item],
+    pub tools_allowed: &'a [Value],
+    pub effort: Effort,
+}
+
+impl RequestPlanView<'_> {
+    pub fn to_owned(&self) -> RequestPlan {
+        RequestPlan {
+            items: self.items.to_vec(),
+            tools_allowed: self.tools_allowed.to_vec(),
+            effort: self.effort,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum BeforeRequestDecision {
     #[default]

@@ -30,7 +30,7 @@ impl Provider for TreeProvider {
 
     async fn before_request(
         &self,
-        plan: &harness::hooks::RequestPlan,
+        plan: &harness::hooks::RequestPlanView<'_>,
     ) -> harness::hooks::BeforeRequestResult {
         self.demo.before_request(plan).await
     }
@@ -127,7 +127,7 @@ mod tests {
     use crate::DemoProvider;
     use harness::{agent_runtime::StoreAgentToolService, model::AgentPath, store::Store};
     use harness::{
-        hooks::{BeforeRequestDecision, RequestPlan},
+        hooks::{BeforeRequestDecision, RequestPlanView},
         model::Effort,
     };
 
@@ -151,9 +151,9 @@ mod tests {
     #[tokio::test]
     async fn before_request_forwards_standalone_browser_marker() {
         let result = provider(false)
-            .before_request(&RequestPlan {
-                items: vec![],
-                tools_allowed: vec![],
+            .before_request(&RequestPlanView {
+                items: &[],
+                tools_allowed: &[],
                 effort: Effort::Low,
             })
             .await;

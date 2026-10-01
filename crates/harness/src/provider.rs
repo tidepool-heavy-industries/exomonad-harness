@@ -1,6 +1,6 @@
 use crate::{
     agents::{is_agent_verb, verb_tool_schemas},
-    hooks::{BeforeRequestResult, RequestPlan},
+    hooks::{BeforeRequestResult, RequestPlanView},
     model::{AgentPath, CallId, OperationId},
 };
 use async_trait::async_trait;
@@ -160,7 +160,7 @@ pub trait Provider: Send + Sync {
     }
 
     /// Invoked once before an Engine transport attempt. Default is pass-through.
-    async fn before_request(&self, _plan: &RequestPlan) -> BeforeRequestResult {
+    async fn before_request(&self, _plan: &RequestPlanView<'_>) -> BeforeRequestResult {
         BeforeRequestResult::default()
     }
     async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError>;
@@ -220,6 +220,11 @@ pub trait Provider: Send + Sync {
             }
         }
         tools
+    }
+
+    /// Immutable advertised input for one request; pinned providers share it.
+    fn tool_manifest(&self) -> crate::transport::ToolManifest {
+        self.all_tools().into()
     }
 
     fn tools(&self) -> Vec<Value>;

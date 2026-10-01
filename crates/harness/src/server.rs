@@ -1152,7 +1152,7 @@ mod tests {
         let model_request = ResponsesRequest {
             input: vec![],
             instructions: String::new(),
-            tools: vec![],
+            tools: vec![].into(),
             tools_allowed: None,
             model: "offline".into(),
             pinned_effort: Effort::Low,

@@ -4,8 +4,11 @@ mod embedded_commands;
 pub(crate) use embedded::{CommandInputAdmission, EmbeddedInputState};
 pub use embedded_commands::{EmbeddedCommandRecord, EmbeddedCommandState};
 pub mod history;
+mod replay;
 pub mod schema;
 mod schema_migration;
+mod validation;
+pub use replay::IssuedReplayRequest;
 
 use crate::{
     item::{Item, ItemHash, ToolKind},
@@ -27,6 +30,10 @@ pub const SQL: &str = schema::SQL;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("replay event {event} has unsupported format; preserve its bytes")]
+    UnsupportedReplayFormat { event: i64 },
+    #[error("replay event references missing item {0}")]
+    MissingReplayItem(String),
     #[error("operation ID already identifies a different host command")]
     ConflictingCommand,
     #[error("command does not have the required durable claim or outcome")]
@@ -113,43 +120,7 @@ struct OperationOutput {
 }
 
 fn invocation_kind(c: &Connection, request: &RequestId, call: &CallId) -> Result<Option<ToolKind>> {
-    let mut items = c.prepare(
-        "SELECT i.json FROM request_items ri \
-         JOIN items i ON i.hash=ri.item_hash \
-         WHERE ri.request_id=?1 ORDER BY ri.position",
-    )?;
-    let evidence = items
-        .query_map([&request.0], |row| row.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let mut kind = None;
-    for raw in evidence {
-        let item: Item = serde_json::from_str(&raw)?;
-        match item.tool_call() {
-            Ok(Some(tool_call)) if tool_call.call_id == *call => {
-                if kind.replace(tool_call.input.kind()).is_some() {
-                    return Err(StoreError::AmbiguousReplayCall {
-                        call_id: call.0.clone(),
-                    });
-                }
-            }
-            Ok(_) => {}
-            Err(reason)
-                if matches!(
-                    item.0.get("type").and_then(serde_json::Value::as_str),
-                    Some("function_call" | "custom_tool_call")
-                ) && item.0.get("call_id").and_then(serde_json::Value::as_str)
-                    == Some(call.0.as_str()) =>
-            {
-                return Err(StoreError::MalformedReplayCall {
-                    call_id: call.0.clone(),
-                    request: request.0.clone(),
-                    reason: reason.into(),
-                });
-            }
-            Err(_) => {}
-        }
-    }
-    Ok(kind)
+    Ok(validation::invocation_item(c, request, call)?.map(|item| item.input.kind()))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1438,6 +1409,18 @@ impl Store {
             .map(|x| Ok(serde_json::from_str(&x?)?))
             .collect()
     }
+    pub(crate) fn items_with_hashes(&self, request: &RequestId) -> Result<Vec<(ItemHash, Item)>> {
+        let c = self.lock();
+        let mut q = c.prepare("SELECT ri.item_hash,i.json FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 ORDER BY ri.position")?;
+        q.query_map([&request.0], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .map(|row| {
+            let (hash, json) = row?;
+            Ok((ItemHash(hash), serde_json::from_str(&json)?))
+        })
+        .collect()
+    }
     /// Copy a spawn tool's actual durable output from its parent request into
     /// the Here snapshot. Claim settlement alone is insufficient: this returns
     /// `false` until the function_call_output Item is in request history.
@@ -1560,35 +1543,35 @@ impl Store {
         model_request: &ResponsesRequest,
         model_response: &ResponsesTurn,
     ) -> Result<i64> {
-        let record = RecordedReplayTurn {
-            request: request.clone(),
-            model_request: model_request.clone(),
-            model_response: model_response.clone(),
-        };
-        self.record_event(Some(request), "model_turn", &serde_json::to_value(record)?)
+        let issued = self.seal_replay_request(model_request)?;
+        self.record_issued_replay_turn(request, issued, model_response)
     }
 
     /// Completed model turns on this request's branch, from `root` forward.
     /// Fork branches are excluded even when they inherit `root` as an ancestor.
     pub fn replay_turns(&self, root: &RequestId) -> Result<Vec<RecordedReplayTurn>> {
-        let c = self.lock();
-        let mut q = c.prepare(
-            "WITH RECURSIVE chain(id, branch) AS (
+        let records = {
+            let c = self.lock();
+            let mut q = c.prepare(
+                "WITH RECURSIVE chain(id, branch) AS (
                 SELECT id, branch FROM requests WHERE id=?1
                 UNION ALL
                 SELECT child.id, child.branch FROM requests child
                 JOIN chain parent ON child.parent_id=parent.id AND child.branch=parent.branch
             )
-            SELECT e.payload FROM events e
+            SELECT e.id,e.payload FROM events e
             JOIN chain ON chain.id=e.request_id
             WHERE e.kind='model_turn' ORDER BY e.id",
-        )?;
-        let rows = q.query_map([&root.0], |r| r.get::<_, String>(0))?;
-        rows.map(|row| {
-            let payload = row?;
-            Ok(serde_json::from_str(&payload)?)
-        })
-        .collect()
+            )?;
+            q.query_map([&root.0], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        records
+            .into_iter()
+            .map(|(event, payload)| self.decode_replay_record(event, &payload))
+            .collect()
     }
 
     /// The durable settled output for one recorded provider call.
@@ -2297,7 +2280,7 @@ mod tests {
                 serde_json::json!({"role":"user","content":"run cell"}),
             )],
             instructions: "reply by tool".into(),
-            tools: vec![serde_json::json!({"type":"function","name":"cell"})],
+            tools: vec![serde_json::json!({"type":"function","name":"cell"})].into(),
             tools_allowed: None,
             model: "offline-recording".into(),
             pinned_effort: Effort::Low,

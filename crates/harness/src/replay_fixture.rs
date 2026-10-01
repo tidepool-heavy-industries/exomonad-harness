@@ -28,7 +28,7 @@ mod tests {
         ResponsesRequest {
             input,
             instructions: "fixture".into(),
-            tools: vec![],
+            tools: vec![].into(),
             tools_allowed: None,
             model: "fixture-model".into(),
             pinned_effort: Effort::Low,
