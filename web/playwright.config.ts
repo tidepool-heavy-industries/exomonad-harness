@@ -10,8 +10,10 @@ const evidenceDir = process.env.HARNESS_BROWSER_EVIDENCE_DIR ?? resolve('../targ
 
 export default defineConfig({
   testDir: './e2e',
+  metadata: { runId: process.env.HARNESS_BROWSER_RUN_ID ?? 'manual' },
   testMatch: '**/*.spec.ts',
   workers: 1,
+  forbidOnly: true,
   fullyParallel: false,
   retries: 0,
   timeout: 30_000,

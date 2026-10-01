@@ -9,7 +9,8 @@
     "test": "vitest run",
     "check": "tsc --noEmit",
     "test:browser": "playwright test",
-    "check:browser": "tsc --project tsconfig.browser.json"
+    "check:browser": "tsc --project tsconfig.browser.json",
+    "test:tooling": "node --test e2e/report-validation.test.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
@@ -27,7 +28,8 @@
     "@types/react-dom": "^18.3.5",
     "jsdom": "^25.0.1",
     "typescript": "~5.7.2",
-    "vitest": "^5.0.1"
+    "vitest": "^5.0.1",
+    "ws": "8.21.3"
   },
   "overrides": {
     "playwright-core": "1.57.0"

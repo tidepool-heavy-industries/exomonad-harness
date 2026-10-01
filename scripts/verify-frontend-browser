@@ -8,9 +8,16 @@ if [[ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]]; then
   echo "enter the pinned nix develop .#web shell and materialize .#web-chromium" >&2
   exit 2
 fi
+web_system="$(nix eval --impure --raw --expr builtins.currentSystem)"
+declared_node="$(nix eval --raw ".#packages.$web_system.buck-node.outPath")/bin/node"
+declared_browser="$(nix eval --raw ".#packages.$web_system.web-chromium.outPath")"
+if [[ "$(node -p 'process.execPath')" != "$declared_node" || "$PLAYWRIGHT_BROWSERS_PATH" != "$declared_browser" ]]; then
+  echo "frontend verification requires the declared Node and Chromium output paths" >&2
+  exit 2
+fi
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 if [[ "$mode" == prepare ]]; then
-  cache_source="${HARNESS_NPM_CACHE:-$(nix eval --raw .#packages.x86_64-linux.buck-npm-cache.outPath)}"
+  cache_source="${HARNESS_NPM_CACHE:-$(nix eval --raw ".#packages.$web_system.buck-npm-cache.outPath")}"
   if [[ ! -d "$cache_source/_cacache" ]]; then
     echo "materialize nix build .#buck-npm-cache --no-link before frontend verification" >&2
     exit 2
@@ -23,12 +30,17 @@ if [[ "$mode" == prepare ]]; then
   (cd web && npm run check && npm test && npm run build)
 fi
 test -s web/dist/index.html || { echo "production assets are missing" >&2; exit 2; }
-(cd web && npm run check:browser)
-export HARNESS_BROWSER_EVIDENCE_DIR="$repo_root/target/gui-browser/runs/$(date -u +%Y%m%dT%H%M%S)-$$"
+(cd web && npm run check:browser && npm run test:tooling)
+export HARNESS_BROWSER_RUN_ID="$(date -u +%Y%m%dT%H%M%S)-$$"
+export HARNESS_BROWSER_EVIDENCE_DIR="$repo_root/target/gui-browser/runs/$HARNESS_BROWSER_RUN_ID"
 mkdir -p "$HARNESS_BROWSER_EVIDENCE_DIR"
 set +e
 (cd web && npm run test:browser)
 status=$?
 set -e
+set +e
 node web/e2e/evidence.mjs "$status" "$HARNESS_BROWSER_EVIDENCE_DIR"
-exit "$status"
+evidence_status=$?
+set -e
+if [[ "$status" -ne 0 ]]; then exit "$status"; fi
+exit "$evidence_status"

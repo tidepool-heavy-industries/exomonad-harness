@@ -25,7 +25,8 @@ nix develop .#web -c scripts/verify-frontend-browser
 
 This frontend-only check copies the fixed-output npm cache to disposable scratch,
 installs locked dependencies offline, runs TypeScript and Vitest, builds production
-assets, typechecks the browser tests, then executes Playwright. It requires no
+assets, typechecks the browser tests, checks the evidence reader, then executes
+Playwright. It requires no
 Cargo or Rust build. Node 24 and Chromium come from the existing flake pin;
 Playwright and axe are development dependencies. Browser installation scripts and
 ambient browsers are not used.
@@ -43,7 +44,9 @@ are retained, while performance gates check structural bounds.
 
 Reports, screenshots, traces and provenance are retained per invocation under
 `target/gui-browser/runs/`; `target/gui-browser/latest.json` points to the latest
-run. A failed or empty selection is not a passing check. To run only a named
+run. The evidence reader rejects missing, malformed, stale or zero-execution
+reports and preserves the original test failure. A failed or empty selection is
+not a passing check. To run only a named
 browser case after a current production build, use `npm run test:browser --
 --grep 'case name'` from `web` inside the pinned shell. `npm run check:browser`
 typechecks the browser target. Vitest collects only `src/**/*.test.ts(x)`.

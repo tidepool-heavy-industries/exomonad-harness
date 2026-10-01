@@ -3,26 +3,22 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { snapshot, history } from './fixtures.mjs';
+import { WebSocket, WebSocketServer } from 'ws';
 
 const root = resolve(process.env.HARNESS_BROWSER_ASSETS ?? 'dist');
 const port = Number(process.env.HARNESS_BROWSER_PORT ?? 4387);
 const sockets = new Set();
 let config, observations, statuses;
 function reset(value = {}) {
-  for (const socket of sockets) socket.destroy();
+  for (const socket of sockets) socket.terminate();
   config = { authenticated: true, snapshot: snapshot(), receipt: 'refused', historyUnavailable: false, historyOversized: false, holdSnapshot: false, ...value };
   observations = { commands: [], snapshotRequests: 0, connections: 0, historyReads: [], statusReads: [] };
   statuses = new Map();
 }
 reset();
 function json(response, value, status = 200) { response.writeHead(status, {'Content-Type':'application/json', 'Cache-Control':'no-store'}); response.end(JSON.stringify(value)); }
-function frame(socket, value, opcode = 1) {
-  const data = Buffer.from(typeof value === 'string' ? value : JSON.stringify(value));
-  let head;
-  if (data.length < 126) head = Buffer.from([0x80 | opcode, data.length]);
-  else if (data.length < 65536) { head = Buffer.alloc(4); head[0] = 0x80 | opcode; head[1] = 126; head.writeUInt16BE(data.length, 2); }
-  else { head = Buffer.alloc(10); head[0] = 0x80 | opcode; head[1] = 127; head.writeBigUInt64BE(BigInt(data.length), 2); }
-  if (!socket.destroyed) socket.write(Buffer.concat([head, data]));
+function frame(socket, value) {
+  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value));
 }
 function broadcast(value) { for (const socket of sockets) frame(socket, value); }
 function receive(socket, message) {
@@ -59,7 +55,7 @@ const server = createServer(async (request, response) => {
       if (url.pathname === '/__fixture/config') Object.assign(config, body);
       if (url.pathname === '/__fixture/status') statuses.set(body.operationId, body);
       if (url.pathname === '/__fixture/frame') broadcast(body);
-      if (url.pathname === '/__fixture/disconnect') for (const socket of sockets) socket.destroy();
+      if (url.pathname === '/__fixture/disconnect') for (const socket of sockets) socket.terminate();
       if (url.pathname === '/__fixture/snapshot') { config.snapshot = body; broadcast({type:'snapshot',snapshot:body}); }
       return json(response, observations);
     }
@@ -95,32 +91,21 @@ const server = createServer(async (request, response) => {
     response.writeHead(200, {'Content-Type':({'.html':'text/html','.js':'text/javascript','.css':'text/css'}[extname(path)] ?? 'application/octet-stream')}); response.end(data);
   } catch (error) { json(response,{error:String(error)},500); }
 });
-server.on('upgrade', (request, socket) => {
+const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+server.on('upgrade', (request, socket, head) => {
   if (request.url !== '/api/ws' || !config.authenticated) return socket.destroy();
-  const key = request.headers['sec-websocket-key'];
-  const accept = createHash('sha1').update(key+'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
-  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
-  sockets.add(socket); observations.connections++;
-  let pending = Buffer.alloc(0);
-  socket.on('data', chunk => {
-    pending = Buffer.concat([pending,chunk]);
-    while (pending.length >= 2) {
-      const opcode=pending[0]&15, masked=(pending[1]&128)!==0;
-      let length=pending[1]&127, at=2;
-      if(length===126){if(pending.length<4)return;length=pending.readUInt16BE(2);at=4;}
-      if(length===127){if(pending.length<10)return;length=Number(pending.readBigUInt64BE(2));at=10;}
-      if(length>1024*1024)return socket.destroy();
-      if(pending.length<at+(masked?4:0)+length)return;
-      const mask=masked?pending.subarray(at,at+4):null;at+=masked?4:0;
-      const data=Buffer.from(pending.subarray(at,at+length));pending=pending.subarray(at+length);
-      if(mask)for(let n=0;n<data.length;n++)data[n]^=mask[n%4];
-      if(opcode===8){socket.end();return;}
-      if(opcode===9){frame(socket,data.toString(),10);continue;}
-      if(opcode===1)try{receive(socket,JSON.parse(data.toString()));}catch{socket.destroy();}
-    }
+  websocketServer.handleUpgrade(request, socket, head, (connection) => {
+    sockets.add(connection);
+    observations.connections++;
+    connection.on('message', (data, isBinary) => {
+      if (isBinary) return connection.close(1003, 'Fixture expects JSON text');
+      try { receive(connection, JSON.parse(data.toString())); }
+      catch { connection.close(1007, 'Invalid fixture JSON'); }
+    });
+    connection.on('close', () => sockets.delete(connection));
+    connection.on('error', () => { sockets.delete(connection); connection.terminate(); });
+    if (!config.holdSnapshot) frame(connection, { type: 'snapshot', snapshot: config.snapshot });
   });
-  socket.on('close',()=>sockets.delete(socket)); socket.on('error',()=>sockets.delete(socket));
-  if(!config.holdSnapshot) frame(socket,{type:'snapshot',snapshot:config.snapshot});
 });
 server.listen(port,'127.0.0.1',()=>console.log(`Synthetic production-assets fixture transport http://127.0.0.1:${port}`));
-for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>{for(const socket of sockets)socket.destroy();server.close(()=>process.exit());});
+for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>{for(const socket of sockets)socket.terminate();websocketServer.close();server.close(()=>process.exit());});
