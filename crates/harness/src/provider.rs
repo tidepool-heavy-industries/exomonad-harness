@@ -81,12 +81,39 @@ impl CallContext {
 #[derive(Debug)]
 pub enum ProviderError {
     Tool(ToolFailure),
+    NonValueTerminal(NonValueTerminal),
+}
+
+/// A value-only direct call cannot faithfully return these recorded terminals.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NonValueTerminal {
+    Cancelled,
+    Interrupted,
+    CancellationUnconfirmed(String),
 }
 
 impl std::fmt::Display for ProviderError {
     fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Tool(failure) => failure.fmt_provider(output),
+            Self::NonValueTerminal(NonValueTerminal::Cancelled) => {
+                write!(
+                    output,
+                    "recorded cancellation requires terminal-aware scheduling"
+                )
+            }
+            Self::NonValueTerminal(NonValueTerminal::Interrupted) => {
+                write!(
+                    output,
+                    "recorded interruption requires terminal-aware scheduling"
+                )
+            }
+            Self::NonValueTerminal(NonValueTerminal::CancellationUnconfirmed(detail)) => {
+                write!(
+                    output,
+                    "recorded unconfirmed cancellation requires terminal-aware scheduling: {detail}"
+                )
+            }
         }
     }
 }
@@ -97,7 +124,70 @@ impl ProviderError {
     pub fn into_tool_failure(self) -> ToolFailure {
         match self {
             Self::Tool(failure) => failure.with_tool_prefix(),
+            error @ Self::NonValueTerminal(_) => error.to_string().into(),
         }
+    }
+}
+
+/// Exact retained terminal output. Only the replay owner can attach a sealed
+/// builtin continuation; ordinary providers can supply terminal output alone.
+#[derive(Debug)]
+pub struct RetainedOutput {
+    output: crate::turn::JobOutput,
+    wait_operation: Option<OperationId>,
+    continuation: Option<crate::store::RecordedWaitContinuation>,
+    wait_barrier: Vec<OperationId>,
+}
+
+impl RetainedOutput {
+    pub fn terminal(output: crate::turn::JobOutput) -> Self {
+        Self {
+            output,
+            wait_operation: None,
+            continuation: None,
+            wait_barrier: vec![],
+        }
+    }
+
+    pub fn output(&self) -> &crate::turn::JobOutput {
+        &self.output
+    }
+
+    pub(crate) fn recorded_wait(
+        operation: OperationId,
+        output: crate::turn::JobOutput,
+        continuation: Option<crate::store::RecordedWaitContinuation>,
+        wait_barrier: Vec<OperationId>,
+    ) -> Self {
+        Self {
+            output,
+            wait_operation: Some(operation),
+            continuation,
+            wait_barrier,
+        }
+    }
+
+    pub(crate) fn into_parts(
+        self,
+        operation: &OperationId,
+    ) -> Result<
+        (
+            crate::turn::JobOutput,
+            Option<crate::store::RecordedWaitContinuation>,
+            Vec<OperationId>,
+        ),
+        ProviderError,
+    > {
+        if self
+            .wait_operation
+            .as_ref()
+            .is_some_and(|expected| expected != operation)
+        {
+            return Err(ProviderError::Tool(
+                "retained builtin output belongs to another operation".into(),
+            ));
+        }
+        Ok((self.output, self.continuation, self.wait_barrier))
     }
 }
 
@@ -127,6 +217,18 @@ pub trait Provider: Send + Sync {
     /// Continuation bridges do not hold a scheduler slot while the host runs.
     fn holds_job_capacity(&self) -> bool {
         true
+    }
+
+    /// Read-only lookup of an exact retained call. Returning None permits live
+    /// dispatch only after the scheduler or builtin owner rechecks cancellation.
+    /// A retained cancellation is historical output, not new cleanup authority.
+    async fn retained_output(
+        &self,
+        _name: &str,
+        _input: &crate::item::ToolInput,
+        _operation: &OperationId,
+    ) -> Result<Option<RetainedOutput>, ProviderError> {
+        Ok(None)
     }
 
     /// Optional projection of one durable item for model input. The durable

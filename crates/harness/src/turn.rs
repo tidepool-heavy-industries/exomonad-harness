@@ -381,6 +381,42 @@ impl JobScheduler {
             if launch_gate.await.is_err() {
                 return;
             }
+            let retained = provider
+                .retained_output(&name, &input, &task_operation)
+                .await;
+            match retained {
+                Ok(Some(retained)) => {
+                    let output = match retained.into_parts(&task_operation) {
+                        Ok((output, None, barrier)) if barrier.is_empty() => output,
+                        Ok(_) => JobOutput::Completed(Err(
+                            "retained builtin continuation requires Engine dispatch".into(),
+                        )),
+                        Err(error) => JobOutput::Completed(Err(error.into_tool_failure())),
+                    };
+                    let completion = match &output {
+                        JobOutput::Completed(result) => Some(result.clone()),
+                        _ => None,
+                    };
+                    settle(&jobs, task_operation.clone(), output, completion).await;
+                    let _ = events.send(task_operation);
+                    let _ = legacy_events.send(task_call_id);
+                    return;
+                }
+                Err(error) => {
+                    let result = Err(error.into_tool_failure());
+                    settle(
+                        &jobs,
+                        task_operation.clone(),
+                        JobOutput::Completed(result.clone()),
+                        Some(result),
+                    )
+                    .await;
+                    let _ = events.send(task_operation);
+                    let _ = legacy_events.send(task_call_id);
+                    return;
+                }
+                Ok(None) => {}
+            }
             let permit = if holds_capacity {
                 match capacity.acquire_owned().await {
                     Ok(p) => Some(p),
@@ -392,7 +428,7 @@ impl JobScheduler {
             let cancelled_before_start = {
                 let mut registry = jobs.lock().await;
                 let job = registry.get_mut(&task_operation).expect("registered job");
-                if task_cancel.is_cancelled() {
+                if job.output.is_some() || task_cancel.is_cancelled() {
                     true
                 } else {
                     job.started = true;
