@@ -1079,13 +1079,62 @@ async fn index_asset(State(state): State<AppState>) -> Response<axum::body::Body
 
 async fn static_asset(
     State(state): State<AppState>,
+    uri: Uri,
     axum::extract::Path(path): axum::extract::Path<String>,
 ) -> Response<axum::body::Body> {
+    if is_frontend_page_path(uri.path()) {
+        return index_asset(State(state)).await;
+    }
     assets::asset_response(state.asset_root.as_path(), &path).await
+}
+
+fn is_frontend_page_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/tree" | "/timeline" | "/inbox" | "/host" | "/command" | "/chat"
+    ) || path.strip_prefix("/chat/").is_some_and(|actor_path| {
+        !actor_path.is_empty()
+            && !actor_path.starts_with('/')
+            && !actor_path.ends_with('/')
+            && !actor_path.contains("//")
+            && !actor_path.to_ascii_lowercase().contains("%2e")
+            && !actor_path.to_ascii_lowercase().contains("%2f")
+            && !actor_path.to_ascii_lowercase().contains("%5c")
+            && !actor_path.to_ascii_lowercase().contains("%00")
+            && actor_path
+                .split('/')
+                .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_known_frontend_paths_receive_index_fallback() {
+        for path in [
+            "/tree",
+            "/timeline",
+            "/inbox",
+            "/host",
+            "/command",
+            "/chat",
+            "/chat/root/worker",
+        ] {
+            assert!(super::is_frontend_page_path(path), "{path}");
+        }
+        for path in [
+            "/api/unknown",
+            "/assets/missing.js",
+            "/unknown",
+            "/chat/",
+            "/chat/root//worker",
+            "/chat/%2e%2e/secret",
+            "/chat/root%2fworker",
+        ] {
+            assert!(!super::is_frontend_page_path(path), "{path}");
+        }
+    }
+
     #[test]
     fn retained_model_requests_install_index_when_reopening_current_database() {
         let path =
@@ -1854,7 +1903,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn static_routes_serve_index_and_assets() {
+    async fn frontend_static_routes_serve_pages_without_swallowing_assets_or_api_errors() {
         let root = std::env::temp_dir().join(format!("harness-web-{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(root.join("assets"))
             .await
@@ -1877,6 +1926,15 @@ mod tests {
             .unwrap();
         assert_eq!(index.status(), StatusCode::OK);
         assert_eq!(index.text().await.unwrap(), "<main>app</main>");
+        for page in ["/tree", "/chat", "/chat/root/worker?run=r&incarnation=i"] {
+            let response = client
+                .get(format!("http://{address}{page}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{page}");
+            assert_eq!(response.text().await.unwrap(), "<main>app</main>");
+        }
         let asset = client
             .get(format!("http://{address}/assets/app.css"))
             .send()
@@ -1894,6 +1952,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let unknown = client
+            .get(format!("http://{address}/unknown"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        let unknown_api = client
+            .get(format!("http://{address}/api/unknown"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unknown_api.status(), StatusCode::NOT_FOUND);
         server_task.abort();
         tokio::fs::remove_dir_all(root).await.unwrap();
     }

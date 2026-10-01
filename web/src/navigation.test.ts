@@ -1,22 +1,77 @@
 import { describe, expect, it } from 'vitest';
 import { defaultRoute, parseRoute, routeUrl } from './navigation';
+
 describe('native route codec', () => {
-  it('roundtrips opaque identity/context and preserves unknown query fields', () => {
-    const route = { ...defaultRoute, screen: 'inbox' as const, selection: { kind: 'actor' as const, identity: { run: 'Run A', actor: '/actor/日本', incarnation: 'Inc.CASE' } }, global: true, requestId: 'request/id', messageFilters: { sender: '/operator', recipient: '/actor/日本', type: 'FINAL_ANSWER' as const } };
-    const url = routeUrl(route, new URL('https://host/?theme=custom&theme=two#anchor'));
+  it('roundtrips exact actor identity in canonical pathname and query', () => {
+    const route = {
+      ...defaultRoute,
+      screen: 'chat' as const,
+      selection: { kind: 'actor' as const, identity: { run: 'Run A', actor: '/root/worker 日本', incarnation: 'Inc.CASE' } },
+      global: true,
+      requestId: 'request/id',
+      messageFilters: { sender: '/operator', recipient: '/root/worker 日本', type: 'FINAL_ANSWER' as const },
+    };
+    const url = routeUrl(route, new URL('https://host/tree?theme=custom&theme=two#anchor'));
+    expect(url.pathname).toBe('/chat/root/worker%20%E6%97%A5%E6%9C%AC');
+    expect(url.searchParams.get('run')).toBe('Run A');
+    expect(url.searchParams.get('incarnation')).toBe('Inc.CASE');
+    expect(url.searchParams.has('actor')).toBe(false);
     expect(parseRoute(url)).toEqual({ route, issue: undefined });
     expect(url.searchParams.getAll('theme')).toEqual(['custom', 'two']);
     expect(url.hash).toBe('#anchor');
   });
-  it.each(['?actor=a&run=r', '?actor=a&run=r&incarnation=i&conversation=c', '?view=nope', '?type=BOGUS', '?global=0', '?conversation=', '?actor=a&actor=b&run=r&incarnation=i'])('rejects invalid routes without replacement: %s', query => {
-    const parsed = parseRoute(new URL('https://host/' + query));
+
+  it('preserves a slashless actor identity that shares the same readable path', () => {
+    const route = { ...defaultRoute, screen: 'chat' as const, selection: { kind: 'actor' as const, identity: { run: 'r', actor: 'root/worker', incarnation: 'i' } } };
+    const url = routeUrl(route, new URL('https://host/tree'));
+    expect(url.pathname).toBe('/chat/root/worker');
+    expect(url.searchParams.get('actor')).toBe('root/worker');
+    expect(parseRoute(url)).toEqual({ route, issue: undefined });
+  });
+
+  it.each([
+    ['tree', '/tree'], ['timeline', '/timeline'], ['inbox', '/inbox'],
+    ['host', '/host'], ['command', '/command'], ['chat', '/chat'],
+  ] as const)('uses %s as the page route', (screen, pathname) => {
+    const route = { ...defaultRoute, screen };
+    const url = routeUrl(route, new URL('https://host/'));
+    expect(url.pathname).toBe(pathname);
+    expect(parseRoute(url)).toEqual({ route, issue: undefined });
+  });
+
+  it('allows an unselected chat page and reads unambiguous legacy query links', () => {
+    expect(parseRoute(new URL('https://host/chat'))).toEqual({ route: { ...defaultRoute, screen: 'chat' } });
+    expect(parseRoute(new URL('https://host/?view=chat&run=r&actor=%2Froot%2Fworker&incarnation=i'))).toEqual({
+      route: { ...defaultRoute, screen: 'chat', selection: { kind: 'actor', identity: { run: 'r', actor: '/root/worker', incarnation: 'i' } } },
+    });
+  });
+
+  it.each([
+    '/chat/root/worker?run=r',
+    '/chat/root/worker?run=r&incarnation=i&actor=%2Froot%2Fother',
+    '/chat/root/%ZZ?run=r&incarnation=i',
+    '/chat/root//worker?run=r&incarnation=i',
+    '/chat/../worker?run=r&incarnation=i',
+    '/tree?view=chat',
+    '/chat?actor=%2Froot&run=r&incarnation=i',
+    '/chat?run=r&incarnation=i',
+    '/?view=nope',
+    '/?view=chat&actor=%2Froot&run=r',
+    '/?actor=a&actor=b&run=r&incarnation=i&view=chat',
+    '/?type=BOGUS',
+    '/?global=0',
+    '/?conversation=',
+  ])('rejects malformed, incomplete, or conflicting routes without replacement: %s', pathname => {
+    const parsed = parseRoute(new URL(`https://host${pathname}`));
     expect(parsed.issue).toBeTruthy();
     expect(parsed.route.selection.kind).toBe('none');
   });
-  it('replaces selection fields and keeps unrelated native URL context', () => {
-    const url = routeUrl({ ...defaultRoute, selection: { kind: 'conversation', conversationId: 'unattached' } }, new URL('https://host/?run=old&actor=old&incarnation=old&plugin=1'));
-    expect(url.searchParams.has('actor')).toBe(false);
+
+  it('replaces route selection and keeps unrelated native URL context', () => {
+    const url = routeUrl({ ...defaultRoute, screen: 'chat', selection: { kind: 'conversation', conversationId: 'unattached' } }, new URL('https://host/chat/old?run=old&incarnation=old&theme=custom'));
+    expect(url.pathname).toBe('/chat');
+    expect(url.searchParams.has('run')).toBe(false);
     expect(url.searchParams.get('conversation')).toBe('unattached');
-    expect(url.searchParams.get('plugin')).toBe('1');
+    expect(url.searchParams.get('theme')).toBe('custom');
   });
 });
