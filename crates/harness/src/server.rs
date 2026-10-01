@@ -389,7 +389,7 @@ impl ServerControl {
         event
     }
 
-    /// Publish bounded completed model requests from their durable Store evidence.
+    /// Publish bounded settled model requests from their durable Store evidence.
     /// Request metadata and its event watermark become visible together. Reconnect
     /// retains the same bounded window of the last 128 model completion events;
     /// older requests leave the projection through explicit removal events.
@@ -402,12 +402,14 @@ impl ServerControl {
         let mut snapshot = self.snapshot.write().expect("snapshot lock poisoned");
         let rows = requests
             .into_iter()
-            .map(|request| {
+            .map(|settled| {
+                let request = settled.request;
                 serde_json::json!({
                     "id": request.id.0,
                     "parentId": request.parent.map(|parent| parent.0),
                     "conversationId": request.branch,
-                    "state": "completed",
+                    "state": if settled.failure.is_some() { "failed" } else { "completed" },
+                    "failure": settled.failure,
                 })
             })
             .collect::<Vec<_>>();
@@ -2250,5 +2252,35 @@ mod durable_command_tests {
             .unwrap();
         assert_eq!(record.receipt, Some(receipt));
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod rejection_projection_tests {
+    use super::*;
+
+    #[test]
+    fn rejected_request_survives_projection_refresh_and_reconnect() {
+        let store = Store::memory().unwrap();
+        let request = crate::model::RequestId("rejected-request".into());
+        store.create_request(&request, None, "/root").unwrap();
+        let failure = serde_json::json!({"kind":"http", "status":400, "diagnostic":{"code":"invalid_function_parameters"}});
+        store
+            .record_event(Some(&request), "request_failed", &failure)
+            .unwrap();
+        let (_, control, _) = server(PathBuf::from("."));
+        let mut events = control.events.subscribe();
+        control.refresh_completed_model_requests(&store).unwrap();
+        let event = events.try_recv().unwrap();
+        assert_eq!(event.event, "request.upsert");
+        assert_eq!(event.payload["id"], request.0);
+        assert_eq!(event.payload["state"], "failed");
+        assert_eq!(event.payload["failure"], failure);
+        assert_eq!(control.snapshot.read().unwrap().requests[0], event.payload);
+        control.refresh_completed_model_requests(&store).unwrap();
+        assert!(
+            events.try_recv().is_err(),
+            "failure was republished without change"
+        );
     }
 }

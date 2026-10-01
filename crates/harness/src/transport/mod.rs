@@ -5,7 +5,9 @@
 pub mod auth;
 pub mod client;
 mod http_error;
+mod request_failure;
 pub mod sse;
+pub use request_failure::RequestFailure;
 
 use crate::item::Item;
 use crate::model::Effort;

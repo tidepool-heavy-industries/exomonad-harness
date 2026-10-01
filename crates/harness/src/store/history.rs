@@ -39,28 +39,75 @@ pub struct HistoryPage {
     pub oversized_item: Option<OversizedItem>,
 }
 
+pub(crate) struct SettledModelRequest {
+    pub request: Request,
+    pub failure: Option<crate::transport::RequestFailure>,
+}
+
 impl Store {
-    /// Read only durable completion metadata, without loading model inputs or Items.
-    pub(crate) fn completed_model_requests(&self, limit: usize) -> Result<Vec<Request>> {
+    /// Failure publication and an embedded actor's head advance share one
+    /// transaction. A failed CAS or event write publishes neither fact.
+    pub(crate) fn record_failed_model_request(
+        &self,
+        request: &RequestId,
+        failure: &crate::transport::RequestFailure,
+        agent_head: Option<(&crate::model::AgentPath, Option<&RequestId>)>,
+    ) -> Result<bool> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+        if let Some((agent, expected)) = agent_head {
+            if transaction.execute(
+                "UPDATE agents SET head_request=?3 WHERE path=?1 AND head_request IS ?2",
+                params![agent.0, expected.map(|head| &head.0), request.0],
+            )? != 1
+            {
+                return Ok(false);
+            }
+        }
+        transaction.execute(
+            "INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,'request_failed',?2,?3)",
+            params![request.0, serde_json::to_string(failure)?, super::utc_millis()],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// Read only durable success or failure metadata, without loading model inputs or Items.
+    pub(crate) fn completed_model_requests(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<SettledModelRequest>> {
         let c = self.lock();
         let mut query = c.prepare(
             "WITH recent AS (
                 SELECT request_id,MAX(id) AS sequence FROM (
-                    SELECT id,request_id FROM events WHERE kind='model_turn'
+                    SELECT id,request_id FROM events WHERE kind IN ('model_turn','request_failed')
                     ORDER BY id DESC LIMIT ?1
                 ) GROUP BY request_id
-             ) SELECT r.id,r.parent_id,r.branch FROM recent
-             JOIN requests r ON r.id=recent.request_id ORDER BY recent.sequence",
+             ) SELECT r.id,r.parent_id,r.branch,CASE WHEN e.kind='request_failed' THEN e.payload ELSE NULL END FROM recent
+             JOIN requests r ON r.id=recent.request_id JOIN events e ON e.id=recent.sequence
+             ORDER BY recent.sequence",
         )?;
         let rows = query.query_map([limit.clamp(1, 128) as i64], |row| {
-            Ok(Request {
-                id: RequestId(row.get(0)?),
-                parent: row.get::<_, Option<String>>(1)?.map(RequestId),
-                branch: row.get(2)?,
-            })
+            Ok((
+                Request {
+                    id: RequestId(row.get(0)?),
+                    parent: row.get::<_, Option<String>>(1)?.map(RequestId),
+                    branch: row.get(2)?,
+                },
+                row.get::<_, Option<String>>(3)?,
+            ))
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        rows.map(|row| {
+            let (request, payload) = row?;
+            Ok(SettledModelRequest {
+                request,
+                failure: payload
+                    .map(|payload| serde_json::from_str(&payload))
+                    .transpose()?,
+            })
+        })
+        .collect()
     }
     /// Read at most `MAX_HISTORY_ITEMS` and `MAX_HISTORY_BYTES` from one request.
     /// An oversized Item is identified by its content hash and position. It is
@@ -152,6 +199,73 @@ impl Store {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn rejection_failure_and_head_are_atomic_and_survive_reopen() {
+        use crate::{model::AgentPath, transport::RequestFailure};
+        let path =
+            std::env::temp_dir().join(format!("rejected-head-{}.sqlite", uuid::Uuid::new_v4()));
+        let agent = AgentPath("/root".into());
+        let request = RequestId("rejected-head".into());
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .admit_agent(&agent, None, None, &json!({}), &json!({"kind":"root"}))
+                .unwrap();
+            store.create_request(&request, None, &agent.0).unwrap();
+            store.lock().execute_batch("CREATE TRIGGER reject_failure BEFORE INSERT ON events WHEN NEW.kind='request_failed' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+            assert!(
+                store
+                    .record_failed_model_request(
+                        &request,
+                        &RequestFailure::Authentication,
+                        Some((&agent, None))
+                    )
+                    .is_err()
+            );
+            assert!(store.agent(&agent).unwrap().unwrap().head_request.is_none());
+            assert!(store.events(Some(&request)).unwrap().is_empty());
+            store
+                .lock()
+                .execute_batch("DROP TRIGGER reject_failure")
+                .unwrap();
+            assert!(
+                !store
+                    .record_failed_model_request(
+                        &request,
+                        &RequestFailure::Authentication,
+                        Some((&agent, Some(&RequestId("stale".into()))))
+                    )
+                    .unwrap()
+            );
+            assert!(store.events(Some(&request)).unwrap().is_empty());
+            assert!(
+                store
+                    .record_failed_model_request(
+                        &request,
+                        &RequestFailure::Authentication,
+                        Some((&agent, None))
+                    )
+                    .unwrap()
+            );
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.agent(&agent).unwrap().unwrap().head_request,
+            Some(request.clone())
+        );
+        assert_eq!(
+            store
+                .events(Some(&request))
+                .unwrap()
+                .iter()
+                .filter(|event| event.kind == "request_failed")
+                .count(),
+            1
+        );
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn pages_exact_items_and_identifies_large_item_without_skipping_it() {

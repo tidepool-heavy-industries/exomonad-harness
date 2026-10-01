@@ -1,6 +1,9 @@
 pub const VERSION: u32 = 8;
 pub const SQL: &str = include_str!("schema.sql");
-const MODEL_TURN_RECENT_INDEX: &str = "CREATE INDEX IF NOT EXISTS events_model_turn_recent ON events(id DESC,request_id) WHERE kind='model_turn';";
+const MODEL_REQUEST_INDEXES: &str = "
+    CREATE INDEX IF NOT EXISTS events_model_turn_recent ON events(id DESC,request_id) WHERE kind='model_turn';
+    CREATE INDEX IF NOT EXISTS events_model_settled_recent ON events(id DESC,request_id) WHERE kind IN ('model_turn','request_failed');
+";
 
 pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
     let has_version: bool = conn.query_row(
@@ -11,7 +14,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
     if !has_version {
         let tx = conn.transaction()?;
         tx.execute_batch(SQL)?;
-        tx.execute_batch(MODEL_TURN_RECENT_INDEX)?;
+        tx.execute_batch(MODEL_REQUEST_INDEXES)?;
         tx.execute_batch(super::validation::INDEXES)?;
         tx.execute("INSERT INTO schema_version(version) VALUES (?1)", [VERSION])?;
         super::schema_migration::ensure_store_id(&tx)?;
@@ -38,7 +41,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
     }
     if version == VERSION {
         super::schema_migration::validate_checkpoint_metadata(conn)?;
-        conn.execute_batch(MODEL_TURN_RECENT_INDEX)?;
+        conn.execute_batch(MODEL_REQUEST_INDEXES)?;
         conn.execute_batch(super::validation::INDEXES)?;
         return Ok(());
     }
@@ -100,7 +103,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
     if !claim_columns.iter().any(|column| column == "terminal_json") {
         tx.execute_batch("ALTER TABLE claims ADD COLUMN terminal_json TEXT;")?;
     }
-    tx.execute_batch(MODEL_TURN_RECENT_INDEX)?;
+    tx.execute_batch(MODEL_REQUEST_INDEXES)?;
     tx.execute_batch(super::validation::INDEXES)?;
     if legacy_inputs && version < 7 {
         let old_count: i64 =

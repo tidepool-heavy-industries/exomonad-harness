@@ -74,14 +74,29 @@ mod recovery_tests;
 #[path = "engine/completion_tests.rs"]
 mod completion_tests;
 
+#[cfg(test)]
+#[path = "engine/rejection_tests.rs"]
+mod rejection_tests;
+
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error(transparent)]
     Transport(#[from] TransportError),
+    /// A provider refused this exact request before starting a response, and
+    /// all outstanding call cleanup and failure persistence succeeded.
+    #[error("provider rejected request {head_request:?}: {error}")]
+    RequestRejected {
+        head_request: RequestId,
+        error: TransportError,
+    },
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
     Job(#[from] JobError),
+    #[error("cancellation of operation {operation:?} remains unconfirmed")]
+    UnconfirmedCancellation { operation: OperationId },
+    #[error("rejected request lost its embedded agent head fence")]
+    RejectedHeadMismatch,
     #[error("blocking store task failed")]
     StoreTask,
     #[error("engine cancelled")]
@@ -1046,8 +1061,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     result = &mut create => match result {
                         Ok(turn) => break turn,
                         Err(error) => {
-                            let primary = EngineError::Transport(error);
-                            return Err(self.cleanup_pending(primary, &pending).await);
+                            return Err(self.reject_or_cleanup(error, head.as_ref(), &parent, &pending).await);
                         }
                     },
                     changed = cancellation.changed() => {
@@ -1902,20 +1916,29 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                 }
                 match self.scheduler.output(&call.operation).await {
-                    Ok(Some(output)) => match self
-                        .retain_settled_output(
-                            &call.operation,
-                            call.tool_kind,
-                            &output,
-                            &call.claim_request,
-                        )
-                        .await
-                    {
-                        Ok(()) => persisted_terminal = true,
-                        Err(error) => {
-                            first_error.get_or_insert(error);
+                    Ok(Some(output)) => {
+                        if matches!(output, crate::turn::JobOutput::CancellationUnconfirmed(_)) {
+                            first_error.get_or_insert_with(|| {
+                                EngineError::UnconfirmedCancellation {
+                                    operation: call.operation.clone(),
+                                }
+                            });
                         }
-                    },
+                        match self
+                            .retain_settled_output(
+                                &call.operation,
+                                call.tool_kind,
+                                &output,
+                                &call.claim_request,
+                            )
+                            .await
+                        {
+                            Ok(()) => persisted_terminal = true,
+                            Err(error) => {
+                                first_error.get_or_insert(error);
+                            }
+                        }
+                    }
                     Err(JobError::UnknownCall) => {}
                     Ok(None) => {}
                     Err(error) => {
@@ -1935,6 +1958,48 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
         }
         first_error.map_or(Ok(()), Err)
+    }
+
+    async fn reject_or_cleanup(
+        &self,
+        error: TransportError,
+        expected_head: Option<&RequestId>,
+        request: &RequestId,
+        pending: &[PendingCall],
+    ) -> EngineError {
+        let Some(failure) = error.request_failure() else {
+            return self
+                .cleanup_pending(EngineError::Transport(error), pending)
+                .await;
+        };
+        let primary = EngineError::RequestRejected {
+            head_request: request.clone(),
+            error,
+        };
+        if let Err(cleanup) = self.cancel_pending(pending).await {
+            return EngineError::Cleanup {
+                primary: Box::new(primary),
+                cleanup: cleanup.to_string(),
+            };
+        }
+        let store = self.store.clone();
+        let request = request.clone();
+        let expected = expected_head.cloned();
+        let agent = matches!(self.origin, ConversationIdentity::Embedded { .. })
+            .then(|| self.config.agent.clone());
+        match blocking(move || {
+            store.record_failed_model_request(
+                &request,
+                &failure,
+                agent.as_ref().map(|agent| (agent, expected.as_ref())),
+            )
+        })
+        .await
+        {
+            Ok(true) => primary,
+            Ok(false) => EngineError::RejectedHeadMismatch,
+            Err(error) => error,
+        }
     }
 
     async fn cleanup_pending(&self, primary: EngineError, pending: &[PendingCall]) -> EngineError {
