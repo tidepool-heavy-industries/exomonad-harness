@@ -170,10 +170,11 @@ impl EmbeddedToolManifest {
                 return Err(EmbeddedError::Surface(format!("duplicate tool {name}")));
             }
         }
-        Ok(Self {
-            tools: tools.into(),
-            kinds,
-        })
+        let tools: crate::transport::ToolManifest = tools.into();
+        tools
+            .strict_tools()
+            .map_err(|error| EmbeddedError::Surface(error.to_string()))?;
+        Ok(Self { tools, kinds })
     }
 
     pub fn tools(&self) -> &crate::transport::ToolManifest {
@@ -622,5 +623,33 @@ impl Provider for PinnedProvider {
             .dispatcher
             .call_custom_with_context(name, input, context)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn installed_manifest_refuses_false_strict_claim_and_keeps_metadata() {
+        let valid = json!({"type":"function","name":"status","strict":true,"parameters":{
+            "type":"object","properties":{"view":{"type":["string","null"],"description":"A view"}},
+            "required":["view"],"additionalProperties":false
+        }});
+        let manifest = EmbeddedToolManifest::new(vec![valid.clone()]).unwrap();
+        assert_eq!(manifest.tools()[0]["parameters"], valid["parameters"]);
+        let mut incomplete = valid.clone();
+        incomplete["parameters"]
+            .as_object_mut()
+            .unwrap()
+            .remove("required");
+        assert!(matches!(
+            EmbeddedToolManifest::new(vec![incomplete]),
+            Err(EmbeddedError::Surface(_))
+        ));
+        let mut unchecked_nested = valid;
+        unchecked_nested["parameters"]["properties"]["view"] = json!({"type":"object","properties":{"value":{"type":"string"}},"additionalProperties":false});
+        assert!(EmbeddedToolManifest::new(vec![unchecked_nested]).is_err());
     }
 }

@@ -131,6 +131,10 @@ mod tests {
         );
         assert_eq!(diagnostic.param.as_deref(), Some("tools[1].parameters"));
         let serialized = serde_json::to_string(&diagnostic).unwrap();
+        assert_eq!(
+            serde_json::to_value(&diagnostic).unwrap()["error_type"],
+            "invalid_request_error"
+        );
         for secret in [
             token,
             account,
@@ -152,6 +156,16 @@ mod tests {
                 .get("request")
                 .is_none()
         );
+        let error = crate::transport::TransportError::Http {
+            status: 400,
+            diagnostic: Some(diagnostic),
+        };
+        assert!(error.to_string().contains("invalid_function_parameters"));
+        let status_only = crate::transport::TransportError::Http {
+            status: 503,
+            diagnostic: None,
+        };
+        assert_eq!(status_only.to_string(), "terminal HTTP status 503");
     }
 
     #[test]

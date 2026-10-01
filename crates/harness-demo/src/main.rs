@@ -2634,11 +2634,22 @@ impl Provider for DemoProvider {
                 json!({"kind":"operator_form", "question":string_arg(&args,"question")?,
                 "status":"not_connected", "note":"wire this request to the host operator"}),
             ),
-            "form" => Ok(
-                json!({"kind":"operator_form", "title":string_arg(&args,"title")?,
-                "schema":args.get("schema").cloned().unwrap_or(Value::Null),
-                "status":"not_connected", "note":"wire this request to the host operator"}),
-            ),
+            "form" => {
+                let schema: Value =
+                    serde_json::from_str(string_arg(&args, "schema")?).map_err(|_| {
+                        ProviderError::Tool("schema must be a JSON-encoded object".into())
+                    })?;
+                if !schema.is_object() {
+                    return Err(ProviderError::Tool(
+                        "schema must be a JSON-encoded object".into(),
+                    ));
+                }
+                Ok(
+                    json!({"kind":"operator_form", "title":string_arg(&args,"title")?,
+                    "schema":schema,
+                    "status":"not_connected", "note":"wire this request to the host operator"}),
+                )
+            }
             _ => Err(ProviderError::Tool(format!("unknown tool: {name}").into())),
         }
     }
@@ -2704,7 +2715,7 @@ impl Provider for DemoProvider {
             json!({"type":"function","name":"sleep","description":"Wait asynchronously","parameters":{"type":"object","properties":{"duration_ms":{"type":"integer","minimum":0}},"required":["duration_ms"],"additionalProperties":false},"strict":true}),
             json!({"type":"function","name":"edit","description":"Replace one exact string in an existing host-authorized owned file","parameters":{"type":"object","properties":{"path":{"type":"string"},"before":{"type":"string"},"after":{"type":"string"}},"required":["path","before","after"],"additionalProperties":false},"strict":true}),
             json!({"type":"function","name":"ask","description":"Request operator input (host integration required)","parameters":{"type":"object","properties":{"question":{"type":"string"}},"required":["question"],"additionalProperties":false},"strict":true}),
-            json!({"type":"function","name":"form","description":"Request a schema-backed operator form (host integration required)","parameters":{"type":"object","properties":{"title":{"type":"string"},"schema":{"type":"object"}},"required":["title","schema"],"additionalProperties":false},"strict":true}),
+            json!({"type":"function","name":"form","description":"Request an operator form with a JSON-encoded schema object in schema (host integration required)","parameters":{"type":"object","properties":{"title":{"type":"string"},"schema":{"type":"string"}},"required":["title","schema"],"additionalProperties":false},"strict":true}),
         ]
     }
 }
@@ -2786,6 +2797,38 @@ mod tests {
     use harness::store::Store;
     use harness::transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, Usage};
     use harness::turn::JobScheduler;
+
+    #[tokio::test]
+    async fn demo_form_schema_is_json_text_and_all_advertised_tools_pass_strict_admission() {
+        let provider = DemoProvider::development(".", false);
+        let request = ResponsesRequest {
+            input: vec![],
+            instructions: String::new(),
+            tools: provider.all_tools().into(),
+            tools_allowed: None,
+            model: "test-model".into(),
+            pinned_effort: Effort::Low,
+            session_id: "demo-contract".into(),
+        };
+        harness::transport::client::request_body(&request).unwrap();
+        let schema = json!({"type":"object","properties":{"name":{"type":"string"}}});
+        let result = provider
+            .call(
+                "form",
+                json!({"title":"Details","schema":schema.to_string()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["schema"], schema);
+        for invalid in [json!({}), json!("{"), json!("null"), json!("[]")] {
+            assert!(
+                provider
+                    .call("form", json!({"title":"Details","schema":invalid}))
+                    .await
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn command_timing_replacement_preserves_persisted_start_and_single_terminal_end() {

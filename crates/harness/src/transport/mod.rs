@@ -14,7 +14,8 @@ use serde_json::Value;
 use std::{ops::Deref, sync::Arc};
 use thiserror::Error;
 
-/// Immutable advertised tools. Cloning a manifest retains the same schema bytes.
+/// Immutable advertised tools and their cached strict-schema admission result.
+/// Cloning retains the same schema bytes; HTTP serialization requires admission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolManifest(Arc<ManifestData>);
 
@@ -24,6 +25,7 @@ struct ManifestData {
     json: String,
     hash: crate::item::ItemHash,
     duplicate_names: bool,
+    strict_validation: Result<(), String>,
 }
 
 impl Default for ToolManifest {
@@ -33,6 +35,13 @@ impl Default for ToolManifest {
 }
 
 impl ToolManifest {
+    pub(crate) fn strict_tools(&self) -> Result<StrictToolManifest<'_>, TransportError> {
+        self.0
+            .strict_validation
+            .as_ref()
+            .map_err(|error| TransportError::Stream(error.clone()))?;
+        Ok(StrictToolManifest(self))
+    }
     pub(crate) fn encoded(&self) -> (&crate::item::ItemHash, &str) {
         (&self.0.hash, &self.0.json)
     }
@@ -42,8 +51,28 @@ impl ToolManifest {
     }
 }
 
+/// Only the immutable manifest's cached admission can construct this transport
+/// serialization token. Raw JSON declarations cannot enter an HTTP request.
+pub(crate) struct StrictToolManifest<'a>(&'a ToolManifest);
+
+impl Serialize for StrictToolManifest<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
 impl From<Vec<Value>> for ToolManifest {
     fn from(tools: Vec<Value>) -> Self {
+        let strict_validation = tools.iter().try_for_each(|tool| {
+            if tool["type"] == "function" {
+                if tool["strict"] != true {
+                    return Err("all function tools must be strict".to_owned());
+                }
+                crate::finalize::validate_function_parameters(&tool["parameters"])
+                    .map_err(|error| format!("invalid function parameters: {error}"))?;
+            }
+            Ok(())
+        });
         let json = serde_json::to_string(&tools).expect("tool Values serialize");
         let hash = crate::item::ItemHash(blake3::hash(json.as_bytes()).to_hex().to_string());
         let mut names = std::collections::HashSet::new();
@@ -57,6 +86,7 @@ impl From<Vec<Value>> for ToolManifest {
             json,
             hash,
             duplicate_names,
+            strict_validation,
         }))
     }
 }
@@ -115,7 +145,7 @@ pub struct ResponsesTurn {
 pub enum TransportError {
     #[error("authentication expired; operator action required")]
     Authentication,
-    #[error("terminal HTTP status {status}: {diagnostic:?}")]
+    #[error("terminal HTTP status {status}{suffix}", suffix = diagnostic_suffix(.diagnostic.as_ref()))]
     Http {
         status: u16,
         diagnostic: Option<HttpDiagnostic>,
@@ -138,6 +168,15 @@ pub struct HttpDiagnostic {
     pub param: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+fn diagnostic_suffix(diagnostic: Option<&HttpDiagnostic>) -> String {
+    diagnostic.map_or_else(String::new, |diagnostic| {
+        format!(
+            ": {}",
+            serde_json::to_string(diagnostic).expect("diagnostic strings serialize")
+        )
+    })
 }
 
 /// Read-only credential source. An implementation must never refresh Codex's

@@ -1,8 +1,8 @@
-//! Typed `finalize` tool support for adapter replies.
+//! Strict function-tool schema admission, host argument projection, and typed
+//! `finalize` support for adapter replies.
 //!
-//! The wire arguments are always exactly `{"result": T}`. This module only
-//! describes and decodes the existing finalize function call; it does not
-//! provide a separate answer/output channel.
+//! The finalize envelope is always exactly `{"result": T}`; it does not provide
+//! a separate answer/output channel.
 
 use crate::item::Item;
 use schemars::JsonSchema;
@@ -26,6 +26,8 @@ pub enum FinalizeError {
     SerializeResult(String),
     #[error("unsupported JSON schema at {path}: {keyword}")]
     UnsupportedSchema { path: String, keyword: String },
+    #[error("function arguments have ambiguous optional-null semantics at {0}")]
+    AmbiguousArguments(String),
     #[error("finalize result does not match schema at {0}")]
     ResultSchemaMismatch(String),
 }
@@ -55,14 +57,210 @@ pub fn tool_schema_from_result_schema(result_schema: Value) -> Result<Value, Fin
     }))
 }
 
+/// A strict provider schema and the decoder for its host argument contract.
+/// Only nulls introduced to encode omitted fields are removed on dispatch.
+#[derive(Clone, Debug)]
+pub struct FunctionToolSchema {
+    parameters: Value,
+    projection: ArgumentProjection,
+}
+
+impl FunctionToolSchema {
+    pub fn new(schema: Value) -> Result<Self, FinalizeError> {
+        if schema["type"] != "object" {
+            return Err(unsupported("$", "function parameters must be an object"));
+        }
+        let parameters = normalize_schema(schema.clone(), "$")?;
+        let projection = ArgumentProjection::new(&schema)?;
+        Ok(Self {
+            parameters,
+            projection,
+        })
+    }
+
+    pub fn parameters(&self) -> &Value {
+        &self.parameters
+    }
+
+    pub fn decode_arguments(&self, mut arguments: Value) -> Result<Value, FinalizeError> {
+        self.projection.decode(&mut arguments, "$")?;
+        Ok(arguments)
+    }
+}
+
+#[derive(Clone, Debug)]
+enum ArgumentProjection {
+    Identity,
+    Object(Vec<(String, bool, ArgumentProjection)>),
+    Array(Box<ArgumentProjection>),
+    Alternatives(Vec<(Value, ArgumentProjection)>),
+}
+
+impl ArgumentProjection {
+    fn new(schema: &Value) -> Result<Self, FinalizeError> {
+        if let Some(variants) = schema["anyOf"]
+            .as_array()
+            .or_else(|| schema["oneOf"].as_array())
+        {
+            return Ok(Self::Alternatives(
+                variants
+                    .iter()
+                    .map(|variant| {
+                        Ok((normalize_schema(variant.clone(), "$")?, Self::new(variant)?))
+                    })
+                    .collect::<Result<_, FinalizeError>>()?,
+            ));
+        }
+        if let Some(types) = schema["type"].as_array() {
+            let mut variants = Vec::new();
+            for kind in types {
+                let mut variant = schema.clone();
+                variant["type"] = kind.clone();
+                variants.push((
+                    normalize_schema(variant.clone(), "$")?,
+                    Self::new(&variant)?,
+                ));
+            }
+            return Ok(Self::Alternatives(variants));
+        }
+        match schema["type"].as_str() {
+            Some("object") => {
+                let mut fields = Vec::new();
+                if let Some(properties) = schema["properties"].as_object() {
+                    for (name, property) in properties {
+                        let required = schema["required"].as_array().is_some_and(|names| {
+                            names.iter().any(|value| value.as_str() == Some(name))
+                        });
+                        let nullable = validate_result(
+                            &Value::Null,
+                            &normalize_schema(property.clone(), "$")?,
+                            "$",
+                        )
+                        .is_ok();
+                        fields.push((name.clone(), !required && !nullable, Self::new(property)?));
+                    }
+                }
+                Ok(Self::Object(fields))
+            }
+            Some("array") => Ok(Self::Array(Box::new(Self::new(&schema["items"])?))),
+            _ => Ok(Self::Identity),
+        }
+    }
+
+    fn decode(&self, value: &mut Value, path: &str) -> Result<(), FinalizeError> {
+        match self {
+            Self::Identity => {}
+            Self::Object(fields) => {
+                if let Some(object) = value.as_object_mut() {
+                    for (name, omit_null, projection) in fields {
+                        if *omit_null && object.get(name).is_some_and(Value::is_null) {
+                            object.remove(name);
+                        } else if let Some(value) = object.get_mut(name) {
+                            projection.decode(value, &format!("{path}.{name}"))?;
+                        }
+                    }
+                }
+            }
+            Self::Array(projection) => {
+                if let Some(values) = value.as_array_mut() {
+                    for (index, value) in values.iter_mut().enumerate() {
+                        projection.decode(value, &format!("{path}[{index}]"))?;
+                    }
+                }
+            }
+            Self::Alternatives(variants) => {
+                let mut decoded = None;
+                for (_, projection) in variants
+                    .iter()
+                    .filter(|(schema, _)| validate_result(value, schema, path).is_ok())
+                {
+                    let mut candidate = value.clone();
+                    projection.decode(&mut candidate, path)?;
+                    if decoded
+                        .as_ref()
+                        .is_some_and(|previous| previous != &candidate)
+                    {
+                        return Err(FinalizeError::AmbiguousArguments(path.into()));
+                    }
+                    decoded = Some(candidate);
+                }
+                if let Some(decoded) = decoded {
+                    *value = decoded;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SchemaMode {
+    HostProjection,
+    StrictWire,
+}
+
 /// Convert schemars' schema to the conservative subset accepted by strict
 /// Responses tools. Unknown validation keywords are rejected rather than
 /// discarded, since dropping them could silently broaden the reply contract.
 pub(crate) fn normalize_schema(schema: Value, path: &str) -> Result<Value, FinalizeError> {
+    normalize_schema_mode(schema, path, SchemaMode::HostProjection)
+}
+
+/// Admit provider parameters without changing their advertised bytes. Both
+/// normalization and admission share the same supported-schema traversal.
+pub(crate) fn validate_function_parameters(schema: &Value) -> Result<(), FinalizeError> {
+    if schema["type"] != "object" {
+        return Err(unsupported("$", "function parameters must be an object"));
+    }
+    normalize_schema_mode(schema.clone(), "$", SchemaMode::StrictWire).map(|_| ())
+}
+
+fn normalize_schema_mode(
+    schema: Value,
+    path: &str,
+    mode: SchemaMode,
+) -> Result<Value, FinalizeError> {
     let object = schema
         .as_object()
         .ok_or_else(|| unsupported(path, "schema must be an object"))?;
+    if mode == SchemaMode::StrictWire {
+        for key in ["$defs", "definitions"] {
+            if object.contains_key(key) {
+                return Err(unsupported(path, format!("{key} requires host projection")));
+            }
+        }
+        for key in ["title", "description", "$schema"] {
+            if object.get(key).is_some_and(|value| !value.is_string()) {
+                return Err(unsupported(path, format!("{key} requires a string")));
+            }
+        }
+        for key in ["deprecated", "readOnly", "writeOnly"] {
+            if object.get(key).is_some_and(|value| !value.is_boolean()) {
+                return Err(unsupported(path, format!("{key} requires a boolean")));
+            }
+        }
+        if object
+            .get("examples")
+            .is_some_and(|value| !value.is_array())
+        {
+            return Err(unsupported(path, "examples requires an array"));
+        }
+        if object.contains_key("format")
+            && matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("integer" | "number")
+            )
+        {
+            return Err(unsupported(path, "numeric format requires host projection"));
+        }
+    }
     if let Some(variants) = object.get("oneOf") {
+        if mode == SchemaMode::StrictWire {
+            return Err(unsupported(
+                path,
+                "strict tools require anyOf rather than oneOf",
+            ));
+        }
         if object.keys().any(|key| {
             !["oneOf", "title", "description", "$schema", "$defs"].contains(&key.as_str())
         }) {
@@ -88,9 +286,10 @@ pub(crate) fn normalize_schema(schema: Value, path: &str) -> Result<Value, Final
             {
                 return Err(unsupported(path, "oneOf requires distinct required tags"));
             }
-            normalized.push(normalize_schema(
+            normalized.push(normalize_schema_mode(
                 variant.clone(),
                 &format!("{path}.oneOf[{index}]"),
+                mode,
             )?);
         }
         // Distinct required singleton tags make these variants disjoint, so
@@ -109,16 +308,26 @@ pub(crate) fn normalize_schema(schema: Value, path: &str) -> Result<Value, Final
             .ok_or_else(|| unsupported(path, "anyOf requires nonempty variants"))?;
         return Ok(
             json!({"anyOf": variants.iter().enumerate().map(|(index, variant)|
-            normalize_schema(variant.clone(), &format!("{path}.anyOf[{index}]")))
+            normalize_schema_mode(variant.clone(), &format!("{path}.anyOf[{index}]"), mode))
             .collect::<Result<Vec<_>, _>>()?}),
         );
     }
     if let Some(types) = object.get("type").and_then(Value::as_array) {
+        let mut kinds = std::collections::HashSet::new();
+        if types
+            .iter()
+            .any(|kind| kind.as_str().is_none_or(|kind| !kinds.insert(kind)))
+        {
+            return Err(unsupported(
+                path,
+                "type union requires distinct string kinds",
+            ));
+        }
         let mut variants = Vec::new();
         for variant in types {
             let mut child = object.clone();
             child.insert("type".into(), variant.clone());
-            variants.push(normalize_schema(Value::Object(child), path)?);
+            variants.push(normalize_schema_mode(Value::Object(child), path, mode)?);
         }
         if variants.is_empty() {
             return Err(unsupported(path, "empty type union"));
@@ -219,15 +428,34 @@ pub(crate) fn normalize_schema(schema: Value, path: &str) -> Result<Value, Final
                     "required must name distinct declared properties",
                 ));
             }
-            let mut normalized_properties = Map::new();
-            for (name, property) in properties {
-                let property_path = format!("{path}.properties.{name}");
-                let mut normalized_property = normalize_schema(property.clone(), &property_path)?;
+            if mode == SchemaMode::StrictWire {
+                if object.get("additionalProperties") != Some(&Value::Bool(false)) {
+                    return Err(unsupported(
+                        path,
+                        "strict objects require additionalProperties:false",
+                    ));
+                }
                 if object
                     .get("required")
                     .and_then(Value::as_array)
+                    .is_none_or(|required| required.len() != properties.len())
+                {
+                    return Err(unsupported(
+                        path,
+                        "strict objects must require every property",
+                    ));
+                }
+            }
+            let mut normalized_properties = Map::new();
+            for (name, property) in properties {
+                let property_path = format!("{path}.properties.{name}");
+                let mut normalized_property =
+                    normalize_schema_mode(property.clone(), &property_path, mode)?;
+                if !object
+                    .get("required")
+                    .and_then(Value::as_array)
                     .is_some_and(|required| {
-                        !required.iter().any(|field| field.as_str() == Some(name))
+                        required.iter().any(|field| field.as_str() == Some(name))
                     })
                     && validate_result(&Value::Null, &normalized_property, &property_path).is_err()
                 {
@@ -248,7 +476,7 @@ pub(crate) fn normalize_schema(schema: Value, path: &str) -> Result<Value, Final
                 .ok_or_else(|| unsupported(path, "array requires items schema"))?;
             normalized.insert(
                 "items".into(),
-                normalize_schema(items.clone(), &format!("{path}.items"))?,
+                normalize_schema_mode(items.clone(), &format!("{path}.items"), mode)?,
             );
             copy_constraints(object, &mut normalized, &["minItems", "maxItems"]);
         }
@@ -550,6 +778,153 @@ pub(crate) fn validate_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_wire_refuses_unprojected_containers_formats_and_invalid_metadata() {
+        let root =
+            json!({"type":"object","properties":{},"required":[],"additionalProperties":false});
+        for (key, value) in [
+            (
+                "$defs",
+                json!({"bad":{"type":"object","properties":{"value":{"type":"string"}}}}),
+            ),
+            ("$defs", json!(false)),
+            ("definitions", json!({})),
+            ("description", json!(77)),
+            ("title", json!(false)),
+            ("$schema", json!(false)),
+            ("examples", json!(false)),
+            ("readOnly", json!("yes")),
+            ("writeOnly", json!(0)),
+            ("deprecated", json!([])),
+        ] {
+            let mut invalid = root.clone();
+            invalid[key] = value;
+            assert!(
+                validate_function_parameters(&invalid).is_err(),
+                "invalid metadata {key} admitted"
+            );
+        }
+        for value in [
+            json!({"type":"integer","format":"int32"}),
+            json!({"type":["string","string"]}),
+            json!({"anyOf":[{"type":"string"},{"type":"null"}],"$defs":false}),
+            json!({"anyOf":[{"type":"string"},{"type":"null"}],"description":false}),
+        ] {
+            let mut invalid = root.clone();
+            invalid["properties"] = json!({"value":value});
+            invalid["required"] = json!(["value"]);
+            assert!(validate_function_parameters(&invalid).is_err());
+        }
+        let normalized = FunctionToolSchema::new(json!({"type":"object","properties":{"value":{"type":"integer","format":"int32"}},"required":["value"]})).unwrap();
+        validate_function_parameters(normalized.parameters()).unwrap();
+        assert_eq!(
+            normalized.parameters()["properties"]["value"]["minimum"],
+            i32::MIN
+        );
+    }
+
+    #[test]
+    fn function_schema_encodes_omission_and_preserves_nullable_required_fields() {
+        let schema = FunctionToolSchema::new(json!({
+            "type":"object", "properties":{
+                "view":{"type":"string","enum":["changed","summary"]},
+                "also_check":{"type":"array","items":{"type":"string"}},
+                "nullable":{"type":["string","null"]},
+                "required_nullable":{"type":["string","null"]},
+                "required_string":{"type":"string"}
+            }, "required":["required_nullable","required_string"], "additionalProperties":false
+        }))
+        .unwrap();
+        validate_function_parameters(schema.parameters()).unwrap();
+        assert_eq!(schema.parameters()["required"].as_array().unwrap().len(), 5);
+        assert_eq!(
+            schema
+                .decode_arguments(json!({
+                    "view":null,"also_check":null,"nullable":null,
+                    "required_nullable":null,"required_string":"present"
+                }))
+                .unwrap(),
+            json!({"nullable":null,"required_nullable":null,"required_string":"present"})
+        );
+        // The original host remains responsible for refusing an invalid required
+        // value; the decoder must never silently omit it.
+        assert_eq!(
+            schema
+                .decode_arguments(json!({"required_string":null}))
+                .unwrap(),
+            json!({"required_string":null})
+        );
+        let absent_required = FunctionToolSchema::new(json!({
+            "type":"object","properties":{"view":{"type":"string"}}
+        }))
+        .unwrap();
+        assert_eq!(
+            absent_required.parameters()["properties"]["view"],
+            json!({"anyOf":[{"type":"string"},{"type":"null"}]})
+        );
+        assert_eq!(
+            absent_required
+                .decode_arguments(json!({"view":null}))
+                .unwrap(),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn function_schema_projects_nested_arrays_and_disjoint_tagged_unions() {
+        let schema = FunctionToolSchema::new(json!({
+            "type":"object","properties":{
+                "entries":{"type":"array","items":{"type":"object","properties":{
+                    "optional":{"type":"string"},"required_nullable":{"type":["integer","null"]}
+                },"required":["required_nullable"]}},
+                "choice":{"oneOf":[
+                    {"type":"object","properties":{"tag":{"type":"string","enum":["omit"]},"value":{"type":"string"}},"required":["tag"]},
+                    {"type":"object","properties":{"tag":{"type":"string","enum":["keep"]},"value":{"type":["string","null"]}},"required":["tag","value"]}
+                ]}
+            },"required":["entries","choice"]
+        })).unwrap();
+        validate_function_parameters(schema.parameters()).unwrap();
+        let entries = json!([{"optional":null,"required_nullable":null},{"optional":"yes","required_nullable":1}]);
+        let expected = json!([{"required_nullable":null},{"optional":"yes","required_nullable":1}]);
+        assert_eq!(
+            schema
+                .decode_arguments(json!({"entries":entries,"choice":{"tag":"omit","value":null}}))
+                .unwrap(),
+            json!({"entries":expected,"choice":{"tag":"omit"}})
+        );
+        assert_eq!(
+            schema
+                .decode_arguments(json!({"entries":[],"choice":{"tag":"keep","value":null}}))
+                .unwrap(),
+            json!({"entries":[],"choice":{"tag":"keep","value":null}})
+        );
+    }
+
+    #[test]
+    fn function_schema_refuses_ambiguous_optional_null_projection() {
+        let schema = FunctionToolSchema::new(json!({
+            "type":"object","properties":{"choice":{"anyOf":[
+                {"type":"object","properties":{"value":{"type":"string"}},"required":[]},
+                {"type":"object","properties":{"value":{"type":["string","null"]}},"required":["value"]}
+            ]}},"required":["choice"]
+        })).unwrap();
+        assert!(
+            matches!(schema.decode_arguments(json!({"choice":{"value":null}})), Err(FinalizeError::AmbiguousArguments(path)) if path == "$.choice")
+        );
+        assert_eq!(
+            schema
+                .decode_arguments(json!({"choice":{"value":"present"}}))
+                .unwrap(),
+            json!({"choice":{"value":"present"}})
+        );
+        for invalid in [
+            json!({"type":"string"}),
+            json!({"type":"object","properties":{"value":{"type":"string","pattern":".*"}}}),
+        ] {
+            assert!(FunctionToolSchema::new(invalid).is_err());
+        }
+    }
 
     #[test]
     fn dynamic_result_rejects_wrong_shape_and_preserves_json() {

@@ -729,6 +729,9 @@ mod tests {
     #[test]
     fn agent_verb_schemas_are_strict_and_complete() {
         let schemas = verb_tool_schemas();
+        // Check nested contracts through the actual transport admission too.
+        let manifest: crate::transport::ToolManifest = schemas.clone().into();
+        manifest.strict_tools().unwrap();
         let names: Vec<_> = schemas
             .iter()
             .map(|schema| schema["name"].as_str().unwrap())

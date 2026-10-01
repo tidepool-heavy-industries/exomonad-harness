@@ -25,7 +25,7 @@ struct RequestBody<'a> {
     model: &'a str,
     instructions: &'a str,
     input: &'a [crate::item::Item],
-    tools: &'a [Value],
+    tools: super::StrictToolManifest<'a>,
     tool_choice: ToolChoice<'a>,
     parallel_tool_calls: bool,
     reasoning: Reasoning,
@@ -77,19 +77,11 @@ fn normalized_request(request: &ResponsesRequest) -> Result<RequestBody<'_>, Tra
     if request.model.is_empty() || request.session_id.is_empty() {
         return Err(TransportError::Stream("empty model or session id".into()));
     }
-    if request.tools.iter().any(|tool| {
-        tool.get("type").and_then(Value::as_str) == Some("function")
-            && tool.get("strict") != Some(&Value::Bool(true))
-    }) {
-        return Err(TransportError::Stream(
-            "all function tools must be strict".into(),
-        ));
-    }
     Ok(RequestBody {
         model: &request.model,
         instructions: &request.instructions,
         input: &request.input,
-        tools: &request.tools,
+        tools: request.tools.strict_tools()?,
         tool_choice: match request.tools_allowed.as_deref() {
             None => ToolChoice::Automatic("auto"),
             Some([]) => ToolChoice::Automatic("none"),
@@ -259,8 +251,8 @@ mod tests {
             input: vec![],
             instructions: String::new(),
             tools: vec![
-                json!({"type":"function","name":"a","strict":true}),
-                json!({"type":"function","name":"b","strict":true}),
+                json!({"type":"function","name":"a","strict":true,"parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}),
+                json!({"type":"function","name":"b","strict":true,"parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}),
             ]
             .into(),
             tools_allowed: Some(vec!["b".into(), "a".into()]),
@@ -303,6 +295,83 @@ mod tests {
             session_id: "shared".into(),
         };
         assert!(request_body(&request).is_ok());
+    }
+
+    #[test]
+    fn request_gate_checks_nested_strict_contracts_and_preserves_wire_metadata() {
+        let valid = json!({"type":"function","name":"lookup","strict":true,"parameters":{
+            "type":"object","properties":{"nested":{"type":"object","properties":{
+                "value":{"type":["string","null"],"description":"An optional value"}
+            },"required":["value"],"additionalProperties":false}},
+            "required":["nested"],"additionalProperties":false,"description":"Host contract"
+        }});
+        let mut request = ResponsesRequest {
+            input: vec![],
+            instructions: String::new(),
+            tools: vec![valid.clone()].into(),
+            tools_allowed: None,
+            model: "test-model".into(),
+            pinned_effort: Effort::Low,
+            session_id: "gate".into(),
+        };
+        assert_eq!(request_body(&request).unwrap()["tools"][0], valid);
+        // Deserialization retains the same immutable admission result.
+        let restored: ResponsesRequest =
+            serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+        assert_eq!(request_body(&restored).unwrap()["tools"][0], valid);
+        for path in [
+            "root-required",
+            "nested-required",
+            "nested-properties",
+            "parameters",
+        ] {
+            let mut invalid = valid.clone();
+            match path {
+                "root-required" => {
+                    invalid["parameters"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("required");
+                }
+                "nested-required" => {
+                    invalid["parameters"]["properties"]["nested"]["required"] = json!([])
+                }
+                "nested-properties" => {
+                    invalid["parameters"]["properties"]["nested"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("additionalProperties");
+                }
+                "parameters" => invalid["parameters"] = json!({"type":"string"}),
+                _ => unreachable!(),
+            }
+            request.tools = vec![invalid].into();
+            assert!(
+                request_body(&request).is_err(),
+                "invalid {path} was serialized"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn request_gate_refuses_invalid_schema_before_authentication_access() {
+        #[derive(Clone)]
+        struct NoAuth;
+        impl Auth for NoAuth {
+            fn access(&self) -> Result<(String, String), TransportError> {
+                panic!("invalid schema must be refused before authentication");
+            }
+        }
+        let request = ResponsesRequest {
+            input: vec![], instructions:String::new(), tools:vec![json!({
+                "type":"function","name":"status","strict":true,
+                "parameters":{"type":"object","properties":{"view":{"type":"string"}},"additionalProperties":false}
+            })].into(),tools_allowed:None,model:"test-model".into(),pinned_effort:Effort::Low,session_id:"gate-before-auth".into()
+        };
+        assert!(matches!(
+            ResponsesClient::new(NoAuth).create(request).await,
+            Err(TransportError::Stream(_))
+        ));
     }
 
     #[test]
