@@ -54,5 +54,7 @@ export interface NodeWindowProps {
   readonly hostRun?: string
   /** Changes only for durable version, terminal, or delivered-output evidence. */
   readonly refreshKey?: string
+  /** Confirmed authorization loss from a current, protected history read. */
+  readonly onAuthExpired?: () => void
   readonly onClose: () => void
 }
