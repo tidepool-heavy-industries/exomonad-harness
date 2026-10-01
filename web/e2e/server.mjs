@@ -33,11 +33,11 @@ function receive(socket, message) {
     observations.commands.push(message);
     const {operation_id: id, command} = message;
     const receipt = config.receipt === 'none' ? null : config.receipt === 'admitted'
-      ? {commandId:id,target:command.target,outcome:'admitted',envelopeId:'fixture-envelope'}
+      ? {commandId:id,target:command.target,outcome:'admitted',envelopeId:'1'}
       : config.receipt === 'control_requested'
       ? {commandId:id,target:command.target,outcome:'control_requested',control:command.action}
       : {commandId:id,target:command.target,outcome:config.receipt,reason:'Deterministic fixture result'};
-    statuses.set(id, { operationId: id, command, state: receipt?.outcome === 'admitted' ? 'input_admitted' : receipt?.outcome ?? 'queued', envelopeId: null, receipt });
+    statuses.set(id, { operationId: id, command, state: receipt?.outcome === 'admitted' ? 'input_admitted' : receipt?.outcome ?? 'queued', envelopeId: receipt?.outcome === 'admitted' ? 1 : null, receipt });
     frame(socket, {type:'command.accepted',command_id:id});
     if (receipt) {
       config.snapshot.seq++;
@@ -46,7 +46,7 @@ function receive(socket, message) {
     }
   } else if (message.type === 'command') {
     observations.commands.push(message);
-    frame(socket, {type:'command.refused',reason:'Standalone fixture commands have no live provider.'});
+    frame(socket, {type:'command.refused',operation_id:null,code:'unavailable',reason:'Standalone fixture commands have no live provider.'});
   }
 }
 const server = createServer(async (request, response) => {
@@ -57,6 +57,7 @@ const server = createServer(async (request, response) => {
       const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : {};
       if (url.pathname === '/__fixture/reset') reset(body);
       if (url.pathname === '/__fixture/config') Object.assign(config, body);
+      if (url.pathname === '/__fixture/status') statuses.set(body.operationId, body);
       if (url.pathname === '/__fixture/frame') broadcast(body);
       if (url.pathname === '/__fixture/disconnect') for (const socket of sockets) socket.destroy();
       if (url.pathname === '/__fixture/snapshot') { config.snapshot = body; broadcast({type:'snapshot',snapshot:body}); }
@@ -70,16 +71,20 @@ const server = createServer(async (request, response) => {
     if (url.pathname.startsWith('/api/commands/')) {
       const id = decodeURIComponent(url.pathname.slice('/api/commands/'.length));
       observations.statusReads.push(id);
-      return json(response, statuses.get(id) ?? {}, statuses.has(id) ? 200 : 404);
+      const record = statuses.get(id);
+      if (config.statusDelay) await new Promise(r => setTimeout(r, config.statusDelay));
+      if (config.statusUnavailable) return json(response, {}, 503);
+      return json(response, record ?? {}, record ? 200 : 404);
     }
     if (url.pathname.startsWith('/api/history/')) {
       const id = decodeURIComponent(url.pathname.slice('/api/history/'.length));
       const offset = Number(url.searchParams.get('offset') ?? 0);
       observations.historyReads.push({id,offset});
       if (config.historyDelay) await new Promise(r => setTimeout(r, config.historyDelay));
+      if (config.historyStatus) return json(response, {}, config.historyStatus);
       if (config.historyUnavailable) return json(response, {error:'Fixture history unavailable'}, 503);
       const result = history(id, offset);
-      if (config.historyOversized && offset === 50) { result.items = []; result.nextOffset = null; result.oversizedItem = {position:50,hash:'large-hash',byteLen:3000000,skipOffset:51}; }
+      if (config.historyOversized && offset === 50) { result.items = []; result.nextOffset = null; result.oversizedItem = {position:50,hash:createHash('sha256').update('oversized-fixture').digest('hex'),byteLen:3000000,skipOffset:51}; }
       return json(response, result, result.oversizedItem ? 413 : 200);
     }
     if (url.pathname.startsWith('/api/')) return json(response, {error:'Fixture route not found'}, 404);

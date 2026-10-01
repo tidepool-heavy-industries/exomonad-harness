@@ -24,10 +24,11 @@ if [[ "$mode" == prepare ]]; then
 fi
 test -s web/dist/index.html || { echo "production assets are missing" >&2; exit 2; }
 (cd web && npm run check:browser)
-mkdir -p target/gui-browser
+export HARNESS_BROWSER_EVIDENCE_DIR="$repo_root/target/gui-browser/runs/$(date -u +%Y%m%dT%H%M%S)-$$"
+mkdir -p "$HARNESS_BROWSER_EVIDENCE_DIR"
 set +e
 (cd web && npm run test:browser)
 status=$?
 set -e
-node web/e2e/evidence.mjs "$status"
+node web/e2e/evidence.mjs "$status" "$HARNESS_BROWSER_EVIDENCE_DIR"
 exit "$status"
