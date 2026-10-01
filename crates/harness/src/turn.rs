@@ -1040,6 +1040,14 @@ async fn wait_until_exact<I: Into<MailboxSignal>>(
                 return WaitResumeExact::Job(operation.clone());
             }
         }
+        if *cancelled.borrow() || cancelled.has_changed().is_err() {
+            return WaitResumeExact::Cancelled;
+        }
+        // Ready unrelated events must not postpone an expired bound. This
+        // check also fences re-entry after Engine rejects a stale wake hint.
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            return WaitResumeExact::TimedOut;
+        }
         tokio::select! {
             biased;
             changed = cancelled.changed() => if changed.is_err() || *cancelled.borrow() {
@@ -1705,5 +1713,80 @@ mod tests {
         assert!(scheduler.next_ready().is_none());
         assert!(scheduler.finish(&first.id));
         assert_eq!(scheduler.next_ready().unwrap().id.0, "leaf");
+    }
+}
+
+#[cfg(test)]
+mod bounded_wait_tests {
+    use super::*;
+    use crate::mailbox::DurableMailboxWake;
+
+    #[tokio::test]
+    async fn expired_exact_wait_bound_cannot_be_starved_by_queued_wakes() {
+        let jobs = JobScheduler::new(1).unwrap();
+        let (_cancel, mut cancelled) = tokio::sync::watch::channel(false);
+        let (incoming, mut envelopes) = tokio::sync::mpsc::unbounded_channel();
+        for envelope_id in 0..100 {
+            incoming.send(DurableMailboxWake { envelope_id }).unwrap();
+        }
+        let result = wait_agent_and_drain_until_exact(
+            &mut envelopes,
+            &jobs,
+            &mut cancelled,
+            &[],
+            Some(tokio::time::Instant::now()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.resumed_by, WaitResumeExact::TimedOut);
+        assert_eq!(
+            envelopes.len(),
+            100,
+            "expired bound checked before wake re-entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_exact_wait_returns_under_continuous_unrelated_settlements() {
+        let jobs = JobScheduler::new(1).unwrap();
+        let (_cancel, mut cancelled) = tokio::sync::watch::channel(false);
+        let (_incoming, mut envelopes) = tokio::sync::mpsc::unbounded_channel::<MailboxSignal>();
+        let operation = OperationId {
+            origin: ConversationIdentity::Embedded {
+                run: "unrelated".into(),
+                actor: AgentPath("/other".into()),
+                incarnation: "one".into(),
+            },
+            request: RequestId("other".into()),
+            call: CallId("other".into()),
+        };
+        let events = jobs.events.clone();
+        let flood = tokio::spawn(async move {
+            loop {
+                for _ in 0..128 {
+                    let _ = events.send(operation.clone());
+                }
+                tokio::task::yield_now().await;
+            }
+        });
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            wait_agent_and_drain_until_exact(
+                &mut envelopes,
+                &jobs,
+                &mut cancelled,
+                &[],
+                Some(started + Duration::from_millis(10)),
+            ),
+        )
+        .await;
+        flood.abort();
+        let _ = flood.await;
+        let result = result
+            .expect("unrelated events must not starve deadline")
+            .unwrap();
+        assert_eq!(result.resumed_by, WaitResumeExact::TimedOut);
+        assert!(started.elapsed() >= Duration::from_millis(10));
     }
 }
