@@ -2900,6 +2900,7 @@ mod tests {
                 &Item(json!({
                     "type":"function_call_output","call_id":"call-B","output":"\"B output\""
                 })),
+                harness::store::TerminalOutcome::Success,
             )
             .unwrap();
         let tool_jobs = async_demo::ToolJobs::reopen([
@@ -4288,6 +4289,7 @@ mod tests {
                 &Item(json!({
                     "type":"function_call_output","call_id":"call-B","output":"{\"ok\":true}"
                 })),
+                harness::store::TerminalOutcome::Success,
             )
             .unwrap();
         assert_eq!(

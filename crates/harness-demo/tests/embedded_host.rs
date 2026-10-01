@@ -1215,6 +1215,7 @@ async fn checkpoint_conversations_keep_independent_children_after_origin_failure
             .write_output(
                 &operation,
                 &Item::tool_output(&call, ToolKind::Custom, &JobOutput::Interrupted),
+                harness::store::TerminalOutcome::Interrupted,
             )
             .unwrap(),
         4,

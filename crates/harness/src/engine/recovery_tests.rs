@@ -195,7 +195,11 @@ async fn engine_recovery_zero_row_interrupt_uses_durable_settlement_output() {
     }));
     assert_eq!(
         store
-            .settle_claims(&store.claims(&call).unwrap()[0].operation, &actual_output)
+            .settle_claims(
+                &store.claims(&call).unwrap()[0].operation,
+                &actual_output,
+                crate::store::TerminalOutcome::Success
+            )
             .unwrap(),
         1
     );
@@ -242,7 +246,11 @@ async fn engine_recovery_zero_row_interrupt_uses_durable_custom_settlement_outpu
     }));
     assert_eq!(
         store
-            .settle_claims(&store.claims(&call).unwrap()[0].operation, &actual_output)
+            .settle_claims(
+                &store.claims(&call).unwrap()[0].operation,
+                &actual_output,
+                crate::store::TerminalOutcome::Success
+            )
             .unwrap(),
         1
     );
@@ -524,7 +532,13 @@ async fn engine_recovering_reconciles_same_branch_ancestor_after_descendant_barr
     let prior_output = Item(json!({
         "type":"function_call_output", "call_id":call.0, "output":"\"prior completed\""
     }));
-    store.write_output(&prior_op, &prior_output).unwrap();
+    store
+        .write_output(
+            &prior_op,
+            &prior_output,
+            crate::store::TerminalOutcome::Success,
+        )
+        .unwrap();
     store.append_items(&prior, &[prior_output]).unwrap();
     store
         .write_request(

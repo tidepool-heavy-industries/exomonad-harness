@@ -2750,7 +2750,8 @@ mod tests {
             store
                 .write_output(
                     &store.claims(&cancelled).unwrap()[0].operation,
-                    &cancelled_output
+                    &cancelled_output,
+                    crate::store::TerminalOutcome::Cancelled
                 )
                 .unwrap(),
             1
@@ -2882,7 +2883,11 @@ mod tests {
         store.claim(&call, &head).unwrap();
         assert_eq!(
             store
-                .write_output(&store.claims(&call).unwrap()[0].operation, &output)
+                .write_output(
+                    &store.claims(&call).unwrap()[0].operation,
+                    &output,
+                    crate::store::TerminalOutcome::Success
+                )
                 .unwrap(),
             1
         );
@@ -4097,7 +4102,11 @@ mod tests {
         }));
         assert_eq!(
             store
-                .write_output(&store.claims(&call_id).unwrap()[0].operation, &output)
+                .write_output(
+                    &store.claims(&call_id).unwrap()[0].operation,
+                    &output,
+                    crate::store::TerminalOutcome::Success
+                )
                 .unwrap(),
             2
         );
@@ -4205,7 +4214,11 @@ mod tests {
             "output":"{\"settled_before_start\":true}"
         }));
         store
-            .write_output(&store.claims(&call_id).unwrap()[0].operation, &output)
+            .write_output(
+                &store.claims(&call_id).unwrap()[0].operation,
+                &output,
+                crate::store::TerminalOutcome::Success,
+            )
             .unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let replay = Replay {

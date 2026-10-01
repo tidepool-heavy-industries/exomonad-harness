@@ -40,6 +40,22 @@ latest issuing-surface event. Neither query decodes unrelated history or
 completed replay payloads. Host admission, operation identity and original
 request/call IDs remain independent checks.
 
+Schema `8` retains the typed terminal outcome on each settled claim alongside
+its output hash, in the same transaction. Success stores only a discriminant;
+the existing immutable Item owns its payload. Failure retains `ToolFailure`,
+while cancellation, interruption and unconfirmed cancellation remain distinct.
+Raw output writers must supply an explicit `TerminalOutcome`. Completion
+acknowledgment and replay read this same authority; the former
+`operation_output` event is no longer written or used to decide completion.
+Inherited claimants must retain identical output and terminal evidence.
+
+Older schemas open through an additive migration. Their settled rows have no
+terminal marker: typed replay returns `UnsupportedReplayOutcome`, preserving
+their original Item bytes rather than interpreting an `error` key as failure
+or silently treating an unknown result as success. Ordinary diagnostic Item
+reads remain available. Successful tool payloads containing `error` or
+`failure` fields remain successful.
+
 Offline tests compare normalized issued requests after reopening, preserve
 projected/injected and unknown fields, reject old formats without modifying
 bytes, check transaction rollback and validate duplicate/malformed calls. The

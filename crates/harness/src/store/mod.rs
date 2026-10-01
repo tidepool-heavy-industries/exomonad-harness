@@ -113,6 +113,20 @@ fn invocation_kind(c: &Connection, request: &RequestId, call: &CallId) -> Result
     Ok(validation::invocation_item(c, request, call)?.map(|item| item.input.kind()))
 }
 
+fn validate_replay_output(call: &CallId, kind: ToolKind, output: &Item) -> Result<()> {
+    let expected = match kind {
+        ToolKind::Function => "function_call_output",
+        ToolKind::Custom => "custom_tool_call_output",
+    };
+    if output.0["type"] != expected || output.0["call_id"] != call.0 {
+        return Err(StoreError::ReplayOutputKindMismatch {
+            call_id: call.0.clone(),
+            expected: kind,
+        });
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Request {
     pub id: RequestId,
@@ -1560,16 +1574,7 @@ impl Store {
             return Ok(None);
         };
         let output: Item = serde_json::from_str(&raw)?;
-        let expected = match kind {
-            ToolKind::Function => "function_call_output",
-            ToolKind::Custom => "custom_tool_call_output",
-        };
-        if output.0["type"] != expected || output.0["call_id"] != operation.call.0 {
-            return Err(StoreError::ReplayOutputKindMismatch {
-                call_id: operation.call.0.clone(),
-                expected: kind,
-            });
-        }
+        validate_replay_output(&operation.call, kind, &output)?;
         Ok(Some(output))
     }
     /// Diagnostic lookup; refuses collisions instead of choosing an operation.
@@ -1961,16 +1966,7 @@ impl Store {
                 request: operation.request.0.clone(),
                 call_id: operation.call.0.clone(),
             })?;
-        let expected = match kind {
-            ToolKind::Function => "function_call_output",
-            ToolKind::Custom => "custom_tool_call_output",
-        };
-        if output.0["type"] != expected || output.0["call_id"] != operation.call.0 {
-            return Err(StoreError::ReplayOutputKindMismatch {
-                call_id: operation.call.0.clone(),
-                expected: kind,
-            });
-        }
+        validate_replay_output(&operation.call, kind, &output)?;
         let mut c = self.lock();
         let tx = c.transaction()?;
         let h = Self::put_item_tx(&tx, output)?;
@@ -2257,8 +2253,12 @@ mod tests {
             )
             .unwrap();
             s.claim(&call, &root).unwrap();
-            s.write_output(&s.claims(&call).unwrap()[0].operation, &output)
-                .unwrap();
+            s.write_output(
+                &s.claims(&call).unwrap()[0].operation,
+                &output,
+                crate::store::TerminalOutcome::Success,
+            )
+            .unwrap();
             s.append_items(&next, std::slice::from_ref(&output))
                 .unwrap();
             s.record_replay_turn(
@@ -2325,12 +2325,14 @@ mod tests {
                 .write_output(
                     &store.claims(&custom_call).unwrap()[0].operation,
                     &custom_output,
+                    crate::store::TerminalOutcome::Success,
                 )
                 .unwrap();
             assert!(matches!(
                 store.write_output(
                     &store.claims(&mismatch_call).unwrap()[0].operation,
-                    &wrong_output
+                    &wrong_output,
+                    crate::store::TerminalOutcome::Success
                 ),
                 Err(StoreError::ReplayOutputKindMismatch { .. })
             ));
@@ -2376,7 +2378,11 @@ mod tests {
         store.append_items(&root, &[call_item]).unwrap();
         store.claim(&call, &child).unwrap();
         assert!(matches!(
-            store.write_output(&store.claims(&call).unwrap()[0].operation, &output),
+            store.write_output(
+                &store.claims(&call).unwrap()[0].operation,
+                &output,
+                crate::store::TerminalOutcome::Success
+            ),
             Err(StoreError::MissingCheckpointCall { .. })
         ));
 
@@ -2411,7 +2417,11 @@ mod tests {
             .unwrap();
         store.claim(&call, &request).unwrap();
         store
-            .write_output(&store.claims(&call).unwrap()[0].operation, &output)
+            .write_output(
+                &store.claims(&call).unwrap()[0].operation,
+                &output,
+                crate::store::TerminalOutcome::Success,
+            )
             .unwrap();
 
         assert_eq!(store.replay_output(&call).unwrap(), Some(output));
@@ -2528,8 +2538,12 @@ mod tests {
                 serde_json::json!({"type":"function_call_output","call_id":"c1","output":"ok"}),
             );
             assert_eq!(
-                s.settle_claims(&s.claims(&cid).unwrap()[0].operation, &output)
-                    .unwrap(),
+                s.settle_claims(
+                    &s.claims(&cid).unwrap()[0].operation,
+                    &output,
+                    crate::store::TerminalOutcome::Success
+                )
+                .unwrap(),
                 1
             );
             assert_eq!(s.claims(&cid).unwrap()[0].state, ClaimState::Settled);
@@ -2758,7 +2772,7 @@ mod tests {
             );
             let call = CallId("pending".into());
             assert_eq!(
-                s.write_output(&s.claims(&call).unwrap()[0].operation, &item(serde_json::json!({"type":"function_call_output","call_id":"pending","output":"{\"ok\":true}"})))
+                s.write_output(&s.claims(&call).unwrap()[0].operation, &item(serde_json::json!({"type":"function_call_output","call_id":"pending","output":"{\"ok\":true}"})), crate::store::TerminalOutcome::Success)
                     .unwrap(),
                 1
             );

@@ -183,6 +183,7 @@ fn custom_replay_output_and_claim_identity_survive_reopen() {
             .write_output(
                 &store.claims(&custom_call).unwrap()[0].operation,
                 &custom_output,
+                crate::store::TerminalOutcome::Success,
             )
             .unwrap();
         assert!(
@@ -194,6 +195,7 @@ fn custom_replay_output_and_claim_identity_survive_reopen() {
                         "call_id": mismatch_call.0,
                         "output": "{}"
                     })),
+                    crate::store::TerminalOutcome::Success,
                 )
                 .is_err()
         );
@@ -267,7 +269,11 @@ fn replay_uses_the_child_operation_for_a_repeated_call_id() {
         // the same CallId in its ancestor.
         store.claim(&call, &child).unwrap();
         store
-            .write_output(&store.claims(&call).unwrap()[0].operation, &output)
+            .write_output(
+                &store.claims(&call).unwrap()[0].operation,
+                &output,
+                crate::store::TerminalOutcome::Success,
+            )
             .unwrap();
     }
     {
@@ -306,6 +312,7 @@ fn replay_rejects_duplicate_call_items_in_claim_request() {
             &recovery_item(serde_json::json!({
                 "type":"custom_tool_call_output","call_id":call.0,"output":"ambiguous"
             })),
+            crate::store::TerminalOutcome::Success,
         ),
         Err(StoreError::AmbiguousReplayCall { .. })
     ));
@@ -342,6 +349,7 @@ fn replay_rejects_ambiguous_claims_across_agent_branches() {
             &recovery_item(serde_json::json!({
                 "type":"custom_tool_call_output","call_id":call.0,"output":"result"
             })),
+            crate::store::TerminalOutcome::Success,
         )
         .unwrap();
     assert_eq!(
@@ -414,7 +422,11 @@ fn wave18_reopen_interrupts_pending_call_once() {
         assert_eq!(store.interrupt_claim(&call, &request).unwrap(), 0);
         assert_eq!(
             store
-                .settle_claims(&store.claims(&call).unwrap()[0].operation, &output)
+                .settle_claims(
+                    &store.claims(&call).unwrap()[0].operation,
+                    &output,
+                    crate::store::TerminalOutcome::Success
+                )
                 .unwrap(),
             0
         );

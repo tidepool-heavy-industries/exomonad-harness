@@ -200,7 +200,11 @@ mod tests {
                 .unwrap();
             store.claim(&call_id, &root).unwrap();
             store
-                .write_output(&store.claims(&call_id).unwrap()[0].operation, &output)
+                .write_output(
+                    &store.claims(&call_id).unwrap()[0].operation,
+                    &output,
+                    crate::store::TerminalOutcome::Success,
+                )
                 .unwrap();
 
             // Descendant-agent and Here-fork histories carry same-shaped
@@ -316,7 +320,11 @@ mod tests {
                 .unwrap();
             store.claim(&call, &request).unwrap();
             store
-                .write_output(&store.claims(&call).unwrap()[0].operation, &output)
+                .write_output(
+                    &store.claims(&call).unwrap()[0].operation,
+                    &output,
+                    crate::store::TerminalOutcome::Success,
+                )
                 .unwrap();
         }
         {
@@ -403,7 +411,13 @@ mod tests {
             .unwrap()
             .operation
             .clone();
-        store.write_output(&root_operation, &output).unwrap();
+        store
+            .write_output(
+                &root_operation,
+                &output,
+                crate::store::TerminalOutcome::Success,
+            )
+            .unwrap();
         assert_eq!(store.claims(&call).unwrap().len(), 3);
         let selected = store.replay_turns(&root).unwrap();
         assert_eq!(selected.len(), 1);
@@ -451,6 +465,7 @@ mod tests {
                     "call_id": call.0,
                     "output": "ambiguous invocation"
                 })),
+                crate::store::TerminalOutcome::Success,
             ),
             Err(StoreError::AmbiguousReplayCall { .. })
         ));
@@ -475,6 +490,7 @@ mod tests {
                         "call_id": "not-wrong-output-id",
                         "output": "mismatched output"
                     })),
+                    crate::store::TerminalOutcome::Success,
                 )
                 .is_err()
         );
@@ -500,6 +516,7 @@ mod tests {
                         "call_id": wrong_kind.0,
                         "output": "{}"
                     })),
+                    crate::store::TerminalOutcome::Success,
                 )
                 .is_err()
         );

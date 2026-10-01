@@ -6,7 +6,7 @@ use crate::{
     provider::ToolFailure,
     turn::JobOutput,
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,13 +87,22 @@ impl Store {
         &self,
         operation: &OperationId,
     ) -> Result<Option<RecordedToolOutput>> {
-        let terminal = exact_terminal(&self.lock(), operation)?;
+        let c = self.lock();
+        let Some(kind) = super::invocation_kind(&c, &operation.request, &operation.call)? else {
+            return Ok(None);
+        };
+        let terminal = exact_terminal(&c, operation)?;
         let Some((hash, terminal)) = terminal else {
             return Ok(None);
         };
-        let item = self
-            .replay_output_operation(operation)?
-            .ok_or_else(|| StoreError::MissingReplayItem(hash.0))?;
+        let raw: Option<String> = c
+            .query_row("SELECT json FROM items WHERE hash=?1", [&hash.0], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let raw = raw.ok_or_else(|| StoreError::MissingReplayItem(hash.0))?;
+        let item: Item = serde_json::from_str(&raw)?;
+        super::validate_replay_output(&operation.call, kind, &item)?;
         Ok(Some(RecordedToolOutput { item, terminal }))
     }
 
@@ -106,5 +115,200 @@ impl Store {
                 )
             }),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        item::ToolKind,
+        model::{CallId, RequestId},
+    };
+    use serde_json::json;
+
+    fn operation(store: &Store, request: &str) -> OperationId {
+        let request = RequestId(request.into());
+        store.create_request(&request, None, "/root").unwrap();
+        let call = CallId("same-wire-id".into());
+        store.append_items(&request, &[Item(json!({"type":"function_call","call_id":call.0,"name":"probe","arguments":"{}"}))]).unwrap();
+        store.claim(&call, &request).unwrap()
+    }
+
+    fn path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("harness-terminal-{}.sqlite", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn exact_terminal_outcomes_survive_reopen_without_interpreting_success_payloads() {
+        let path = path();
+        let outputs = [
+            JobOutput::Completed(Ok(
+                json!({"error":"successful business data","failure":{"opaque":true}}),
+            )),
+            JobOutput::Completed(Err(ToolFailure::with_metadata(
+                "failed",
+                json!({"class":"input_rejected","phase":"compile","cause":{"kind":"parser"}}),
+            ))),
+            JobOutput::Cancelled,
+            JobOutput::Interrupted,
+            JobOutput::CancellationUnconfirmed("owner still active".into()),
+        ];
+        let operations = {
+            let store = Store::open(&path).unwrap();
+            outputs
+                .iter()
+                .enumerate()
+                .map(|(index, output)| {
+                    let operation = operation(&store, &format!("request-{index}"));
+                    assert_eq!(
+                        store
+                            .write_job_output(&operation, ToolKind::Function, output)
+                            .unwrap(),
+                        1
+                    );
+                    operation
+                })
+                .collect::<Vec<_>>()
+        };
+        let store = Store::open(&path).unwrap();
+        for (operation, output) in operations.iter().zip(&outputs) {
+            let recorded = store
+                .replay_tool_output_operation(operation)
+                .unwrap()
+                .unwrap();
+            assert_eq!(recorded.terminal, TerminalOutcome::from(output));
+            assert_eq!(
+                recorded.item,
+                Item::tool_output(&operation.call, ToolKind::Function, output)
+            );
+            assert_eq!(
+                store.has_completed_output(operation).unwrap(),
+                matches!(output, JobOutput::Completed(_))
+            );
+        }
+        let success = store
+            .replay_tool_output_operation(&operations[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(success.terminal, TerminalOutcome::Success);
+        let wire: serde_json::Value =
+            serde_json::from_str(success.item.0["output"].as_str().unwrap()).unwrap();
+        assert_eq!(wire["error"], "successful business data");
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn schema_seven_unmarked_settlement_is_refused_without_changing_bytes() {
+        let path = path();
+        let (operation, before, hash) = {
+            let store = Store::open(&path).unwrap();
+            let operation = operation(&store, "old");
+            let output = JobOutput::Completed(Ok(json!({"error":"unclassified legacy payload"})));
+            store
+                .write_job_output(&operation, ToolKind::Function, &output)
+                .unwrap();
+            let item = store.replay_output_operation(&operation).unwrap().unwrap();
+            let hash = store.claims_for_operation(&operation).unwrap()[0]
+                .output
+                .clone()
+                .unwrap();
+            let before: String = store
+                .lock()
+                .query_row("SELECT json FROM items WHERE hash=?1", [&hash.0], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(item.0["call_id"], operation.call.0);
+            store.lock().execute_batch("ALTER TABLE claims DROP COLUMN terminal_json; UPDATE schema_version SET version=7;").unwrap();
+            (operation, before, hash)
+        };
+        let store = Store::open(&path).unwrap();
+        assert!(
+            matches!(store.replay_tool_output_operation(&operation),Err(StoreError::UnsupportedReplayOutcome {operation: missing}) if missing==operation)
+        );
+        assert!(store.replay_output_operation(&operation).unwrap().is_some());
+        let after: String = store
+            .lock()
+            .query_row("SELECT json FROM items WHERE hash=?1", [&hash.0], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(before, after);
+        let version: u32 = store
+            .lock()
+            .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 8);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn terminal_settlement_failure_rolls_back_hash_state_and_outcome() {
+        let store = Store::memory().unwrap();
+        let operation = operation(&store, "rollback");
+        store.lock().execute_batch("CREATE TRIGGER reject_terminal BEFORE UPDATE ON claims WHEN NEW.terminal_json IS NOT NULL BEGIN SELECT RAISE(ABORT,'refuse terminal'); END;").unwrap();
+        let output = JobOutput::Completed(Err(ToolFailure::with_metadata(
+            "new failure",
+            json!({"class":"offline"}),
+        )));
+        let item = Item::tool_output(&operation.call, ToolKind::Function, &output);
+        let hash = ItemHash(
+            blake3::hash(&serde_json::to_vec(&item).unwrap())
+                .to_hex()
+                .to_string(),
+        );
+        assert!(
+            store
+                .write_job_output(&operation, ToolKind::Function, &output)
+                .is_err()
+        );
+        assert!(store.get_item(&hash).unwrap().is_none());
+        assert!(
+            store
+                .replay_tool_output_operation(&operation)
+                .unwrap()
+                .is_none()
+        );
+        let claim = &store.claims_for_operation(&operation).unwrap()[0];
+        assert_eq!(claim.state, super::super::ClaimState::Pending);
+        assert!(claim.output.is_none());
+    }
+
+    #[test]
+    fn conflicting_inherited_outcomes_refuse_instead_of_choosing_one_row() {
+        let store = Store::memory().unwrap();
+        let operation = operation(&store, "original");
+        store
+            .write_job_output(&operation, ToolKind::Function, &JobOutput::Cancelled)
+            .unwrap();
+        let child = RequestId("inherited".into());
+        store
+            .create_request(&child, Some(&operation.request), "/root/child")
+            .unwrap();
+        store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash,terminal_json) SELECT origin,origin_request_id,call_id,?1,state,output_hash,terminal_json FROM claims WHERE request_id=?2",params![child.0,operation.request.0]).unwrap();
+        assert_eq!(
+            store
+                .replay_tool_output_operation(&operation)
+                .unwrap()
+                .unwrap()
+                .terminal,
+            TerminalOutcome::Cancelled
+        );
+        store
+            .lock()
+            .execute(
+                "UPDATE claims SET terminal_json=?1 WHERE request_id=?2",
+                params![
+                    serde_json::to_string(&TerminalOutcome::Success).unwrap(),
+                    child.0
+                ],
+            )
+            .unwrap();
+        assert!(
+            matches!(store.replay_tool_output_operation(&operation),Err(StoreError::ConflictingReplayOutcome {operation: conflicting}) if conflicting==operation)
+        );
     }
 }

@@ -697,7 +697,9 @@ mod tests {
         let output = item(json!({
             "type":"function_call_output", "call_id":call.0, "output":"\"first\""
         }));
-        store.write_output(&first_op, &output).unwrap();
+        store
+            .write_output(&first_op, &output, crate::store::TerminalOutcome::Success)
+            .unwrap();
         store.append_items(&first, &[output]).unwrap();
         store
             .create_request(&second, Some(&first), &root.0)
@@ -871,7 +873,11 @@ mod tests {
         let output =
             item(json!({"type":"custom_tool_call_output","call_id":raw.0,"output":"done"}));
         store
-            .settle_claims(&store.claims(&raw).unwrap()[0].operation, &output)
+            .settle_claims(
+                &store.claims(&raw).unwrap()[0].operation,
+                &output,
+                crate::store::TerminalOutcome::Success,
+            )
             .unwrap();
         assert!(
             store
@@ -1255,7 +1261,11 @@ mod tests {
         let cancelled = Item::tool_output(&call, ToolKind::Function, &JobOutput::Cancelled);
         assert_eq!(
             store
-                .write_output(&store.claims(&call).unwrap()[0].operation, &cancelled)
+                .write_output(
+                    &store.claims(&call).unwrap()[0].operation,
+                    &cancelled,
+                    crate::store::TerminalOutcome::Cancelled
+                )
                 .unwrap(),
             2
         );
