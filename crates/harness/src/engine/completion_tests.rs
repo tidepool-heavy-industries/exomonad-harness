@@ -344,6 +344,7 @@ async fn synthetic_settlement_never_acknowledges_completed_execution() {
 
 #[derive(Clone)]
 struct StalledTransport {
+    reject_successor: Option<bool>,
     round: Arc<AtomicUsize>,
     stalled: Arc<Notify>,
     release: Arc<Notify>,
@@ -360,8 +361,20 @@ impl ResponsesTransport for StalledTransport {
                 json!({"type":"function_call", "call_id":"stalled-work", "name":"work", "arguments":"{}"}),
             )]
         } else {
-            self.stalled.notify_one();
-            self.release.notified().await;
+            if round == 1 {
+                self.stalled.notify_one();
+                self.release.notified().await;
+                if let Some(authentication) = self.reject_successor {
+                    return Err(if authentication {
+                        TransportError::Authentication
+                    } else {
+                        TransportError::Http {
+                            status: 400,
+                            diagnostic: None,
+                        }
+                    });
+                }
+            }
             vec![Item(json!({
                 "type":"message", "role":"assistant", "phase":"final_answer",
                 "content":[{"type":"output_text","text":"done"}]
@@ -381,6 +394,7 @@ async fn completed_tool_is_acknowledged_while_successor_provider_response_is_sta
     let provider = CompletionProvider::new(store.clone(), false, false);
     provider.paused.store(true, Ordering::SeqCst);
     let transport = StalledTransport {
+        reject_successor: None,
         round: Arc::new(AtomicUsize::new(0)),
         stalled: Arc::new(Notify::new()),
         release: Arc::new(Notify::new()),
@@ -449,4 +463,139 @@ async fn completed_tool_is_acknowledged_while_successor_provider_response_is_sta
     );
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.committed.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn rejection_recovery_replays_settled_ancestor_output_once_without_reexecuting_tool() {
+    for authentication in [false, true] {
+        let store = Arc::new(Store::memory().unwrap());
+        let provider = CompletionProvider::new(store.clone(), false, false);
+        provider.paused.store(true, Ordering::SeqCst);
+        let transport = StalledTransport {
+            reject_successor: Some(authentication),
+            round: Arc::new(AtomicUsize::new(0)),
+            stalled: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            inputs: Arc::new(Mutex::new(Vec::new())),
+        };
+        let base = engine(store.clone(), provider.clone(), "/root");
+        let runtime = Arc::new(Engine::<TestAuth, _, _>::with_transport(
+            transport.clone(),
+            store.clone(),
+            base.scheduler.clone(),
+            provider.clone(),
+            base.config.clone(),
+        ));
+        let (_cancel, cancellation) = watch::channel(false);
+        let running = runtime.clone();
+        let first_cancellation = cancellation.clone();
+        let first_input = Item(json!({"type":"message","role":"user","content":"first input"}));
+        let first_input_clone = first_input.clone();
+        let task = tokio::spawn(async move {
+            running
+                .run(
+                    None,
+                    vec![first_input_clone],
+                    first_cancellation,
+                    empty_mailbox(),
+                )
+                .await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            transport.stalled.notified(),
+        )
+        .await
+        .unwrap();
+        provider.release.notify_one();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            provider.acknowledged.notified(),
+        )
+        .await
+        .unwrap();
+        let claim = store
+            .claims(&CallId("stalled-work".into()))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(claim.state, crate::store::ClaimState::Settled);
+        assert!(
+            !transport.inputs.lock().await[1]
+                .iter()
+                .any(|item| item.0["type"] == "function_call_output")
+        );
+        assert!(
+            !store
+                .items(&claim.request)
+                .unwrap()
+                .iter()
+                .any(|item| item.0["type"] == "function_call_output")
+        );
+        transport.release.notify_one();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        let EngineError::RequestRejected { head_request, .. } = error else {
+            panic!("unexpected failure: {error}")
+        };
+        assert_ne!(head_request, claim.request);
+        assert_eq!(
+            store.request(&head_request).unwrap().unwrap().parent,
+            Some(claim.request)
+        );
+        assert_eq!(transport.round.load(Ordering::SeqCst), 2);
+        let followup = Item(json!({"type":"message","role":"user","content":"explicit followup"}));
+        let completion = runtime
+            .run_recovering(
+                Some(head_request.clone()),
+                vec![followup.clone()],
+                cancellation,
+                empty_mailbox(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .request(&completion.head_request)
+                .unwrap()
+                .unwrap()
+                .parent,
+            Some(head_request)
+        );
+        let inputs = transport.inputs.lock().await;
+        assert_eq!(inputs.len(), 3);
+        assert_eq!(
+            inputs[2]
+                .iter()
+                .filter(|item| item.0["type"] == "function_call_output"
+                    && item.0["call_id"] == "stalled-work"
+                    && item.0["output"] == "\"result\"")
+                .count(),
+            1
+        );
+        for user_input in [first_input, followup] {
+            assert_eq!(
+                inputs[2].iter().filter(|item| **item == user_input).count(),
+                1
+            );
+        }
+        assert_eq!(
+            completion
+                .transcript
+                .iter()
+                .filter(|item| item.0["type"] == "function_call_output"
+                    && item.0["call_id"] == "stalled-work")
+                .count(),
+            1
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.committed.lock().await.len(), 1);
+        assert_eq!(
+            store.claims(&CallId("stalled-work".into())).unwrap().len(),
+            1
+        );
+    }
 }
