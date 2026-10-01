@@ -1,6 +1,7 @@
 use super::*;
 use crate::embedding::{
-    BindingSuccessorAuthority, BindingSuccessorCommit, EmbeddedError, HostIdentity,
+    BindingInitialAuthority, BindingSuccessorAuthority, BindingSuccessorCommit, EmbeddedError,
+    HostIdentity,
 };
 
 pub(crate) enum CommandInputAdmission {
@@ -25,6 +26,40 @@ fn matches_binding(
     )
     .optional()?
     .is_some_and(|(run, incarnation)| run == identity.run && incarnation == identity.incarnation))
+}
+
+/// ApplicationBound may be fsynced immediately after this owner returns. Confirm
+/// the binding's SQLite durability even when an exact retry writes no new rows.
+/// Ordinary request/event transactions retain the connection's original mode.
+fn durable_binding_transaction<T>(
+    connection: &mut Connection,
+    action: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, EmbeddedError>,
+) -> std::result::Result<T, EmbeddedError> {
+    let original: i64 = connection.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+    connection.pragma_update(None, "synchronous", "FULL")?;
+    let result = (|| {
+        let tx = connection.transaction()?;
+        let result = action(&tx)?;
+        tx.commit()?;
+        let (busy, pages, checkpointed): (i64, i64, i64) =
+            connection.query_row("PRAGMA wal_checkpoint(FULL)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+        if busy != 0 || pages != checkpointed {
+            return Err(EmbeddedError::Binding(
+                "binding committed but WAL durability confirmation is unavailable".into(),
+            ));
+        }
+        Ok(result)
+    })();
+    let restored = connection.pragma_update(None, "synchronous", original);
+    match (result, restored) {
+        (result, Ok(())) => result,
+        (Ok(_), Err(error)) => Err(error.into()),
+        (Err(primary), Err(error)) => Err(EmbeddedError::Binding(format!(
+            "{primary}; restoring binding durability mode failed: {error}"
+        ))),
+    }
 }
 
 impl Store {
@@ -76,6 +111,9 @@ impl Store {
 
     /// Transfer only the existing exact binding. Historical inputs and command
     /// receipts keep their original identities; this does not enqueue work.
+    /// FULL commit and WAL checkpoint confirmation precede success, including
+    /// exact retries. An error can leave the successor visible; retry this same
+    /// authorized transition to confirm durability before publishing attachment.
     pub fn transfer_embedded_binding(
         &self,
         predecessor: &HostIdentity,
@@ -94,33 +132,33 @@ impl Store {
             ));
         }
         let mut connection = self.lock();
-        let tx = connection.transaction()?;
-        if !authority
-            .validate_successor(predecessor, successor)
-            .map_err(EmbeddedError::Host)?
-        {
-            return Err(EmbeddedError::Binding(
-                "successor binding lacks retained run and journal authority".into(),
-            ));
-        }
-        let outcome = if matches_binding(&tx, successor)? {
-            BindingSuccessorCommit::AlreadyInstalled
-        } else if matches_binding(&tx, predecessor)? {
-            let changed = tx.execute("UPDATE embedded_bindings SET incarnation=?1 WHERE agent_path=?2 AND run_id=?3 AND incarnation=?4",
-                params![successor.incarnation, predecessor.actor.0, predecessor.run, predecessor.incarnation])?;
-            if changed != 1 {
+        durable_binding_transaction(&mut connection, |tx| {
+            if !authority
+                .validate_successor(predecessor, successor)
+                .map_err(EmbeddedError::Host)?
+            {
                 return Err(EmbeddedError::Binding(
-                    "successor binding compare-and-swap lost its exact predecessor".into(),
+                    "successor binding lacks retained run and journal authority".into(),
                 ));
             }
-            BindingSuccessorCommit::Installed
-        } else {
-            return Err(EmbeddedError::Binding(
-                "successor binding conflicts with its exact predecessor".into(),
-            ));
-        };
-        tx.commit()?;
-        Ok(outcome)
+            let outcome = if matches_binding(tx, successor)? {
+                BindingSuccessorCommit::AlreadyInstalled
+            } else if matches_binding(tx, predecessor)? {
+                let changed = tx.execute("UPDATE embedded_bindings SET incarnation=?1 WHERE agent_path=?2 AND run_id=?3 AND incarnation=?4",
+                params![successor.incarnation, predecessor.actor.0, predecessor.run, predecessor.incarnation])?;
+                if changed != 1 {
+                    return Err(EmbeddedError::Binding(
+                        "successor binding compare-and-swap lost its exact predecessor".into(),
+                    ));
+                }
+                BindingSuccessorCommit::Installed
+            } else {
+                return Err(EmbeddedError::Binding(
+                    "successor binding conflicts with its exact predecessor".into(),
+                ));
+            };
+            Ok(outcome)
+        })
     }
 
     /// Readback is evidence, not admission or authority to create a host.
@@ -136,48 +174,81 @@ impl Store {
         identity: &HostIdentity,
         parent: Option<&AgentPath>,
     ) -> std::result::Result<(), EmbeddedError> {
+        self.bind_embedded_actor_authorized(identity, parent, None)
+    }
+
+    /// Bind retained startup intent without attaching a Conversation or admitting
+    /// live actor work. Exact retries validate authority again and preserve history.
+    /// Binding writes use FULL commit and WAL checkpoint confirmation, then restore
+    /// the ordinary connection mode. A visible binding after error is insufficient
+    /// attachment evidence: repeat this exact authorized call until it succeeds.
+    pub fn bind_initial_embedded_binding(
+        &self,
+        identity: &HostIdentity,
+        parent: Option<&AgentPath>,
+        authority: &dyn BindingInitialAuthority,
+    ) -> std::result::Result<(), EmbeddedError> {
+        self.bind_embedded_actor_authorized(identity, parent, Some(authority))
+    }
+
+    fn bind_embedded_actor_authorized(
+        &self,
+        identity: &HostIdentity,
+        parent: Option<&AgentPath>,
+        authority: Option<&dyn BindingInitialAuthority>,
+    ) -> std::result::Result<(), EmbeddedError> {
         if identity.run.is_empty() || identity.incarnation.is_empty() {
             return Err(EmbeddedError::Binding("empty run or incarnation".into()));
         }
         Self::validate_agent_path(&identity.actor.0, parent.map(|p| p.0.as_str()))?;
         let mut connection = self.lock();
-        let tx = connection.transaction()?;
-        let bound: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM embedded_bindings WHERE agent_path=?1)",
-            [&identity.actor.0],
-            |r| r.get(0),
-        )?;
-        if bound {
-            if !matches_binding(&tx, identity)? {
-                return Err(EmbeddedError::Binding(
-                    "actor path belongs to another run/incarnation".into(),
-                ));
-            }
-        } else {
-            let existing: Option<String> = tx
-                .query_row(
-                    "SELECT fork_source FROM agents WHERE path=?1",
-                    [&identity.actor.0],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if let Some(source) = existing {
-                let source: serde_json::Value = serde_json::from_str(&source)?;
-                if source["kind"] != "checkpoint" {
+        durable_binding_transaction(&mut connection, |tx| {
+            if let Some(authority) = authority {
+                if !authority
+                    .validate_initial_binding(identity)
+                    .map_err(EmbeddedError::Host)?
+                {
                     return Err(EmbeddedError::Binding(
-                        "existing standalone actor cannot become an embedded actor".into(),
+                        "initial binding lacks retained run and startup authority".into(),
+                    ));
+                }
+            }
+            let bound: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM embedded_bindings WHERE agent_path=?1)",
+                [&identity.actor.0],
+                |r| r.get(0),
+            )?;
+            if bound {
+                if !matches_binding(tx, identity)? {
+                    return Err(EmbeddedError::Binding(
+                        "actor path belongs to another run/incarnation".into(),
                     ));
                 }
             } else {
-                tx.execute("INSERT INTO agents(path,parent_path,head_request,contract,fork_source,state,created_at) VALUES (?1,?2,NULL,'{}',?3,'active',?4)", params![identity.actor.0,parent.map(|p|p.0.as_str()),serde_json::to_string(&serde_json::json!({"kind":"embedded"}))?,utc_millis()])?;
-            }
-            tx.execute(
+                let existing: Option<String> = tx
+                    .query_row(
+                        "SELECT fork_source FROM agents WHERE path=?1",
+                        [&identity.actor.0],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if let Some(source) = existing {
+                    let source: serde_json::Value = serde_json::from_str(&source)?;
+                    if source["kind"] != "checkpoint" {
+                        return Err(EmbeddedError::Binding(
+                            "existing standalone actor cannot become an embedded actor".into(),
+                        ));
+                    }
+                } else {
+                    tx.execute("INSERT INTO agents(path,parent_path,head_request,contract,fork_source,state,created_at) VALUES (?1,?2,NULL,'{}',?3,'active',?4)", params![identity.actor.0,parent.map(|p|p.0.as_str()),serde_json::to_string(&serde_json::json!({"kind":"embedded"}))?,utc_millis()])?;
+                }
+                tx.execute(
                 "INSERT INTO embedded_bindings(agent_path,run_id,incarnation) VALUES (?1,?2,?3)",
                 params![identity.actor.0, identity.run, identity.incarnation],
             )?;
-        }
-        tx.commit()?;
-        Ok(())
+            }
+            Ok(())
+        })
     }
 
     pub(crate) fn admit_embedded_input(
@@ -278,6 +349,182 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct InitialAuthority(HostIdentity);
+    impl BindingInitialAuthority for InitialAuthority {
+        fn validate_initial_binding(
+            &self,
+            identity: &HostIdentity,
+        ) -> std::result::Result<bool, String> {
+            Ok(identity == &self.0)
+        }
+    }
+
+    fn root_identity() -> HostIdentity {
+        HostIdentity {
+            run: "run".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "1".into(),
+        }
+    }
+
+    #[test]
+    fn initial_binding_requires_exact_authority_and_retries_without_live_work() {
+        let root =
+            std::env::temp_dir().join(format!("harness-binding-initial-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("store.sqlite");
+        let store = Store::open(&path).unwrap();
+        let identity = root_identity();
+        let foreign = HostIdentity {
+            run: "foreign".into(),
+            ..identity.clone()
+        };
+        assert!(
+            store
+                .bind_initial_embedded_binding(&identity, None, &InitialAuthority(foreign.clone()))
+                .is_err()
+        );
+        assert!(!store.embedded_binding_matches(&identity).unwrap());
+        store
+            .bind_initial_embedded_binding(&identity, None, &InitialAuthority(identity.clone()))
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        store
+            .bind_initial_embedded_binding(&identity, None, &InitialAuthority(identity.clone()))
+            .unwrap();
+        for other in [
+            foreign,
+            HostIdentity {
+                incarnation: "2".into(),
+                ..identity.clone()
+            },
+        ] {
+            assert!(
+                store
+                    .bind_initial_embedded_binding(&other, None, &InitialAuthority(other.clone()))
+                    .is_err()
+            );
+        }
+        assert!(
+            store
+                .bind_initial_embedded_binding(
+                    &identity,
+                    None,
+                    &InitialAuthority(HostIdentity {
+                        incarnation: "revoked".into(),
+                        ..identity.clone()
+                    })
+                )
+                .is_err()
+        );
+        assert!(store.embedded_binding_matches(&identity).unwrap());
+        let c = store.lock();
+        for table in ["requests", "envelopes", "embedded_commands"] {
+            let count: i64 = c
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "binding created live work in {table}");
+        }
+        drop(c);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+        let standalone = Store::memory().unwrap();
+        standalone.lock().execute("INSERT INTO agents(path,parent_path,contract,fork_source,state,created_at) VALUES('/root',NULL,'{}','{}','active',0)",[]).unwrap();
+        assert!(
+            standalone
+                .bind_initial_embedded_binding(&identity, None, &InitialAuthority(identity.clone()))
+                .is_err()
+        );
+        assert!(!standalone.embedded_binding_matches(&identity).unwrap());
+    }
+
+    #[test]
+    fn binding_durability_mode_restores_after_success_refusal_and_sql_failure() {
+        let store = Store::memory().unwrap();
+        let mut c = store.lock();
+        for original in [1, 2] {
+            c.pragma_update(None, "synchronous", original).unwrap();
+            for failure in [0, 1, 2] {
+                let result = durable_binding_transaction(&mut c, |tx| {
+                    let current: i64 =
+                        tx.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+                    assert_eq!(current, 2);
+                    match failure {
+                        0 => Ok(()),
+                        1 => Err(EmbeddedError::Binding("authority refused".into())),
+                        _ => {
+                            tx.execute("INSERT INTO missing_binding_table VALUES(1)", [])?;
+                            Ok(())
+                        }
+                    }
+                });
+                assert_eq!(result.is_ok(), failure == 0);
+                let restored: i64 = c
+                    .pragma_query_value(None, "synchronous", |row| row.get(0))
+                    .unwrap();
+                assert_eq!(restored, original);
+            }
+        }
+    }
+
+    #[test]
+    fn busy_binding_confirmation_requires_exact_retry_and_restores_normal_mode() {
+        let root =
+            std::env::temp_dir().join(format!("harness-binding-busy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("store.sqlite");
+        let store = Store::open(&path).unwrap();
+        store
+            .lock()
+            .busy_timeout(std::time::Duration::ZERO)
+            .unwrap();
+        let old = root_identity();
+        let new = HostIdentity {
+            incarnation: "2".into(),
+            ..old.clone()
+        };
+        store
+            .bind_initial_embedded_binding(&old, None, &InitialAuthority(old.clone()))
+            .unwrap();
+        let reader = Connection::open(&path).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT COUNT(*) FROM embedded_bindings;")
+            .unwrap();
+        assert!(
+            store
+                .transfer_embedded_binding(&old, &new, &TransferAuthority(true))
+                .is_err()
+        );
+        assert!(store.embedded_binding_matches(&new).unwrap());
+        let mode: i64 = store
+            .lock()
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, 1);
+        drop(reader);
+        assert_eq!(
+            store
+                .transfer_embedded_binding(&old, &new, &TransferAuthority(true))
+                .unwrap(),
+            BindingSuccessorCommit::AlreadyInstalled
+        );
+        assert_eq!(
+            store
+                .lock()
+                .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert!(store.embedded_binding_matches(&new).unwrap());
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     struct TransferAuthority(bool);
     impl BindingSuccessorAuthority for TransferAuthority {

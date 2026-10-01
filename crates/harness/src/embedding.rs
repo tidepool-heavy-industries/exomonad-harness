@@ -39,8 +39,15 @@ pub struct HostIdentity {
     pub incarnation: String,
 }
 
+/// Native composition retains an admitted startup intent and the run lease.
+/// Validation runs under the Store binding transaction and must not reenter Store.
+pub trait BindingInitialAuthority: Send + Sync {
+    fn validate_initial_binding(&self, identity: &HostIdentity) -> Result<bool, String>;
+}
+
 /// Native composition retains the actual run lease and latest journal proof.
 /// Serialized identity fields alone never authorize replacing a live binding.
+/// Validation runs under the Store binding transaction and must not reenter Store.
 pub trait BindingSuccessorAuthority: Send + Sync {
     fn validate_successor(
         &self,
