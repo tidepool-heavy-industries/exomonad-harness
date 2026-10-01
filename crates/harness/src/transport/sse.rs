@@ -48,6 +48,8 @@ impl ResponseAssembly {
                 self.completed = Some((
                     id.to_owned(),
                     Usage {
+                        reported: usage.get("input_tokens").and_then(Value::as_u64).is_some()
+                            && usage.get("output_tokens").and_then(Value::as_u64).is_some(),
                         input_tokens: usage
                             .get("input_tokens")
                             .and_then(Value::as_u64)

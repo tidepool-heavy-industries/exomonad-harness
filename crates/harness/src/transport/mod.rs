@@ -27,6 +27,9 @@ pub struct ResponsesRequest {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Usage {
+    /// True only when both input and output counters were reported.
+    #[serde(default)]
+    pub reported: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_tokens: u64,

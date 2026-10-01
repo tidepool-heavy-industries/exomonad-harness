@@ -3635,6 +3635,7 @@ mod tests {
                     "content":[{"type":"output_text","text":"offline engine answer"}]
                 }))],
                 usage: Usage {
+                    reported: true,
                     input_tokens: 12,
                     output_tokens: 4,
                     cached_tokens: 0,

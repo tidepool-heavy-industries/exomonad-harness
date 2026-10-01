@@ -58,10 +58,73 @@ pub fn tool_schema_from_result_schema(result_schema: Value) -> Result<Value, Fin
 /// Convert schemars' schema to the conservative subset accepted by strict
 /// Responses tools. Unknown validation keywords are rejected rather than
 /// discarded, since dropping them could silently broaden the reply contract.
-fn normalize_schema(schema: Value, path: &str) -> Result<Value, FinalizeError> {
+pub(crate) fn normalize_schema(schema: Value, path: &str) -> Result<Value, FinalizeError> {
     let object = schema
         .as_object()
         .ok_or_else(|| unsupported(path, "schema must be an object"))?;
+    if let Some(variants) = object.get("oneOf") {
+        if object.keys().any(|key| {
+            !["oneOf", "title", "description", "$schema", "$defs"].contains(&key.as_str())
+        }) {
+            return Err(unsupported(path, "unsupported union keyword"));
+        }
+        let variants = variants
+            .as_array()
+            .filter(|variants| !variants.is_empty())
+            .ok_or_else(|| unsupported(path, "oneOf requires nonempty variants"))?;
+        let mut tags = std::collections::HashSet::new();
+        let mut normalized = Vec::new();
+        for (index, variant) in variants.iter().enumerate() {
+            let tag = variant["properties"]["tag"]["enum"]
+                .as_array()
+                .filter(|values| values.len() == 1)
+                .and_then(|values| values[0].as_str())
+                .ok_or_else(|| unsupported(path, "oneOf requires disjoint singleton tags"))?;
+            if variant["type"] != "object"
+                || !tags.insert(tag)
+                || !variant["required"]
+                    .as_array()
+                    .is_some_and(|required| required.iter().any(|field| field == "tag"))
+            {
+                return Err(unsupported(path, "oneOf requires distinct required tags"));
+            }
+            normalized.push(normalize_schema(
+                variant.clone(),
+                &format!("{path}.oneOf[{index}]"),
+            )?);
+        }
+        // Distinct required singleton tags make these variants disjoint, so
+        // anyOf has exactly the same acceptance set as the original oneOf.
+        return Ok(json!({"anyOf": normalized}));
+    }
+    if let Some(variants) = object.get("anyOf") {
+        if object.keys().any(|key| {
+            !["anyOf", "title", "description", "$schema", "$defs"].contains(&key.as_str())
+        }) {
+            return Err(unsupported(path, "unsupported union keyword"));
+        }
+        let variants = variants
+            .as_array()
+            .filter(|variants| !variants.is_empty())
+            .ok_or_else(|| unsupported(path, "anyOf requires nonempty variants"))?;
+        return Ok(
+            json!({"anyOf": variants.iter().enumerate().map(|(index, variant)|
+            normalize_schema(variant.clone(), &format!("{path}.anyOf[{index}]")))
+            .collect::<Result<Vec<_>, _>>()?}),
+        );
+    }
+    if let Some(types) = object.get("type").and_then(Value::as_array) {
+        let mut variants = Vec::new();
+        for variant in types {
+            let mut child = object.clone();
+            child.insert("type".into(), variant.clone());
+            variants.push(normalize_schema(Value::Object(child), path)?);
+        }
+        if variants.is_empty() {
+            return Err(unsupported(path, "empty type union"));
+        }
+        return Ok(json!({"anyOf": variants}));
+    }
     let schema_type = object
         .get("type")
         .and_then(Value::as_str)
@@ -87,9 +150,17 @@ fn normalize_schema(schema: Value, path: &str) -> Result<Value, FinalizeError> {
         // Refuse it rather than advertise a constraint the harness can bypass.
         "string" => &["type", "minLength", "maxLength", "enum", "const"],
         "boolean" => &["type", "enum", "const"],
-        "integer" | "number" => {
-            return Err(unsupported(path, format!("unsupported type {schema_type}")));
-        }
+        "null" => &["type"],
+        "integer" | "number" => &[
+            "type",
+            "minimum",
+            "maximum",
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+            "enum",
+            "const",
+            "format",
+        ],
         other => return Err(unsupported(path, format!("unsupported type {other}"))),
     };
     for key in object.keys() {
@@ -101,6 +172,24 @@ fn normalize_schema(schema: Value, path: &str) -> Result<Value, FinalizeError> {
         }
     }
 
+    for key in ["minLength", "maxLength", "minItems", "maxItems"] {
+        if object
+            .get(key)
+            .is_some_and(|value| value.as_u64().is_none())
+        {
+            return Err(unsupported(
+                path,
+                format!("{key} requires a nonnegative integer"),
+            ));
+        }
+    }
+    if object
+        .get("enum")
+        .is_some_and(|value| value.as_array().is_none_or(|values| values.is_empty()))
+    {
+        return Err(unsupported(path, "enum requires a nonempty array"));
+    }
+
     let mut normalized = Map::new();
     normalized.insert("type".into(), Value::String(schema_type.into()));
     match schema_type {
@@ -109,13 +198,42 @@ fn normalize_schema(schema: Value, path: &str) -> Result<Value, FinalizeError> {
                 .get("properties")
                 .and_then(Value::as_object)
                 .ok_or_else(|| unsupported(path, "object requires properties object"))?;
+            if object
+                .get("additionalProperties")
+                .is_some_and(|value| value != &Value::Bool(false))
+            {
+                return Err(unsupported(path, "open object properties are unsupported"));
+            }
+            if object.get("required").is_some_and(|value| {
+                value.as_array().is_none_or(|fields| {
+                    let mut names = std::collections::HashSet::new();
+                    fields.iter().any(|field| {
+                        field.as_str().is_none_or(|name| {
+                            !properties.contains_key(name) || !names.insert(name)
+                        })
+                    })
+                })
+            }) {
+                return Err(unsupported(
+                    path,
+                    "required must name distinct declared properties",
+                ));
+            }
             let mut normalized_properties = Map::new();
             for (name, property) in properties {
                 let property_path = format!("{path}.properties.{name}");
-                normalized_properties.insert(
-                    name.clone(),
-                    normalize_schema(property.clone(), &property_path)?,
-                );
+                let mut normalized_property = normalize_schema(property.clone(), &property_path)?;
+                if object
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .is_some_and(|required| {
+                        !required.iter().any(|field| field.as_str() == Some(name))
+                    })
+                    && validate_result(&Value::Null, &normalized_property, &property_path).is_err()
+                {
+                    normalized_property = json!({"anyOf":[normalized_property,{"type":"null"}]});
+                }
+                normalized_properties.insert(name.clone(), normalized_property);
             }
             normalized.insert(
                 "required".into(),
@@ -140,7 +258,63 @@ fn normalize_schema(schema: Value, path: &str) -> Result<Value, FinalizeError> {
             &["minLength", "maxLength", "enum", "const"],
         ),
         "boolean" => copy_constraints(object, &mut normalized, &["enum", "const"]),
+        "integer" | "number" => copy_constraints(
+            object,
+            &mut normalized,
+            &[
+                "minimum",
+                "maximum",
+                "exclusiveMinimum",
+                "exclusiveMaximum",
+                "enum",
+                "const",
+            ],
+        ),
+        "null" => {}
         _ => unreachable!("type checked above"),
+    }
+    for key in ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] {
+        if let Some(bound) = normalized.get(key) {
+            if !bound.is_number()
+                || (schema_type == "integer"
+                    && bound.as_i64().is_none()
+                    && bound.as_u64().is_none())
+            {
+                return Err(unsupported(
+                    path,
+                    format!("{key} requires a supported numeric bound"),
+                ));
+            }
+        }
+    }
+    if let Some(format) = object.get("format") {
+        let bounds = match (schema_type, format.as_str()) {
+            ("integer", Some("int8")) => (json!(i8::MIN), json!(i8::MAX)),
+            ("integer", Some("uint8")) => (json!(0), json!(u8::MAX)),
+            ("integer", Some("int16")) => (json!(i16::MIN), json!(i16::MAX)),
+            ("integer", Some("uint16")) => (json!(0), json!(u16::MAX)),
+            ("integer", Some("int32")) => (json!(i32::MIN), json!(i32::MAX)),
+            ("integer", Some("uint32")) => (json!(0), json!(u32::MAX)),
+            ("integer", Some("int64")) => (json!(i64::MIN), json!(i64::MAX)),
+            ("integer", Some("uint64")) => (json!(0), json!(u64::MAX)),
+            ("number", Some("float")) => (json!(f32::MIN), json!(f32::MAX)),
+            ("number", Some("double")) => (json!(f64::MIN), json!(f64::MAX)),
+            _ => return Err(unsupported(path, "unsupported numeric format")),
+        };
+        for (key, bound, lower) in [("minimum", bounds.0, true), ("maximum", bounds.1, false)] {
+            let tighter = normalized
+                .get(key)
+                .and_then(|existing| number_cmp(existing, &bound))
+                .is_some_and(|order| if lower { order.is_gt() } else { order.is_lt() });
+            if !tighter {
+                normalized.insert(key.into(), bound);
+            }
+        }
+    }
+    for key in ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] {
+        if normalized.get(key).is_some_and(|value| !value.is_number()) {
+            return Err(unsupported(path, format!("{key} requires a number")));
+        }
     }
     Ok(Value::Object(normalized))
 }
@@ -243,12 +417,69 @@ impl FinalizeParser {
     }
 }
 
-fn validate_result(value: &Value, schema: &Value, path: &str) -> Result<(), FinalizeError> {
+fn number_cmp(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+    let integer = |value: &Value| {
+        value
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| value.as_u64().map(i128::from))
+    };
+    let integer_float = |integer: i128, float: f64| {
+        if float < i128::MIN as f64 {
+            return std::cmp::Ordering::Greater;
+        }
+        if float >= i128::MAX as f64 {
+            return std::cmp::Ordering::Less;
+        }
+        integer.cmp(&(float as i128)).then_with(|| {
+            // Compare the fractional remainder only after the whole parts
+            // match; converting the integer to f64 would lose boundary bits.
+            0.0_f64.partial_cmp(&float.fract()).unwrap()
+        })
+    };
+    match (integer(left), integer(right)) {
+        (Some(left), Some(right)) => Some(left.cmp(&right)),
+        (Some(left), None) => Some(integer_float(left, right.as_f64()?)),
+        (None, Some(right)) => Some(integer_float(right, left.as_f64()?).reverse()),
+        (None, None) => left.as_f64()?.partial_cmp(&right.as_f64()?),
+    }
+}
+
+pub(crate) fn validate_result(
+    value: &Value,
+    schema: &Value,
+    path: &str,
+) -> Result<(), FinalizeError> {
+    if let Some(variants) = schema["oneOf"].as_array() {
+        return if variants
+            .iter()
+            .filter(|variant| validate_result(value, variant, path).is_ok())
+            .count()
+            == 1
+        {
+            Ok(())
+        } else {
+            Err(FinalizeError::ResultSchemaMismatch(path.into()))
+        };
+    }
+    if let Some(variants) = schema["anyOf"].as_array() {
+        return if variants
+            .iter()
+            .any(|variant| validate_result(value, variant, path).is_ok())
+        {
+            Ok(())
+        } else {
+            Err(FinalizeError::ResultSchemaMismatch(path.into()))
+        };
+    }
     let matches_type = match schema["type"].as_str() {
         Some("object") => value.is_object(),
         Some("array") => value.is_array(),
         Some("string") => value.is_string(),
         Some("boolean") => value.is_boolean(),
+        Some("integer") => value.as_i64().is_some() || value.as_u64().is_some(),
+        Some("number") => value.is_number(),
+        Some("null") => value.is_null(),
         _ => false,
     };
     if !matches_type
@@ -260,6 +491,28 @@ fn validate_result(value: &Value, schema: &Value, path: &str) -> Result<(), Fina
             .is_some_and(|choices| !choices.contains(value))
     {
         return Err(FinalizeError::ResultSchemaMismatch(path.into()));
+    }
+    if value.is_number() {
+        for (key, inclusive) in [
+            ("minimum", true),
+            ("maximum", true),
+            ("exclusiveMinimum", false),
+            ("exclusiveMaximum", false),
+        ] {
+            if let Some(bound) = schema.get(key) {
+                let order = number_cmp(value, bound)
+                    .ok_or_else(|| FinalizeError::ResultSchemaMismatch(path.into()))?;
+                let lower = key == "minimum" || key == "exclusiveMinimum";
+                let passes = if lower {
+                    order.is_gt() || (inclusive && order.is_eq())
+                } else {
+                    order.is_lt() || (inclusive && order.is_eq())
+                };
+                if !passes {
+                    return Err(FinalizeError::ResultSchemaMismatch(path.into()));
+                }
+            }
+        }
     }
     if let Some(object) = value.as_object() {
         let properties = schema["properties"]
@@ -448,12 +701,12 @@ mod tests {
                         "type":"object",
                         "properties":{"count":{"type":"string"}},
                         "required":["count"],
-                        "additionalProperties":true
+                        "additionalProperties":false
                     },
                     "entries":{"type":"array","items":{"type":"string"}}
                 },
                 "required":["nested"],
-                "additionalProperties":true
+                "additionalProperties":false
             }),
             "$",
         )
@@ -465,27 +718,21 @@ mod tests {
             false
         );
         assert_eq!(result["properties"]["nested"]["required"], json!(["count"]));
-        assert_eq!(result["properties"]["entries"]["items"]["type"], "string");
+        assert_eq!(
+            result["properties"]["entries"]["anyOf"][0]["items"]["type"],
+            "string"
+        );
     }
 
     #[test]
-    fn explicitly_rejects_optional_union_and_reference_schemas() {
-        assert!(matches!(
-            tool_schema::<OptionalReply>(),
-            Err(FinalizeError::UnsupportedSchema { .. })
-        ));
-        assert!(matches!(
-            tool_schema::<UnionReply>(),
-            Err(FinalizeError::UnsupportedSchema { .. })
-        ));
+    fn accepts_finite_values_and_rejects_unchecked_schemas() {
+        assert!(tool_schema::<OptionalReply>().is_ok());
+        assert!(tool_schema::<UnionReply>().is_ok());
         assert!(matches!(
             tool_schema::<ReferencedReply>(),
             Err(FinalizeError::UnsupportedSchema { .. })
         ));
-        assert!(matches!(
-            tool_schema::<u32>(),
-            Err(FinalizeError::UnsupportedSchema { .. })
-        ));
+        assert!(tool_schema::<u32>().is_ok());
         assert!(matches!(
             tool_schema::<FormattedReply>(),
             Err(FinalizeError::UnsupportedSchema { .. })
@@ -496,10 +743,26 @@ mod tests {
             tool_schema::<HashSet<String>>(),
             Err(FinalizeError::UnsupportedSchema { .. })
         ));
-        assert!(matches!(
-            normalize_schema(json!({"type":"null"}), "$"),
-            Err(FinalizeError::UnsupportedSchema { .. })
-        ));
+        assert!(normalize_schema(json!({"type":"null"}), "$").is_ok());
+    }
+
+    #[test]
+    fn rejects_open_objects_and_malformed_validation_constraints() {
+        for schema in [
+            json!({"type":"object","properties":{},"additionalProperties":true}),
+            json!({"type":"object","properties":{},"additionalProperties":{"type":"string"}}),
+            json!({"type":"object","properties":{},"required":["missing"]}),
+            json!({"type":"object","properties":{},"required":false}),
+            json!({"type":"string","minLength":"3"}),
+            json!({"type":"array","items":{"type":"string"},"maxItems":-1}),
+            json!({"type":"string","enum":false}),
+            json!({"type":"string","enum":[]}),
+        ] {
+            assert!(matches!(
+                normalize_schema(schema, "$"),
+                Err(FinalizeError::UnsupportedSchema { .. })
+            ));
+        }
     }
 
     #[test]
@@ -563,5 +826,84 @@ mod tests {
             parser.parse_completed::<Reply>(&call("finalize", json!({"result":{"answer":"7"}}))),
             Ok(Reply { answer: "7".into() })
         );
+    }
+    #[test]
+    fn tagged_sums_optional_fields_and_numbers_preserve_haskell_codec() {
+        let schema=tool_schema_from_result_schema(json!({"type":"object","properties":{
+            "maybe":{"type":"integer"},
+            "choice":{"oneOf":[
+                {"type":"object","properties":{"tag":{"type":"string","enum":["Count"]},"contents":{"type":"number"}},"required":["tag","contents"],"additionalProperties":false},
+                {"type":"object","properties":{"tag":{"type":"string","enum":["Empty"]}},"required":["tag"],"additionalProperties":false}
+            ]}
+        },"required":["choice"],"additionalProperties":false})).unwrap();
+        let result = &schema["parameters"]["properties"]["result"];
+        assert!(result["properties"]["choice"]["anyOf"].is_array());
+        for value in [
+            json!({"maybe":null,"choice":{"tag":"Count","contents":2.5}}),
+            json!({"maybe":7,"choice":{"tag":"Empty"}}),
+        ] {
+            validate_result(&value, result, "$").unwrap();
+        }
+        for value in [
+            json!({"maybe":"bad","choice":{"tag":"Empty"}}),
+            json!({"maybe":null,"choice":{"tag":"Count","contents":"bad"}}),
+            json!({"maybe":null,"choice":{"tag":"unknown"}}),
+        ] {
+            assert!(validate_result(&value, result, "$").is_err());
+        }
+    }
+    #[test]
+    fn overlapping_one_of_is_rejected_and_direct_validation_requires_one_match() {
+        assert!(
+            tool_schema_from_result_schema(json!({"oneOf":[{"type":"number"},{"type":"integer"}]}))
+                .is_err()
+        );
+        assert!(
+            validate_result(
+                &json!(2),
+                &json!({"oneOf":[{"type":"number"},{"type":"integer"}]}),
+                "$"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_result(
+                &json!(2.5),
+                &json!({"oneOf":[{"type":"number"},{"type":"integer"}]}),
+                "$"
+            )
+            .is_ok()
+        );
+    }
+    #[test]
+    fn integer_bounds_remain_exact_above_float_precision_and_across_signs() {
+        let minimum = json!({"type":"integer","minimum":9007199254740993_u64});
+        assert!(validate_result(&json!(9007199254740992_u64), &minimum, "$").is_err());
+        assert!(validate_result(&json!(9007199254740993_u64), &minimum, "$").is_ok());
+        let number_minimum = json!({"type":"number","minimum":9007199254740993_u64});
+        assert!(validate_result(&json!(9007199254740992.0_f64), &number_minimum, "$").is_err());
+        let float_maximum = json!({"type":"number","maximum":9007199254740992.0_f64});
+        assert!(validate_result(&json!(9007199254740993_u64), &float_maximum, "$").is_err());
+        assert!(number_cmp(&json!(-2), &json!(-2.5)).unwrap().is_gt());
+        assert!(number_cmp(&json!(2), &json!(2.5)).unwrap().is_lt());
+        let exclusive = json!({"type":"integer","exclusiveMaximum":u64::MAX});
+        assert!(validate_result(&json!(u64::MAX), &exclusive, "$").is_err());
+        assert!(validate_result(&json!(u64::MAX - 1), &exclusive, "$").is_ok());
+        let nonnegative = json!({"type":"integer","minimum":0_u64});
+        assert!(validate_result(&json!(-1), &nonnegative, "$").is_err());
+        assert!(
+            validate_result(
+                &json!(i64::MIN),
+                &json!({"type":"integer","minimum":i64::MIN}),
+                "$"
+            )
+            .is_ok()
+        );
+        assert!(normalize_schema(json!({"type":"integer","minimum":2.5}), "$").is_err());
+        let schema = tool_schema::<u32>().unwrap();
+        let integer = &schema["parameters"]["properties"]["result"];
+        assert!(validate_result(&json!(u32::MAX), integer, "$").is_ok());
+        assert!(validate_result(&json!(u32::MAX as u64 + 1), integer, "$").is_err());
+        assert!(tool_schema::<f64>().is_ok());
     }
 }

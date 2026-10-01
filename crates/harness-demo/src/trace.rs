@@ -503,6 +503,7 @@ mod tests {
             response_id: "SENTINEL_RESPONSE_ID".into(),
             items: vec![Item(json!({"text":"SENTINEL_RESPONSE_TEXT"}))],
             usage: Usage {
+                reported: true,
                 input_tokens: 2,
                 output_tokens: 3,
                 cached_tokens: 1,
