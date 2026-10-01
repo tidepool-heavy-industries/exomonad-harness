@@ -50,6 +50,15 @@ struct PendingCall {
     cancel_job_on_cleanup: bool,
 }
 
+enum DispatchResult {
+    NotCall,
+    Pending(PendingCall),
+    Settled {
+        operation: OperationId,
+        continuation: Option<crate::store::RecordedWaitContinuation>,
+    },
+}
+
 #[cfg(test)]
 #[path = "engine/recovery_tests.rs"]
 mod recovery_tests;
@@ -1005,6 +1014,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             tokio::pin!(create);
             let mut turn_call_ids = Vec::<CallId>::new();
             let mut turn_call_items = Vec::<(CallId, Item)>::new();
+            let mut inline_settled =
+                Vec::<(OperationId, Option<crate::store::RecordedWaitContinuation>)>::new();
             let mut wait_call = None;
             let mut persisted_items = Vec::<Item>::new();
             let mut event_stream_open = true;
@@ -1066,9 +1077,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 }
                                 let call_item = item.clone();
                                 match self.dispatch_with_provider(item, &parent, request_provider.clone()).await {
-                                    Ok(Some(call)) => {
+                                    Ok(DispatchResult::Pending(call)) => {
                                         if !pending.iter().any(|current| current.operation == call.operation) {
-                                            if call.is_wait_agent && wait_call.is_some() {
+                                            if call.is_wait_agent && (wait_call.is_some() || !inline_settled.is_empty()) {
                                                 deferred_dispatch_error = Some(EngineError::MultipleWaitAgents);
                                                 continue;
                                             }
@@ -1078,7 +1089,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                             pending.push(call);
                                         }
                                     }
-                                    Ok(None) => {}
+                                    Ok(DispatchResult::Settled { operation, continuation }) => {
+                                        if wait_call.is_some() || !inline_settled.is_empty() {
+                                            deferred_dispatch_error = Some(EngineError::MultipleWaitAgents);
+                                            continue;
+                                        }
+                                        turn_call_ids.push(operation.call.clone());
+                                        turn_call_items.push((operation.call.clone(), call_item));
+                                        inline_settled.push((operation, continuation));
+                                    }
+                                    Ok(DispatchResult::NotCall) => {}
                                     Err(error) => deferred_dispatch_error = Some(error),
                                 }
                             }
@@ -1138,12 +1158,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         .dispatch_with_provider(item, &parent, request_provider.clone())
                         .await
                     {
-                        Ok(Some(call)) => {
+                        Ok(DispatchResult::Pending(call)) => {
                             if !pending
                                 .iter()
                                 .any(|current| current.operation == call.operation)
                             {
-                                if call.is_wait_agent && wait_call.is_some() {
+                                if call.is_wait_agent
+                                    && (wait_call.is_some() || !inline_settled.is_empty())
+                                {
                                     return Err(self
                                         .cleanup_pending(EngineError::MultipleWaitAgents, &pending)
                                         .await);
@@ -1156,7 +1178,20 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 pending.push(call);
                             }
                         }
-                        Ok(_) => {}
+                        Ok(DispatchResult::Settled {
+                            operation,
+                            continuation,
+                        }) => {
+                            if wait_call.is_some() || !inline_settled.is_empty() {
+                                return Err(self
+                                    .cleanup_pending(EngineError::MultipleWaitAgents, &pending)
+                                    .await);
+                            }
+                            turn_call_ids.push(operation.call.clone());
+                            turn_call_items.push((operation.call.clone(), call_item));
+                            inline_settled.push((operation, continuation));
+                        }
+                        Ok(DispatchResult::NotCall) => {}
                         Err(error) => {
                             return Err(self.cleanup_pending(error, &pending).await);
                         }
@@ -1208,8 +1243,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             .dispatch_with_provider(item.clone(), &parent, request_provider.clone())
                             .await
                         {
-                            Ok(Some(call)) => {
-                                if call.is_wait_agent && wait_call.is_some() {
+                            Ok(DispatchResult::Pending(call)) => {
+                                if call.is_wait_agent
+                                    && (wait_call.is_some() || !inline_settled.is_empty())
+                                {
                                     return Err(self
                                         .cleanup_pending(EngineError::MultipleWaitAgents, &pending)
                                         .await);
@@ -1221,7 +1258,20 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 turn_call_items.push((call_id.clone(), item.clone()));
                                 pending.push(call);
                             }
-                            Ok(None) => {
+                            Ok(DispatchResult::Settled {
+                                operation,
+                                continuation,
+                            }) => {
+                                if wait_call.is_some() || !inline_settled.is_empty() {
+                                    return Err(self
+                                        .cleanup_pending(EngineError::MultipleWaitAgents, &pending)
+                                        .await);
+                                }
+                                turn_call_ids.push(operation.call.clone());
+                                turn_call_items.push((operation.call.clone(), item.clone()));
+                                inline_settled.push((operation, continuation));
+                            }
+                            Ok(DispatchResult::NotCall) => {
                                 return Err(self
                                     .cleanup_pending(EngineError::InvalidFunctionCall, &pending)
                                     .await);
@@ -1271,6 +1321,30 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 Ok(settled) => settled,
                 Err(error) => return Err(self.cleanup_pending(error, &pending).await),
             };
+
+            // Retained builtin output follows every model Item and the ready
+            // job drain, matching the live wait boundary's history order.
+            for (operation, continuation) in inline_settled {
+                let item = match self
+                    .read_settled_output(&operation, &operation.request)
+                    .await
+                {
+                    Ok(item) => item,
+                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                };
+                let mut attached = vec![item];
+                if let Some(continuation) = continuation {
+                    match continuation.into_items(&operation, &attached[0]) {
+                        Ok(items) => attached.extend(items),
+                        Err(error) => {
+                            return Err(self.cleanup_pending(error.into(), &pending).await);
+                        }
+                    }
+                }
+                if let Err(error) = self.append(&parent, attached).await {
+                    return Err(self.cleanup_pending(error, &pending).await);
+                }
+            }
 
             if let Some(wait_call_id) = wait_call {
                 let result = if let Some(call_id) = settled_this_turn.first() {
@@ -1534,9 +1608,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         &self,
         item: Item,
         request: &RequestId,
-    ) -> Result<Option<PendingCall>, EngineError> {
+    ) -> Result<DispatchResult, EngineError> {
         if item.0["type"] != "function_call" && item.0["type"] != "custom_tool_call" {
-            return Ok(None);
+            return Ok(DispatchResult::NotCall);
         }
         self.dispatch_with_provider(item, request, self.provider.clone())
             .await
@@ -1547,9 +1621,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         item: Item,
         request: &RequestId,
         provider: Arc<dyn Provider>,
-    ) -> Result<Option<PendingCall>, EngineError> {
+    ) -> Result<DispatchResult, EngineError> {
         if item.0["type"] != "function_call" && item.0["type"] != "custom_tool_call" {
-            return Ok(None);
+            return Ok(DispatchResult::NotCall);
         }
         let call = item
             .tool_call()
@@ -1578,7 +1652,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let call = operation.clone();
             let request_id = request.clone();
             blocking(move || store.claim_operation(&call, &request_id)).await?;
-            return Ok(Some(PendingCall {
+            return Ok(DispatchResult::Pending(PendingCall {
                 operation,
                 call_id,
                 claim_request: request.clone(),
@@ -1630,7 +1704,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             self.persist_output(&operation, tool_kind, &output, request, request)
                 .await?;
         }
-        Ok(Some(PendingCall {
+        Ok(DispatchResult::Pending(PendingCall {
             operation,
             call_id,
             claim_request: request.clone(),
