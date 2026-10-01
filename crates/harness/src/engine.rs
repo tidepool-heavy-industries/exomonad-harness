@@ -56,6 +56,7 @@ enum DispatchResult {
     Settled {
         operation: OperationId,
         continuation: Option<crate::store::RecordedWaitContinuation>,
+        barrier: Vec<OperationId>,
     },
 }
 
@@ -1014,8 +1015,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             tokio::pin!(create);
             let mut turn_call_ids = Vec::<CallId>::new();
             let mut turn_call_items = Vec::<(CallId, Item)>::new();
-            let mut inline_settled =
-                Vec::<(OperationId, Option<crate::store::RecordedWaitContinuation>)>::new();
+            let mut inline_settled = Vec::<(
+                OperationId,
+                Option<crate::store::RecordedWaitContinuation>,
+                Vec<OperationId>,
+            )>::new();
             let mut wait_call = None;
             let mut persisted_items = Vec::<Item>::new();
             let mut event_stream_open = true;
@@ -1076,7 +1080,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                     continue;
                                 }
                                 let call_item = item.clone();
-                                match self.dispatch_with_provider(item, &parent, request_provider.clone()).await {
+                                match self.dispatch_with_provider(item, &parent, request_provider.clone(), &mut cancellation).await {
                                     Ok(DispatchResult::Pending(call)) => {
                                         if !pending.iter().any(|current| current.operation == call.operation) {
                                             if call.is_wait_agent && (wait_call.is_some() || !inline_settled.is_empty()) {
@@ -1089,14 +1093,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                             pending.push(call);
                                         }
                                     }
-                                    Ok(DispatchResult::Settled { operation, continuation }) => {
+                                    Ok(DispatchResult::Settled { operation, continuation, barrier }) => {
                                         if wait_call.is_some() || !inline_settled.is_empty() {
                                             deferred_dispatch_error = Some(EngineError::MultipleWaitAgents);
                                             continue;
                                         }
                                         turn_call_ids.push(operation.call.clone());
                                         turn_call_items.push((operation.call.clone(), call_item));
-                                        inline_settled.push((operation, continuation));
+                                        inline_settled.push((operation, continuation, barrier));
                                     }
                                     Ok(DispatchResult::NotCall) => {}
                                     Err(error) => deferred_dispatch_error = Some(error),
@@ -1155,7 +1159,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                     let call_item = item.clone();
                     match self
-                        .dispatch_with_provider(item, &parent, request_provider.clone())
+                        .dispatch_with_provider(
+                            item,
+                            &parent,
+                            request_provider.clone(),
+                            &mut cancellation,
+                        )
                         .await
                     {
                         Ok(DispatchResult::Pending(call)) => {
@@ -1181,6 +1190,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         Ok(DispatchResult::Settled {
                             operation,
                             continuation,
+                            barrier,
                         }) => {
                             if wait_call.is_some() || !inline_settled.is_empty() {
                                 return Err(self
@@ -1189,7 +1199,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             }
                             turn_call_ids.push(operation.call.clone());
                             turn_call_items.push((operation.call.clone(), call_item));
-                            inline_settled.push((operation, continuation));
+                            inline_settled.push((operation, continuation, barrier));
                         }
                         Ok(DispatchResult::NotCall) => {}
                         Err(error) => {
@@ -1240,7 +1250,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     };
                     if !turn_call_ids.contains(&call_id) {
                         match self
-                            .dispatch_with_provider(item.clone(), &parent, request_provider.clone())
+                            .dispatch_with_provider(
+                                item.clone(),
+                                &parent,
+                                request_provider.clone(),
+                                &mut cancellation,
+                            )
                             .await
                         {
                             Ok(DispatchResult::Pending(call)) => {
@@ -1261,6 +1276,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             Ok(DispatchResult::Settled {
                                 operation,
                                 continuation,
+                                barrier,
                             }) => {
                                 if wait_call.is_some() || !inline_settled.is_empty() {
                                     return Err(self
@@ -1269,7 +1285,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 }
                                 turn_call_ids.push(operation.call.clone());
                                 turn_call_items.push((operation.call.clone(), item.clone()));
-                                inline_settled.push((operation, continuation));
+                                inline_settled.push((operation, continuation, barrier));
                             }
                             Ok(DispatchResult::NotCall) => {
                                 return Err(self
@@ -1317,6 +1333,43 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .compact_at_input_tokens
                 .is_some_and(|threshold| turn.usage.input_tokens >= threshold);
 
+            // A retained wait can witness a job that is still resolving its
+            // read-only replay lookup. Await only those already admitted jobs;
+            // the barrier never creates execution or cleanup authority.
+            for (_, _, barrier) in &inline_settled {
+                let mut seen = HashSet::new();
+                for operation in barrier {
+                    if operation.origin != self.origin || !seen.insert(operation) {
+                        return Err(self
+                            .cleanup_pending(
+                                EngineError::ClaimRecoveryConflict(operation.call.0.clone()),
+                                &pending,
+                            )
+                            .await);
+                    }
+                    if pending
+                        .iter()
+                        .any(|call| call.operation == *operation && !call.is_wait_agent)
+                    {
+                        let result = tokio::select! {
+                            biased;
+                            _ = await_cancellation(&mut cancellation) => Err(EngineError::Cancelled { head_request: Some(parent.clone()) }),
+                            output = self.scheduler.wait(operation) => output.map(|_| ()).map_err(EngineError::from),
+                        };
+                        if let Err(error) = result {
+                            return Err(self.cleanup_pending(error, &pending).await);
+                        }
+                    } else {
+                        return Err(self
+                            .cleanup_pending(
+                                EngineError::ClaimRecoveryConflict(operation.call.0.clone()),
+                                &pending,
+                            )
+                            .await);
+                    }
+                }
+            }
+
             let settled_this_turn = match self.persist_settled(&mut pending, &parent).await {
                 Ok(settled) => settled,
                 Err(error) => return Err(self.cleanup_pending(error, &pending).await),
@@ -1324,7 +1377,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
 
             // Retained builtin output follows every model Item and the ready
             // job drain, matching the live wait boundary's history order.
-            for (operation, continuation) in inline_settled {
+            for (operation, continuation, _) in inline_settled {
                 let item = match self
                     .read_settled_output(&operation, &operation.request)
                     .await
@@ -1342,6 +1395,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                 }
                 if let Err(error) = self.append(&parent, attached).await {
+                    return Err(self.cleanup_pending(error, &pending).await);
+                }
+                if let Err(error) = self.acknowledge_output(&operation).await {
                     return Err(self.cleanup_pending(error, &pending).await);
                 }
             }
@@ -1612,7 +1668,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         if item.0["type"] != "function_call" && item.0["type"] != "custom_tool_call" {
             return Ok(DispatchResult::NotCall);
         }
-        self.dispatch_with_provider(item, request, self.provider.clone())
+        let (_cancel, mut cancellation) = watch::channel(false);
+        self.dispatch_with_provider(item, request, self.provider.clone(), &mut cancellation)
             .await
     }
 
@@ -1621,6 +1678,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         item: Item,
         request: &RequestId,
         provider: Arc<dyn Provider>,
+        cancellation: &mut watch::Receiver<bool>,
     ) -> Result<DispatchResult, EngineError> {
         if item.0["type"] != "function_call" && item.0["type"] != "custom_tool_call" {
             return Ok(DispatchResult::NotCall);
@@ -1652,6 +1710,42 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let call = operation.clone();
             let request_id = request.clone();
             blocking(move || store.claim_operation(&call, &request_id)).await?;
+            let retained = tokio::select! {
+                biased;
+                _ = await_cancellation(cancellation) => Err(EngineError::Cancelled { head_request: Some(request.clone()) }),
+                result = async {
+                    provider.retained_output(&name, &input, &operation).await?
+                        .map(|retained| retained.into_parts(&operation)).transpose()
+                } => result.map_err(EngineError::from),
+            };
+            let retained = match retained {
+                Ok(retained) => retained,
+                Err(error) => {
+                    let store = self.store.clone();
+                    let call = operation.clone();
+                    let request = request.clone();
+                    blocking(move || store.interrupt_operation_claim(&call, &request)).await?;
+                    return Err(error);
+                }
+            };
+            if let Some((output, continuation, barrier)) = retained {
+                self.retain_output(&operation, tool_kind, &output, request)
+                    .await?;
+                return Ok(DispatchResult::Settled {
+                    operation,
+                    continuation,
+                    barrier,
+                });
+            }
+            if *cancellation.borrow() || cancellation.has_changed().is_err() {
+                let store = self.store.clone();
+                let call = operation.clone();
+                let request_id = request.clone();
+                blocking(move || store.interrupt_operation_claim(&call, &request_id)).await?;
+                return Err(EngineError::Cancelled {
+                    head_request: Some(request.clone()),
+                });
+            }
             return Ok(DispatchResult::Pending(PendingCall {
                 operation,
                 call_id,
@@ -1889,6 +1983,21 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         output: &crate::turn::JobOutput,
         claim_request: &RequestId,
     ) -> Result<(), EngineError> {
+        self.retain_output(operation, kind, output, claim_request)
+            .await?;
+        if matches!(output, crate::turn::JobOutput::Completed(_)) {
+            self.acknowledge_output(operation).await?;
+        }
+        Ok(())
+    }
+
+    async fn retain_output(
+        &self,
+        operation: &OperationId,
+        kind: ToolKind,
+        output: &crate::turn::JobOutput,
+        claim_request: &RequestId,
+    ) -> Result<(), EngineError> {
         let call_id = &operation.call;
         let item = Item::tool_output(call_id, kind, output);
         let store = self.store.clone();
@@ -1915,9 +2024,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         ) || retained.as_ref() != Some(&item)
         {
             return Err(EngineError::ClaimRecoveryConflict(call_id.0.clone()));
-        }
-        if matches!(output, crate::turn::JobOutput::Completed(_)) {
-            self.acknowledge_output(operation).await?;
         }
         Ok(())
     }
@@ -2403,6 +2509,17 @@ fn is_final(turn: &ResponsesTurn, finalized: bool) -> bool {
     })
 }
 
+async fn await_cancellation(cancellation: &mut watch::Receiver<bool>) {
+    loop {
+        if *cancellation.borrow() {
+            return;
+        }
+        if cancellation.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, StoreError> + Send + 'static,
 ) -> Result<T, EngineError> {
@@ -2590,6 +2707,141 @@ mod tests {
                 Some(output)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn retained_wait_lookup_is_cancel_responsive_and_fences_none() {
+        struct Lookup {
+            cancel: watch::Sender<bool>,
+            block: bool,
+        }
+        #[async_trait]
+        impl Provider for Lookup {
+            async fn retained_output(
+                &self,
+                _: &str,
+                _: &ToolInput,
+                _: &OperationId,
+            ) -> Result<Option<crate::provider::RetainedOutput>, ProviderError> {
+                self.cancel.send(true).unwrap();
+                if self.block {
+                    std::future::pending::<()>().await;
+                }
+                Ok(None)
+            }
+            async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+                panic!("cancelled wait cannot execute provider work")
+            }
+            fn tools(&self) -> Vec<Value> {
+                vec![]
+            }
+        }
+        for block in [true, false] {
+            let store = Arc::new(Store::memory().unwrap());
+            let request = RequestId("cancel-retained-wait".into());
+            store.create_request(&request, None, "/root").unwrap();
+            let item = Item(
+                json!({"type":"function_call","call_id":"wait","name":"wait_agent","arguments":"{}"}),
+            );
+            store.append_items(&request, &[item.clone()]).unwrap();
+            let (cancel, mut cancellation) = watch::channel(false);
+            let provider = Arc::new(Lookup { cancel, block });
+            let engine = Engine::<FakeAuth, Lookup, _>::with_transport(
+                Replay {
+                    requests: Arc::new(Mutex::new(vec![])),
+                    turns: Mutex::new(Default::default()),
+                },
+                store.clone(),
+                Arc::new(JobScheduler::new(1).unwrap()),
+                provider.clone(),
+                EngineConfig {
+                    instructions: "test".into(),
+                    tools: vec![],
+                    model: "test".into(),
+                    effort: Effort::Low,
+                    session_id: "test".into(),
+                    agent: AgentPath("/root".into()),
+                },
+            );
+            assert!(matches!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    engine.dispatch_with_provider(item, &request, provider, &mut cancellation)
+                )
+                .await
+                .unwrap(),
+                Err(EngineError::Cancelled { .. })
+            ));
+            assert_eq!(
+                store.claims_on(&request).unwrap()[0].state,
+                crate::store::ClaimState::Interrupted
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_wait_counts_once_and_attaches_after_full_model_turn() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Retained(AtomicUsize);
+        #[async_trait]
+        impl Provider for Retained {
+            async fn retained_output(
+                &self,
+                _: &str,
+                _: &ToolInput,
+                _: &OperationId,
+            ) -> Result<Option<crate::provider::RetainedOutput>, ProviderError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(crate::provider::RetainedOutput::terminal(
+                    crate::turn::JobOutput::Completed(Ok(json!({"resumed_by":"user_input"}))),
+                )))
+            }
+            async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+                panic!("retained wait cannot execute provider work")
+            }
+            fn tools(&self) -> Vec<Value> {
+                vec![]
+            }
+        }
+        let requests = Arc::new(Mutex::new(vec![]));
+        let wait = Item(
+            json!({"type":"function_call","call_id":"retained-wait","name":"wait_agent","arguments":"{}"}),
+        );
+        let following =
+            Item(json!({"type":"message","role":"assistant","content":"after wait call"}));
+        let provider = Arc::new(Retained(AtomicUsize::new(0)));
+        let engine=Engine::<FakeAuth,Retained,_>::with_transport(
+            Replay{requests:requests.clone(),turns:Mutex::new([turn("wait",vec![wait.clone(),following.clone()]),turn("final",vec![Item(json!({"type":"message","role":"assistant","phase":"final_answer","content":"done"}))])].into())},
+            Arc::new(Store::memory().unwrap()),Arc::new(JobScheduler::new(1).unwrap()),provider.clone(),
+            EngineConfig{instructions:"test".into(),tools:vec![],model:"test".into(),effort:Effort::Low,session_id:"test".into(),agent:AgentPath("/root".into())},
+        );
+        let (_cancel, cancellation) = watch::channel(false);
+        let completion = engine
+            .run(None, vec![], cancellation, empty_mailbox())
+            .await
+            .unwrap();
+        assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let next = &requests[1].input;
+        let call = next.iter().position(|item| item == &wait).unwrap();
+        let model_item = next.iter().position(|item| item == &following).unwrap();
+        let output = next
+            .iter()
+            .position(|item| {
+                item.0["type"] == "function_call_output" && item.0["call_id"] == "retained-wait"
+            })
+            .unwrap();
+        assert!(call < model_item && model_item < output);
+        assert_eq!(
+            completion
+                .transcript
+                .iter()
+                .filter(|item| item.0["type"] == "function_call_output"
+                    && item.0["call_id"] == "retained-wait")
+                .count(),
+            1
+        );
     }
 
     struct Echo;
