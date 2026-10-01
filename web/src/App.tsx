@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from 'react';
 import NodeWindow from './NodeWindow';
+import ChatHistory from './ChatHistory';
 import type { CommandReceipt, HostActorIdentity, HostCommand } from './protocol';
 import { actorIdentityKey } from './protocol';
 import { isSettledCommand, operationKey, type BrowserCommandRecord } from './pending-commands';
@@ -19,7 +20,7 @@ export type AppProps = {
   demoFeedback?: string;
   onAuthExpired?: () => void;
 };
-const screenNames: Record<Screen, string> = { tree: 'Tree', timeline: 'Timeline', inbox: 'Inbox', host: 'Host', command: 'Command' };
+const screenNames: Record<Screen, string> = { tree: 'Tree', timeline: 'Timeline', inbox: 'Inbox', host: 'Host', command: 'Command', chat: 'Chat' };
 const identityOf = (actor: NonNullable<HarnessViewModel['actors']>[number]): HostActorIdentity => ({ run: actor.run, actor: actor.name, incarnation: actor.incarnation });
 const sameSelection = (left: Selection, right: Selection) => JSON.stringify(left) === JSON.stringify(right);
 function Empty({ children }: {
@@ -119,22 +120,23 @@ function RetainedCommands({ commands, run, ready, onRetry }: {
     <p className="hint">Original payloads are retained. Reconnect never automatically resubmits an operation.</p>
   </section>;
 }
-function HostComposer({ data, route, navigate, unavailable, ready, onHostCommand }: {
+function HostComposer({ data, route, navigate, unavailable, ready, onHostCommand, chat = false }: {
   data: HarnessViewModel;
   route: RouteState;
   navigate: (route: RouteState) => void;
   unavailable: boolean;
   ready: boolean;
   onHostCommand?: SubmitHostCommand;
+  chat?: boolean;
 }) {
   const resolved = resolveSelection(data, route.selection);
   const actor = resolved.actor;
   const target = route.selection.kind === 'actor' ? route.selection.identity : undefined;
   const draft = useDraft(target ? actorDraftKey(target) : undefined);
   const [feedback, setFeedback] = useState('');
-  const actors = (data.actors ?? []).filter(item => item.run === data.hostRun);
+  const actors = (data.actors ?? []).filter(item => item.run === data.hostRun && (!chat || item.kind === 'model'));
   const selectedKey = target ? actorIdentityKey(target) : '';
-  const canControl = Boolean(target && actor && !unavailable && actor.run === data.hostRun && ready && onHostCommand && (actor.lifecycle === 'running' || actor.lifecycle === 'waiting'));
+  const canControl = Boolean(target && actor && (!chat || actor.kind === 'model') && !unavailable && actor.run === data.hostRun && ready && onHostCommand && (actor.lifecycle === 'running' || actor.lifecycle === 'waiting'));
   const send = (command: HostCommand) => {
     const result = onHostCommand?.(command);
     if (!result)
@@ -144,7 +146,7 @@ function HostComposer({ data, route, navigate, unavailable, ready, onHostCommand
       draft.submitted();
   };
   return <section className="host-controls">
-    <h2>Embedded host controls</h2>
+    <h2>{chat ? 'Reply' : 'Embedded host controls'}</h2>
     <label htmlFor="host-target">Target actor</label>
     <select id="host-target" value={selectedKey} onChange={event => { const selected = actors.find(item => actorIdentityKey(identityOf(item)) === event.target.value); navigate({ ...route, selection: selected ? { kind: 'actor', identity: identityOf(selected) } : { kind: 'none' } }); setFeedback(''); }}>
       <option value="">Choose an actor…</option>
@@ -166,7 +168,7 @@ function HostComposer({ data, route, navigate, unavailable, ready, onHostCommand
           if (target && actor?.activeRound)
             send({ action: 'interrupt', target, expected_round: actor.activeRound });
         }}>Interrupt</button>
-        <button type="button" disabled={!canControl} onClick={() => {
+        <button type="button" hidden={chat} disabled={!canControl} onClick={() => {
           if (target)
             send({ action: 'retire', target });
         }}>Retire</button>
@@ -185,7 +187,24 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
   const selector = useMemo(() => createViewSelector(), []);
   const view = useMemo(() => selector(data, route.selection, route.global, route.messageFilters), [selector, data, route.selection, route.global, route.messageFilters]);
   const embedded = data.hostRun !== undefined;
-  const screens = useMemo<Screen[]>(() => ['tree', 'timeline', 'inbox', embedded ? 'host' : 'command'], [embedded]);
+  const screens = useMemo<Screen[]>(() => embedded ? ['chat', 'tree', 'timeline', 'inbox', 'host'] : ['tree', 'timeline', 'inbox', 'command'], [embedded]);
+  const defaultChat = useRef(!new URL(window.location.href).searchParams.has('view'));
+  const rootChosen = useRef(false);
+  useEffect(() => {
+    if (!embedded) return;
+    if (route.selection.kind !== 'none') rootChosen.current = true;
+    if (defaultChat.current && !issue) {
+      defaultChat.current = false;
+      navigate({ ...route, screen: 'chat' }, true);
+      return;
+    }
+    if (route.screen !== 'chat' || route.selection.kind !== 'none' || issue || rootChosen.current || transportPhase !== 'ready') return;
+    const roots = (data.actors ?? []).filter(actor => actor.run === data.hostRun && actor.kind === 'model' && actor.parentIdentity === null);
+    if (roots.length === 1) {
+      rootChosen.current = true;
+      navigate({ ...route, selection: { kind: 'actor', identity: identityOf(roots[0]!) } }, true);
+    }
+  }, [embedded, data.actors, data.hostRun, route, issue, transportPhase, navigate]);
   const heading = useRef<HTMLHeadingElement>(null);
   const previousScreen = useRef(route.screen);
   const inspectionTrigger = useRef<HTMLElement | null>(null);
@@ -435,6 +454,19 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
           {!inbox.total && <Empty>No messages match this context and filters.</Empty>}
           <Pager page={inbox.page} count={inbox.pageCount} total={inbox.total} onPage={setPage} />
         </>, [inbox, endpoints, endpointNodes, endpointActors, link, route, navigate]);
+  const chatContext = JSON.stringify(route.selection);
+  const retainedChat = useRef<{ context: string; conversationId: string; head?: HarnessViewModel['timeline'][number] }>();
+  const retainedConversation = retainedChat.current?.context === chatContext ? retainedChat.current : undefined;
+  const chatConversation = resolved.actor?.kind === 'model' ? resolved.conversationId ?? retainedConversation?.conversationId :
+    resolved.missing ? retainedConversation?.conversationId : undefined;
+  const chatRequests = data.timeline.filter(item => item.kind === 'request' && item.nodeId === chatConversation);
+  const parentRequests = new Set(chatRequests.flatMap(item => item.parentId ? [item.parentId] : []));
+  const currentChatHead = chatRequests.filter(item => !parentRequests.has(item.id)).at(-1);
+  const chatHead = currentChatHead ?? (retainedChat.current?.context === chatContext && retainedChat.current.conversationId === chatConversation ? retainedChat.current.head : undefined);
+  if (chatConversation) retainedChat.current = { context: chatContext, conversationId: chatConversation, head: chatHead };
+  const chatReady = transportPhase === 'ready' && route.selection.kind === 'actor' && route.selection.identity.run === data.hostRun && !resolved.missing && resolved.actor?.lifecycle !== 'lost';
+  const chatRefreshKey = JSON.stringify([data.nodes.find(node => node.id === chatConversation)?.version, chatRequests.map(item => [item.id, item.historyRefreshKey])]);
+  const chatCommands = pendingCommands.filter(record => route.selection.kind === 'actor' && actorIdentityKey(record.submission.command.target) === actorIdentityKey(route.selection.identity));
   const inspected = route.requestId ? requestIndex.get(route.requestId) : undefined;
   return <div className="harness">
     <a className="skip-link" href="#main-content">Skip to content</a>
@@ -447,7 +479,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
         </button>)}
       </nav>
     </header>
-    {transportPhase !== 'ready' && <p className="snapshot-status" role="status">Showing last snapshot · {transportPhase}; controls await a fresh snapshot.</p>}
+    {transportPhase !== 'ready' && <p className="snapshot-status" role="status">{route.screen === 'chat' ? 'Host unavailable · ' : ''}Showing last snapshot · {transportPhase}; controls await a fresh snapshot.</p>}
     <div className="selection-context">
       <strong>Selected context:</strong> <span>
         {selectedDescription}
@@ -486,6 +518,13 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
         {route.screen === 'tree' && tree}
         {route.screen === 'timeline' && timeline}
         {route.screen === 'inbox' && inboxScreen}
+        {route.screen === 'chat' && <div className="chat-layout">
+          {chatConversation ? (chatHead ?
+            <ChatHistory key={JSON.stringify([route.selection, chatConversation])} requestId={chatHead.id} refreshKey={chatRefreshKey} ready={chatReady} onAuthExpired={onAuthExpired} /> :
+            <Empty>No retained model exchange is available yet.</Empty>) : <Empty>Select an exact model actor to open its conversation.</Empty>}
+          <HostComposer key={route.selection.kind === 'actor' ? actorIdentityKey(route.selection.identity) : 'none'} chat data={data} route={route} navigate={navigate} unavailable={Boolean(issue || resolved.missing)} ready={transportPhase === 'ready'} onHostCommand={onHostCommand} />
+          <RetainedCommands commands={chatCommands} run={data.hostRun} ready={transportPhase === 'ready' && Boolean(resolved.actor && ['running', 'waiting'].includes(resolved.actor.lifecycle))} onRetry={onRetry} />
+        </div>}
         {route.screen === 'host' && <>
           <HostComposer data={data} route={route} navigate={navigate} unavailable={Boolean(issue || resolved.missing)} ready={transportPhase === 'ready'} onHostCommand={onHostCommand} />
           <RetainedCommands commands={pendingCommands} run={data.hostRun} ready={transportPhase === 'ready'} onRetry={onRetry} />

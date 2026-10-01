@@ -20,7 +20,7 @@ vi.mock('./NodeWindow', () => ({
 const target = { run: 'run', actor: '/worker', incarnation: 'old' };
 const actor = { id: JSON.stringify(['run', '/worker', 'old']), name: '/worker', run: 'run', incarnation: 'old', kind: 'model' as const, lifecycle: 'running', modelConversation: 'conv', activeRound: '00000000-0000-4000-8000-000000000001' };
 const data: HarnessViewModel = { hostRun: 'run', actors: [actor, { ...actor, id: JSON.stringify(['run', '/workflow', 'w']), name: '/workflow', incarnation: 'w', kind: 'workflow', modelConversation: undefined }], nodes: [{ id: 'conv', name: 'Conversation A', state: 'active' }, { id: 'other', name: 'Unattached conversation', state: 'idle' }], timeline: [{ id: 'req', key: 'request:req', nodeId: 'conv', label: 'Selected request', kind: 'request', state: 'completed', startedAtMs: 1000, endedAtMs: 2000, historyRefreshKey: 'stable' }, { id: 'req', key: 'job:req', nodeId: 'other', label: 'Unrelated job', kind: 'job', state: 'completed', delivered: false, output: ' retained output ' }], inbox: [{ id: 'one', sender: '/worker', recipient: '/operator', message: 'selected message', type: 'MESSAGE', state: 'MESSAGE' }, { id: 'two', sender: '/other', recipient: '/operator', message: 'other progress', type: 'PROGRESS', state: 'PROGRESS' }] };
-function route(query = '') { window.history.replaceState(null, '', '/' + query); }
+function route(query = '?view=tree') { window.history.replaceState(null, '', '/' + query); }
 function tab(name: string) { fireEvent.click(screen.getByRole('button', { name })); }
 function choose() { fireEvent.change(screen.getByLabelText('Target actor'), { target: { value: JSON.stringify(['run', '/worker', 'old']) } }); }
 beforeEach(() => { route(); sessionStorage.clear(); clearDrafts(); });

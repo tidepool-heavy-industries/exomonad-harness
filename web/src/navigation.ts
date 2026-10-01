@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { RouteState, Screen } from './client-contract';
 const keys = ['view', 'run', 'actor', 'incarnation', 'conversation', 'global', 'request', 'sender', 'recipient', 'type'] as const;
-const screens: Screen[] = ['tree', 'timeline', 'inbox', 'host', 'command'];
+const screens: Screen[] = ['tree', 'timeline', 'inbox', 'host', 'command', 'chat'];
 const kinds = ['NEW_TASK', 'MESSAGE', 'FINAL_ANSWER', 'PROGRESS'] as const;
 export const defaultRoute: RouteState = { screen: 'tree', selection: { kind: 'none' }, global: false, messageFilters: {} };
 export function parseRoute(url: URL): {
