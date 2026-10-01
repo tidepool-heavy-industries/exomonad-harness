@@ -149,6 +149,7 @@ pub struct RetainedOutput {
     wait_operation: Option<OperationId>,
     continuation: Option<crate::store::RecordedWaitContinuation>,
     wait_barrier: WaitReplayBarrier,
+    wait_commit: Option<crate::replay::ReplayWaitCommit>,
 }
 
 impl RetainedOutput {
@@ -158,6 +159,7 @@ impl RetainedOutput {
             wait_operation: None,
             continuation: None,
             wait_barrier: WaitReplayBarrier::default(),
+            wait_commit: None,
         }
     }
 
@@ -170,12 +172,14 @@ impl RetainedOutput {
         output: crate::turn::JobOutput,
         continuation: Option<crate::store::RecordedWaitContinuation>,
         wait_barrier: WaitReplayBarrier,
+        wait_commit: crate::replay::ReplayWaitCommit,
     ) -> Self {
         Self {
             output,
             wait_operation: Some(operation),
             continuation,
             wait_barrier,
+            wait_commit: Some(wait_commit),
         }
     }
 
@@ -187,6 +191,7 @@ impl RetainedOutput {
             crate::turn::JobOutput,
             Option<crate::store::RecordedWaitContinuation>,
             WaitReplayBarrier,
+            Option<crate::replay::ReplayWaitCommit>,
         ),
         ProviderError,
     > {
@@ -199,7 +204,12 @@ impl RetainedOutput {
                 "retained builtin output belongs to another operation".into(),
             ));
         }
-        Ok((self.output, self.continuation, self.wait_barrier))
+        Ok((
+            self.output,
+            self.continuation,
+            self.wait_barrier,
+            self.wait_commit,
+        ))
     }
 }
 

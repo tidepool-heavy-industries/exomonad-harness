@@ -42,10 +42,9 @@ pub struct ReplayProvider {
     store: Arc<Store>,
     turns: Arc<[RecordedReplayTurn]>,
     cursor: Mutex<usize>,
-    changed: Notify,
+    progress: Arc<ReplayProgress>,
     tool_schemas: crate::transport::ToolManifest,
     calls: HashMap<OperationId, RecordedCall>,
-    local_requests: Mutex<HashMap<RequestId, LocalReplayRequest>>,
 }
 
 struct RecordedCall {
@@ -55,9 +54,51 @@ struct RecordedCall {
     issued: usize,
 }
 
+struct ReplayProgress {
+    local_requests: Mutex<HashMap<RequestId, LocalReplayRequest>>,
+    changed: Notify,
+}
+
 struct LocalReplayRequest {
     original: RequestId,
     committed: HashSet<crate::model::CallId>,
+}
+
+/// Authority to publish a recorded wait boundary after its exact history Item.
+/// Only this replay owner constructs the token.
+pub(crate) struct ReplayWaitCommit {
+    operation: OperationId,
+    item: crate::item::Item,
+    progress: Arc<ReplayProgress>,
+}
+
+impl std::fmt::Debug for ReplayWaitCommit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplayWaitCommit")
+            .field("operation", &self.operation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReplayWaitCommit {
+    pub(crate) fn commit(
+        self,
+        operation: &OperationId,
+        item: &crate::item::Item,
+    ) -> Result<(), ProviderError> {
+        if operation != &self.operation || item != &self.item {
+            return Err(ProviderError::Tool(
+                "recorded wait history commit belongs to different evidence".into(),
+            ));
+        }
+        let mut mappings = lock(&self.progress.local_requests);
+        let mapped = mappings.get_mut(&operation.request).ok_or_else(|| {
+            ProviderError::Tool("recorded wait history has no admitted local request".into())
+        })?;
+        mapped.committed.insert(operation.call.clone());
+        self.progress.changed.notify_waiters();
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -116,10 +157,12 @@ impl ReplayProvider {
             store,
             turns: turns.into(),
             cursor: Mutex::new(0),
-            changed: Notify::new(),
+            progress: Arc::new(ReplayProgress {
+                local_requests: Mutex::new(HashMap::new()),
+                changed: Notify::new(),
+            }),
             tool_schemas,
             calls,
-            local_requests: Mutex::new(HashMap::new()),
         })
     }
 
@@ -129,7 +172,7 @@ impl ReplayProvider {
         input: &ToolInput,
         local: &OperationId,
     ) -> Result<(OperationId, JobOutput), ProviderError> {
-        let recorded_request = lock(&self.local_requests)
+        let recorded_request = lock(&self.progress.local_requests)
             .get(&local.request)
             .map(|request| request.original.clone())
             .ok_or_else(|| {
@@ -231,7 +274,11 @@ impl ReplayProvider {
     // Find the first immutable issued input containing this output after its
     // invocation. Count prior identical items so reused wire call ids cannot
     // borrow visibility from an older operation.
-    fn output_cut(&self, original: &OperationId, output: &JobOutput) -> Option<(usize, usize)> {
+    fn output_cut_unchecked(
+        &self,
+        original: &OperationId,
+        output: &JobOutput,
+    ) -> Option<(usize, usize)> {
         let call = self.calls.get(original)?;
         let item = crate::item::Item::tool_output(&original.call, call.kind, output);
         let prior = self.turns[call.issued]
@@ -255,8 +302,40 @@ impl ReplayProvider {
         None
     }
 
+    fn output_cut(
+        &self,
+        original: &OperationId,
+        output: &JobOutput,
+    ) -> Result<Option<(usize, usize)>, ProviderError> {
+        let cut = self.output_cut_unchecked(original, output);
+        if let Some(cut) = cut {
+            let item =
+                crate::item::Item::tool_output(&original.call, self.calls[original].kind, output);
+            for (other, call) in &self.calls {
+                if other == original || other.call != original.call || call.issued >= cut.0 {
+                    continue;
+                }
+                let saved = self
+                    .store
+                    .replay_tool_output_operation(other)
+                    .map_err(|error| {
+                        ProviderError::Tool(format!("validating replay occurrence: {error}").into())
+                    })?;
+                if let Some(saved) = saved {
+                    if saved.item == item && self.output_cut_unchecked(other, output) == Some(cut) {
+                        return Err(ProviderError::Tool(
+                            "recorded output occurrence belongs to multiple exact operations"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(cut)
+    }
+
     fn local_operation(&self, original: &OperationId, local: &OperationId) -> Option<OperationId> {
-        lock(&self.local_requests)
+        lock(&self.progress.local_requests)
             .iter()
             .find_map(|(request, mapped)| {
                 (mapped.original == original.request).then(|| OperationId {
@@ -272,36 +351,27 @@ impl ReplayProvider {
         cut: usize,
         position: usize,
         local: &OperationId,
-        waits_only: bool,
-    ) -> Vec<OperationId> {
-        let input = &self.turns[cut].model_request.input;
-        self.calls
-            .iter()
-            .filter_map(|(original, call)| {
-                if call.issued >= cut || (waits_only && call.name != "wait_agent") {
-                    return None;
+    ) -> Result<Vec<OperationId>, ProviderError> {
+        let mut waits = vec![];
+        for (original, call) in &self.calls {
+            if call.issued >= cut || call.name != "wait_agent" {
+                continue;
+            }
+            let Some(operation) = self.local_operation(original, local) else {
+                continue;
+            };
+            let (_, output) = self.recorded_job_output(
+                &call.name,
+                &ToolInput::Function(call.input.clone()),
+                &operation,
+            )?;
+            if let Some((output_cut, output_position)) = self.output_cut(original, &output)? {
+                if output_cut == cut && output_position < position {
+                    waits.push(operation);
                 }
-                let (_, output) = self
-                    .recorded_job_output(
-                        &call.name,
-                        &match call.kind {
-                            ToolKind::Function => ToolInput::Function(call.input.clone()),
-                            ToolKind::Custom => ToolInput::Custom(call.input.as_str()?.to_owned()),
-                        },
-                        &self.local_operation(original, local)?,
-                    )
-                    .ok()?;
-                let (output_cut, output_position) = self.output_cut(original, &output)?;
-                if output_cut == cut
-                    && output_position < position
-                    && input.get(output_position).is_some()
-                {
-                    self.local_operation(original, local)
-                } else {
-                    None
-                }
-            })
-            .collect()
+            }
+        }
+        Ok(waits)
     }
 
     async fn ready_output(
@@ -311,9 +381,16 @@ impl ReplayProvider {
         local: &OperationId,
     ) -> Result<RetainedOutput, ProviderError> {
         let (original, output) = self.recorded_job_output(name, input, local)?;
-        let cut = self.output_cut(&original, &output);
+        let cut = self.output_cut(&original, &output)?;
+        if name == "wait_agent"
+            && cut.map(|(index, _)| index) != Some(self.calls[&original].issued + 1)
+        {
+            return Err(ProviderError::Tool(
+                "recorded wait has no immediate immutable successor input boundary".into(),
+            ));
+        }
         loop {
-            let changed = self.changed.notified();
+            let changed = self.progress.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
             let ready_turn = cut.map(|(index, _)| index).unwrap_or(self.turns.len());
@@ -321,11 +398,13 @@ impl ReplayProvider {
             let preceding_waits = if name == "wait_agent" {
                 vec![]
             } else {
-                cut.map(|(index, position)| self.outputs_before(index, position, local, true))
-                    .unwrap_or_default()
+                match cut {
+                    Some((index, position)) => self.outputs_before(index, position, local)?,
+                    None => vec![],
+                }
             };
             let waits_committed = {
-                let mappings = lock(&self.local_requests);
+                let mappings = lock(&self.progress.local_requests);
                 preceding_waits.iter().all(|wait| {
                     mappings
                         .get(&wait.request)
@@ -349,24 +428,25 @@ impl ReplayProvider {
             })?;
         let mut barrier = WaitReplayBarrier::default();
         if let Some((index, position)) = cut {
-            let next_wait = self
-                .calls
-                .iter()
-                .filter(|(_, call)| call.name == "wait_agent")
-                .filter_map(|(original, call)| {
-                    let operation = self.local_operation(original, local)?;
-                    let (_, output) = self
-                        .recorded_job_output(
-                            &call.name,
-                            &ToolInput::Function(call.input.clone()),
-                            &operation,
-                        )
-                        .ok()?;
-                    let (other_cut, other_position) = self.output_cut(original, &output)?;
-                    (other_cut == index && other_position > position).then_some(other_position)
-                })
-                .min()
-                .unwrap_or(self.turns[index].model_request.input.len());
+            let mut next_wait = self.turns[index].model_request.input.len();
+            for (original, call) in &self.calls {
+                if call.name != "wait_agent" || call.issued >= index {
+                    continue;
+                }
+                let Some(operation) = self.local_operation(original, local) else {
+                    continue;
+                };
+                let (_, output) = self.recorded_job_output(
+                    &call.name,
+                    &ToolInput::Function(call.input.clone()),
+                    &operation,
+                )?;
+                if let Some((other_cut, other_position)) = self.output_cut(original, &output)? {
+                    if other_cut == index && other_position > position {
+                        next_wait = next_wait.min(other_position);
+                    }
+                }
+            }
             for (original, call) in &self.calls {
                 if call.name == "wait_agent" {
                     continue;
@@ -374,12 +454,6 @@ impl ReplayProvider {
                 let Some(operation) = self.local_operation(original, local) else {
                     continue;
                 };
-                if lock(&self.local_requests)
-                    .get(&operation.request)
-                    .is_some_and(|mapped| mapped.committed.contains(&operation.call))
-                {
-                    continue;
-                }
                 let input = match call.kind {
                     ToolKind::Function => ToolInput::Function(call.input.clone()),
                     ToolKind::Custom => ToolInput::Custom(
@@ -392,7 +466,7 @@ impl ReplayProvider {
                     ),
                 };
                 let (_, output) = self.recorded_job_output(&call.name, &input, &operation)?;
-                if let Some((output_cut, output_position)) = self.output_cut(original, &output) {
+                if let Some((output_cut, output_position)) = self.output_cut(original, &output)? {
                     if output_cut == index {
                         if output_position < position {
                             barrier.before.push(operation);
@@ -403,11 +477,17 @@ impl ReplayProvider {
                 }
             }
         }
+        let commit = ReplayWaitCommit {
+            operation: local.clone(),
+            item: crate::item::Item::tool_output(&local.call, self.calls[&original].kind, &output),
+            progress: self.progress.clone(),
+        };
         Ok(RetainedOutput::recorded_wait(
             local.clone(),
             output,
             continuation,
             barrier,
+            commit,
         ))
     }
 
@@ -417,7 +497,7 @@ impl ReplayProvider {
         request: ResponsesRequest,
     ) -> Result<ResponsesTurn, TransportError> {
         let mut cursor = lock(&self.cursor);
-        let mut mappings = lock(&self.local_requests);
+        let mut mappings = lock(&self.progress.local_requests);
         if let Some(local) = local {
             if mappings.contains_key(local) {
                 return Err(TransportError::ReplayRequestReuse {
@@ -446,7 +526,7 @@ impl ReplayProvider {
                 },
             );
         }
-        self.changed.notify_waiters();
+        self.progress.changed.notify_waiters();
         Ok(recorded.model_response.clone())
     }
 
@@ -567,16 +647,6 @@ impl Provider for ReplayProvider {
         }
     }
 
-    async fn output_committed(&self, operation: &OperationId) -> Result<(), ProviderError> {
-        let mut mappings = lock(&self.local_requests);
-        let request = mappings.get_mut(&operation.request).ok_or_else(|| {
-            ProviderError::Tool("replay output acknowledgment has no admitted request".into())
-        })?;
-        request.committed.insert(operation.call.clone());
-        self.changed.notify_waiters();
-        Ok(())
-    }
-
     fn tools(&self) -> Vec<serde_json::Value> {
         self.tool_schemas.to_vec()
     }
@@ -683,7 +753,7 @@ impl ReplayTransport {
     /// boundary and been recorded.
     pub async fn wait_requested(&self, count: usize) {
         loop {
-            let changed = self.changed.notified();
+            let changed = self.progress.changed.notified();
             if self.recorded_requests().len() >= count {
                 return;
             }
@@ -694,7 +764,7 @@ impl ReplayTransport {
     /// Permit exactly one gated model response to return to the caller.
     pub fn release_next(&self) {
         *lock(&self.response_permits) += 1;
-        self.changed.notify_waiters();
+        self.progress.changed.notify_waiters();
     }
 
     async fn wait_for_response_release(&self) {
@@ -702,7 +772,7 @@ impl ReplayTransport {
             return;
         }
         loop {
-            let changed = self.changed.notified();
+            let changed = self.progress.changed.notified();
             {
                 let mut permits = lock(&self.response_permits);
                 if *permits > 0 {
@@ -730,7 +800,7 @@ impl ResponsesTransport for ReplayTransport {
         if let Some(observer) = &self.observer {
             observer(&request, &mut turn, ordinal);
         }
-        self.changed.notify_waiters();
+        self.progress.changed.notify_waiters();
         self.wait_for_response_release().await;
         Ok(turn)
     }
@@ -827,7 +897,7 @@ impl FakeResidentCell {
     /// Wait until at least `count` cell calls have entered `run`.
     pub async fn wait_started(&self, count: usize) {
         loop {
-            let changed = self.changed.notified();
+            let changed = self.progress.changed.notified();
             if self.start_count() >= count {
                 return;
             }
@@ -838,7 +908,7 @@ impl FakeResidentCell {
     /// Make one waiting call complete with this exact output.
     pub fn release(&self, output: CellOutput) {
         lock(&self.control).released.push_back(output);
-        self.changed.notify_waiters();
+        self.progress.changed.notify_waiters();
     }
 
     pub fn query_state(&self, store: &Store) -> crate::store::Result<ReplayCellState> {
@@ -847,7 +917,7 @@ impl FakeResidentCell {
 
     async fn take_release(&self) -> CellOutput {
         loop {
-            let changed = self.changed.notified();
+            let changed = self.progress.changed.notified();
             if let Some(output) = lock(&self.control).released.pop_front() {
                 return output;
             }
@@ -884,7 +954,7 @@ impl CellJob for FakeResidentCell {
         _context: CallContext,
     ) -> Result<CellOutput, ProviderError> {
         lock(&self.control).starts += 1;
-        self.changed.notify_waiters();
+        self.progress.changed.notify_waiters();
         let pending = PendingRun {
             cell: self,
             completed: AtomicBool::new(false),
@@ -1327,12 +1397,298 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_failure_metadata_survives_scheduler_and_durable_replay() {
+        use crate::provider::ToolFailure;
+        struct FailingTool(Arc<std::sync::atomic::AtomicUsize>);
+        #[async_trait]
+        impl Provider for FailingTool {
+            fn tools(&self) -> Vec<serde_json::Value> {
+                EchoTool.tools()
+            }
+
+            async fn call(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+            ) -> Result<serde_json::Value, ProviderError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(ProviderError::Tool(ToolFailure::with_metadata(
+                    "retained owner missing",
+                    json!({
+                        "class": "version-skew", "phase": "compile",
+                        "cause": { "kind": "artifact_inventory", "required": { "unit": "package", "module": "Original" } }
+                    }),
+                )))
+            }
+        }
+        let path = std::env::temp_dir().join(format!(
+            "harness-replay-failure-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = Arc::new(Store::open(&path).unwrap());
+        let root = RequestId("failure-root".into());
+        let call_id = CallId("failure-call".into());
+        let call = Item(
+            json!({ "type": "function_call", "call_id": call_id.0, "name": "echo", "arguments": "{}" }),
+        );
+        store.create_request(&root, None, "/root").unwrap();
+        store
+            .append_items(&root, std::slice::from_ref(&call))
+            .unwrap();
+        let operation = store.claim(&call_id, &root).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let scheduler = JobScheduler::new(1).unwrap();
+        scheduler
+            .start_operation(
+                Arc::new(FailingTool(calls.clone())),
+                operation.clone(),
+                AgentPath("/root".into()),
+                Some(root.clone()),
+                "echo".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        let output = scheduler.wait(&operation).await.unwrap();
+        let JobOutput::Completed(Err(failure)) = &output else {
+            panic!("failed provider became successful: {output:?}")
+        };
+        assert_eq!(failure.message(), "tool failed: retained owner missing");
+        assert_eq!(
+            failure.metadata().unwrap()["cause"]["required"]["module"],
+            "Original"
+        );
+        store
+            .write_job_output(&operation, ToolKind::Function, &output)
+            .unwrap();
+        store
+            .record_replay_turn(
+                &root,
+                &request("failure-session"),
+                &ResponsesTurn {
+                    response_id: "failure-response".into(),
+                    items: vec![call],
+                    usage: Usage::default(),
+                },
+            )
+            .unwrap();
+        let original = store.replay_output_operation(&operation).unwrap().unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_str(original.0["output"].as_str().unwrap()).unwrap();
+        assert_eq!(expected, failure.output_value());
+        drop(scheduler);
+        drop(store);
+
+        let reopened = Arc::new(Store::open(&path).unwrap());
+        assert_eq!(
+            reopened.replay_output_operation(&operation).unwrap(),
+            Some(original)
+        );
+        let provider = Arc::new(ReplayProvider::new(reopened, &root).unwrap());
+        let local = RequestId("failure-local".into());
+        let (sink, _stream) = tokio::sync::mpsc::channel(4);
+        provider
+            .create_streaming_for_request(&local, request("failure-session"), sink)
+            .await
+            .unwrap();
+        let mut replay_operation = operation.clone();
+        replay_operation.request = local.clone();
+        let scheduler = JobScheduler::new(1).unwrap();
+        scheduler
+            .start_operation(
+                provider.clone(),
+                replay_operation.clone(),
+                AgentPath("/root".into()),
+                Some(local),
+                "echo".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        let replayed = scheduler.wait(&replay_operation).await.unwrap();
+        assert_eq!(replayed, output);
+        let JobOutput::Completed(Err(replayed_failure)) = replayed else {
+            panic!("failed replay became a success")
+        };
+        assert_eq!(
+            replayed_failure.metadata().unwrap()["class"],
+            "version-skew"
+        );
+        assert_eq!(replayed_failure.metadata().unwrap()["phase"], "compile");
+        assert_eq!(
+            replayed_failure.message(),
+            "tool failed: retained owner missing"
+        );
+        drop(scheduler);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "replay executed the failing provider again"
+        );
+        drop(provider);
+        std::fs::remove_file(&path).unwrap();
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    fn recorded_terminal(output: &JobOutput, tombstone: bool) -> (Arc<Store>, RequestId, CallId) {
+        let store = Arc::new(Store::memory().unwrap());
+        let root = RequestId("terminal-root".into());
+        let call_id = CallId("terminal-call".into());
+        let call = Item(
+            json!({"type":"function_call", "call_id":call_id.0, "name":"echo", "arguments":"{}"}),
+        );
+        store.create_request(&root, None, "/root").unwrap();
+        store
+            .append_items(&root, std::slice::from_ref(&call))
+            .unwrap();
+        let operation = store.claim(&call_id, &root).unwrap();
+        if tombstone {
+            store.interrupt_operation_claim(&operation, &root).unwrap();
+        } else {
+            store
+                .write_job_output(&operation, ToolKind::Function, output)
+                .unwrap();
+        }
+        store
+            .record_replay_turn(
+                &root,
+                &request("terminal-session"),
+                &ResponsesTurn {
+                    response_id: "terminal-response".into(),
+                    items: vec![call],
+                    usage: Usage::default(),
+                },
+            )
+            .unwrap();
+        (store, root, call_id)
+    }
+
+    #[tokio::test]
+    async fn replay_restores_each_typed_terminal_without_interpreting_success_payload() {
+        for expected in [
+            JobOutput::Completed(Ok(
+                json!({"error":"legitimate data", "failure":{"class":"user"}}),
+            )),
+            JobOutput::Completed(Err("old plain failure".into())),
+            JobOutput::Cancelled,
+            JobOutput::Interrupted,
+            JobOutput::CancellationUnconfirmed("owner unavailable".into()),
+        ] {
+            let (store, root, call) = recorded_terminal(&expected, false);
+            let provider = Arc::new(ReplayProvider::new(store, &root).unwrap());
+            let local = RequestId("replay-direct".into());
+            let (sink, _stream) = tokio::sync::mpsc::channel(4);
+            provider
+                .create_streaming_for_request(&local, request("terminal-session"), sink)
+                .await
+                .unwrap();
+            let context = call_context(call.clone());
+            let operation = context.operation.clone().unwrap();
+            let retained = provider
+                .retained_output("echo", &ToolInput::Function(json!({})), &operation)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(retained.output(), &expected);
+            let direct = provider.call_with_context("echo", json!({}), context).await;
+            match expected {
+                JobOutput::Completed(Ok(value)) => assert_eq!(direct.unwrap(), value),
+                JobOutput::Completed(Err(failure)) => {
+                    assert!(matches!(direct, Err(ProviderError::Tool(saved)) if saved == failure))
+                }
+                JobOutput::Cancelled => assert!(matches!(
+                    direct,
+                    Err(ProviderError::NonValueTerminal(NonValueTerminal::Cancelled))
+                )),
+                JobOutput::Interrupted => assert!(matches!(
+                    direct,
+                    Err(ProviderError::NonValueTerminal(
+                        NonValueTerminal::Interrupted
+                    ))
+                )),
+                JobOutput::CancellationUnconfirmed(detail) => assert!(
+                    matches!(direct, Err(ProviderError::NonValueTerminal(NonValueTerminal::CancellationUnconfirmed(saved))) if saved == detail)
+                ),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_restores_original_process_loss_claim_without_borrowing_child_success() {
+        let (store, root, call) = recorded_terminal(&JobOutput::Interrupted, true);
+        let child = RequestId("terminal-child".into());
+        store.create_request(&child, Some(&root), "/root").unwrap();
+        let parent_op = store.operation_for_request(&root, &call).unwrap();
+        store.claim(&call, &child).unwrap();
+        store
+            .write_job_output(
+                &parent_op,
+                ToolKind::Function,
+                &JobOutput::Completed(Ok(json!({"child":true}))),
+            )
+            .unwrap();
+        let provider = ReplayProvider::new(store, &root).unwrap();
+        let (sink, _stream) = tokio::sync::mpsc::channel(4);
+        provider
+            .create_streaming_for_request(
+                &RequestId("replay-direct".into()),
+                request("terminal-session"),
+                sink,
+            )
+            .await
+            .unwrap();
+        let result = provider
+            .retained_output(
+                "echo",
+                &ToolInput::Function(json!({})),
+                call_context(call).operation.as_ref().unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.output(), &JobOutput::Interrupted);
+    }
+
+    #[tokio::test]
+    async fn replay_refuses_context_aliases_and_local_request_remapping() {
+        let (store, root, call) = recorded_terminal(&JobOutput::Completed(Ok(json!({}))), false);
+        let provider = ReplayProvider::new(store, &root).unwrap();
+        let local = RequestId("replay-direct".into());
+        let (sink, _stream) = tokio::sync::mpsc::channel(4);
+        provider
+            .create_streaming_for_request(&local, request("terminal-session"), sink)
+            .await
+            .unwrap();
+        let mut context = call_context(call);
+        context.request = Some(RequestId("foreign-request".into()));
+        assert!(
+            provider
+                .call_with_context("echo", json!({}), context)
+                .await
+                .is_err()
+        );
+        let (sink, _stream) = tokio::sync::mpsc::channel(4);
+        assert!(matches!(
+            provider
+                .create_streaming_for_request(&local, request("terminal-session"), sink)
+                .await,
+            Err(TransportError::ReplayRequestReuse { .. })
+        ));
+        assert_eq!(provider.turns_remaining(), 0);
+    }
+
+    #[tokio::test]
     async fn replay_provider_rejects_missing_and_malformed_tool_outputs() {
         let store = Arc::new(Store::memory().unwrap());
         let root = RequestId("replay-output-root".into());
         store.create_request(&root, None, "/root").unwrap();
         let provider = ReplayProvider::new(store.clone(), &root).unwrap();
-        lock(&provider.local_requests).insert(
+        lock(&provider.progress.local_requests).insert(
             RequestId("replay-direct".into()),
             LocalReplayRequest {
                 original: root.clone(),
@@ -1435,7 +1791,8 @@ mod tests {
                 .await
                 .unwrap();
             let mut context = call_context(CallId("ambiguous-id".into()));
-            context.operation.as_mut().unwrap().request = local;
+            context.operation.as_mut().unwrap().request = local.clone();
+            context.request = Some(local);
             assert_eq!(
                 provider
                     .call_custom_with_context("cell", "raw input".into(), context)
