@@ -18,7 +18,7 @@ use crate::store::Store;
 use axum::extract::ws::{Message, WebSocket};
 use axum::{
     Json, Router,
-    extract::{Request, State, WebSocketUpgrade},
+    extract::{ConnectInfo, Extension, Request, State, WebSocketUpgrade},
     http::{HeaderMap, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{
@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
     convert::Infallible,
+    net::SocketAddr,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -41,6 +42,32 @@ use tokio::sync::{broadcast, mpsc};
 const COMMAND_CAPACITY: usize = 128;
 const EVENT_CAPACITY: usize = 512;
 const COMMAND_RECEIPT_CAPACITY: usize = 128;
+const PEER_REVALIDATION_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Verifies the actual socket peer. The embedding owns identity policy and
+/// must bound every authentication attempt, including unavailable services.
+#[async_trait::async_trait]
+pub trait BrowserPeerAuthenticator: Send + Sync {
+    async fn authenticate(&self, peer: SocketAddr) -> Result<(), PeerAuthError>;
+}
+
+/// A peer is either denied by policy or cannot currently be verified.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum PeerAuthError {
+    #[error("browser peer denied")]
+    Denied,
+    #[error("browser peer authentication unavailable")]
+    Unavailable,
+}
+
+impl PeerAuthError {
+    fn status(self) -> StatusCode {
+        match self {
+            Self::Denied => StatusCode::UNAUTHORIZED,
+            Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+}
 
 /// Stable command envelope accepted by `POST /api/commands`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -234,8 +261,7 @@ pub struct ServerConfig {
     pub asset_root: PathBuf,
     history_store: Option<Arc<Store>>,
     bearer_secret: Option<BearerSecret>,
-    session_secret: Option<SessionSecret>,
-    session_lifetime: Duration,
+    browser_auth: BrowserAuthentication,
     public_origin_scheme: String,
 }
 
@@ -245,8 +271,7 @@ impl ServerConfig {
             asset_root,
             history_store: None,
             bearer_secret: None,
-            session_secret: None,
-            session_lifetime: Duration::from_secs(8 * 60 * 60),
+            browser_auth: BrowserAuthentication::Disabled,
             public_origin_scheme: "http".into(),
         }
     }
@@ -273,8 +298,28 @@ impl ServerConfig {
         if lifetime.is_zero() {
             return Err("browser session lifetime must be positive");
         }
-        self.session_secret = Some(secret);
-        self.session_lifetime = lifetime;
+        if matches!(self.browser_auth, BrowserAuthentication::Peer(_)) {
+            return Err("browser peer and secret authentication are exclusive");
+        }
+        self.browser_auth = BrowserAuthentication::Secret(BrowserSessions {
+            secret,
+            lifetime,
+            tokens: std::sync::Mutex::new(HashMap::new()),
+        });
+        Ok(self)
+    }
+
+    /// Authenticate browsers through the transport peer rather than cookies.
+    /// The listener must supply Axum `ConnectInfo<SocketAddr>`; missing peer
+    /// information fails closed. Bearer credentials do not bypass peer policy.
+    pub fn with_browser_peer_auth(
+        mut self,
+        authenticator: Arc<dyn BrowserPeerAuthenticator>,
+    ) -> Result<Self, &'static str> {
+        if matches!(self.browser_auth, BrowserAuthentication::Secret(_)) {
+            return Err("browser peer and secret authentication are exclusive");
+        }
+        self.browser_auth = BrowserAuthentication::Peer(authenticator);
         Ok(self)
     }
 
@@ -312,7 +357,13 @@ struct ApiAuth {
 
 struct ApiAuthPolicy {
     bearer_secret: Option<BearerSecret>,
-    browser_session: Option<BrowserSessions>,
+    browser_auth: BrowserAuthentication,
+}
+
+enum BrowserAuthentication {
+    Disabled,
+    Secret(BrowserSessions),
+    Peer(Arc<dyn BrowserPeerAuthenticator>),
 }
 
 struct BrowserSessions {
@@ -595,8 +646,7 @@ pub fn server_with_config(
         asset_root,
         history_store,
         bearer_secret,
-        session_secret,
-        session_lifetime,
+        browser_auth,
         public_origin_scheme,
     } = config;
     let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
@@ -610,11 +660,7 @@ pub fn server_with_config(
         public_origin_scheme: Arc::from(public_origin_scheme),
         auth: Arc::new(ApiAuthPolicy {
             bearer_secret: bearer_secret.clone(),
-            browser_session: session_secret.map(|secret| BrowserSessions {
-                secret,
-                lifetime: session_lifetime,
-                tokens: std::sync::Mutex::new(HashMap::new()),
-            }),
+            browser_auth,
         }),
     };
     let snapshot = state.snapshot.clone();
@@ -635,13 +681,15 @@ pub fn server_with_config(
         .route("/ws", get(websocket))
         .route_layer(middleware::from_fn_with_state(auth, authorize))
         .with_state(state.clone());
+    let session_route = if matches!(state.auth.browser_auth, BrowserAuthentication::Peer(_)) {
+        get(session_status)
+    } else {
+        get(session_status)
+            .post(session_login)
+            .delete(session_logout)
+    };
     let session_api = Router::new()
-        .route(
-            "/session",
-            get(session_status)
-                .post(session_login)
-                .delete(session_logout),
-        )
+        .route("/session", session_route)
         .with_state(state.clone());
     let api = protected_api.merge(session_api);
     let router = Router::new()
@@ -653,23 +701,29 @@ pub fn server_with_config(
 }
 
 async fn authorize(State(auth): State<ApiAuth>, request: Request, next: Next) -> Response {
-    let session_id = valid_session_from_headers(request.headers(), &auth.policy);
-    let bearer = bearer_authorized(request.headers(), &auth.policy);
-    if !bearer && session_id.is_none() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Bearer")],
-            "API authentication required",
-        )
-            .into_response();
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0);
+    if let Err(error) = authenticate_request(request.headers(), peer, &auth.policy).await {
+        let mut response = (error.status(), "API authentication required").into_response();
+        if !matches!(auth.policy.browser_auth, BrowserAuthentication::Peer(_)) {
+            response.headers_mut().insert(
+                header::WWW_AUTHENTICATE,
+                axum::http::HeaderValue::from_static("Bearer"),
+            );
+        }
+        return response;
     }
+    let ambient = matches!(auth.policy.browser_auth, BrowserAuthentication::Peer(_))
+        || valid_session_from_headers(request.headers(), &auth.policy).is_some();
     let submitting =
         request.method() == axum::http::Method::POST && request.uri().path() == "/commands";
     let command_lookup_with_origin = request.method() == axum::http::Method::GET
         && request.uri().path().starts_with("/commands/")
         && request.headers().contains_key(header::ORIGIN);
     if (submitting || command_lookup_with_origin)
-        && session_id.is_some()
+        && ambient
         && !same_origin(request.headers(), &auth.public_origin_scheme)
     {
         return (StatusCode::FORBIDDEN, "same-origin request required").into_response();
@@ -677,7 +731,30 @@ async fn authorize(State(auth): State<ApiAuth>, request: Request, next: Next) ->
     next.run(request).await
 }
 
+async fn authenticate_request(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    policy: &ApiAuthPolicy,
+) -> Result<(), PeerAuthError> {
+    match &policy.browser_auth {
+        BrowserAuthentication::Peer(authenticator) => {
+            authenticator
+                .authenticate(peer.ok_or(PeerAuthError::Denied)?)
+                .await
+        }
+        _ if bearer_authorized(headers, policy)
+            || valid_session_from_headers(headers, policy).is_some() =>
+        {
+            Ok(())
+        }
+        _ => Err(PeerAuthError::Denied),
+    }
+}
+
 fn bearer_authorized(headers: &HeaderMap, policy: &ApiAuthPolicy) -> bool {
+    if matches!(policy.browser_auth, BrowserAuthentication::Peer(_)) {
+        return false;
+    }
     policy.bearer_secret.as_ref().is_some_and(|secret| {
         headers
             .get(header::AUTHORIZATION)
@@ -688,7 +765,9 @@ fn bearer_authorized(headers: &HeaderMap, policy: &ApiAuthPolicy) -> bool {
 }
 
 fn valid_session_from_headers(headers: &HeaderMap, policy: &ApiAuthPolicy) -> Option<String> {
-    let sessions = policy.browser_session.as_ref()?;
+    let BrowserAuthentication::Secret(sessions) = &policy.browser_auth else {
+        return None;
+    };
     let session_id = headers
         .get_all(header::COOKIE)
         .iter()
@@ -721,6 +800,7 @@ fn constant_time_eq(provided: &[u8], expected: &[u8]) -> bool {
 async fn websocket(
     State(state): State<AppState>,
     headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     upgrade: WebSocketUpgrade,
 ) -> Result<axum::response::Response, StatusCode> {
     if !same_origin(&headers, &state.public_origin_scheme) {
@@ -729,7 +809,8 @@ async fn websocket(
     // Subscribe before upgrading, so events published during the handshake are
     // buffered and delivered after the initial snapshot.
     let receiver = state.events.subscribe();
-    Ok(upgrade.on_upgrade(move |socket| websocket_session(socket, state, receiver, headers)))
+    let peer = peer.map(|Extension(ConnectInfo(peer))| peer);
+    Ok(upgrade.on_upgrade(move |socket| websocket_session(socket, state, receiver, headers, peer)))
 }
 
 fn same_origin(headers: &HeaderMap, expected_scheme: &str) -> bool {
@@ -745,9 +826,7 @@ fn same_origin(headers: &HeaderMap, expected_scheme: &str) -> bool {
     let Some(scheme) = origin.scheme_str() else {
         return false;
     };
-    // Authorization is always the configured bearer credential. Forwarded
-    // headers are intentionally not consulted; scheme comes from explicit
-    // public-server configuration, not an untrusted x-forwarded-proto header.
+    // Scheme comes from explicit configuration, never forwarding headers.
     if scheme != expected_scheme {
         return false;
     }
@@ -768,14 +847,27 @@ async fn websocket_session(
     state: AppState,
     mut receiver: broadcast::Receiver<ServerEvent>,
     headers: HeaderMap,
+    peer: Option<SocketAddr>,
 ) {
+    if authenticate_request(&headers, peer, &state.auth)
+        .await
+        .is_err()
+    {
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    }
+    let mut revalidation = tokio::time::interval(PEER_REVALIDATION_INTERVAL);
+    revalidation.tick().await;
     let mut last_sent = send_snapshot(&mut socket, &state).await.unwrap_or(0);
     loop {
         tokio::select! {
+            _ = revalidation.tick(), if matches!(state.auth.browser_auth, BrowserAuthentication::Peer(_)) => {
+                if authenticate_request(&headers, peer, &state.auth).await.is_err() { break; }
+            }
             incoming = socket.recv() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        if !bearer_authorized(&headers, &state.auth) && valid_session_from_headers(&headers, &state.auth).is_none() { break; }
+                        if authenticate_request(&headers, peer, &state.auth).await.is_err() { break; }
                         let frame = match serde_json::from_str::<WsClientFrame>(&text) {
                             Ok(frame) => frame,
                             Err(_) => {
@@ -815,6 +907,7 @@ async fn websocket_session(
                 }
             }
             received = receiver.recv() => {
+                if authenticate_request(&headers, peer, &state.auth).await.is_err() { break; }
                 match received {
                     Ok(event) if event.sequence > last_sent => {
                         let frame = WsServerFrame::Event {
@@ -840,6 +933,7 @@ async fn websocket_session(
             }
         }
     }
+    let _ = socket.send(Message::Close(None)).await;
 }
 
 async fn send_snapshot(socket: &mut WebSocket, state: &AppState) -> Result<u64, ()> {
@@ -927,14 +1021,44 @@ struct SessionLoginRequest {
 }
 
 #[derive(Serialize)]
-struct SessionStatus {
-    authenticated: bool,
+#[serde(rename_all = "lowercase")]
+enum AuthenticationMode {
+    Secret,
+    Tailscale,
+    Disabled,
 }
 
-async fn session_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let authenticated = bearer_authorized(&headers, &state.auth)
-        || valid_session_from_headers(&headers, &state.auth).is_some();
-    let mut response = Json(SessionStatus { authenticated }).into_response();
+#[derive(Serialize)]
+struct SessionStatus {
+    authenticated: bool,
+    authentication: AuthenticationMode,
+    available: bool,
+}
+
+async fn session_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+) -> Response {
+    let result = authenticate_request(
+        &headers,
+        peer.map(|Extension(ConnectInfo(peer))| peer),
+        &state.auth,
+    )
+    .await;
+    let authentication = match &state.auth.browser_auth {
+        BrowserAuthentication::Disabled => AuthenticationMode::Disabled,
+        BrowserAuthentication::Secret(_) => AuthenticationMode::Secret,
+        BrowserAuthentication::Peer(_) => AuthenticationMode::Tailscale,
+    };
+    let available = !matches!(state.auth.browser_auth, BrowserAuthentication::Disabled)
+        && result != Err(PeerAuthError::Unavailable);
+    let mut response = Json(SessionStatus {
+        authenticated: result.is_ok(),
+        authentication,
+        available,
+    })
+    .into_response();
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
@@ -949,11 +1073,9 @@ async fn session_login(
     if !same_origin(&headers, &state.public_origin_scheme) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let sessions = state
-        .auth
-        .browser_session
-        .as_ref()
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let BrowserAuthentication::Secret(sessions) = &state.auth.browser_auth else {
+        return Err(StatusCode::NOT_FOUND);
+    };
     if !constant_time_eq(input.secret.as_bytes(), sessions.secret.0.as_bytes()) {
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -987,6 +1109,8 @@ async fn session_login(
     );
     let mut response = Json(SessionStatus {
         authenticated: true,
+        authentication: AuthenticationMode::Secret,
+        available: true,
     })
     .into_response();
     response.headers_mut().insert(
@@ -1008,11 +1132,9 @@ async fn session_logout(
     if !same_origin(&headers, &state.public_origin_scheme) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let sessions = state
-        .auth
-        .browser_session
-        .as_ref()
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let BrowserAuthentication::Secret(sessions) = &state.auth.browser_auth else {
+        return Err(StatusCode::NOT_FOUND);
+    };
     if let Some(session_id) = session_id_from_cookie(&headers) {
         sessions
             .tokens
@@ -1052,24 +1174,36 @@ fn session_id_from_cookie(headers: &HeaderMap) -> Option<String> {
 
 async fn event_stream(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let receiver = state.events.subscribe();
-    let stream = stream::unfold(receiver, |mut receiver| async move {
-        loop {
-            match receiver.recv().await {
-                Ok(event) => {
-                    let data = serde_json::to_string(&event).expect("ServerEvent serializes");
-                    return Some((
-                        Ok(SseEvent::default().event(event.event).data(data)),
-                        receiver,
-                    ));
+    let peer = peer.map(|Extension(ConnectInfo(peer))| peer);
+    let mut revalidation = tokio::time::interval(PEER_REVALIDATION_INTERVAL);
+    revalidation.tick().await;
+    let stream = stream::unfold(
+        (receiver, revalidation, state.auth, headers, peer),
+        |(mut receiver, mut revalidation, auth, headers, peer)| async move {
+            loop {
+                tokio::select! {
+                    _ = revalidation.tick(), if matches!(auth.browser_auth, BrowserAuthentication::Peer(_)) => {
+                        if authenticate_request(&headers, peer, &auth).await.is_err() { return None; }
+                    }
+                    received = receiver.recv() => {
+                        if authenticate_request(&headers, peer, &auth).await.is_err() { return None; }
+                        match received {
+                            Ok(event) => {
+                                let data = serde_json::to_string(&event).expect("ServerEvent serializes");
+                                return Some((Ok(SseEvent::default().event(event.event).data(data)), (receiver, revalidation, auth, headers, peer)));
+                            }
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => return None,
+                        }
+                    }
                 }
-                // A lagged client resumes at the oldest still-buffered event.
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => return None,
             }
-        }
-    });
+        },
+    );
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
@@ -1668,6 +1802,311 @@ mod tests {
         );
     }
 
+    #[derive(Default)]
+    struct TestPeerAuth {
+        outcome: std::sync::atomic::AtomicU8,
+        peers: std::sync::Mutex<Vec<SocketAddr>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BrowserPeerAuthenticator for TestPeerAuth {
+        async fn authenticate(&self, peer: SocketAddr) -> Result<(), PeerAuthError> {
+            self.peers.lock().unwrap().push(peer);
+            match self.outcome.load(std::sync::atomic::Ordering::SeqCst) {
+                0 => Ok(()),
+                1 => Err(PeerAuthError::Denied),
+                _ => Err(PeerAuthError::Unavailable),
+            }
+        }
+    }
+
+    fn peer_server(
+        auth: Arc<TestPeerAuth>,
+    ) -> (Router, ServerControl, mpsc::Receiver<QueuedCommand>) {
+        server_with_config(
+            ServerConfig::new(PathBuf::from("."))
+                .with_bearer_secret(BearerSecret::new(TEST_SECRET).unwrap())
+                .with_browser_peer_auth(auth)
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn browser_peer_auth_is_exclusive_with_secret_in_both_builder_orders() {
+        let auth = Arc::new(TestPeerAuth::default());
+        assert!(
+            ServerConfig::new(PathBuf::from("."))
+                .with_browser_peer_auth(auth.clone())
+                .unwrap()
+                .with_browser_session(
+                    SessionSecret::new(TEST_SESSION_SECRET).unwrap(),
+                    Duration::from_secs(60)
+                )
+                .is_err()
+        );
+        assert!(
+            ServerConfig::new(PathBuf::from("."))
+                .with_browser_session(
+                    SessionSecret::new(TEST_SESSION_SECRET).unwrap(),
+                    Duration::from_secs(60)
+                )
+                .unwrap()
+                .with_browser_peer_auth(auth)
+                .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_peer_auth_uses_transport_peer_and_retains_origin_checks() {
+        let auth = Arc::new(TestPeerAuth::default());
+        let (app, _, mut commands) = peer_server(auth.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap()
+        });
+        let client = reqwest::Client::new();
+        let origin = format!("http://{address}");
+        let status = client
+            .get(format!("{origin}/api/session"))
+            .header("x-forwarded-for", "100.100.100.100:443")
+            .header("forwarded", "for=100.100.100.100")
+            .header("tailscale-user-login", "forged@example.invalid")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+        assert_eq!(status.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(status.headers().get(header::SET_COOKIE).is_none());
+        assert_eq!(
+            status.json::<serde_json::Value>().await.unwrap(),
+            json!({"authenticated":true,"authentication":"tailscale","available":true})
+        );
+        let observed = auth.peers.lock().unwrap().clone();
+        assert_eq!(observed.len(), 1);
+        assert!(observed[0].ip().is_loopback());
+        assert_ne!(observed[0].port(), address.port());
+
+        for method in [reqwest::Method::POST, reqwest::Method::DELETE] {
+            let response = client
+                .request(method, format!("{origin}/api/session"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert!(response.headers().get(header::SET_COOKIE).is_none());
+        }
+        for requested_origin in [
+            None,
+            Some("http://attacker.invalid"),
+            Some("https://invalid.example"),
+        ] {
+            let mut request = client
+                .post(format!("{origin}/api/commands"))
+                .header("x-forwarded-proto", "https")
+                .json(&ClientCommand::Submit {
+                    command: "csrf".into(),
+                });
+            if let Some(origin) = requested_origin {
+                request = request.header(header::ORIGIN, origin);
+            }
+            assert_eq!(
+                request.send().await.unwrap().status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        let accepted = client
+            .post(format!("{origin}/api/commands"))
+            .header(header::ORIGIN, &origin)
+            .json(&ClientCommand::Submit {
+                command: "accepted".into(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        assert!(
+            matches!(commands.recv().await.unwrap().command, ClientCommand::Submit { command } if command == "accepted")
+        );
+        assert_eq!(
+            client
+                .get(format!("{origin}/api/commands/{}", uuid::Uuid::new_v4()))
+                .header(header::ORIGIN, "http://attacker.invalid")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        for ws_origin in [None, Some("http://attacker.invalid")] {
+            let (_, handshake) = websocket(address, ws_origin, Some(TEST_SECRET));
+            assert!(handshake.starts_with("HTTP/1.1 403"), "{handshake}");
+        }
+        auth.outcome.store(1, std::sync::atomic::Ordering::SeqCst);
+        for path in ["events", "history/any", "ws"] {
+            let denied = client
+                .get(format!("{origin}/api/{path}"))
+                .bearer_auth(TEST_SECRET)
+                .header(header::COOKIE, "harness_session=forged")
+                .header("x-forwarded-for", "100.100.100.100:443")
+                .header("tailscale-user-login", "forged@example.invalid")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        }
+        let denied = client
+            .get(format!("{origin}/api/session"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            denied.json::<serde_json::Value>().await.unwrap(),
+            json!({"authenticated":false,"authentication":"tailscale","available":true})
+        );
+        auth.outcome.store(2, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            client
+                .get(format!("{origin}/api/history/any"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let unavailable = client
+            .get(format!("{origin}/api/session"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unavailable.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            unavailable.json::<serde_json::Value>().await.unwrap(),
+            json!({"authenticated":false,"authentication":"tailscale","available":false})
+        );
+        assert!(
+            auth.peers
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|peer| peer.ip().is_loopback())
+        );
+        server_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_peer_auth_missing_connect_info_fails_closed() {
+        let auth = Arc::new(TestPeerAuth::default());
+        let (app, _, _) = peer_server(auth.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("http://{address}/api/history/any"))
+            .bearer_auth(TEST_SECRET)
+            .header(header::COOKIE, "harness_session=forged")
+            .header("x-forwarded-for", "127.0.0.1:12345")
+            .header("forwarded", "for=127.0.0.1")
+            .header("tailscale-user-login", "forged@example.invalid")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(auth.peers.lock().unwrap().is_empty());
+        assert_eq!(
+            client
+                .get(format!("http://{address}/api/session"))
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap(),
+            json!({"authenticated":false,"authentication":"tailscale","available":true})
+        );
+        server_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_peer_auth_revalidates_websocket_commands_and_snapshots() {
+        let auth = Arc::new(TestPeerAuth::default());
+        let (app, _, mut commands) = peer_server(auth.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap()
+        });
+        for frame in [
+            json!({"type":"command","command":"revoked"}),
+            json!({"type":"snapshot.request"}),
+        ] {
+            auth.outcome.store(0, std::sync::atomic::Ordering::SeqCst);
+            let (mut ws, handshake) = websocket(address, Some(&format!("http://{address}")), None);
+            assert!(handshake.starts_with("HTTP/1.1 101"), "{handshake}");
+            assert_eq!(read_ws_text(&mut ws)["type"], "snapshot");
+            auth.outcome.store(1, std::sync::atomic::Ordering::SeqCst);
+            write_ws_text(&mut ws, &frame.to_string());
+            let mut close = [0u8; 2];
+            ws.read_exact(&mut close).unwrap();
+            assert_eq!(close[0] & 0x0f, 8, "revoked socket must close");
+        }
+        assert!(commands.try_recv().is_err());
+        server_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_peer_auth_revokes_idle_websocket_and_sse() {
+        use futures_util::StreamExt;
+        let auth = Arc::new(TestPeerAuth::default());
+        let (app, _, _) = peer_server(auth.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap()
+        });
+        let (mut ws, handshake) = websocket(address, Some(&format!("http://{address}")), None);
+        assert!(handshake.starts_with("HTTP/1.1 101"), "{handshake}");
+        assert_eq!(read_ws_text(&mut ws)["type"], "snapshot");
+        ws.set_read_timeout(Some(Duration::from_secs(35))).unwrap();
+        let response = reqwest::get(format!("http://{address}/api/events"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut events = response.bytes_stream();
+        auth.outcome.store(2, std::sync::atomic::Ordering::SeqCst);
+        let ws_closed = tokio::task::spawn_blocking(move || {
+            let mut close = [0u8; 2];
+            ws.read_exact(&mut close).unwrap();
+            assert_eq!(close[0] & 0x0f, 8);
+        });
+        tokio::time::timeout(Duration::from_secs(35), async {
+            while let Some(chunk) = events.next().await {
+                let chunk = chunk.unwrap();
+                assert!(!String::from_utf8_lossy(&chunk).contains("data:"));
+            }
+            ws_closed.await.unwrap();
+        })
+        .await
+        .expect("idle streams revoked within their 30 second interval");
+        server_task.abort();
+    }
+
     #[test]
     fn bearer_secret_is_strong_enough_and_redacted() {
         assert!(BearerSecret::new("short").is_err());
@@ -1761,7 +2200,7 @@ mod tests {
             .to_owned();
         assert_eq!(
             login.json::<serde_json::Value>().await.unwrap(),
-            serde_json::json!({"authenticated":true})
+            serde_json::json!({"authenticated":true,"authentication":"secret","available":true})
         );
         assert!(set_cookie.contains("Path=/api"));
         assert!(set_cookie.contains("HttpOnly"));
@@ -1778,7 +2217,10 @@ mod tests {
             .json::<serde_json::Value>()
             .await
             .unwrap();
-        assert_eq!(status, serde_json::json!({"authenticated":true}));
+        assert_eq!(
+            status,
+            serde_json::json!({"authenticated":true,"authentication":"secret","available":true})
+        );
 
         let csrf = client
             .post(format!("http://{address}/api/commands"))
@@ -1904,7 +2346,10 @@ mod tests {
             .json::<serde_json::Value>()
             .await
             .unwrap();
-        assert_eq!(status, serde_json::json!({"authenticated":false}));
+        assert_eq!(
+            status,
+            serde_json::json!({"authenticated":false,"authentication":"secret","available":true})
+        );
         server_task.abort();
     }
 
