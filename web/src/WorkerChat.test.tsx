@@ -113,6 +113,18 @@ describe('exact worker Chat', () => {
     expect(screen.getByText('No exact history head is available for this actor.')).toBeVisible()
     expect(readHistoryPage).not.toHaveBeenCalled()
   })
+  it('opens a fresh retired exact head outside the activity limit and isolates the replacement head', async () => {
+    const replacementIdentity = { ...identity, incarnation: 'two' }
+    const shared = { ...data, actors: [{ ...actor, lifecycle: 'retired', modelHeadRequest: 'retired-head' },
+      { ...actor, id: actorIdentityKey(replacementIdentity), incarnation: 'two', modelHeadRequest: 'replacement-head' }],
+      timeline: Array.from({ length: 128 }, (_, index) => ({ ...data.timeline[0]!, id: index === 127 ? 'replacement-head' : `sibling-${index}` })) }
+    const mounted = render(chat(shared))
+    await waitFor(() => expect(readHistoryPage).toHaveBeenCalledWith('retired-head', 0, expect.any(AbortSignal)))
+    expect(vi.mocked(readHistoryPage).mock.calls.map(call => call[0])).toEqual(['retired-head'])
+    mounted.rerender(chat(shared, { ...route, selection: { kind: 'actor', identity: replacementIdentity } }))
+    await waitFor(() => expect(readHistoryPage).toHaveBeenCalledWith('replacement-head', 0, expect.any(AbortSignal)))
+    expect(vi.mocked(readHistoryPage).mock.calls.map(call => call[0])).toEqual(['retired-head', 'replacement-head'])
+  })
   it('loads only the selected conversation and uses ordinary exact worker anchors', async () => {
     const childIdentity = { ...identity, actor: '/root/child', incarnation: 'child' }
     const child = { ...actor, id: actorIdentityKey(childIdentity), name: childIdentity.actor, incarnation: childIdentity.incarnation, modelConversation: 'child' }

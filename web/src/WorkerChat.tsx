@@ -36,6 +36,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
   const retained = context ? retainedChats.get(context) : undefined
   const conversationId = !issue && identity && (resolved.actor?.kind === 'model' || resolved.missing)
     ? resolved.conversationId ?? retained?.conversationId : undefined
+  const exactHead = !issue && identity && resolved.actor?.kind === 'model' ? resolved.actor.modelHeadRequest : undefined
   const ambiguousConversation = conversationId !== undefined && new Set((data.actors ?? [])
     .filter(actor => actor.kind === 'model' && actor.modelConversation === conversationId)
     .map(actor => actorIdentityKey(identityOf(actor)))).size > 1
@@ -43,9 +44,10 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
   const requests = !ambiguousConversation && resolved.actor?.kind === 'model' && resolved.conversationId
     ? data.timeline.filter(item => item.kind === 'request' && item.nodeId === resolved.conversationId) : []
   const parents = new Set(requests.flatMap(item => item.parentId ? [item.parentId] : []))
-  const currentHead = requests.filter(item => !parents.has(item.id)).at(-1)
+  const currentHead = exactHead ? { id: exactHead } : requests.filter(item => !parents.has(item.id)).at(-1)
   const head = currentHead ?? (retained?.conversationId === conversationId ? retained?.head : undefined)
-  const refreshKey = JSON.stringify([data.nodes.find(node => node.id === conversationId)?.version,
+  const refreshKey = JSON.stringify([exactHead, data.timeline.find(item => item.kind === 'request' && item.id === exactHead)?.historyRefreshKey,
+    data.nodes.find(node => node.id === conversationId)?.version,
     requests.map(item => [item.id, item.historyRefreshKey])])
   useEffect(() => {
     if (!context || !identity || !conversationId) return
@@ -90,8 +92,8 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
           {resolved.actor && !['running', 'waiting'].includes(resolved.actor.lifecycle) &&
             <p role="status">This actor is {resolved.actor.lifecycle}. Its Chat is read-only; retained history remains available.</p>}
           {resolved.missing && <p role="status">This exact actor is unavailable. Retained history remains read-only; choose a different worker explicitly.</p>}
-          {ambiguousConversation && <p role="status">The host associates this conversation with multiple exact actors. Its current history head is unavailable; only previously retained exact history can be shown.</p>}
-          {conversationId && head ? <ChatHistory key={JSON.stringify([context, conversationId])}
+          {ambiguousConversation && !exactHead && <p role="status">The host associates this conversation with multiple exact actors. Its current history head is unavailable; only previously retained exact history can be shown.</p>}
+          {(conversationId || exactHead) && head ? <ChatHistory key={JSON.stringify([context, conversationId])}
             cacheKey={JSON.stringify([context, conversationId])} requestId={head.id}
             requests={new Map(data.timeline.filter(item => item.kind === 'request').map(item => [item.id, item]))}
             refreshKey={refreshKey} ready={transportPhase === 'ready'} onAuthExpired={onAuthExpired} /> :
