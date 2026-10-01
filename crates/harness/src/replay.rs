@@ -1050,6 +1050,7 @@ mod tests {
                     "call_id":malformed.0,
                     "output":"not valid json"
                 })),
+                crate::store::TerminalOutcome::Success,
             )
             .unwrap();
         let invalid = provider
@@ -1088,6 +1089,7 @@ mod tests {
                     &Item(json!({
                         "type":"custom_tool_call_output", "call_id":"ambiguous-id", "output":value
                     })),
+                    crate::store::TerminalOutcome::Success,
                 )
                 .unwrap();
         }
