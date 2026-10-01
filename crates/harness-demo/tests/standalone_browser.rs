@@ -470,14 +470,27 @@ fn stored_items(db: &Path, request_id: &str) -> Vec<Value> {
 }
 
 fn recorded_model_turns(db: &Path) -> Vec<RecordedReplayTurn> {
-    Store::open(db)
-        .expect("open Engine Store")
-        .events(None)
-        .expect("read immutable Store events")
-        .into_iter()
-        .filter(|event| event.kind == "model_turn")
-        .map(|event| serde_json::from_str(&event.payload).expect("decode recorded model turn"))
-        .collect()
+    let store = Store::open(db).expect("open Engine Store");
+    let mut seen = std::collections::HashSet::new();
+    let mut recorded = Vec::new();
+    for event in store.events(None).expect("read immutable Store events") {
+        if event.kind != "model_turn" {
+            continue;
+        }
+        let request = event.request.expect("model turn has an issuing request");
+        if seen.contains(&request) {
+            continue;
+        }
+        let turns: Vec<_> = store
+            .replay_turns(&request)
+            .expect("read exact issued replay windows")
+            .into_iter()
+            .filter(|turn| !seen.contains(&turn.request))
+            .collect();
+        seen.extend(turns.iter().map(|turn| turn.request.clone()));
+        recorded.extend(turns);
+    }
+    recorded
 }
 
 fn recorded_turn_for(db: &Path, request_id: &str) -> RecordedReplayTurn {
