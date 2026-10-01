@@ -151,18 +151,25 @@ impl Store {
         };
         let issued_messages = next.model_request.input[cut_start + 1..]
             .iter()
-            .take_while(|item| item.0["type"] == "message");
-        let items = following
-            .into_iter()
-            .zip(issued_messages)
-            .take_while(|(history, issued)| *history == *issued)
-            .map(|(item, _)| item.clone())
+            .take_while(|item| item.0["type"] == "message")
             .collect::<Vec<_>>();
-        if items.is_empty() {
+        if issued_messages.is_empty() {
+            return Ok(None);
+        }
+        if following
+            .iter()
+            .zip(&issued_messages)
+            .any(|(history, issued)| *history != *issued)
+        {
             return Err(StoreError::InvalidWaitContinuation {
                 operation: local.clone(),
             });
         }
+        let items = following
+            .into_iter()
+            .take(issued_messages.len())
+            .cloned()
+            .collect::<Vec<_>>();
         let output_hash = hash(&recorded.item)?;
         let mut issued_cut = vec![output_hash.clone()];
         issued_cut.extend(items.iter().map(hash).collect::<Result<Vec<_>>>()?);
@@ -187,7 +194,9 @@ mod tests {
     };
     use serde_json::json;
 
-    fn fixture() -> (
+    fn fixture(
+        include_message: bool,
+    ) -> (
         Store,
         OperationId,
         OperationId,
@@ -217,11 +226,14 @@ mod tests {
             .write_job_output(&original, ToolKind::Function, &terminal)
             .unwrap();
         let message = Item(json!({"type":"message","role":"user","content":"recorded wake"}));
-        store
-            .append_items(&source, &[output.clone(), message.clone()])
-            .unwrap();
+        let mut input = vec![invocation, output.clone()];
+        store.append_items(&source, &[output.clone()]).unwrap();
+        if include_message {
+            store.append_items(&source, &[message.clone()]).unwrap();
+            input.push(message.clone());
+        }
         let request = ResponsesRequest {
-            input: vec![invocation, output.clone(), message.clone()],
+            input,
             instructions: String::new(),
             tools: vec![].into(),
             tools_allowed: None,
@@ -246,7 +258,7 @@ mod tests {
 
     #[test]
     fn immutable_issued_cut_excludes_later_history_messages() {
-        let (store, local, original, next, output, message) = fixture();
+        let (store, local, original, next, output, message) = fixture(true);
         let late = Item(json!({"type":"message","role":"user","content":"late mutation"}));
         store.append_items(&original.request, &[late]).unwrap();
         let witness = store
@@ -257,8 +269,20 @@ mod tests {
     }
 
     #[test]
+    fn late_message_cannot_enlarge_an_empty_issued_continuation() {
+        let (store, local, original, next, _, message) = fixture(false);
+        store.append_items(&original.request, &[message]).unwrap();
+        assert!(
+            store
+                .replay_wait_continuation(&local, &original, Some(&next))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn wait_continuation_stops_at_first_non_message() {
-        let (store, local, original, next, output, message) = fixture();
+        let (store, local, original, next, output, message) = fixture(true);
         let late = Item(json!({"type":"message","role":"user","content":"after parallel output"}));
         store
             .append_items(
@@ -278,7 +302,7 @@ mod tests {
 
     #[test]
     fn edited_next_request_cannot_issue_continuation_authority() {
-        let (store, local, original, mut next, _, _) = fixture();
+        let (store, local, original, mut next, _, _) = fixture(true);
         next.model_request.input.push(Item(
             json!({"type":"message","role":"user","content":"forged cut"}),
         ));
@@ -290,7 +314,7 @@ mod tests {
 
     #[test]
     fn wait_continuation_refuses_duplicate_output_or_missing_cut() {
-        let (store, local, original, next, output, _) = fixture();
+        let (store, local, original, next, output, _) = fixture(true);
         assert!(
             store
                 .replay_wait_continuation(&local, &original, None)
@@ -306,7 +330,7 @@ mod tests {
 
     #[test]
     fn wait_continuation_is_bound_to_local_operation_and_exact_output() {
-        let (store, local, original, next, output, _) = fixture();
+        let (store, local, original, next, output, _) = fixture(true);
         let witness = store
             .replay_wait_continuation(&local, &original, Some(&next))
             .unwrap()
