@@ -7,8 +7,8 @@ cd "$repo_root"
 mode=${1:-check}
 case "$mode" in check|--prepare-only) ;; *) echo "usage: $0 [--prepare-only]" >&2; exit 2 ;; esac
 
-if ! command -v npm >/dev/null || ! command -v cargo >/dev/null; then
-  echo "verification prerequisite missing: enter 'nix develop .#web' and provide the Rust toolchain" >&2
+if ! command -v npm >/dev/null; then
+  echo "verification prerequisite missing: enter 'nix develop .#web' for the pinned Node toolchain" >&2
   exit 2
 fi
 
@@ -24,5 +24,10 @@ test -f web/dist/index.html || { echo "verification prerequisite missing: web/di
 
 if [[ "$mode" == --prepare-only ]]; then exit 0; fi
 
-echo "verification assertion: browser_journey"
+if ! command -v cargo >/dev/null; then
+  echo "backend browser journey prerequisite missing: provide the Rust toolchain" >&2
+  exit 2
+fi
+
+echo "verification assertion: production HTTP/WebSocket backend browser_journey"
 scripts/cargo-focused-test --package harness-demo --target test:browser_journey --filter browser --expect 4

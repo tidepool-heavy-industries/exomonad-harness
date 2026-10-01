@@ -21,7 +21,7 @@ class BrowserPreparationTests(unittest.TestCase):
         self.bin.mkdir()
         self.env = dict(os.environ, PATH=str(self.bin) + ":" + os.environ["PATH"])
         self.stub("git", 'printf "candidate\\n"')
-        self.stub("cargo", 'exit 99')
+        self.stub("cargo", 'echo unexpected-cargo >> cargo-calls; exit 99')
         self.stub("nix", r'''
 case "$2" in path:*\#web) ;; *) exit 91;; esac
 source=${2#path:}; source=${source%#web}
@@ -56,6 +56,12 @@ exit "${NPM_EXIT:-0}"
         self.assertEqual((self.root / "npm-calls").read_text().splitlines(),
                          ["ci", "run check", "test", "run build"])
         self.assertFalse(Path((self.root / "shell-source").read_text()).exists())
+        self.assertFalse((self.root / "cargo-calls").exists())
+
+    def test_frontend_preparation_does_not_need_cargo_on_path(self):
+        (self.bin / "cargo").unlink()
+        result = self.run_preparation()
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_wrong_source_does_not_start_preparation(self):
         self.assertNotEqual(self.run_preparation("older-candidate").returncode, 0)

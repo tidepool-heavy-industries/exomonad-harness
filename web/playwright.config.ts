@@ -1,0 +1,31 @@
+import { defineConfig, chromium } from '@playwright/test'
+import { existsSync } from 'node:fs'
+
+if (!process.env.PLAYWRIGHT_BROWSERS_PATH) throw new Error('Enter the pinned nix develop .#web shell; PLAYWRIGHT_BROWSERS_PATH is required.')
+const executablePath = chromium.executablePath()
+if (!existsSync(executablePath)) throw new Error(`Materialize nix build .#web-chromium; browser missing: ${executablePath}`)
+
+export default defineConfig({
+  testDir: './e2e',
+  testMatch: '**/*.spec.ts',
+  workers: 1,
+  fullyParallel: false,
+  retries: 0,
+  timeout: 30_000,
+  outputDir: '../target/gui-browser/artifacts',
+  reporter: [['list'], ['json', { outputFile: '../target/gui-browser/results.json' }]],
+  use: {
+    baseURL: 'http://127.0.0.1:4387',
+    viewport: { width: 1280, height: 800 },
+    contextOptions: { reducedMotion: 'reduce' },
+    launchOptions: { executablePath },
+    trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
+  },
+  webServer: {
+    command: 'node e2e/server.mjs',
+    url: 'http://127.0.0.1:4387',
+    reuseExistingServer: false,
+    timeout: 10_000,
+  },
+})

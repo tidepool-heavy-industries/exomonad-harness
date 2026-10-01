@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+mode=${1:-prepare}
+case "$mode" in prepare|--assets-ready) ;; *) echo "usage: $0 [--assets-ready]" >&2; exit 2 ;; esac
+if [[ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]]; then
+  echo "enter the pinned nix develop .#web shell and materialize .#web-chromium" >&2
+  exit 2
+fi
+export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+if [[ "$mode" == prepare ]]; then
+  cache_source="${HARNESS_NPM_CACHE:-$(nix eval --raw .#packages.x86_64-linux.buck-npm-cache.outPath)}"
+  if [[ ! -d "$cache_source/_cacache" ]]; then
+    echo "materialize nix build .#buck-npm-cache --no-link before frontend verification" >&2
+    exit 2
+  fi
+  task_cache=$(mktemp -d)
+  trap 'rm -rf -- "$task_cache"' EXIT
+  cp -R "$cache_source/." "$task_cache/"
+  chmod -R u+w "$task_cache"
+  (cd web && npm ci --offline --ignore-scripts --cache "$task_cache" --no-audit --no-fund)
+  (cd web && npm run check && npm test && npm run build)
+fi
+test -s web/dist/index.html || { echo "production assets are missing" >&2; exit 2; }
+(cd web && npm run check:browser)
+mkdir -p target/gui-browser
+set +e
+(cd web && npm run test:browser)
+status=$?
+set -e
+node web/e2e/evidence.mjs "$status"
+exit "$status"
