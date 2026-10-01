@@ -24,7 +24,7 @@ use crate::{
     },
     turn::{
         JobError, JobScheduler, WaitAgentResultExact, WaitResumeExact, outputs_in_operation_order,
-        wait_agent_and_drain_exact,
+        wait_agent_and_drain_until_exact,
     },
 };
 use schemars::JsonSchema;
@@ -47,10 +47,28 @@ struct PendingCall {
     operation: OperationId,
     call_id: CallId,
     claim_request: RequestId,
-    is_wait_agent: bool,
+    wait: Option<WaitKind>,
     tool_kind: ToolKind,
     persist_here_invocation_output: bool,
     cancel_job_on_cleanup: bool,
+}
+
+#[derive(Clone, Debug)]
+enum WaitKind {
+    Agent,
+    Yield {
+        deadline: Option<tokio::time::Instant>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum YieldReason {
+    ToolResult,
+    UserInput,
+    WorkerInput,
+    Timeout,
+    Cancelled,
 }
 
 enum DispatchResult {
@@ -82,6 +100,9 @@ mod embedded_restart_tests;
 #[cfg(test)]
 #[path = "engine/rejection_tests.rs"]
 mod rejection_tests;
+#[cfg(test)]
+#[path = "engine/yield_tests.rs"]
+mod yield_tests;
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -126,6 +147,10 @@ pub enum EngineError {
     MissingEffortPin,
     #[error("a model response contained more than one wait_agent call")]
     MultipleWaitAgents,
+    #[error("tool name `yield` is reserved by the engine")]
+    ReservedYieldTool,
+    #[error("yield requires an object with optional nullable nonnegative finite `until` seconds")]
+    InvalidYieldArguments,
     #[error(transparent)]
     Compact(#[from] CompactError),
     #[error("cannot resume a forked wait_agent call before its parent settles it")]
@@ -740,7 +765,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .iter()
                 .any(|item| {
                     items::function_call(item).is_some_and(|(call, name, _)| {
-                        call == claim.call_id && name == "wait_agent"
+                        call == claim.call_id && matches!(name.as_str(), "wait_agent" | "yield")
                     })
                 })
             {
@@ -776,7 +801,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     operation: claim.operation,
                     call_id: claim.call_id,
                     claim_request: claim.request,
-                    is_wait_agent: false,
+                    wait: None,
                     tool_kind,
                     persist_here_invocation_output: false,
                     cancel_job_on_cleanup: false,
@@ -953,7 +978,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .as_ref()
                 .is_none_or(|(previous, _)| previous != &provider_tools)
             {
-                let tools = self.compose_tools(finalize_schema, &provider_tools);
+                let tools = match self.compose_tools(finalize_schema, &provider_tools) {
+                    Ok(tools) => tools,
+                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                };
                 request_tools = Some((provider_tools, tools));
             }
             let mut input_hashes = Vec::with_capacity(history.items.len());
@@ -1250,11 +1278,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 match self.dispatch_with_provider(item, &parent, request_provider.clone(), &mut cancellation).await {
                                     Ok(DispatchResult::Pending(call)) => {
                                         if !pending.iter().any(|current| current.operation == call.operation) {
-                                            if call.is_wait_agent && (wait_call.is_some() || !inline_settled.is_empty()) {
+                                            if call.wait.is_some() && (wait_call.is_some() || !inline_settled.is_empty()) {
                                                 deferred_dispatch_error = Some(EngineError::MultipleWaitAgents);
                                                 continue;
                                             }
-                                            if call.is_wait_agent { wait_call = Some(call.call_id.clone()); }
+                                            if call.wait.is_some() { wait_call = Some(call.call_id.clone()); }
                                             turn_call_ids.push(call.call_id.clone());
                                             turn_call_items.push((call.call_id.clone(), call_item));
                                             pending.push(call);
@@ -1351,14 +1379,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 .iter()
                                 .any(|current| current.operation == call.operation)
                             {
-                                if call.is_wait_agent
+                                if call.wait.is_some()
                                     && (wait_call.is_some() || !inline_settled.is_empty())
                                 {
                                     return Err(self
                                         .cleanup_pending(EngineError::MultipleWaitAgents, &pending)
                                         .await);
                                 }
-                                if call.is_wait_agent {
+                                if call.wait.is_some() {
                                     wait_call = Some(call.call_id.clone());
                                 }
                                 turn_call_ids.push(call.call_id.clone());
@@ -1440,14 +1468,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             .await
                         {
                             Ok(DispatchResult::Pending(call)) => {
-                                if call.is_wait_agent
+                                if call.wait.is_some()
                                     && (wait_call.is_some() || !inline_settled.is_empty())
                                 {
                                     return Err(self
                                         .cleanup_pending(EngineError::MultipleWaitAgents, &pending)
                                         .await);
                                 }
-                                if call.is_wait_agent {
+                                if call.wait.is_some() {
                                     wait_call = Some(call_id.clone());
                                 }
                                 turn_call_ids.push(call_id.clone());
@@ -1620,16 +1648,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         Err(error) => return Err(self.cleanup_pending(error, &pending).await),
                     }
                 };
-                if matches!(&result.resumed_by, WaitResumeExact::Cancelled) {
-                    return Err(self
-                        .cleanup_pending(
-                            EngineError::Cancelled {
-                                head_request: Some(parent.clone()),
-                            },
-                            &pending,
-                        )
-                        .await);
-                }
+                let cancelled = matches!(&result.resumed_by, WaitResumeExact::Cancelled);
                 let wait_operation = OperationId {
                     origin: self.origin.clone(),
                     request: parent.clone(),
@@ -1641,11 +1660,22 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         &parent,
                         Some(&wait_operation),
                         result,
+                        &settled_this_turn,
                         admit_inbox,
                     )
                     .await
                 {
                     return Err(self.cleanup_pending(error, &pending).await);
+                }
+                if cancelled {
+                    return Err(self
+                        .cleanup_pending(
+                            EngineError::Cancelled {
+                                head_request: Some(parent.clone()),
+                            },
+                            &pending,
+                        )
+                        .await);
                 }
             } else if !had_inline_wait
                 && is_final(&turn, finalize_schema.is_some())
@@ -1670,7 +1700,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         .await);
                 }
                 if let Err(error) = self
-                    .persist_wait_result(&mut pending, &parent, None, result, admit_inbox)
+                    .persist_wait_result(&mut pending, &parent, None, result, &[], admit_inbox)
                     .await
                 {
                     return Err(self.cleanup_pending(error, &pending).await);
@@ -1870,7 +1900,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .ok_or(EngineError::MissingInheritedOutput(call_id))
     }
 
-    fn tools(&self, finalize_schema: Option<&serde_json::Value>) -> crate::transport::ToolManifest {
+    fn tools(
+        &self,
+        finalize_schema: Option<&serde_json::Value>,
+    ) -> Result<crate::transport::ToolManifest, EngineError> {
         self.compose_tools(finalize_schema, &self.provider.tool_manifest())
     }
 
@@ -1878,12 +1911,22 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         &self,
         finalize_schema: Option<&serde_json::Value>,
         manifest: &crate::transport::ToolManifest,
-    ) -> crate::transport::ToolManifest {
+    ) -> Result<crate::transport::ToolManifest, EngineError> {
+        if self
+            .config
+            .tools
+            .iter()
+            .chain(manifest.iter())
+            .any(|tool| tool["name"] == "yield")
+        {
+            return Err(EngineError::ReservedYieldTool);
+        }
         if self.config.tools.is_empty()
             && finalize_schema.is_none()
             && !manifest.has_duplicate_names()
+            && self.embedded_identity().is_none()
         {
-            return manifest.clone();
+            return Ok(manifest.clone());
         }
         let mut tools = self.config.tools.clone();
         if let Some(schema) = finalize_schema {
@@ -1905,7 +1948,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 tools.push(tool.clone());
             }
         }
-        tools.into()
+        if self.embedded_identity().is_some() {
+            tools.push(yield_tool_schema());
+        }
+        Ok(tools.into())
     }
 
     #[cfg(test)]
@@ -1945,16 +1991,27 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let name = call.name;
         let input = call.input;
         let tool_kind = input.kind();
-        provider.validate_call(&name, tool_kind)?;
+        let is_yield = name == "yield";
+        let wait = if is_yield {
+            if self.embedded_identity().is_none() || tool_kind != ToolKind::Function {
+                return Err(EngineError::InvalidFunctionCall);
+            }
+            self.compose_tools(None, &provider.tool_manifest())?;
+            Some(WaitKind::Yield {
+                deadline: yield_deadline(&input)?,
+            })
+        } else {
+            provider.validate_call(&name, tool_kind)?;
+            (name == "wait_agent").then_some(WaitKind::Agent)
+        };
         if tool_kind == ToolKind::Custom
             && (crate::provider::is_harness_tool(&name) || name == FINALIZE_TOOL_NAME)
         {
             return Err(EngineError::InvalidFunctionCall);
         }
-        let is_wait_agent = name == "wait_agent";
         let is_here_spawn = name == "spawn_agent"
             && matches!(&input, ToolInput::Function(args) if args["from"]["kind"].as_str() == Some("here"));
-        if is_wait_agent {
+        if wait.is_some() {
             let store = self.store.clone();
             let call = operation.clone();
             let request_id = request.clone();
@@ -1963,6 +2020,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 biased;
                 _ = await_cancellation(cancellation) => Err(EngineError::Cancelled { head_request: Some(request.clone()) }),
                 result = async {
+                    if is_yield {
+                        return Ok(None);
+                    }
                     provider.retained_output(&name, &input, &operation).await?
                         .map(|retained| retained.into_parts(&operation)).transpose()
                 } => result.map_err(EngineError::from),
@@ -2000,7 +2060,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 operation,
                 call_id,
                 claim_request: request.clone(),
-                is_wait_agent,
+                wait,
                 tool_kind,
                 persist_here_invocation_output: false,
                 cancel_job_on_cleanup: false,
@@ -2052,7 +2112,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             operation,
             call_id,
             claim_request: request.clone(),
-            is_wait_agent,
+            wait,
             tool_kind,
             persist_here_invocation_output: is_here_spawn,
             cancel_job_on_cleanup: true,
@@ -2080,7 +2140,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         for operation in first.iter().chain(second) {
             if !pending
                 .iter()
-                .any(|call| call.operation == *operation && !call.is_wait_agent)
+                .any(|call| call.operation == *operation && call.wait.is_none())
             {
                 return Err(EngineError::ClaimRecoveryConflict(operation.call.0.clone()));
             }
@@ -2099,7 +2159,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let mut first_error = None;
         for call in pending {
             let mut persisted_terminal = false;
-            if call.cancel_job_on_cleanup && !call.is_wait_agent {
+            if call.cancel_job_on_cleanup && call.wait.is_none() {
                 if let Err(error) = self.scheduler.cancel(&call.operation).await {
                     if !matches!(error, JobError::UnknownCall) {
                         first_error.get_or_insert_with(|| EngineError::Job(error));
@@ -2221,7 +2281,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     ) -> Result<Vec<OperationId>, EngineError> {
         let calls: Vec<_> = pending
             .iter()
-            .filter(|call| !call.is_wait_agent)
+            .filter(|call| call.wait.is_none())
             .map(|call| call.operation.clone())
             .collect();
         let outputs = outputs_in_operation_order(&self.scheduler, &calls).await?;
@@ -2259,7 +2319,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     ) -> Result<(), EngineError> {
         let operations = pending
             .iter()
-            .filter(|call| !call.is_wait_agent && !retained.contains(&call.operation))
+            .filter(|call| call.wait.is_none() && !retained.contains(&call.operation))
             .map(|call| call.operation.clone())
             .collect::<Vec<_>>();
         for (operation, output) in outputs_in_operation_order(&self.scheduler, &operations).await? {
@@ -2389,16 +2449,27 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     ) -> Result<WaitAgentResultExact, EngineError> {
         let calls: Vec<_> = pending
             .iter()
-            .filter(|call| !call.is_wait_agent)
+            .filter(|call| call.wait.is_none())
             .map(|call| call.operation.clone())
             .collect();
+        let deadline = pending.iter().find_map(|call| match &call.wait {
+            Some(WaitKind::Yield { deadline }) => *deadline,
+            _ => None,
+        });
         loop {
-            let result =
-                wait_agent_and_drain_exact(envelopes, &self.scheduler, cancellation, &calls)
-                    .await?;
+            let result = wait_agent_and_drain_until_exact(
+                envelopes,
+                &self.scheduler,
+                cancellation,
+                &calls,
+                deadline,
+            )
+            .await?;
             match &result.resumed_by {
                 WaitResumeExact::Job(operation) if calls.contains(operation) => return Ok(result),
-                WaitResumeExact::Envelope(_) | WaitResumeExact::Cancelled => return Ok(result),
+                WaitResumeExact::Envelope(_)
+                | WaitResumeExact::TimedOut
+                | WaitResumeExact::Cancelled => return Ok(result),
                 WaitResumeExact::DurableWake(envelope_id) => {
                     let store = self.store.clone();
                     let recipient = self.config.agent.0.clone();
@@ -2424,8 +2495,51 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         request: &RequestId,
         wait_call: Option<&OperationId>,
         result: WaitAgentResultExact,
+        ready_before_wait: &[OperationId],
         durable_mailbox: bool,
     ) -> Result<(), EngineError> {
+        let yield_wait = wait_call.is_some_and(|operation| {
+            pending.iter().any(|call| {
+                call.operation == *operation && matches!(call.wait, Some(WaitKind::Yield { .. }))
+            })
+        });
+        let yield_reason = match &result.resumed_by {
+            WaitResumeExact::Job(_) => YieldReason::ToolResult,
+            WaitResumeExact::Envelope(envelope) if envelope.sender.0 == "/operator" => {
+                YieldReason::UserInput
+            }
+            WaitResumeExact::Envelope(_) => YieldReason::WorkerInput,
+            WaitResumeExact::DurableWake(id) => {
+                let store = self.store.clone();
+                let id = *id;
+                if blocking(move || {
+                    Ok(store.envelope(id)?.is_some_and(|envelope| {
+                        envelope.sender == "operator" || envelope.sender == "/operator"
+                    }))
+                })
+                .await?
+                {
+                    YieldReason::UserInput
+                } else {
+                    YieldReason::WorkerInput
+                }
+            }
+            WaitResumeExact::TimedOut => YieldReason::Timeout,
+            WaitResumeExact::Cancelled => YieldReason::Cancelled,
+        };
+        let mut operations: Vec<_> = ready_before_wait.to_vec();
+        operations.extend(
+            result
+                .call_outputs
+                .iter()
+                .map(|(operation, _)| operation.clone())
+                .filter(|operation| !ready_before_wait.contains(operation)),
+        );
+        if let WaitResumeExact::Job(operation) = &result.resumed_by {
+            if !operations.contains(operation) {
+                operations.insert(0, operation.clone());
+            }
+        }
         for (operation, output) in result.call_outputs {
             let call = pending
                 .iter()
@@ -2474,11 +2588,20 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 // A wake never supplies or appends a second copy of its content.
                 (None, None, json!({"resumed_by":"user_input"}))
             }
+            WaitResumeExact::TimedOut => (None, None, json!({"resumed_by":"timeout"})),
+            WaitResumeExact::Cancelled if yield_wait => {
+                (None, None, json!({"resumed_by":"cancelled"}))
+            }
             WaitResumeExact::Cancelled => {
                 return Err(EngineError::Cancelled {
                     head_request: Some(request.clone()),
                 });
             }
+        };
+        let output = if yield_wait {
+            json!({"reason": yield_reason, "ready_results": operations})
+        } else {
+            output
         };
         if let Some(wait_call) = wait_call {
             self.persist_output(
@@ -2605,7 +2728,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     .create(ResponsesRequest {
                         input: items,
                         instructions: self.config.instructions.clone(),
-                        tools: self.tools(None),
+                        tools: self
+                            .tools(None)
+                            .map_err(|error| CompactError::Failed(error.to_string()))?,
                         tools_allowed: None,
                         model: self.config.model.clone(),
                         pinned_effort: effective_effort,
@@ -2717,7 +2842,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let branch = self.config.agent.0.clone();
         let pending_operations = pending
             .iter()
-            .filter(|call| !call.is_wait_agent)
+            .filter(|call| call.wait.is_none())
             .map(|call| call.operation.clone())
             .collect::<Vec<_>>();
         let identity = self.embedded_identity();
@@ -2853,6 +2978,36 @@ fn is_final(turn: &ResponsesTurn, finalized: bool) -> bool {
             item.0["phase"] == "final_answer"
         }
     })
+}
+
+/// `until` is elapsed seconds, never a wall-clock timestamp. Strict schema
+/// requires the nullable field on the wire; direct calls may omit it.
+fn yield_tool_schema() -> serde_json::Value {
+    json!({"type":"function","name":"yield","strict":true,
+        "description":"Park until an owned tool result, user or worker input, cancellation, or optional maximum duration. until is seconds; null waits for the first event. Timeout leaves pending jobs running.",
+        "parameters":{"type":"object","properties":{"until":{"anyOf":[{"type":"number","minimum":0},{"type":"null"}]}},"required":["until"],"additionalProperties":false}})
+}
+
+fn yield_deadline(input: &ToolInput) -> Result<Option<tokio::time::Instant>, EngineError> {
+    let ToolInput::Function(value) = input else {
+        return Err(EngineError::InvalidYieldArguments);
+    };
+    let object = value
+        .as_object()
+        .ok_or(EngineError::InvalidYieldArguments)?;
+    if object.keys().any(|name| name != "until") {
+        return Err(EngineError::InvalidYieldArguments);
+    }
+    let Some(value) = object.get("until").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let seconds = value.as_f64().ok_or(EngineError::InvalidYieldArguments)?;
+    let duration = std::time::Duration::try_from_secs_f64(seconds)
+        .map_err(|_| EngineError::InvalidYieldArguments)?;
+    tokio::time::Instant::now()
+        .checked_add(duration)
+        .map(Some)
+        .ok_or(EngineError::InvalidYieldArguments)
 }
 
 async fn await_cancellation(cancellation: &mut watch::Receiver<bool>) {

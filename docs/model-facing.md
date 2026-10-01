@@ -105,3 +105,25 @@ OURS: [same three closing lines as root: results/messages/user, wait_agent, slot
 - any change to a VERBATIM block needs a stated reason in the commit.
 - strict schemas ∀tools; descriptions ≤ 4 sentences except spawn_agent.
 - bytes test: rendered developer items + tool list for a fixed config are a fixture; a diff fails CI.
+
+Embedded conversations advertise the engine-owned `yield` function alongside
+host tools. A submitted asynchronous tool is admitted work; its completion
+arrives later under its original call ID. When work is pending, use `yield`
+instead of resubmitting it, polling status, or claiming completion.
+
+`until` is a maximum elapsed duration in seconds, not a timestamp. Its strict
+wire schema requires a nullable number: `{"until":null}` waits indefinitely for
+the first event; direct calls may also omit the field. Nonnegative finite numbers
+bound the wait, including zero for an immediate readiness check. Yield wakes on
+an owned tool result, durable user or worker input, cancellation, or the bound.
+A timeout leaves pending jobs running. It uses the existing exact-operation
+scheduler and event wait, with one timer and no polling or Haskell compilation.
+
+Ready tool outputs are appended once in operation order, before the yield
+status. The status has `reason` (`tool_result`, `user_input`, `worker_input`,
+`timeout`, or `cancelled`) and `ready_results`, an array of exact operation IDs
+whose outputs are available in that transcript. Cancellation records this status
+and ends the cancelled engine invocation. Host tool declarations and configured
+tools must not use the reserved `yield` name. After process loss, an unfinished
+yield is subject to the existing fail-closed wait recovery policy; its timer does
+not authorize replaying pending asynchronous work.

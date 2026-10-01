@@ -959,6 +959,7 @@ pub enum WaitResumeExact {
     Job(OperationId),
     Envelope(Envelope),
     DurableWake(i64),
+    TimedOut,
     Cancelled,
 }
 
@@ -974,8 +975,29 @@ pub async fn wait_agent_and_drain_exact<I: Into<MailboxSignal>>(
     cancelled: &mut tokio::sync::watch::Receiver<bool>,
     outstanding: &[OperationId],
 ) -> Result<WaitAgentResultExact, JobError> {
-    let resumed_by = wait_agent_exact(envelopes, jobs, cancelled, outstanding).await;
+    wait_agent_and_drain_until_exact(envelopes, jobs, cancelled, outstanding, None).await
+}
+
+/// One event wait shared by indefinite waits and bounded yields. A timeout
+/// only settles this wait; ownership of outstanding jobs is unchanged.
+pub async fn wait_agent_and_drain_until_exact<I: Into<MailboxSignal>>(
+    envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<I>,
+    jobs: &JobScheduler,
+    cancelled: &mut tokio::sync::watch::Receiver<bool>,
+    outstanding: &[OperationId],
+    deadline: Option<tokio::time::Instant>,
+) -> Result<WaitAgentResultExact, JobError> {
+    let resumed_by = wait_until_exact(envelopes, jobs, cancelled, outstanding, deadline).await;
     let call_outputs = outputs_in_operation_order(jobs, outstanding).await?;
+    // A result ready at the timer boundary wins over the timer and is drained
+    // before the wait status. Exact operation identity fences other actors.
+    let resumed_by = if matches!(resumed_by, WaitResumeExact::TimedOut) {
+        call_outputs.first().map_or(resumed_by, |(operation, _)| {
+            WaitResumeExact::Job(operation.clone())
+        })
+    } else {
+        resumed_by
+    };
     Ok(WaitAgentResultExact {
         call_outputs,
         resumed_by,
@@ -988,31 +1010,54 @@ pub async fn wait_agent_exact<I: Into<MailboxSignal>>(
     cancelled: &mut tokio::sync::watch::Receiver<bool>,
     outstanding: &[OperationId],
 ) -> WaitResumeExact {
-    if *cancelled.borrow() {
+    wait_until_exact(envelopes, jobs, cancelled, outstanding, None).await
+}
+
+async fn wait_until_exact<I: Into<MailboxSignal>>(
+    envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<I>,
+    jobs: &JobScheduler,
+    cancelled: &mut tokio::sync::watch::Receiver<bool>,
+    outstanding: &[OperationId],
+    deadline: Option<tokio::time::Instant>,
+) -> WaitResumeExact {
+    if *cancelled.borrow() || cancelled.has_changed().is_err() {
         return WaitResumeExact::Cancelled;
     }
     let mut settlements = jobs.operation_settlements();
-    for operation in outstanding {
-        if jobs.output(operation).await.ok().flatten().is_some() {
-            return WaitResumeExact::Job(operation.clone());
+    let timer = async {
+        match deadline {
+            Some(deadline) => tokio::time::sleep_until(deadline).await,
+            None => std::future::pending::<()>().await,
         }
-    }
+    };
+    tokio::pin!(timer);
+    // Subscribe before reading retained results to close the check/await race.
+    // Recheck after a lagged broadcast because its lost event may be ours.
+    let mut mailbox_open = true;
     loop {
+        for operation in outstanding {
+            if jobs.output(operation).await.ok().flatten().is_some() {
+                return WaitResumeExact::Job(operation.clone());
+            }
+        }
         tokio::select! {
-            envelope = envelopes.recv() => if let Some(envelope) = envelope {
-                return match envelope.into() {
-                    MailboxSignal::Direct(envelope) => WaitResumeExact::Envelope(envelope),
-                    MailboxSignal::Durable(wake) => WaitResumeExact::DurableWake(wake.envelope_id),
-                };
+            biased;
+            changed = cancelled.changed() => if changed.is_err() || *cancelled.borrow() {
+                return WaitResumeExact::Cancelled;
             },
             event = settlements.recv() => match event {
                 Ok(operation) if outstanding.contains(&operation) => return WaitResumeExact::Job(operation),
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => return WaitResumeExact::Cancelled,
             },
-            changed = cancelled.changed() => if changed.is_err() || *cancelled.borrow() {
-                return WaitResumeExact::Cancelled;
+            envelope = envelopes.recv(), if mailbox_open => match envelope {
+                Some(envelope) => return match envelope.into() {
+                    MailboxSignal::Direct(envelope) => WaitResumeExact::Envelope(envelope),
+                    MailboxSignal::Durable(wake) => WaitResumeExact::DurableWake(wake.envelope_id),
+                },
+                None => mailbox_open = false,
             },
+            _ = &mut timer => return WaitResumeExact::TimedOut,
         }
     }
 }
