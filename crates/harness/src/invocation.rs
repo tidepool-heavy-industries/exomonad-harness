@@ -3,7 +3,7 @@ use crate::{
     engine::{Engine, EngineConfig, ResponsesTransport},
     item::{Item, ToolKind},
     model::{AgentPath, RequestId},
-    provider::{Provider, ProviderError},
+    provider::{Provider, ProviderError, ToolFailure},
     store::Store,
     transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, Usage, sse::StreamEvent},
     turn::JobScheduler,
@@ -199,10 +199,13 @@ pub struct Callback {
     pub arguments: Value,
     pub call_id: String,
     admission: Arc<AtomicU8>,
-    reply: oneshot::Sender<Result<Value, String>>,
+    reply: oneshot::Sender<Result<Value, ToolFailure>>,
 }
 impl Callback {
-    pub fn complete(self, result: Result<Value, String>) -> Result<(), Result<Value, String>> {
+    pub fn complete(
+        self,
+        result: Result<Value, ToolFailure>,
+    ) -> Result<(), Result<Value, ToolFailure>> {
         self.reply.send(result)
     }
 }
@@ -404,7 +407,7 @@ impl Provider for CallbackProvider {
             .map_err(|_| ProviderError::Tool("callback continuation closed".into()))?;
         self.continuation(receive, &admission)
             .await?
-            .map_err(|error| ProviderError::Tool(error.into()))
+            .map_err(ProviderError::Tool)
     }
 }
 struct BudgetTransport<C> {
@@ -877,6 +880,48 @@ mod tests {
                 Step::Finished(receipt) => return receipt,
             }
         }
+    }
+    #[tokio::test]
+    async fn callback_failure_metadata_reaches_authoritative_terminal_output() {
+        let store = Arc::new(Store::memory().unwrap());
+        let mut invocation = start(
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            CellBudget::new(Limits::default()),
+            vec![turn(vec![call("refused")]), final_turn()],
+            false,
+        );
+        let Step::Callback(callback) = invocation.next().await else {
+            panic!("callback expected")
+        };
+        let operation = callback.operation.clone();
+        let metadata = json!({"kind":"invalid_input","tool":"echo","detail":"message rejected"});
+        callback
+            .complete(Err(ToolFailure::with_metadata(
+                "invalid input for tool echo: message rejected",
+                metadata.clone(),
+            )))
+            .unwrap();
+        assert!(matches!(
+            finish(&mut invocation).await.outcome,
+            Outcome::Text(_)
+        ));
+        let recorded = store
+            .replay_tool_output_operation(&operation)
+            .unwrap()
+            .unwrap();
+        let crate::store::TerminalOutcome::Failure(failure) = recorded.terminal else {
+            panic!("typed failure expected")
+        };
+        assert_eq!(failure.metadata(), Some(&metadata));
+        assert_eq!(
+            failure.message(),
+            "tool failed: invalid input for tool echo: message rejected"
+        );
+        let output: Value =
+            serde_json::from_str(recorded.item.0["output"].as_str().unwrap()).unwrap();
+        assert_eq!(output["failure"], metadata);
+        assert_eq!(output["error"], failure.message());
     }
     #[tokio::test]
     async fn sequential_callbacks_and_hooks_are_retained_by_real_engine() {
