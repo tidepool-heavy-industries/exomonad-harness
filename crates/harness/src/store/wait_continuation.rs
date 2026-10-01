@@ -104,6 +104,39 @@ impl Store {
                 operation: local.clone(),
             });
         };
+        // A caller cannot turn a reconstructed or edited view into authority.
+        // Match the cut against the immutable reference event owned by Store.
+        let records = {
+            let c = self.lock();
+            let descendant: bool = c.query_row(
+                "WITH RECURSIVE ancestry(id) AS (SELECT ?1 UNION ALL SELECT r.parent_id FROM requests r JOIN ancestry a ON r.id=a.id WHERE r.parent_id IS NOT NULL) SELECT EXISTS(SELECT 1 FROM ancestry WHERE id=?2) AND (SELECT branch FROM requests WHERE id=?1)=(SELECT branch FROM requests WHERE id=?2)",
+                rusqlite::params![next.request.0,original.request.0], |row| row.get(0),
+            )?;
+            if !descendant {
+                return Err(StoreError::InvalidWaitContinuation {
+                    operation: local.clone(),
+                });
+            }
+            let mut query = c.prepare("SELECT id,payload FROM events WHERE request_id=?1 AND kind='model_turn' ORDER BY id")?;
+            query
+                .query_map([&next.request.0], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let mut authorized = false;
+        for (event, payload) in records {
+            let issued = self.decode_replay_record(event, &payload)?;
+            if issued.model_request.input == next.model_request.input {
+                authorized = true;
+                break;
+            }
+        }
+        if !authorized {
+            return Err(StoreError::InvalidWaitContinuation {
+                operation: local.clone(),
+            });
+        }
         let positions = next
             .model_request
             .input
@@ -140,5 +173,151 @@ impl Store {
             issued_cut,
             items,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        item::ToolKind,
+        model::{CallId, Effort, RequestId},
+        transport::{ResponsesRequest, ResponsesTurn, Usage},
+        turn::JobOutput,
+    };
+    use serde_json::json;
+
+    fn fixture() -> (
+        Store,
+        OperationId,
+        OperationId,
+        RecordedReplayTurn,
+        Item,
+        Item,
+    ) {
+        let store = Store::memory().unwrap();
+        let source = RequestId("wait-source".into());
+        let next = RequestId("wait-next".into());
+        let local_request = RequestId("replay-local".into());
+        store.create_request(&source, None, "/root").unwrap();
+        store.create_request(&next, Some(&source), "/root").unwrap();
+        store
+            .create_request(&local_request, None, "/replay")
+            .unwrap();
+        let call = CallId("wait-id".into());
+        let invocation = Item(
+            json!({"type":"function_call","name":"wait_agent","call_id":call.0,"arguments":"{}"}),
+        );
+        store.append_items(&source, &[invocation.clone()]).unwrap();
+        let original = store.claim(&call, &source).unwrap();
+        let local = store.operation_for_request(&local_request, &call).unwrap();
+        let terminal = JobOutput::Completed(Ok(json!({"resumed_by":"user_input"})));
+        let output = Item::tool_output(&call, ToolKind::Function, &terminal);
+        store
+            .write_job_output(&original, ToolKind::Function, &terminal)
+            .unwrap();
+        let message = Item(json!({"type":"message","role":"user","content":"recorded wake"}));
+        store
+            .append_items(&source, &[output.clone(), message.clone()])
+            .unwrap();
+        let request = ResponsesRequest {
+            input: vec![invocation, output.clone(), message.clone()],
+            instructions: String::new(),
+            tools: vec![].into(),
+            tools_allowed: None,
+            model: "test".into(),
+            pinned_effort: Effort::Low,
+            session_id: "test".into(),
+        };
+        store
+            .record_replay_turn(
+                &next,
+                &request,
+                &ResponsesTurn {
+                    response_id: "next".into(),
+                    items: vec![],
+                    usage: Usage::default(),
+                },
+            )
+            .unwrap();
+        let next = store.replay_turns(&next).unwrap().remove(0);
+        (store, local, original, next, output, message)
+    }
+
+    #[test]
+    fn immutable_issued_cut_excludes_later_history_messages() {
+        let (store, local, original, next, output, message) = fixture();
+        let late = Item(json!({"type":"message","role":"user","content":"late mutation"}));
+        store.append_items(&original.request, &[late]).unwrap();
+        let witness = store
+            .replay_wait_continuation(&local, &original, Some(&next))
+            .unwrap()
+            .unwrap();
+        assert_eq!(witness.into_items(&local, &output).unwrap(), vec![message]);
+    }
+
+    #[test]
+    fn wait_continuation_stops_at_first_non_message() {
+        let (store, local, original, next, output, message) = fixture();
+        let late = Item(json!({"type":"message","role":"user","content":"after parallel output"}));
+        store
+            .append_items(
+                &original.request,
+                &[
+                    Item(json!({"type":"function_call_output","call_id":"other","output":"{}"})),
+                    late.clone(),
+                ],
+            )
+            .unwrap();
+        let witness = store
+            .replay_wait_continuation(&local, &original, Some(&next))
+            .unwrap()
+            .unwrap();
+        assert_eq!(witness.into_items(&local, &output).unwrap(), vec![message]);
+    }
+
+    #[test]
+    fn edited_next_request_cannot_issue_continuation_authority() {
+        let (store, local, original, mut next, _, _) = fixture();
+        next.model_request.input.push(Item(
+            json!({"type":"message","role":"user","content":"forged cut"}),
+        ));
+        assert!(matches!(
+            store.replay_wait_continuation(&local, &original, Some(&next)),
+            Err(StoreError::InvalidWaitContinuation { .. })
+        ));
+    }
+
+    #[test]
+    fn wait_continuation_refuses_duplicate_output_or_missing_cut() {
+        let (store, local, original, next, output, _) = fixture();
+        assert!(
+            store
+                .replay_wait_continuation(&local, &original, None)
+                .is_err()
+        );
+        store.append_items(&original.request, &[output]).unwrap();
+        assert!(
+            store
+                .replay_wait_continuation(&local, &original, Some(&next))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn wait_continuation_is_bound_to_local_operation_and_exact_output() {
+        let (store, local, original, next, output, _) = fixture();
+        let witness = store
+            .replay_wait_continuation(&local, &original, Some(&next))
+            .unwrap()
+            .unwrap();
+        let mut foreign = local.clone();
+        foreign.request = RequestId("foreign".into());
+        assert!(witness.clone().into_items(&foreign, &output).is_err());
+        assert!(
+            witness
+                .into_items(&local, &Item(json!({"changed":true})))
+                .is_err()
+        );
     }
 }
