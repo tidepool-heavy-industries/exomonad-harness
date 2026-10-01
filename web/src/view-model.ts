@@ -1,4 +1,4 @@
-import type { CommandReceipt, HostActorIdentity } from "./protocol";
+import type { CommandReceipt, Envelope, HostActorIdentity } from "./protocol";
 
 /**
  * Presentation rows derived from normalized server state. The integration
@@ -62,6 +62,7 @@ export type HarnessViewModel = {
     recipient?: string;
     message: string;
     state: string;
+    type?: Envelope["type"];
     receivedAt?: string;
     ordinal?: number;
   }>;
