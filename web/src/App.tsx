@@ -1,435 +1,531 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
-import NodeWindow from "./NodeWindow";
-import type { CommandReceipt, HostCommand, HostCommandSubmission } from "./protocol";
-
-/**
- * Presentation-only contract for the web views. The server/protocol adapter
- * owns conversion from protocol events into this view model; this module does
- * not import or re-declare wire types.
- */
-export type HarnessViewModel = {
-  hostRun?: string;
-  actors?: Array<{
-    id: string;
-    name: string;
-    run: string;
-    incarnation: string;
-    parent?: string;
-    kind: "model" | "workflow";
-    lifecycle: string;
-    modelConversation?: string;
-    activeRound?: string;
-  }>;
-  commandReceipts?: CommandReceipt[];
-  nodes: Array<{
-    id: string;
-    parentId?: string;
-    name: string;
-    model?: string;
-    effort?: string;
-    state: string;
-    detail?: string;
-    updatedAt?: string;
-  }>;
-  timeline: Array<{
-    id: string;
-    nodeId: string;
-    label: string;
-    kind: "request" | "job" | "wait";
-    state: string;
-    startedAt?: string;
-    duration?: string;
-    detail?: string;
-    commandId?: string;
-    command?: string;
-    toolKind?: "function" | "custom";
-    outcome?: "accepted" | "pending" | "queued" | "presented" | "acted" | "completed" | "cancelled" | "failed";
-    requestId?: string;
-    callId?: string;
-    toolName?: string;
-    delivered?: boolean;
-    output?: unknown;
-  }>;
-  inbox: Array<{
-    id: string;
-    sender: string;
-    recipient?: string;
-    message: string;
-    state: string;
-    receivedAt?: string;
-    ordinal?: number;
-  }>;
-};
-
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from 'react';
+import NodeWindow from './NodeWindow';
+import type { CommandReceipt, HostActorIdentity, HostCommand } from './protocol';
+import { actorIdentityKey } from './protocol';
+import { isSettledCommand, operationKey, type BrowserCommandRecord } from './pending-commands';
+import type { HarnessViewModel } from './view-model';
+import type { RouteState, Screen, Selection, SubmitHostCommand, RetryHostCommand, SubmitDemoCommand, TransportPhase } from './client-contract';
+import { createViewSelector, formatActivityTime, orderConversationTree, pageRows, resolveSelection, needsActivityClock } from './selectors';
+import { actorDraftKey, demoDraftKey, useDraft } from './drafts';
+import { routeUrl, useRoute } from './navigation';
 export type AppProps = {
-  data?: HarnessViewModel;
-  onCommand?: (command: string | HostCommand) => void;
-  onRetry?: (submission: HostCommandSubmission) => void;
-  pendingCommands?: Array<{ submission: HostCommandSubmission; state: string }>;
+  data: HarnessViewModel;
+  onHostCommand?: SubmitHostCommand;
+  onDemoCommand?: SubmitDemoCommand;
+  onRetry?: RetryHostCommand;
+  transportPhase?: TransportPhase;
+  pendingCommands?: readonly BrowserCommandRecord[];
   acceptedCommandIds?: readonly string[];
+  demoFeedback?: string;
+  onAuthExpired?: () => void;
 };
-
-type Screen = "tree" | "timeline" | "inbox" | "command" | "host";
-const emptyData: HarnessViewModel = { nodes: [], timeline: [], inbox: [] };
-const commonScreens: Array<{ id: Screen; title: string; shortcut: string }> = [
-  { id: "tree", title: "Tree", shortcut: "g t" },
-  { id: "timeline", title: "Timeline", shortcut: "g l" },
-  { id: "inbox", title: "Inbox", shortcut: "g i" },
-];
-const standaloneScreens = [...commonScreens, { id: "command" as const, title: "Command", shortcut: "g c" }];
-const embeddedScreens = [...commonScreens, { id: "host" as const, title: "Host", shortcut: "g h" }];
-
-const styles = `
-  :root { color-scheme: light dark; --bg:#fff; --fg:#171717; --muted:#595959; --line:#b8b8b8; --soft:#f2f2f2; --accent:#075fc7; --pending:#765000; --failed:#a31313; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#151515; --fg:#f2f2f2; --muted:#c1c1c1; --line:#626262; --soft:#242424; --accent:#83baff; --pending:#ffd166; --failed:#ff9292; } }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.4 Inter,ui-sans-serif,system-ui,sans-serif; font-variant-numeric:tabular-nums; }
-  button,input { font:inherit; }
-  button { color:inherit; }
-  .harness { min-height:100vh; display:flex; flex-direction:column; }
-  .top { display:flex; align-items:center; gap:20px; min-height:48px; padding:8px 16px; border-bottom:1px solid var(--line); }
-  .brand { font-weight:600; letter-spacing:.02em; margin-right:auto; }
-  .tabs { display:flex; gap:4px; }
-  .tab { border:0; background:transparent; padding:7px 10px; cursor:pointer; border-bottom:2px solid transparent; }
-  .tab[aria-current=page] { border-color:var(--accent); font-weight:600; }
-  .tab kbd { margin-left:6px; color:var(--muted); font:11px ui-monospace,monospace; }
-  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-  main { width:min(100%,1200px); margin:0 auto; padding:20px 16px; flex:1; }
-  h1 { font-size:20px; line-height:1.25; margin:0 0 16px; font-weight:600; }
-  h2 { font-size:14px; margin:0; font-weight:600; }
-  .hint,.meta { color:var(--muted); }
-  .mono { font:12px/1.4 ui-monospace,SFMono-Regular,monospace; }
-  .rows { border-top:1px solid var(--line); }
-  .row { min-height:36px; display:grid; grid-template-columns:minmax(130px,1.1fr) minmax(90px,.8fr) minmax(120px,1fr); gap:12px; align-items:center; padding:6px 8px; border-bottom:1px solid var(--line); }
-  .row:nth-child(even) { background:var(--soft); }
-  .tree-row { grid-template-columns:minmax(180px,1fr) minmax(100px,.6fr) minmax(130px,.8fr); }
-  .indent { display:flex; align-items:center; min-width:0; }
-  .branch { display:inline-block; width:18px; flex:none; color:var(--muted); }
-  .state { font-weight:500; }
-  .state[data-state*=pending],.state[data-state*=waiting] { color:var(--pending); }
-  .state[data-state*=fail],.state[data-state*=error],.state[data-state*=refus] { color:var(--failed); }
-  .empty { padding:22px 8px; border-block:1px solid var(--line); }
-  .empty strong { display:block; margin-bottom:4px; }
-  .toolbar { display:flex; justify-content:space-between; gap:12px; align-items:center; margin-bottom:12px; }
-  .command-form { display:flex; gap:8px; max-width:760px; }
-  .command-form input { flex:1; min-width:0; padding:10px; color:var(--fg); background:var(--bg); border:1px solid var(--line); }
-  .command-form button { padding:8px 14px; background:var(--fg); color:var(--bg); border:1px solid var(--fg); cursor:pointer; }
-  .host-controls { max-width:760px; }
-  .host-controls label { display:block; margin:12px 0 4px; font-weight:600; }
-  .host-controls select,.host-controls textarea { width:100%; padding:9px; color:var(--fg); background:var(--bg); border:1px solid var(--line); }
-  .host-actions { display:flex; gap:8px; margin-top:10px; }
-  .host-actions button { padding:8px 12px; }
-  .message { white-space:pre-wrap; overflow-wrap:anywhere; }
-  .message pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:4px 0 12px; }
-  .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
-  @media(max-width:600px) {
-    .top { align-items:flex-start; flex-wrap:wrap; gap:4px; padding:8px; }
-    .brand { width:100%; }
-    .tabs { width:100%; overflow-x:auto; }
-    .tab { padding:7px 8px; white-space:nowrap; }
-    .tab kbd { display:none; }
-    main { padding:16px 8px; }
-    .row { grid-template-columns:minmax(0,1fr) minmax(80px,.7fr); gap:6px 10px; }
-    .row > :last-child { grid-column:1 / -1; }
-    .tree-row { grid-template-columns:minmax(0,1fr) minmax(85px,.7fr); }
-    .command-form { flex-wrap:wrap; }
-    .command-form input { flex-basis:100%; }
+const screenNames: Record<Screen, string> = { tree: 'Tree', timeline: 'Timeline', inbox: 'Inbox', host: 'Host', command: 'Command' };
+const identityOf = (actor: NonNullable<HarnessViewModel['actors']>[number]): HostActorIdentity => ({ run: actor.run, actor: actor.name, incarnation: actor.incarnation });
+const sameSelection = (left: Selection, right: Selection) => JSON.stringify(left) === JSON.stringify(right);
+function Empty({ children }: {
+  children: React.ReactNode;
+}) {
+  return <p className="empty" role="status">
+    {children}
+  </p>;
+}
+function Pager({ page, count, total, onPage }: {
+  page: number;
+  count: number;
+  total: number;
+  onPage: (page: number) => void;
+}) {
+  return <div className="pager">
+    <span>
+      {total} rows · Page {page + 1} of {Math.max(1, count)}
+    </span>
+    <button disabled={page === 0} onClick={() => onPage(page - 1)}>Previous page</button>
+    <button disabled={page + 1 >= count} onClick={() => onPage(page + 1)}>Next page</button>
+  </div>;
+}
+function receiptText(receipt: CommandReceipt): {
+  title: string;
+  detail: string;
+} {
+  switch (receipt.outcome) {
+    case 'admitted': return { title: 'Admitted for processing', detail: `envelope ${receipt.envelopeId}${receipt.wakeError ? ` · wake issue: ${receipt.wakeError}` : ''}` };
+    case 'control_requested': return { title: receipt.control === 'interrupt' ? 'Interrupt requested' : 'Retire requested', detail: 'Host control request; actor completion is not established.' };
+    case 'refused': return { title: 'Refused', detail: receipt.reason };
+    case 'unconfirmed': return { title: 'Unconfirmed', detail: receipt.reason };
   }
-  @media(prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto !important; transition:none !important; animation:none !important; } }
-  @media(forced-colors:active) { .tab[aria-current=page] { border-bottom-color:Highlight; } :focus-visible { outline-color:Highlight; } }
-`;
-
-function Empty({ title, help }: { title: string; help: string }) {
-  return <div className="empty"><strong>{title}</strong><span className="hint">{help}</span></div>;
 }
-
-function Tree({ data }: { data: HarnessViewModel }) {
-  const children = useMemo(() => {
-    const byParent = new Map<string | undefined, HarnessViewModel["nodes"]>();
-    data.nodes.forEach((node) => byParent.set(node.parentId, [...(byParent.get(node.parentId) ?? []), node]));
-    return byParent;
-  }, [data.nodes]);
-  const rows: Array<{ node: HarnessViewModel["nodes"][number]; depth: number }> = [];
-  const visit = (parent: string | undefined, depth: number, seen: Set<string>) => {
-    (children.get(parent) ?? []).forEach((node) => {
-      if (seen.has(node.id)) return;
-      rows.push({ node, depth });
-      const next = new Set(seen); next.add(node.id); visit(node.id, depth + 1, next);
-    });
-  };
-  visit(undefined, 0, new Set());
-  return data.nodes.length === 0 ? <Empty title="No nodes yet" help="Active conversations and their children appear here." /> : (
-    <div role="table" aria-label="Conversation tree" className="rows">
-      <div className="row tree-row" role="row"><strong role="columnheader">Conversation</strong><strong role="columnheader">State</strong><strong role="columnheader">Model · effort · activity</strong></div>
-      {rows.map(({ node, depth }) => <div className="row tree-row" role="row" key={node.id}>
-        <div className="indent" role="cell" style={{ paddingInlineStart: Math.min(depth, 8) * 16 }}>
-          {depth > 0 && <span className="branch" aria-hidden="true">└─</span>}
-          <span title={node.id}>{node.name}</span>
-        </div>
-        <span role="cell" className="state" data-state={node.state}>{node.state}</span>
-        <span role="cell" className="meta">{[node.model, node.effort, node.detail ?? node.updatedAt].filter(Boolean).join(" · ") || "—"}</span>
-      </div>)}
-    </div>
-  );
+function CommandReceipts({ receipts }: {
+  receipts: readonly CommandReceipt[];
+}) {
+  return receipts.length ? <section aria-label="Command handoff receipts">
+    <h2>Recent command handoffs</h2>
+    {receipts.map((receipt, index) => {
+      const text = receiptText(receipt);
+      return <article className="row" key={`${receipt.commandId}:${index}`}>
+        <strong>
+          {text.title}
+        </strong>
+        <span className="mono">
+          {receipt.commandId}
+        </span>
+        <span>
+          {receipt.target && `${receipt.target.actor} · run ${receipt.target.run} · incarnation ${receipt.target.incarnation} · `}{text.detail}
+        </span>
+      </article>;
+    })}
+    <p className="hint">Admission, request inclusion, execution, delivery and terminal outcome are separate observations.</p>
+  </section> : null;
 }
-
-function HostActors({ data }: { data: HarnessViewModel }) {
-  const actors = data.actors ?? [];
-  if (actors.length === 0) return null;
-  return <section aria-label="Host actors">
-    <h2>Host actors</h2>
-    <div role="table" aria-label="Host actor lifecycles" className="rows">
-      <div className="row" role="row"><strong role="columnheader">Actor</strong><strong role="columnheader">Lifecycle</strong><strong role="columnheader">Incarnation · relation</strong></div>
-      {actors.map((actor) => <div className="row" role="row" key={actor.id}>
-        <strong role="cell">{actor.name} <span className="hint">({actor.kind})</span></strong>
-        <span role="cell" className="state" data-state={actor.lifecycle}>{actor.lifecycle}</span>
-        <span role="cell" className="meta">{[
-          `run ${actor.run}`, `incarnation ${actor.incarnation}`,
-          actor.parent ? `parent ${actor.parent}` : undefined,
-          actor.modelConversation ? `conversation ${actor.modelConversation}` : undefined,
-        ].filter(Boolean).join(" · ")}</span>
-      </div>)}
-    </div>
+function RetainedCommands({ commands, run, ready, onRetry }: {
+  commands: readonly BrowserCommandRecord[];
+  run?: string;
+  ready: boolean;
+  onRetry?: RetryHostCommand;
+}) {
+  const [feedback, setFeedback] = useState('');
+  if (!commands.length)
+    return null;
+  return <section aria-label="Retained browser operations">
+    <h2>Retained browser operations</h2>
+    {commands.map(record => <article className="operation" data-operation-id={record.submission.operation_id} key={operationKey(record)}>
+      <strong>
+        {record.submission.command.action} · {record.authority === 'legacy' ? `Previously observed ${record.state}; fresh lookup required` : record.authority === 'local' ? 'Locally retained; host admission unknown' : record.state}
+      </strong>
+      <div className="mono">
+        {record.submission.operation_id} · run {record.hostRun}
+      </div>
+      <pre>
+        {JSON.stringify(record.submission.command, null, 2)}
+      </pre>
+      <p>Socket send: {record.send ?? 'unknown'}{record.accepted ? ' · Server acknowledged handoff; terminal outcome unknown.' : ''}
+      </p>
+      {record.lookup && <p className="hint">Status lookup {record.lookup.kind}: {record.lookup.reason}
+      </p>}
+      {record.localRefusal && <p className="error">Local channel refusal: {record.localRefusal.reason}
+      </p>}
+      {record.issues?.map((issue, i) => <p className="error" key={i}>
+        {issue}
+      </p>)}
+      {record.receipt && <p>
+        {receiptText(record.receipt).title}: {receiptText(record.receipt).detail}
+      </p>}
+      <button disabled={!onRetry || !ready || record.hostRun !== run || isSettledCommand(record)} onClick={() => {
+        const result = onRetry?.(record.submission); if (result)
+          setFeedback(result.kind === 'blocked' ? result.reason : `Same operation retained; socket send ${result.send}.`);
+      }}>Retry same operation</button>
+    </article>)}{feedback && <p role="status">
+      {feedback}
+    </p>}
+    <p className="hint">Original payloads are retained. Reconnect never automatically resubmits an operation.</p>
   </section>;
 }
-
-function HostControls({ data, onCommand, pendingCommands, onRetry }: {
+function HostComposer({ data, route, navigate, unavailable, ready, onHostCommand }: {
   data: HarnessViewModel;
-  onCommand?: AppProps["onCommand"];
-  pendingCommands: NonNullable<AppProps["pendingCommands"]>;
-  onRetry?: AppProps["onRetry"];
+  route: RouteState;
+  navigate: (route: RouteState) => void;
+  unavailable: boolean;
+  ready: boolean;
+  onHostCommand?: SubmitHostCommand;
 }) {
-  const actors = (data.actors ?? []).filter((actor) => actor.run === data.hostRun);
-  const [selectedKey, setSelectedKey] = useState("");
-  const [text, setText] = useState("");
-  const selected = actors.find((actor) => actor.id === selectedKey);
-  const target = selected && {
-    run: selected.run,
-    actor: selected.name,
-    incarnation: selected.incarnation,
+  const resolved = resolveSelection(data, route.selection);
+  const actor = resolved.actor;
+  const target = route.selection.kind === 'actor' ? route.selection.identity : undefined;
+  const draft = useDraft(target ? actorDraftKey(target) : undefined);
+  const [feedback, setFeedback] = useState('');
+  const actors = (data.actors ?? []).filter(item => item.run === data.hostRun);
+  const selectedKey = target ? actorIdentityKey(target) : '';
+  const canControl = Boolean(target && actor && !unavailable && actor.run === data.hostRun && ready && onHostCommand && (actor.lifecycle === 'running' || actor.lifecycle === 'waiting'));
+  const send = (command: HostCommand) => {
+    const result = onHostCommand?.(command);
+    if (!result)
+      return;
+    setFeedback(result.kind === 'blocked' ? result.reason : `Operation ${result.operationId} retained locally; socket send ${result.send}. Host admission is not established.`);
+    if (result.kind === 'retained' && command.action === 'input')
+      draft.submitted();
   };
-  const canControl = Boolean(target && (selected?.lifecycle === "running" || selected?.lifecycle === "waiting") && onCommand);
-  const submitInput = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!target || !canControl || !text.trim()) return;
-    onCommand?.({ action: "input", target, text });
-    setText("");
-  };
-  const sendAction = (action: "interrupt" | "retire") => {
-    if (!target || !canControl) return;
-    if (action === "interrupt") {
-      if (!selected?.activeRound) return;
-      onCommand?.({ action, target, expected_round: selected.activeRound });
-    } else onCommand?.({ action, target });
-  };
-  const selectedWasRemoved = selectedKey.length > 0 && !selected;
-  return <section className="host-controls" aria-labelledby="host-controls-heading">
-    <h2 id="host-controls-heading">Embedded host controls</h2>
-    <p className="hint">Run <span className="mono">{data.hostRun}</span>. Select an actor explicitly. Controls address its exact run, actor, and incarnation.</p>
-    {actors.length === 0 && <p role="status" className="hint">No actors are currently projected for this host run.</p>}
-    <label htmlFor="host-actor-target">Target actor</label>
-    <select id="host-actor-target" value={selectedKey} onChange={(event) => setSelectedKey(event.target.value)}>
+  return <section className="host-controls">
+    <h2>Embedded host controls</h2>
+    <label htmlFor="host-target">Target actor</label>
+    <select id="host-target" value={selectedKey} onChange={event => { const selected = actors.find(item => actorIdentityKey(identityOf(item)) === event.target.value); navigate({ ...route, selection: selected ? { kind: 'actor', identity: identityOf(selected) } : { kind: 'none' } }); setFeedback(''); }}>
       <option value="">Choose an actor…</option>
-      {selectedWasRemoved && <option value={selectedKey}>Previously selected actor is no longer present</option>}
-      {actors.map((actor) => <option key={actor.id} value={actor.id}>
-        {actor.name} · {actor.kind} · {actor.lifecycle} · incarnation {actor.incarnation}
+      {target && !actor && <option value={selectedKey}>Previously selected actor is no longer present</option>}{actors.map(item => <option key={actorIdentityKey(identityOf(item))} value={actorIdentityKey(identityOf(item))}>
+        {item.name} · {item.kind} · {item.lifecycle} · incarnation {item.incarnation}
       </option>)}
     </select>
-    {selectedWasRemoved && <p role="status" className="hint">The selected actor disappeared or was replaced. Choose an actor again before sending a command.</p>}
-    {selected && selected.lifecycle !== "running" && selected.lifecycle !== "waiting" &&
-      <p role="status" className="hint">This actor is {selected.lifecycle}; host controls are unavailable.</p>}
-    {!onCommand && <p role="status" className="hint">Host command channel is not connected.</p>}
-    <form onSubmit={submitInput}>
-      <label htmlFor="host-actor-input">Message to selected actor</label>
-      <textarea id="host-actor-input" rows={4} value={text} onChange={(event) => setText(event.target.value)} disabled={!canControl} />
+    {!ready && <p role="status">Host controls await a fresh connected snapshot.</p>}{!onHostCommand && <p role="status">Host command channel is unavailable; this view is read-only.</p>}
+    {actor && actor.lifecycle !== 'running' && actor.lifecycle !== 'waiting' && <p role="status">This actor is {actor.lifecycle}; controls are unavailable.</p>}
+    <form onSubmit={(event: FormEvent) => {
+      event.preventDefault(); if (target && canControl && draft.text.trim())
+        send({ action: 'input', target, text: draft.text });
+    }}>
+      <label htmlFor="actor-message">Message to selected actor</label>
+      <textarea id="actor-message" rows={4} value={draft.text} onChange={event => draft.setText(event.target.value)} disabled={!target || !actor || unavailable} />
       <div className="host-actions">
-        <button type="submit" disabled={!canControl || !text.trim()}>Send input</button>
-        <button type="button" disabled={!canControl || !selected?.activeRound} onClick={() => sendAction("interrupt")}>Interrupt</button>
-        <button type="button" disabled={!canControl} onClick={() => sendAction("retire")}>Retire</button>
+        <button disabled={!canControl || !draft.text.trim()}>Send input</button>
+        <button type="button" disabled={!canControl || !actor?.activeRound} onClick={() => {
+          if (target && actor?.activeRound)
+            send({ action: 'interrupt', target, expected_round: actor.activeRound });
+        }}>Interrupt</button>
+        <button type="button" disabled={!canControl} onClick={() => {
+          if (target)
+            send({ action: 'retire', target });
+        }}>Retire</button>
       </div>
     </form>
-    <CommandReceipts receipts={data.commandReceipts ?? []} />
-    <PendingCommands commands={pendingCommands ?? []} onRetry={onRetry} />
-    <HostActors data={data} />
+    {draft.error && <p className="error" role="status">
+      {draft.error}
+    </p>}{feedback && <p role="status">
+      {feedback}
+    </p>}
   </section>;
 }
-
-function PendingCommands({ commands, onRetry }: { commands: NonNullable<AppProps["pendingCommands"]>; onRetry?: AppProps["onRetry"] }) {
-  if (commands.length === 0) return null;
-  return <section aria-labelledby="pending-commands-heading">
-    <h2 id="pending-commands-heading">Retained browser operations</h2>
-    {commands.map(({ submission, state }) => <article className="row" key={submission.operation_id} data-operation-id={submission.operation_id}>
-      <span>{submission.command.action}</span>
-      <span className="state" data-state={state}>{state}</span>
-      <span className="meta mono">{submission.operation_id}</span>
-      <button type="button" onClick={() => onRetry?.(submission)} disabled={!onRetry}>Retry same operation</button>
-    </article>)}
-    <p className="hint">Unconfirmed operations are retained across reloads and are never replayed automatically. Retry reuses the same operation ID.</p>
-  </section>;
-}
-
-function CommandReceipts({ receipts }: { receipts: readonly CommandReceipt[] }) {
-  if (receipts.length === 0) return null;
-  return <section aria-labelledby="command-receipts-heading">
-    <h2 id="command-receipts-heading">Recent command handoffs</h2>
-    <div role="list" className="rows" aria-label="Command handoff receipts">
-      {receipts.map((receipt) => {
-        const outcome = receipt.outcome === "admitted"
-          ? "Admitted for processing"
-          : receipt.outcome === "control_requested"
-            ? `${receipt.control === "interrupt" ? "Interrupt" : "Retire"} requested`
-            : "Refused";
-        const detail = receipt.outcome === "admitted"
-          ? [`envelope ${receipt.envelopeId}`, receipt.wakeError ? `wake issue: ${receipt.wakeError}` : undefined].filter(Boolean).join(" · ")
-          : receipt.outcome === "control_requested"
-            ? "Request sent to the host; this does not report actor completion."
-            : receipt.reason;
-        return <article role="listitem" className="row" key={receipt.commandId}>
-          <strong>{outcome}</strong>
-          <span className="mono">{receipt.commandId}</span>
-          <span className="meta">{[
-            receipt.target
-              ? `${receipt.target.actor} · run ${receipt.target.run} · incarnation ${receipt.target.incarnation}`
-              : undefined,
-            detail,
-          ].filter(Boolean).join(" · ")}</span>
-        </article>;
-      })}
-    </div>
-  </section>;
-}
-
-function Timeline({ data, onInspectRequest }: { data: HarnessViewModel; onInspectRequest?: (requestId: string) => void }) {
-  return data.timeline.length === 0 ? <Empty title="No activity yet" help="Requests, jobs and waits will be listed as they happen." /> : (
-    <div role="table" aria-label="Conversation activity timeline" className="rows">
-      <div className="row" role="row"><strong role="columnheader">Activity</strong><strong role="columnheader">State</strong><strong role="columnheader">Node · start · duration</strong></div>
-      {data.timeline.map((item) => <div className="row" role="row" key={item.id}>
-        <span role="cell"><span className="mono">{item.kind}</span> · {item.label}
-          {item.kind === "request" && onInspectRequest && <button type="button" onClick={() => onInspectRequest(item.id)}>Inspect history</button>}
-        </span>
-        <span role="cell" className="state" data-state={item.state}>{item.state}</span>
-        <span role="cell" className="meta">{[
-          `id ${item.id}`,
-          item.nodeId,
-          item.commandId ? `command ${item.commandId}` : undefined,
-          item.outcome ? `outcome ${item.outcome}` : undefined,
-          item.requestId ? `request ${item.requestId}` : undefined,
-          item.callId ? `call ${item.callId}` : undefined,
-          item.toolKind ? `tool kind ${item.toolKind}` : undefined,
-          item.toolName,
-          item.delivered === undefined ? undefined : `delivered ${item.delivered}`,
-          item.startedAt,
-          item.duration,
-          item.detail,
-          item.output === undefined ? undefined : `output ${formatOutput(item.output)}`,
-        ].filter(Boolean).join(" · ") || "—"}</span>
-      </div>)}
-    </div>
-  );
-}
-
-function formatOutput(output: unknown): string {
-  if (typeof output === "string") return output;
-  try { return JSON.stringify(output) ?? String(output); }
-  catch { return String(output); }
-}
-
-function Inbox({ data }: { data: HarnessViewModel }) {
-  return data.inbox.length === 0 ? <Empty title="Inbox is clear" help="Operator messages and pending questions appear here. Use “g t” to return to the tree." /> : (
-    <div role="list" className="rows" aria-label="Inbox messages">
-      {data.inbox.map((item) => <article className="row" role="listitem" key={item.id}>
-        <strong>{item.sender}{item.recipient ? ` → ${item.recipient}` : ""}</strong><span className="state" data-state={item.state}>{item.state}{item.ordinal !== undefined ? ` · #${item.ordinal}` : ""}</span>
-        <span className="message">{item.message}</span><span className="meta">{item.receivedAt ?? ""}</span>
-      </article>)}
-    </div>
-  );
-}
-
-export default function App({ data = emptyData, onCommand, onRetry, pendingCommands = [], acceptedCommandIds = [] }: AppProps) {
-  const [screen, setScreen] = useState<Screen>("tree");
-  const [command, setCommand] = useState("");
-  const [inspectedRequest, setInspectedRequest] = useState<string>();
-  const embeddedMode = data.hostRun !== undefined;
-  const screens = embeddedMode ? embeddedScreens : standaloneScreens;
-  const activeScreen = screens.some((item) => item.id === screen) ? screen : "tree";
+export default function App({ data, onHostCommand, onDemoCommand, onRetry, transportPhase = 'ready', pendingCommands = [], acceptedCommandIds = [], demoFeedback, onAuthExpired }: AppProps) {
+  const { route, issue, navigate } = useRoute();
+  const resolved = useMemo(() => resolveSelection(data, route.selection), [data.actors, data.nodes, route.selection]);
+  const selector = useMemo(() => createViewSelector(), []);
+  const view = useMemo(() => selector(data, route.selection, route.global, route.messageFilters), [selector, data, route.selection, route.global, route.messageFilters]);
+  const embedded = data.hostRun !== undefined;
+  const screens = useMemo<Screen[]>(() => ['tree', 'timeline', 'inbox', embedded ? 'host' : 'command'], [embedded]);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const previousScreen = useRef(route.screen);
+  const inspectionTrigger = useRef<HTMLElement | null>(null);
+  const previousInspection = useRef(route.requestId);
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(0);
+  const [actorPage, setActorPage] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
+  const demo = useDraft(demoDraftKey);
+  const [demoLocalFeedback, setDemoLocalFeedback] = useState('');
   useEffect(() => {
-    let prefix = "";
-    let timer = 0;
+    if (previousScreen.current !== route.screen) {
+      heading.current?.focus();
+      previousScreen.current = route.screen;
+    } setSearch(''); setPage(0); setActorPage(0);
+  }, [route.screen]);
+  useEffect(() => {
+    if (previousInspection.current !== undefined && route.requestId === undefined) {
+      if (inspectionTrigger.current?.isConnected)
+        inspectionTrigger.current.focus();
+      else
+        heading.current?.focus();
+      inspectionTrigger.current = null;
+    }
+    previousInspection.current = route.requestId;
+  }, [route.requestId]);
+  useEffect(() => { setPage(0); setActorPage(0); }, [route.selection, route.global, route.messageFilters]);
+  const searchTerm = search.toLowerCase();
+  const filteredTimeline = useMemo(() => searchTerm ? view.timeline.filter(item => `${item.label} ${item.id} ${item.detail ?? ''}`.toLowerCase().includes(searchTerm)) : view.timeline, [view.timeline, searchTerm]);
+  const activity = useMemo(() => pageRows(filteredTimeline, page, 50), [filteredTimeline, page]);
+  const activeVisible = (route.screen === 'timeline' || route.screen === 'command') && activity.rows.some(needsActivityClock);
+  useEffect(() => {
+    if (!activeVisible)
+      return;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const visibility = () => {
+      if (timer)
+        clearInterval(timer); if (!document.hidden) {
+          setNow(Date.now());
+          timer = setInterval(() => setNow(Date.now()), 1000);
+        }
+    };
+    visibility();
+    document.addEventListener('visibilitychange', visibility);
+    return () => {
+      if (timer)
+        clearInterval(timer); document.removeEventListener('visibilitychange', visibility);
+    };
+  }, [activeVisible]);
+  useEffect(() => {
+    let prefix = false;
+    let timer: ReturnType<typeof setTimeout>;
     const handle = (event: KeyboardEvent) => {
-      if (event.altKey || event.ctrlKey || event.metaKey || event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || (event.target as HTMLElement).isContentEditable) return;
-      if (event.key === "g") { prefix = "g"; window.clearTimeout(timer); timer = window.setTimeout(() => { prefix = ""; }, 900); return; }
-      if (prefix === "g") {
-        const target: Record<string, Screen> = embeddedMode
-          ? { t: "tree", l: "timeline", i: "inbox", h: "host" }
-          : { t: "tree", l: "timeline", i: "inbox", c: "command" };
-        const nextScreen = target[event.key]
-        if (nextScreen !== undefined) { event.preventDefault(); setScreen(nextScreen); }
-        prefix = "";
+      const element = event.target instanceof Element ? event.target : null;
+      if (event.altKey || event.ctrlKey || event.metaKey || element?.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])')) {
+        prefix = false;
+        return;
+      }
+      if (event.key === 'g') {
+        prefix = true;
+        clearTimeout(timer);
+        timer = setTimeout(() => { prefix = false; }, 900);
+        return;
+      }
+      if (!prefix)
+        return;
+      prefix = false;
+      const target = ({ t: 'tree', l: 'timeline', i: 'inbox', h: 'host', c: 'command' } as Record<string, Screen>)[event.key];
+      if (target && screens.includes(target)) {
+        event.preventDefault();
+        navigate({ ...route, screen: target });
       }
     };
-    window.addEventListener("keydown", handle);
-    return () => { window.removeEventListener("keydown", handle); window.clearTimeout(timer); };
-  }, [embeddedMode]);
-  const submit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    // Preserve the payload exactly: whitespace after the verb is data in the
-    // deterministic command grammar.
-    if (command.trim()) { onCommand?.(command); setCommand(""); }
+    window.addEventListener('keydown', handle);
+    return () => { window.removeEventListener('keydown', handle); clearTimeout(timer); };
+  }, [route, embedded]);
+  const link = useCallback((selection: Selection, label: string, screen = route.screen) => {
+    const next = { ...route, screen, selection };
+    return <a href={routeUrl(next, new URL(window.location.href)).toString()} onClick={(event: MouseEvent<HTMLAnchorElement>) => {
+      if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+        event.preventDefault();
+        navigate(next);
+      }
+    }}>
+      {label}
+    </a>;
+  }, [route, navigate]);
+  const inspect = useCallback((requestId: string, element?: HTMLElement) => { inspectionTrigger.current = element ?? null; navigate({ ...route, requestId }); }, [route, navigate]);
+  const closeInspector = useCallback(() => {
+    navigate({ ...route, requestId: undefined });
+  }, [route, navigate]);
+  const selectedDescription = route.selection.kind === 'actor' ? `${route.selection.identity.actor} · run ${route.selection.identity.run} · incarnation ${route.selection.identity.incarnation}` : route.selection.kind === 'conversation' ? `Conversation ${route.selection.conversationId}` : 'All contexts';
+  const orderedNodes = useMemo(() => orderConversationTree(data.nodes), [data.nodes]);
+  const nodes = useMemo(() => searchTerm ? orderedNodes.filter(({ node }) => `${node.name} ${node.id}`.toLowerCase().includes(searchTerm)) : orderedNodes, [orderedNodes, searchTerm]);
+  const conversations = useMemo(() => pageRows(nodes, page, 100), [nodes, page]);
+  const filteredActors = useMemo(() => (data.actors ?? []).filter(actor => !searchTerm || `${actor.name} ${actor.incarnation}`.toLowerCase().includes(searchTerm)), [data.actors, searchTerm]);
+  const actors = useMemo(() => pageRows(filteredActors, actorPage, 100), [filteredActors, actorPage]);
+  const filteredInbox = useMemo(() => searchTerm ? view.inbox.filter(item => `${item.message} ${item.sender} ${item.recipient ?? ''}`.toLowerCase().includes(searchTerm)) : view.inbox, [view.inbox, searchTerm]);
+  const inbox = useMemo(() => pageRows(filteredInbox, page, 50), [filteredInbox, page]);
+  const endpoints = useMemo(() => [...new Set(['/operator', ...data.inbox.flatMap(item => [item.sender, ...(item.recipient ? [item.recipient] : [])])])].sort(), [data.inbox]);
+  const endpointNodes = useMemo(() => {
+    const index = new Map<string, HarnessViewModel['nodes']>();
+    for (const node of data.nodes) {
+      const rows = index.get(node.name) ?? [];
+      rows.push(node);
+      index.set(node.name, rows);
+    }
+    return index;
+  }, [data.nodes]);
+  const endpointActors = useMemo(() => {
+    const index = new Map<string, NonNullable<HarnessViewModel['actors']>>();
+    for (const actor of data.actors ?? []) {
+      const rows = index.get(actor.name) ?? [];
+      rows.push(actor);
+      index.set(actor.name, rows);
+    }
+    return index;
+  }, [data.actors]);
+  const requestIndex = useMemo(() => new Map(data.timeline.filter(item => item.kind === 'request').map(item => [item.id, item])), [data.timeline]);
+  const commandIds = useMemo(() => new Set(data.timeline.flatMap(item => item.commandId ? [item.commandId] : [])), [data.timeline]);
+  const sendDemo = (text: string) => {
+    if (transportPhase !== 'ready' || !text.trim())
+      return;
+    const result = onDemoCommand?.(text);
+    if (!result) return;
+    setDemoLocalFeedback(result.kind === 'blocked' ? result.reason : 'Sent to the demo channel; server result remains separate.');
+    if (result.kind === 'sent')
+      demo.submitted(text);
   };
-  return <>
-    <style>{styles}</style>
-    <div className="harness">
-      <header className="top">
-        <div className="brand">Harness <span className="hint">/ operator</span></div>
-        <nav className="tabs" aria-label="Views">
-          {screens.map(({ id, title, shortcut }) => <button className="tab" key={id} type="button" aria-current={activeScreen === id ? "page" : undefined} onClick={() => setScreen(id)}>
-            {title}<kbd aria-hidden="true">{shortcut}</kbd>
-          </button>)}
-        </nav>
-      </header>
-      <main>
-        <div className="toolbar"><h1>{screens.find((item) => item.id === activeScreen)?.title}</h1><span className="hint">Keyboard: g then t / l / i / {embeddedMode ? "h" : "c"}</span></div>
-        {activeScreen === "tree" && <><HostActors data={data} /><Tree data={data} /></>}
-        {activeScreen === "host" && <HostControls data={data} onCommand={onCommand} pendingCommands={pendingCommands} onRetry={onRetry} />}
-        {activeScreen === "timeline" && <><Timeline data={data} onInspectRequest={setInspectedRequest} />
-          {inspectedRequest && <NodeWindow key={inspectedRequest} requestId={inspectedRequest} onClose={() => setInspectedRequest(undefined)} />}</>}
-        {activeScreen === "inbox" && <Inbox data={data} />}
-        {activeScreen === "command" && <section aria-labelledby="command-heading">
-          <h2 id="command-heading">Send a command</h2>
-          <p className="hint">Deterministic mode · commands are sent to the authenticated host. Sending is not acceptance or completion; this client displays only state present in the server snapshot and events.</p>
-          <div className="rows" aria-label="Command grammar">
-            <p><code>echo TEXT</code> · <code>test</code> · <code>wait</code> · <code>message TEXT</code></p>
-            <p><code>cancel</code> · <code>child TEXT</code> · <code>fail</code></p>
-            <p className="hint">Use the command form for the documented operations. Outcomes, progress, and messages appear only to the extent represented by received server records.</p>
-          </div>
-          <div className="toolbar" aria-label="Common deterministic actions">
-            {([
-              ["Run test", "test"],
-              ["Start wait", "wait"],
-              ["Cancel wait", "cancel"],
-              ["Create example child", "child browser example"],
-              ["Fail request", "fail"],
-              ["Recover with echo", "echo recovered"],
-            ] as const).map(([label, value]) => <button key={value} type="button" disabled={!onCommand} onClick={() => onCommand?.(value)}>{label}</button>)}
-          </div>
-          <form className="command-form" onSubmit={submit}>
-            <label className="sr-only" htmlFor="command-input">Command</label>
-            <input id="command-input" value={command} onChange={(event) => setCommand(event.target.value)} autoComplete="off" />
-            <button type="submit" disabled={!command.trim() || !onCommand}>Send</button>
-          </form>
-          {!onCommand && <p className="hint" role="status">Command channel is not connected.</p>}
-          <h2>Authoritative activity</h2>
-          <p className="hint">Stored records received from the host; refresh reconnects to the server snapshot and does not replay submitted commands.</p>
-          {acceptedCommandIds.filter((id) => !data.timeline.some((item) => item.commandId === id)).map((id) => (
-            <p className="hint" role="status" key={id}>Server accepted command {id}; this acknowledgment is not a terminal outcome.</p>
-          ))}
-          <Timeline data={data} onInspectRequest={setInspectedRequest} />
-          {inspectedRequest && <NodeWindow key={inspectedRequest} requestId={inspectedRequest} onClose={() => setInspectedRequest(undefined)} />}
-          <CommandReceipts receipts={data.commandReceipts ?? []} />
-          <HostActors data={data} /><h2>Conversation and child identities</h2><Tree data={data} />
-          <h2>Messages and replies</h2><Inbox data={data} />
-        </section>}
-      </main>
+  const timeline = useMemo(() => <>
+    <div role="table" aria-label="Conversation activity timeline" className="rows">
+      <div className="row" role="row">
+        <strong role="columnheader">Activity</strong>
+        <strong role="columnheader">State</strong>
+        <strong role="columnheader">Source and time</strong>
+      </div>
+      {activity.rows.map(item => {
+        const time = formatActivityTime(item, now);
+        return <div className="row" role="row" key={item.key ?? `${item.kind}:${item.id}`}>
+          <span role="cell">
+            {item.kind} · {item.label}{item.kind === 'request' && <button onClick={event => inspect(item.id, event.currentTarget)}>Inspect history</button>}{item.parentId && <button onClick={event => inspect(item.parentId!, event.currentTarget)}>Inspect parent request</button>}
+          </span>
+          <span role="cell">
+            {item.state}{item.outcome && ` · outcome ${item.outcome}`}{item.delivered !== undefined && ` · delivered ${item.delivered}`}
+          </span>
+          <span role="cell" className="meta">
+            {link({ kind: 'conversation', conversationId: item.nodeId }, item.nodeId)} · id {item.id} · {time.start} · {time.duration}{item.commandId && ` · command ${item.commandId}`}{item.requestId && ` · request ${item.requestId}`}{item.callId && ` · call ${item.callId}`}{item.toolKind && ` · tool kind ${item.toolKind}`}{item.toolName && ` · ${item.toolName}`}{item.detail && ` · ${item.detail}`}{item.output !== undefined && <pre>
+              {typeof item.output === 'string' ? item.output : JSON.stringify(item.output, null, 2)}
+            </pre>}
+          </span>
+        </div>;
+      })}
     </div>
-  </>;
+    {!activity.total && <Empty>No activity is available for this context.</Empty>}
+    <Pager page={activity.page} count={activity.pageCount} total={activity.total} onPage={setPage} />
+  </>, [activity, now, inspect, link]);
+  const tree = useMemo(() => <>
+          <section aria-label="Host actors">
+            <h2>Host actors</h2>
+            <div role="table" aria-label="Host actor lifecycles">
+              {actors.rows.map(actor => <div className="row" role="row" key={actorIdentityKey(identityOf(actor))} aria-selected={sameSelection(route.selection, { kind: 'actor', identity: identityOf(actor) })}>
+                <span role="cell">
+                  {link({ kind: 'actor', identity: identityOf(actor) }, actor.name)} · {actor.kind}
+                </span>
+                <span role="cell">
+                  {actor.lifecycle}
+                </span>
+                <span role="cell">run {actor.run} · incarnation {actor.incarnation}{actor.parentIdentity && <> · Parent {link({ kind: 'actor', identity: actor.parentIdentity }, actor.parentIdentity.actor)}
+                </>}{actor.modelConversation && <> · {link({ kind: 'conversation', conversationId: actor.modelConversation }, actor.modelConversation)}
+                </>}
+                </span>
+              </div>)}
+            </div>
+            <Pager page={actors.page} count={actors.pageCount} total={actors.total} onPage={setActorPage} />
+          </section>
+          <section aria-label="Conversations">
+            <h2>Conversations</h2>
+            <div role="table" aria-label="Conversation tree">
+              {conversations.rows.map(({ node, depth, lineage }) => <div className="row tree-row" role="row" key={node.id} aria-selected={route.selection.kind === 'conversation' && route.selection.conversationId === node.id}>
+                <span role="cell">
+                  <span className="branch" aria-hidden="true">
+                    {'· '.repeat(Math.min(depth, 8))}
+                  </span>
+                  {link({ kind: 'conversation', conversationId: node.id }, node.name)}{lineage === 'orphan' || lineage === 'cycle' ? ` · ${lineage}` : ''}
+                </span>
+                <span role="cell">
+                  {node.state}
+                </span>
+                <span role="cell" className="meta">
+                  {node.id} · {[node.model, node.effort, node.detail ?? node.updatedAt].filter(Boolean).join(' · ')}{node.forkSourceRequestId && <button onClick={event => inspect(node.forkSourceRequestId!, event.currentTarget)}>Inspect fork source</button>}
+                </span>
+              </div>)}
+            </div>
+            {!conversations.total && <Empty>No conversations are available.</Empty>}
+            <Pager page={conversations.page} count={conversations.pageCount} total={conversations.total} onPage={setPage} />
+          </section>
+        </>, [actors, conversations, link, inspect, route.selection]);
+  const inboxScreen = useMemo(() => <>
+          <div className="toolbar filters">
+            {(['sender', 'recipient'] as const).map(key => <label key={key}>
+              {key === 'sender' ? 'Sender' : 'Recipient'}
+              <select value={route.messageFilters[key] ?? ''} onChange={event => navigate({ ...route, messageFilters: { ...route.messageFilters, [key]: event.target.value || undefined } })}>
+                <option value="">All endpoints</option>
+                {route.messageFilters[key] && !endpoints.includes(route.messageFilters[key]!) && <option>
+                  {route.messageFilters[key]}
+                </option>}{endpoints.map(endpoint => <option key={endpoint}>
+                  {endpoint}
+                </option>)}
+              </select>
+            </label>)}
+            <label>Message type<select value={route.messageFilters.type ?? ''} onChange={event => navigate({ ...route, messageFilters: { ...route.messageFilters, type: event.target.value as RouteState['messageFilters']['type'] || undefined } })}>
+              <option value="">All types</option>
+              {['NEW_TASK', 'MESSAGE', 'FINAL_ANSWER', 'PROGRESS'].map(kind => <option key={kind}>
+                {kind}
+              </option>)}
+            </select>
+            </label>
+          </div>
+          <p className="hint">Filters match supplied endpoint labels. They do not prove an actor incarnation or that a question was answered.</p>
+          <div role="list" aria-label="Inbox messages">
+            {inbox.rows.map(item => <article className="row" role="listitem" key={item.id}>
+              <strong>
+                {item.sender}{item.recipient && ` → ${item.recipient}`}
+              </strong>
+              <span>
+                {item.type ?? item.state}{item.ordinal !== undefined && ` · #${item.ordinal}`}
+              </span>
+              <span className="message">
+                {item.message}
+                <span className="meta">
+                  {item.receivedAt}
+                </span>
+              </span>
+              <div>
+                {[...new Set([item.sender, item.recipient].filter((endpoint): endpoint is string => Boolean(endpoint)))].map(endpoint => {
+                  return <span key={endpoint}>
+                    {(endpointNodes.get(endpoint) ?? []).map(node => <span key={node.id}>
+                      {link({ kind: 'conversation', conversationId: node.id }, `Open conversation ${node.name} · ${node.id}`)} </span>)}{(endpointActors.get(endpoint) ?? []).map(actor => <span key={actorIdentityKey(identityOf(actor))}>
+                        {link({ kind: 'actor', identity: identityOf(actor) }, `Select actor ${actor.name} · run ${actor.run} · incarnation ${actor.incarnation}`)} </span>)}
+                    <button onClick={() => navigate({ ...route, messageFilters: { ...route.messageFilters, sender: endpoint } })}>Filter {endpoint}
+                    </button>
+                  </span>;
+                })}
+              </div>
+            </article>)}
+          </div>
+          {!inbox.total && <Empty>No messages match this context and filters.</Empty>}
+          <Pager page={inbox.page} count={inbox.pageCount} total={inbox.total} onPage={setPage} />
+        </>, [inbox, endpoints, endpointNodes, endpointActors, link, route, navigate]);
+  const inspected = route.requestId ? requestIndex.get(route.requestId) : undefined;
+  return <div className="harness">
+    <a className="skip-link" href="#main-content">Skip to content</a>
+    <header className="top">
+      <span className="brand">Harness <span className="hint">/ operator</span>
+      </span>
+      <nav className="tabs" aria-label="Views">
+        {screens.map(screen => <button className="tab" key={screen} aria-current={route.screen === screen ? 'page' : undefined} onClick={() => navigate({ ...route, screen })}>
+          {screenNames[screen]}
+        </button>)}
+      </nav>
+    </header>
+    {transportPhase !== 'ready' && <p className="snapshot-status" role="status">Showing last snapshot · {transportPhase}; controls await a fresh snapshot.</p>}
+    <div className="selection-context">
+      <strong>Selected context:</strong> <span>
+        {selectedDescription}
+      </span>
+      <button disabled={route.selection.kind === 'none' && !issue} onClick={() => navigate({ ...route, selection: { kind: 'none' } })}>Clear selection</button>
+      <label>
+        <input type="checkbox" checked={route.global} onChange={event => navigate({ ...route, global: event.target.checked })} />Global activity</label>
+      {issue && <p className="error" role="status">
+        {issue}
+      </p>}{resolved.missing && <p className="error" role="status">The selected actor or conversation is unavailable. The exact selection remains preserved; choose a new context explicitly.</p>}{resolved.actor?.kind === 'workflow' && !resolved.conversationId && <p role="status">Workflow actor model history is unavailable.</p>}
+    </div>
+    <main id="main-content" tabIndex={-1}>
+      <div className="toolbar">
+        <h1 ref={heading} tabIndex={-1}>
+          {screenNames[route.screen]}
+        </h1>
+        <span className="hint">Keyboard: g then t / l / i / {embedded ? 'h' : 'c'}
+        </span>
+      </div>
+      {!screens.includes(route.screen) ? <Empty>This view is unavailable in this host mode. Choose a view above.</Empty> : <>
+        {['tree', 'timeline', 'inbox'].includes(route.screen) && <div className="toolbar">
+          <label>Search <input type="search" value={search} onChange={event => { setSearch(event.target.value); setPage(0); setActorPage(0); }} />
+          </label>
+          {route.screen === 'tree' && <button disabled={route.selection.kind === 'none'} onClick={() => {
+            setSearch(''); if (route.selection.kind === 'actor') {
+              const index = (data.actors ?? []).findIndex(actor => sameSelection(route.selection, { kind: 'actor', identity: identityOf(actor) }));
+              setActorPage(Math.max(0, Math.floor(index / 100)));
+            }
+            else if (route.selection.kind === 'conversation') {
+              const selectedId = route.selection.conversationId;
+              const index = orderedNodes.findIndex(({ node }) => node.id === selectedId);
+              setPage(Math.max(0, Math.floor(index / 100)));
+            }
+          }}>Jump to selected</button>}
+        </div>}
+        {route.screen === 'tree' && tree}
+        {route.screen === 'timeline' && timeline}
+        {route.screen === 'inbox' && inboxScreen}
+        {route.screen === 'host' && <>
+          <HostComposer data={data} route={route} navigate={navigate} unavailable={Boolean(issue || resolved.missing)} ready={transportPhase === 'ready'} onHostCommand={onHostCommand} />
+          <RetainedCommands commands={pendingCommands} run={data.hostRun} ready={transportPhase === 'ready'} onRetry={onRetry} />
+          <CommandReceipts receipts={data.commandReceipts ?? []} />
+        </>}
+        {route.screen === 'command' && <section>
+          <h2>Send a command</h2>
+          <p className="hint">Standalone deterministic demo · sending is separate from server acceptance and completion.</p>
+          <p>
+            <code>echo TEXT · test · wait · message TEXT · cancel · child TEXT · fail</code>
+          </p>
+          <div className="toolbar" aria-label="Common deterministic actions">
+            {[['Run test', 'test'], ['Start wait', 'wait'], ['Cancel wait', 'cancel'], ['Create example child', 'child browser example'], ['Fail request', 'fail'], ['Recover with echo', 'echo recovered']].map(([label, value]) => <button key={value} disabled={!onDemoCommand || transportPhase !== 'ready'} onClick={() => sendDemo(value!)}>
+              {label}
+            </button>)}
+          </div>
+          <form className="command-form" onSubmit={event => {
+            event.preventDefault(); if (demo.text.trim())
+              sendDemo(demo.text);
+          }}>
+            <label htmlFor="demo-command">Command</label>
+            <input id="demo-command" value={demo.text} onChange={event => demo.setText(event.target.value)} autoComplete="off" />
+            <button disabled={!demo.text.trim() || !onDemoCommand || transportPhase !== 'ready'}>Send</button>
+          </form>
+          {!onDemoCommand && <p role="status">Command channel is unavailable; this view is read-only.</p>}{demo.error && <p role="status" className="error">
+            {demo.error}
+          </p>}{demoLocalFeedback && <p role="status">
+            {demoLocalFeedback}
+          </p>}{demoFeedback && <p role="status" className="error">
+            {demoFeedback}
+          </p>}{demo.lastSubmitted && <div>
+            <pre>
+              {demo.lastSubmitted}
+            </pre>
+            <button onClick={demo.restore}>Restore last demo command</button>
+          </div>}{acceptedCommandIds.filter(id => !commandIds.has(id)).map(id => <p role="status" key={id}>Server accepted command {id}; this acknowledgment is not a terminal outcome.</p>)}
+          <h2>Authoritative activity</h2>
+          {timeline}
+        </section>}
+      </>}{route.requestId && <NodeWindow requestId={route.requestId} conversationId={inspected?.nodeId} hostRun={data.hostRun} refreshKey={inspected?.historyRefreshKey} onAuthExpired={onAuthExpired} onClose={closeInspector} />}
+    </main>
+  </div>;
 }

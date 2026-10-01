@@ -1,37 +1,83 @@
 # Operator web view
 
-On x86_64 Linux, `buck2 build //web:check //web:test //web:dist` uses the
-flake-pinned Node and fixed-output npm cache. The actions declare the lockfile
-and web sources, install with `npm ci --offline`, and produce separate check,
-test log, and production asset outputs. Run `scripts/buck2-configure.sh` from
-the repository root after changing the flake inputs.
+The production entry point always checks `/api/session`, then connects to the
+same-origin `/api/ws` after authentication. It waits for an authoritative snapshot.
+Serving the asset directory alone does not provide a working operator session.
+`src/fixture.ts` supplies unit-test examples; there is no default fixture mode or
+`?live=1` switch.
 
-For a reproducible browser journey check from the repository root, run
-`nix develop .#web -c scripts/verify-browser-journey` with the Rust toolchain
-available. The pinned Node 24 shell and package lock drive `npm ci`, typecheck,
-unit tests, and the production asset build. The script then runs the production
-API/WebSocket browser journey through `scripts/cargo-focused-test`, which retains
-its executable, output, and test counts in `evidence.json`. A preparation failure
-ends before the browser assertions and is reported as such.
+For the standalone server, prepare the local release executable and production
+assets with `scripts/prepare-browser-harness`, then launch with
+`scripts/launch-browser-harness ABSOLUTE_SQLITE_PATH LOOPBACK_ADDR`. Preparation
+requires the repository's Rust toolchain and pinned Nix Node environment. The
+launcher uses the prepared executable and `web/dist`; it does not build them.
+The embedded operator uses the host's existing actor capabilities, not the
+standalone demo command grammar.
 
-For web-only development, run `npm ci`, `npm test`, and `npm run build` from this directory.
-The default view renders `src/fixture.ts`; this keeps the screens usable before
-the harness server is integrated. Add `?live=1` to connect to the same-origin
-WebSocket endpoint `/api/ws`.
+## Frontend and rendered browser checks
 
-The browser boundary is `src/protocol.ts` and `src/ws-client.ts`. The expected
-JSON frames are:
+From the repository root:
 
-```json
-{"type":"snapshot","snapshot":{"seq":1,"conversations":[],"requests":[],"jobs":[],"envelopes":[]}}
-{"type":"event","event":{"seq":2,"event":{"kind":"conversation.upsert","value":{"id":"root","path":"/root","state":"requesting"}}}}
-{"type":"command","command":"wait_agent"}
-{"type":"snapshot.request"}
+```sh
+nix build .#buck-node .#buck-npm-cache .#web-chromium --no-link
+nix develop .#web -c scripts/verify-frontend-browser
 ```
 
-The event reducer applies only contiguous state-lane sequence numbers and
-requests a full snapshot after a gap. The UI is a view-only projection; wire
-types intentionally are not imported from Rust. The initial timeline is a
-table projection of request/job state (not a duration chart); live event
-deltas, richer command results, server protocol conformance, and end-to-end
-visual/accessibility evidence still require server integration.
+This frontend-only check copies the fixed-output npm cache to disposable scratch,
+installs locked dependencies offline, runs TypeScript and Vitest, builds production
+assets, typechecks the browser tests, checks the evidence reader, then executes
+Playwright. It requires no
+Cargo or Rust build. Node 24 and Chromium come from the existing flake pin;
+Playwright and axe are development dependencies. Browser installation scripts and
+ambient browsers are not used.
+
+Playwright serves those production assets from an owned loopback fixture transport
+on port 4387. Synthetic session, history, command status and WebSocket frames
+exercise the actual renderer without provider requests, credentials, or a live
+host. Fixture command receipts are supplied evidence, not proof of real host
+admission, execution or cleanup. The tests cover light/dark themes, desktop and
+390px views, axe checks, keyboard/URL navigation, draft and transport recovery,
+history bounds, receipt handling, exact targets and large-list bounds. Actual
+200% browser zoom is set and read through a test-only Chromium extension; it is
+not a smaller viewport or pinch-scale substitution. Timing and heap observations
+are retained, while performance gates check structural bounds.
+
+Reports, screenshots, traces and provenance are retained per invocation under
+`target/gui-browser/runs/`; `target/gui-browser/latest.json` points to the latest
+run. The evidence reader rejects missing, malformed, stale or zero-execution
+reports and preserves the original test failure. A failed or empty selection is
+not a passing check. To run only a named
+browser case after a current production build, use `npm run test:browser --
+--grep 'case name'` from `web` inside the pinned shell. `npm run check:browser`
+typechecks the browser target. Vitest collects only `src/**/*.test.ts(x)`.
+
+On the shared Linux host, bound the owned browser/server process group, for
+example with the user service manager:
+
+```sh
+systemd-run --user --wait --pipe --collect --unit=harness-frontend-browser \
+  -p MemoryMax=2G --working-directory="$PWD" \
+  "$(command -v nix)" develop .#web --command scripts/verify-frontend-browser
+```
+
+For ordinary frontend work, enter `nix develop .#web`, then run `npm ci`,
+`npm run check`, `npm test`, and `npm run build` in `web`. The Vite dev server
+needs the protected API/WebSocket routes on its origin; static Vite alone does
+not authenticate or supply the operator state.
+
+## Backend contract checks and Buck
+
+`nix develop .#web -c scripts/verify-browser-journey` prepares frontend assets,
+then runs four focused Rust HTTP/WebSocket contract tests through
+`scripts/cargo-focused-test`. It requires Rust for that backend phase.
+`--prepare-only` performs only the frontend preparation and requires no Cargo.
+These tests retain counted native execution evidence separately from Playwright's
+rendered GUI evidence. They do not run Chromium or axe.
+
+On an admitted x86_64 Linux checkout, `buck2 build //web:check //web:test
+//web:dist` uses pinned Node and the fixed-output npm cache. It produces separate
+TypeScript, Vitest and production asset outputs. Browser execution is a separate
+frontend gate. Follow the repository/server build admission rules, configure the
+checkout after pin changes, and use `--local-only -c remote.enabled=false` until
+remote-execution acceptance is recorded. A new worktree needs its own provisioned
+`buck-out` bind mount before Buck is used.

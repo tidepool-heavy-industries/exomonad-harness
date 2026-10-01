@@ -25,14 +25,20 @@
       }));
     in {
       devShells = forSystems (pkgs: {
-        web = pkgs.mkShell { packages = [ pkgs.nodejs_24 ]; };
+        web = pkgs.mkShell {
+          packages = [ pkgs.nodejs_24 ];
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
+          PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers-chromium}";
+        };
       });
 
       packages = forSystems (pkgs: {
         prefetch-npm-deps = pkgs.prefetch-npm-deps;
+        # Browser downloads are Nix inputs, independent of npm install scripts.
+        web-chromium = pkgs.playwright-driver.browsers-chromium;
         buck-npm-cache = pkgs.fetchNpmDeps {
           src = ./web;
-          hash = "sha256-yJrPGaSazF06w91mddpNlOyoB6d1cYKXumyaoeWCfeU=";
+          hash = "sha256-R1WPUQzu8+knK7B5mSx7i6sneSBLgKmX7HDCSsWwekI=";
         };
         buck-rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         buck-cc = pkgs.stdenv.cc;

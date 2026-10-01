@@ -138,3 +138,41 @@ describe("stable JSON state adapter", () => {
     }
   });
 });
+
+it('validates every receipt outcome and rejects unsupported or incomplete handoff evidence', async () => {
+  const { isCommandReceipt, isEmbeddedCommandRecord } = await import('./protocol')
+  const target = { run: 'Run', actor: '/ROOT', incarnation: 'Inc' }
+  const commandId = '11111111-1111-4111-8111-111111111111'
+  for (const receipt of [
+    { commandId, target, outcome: 'admitted', envelopeId: '42', wakeError: 'wake failed' },
+    { commandId, target, outcome: 'control_requested', control: 'interrupt' },
+    { commandId, target, outcome: 'refused', reason: 'denied' },
+    { commandId, target, outcome: 'unconfirmed', reason: 'ack lost' },
+  ]) expect(isCommandReceipt(receipt)).toBe(true)
+  for (const receipt of [
+    { commandId, target, outcome: 'future_success' },
+    { commandId, outcome: 'unconfirmed', reason: 'unknown' },
+    { commandId, target, outcome: 'admitted', envelopeId: 42 },
+    { commandId, target, outcome: 'control_requested', control: 'kill' },
+  ]) {
+    expect(isCommandReceipt(receipt)).toBe(false)
+    expect(isEmbeddedCommandRecord({ operationId: commandId, command: { action: 'retire', target }, state: 'queued', envelopeId: null, receipt })).toBe(false)
+  }
+})
+
+it('validates known optional fields while preserving absent parent and explicit null provenance', async () => {
+  const { isSnapshot, isSequencedEvent } = await import('./protocol')
+  const legacy = { seq: 0, conversations: [{ id: 'c', path: '/c', state: 'idle' }], requests: [], jobs: [], envelopes: [] }
+  expect(isSnapshot(legacy)).toBe(true)
+  expect(Object.hasOwn(legacy.conversations[0]!, 'parentId')).toBe(false)
+  expect(isSnapshot({ ...legacy, conversations: [{ ...legacy.conversations[0], parentId: null }] })).toBe(true)
+  const malformed = [
+    { kind: 'conversation.upsert', value: { ...legacy.conversations[0], parentId: 123 } },
+    { kind: 'job.upsert', value: { id: 'j', conversationId: 'c', state: 'running', delivered: 'false' } },
+    { kind: 'job.upsert', value: { id: 'j', conversationId: 'c', state: 'running', toolKind: {} } },
+    { kind: 'request.upsert', value: { id: 'r', conversationId: 'c', state: 'running', createdAtMs: Infinity } },
+    { kind: 'envelope.upsert', value: { id: 'e', sender: 's', recipient: 'r', type: 'MESSAGE', payload: '', ordinal: -1 } },
+  ]
+  for (const event of malformed) expect(isSequencedEvent({ seq: 1, event })).toBe(false)
+  expect(isSequencedEvent({ seq: 1, event: { kind: 'tokens.observed', value: null } })).toBe(true)
+})

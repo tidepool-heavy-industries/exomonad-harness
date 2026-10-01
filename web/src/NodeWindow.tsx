@@ -1,77 +1,115 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import type { NodeWindowProps } from './client-contract'
+import HistoryItem from './HistoryItem'
+import { HistoryReadError, readHistoryPage, type HistoryPage } from './history-client'
 
-interface HistoryItem {
-  readonly position: number;
-  readonly hash: string;
-  readonly byteLen: number;
-  readonly item: unknown;
+interface LoadedPage {
+  readonly page: HistoryPage
+  readonly offset: number
+  readonly previous?: PageOffset
 }
 
-interface OversizedItem {
-  readonly position: number;
-  readonly hash: string;
-  readonly byteLen: number;
-  readonly skipOffset: number;
+interface PageOffset {
+  readonly offset: number
+  readonly previous?: PageOffset
 }
 
-interface HistoryPage {
-  readonly requestId: string;
-  readonly parentId: string | null;
-  readonly branch: string;
-  readonly items: readonly HistoryItem[];
-  readonly nextOffset: number | null;
-  readonly oversizedItem: OversizedItem | null;
+interface ReadIntent {
+  readonly offset: number
+  readonly previous?: PageOffset
+  readonly attempt: number
 }
 
-/** Reads retained request Items through the protected, bounded Store route. */
-export default function NodeWindow({ requestId, onClose }: { requestId: string; onClose: () => void }) {
-  const [items, setItems] = useState<readonly HistoryItem[]>([])
-  const [page, setPage] = useState<HistoryPage>()
+function visiblePageIntent(current: ReadIntent, loaded?: LoadedPage): ReadIntent {
+  return { offset: loaded?.offset ?? current.offset, previous: loaded ? loaded.previous : current.previous, attempt: current.attempt + 1 }
+}
+
+/** One bounded retained page belongs to one exact inspection context. */
+export default function NodeWindow({ requestId, conversationId, hostRun, refreshKey, onClose, onAuthExpired }: NodeWindowProps) {
+  const context = JSON.stringify([requestId, conversationId, hostRun])
+  const [loaded, setLoaded] = useState<LoadedPage>()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>()
+  const [intent, setIntent] = useState<ReadIntent>({ offset: 0, attempt: 0 })
+  const currentContext = useRef(context)
+  currentContext.current = context
+  const generation = useRef(0)
+  const authCallback = useRef(onAuthExpired)
+  authCallback.current = onAuthExpired
+  const [stateContext, setStateContext] = useState(context)
+  const [stateRefreshKey, setStateRefreshKey] = useState(refreshKey)
 
-  async function load(offset: number) {
-    setLoading(true)
+  // A context change resets paging before rendering any data from the old host.
+  if (stateContext !== context) {
+    setStateContext(context)
+    setLoaded(undefined)
     setError(undefined)
-    try {
-      const response = await fetch(`/api/history/${encodeURIComponent(requestId)}?offset=${offset}&limit=50`, {
-        credentials: 'same-origin',
-        cache: 'no-store',
-      })
-      if (!response.ok && response.status !== 413) {
-        throw new Error(response.status === 404 ? 'Request history was not found.'
-          : response.status === 503 ? 'Request history is unavailable.'
-          : `Request history failed (${response.status}).`)
-      }
-      const next = await response.json() as HistoryPage
-      setPage(next)
-      setItems((current) => offset === 0 ? next.items : [...current, ...next.items])
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Request history failed.')
-    } finally {
-      setLoading(false)
-    }
+    setIntent({ offset: 0, attempt: 0 })
+    setStateRefreshKey(refreshKey)
+  } else if (stateRefreshKey !== refreshKey) {
+    setStateRefreshKey(refreshKey)
+    setIntent((current) => visiblePageIntent(current, loaded))
   }
 
-  useEffect(() => { void load(0) }, [requestId])
+  useEffect(() => {
+    const controller = new AbortController()
+    const readGeneration = ++generation.current
+    const isCurrent = () => !controller.signal.aborted && generation.current === readGeneration && currentContext.current === context
+    setLoading(true)
+    setError(undefined)
+    void readHistoryPage(requestId, intent.offset, controller.signal).then((page) => {
+      if (isCurrent()) setLoaded({ page, offset: intent.offset, previous: intent.previous })
+    }).catch((cause: unknown) => {
+      if (!isCurrent()) return
+      setError(cause instanceof Error ? cause.message : 'Request history failed.')
+      if (cause instanceof HistoryReadError && cause.kind === 'authentication') authCallback.current?.()
+    }).finally(() => {
+      if (isCurrent()) setLoading(false)
+    })
+    return () => controller.abort()
+  }, [context, requestId, intent])
 
-  return <section aria-label="Retained request history">
-    <div className="toolbar"><h2>Request history · {requestId}</h2><button type="button" onClick={onClose}>Close history</button></div>
-    {page && <p className="meta">Branch {page.branch}{page.parentId ? ` · parent ${page.parentId}` : ''}</p>}
-    {error && <p role="alert">{error}</p>}
+  function reload() {
+    setIntent((current) => ({ ...current, attempt: current.attempt + 1 }))
+  }
+
+  function refresh() {
+    setIntent((current) => visiblePageIntent(current, loaded))
+  }
+
+  function next(offset: number) {
+    if (!loaded) return
+    setIntent({ offset, previous: { offset: loaded.offset, previous: loaded.previous }, attempt: 0 })
+  }
+
+  function previous() {
+    if (!loaded) return
+    const previous = loaded.previous
+    if (previous) setIntent({ offset: previous.offset, previous: previous.previous, attempt: 0 })
+  }
+
+  const page = loaded?.page
+  return <section aria-label="Retained request history" aria-busy={loading}>
+    <div className="toolbar"><h2>Request history · {requestId}</h2><div className="history-controls">
+      <button type="button" disabled={loading} onClick={refresh}>Refresh history</button>
+      <button type="button" onClick={onClose}>Close history</button>
+    </div></div>
+    {page && <p className="meta">Branch {page.branch}{page.parentId !== null ? ` · parent ${page.parentId}` : ''} · Offset {loaded?.offset} · {page.items.length} items</p>}
+    {error && <div role="alert"><p>{error}</p><button type="button" disabled={loading} onClick={reload}>Retry history</button></div>}
     {loading && <p role="status">Loading retained history…</p>}
+    {!loading && page && page.items.length === 0 && !page.oversizedItem && <p>No retained items at this offset.</p>}
     <div role="list" aria-label="Retained request items" className="rows">
-      {items.map((entry) => <article role="listitem" key={`${entry.position}:${entry.hash}`} className="message">
-        <strong>Item {entry.position}</strong> <span className="meta">hash {entry.hash} · {entry.byteLen} bytes</span>
-        <pre>{JSON.stringify(entry.item, null, 2)}</pre>
-      </article>)}
+      {page?.items.map((entry) => <HistoryItem key={`${context}:${loaded?.offset}:${entry.position}:${entry.hash}`} entry={entry} />)}
     </div>
     {page?.oversizedItem && <p role="status">
       Item {page.oversizedItem.position} is too large to show ({page.oversizedItem.byteLen} bytes; hash {page.oversizedItem.hash}).
       Full large-item retrieval is unavailable in this view.
-      <button type="button" disabled={loading} onClick={() => void load(page.oversizedItem!.skipOffset)}>Skip this item</button>
+      <button type="button" disabled={loading} onClick={() => next(page.oversizedItem!.skipOffset)}>Skip this item</button>
     </p>}
-    {!page?.oversizedItem && page?.nextOffset !== null && page?.nextOffset !== undefined &&
-      <button type="button" disabled={loading} onClick={() => void load(page.nextOffset!)}>Next page</button>}
+    <div className="history-controls">
+      <button type="button" disabled={loading || !loaded?.previous} onClick={previous}>Previous page</button>
+      {!page?.oversizedItem && page?.nextOffset !== null && page?.nextOffset !== undefined &&
+        <button type="button" disabled={loading} onClick={() => next(page.nextOffset!)}>Next page</button>}
+    </div>
   </section>
 }

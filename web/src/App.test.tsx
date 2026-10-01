@@ -1,213 +1,270 @@
-import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
-import App, { type HarnessViewModel } from './App'
+import { act, fireEvent, render, screen, within, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import App from './App';
+import { clearDrafts } from './drafts';
+import type { HarnessViewModel } from './view-model';
+import type { BrowserCommandRecord } from './pending-commands';
+vi.mock('./NodeWindow', () => ({
+  default: ({ requestId, conversationId, refreshKey, onClose, onAuthExpired }: {
+    requestId: string;
+    conversationId?: string;
+    refreshKey?: string;
+    onClose: () => void;
+    onAuthExpired?: () => void;
+  }) => <section aria-label="Request history">
+      {requestId} · {conversationId} · {refreshKey}
+      <button onClick={onClose}>Close history</button>
+      <button onClick={onAuthExpired}>Expire auth</button>
+    </section>
+}));
+const target = { run: 'run', actor: '/worker', incarnation: 'old' };
+const actor = { id: JSON.stringify(['run', '/worker', 'old']), name: '/worker', run: 'run', incarnation: 'old', kind: 'model' as const, lifecycle: 'running', modelConversation: 'conv', activeRound: '00000000-0000-4000-8000-000000000001' };
+const data: HarnessViewModel = { hostRun: 'run', actors: [actor, { ...actor, id: JSON.stringify(['run', '/workflow', 'w']), name: '/workflow', incarnation: 'w', kind: 'workflow', modelConversation: undefined }], nodes: [{ id: 'conv', name: 'Conversation A', state: 'active' }, { id: 'other', name: 'Unattached conversation', state: 'idle' }], timeline: [{ id: 'req', key: 'request:req', nodeId: 'conv', label: 'Selected request', kind: 'request', state: 'completed', startedAtMs: 1000, endedAtMs: 2000, historyRefreshKey: 'stable' }, { id: 'req', key: 'job:req', nodeId: 'other', label: 'Unrelated job', kind: 'job', state: 'completed', delivered: false, output: ' retained output ' }], inbox: [{ id: 'one', sender: '/worker', recipient: '/operator', message: 'selected message', type: 'MESSAGE', state: 'MESSAGE' }, { id: 'two', sender: '/other', recipient: '/operator', message: 'other progress', type: 'PROGRESS', state: 'PROGRESS' }] };
+function route(query = '') { window.history.replaceState(null, '', '/' + query); }
+function tab(name: string) { fireEvent.click(screen.getByRole('button', { name })); }
+function choose() { fireEvent.change(screen.getByLabelText('Target actor'), { target: { value: JSON.stringify(['run', '/worker', 'old']) } }); }
+beforeEach(() => { route(); sessionStorage.clear(); clearDrafts(); });
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); clearDrafts(); });
+describe('linked operator views', () => {
+  it('links exact actors to supplied model conversation, keeps selection across screens and uses global toggle', () => {
+    render(<App data={data} />);
+    fireEvent.click(within(screen.getByRole('table', { name: 'Host actor lifecycles' })).getByRole('link', { name: '/worker' }));
+    expect(window.location.search).toContain('incarnation=old');
+    tab('Timeline');
+    expect(screen.getByText('Selected request', { exact: false })).toBeVisible();
+    expect(screen.queryByText('Unrelated job', { exact: false })).toBeNull();
+    fireEvent.click(screen.getByLabelText('Global activity'));
+    expect(screen.getByText('Unrelated job', { exact: false })).toBeVisible();
+    tab('Inbox');
+    expect(screen.getByText('selected message')).toBeVisible();
+    expect(screen.getByText('other progress')).toBeVisible();
+    fireEvent.click(screen.getByLabelText('Global activity'));
+    expect(screen.queryByText('other progress')).toBeNull();
+  });
+  it('conjoins endpoint/type filters and restores route on reload/popstate without losing unknown query', () => {
+    route('?view=inbox&sender=%2Fother&type=PROGRESS&plugin=keep');
+    const mounted = render(<App data={data} />);
+    expect(screen.getByText('other progress')).toBeVisible();
+    expect(screen.queryByText('selected message')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Message type'), { target: { value: 'MESSAGE' } });
+    expect(screen.queryByText('other progress')).toBeNull();
+    expect(window.location.search).toContain('plugin=keep');
+    act(() => { window.history.replaceState(null, '', '/?view=inbox&sender=%2Fother&type=PROGRESS&plugin=keep'); window.dispatchEvent(new PopStateEvent('popstate')); });
+    expect(screen.getByText('other progress')).toBeVisible();
+    mounted.unmount();
+    render(<App data={data} />);
+    expect(screen.getByLabelText('Sender')).toHaveValue('/other');
+  });
+  it('keeps missing incarnation visible, disables controls and never follows a replacement', () => {
+    route('?view=host&run=run&actor=%2Fworker&incarnation=old');
+    const submit = vi.fn(() => ({ kind: 'retained' as const, operationId: 'op', send: 'unknown' as const }));
+    const mounted = render(<App data={data} onHostCommand={submit} />);
+    mounted.rerender(<App data={{ ...data, actors: [{ ...actor, incarnation: 'new' }] }} onHostCommand={submit} />);
+    expect(screen.getByText(/exact selection remains preserved/)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Send input' })).toBeDisabled();
+    expect(window.location.search).toContain('incarnation=old');
+    fireEvent.click(screen.getByRole('button', { name: 'Retire' }));
+    expect(submit).not.toHaveBeenCalled();
+  });
+  it('conversation-only and malformed URL contexts cannot grant actor controls', () => {
+    route('?view=host&conversation=conv');
+    const mounted = render(<App data={data} onHostCommand={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'Retire' })).toBeDisabled();
+    mounted.unmount();
+    route('?view=host&actor=%2Fworker&run=run');
+    render(<App data={data} onHostCommand={vi.fn()} />);
+    expect(screen.getByText(/invalid or incomplete selection/)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Send input' })).toBeDisabled();
+  });
+  it('shows workflow history unavailable and retains unattached conversation links', () => {
+    render(<App data={data} />);
+    fireEvent.click(screen.getByRole('link', { name: '/workflow' }));
+    expect(screen.getByText('Workflow actor model history is unavailable.')).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Unattached conversation' })).toBeVisible();
+  });
+  it('requires fresh transport and callback, retaining text across disconnection', () => {
+    route('?view=host');
+    const callback = vi.fn();
+    const mounted = render(<App data={data} onHostCommand={callback} />);
+    choose();
+    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'draft' } });
+    mounted.rerender(<App data={data} onHostCommand={callback} transportPhase="disconnected" />);
+    expect(screen.getByRole('button', { name: 'Send input' })).toBeDisabled();
+    expect(screen.getByLabelText('Message to selected actor')).toHaveValue('draft');
+    mounted.rerender(<App data={data} />);
+    expect(screen.getByRole('button', { name: 'Retire' })).toBeDisabled();
+  });
+  it('preserves blocked host text and clears only after exact locally retained handoff', () => {
+    route('?view=host');
+    const callback = vi.fn().mockReturnValueOnce({ kind: 'blocked', reason: 'storage refused' }).mockReturnValueOnce({ kind: 'retained', operationId: 'op', send: 'unknown' });
+    render(<App data={data} onHostCommand={callback} />);
+    choose();
+    const input = screen.getByLabelText('Message to selected actor');
+    fireEvent.change(input, { target: { value: ' exact\n text ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send input' }));
+    expect(input).toHaveValue(' exact\n text ');
+    expect(screen.getByText('storage refused')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Send input' }));
+    expect(input).toHaveValue('');
+    expect(callback).toHaveBeenLastCalledWith({ action: 'input', target, text: ' exact\n text ' });
+    expect(screen.getByText(/socket send unknown/)).toBeVisible();
+  });
+  it('keeps actor drafts separate across views and clears mounted drafts only on explicit logout', () => {
+    route('?view=host');
+    render(<App data={data} />);
+    choose();
+    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'actor draft' } });
+    tab('Timeline');
+    tab('Host');
+    expect(screen.getByLabelText('Message to selected actor')).toHaveValue('actor draft');
+    fireEvent.change(screen.getByLabelText('Target actor'), { target: { value: JSON.stringify(['run', '/workflow', 'w']) } });
+    expect(screen.getByLabelText('Message to selected actor')).toHaveValue('');
+    choose();
+    expect(screen.getByLabelText('Message to selected actor')).toHaveValue('actor draft');
+    act(() => clearDrafts());
+    expect(screen.getByLabelText('Message to selected actor')).toHaveValue('');
+  });
+  it('preserves live drafts and reports persistence failures inline', () => {
+    vi.useFakeTimers();
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota'); });
+    route('?view=host');
+    render(<App data={data} />);
+    choose();
+    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'still here' } });
+    act(() => vi.advanceTimersByTime(200));
+    expect(screen.getByText(/Draft could not be saved/)).toBeVisible();
+    expect(screen.getByLabelText('Message to selected actor')).toHaveValue('still here');
+  });
+  it('keeps demo blocked text and restores exact last sent text beside server refusal', () => {
+    route('?view=command');
+    const callback = vi.fn().mockReturnValueOnce({ kind: 'blocked', reason: 'socket lost' }).mockReturnValueOnce({ kind: 'sent' });
+    const standalone = { ...data, hostRun: undefined };
+    const mounted = render(<App data={standalone} onDemoCommand={callback} />);
+    const input = screen.getByLabelText('Command');
+    fireEvent.change(input, { target: { value: 'echo  exact  ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(input).toHaveValue('echo  exact  ');
+    expect(screen.getByText('socket lost')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(input).toHaveValue('');
+    mounted.rerender(<App data={standalone} onDemoCommand={callback} demoFeedback="Server refused demo" />);
+    expect(screen.getByText('Server refused demo')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Restore last demo command' }));
+    expect(input).toHaveValue('echo  exact  ');
+  });
+  it('uses typing-safe shortcuts, heading focus and inspector close focus restoration', () => {
+    vi.useFakeTimers();
+    route('?view=host');
+    render(<App data={data} />);
+    choose();
+    const input = screen.getByLabelText('Message to selected actor');
+    fireEvent.keyDown(input, { key: 'g' });
+    fireEvent.keyDown(input, { key: 'l' });
+    expect(screen.getByRole('heading', { name: 'Host', level: 1 })).toBeVisible();
+    fireEvent.keyDown(window, { key: 'g' });
+    fireEvent.keyDown(window, { key: 'l' });
+    expect(screen.getByRole('heading', { name: 'Timeline', level: 1 })).toHaveFocus();
+    const trigger = screen.getByRole('button', { name: 'Inspect history' });
+    fireEvent.click(trigger);
+    expect(screen.getByRole('region', { name: 'Request history' })).toHaveTextContent('req · conv · stable');
+    fireEvent.click(screen.getByRole('button', { name: 'Close history' }));
+    act(() => vi.advanceTimersByTime(0));
+    expect(trigger).toHaveFocus();
+  });
+  it('restores inspector trigger focus when native URL history closes the inspector', async () => {
+    route('?view=timeline');
+    render(<App data={data} />);
+    const trigger = screen.getByRole('button', { name: 'Inspect history' });
+    fireEvent.click(trigger);
+    screen.getByRole('button', { name: 'Close history' }).focus();
+    expect(screen.getByRole('button', { name: 'Close history' })).toHaveFocus();
+    act(() => {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('request');
+      window.history.replaceState(null, '', url);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    expect(screen.queryByRole('region', { name: 'Request history' })).toBeNull();
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+  it('focuses the heading after URL inspector closure when the original trigger disappeared', async () => {
+    route('?view=timeline');
+    const mounted = render(<App data={data} />);
+    const trigger = screen.getByRole('button', { name: 'Inspect history' });
+    fireEvent.click(trigger);
+    screen.getByRole('button', { name: 'Close history' }).focus();
+    mounted.rerender(<App data={{ ...data, timeline: [] }} />);
+    expect(trigger.isConnected).toBe(false);
+    act(() => {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('request');
+      window.history.replaceState(null, '', url);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    expect(screen.queryByRole('region', { name: 'Request history' })).toBeNull();
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Timeline', level: 1 })).toHaveFocus());
+  });
+  it('renders all receipt outcomes distinctly and keeps legacy/local observations separate', () => {
+    route('?view=host');
+    const record: BrowserCommandRecord = { hostRun: 'run', authority: 'legacy', state: 'input_admitted', submission: { operation_id: '00000000-0000-4000-8000-000000000001', command: { action: 'input', target, text: ' exact retained ' } }, send: 'unknown', lookup: { kind: 'unavailable', reason: 'offline' } };
+    render(<App data={{ ...data, commandReceipts: [{ commandId: '1', outcome: 'admitted', envelopeId: 'e' }, { commandId: '2', outcome: 'control_requested', control: 'retire', target }, { commandId: '3', outcome: 'refused', reason: 'no' }, { commandId: '4', outcome: 'unconfirmed', target, reason: 'unknown' }] }} pendingCommands={[record]} />);
+    expect(screen.getByText('Unconfirmed')).toBeVisible();
+    expect(screen.getByText('Refused')).toBeVisible();
+    expect(screen.getByText('Admitted for processing')).toBeVisible();
+    expect(screen.getByText('Retire requested')).toBeVisible();
+    expect(screen.getByText(/Previously observed input_admitted; fresh lookup required/)).toBeVisible();
+    expect(screen.getByText(/exact retained/)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Retry same operation' })).toBeDisabled();
+  });
+  it('bounds large conversation/activity lists and exposes paging/search', () => {
+    const large = { ...data, nodes: Array.from({ length: 205 }, (_, i) => ({ id: `c${i}`, name: `Conversation ${i}`, state: 'active' })), timeline: Array.from({ length: 105 }, (_, i) => ({ id: `r${i}`, nodeId: 'c0', label: `Request ${i}`, kind: 'request' as const, state: 'completed' })) };
+    render(<App data={large} />);
+    expect(within(screen.getByRole('table', { name: 'Conversation tree' })).getAllByRole('row')).toHaveLength(100);
+    fireEvent.change(screen.getByLabelText('Search'), { target: { value: 'Conversation 204' } });
+    expect(screen.getByRole('link', { name: 'Conversation 204' })).toBeVisible();
+    tab('Timeline');
+    expect(screen.getAllByRole('button', { name: 'Inspect history' })).toHaveLength(50);
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    expect(screen.getAllByRole('button', { name: 'Inspect history' })).toHaveLength(50);
+  });
+  it('addresses interrupt and retire to the exact selected identity and round', () => {
+    route('?view=host');
+    const callback = vi.fn(() => ({ kind: 'retained' as const, operationId: 'op', send: 'sent' as const }));
+    render(<App data={data} onHostCommand={callback} />); choose();
+    fireEvent.click(screen.getByRole('button', { name: 'Interrupt' }));
+    expect(callback).toHaveBeenLastCalledWith({ action: 'interrupt', target, expected_round: actor.activeRound });
+    fireEvent.click(screen.getByRole('button', { name: 'Retire' }));
+    expect(callback).toHaveBeenLastCalledWith({ action: 'retire', target });
+  });
+  it('forwards protected history authentication expiry with exact request context', () => {
+    route('?view=timeline&request=req');
+    const expired = vi.fn(); render(<App data={data} onAuthExpired={expired} />);
+    expect(screen.getByRole('region', { name: 'Request history' })).toHaveTextContent('req · conv · stable');
+    fireEvent.click(screen.getByRole('button', { name: 'Expire auth' })); expect(expired).toHaveBeenCalledOnce();
+  });
+  it('uses one clock for visible active rows and stops it outside activity views', () => {
+    vi.useFakeTimers(); vi.setSystemTime(5000); route('?view=timeline');
+    const interval = vi.spyOn(globalThis, 'setInterval');
+    const cancelInterval = vi.spyOn(globalThis, 'clearInterval');
+    const activeData = { ...data, timeline: [{ ...data.timeline[0]!, state: 'running', endedAtMs: undefined }, { ...data.timeline[1]!, state: 'running', startedAtMs: 1000, endedAtMs: undefined }] };
+    render(<App data={activeData} />); expect(interval).toHaveBeenCalledTimes(1);
+    act(() => vi.advanceTimersByTime(1000)); expect(screen.getAllByText(/5s/).length).toBeGreaterThan(0);
+    tab('Tree'); expect(cancelInterval).toHaveBeenCalledWith(interval.mock.results[0]!.value);
+  });
+  it('immediately persists successful draft clearing without keeping host text as a demo restoration', () => {
+    route('?view=host'); const callback = vi.fn(() => ({ kind: 'retained' as const, operationId: 'op', send: 'unknown' as const }));
+    render(<App data={data} onHostCommand={callback} />); choose();
+    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'sent host text' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send input' }));
+    expect(JSON.parse(sessionStorage.getItem('harness.draft.v1:' + JSON.stringify(['run', '/worker', 'old']))!)).toEqual({ key: JSON.stringify(['run', '/worker', 'old']), text: '', lastSubmitted: '' });
+  });
 
-describe('operator views', () => {
-  it('teaches the empty inbox and navigates between views by keyboard', () => {
-    render(<App />)
-    fireEvent.click(screen.getByRole('button', { name: 'Inbox' }))
-    expect(screen.getByText('Inbox is clear')).toBeInTheDocument()
-    fireEvent.keyDown(window, { key: 'g' })
-    fireEvent.keyDown(window, { key: 't' })
-    expect(screen.getByRole('heading', { name: 'Tree' })).toBeInTheDocument()
-  })
+  it('flushes pending drafts on pagehide before a fast reload', () => {
+    route('?view=host'); render(<App data={data} />); choose();
+    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: ' last typed characters ' } });
+    act(() => window.dispatchEvent(new Event('pagehide')));
+    const stored = JSON.parse(sessionStorage.getItem('harness.draft.v1:' + JSON.stringify(['run', '/worker', 'old']))!);
+    expect(stored.text).toBe(' last typed characters ');
+  });
 
-  it('renders protocol-adapted records and passes commands without inventing a result', () => {
-    const data: HarnessViewModel = {
-      nodes: [{ id: 'n-1', name: '/root', state: 'waiting on operator', model: 'gpt-6-luna' }],
-      timeline: [{ id: 'e-1', nodeId: 'n-1', label: 'spawn_agent', kind: 'job', state: 'running' }],
-      inbox: [{ id: 'm-1', sender: '/root', message: 'Continue?', state: 'unread' }],
-    }
-    const onCommand = vi.fn()
-    render(<App data={data} onCommand={onCommand} />)
-    expect(screen.getByText('/root')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Timeline' }))
-    expect(screen.getByText(/spawn_agent/)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Inbox' }))
-    expect(screen.getByText('Continue?')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Command' }))
-    fireEvent.change(screen.getByLabelText('Command'), { target: { value: 'wait_agent' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
-    expect(onCommand).toHaveBeenCalledWith('wait_agent')
-    expect(screen.queryByText('Command sent')).not.toBeInTheDocument()
-  })
-
-  it('offers deterministic actions and preserves payload whitespace after the verb', () => {
-    const onCommand = vi.fn()
-    render(<App onCommand={onCommand} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Command' }))
-    expect(screen.getByText(/Deterministic mode/)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel wait' }))
-    expect(onCommand).toHaveBeenCalledWith('cancel')
-    fireEvent.change(screen.getByLabelText('Command'), { target: { value: 'echo  keep spaces' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
-    expect(onCommand).toHaveBeenLastCalledWith('echo  keep spaces')
-    expect(screen.getByText(/Sending is not acceptance or completion/)).toBeInTheDocument()
-    expect(screen.getByText(/Outcomes, progress, and messages appear only to the extent represented/)).toBeInTheDocument()
-  })
-
-  it('presents server command outcomes and real ordered message endpoints', () => {
-    const data: HarnessViewModel = {
-      nodes: [{ id: 'root', name: '/root', state: 'idle' }],
-      timeline: [{
-        id: 'req', nodeId: 'root', label: 'echo hello', kind: 'request', state: 'completed',
-        commandId: 'cmd-7', command: 'echo hello', outcome: 'completed', detail: 'echoed hello',
-      }],
-      inbox: [{
-        id: 'progress', sender: '/harness', recipient: '/root', message: 'working',
-        state: 'PROGRESS', ordinal: 1,
-      }],
-    }
-    render(<App data={data} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Timeline' }))
-    expect(screen.getByText(/command cmd-7/)).toBeInTheDocument()
-    expect(screen.getByText(/outcome completed/)).toBeInTheDocument()
-    expect(screen.getByText(/echoed hello/)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Inbox' }))
-    expect(screen.getByText('/harness → /root')).toBeInTheDocument()
-    expect(screen.getByText('PROGRESS · #1')).toBeInTheDocument()
-    expect(screen.getByText('working')).toBeInTheDocument()
-  })
-
-  it('shows authoritative async job identity, lifecycle, delivery, and output', () => {
-    const data: HarnessViewModel = {
-      nodes: [{ id: 'root', name: '/root', state: 'paused' }],
-      timeline: [{
-        id: 'job-9', nodeId: 'root', label: 'Async job', kind: 'job', state: 'settled',
-        requestId: 'request-1', callId: 'call-3', toolKind: 'function', toolName: 'slow_tool',
-        delivered: false, output: 'result pending delivery',
-      }],
-      inbox: [],
-    }
-    render(<App data={data} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Timeline' }))
-    expect(screen.getByText(/job-9/)).toBeInTheDocument()
-    expect(screen.getByText(/settled/)).toBeInTheDocument()
-    expect(screen.getByText(/request request-1/)).toBeInTheDocument()
-    expect(screen.getByText(/call call-3/)).toBeInTheDocument()
-    expect(screen.getByText(/tool kind function/)).toBeInTheDocument()
-    expect(screen.getByText(/slow_tool/)).toBeInTheDocument()
-    expect(screen.getByText(/delivered false/)).toBeInTheDocument()
-    expect(screen.getByText(/result pending delivery/)).toBeInTheDocument()
-  })
-
-  it('presents raw custom job kind and retained terminal output', () => {
-    const data: HarnessViewModel = {
-      nodes: [{ id: 'root', name: '/root', state: 'cancelled' }],
-      timeline: [{
-        id: 'custom-job-4', nodeId: 'root', label: 'custom run', kind: 'job', state: 'cancelled',
-        requestId: 'request-4', callId: 'call-custom-4', toolKind: 'custom',
-        toolName: 'run', delivered: true, output: 'cancelled; retained result',
-      }],
-      inbox: [],
-    }
-    render(<App data={data} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Timeline' }))
-    expect(screen.getByText(/custom-job-4/)).toBeInTheDocument()
-    expect(screen.getByText(/tool kind custom/)).toBeInTheDocument()
-    expect(screen.getByText(/call-custom-4/)).toBeInTheDocument()
-    expect(screen.getByRole('cell', { name: /^cancelled$/ })).toBeInTheDocument()
-    expect(screen.getByText(/delivered true/)).toBeInTheDocument()
-    expect(screen.getByText(/cancelled; retained result/)).toBeInTheDocument()
-  })
-
-  it('uses explicit hostRun to show embedded controls even when the actor list is empty', () => {
-    render(<App data={{ hostRun: 'run-7', actors: [], nodes: [], timeline: [], inbox: [] }} />)
-    expect(screen.getByRole('button', { name: 'Host' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Command' })).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Host' }))
-    expect(screen.getByRole('heading', { name: 'Embedded host controls' })).toBeInTheDocument()
-    expect(screen.getByText('No actors are currently projected for this host run.')).toBeInTheDocument()
-  })
-
-  it('sends input, interrupt, and retire to the explicitly selected exact actor', () => {
-    const onCommand = vi.fn()
-    const selected = {
-      id: '["run-7","/root/reviewer","inc-2"]', name: '/root/reviewer', run: 'run-7', incarnation: 'inc-2',
-      kind: 'workflow' as const, lifecycle: 'waiting', activeRound: 'round-8',
-    }
-    const data: HarnessViewModel = {
-      hostRun: 'run-7',
-      actors: [
-        { ...selected, id: '["run-7","/root/other","inc-1"]', name: '/root/other', incarnation: 'inc-1', kind: 'model', lifecycle: 'running' },
-        selected,
-        { ...selected, id: '["different-run","/root/foreign","inc-1"]', name: '/root/foreign', run: 'different-run', incarnation: 'inc-1', kind: 'model', lifecycle: 'running' },
-      ],
-      nodes: [], timeline: [], inbox: [],
-    }
-    render(<App data={data} onCommand={onCommand} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Host' }))
-    const selector = screen.getByLabelText('Target actor')
-    expect(selector.querySelectorAll('option')).toHaveLength(3)
-    fireEvent.change(selector, { target: { value: selected.id } })
-    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'continue with care' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Send input' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Interrupt' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Retire' }))
-    expect(onCommand.mock.calls.map(([command]) => command)).toEqual([
-      { action: 'input', target: { run: 'run-7', actor: '/root/reviewer', incarnation: 'inc-2' }, text: 'continue with care' },
-      { action: 'interrupt', target: { run: 'run-7', actor: '/root/reviewer', incarnation: 'inc-2' }, expected_round: 'round-8' },
-      { action: 'retire', target: { run: 'run-7', actor: '/root/reviewer', incarnation: 'inc-2' } },
-    ])
-  })
-
-  it('keeps a selected actor unavailable after an incarnation replacement until reselected', () => {
-    const onCommand = vi.fn()
-    const first = {
-      id: '["run-7","/root/reviewer","inc-1"]', name: '/root/reviewer', run: 'run-7', incarnation: 'inc-1',
-      kind: 'workflow' as const, lifecycle: 'waiting',
-    }
-    const replacement = { ...first, id: '["run-7","/root/reviewer","inc-2"]', incarnation: 'inc-2' }
-    const view = (actor: typeof first): HarnessViewModel => ({ hostRun: 'run-7', actors: [actor], nodes: [], timeline: [], inbox: [] })
-    const { rerender } = render(<App data={view(first)} onCommand={onCommand} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Host' }))
-    const selector = screen.getByLabelText('Target actor') as HTMLSelectElement
-    fireEvent.change(selector, { target: { value: first.id } })
-    rerender(<App data={view(replacement)} onCommand={onCommand} />)
-    expect(selector.value).toBe(first.id)
-    expect(screen.getByText(/selected actor disappeared or was replaced/i)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Send input' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Interrupt' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Retire' })).toBeDisabled()
-    expect(onCommand).not.toHaveBeenCalled()
-
-    fireEvent.change(selector, { target: { value: replacement.id } })
-    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'address replacement' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Send input' }))
-    expect(onCommand).toHaveBeenCalledWith({
-      action: 'input', target: { run: 'run-7', actor: '/root/reviewer', incarnation: 'inc-2' }, text: 'address replacement',
-    })
-  })
-
-  it('retains the standalone command view when hostRun is absent', () => {
-    const onCommand = vi.fn()
-    render(<App data={{ actors: [], nodes: [], timeline: [], inbox: [] }} onCommand={onCommand} />)
-    expect(screen.getByRole('button', { name: 'Command' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Host' })).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Command' }))
-    expect(screen.getByText(/Deterministic mode/)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Run test' }))
-    expect(onCommand).toHaveBeenCalledWith('test')
-  })
-
-  it('shows handoff outcomes without treating control requests as completed work', () => {
-    const data: HarnessViewModel = {
-      hostRun: 'run-7', actors: [], nodes: [], timeline: [], inbox: [],
-      commandReceipts: [
-        { commandId: 'cmd-input', outcome: 'admitted', envelopeId: 'env-8' },
-        {
-          commandId: 'cmd-interrupt', target: { run: 'run-7', actor: '/root/worker', incarnation: 'inc-2' },
-          outcome: 'control_requested', control: 'interrupt',
-        },
-        { commandId: 'cmd-refused', outcome: 'refused', reason: 'target actor is no longer live' },
-      ],
-    }
-    render(<App data={data} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Host' }))
-    expect(screen.getByText('Admitted for processing')).toBeInTheDocument()
-    expect(screen.getByText('Interrupt requested')).toBeInTheDocument()
-    expect(screen.getByText('Refused')).toBeInTheDocument()
-    expect(screen.getByText(/request sent to the host; this does not report actor completion/i)).toBeInTheDocument()
-    expect(screen.queryByText('Completed')).not.toBeInTheDocument()
-  })
-})
+});

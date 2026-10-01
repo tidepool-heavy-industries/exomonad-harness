@@ -47,3 +47,61 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .session-error { padding: 8px 12px; color: var(--failed); border-inline-start: 3px solid var(--failed); }
 .session-bar { display: flex; justify-content: flex-end; align-items: center; gap: 12px; padding: 8px 16px; border-bottom: 1px solid var(--line); }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; } }
+a { color: var(--accent); overflow-wrap: anywhere; }
+button, select { font: inherit; }
+button { padding: 7px 10px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; }
+button:disabled { cursor: default; opacity: .6; }
+input, textarea, select { background: var(--panel); color: var(--ink); border: 1px solid var(--line); padding: 8px; max-width: 100%; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.harness { display: flex; flex-direction: column; min-width: 0; }
+body > #root { min-height: 100dvh; }
+.top, .toolbar, .tabs, .host-actions, .pager, .history-controls, .selection-context { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.top, .selection-context { padding: 8px 16px; border-bottom: 1px solid var(--line); }
+.brand { font-weight: 600; margin-inline-end: auto; }
+.tabs { gap: 4px; }
+.tab { background: transparent; border: 0; border-bottom: 2px solid transparent; }
+.tab[aria-current="page"] { border-color: var(--accent); font-weight: 600; }
+.harness main { width: min(100%, 1200px); padding: 20px 16px; margin-inline: auto; min-width: 0; }
+h1 { font-size: 20px; margin: 0; }
+h2 { font-size: 15px; margin: 16px 0 8px; }
+.toolbar { justify-content: space-between; margin-bottom: 12px; }
+.hint, .meta { color: var(--muted); }
+.mono, code, pre { font-family: var(--mono); }
+.row { display: grid; grid-template-columns: minmax(0,1.1fr) minmax(0,.8fr) minmax(0,1.4fr); align-items: start; gap: 8px 12px; padding: 8px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.row > * { min-width: 0; }
+.row:nth-child(even), .operation { background: var(--panel); }
+.row[aria-selected="true"] { border-inline-start: 3px solid var(--accent); }
+.row button { margin: 4px; }
+.empty { padding: 20px 8px; border-block: 1px solid var(--line); }
+.branch { color: var(--muted); }
+.host-controls { max-width: 760px; }
+.host-controls label { display: block; margin: 12px 0 4px; font-weight: 600; }
+.host-controls textarea, .host-controls select { width: 100%; }
+.host-actions { margin-block: 10px; }
+.command-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; max-width: 760px; }
+.command-form input { flex: 1; min-width: 120px; }
+.filters label { display: grid; gap: 4px; max-width: 100%; }
+.pager { margin-block: 12px; }
+.operation { border: 1px solid var(--line); padding: 12px; margin-block: 8px; overflow-wrap: anywhere; }
+.selection-context span, .selection-context p { overflow-wrap: anywhere; min-width: 0; }
+.selection-context p { flex-basis: 100%; margin: 0; }
+.message, pre, .history-content { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+pre { margin-block: 8px; max-width: 100%; }
+.message .meta { display: block; }
+.error { color: var(--failed); }
+.history-window { margin-block: 20px; padding: 12px; border: 1px solid var(--line); min-width: 0; }
+.history-content, .history-item { min-width: 0; }
+.history-controls { margin-block: 12px; }
+.skip-link { position: absolute; inset-inline-start: 8px; top: -80px; padding: 8px; background: var(--panel); z-index: 20; }
+.skip-link:focus { top: 8px; }
+@media (max-width: 600px) {
+  .top, .selection-context { padding: 8px; }
+  .brand { width: 100%; }
+  .harness main { padding: 16px 8px; }
+  .row { grid-template-columns: minmax(0,1fr) minmax(0,.7fr); }
+  .row > :nth-child(n+3) { grid-column: 1 / -1; }
+  .command-form input { flex-basis: 100%; }
+  .session-bar { flex-wrap: wrap; }
+}
+@media (forced-colors: active) { .tab[aria-current="page"], .row[aria-selected="true"] { border-color: Highlight; } }
+.snapshot-status { margin: 0; padding: 8px 16px; color: var(--pending); background: var(--panel); border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }

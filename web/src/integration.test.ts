@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { createElement } from 'react'
-import { fireEvent, render, screen } from '@testing-library/react'
-import { normalizeSnapshot, type Snapshot } from './protocol'
-import { toViewModel } from './integration'
+import { fireEvent, render, screen, within } from '@testing-library/react'
+import { normalizeSnapshot, type Snapshot, type RequestRecord } from './protocol'
+import { createViewProjector, toViewModel } from './integration'
 import { customJobJourney, customSuccessJourney } from './fixture'
 import App from './App'
 
@@ -25,9 +25,11 @@ describe('web outcome integration', () => {
     expect(view.actors).toHaveLength(2);
     render(createElement(App, { data: view }));
     const actorTable = screen.getByRole('table', { name: 'Host actor lifecycles' });
-    expect(actorTable.textContent).toContain('reviewer (workflow)');
-    expect(actorTable.textContent).toContain('incarnation second');
-    expect(actorTable.textContent).toContain('waiting');
+    const reviewerRow = within(actorTable).getByRole('row', { name: /reviewer/ });
+    expect(within(reviewerRow).getByRole('link', { name: 'reviewer' })).toBeInTheDocument();
+    expect(within(reviewerRow).getByRole('cell', { name: 'reviewer · workflow' })).toBeInTheDocument();
+    expect(within(reviewerRow).getByRole('cell', { name: /incarnation second/ })).toBeInTheDocument();
+    expect(within(reviewerRow).getByRole('cell', { name: 'waiting' })).toBeInTheDocument();
     expect(screen.getByRole('table', { name: 'Conversation tree' }).textContent).not.toContain('reviewer');
   });
 
@@ -223,5 +225,88 @@ describe('web outcome integration', () => {
     expect(view.timeline[0]?.commandId).toBeUndefined()
     expect(view.inbox[0]?.ordinal).toBeUndefined()
     expect(view.inbox[0]?.state).toBe('MESSAGE')
+  })
+})
+
+describe('indexed retained projection', () => {
+  it('preserves authoritative null/unrelated parents, source links, exact identity and null output', () => {
+    const parent = { run: 'Opaque/Run', actor: 'same-label', incarnation: 'OLD' }
+    const state = normalizeSnapshot({ seq: 1, actors: [{
+      identity: { ...parent, incarnation: 'NEW' }, parent, kind: 'workflow', lifecycle: 'waiting', modelConversation: null,
+    }], conversations: [
+      { id: 'root', path: '/root', state: 'idle' },
+      { id: 'child', path: '/unrelated', parentId: 'root', state: 'idle', forkSourceRequestId: 'source' },
+      { id: 'other-root', path: '/root/other', parentId: null, state: 'idle' },
+    ], requests: [{ id: 'same', conversationId: 'root', parentId: 'source', state: 'completed', createdAtMs: 3000, endedAtMs: 4000 }],
+    jobs: [{ id: 'same', conversationId: 'root', requestId: 'same', state: 'settled', startedAtMs: 1000, endedAtMs: 3000, output: null }], envelopes: [] })
+    const data = toViewModel(state)
+    expect(data.actors?.[0]?.parentIdentity).toBe(parent)
+    expect(data.nodes.find((node) => node.id === 'child')).toMatchObject({ parentId: 'root', forkSourceRequestId: 'source' })
+    expect(data.nodes.find((node) => node.id === 'other-root')?.parentId).toBeNull()
+    expect(data.timeline.map((row) => row.kind)).toEqual(['job', 'request'])
+    expect(data.timeline[0]).toMatchObject({ id: 'same', output: null, startedAtMs: 1000, endedAtMs: 3000, duration: '2s' })
+    expect(data.timeline[1]).toMatchObject({ parentId: 'source', startedAtMs: 3000, duration: '1s' })
+    expect(data.timeline[0]?.key).not.toBe(data.timeline[1]?.key)
+  })
+
+  it('refreshes history only for the exact durable request and its terminal/delivered jobs', () => {
+    const project = createViewProjector()
+    let state = normalizeSnapshot({ seq: 1, conversations: [{ id: 'c', path: '/c', state: 'idle', version: 1 }],
+      requests: [{ id: 'r', conversationId: 'c', state: 'running', version: 1 }],
+      jobs: [{ id: 'j', conversationId: 'c', requestId: 'r', state: 'running', version: 1, delivered: false }], envelopes: [] })
+    const key = () => project(state).timeline.find((row) => row.kind === 'request')!.historyRefreshKey
+    const first = key()
+    state = { ...state, seq: 9, conversations: new Map([['c', { ...state.conversations.get('c')!, version: 100 }]]) }
+    expect(key()).toBe(first)
+    state = { ...state, jobs: new Map([['j', { ...state.jobs.get('j')!, version: 8, output: 'progress' }]]) }
+    expect(key()).toBe(first)
+    state = { ...state, jobs: new Map([...state.jobs, ['other', { id: 'other', conversationId: 'c', requestId: 'elsewhere', state: 'settled', delivered: true }]]) }
+    expect(key()).toBe(first)
+    state = { ...state, jobs: new Map([...state.jobs, ['j', { ...state.jobs.get('j')!, state: 'settled' }]]) }
+    const terminal = key()
+    expect(terminal).not.toBe(first)
+    state = { ...state, jobs: new Map([...state.jobs, ['j', { ...state.jobs.get('j')!, delivered: true }]]) }
+    const delivered = key()
+    expect(delivered).not.toBe(terminal)
+    state = { ...state, jobs: new Map([...state.jobs, ['j', { ...state.jobs.get('j')!, version: 99, output: 'metadata update' }]]) }
+    expect(key()).toBe(delivered)
+    state = { ...state, requests: new Map([['r', { ...state.requests.get('r')!, version: 2 }]]) }
+    expect(key()).not.toBe(delivered)
+  })
+
+  it('reuses unrelated tables and unchanged rows when relevant Maps change', () => {
+    const project = createViewProjector()
+    const state = normalizeSnapshot({ seq: 1, conversations: [
+      { id: 'a', path: '/a', state: 'idle' }, { id: 'b', path: '/b', state: 'idle' }],
+      requests: [{ id: 'r', conversationId: 'a', state: 'running' }], jobs: [], envelopes: [] })
+    const first = project(state)
+    expect(project({ ...state, seq: 2 })).toBe(first)
+    const message = project({ ...state, envelopes: new Map([['e', { id: 'e', sender: '/a', recipient: '/b', type: 'MESSAGE', payload: 'hi' }]]) })
+    expect(message.nodes).toBe(first.nodes)
+    expect(message.timeline).toBe(first.timeline)
+    expect(message.actors).toBe(first.actors)
+    const updated = project({ ...state, requests: new Map([['r', { ...state.requests.get('r')!, detail: 'changed' }]]) })
+    expect(updated.nodes.find((row) => row.id === 'b')).toBe(first.nodes.find((row) => row.id === 'b'))
+    expect(updated.nodes.find((row) => row.id === 'a')).not.toBe(first.nodes.find((row) => row.id === 'a'))
+  })
+
+  it.each([200, 2000])('indexes %i worker requests without a request scan per conversation', (count) => {
+    let scans = 0
+    class CountedRequests extends Map<string, RequestRecord> {
+      override values() { scans++; return super.values() }
+    }
+    const state = normalizeSnapshot({ seq: 1, conversations: Array.from({ length: count }, (_, n) => ({
+      id: `c${n}`, path: `/root/c${n}`, parentId: n === 0 ? null : 'c0', state: 'idle' as const,
+    })), requests: [], jobs: [], envelopes: [] })
+    const requests = new CountedRequests(Array.from({ length: count }, (_, n) => [`r${n}`, {
+      id: `r${n}`, conversationId: `c${n}`, state: 'running' as const,
+    }]))
+    const project = createViewProjector()
+    const view = project({ ...state, requests })
+    expect(view.nodes).toHaveLength(count)
+    expect(view.nodes.every((row) => row.detail === 'request running')).toBe(true)
+    expect(scans).toBe(2)
+    project({ ...state, requests, seq: 100 })
+    expect(scans).toBe(2)
   })
 })
