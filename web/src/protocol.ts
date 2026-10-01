@@ -347,33 +347,67 @@ export function isCommandRefusal(value: unknown): value is HostCommandRefusal {
 }
 
 export function isEmbeddedCommandRecord(value: unknown): value is EmbeddedCommandRecord {
-  return isObject(value) && isOperationId(value.operationId) && isHostCommand(value.command)
-    && isCommandState(value.state)
-    && (value.envelopeId === null || (Number.isSafeInteger(value.envelopeId) && (value.envelopeId as number) >= 0))
-    && (value.receipt === null || isCommandReceipt(value.receipt));
+  if (!isObject(value) || !isOperationId(value.operationId) || !isHostCommand(value.command)
+    || !isCommandState(value.state)
+    || !(value.envelopeId === null || (Number.isSafeInteger(value.envelopeId) && (value.envelopeId as number) >= 0))
+    || !(value.receipt === null || isCommandReceipt(value.receipt))) return false;
+  if (value.state === 'input_admitted' && value.command.action !== 'input') return false;
+  if (value.state === 'control_requested' && value.command.action === 'input') return false;
+  const receipt = value.receipt;
+  if (receipt === null) return true;
+  if (!isOperationId(receipt.commandId) || canonicalOperationId(receipt.commandId) !== canonicalOperationId(value.operationId)
+    || (receipt.target !== undefined && !sameHostIdentity(receipt.target, value.command.target))) return false;
+  switch (receipt.outcome) {
+    case 'admitted': return value.state === 'input_admitted' && value.command.action === 'input'
+      && (value.envelopeId === null || String(value.envelopeId) === receipt.envelopeId);
+    case 'control_requested': return value.state === 'control_requested' && value.command.action === receipt.control;
+    case 'refused': return value.state === 'refused';
+    case 'unconfirmed': return value.state === 'unconfirmed';
+  }
 }
 
+function optional(value: Record<string, unknown>, key: string, valid: (field: unknown) => boolean): boolean {
+  return value[key] === undefined || valid(value[key]);
+}
+const text = (value: unknown): value is string => typeof value === 'string';
+const nullableId = (value: unknown) => value === null || (text(value) && value.length > 0);
+const count = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0;
+const nullableTime = (value: unknown) => value === null || (typeof value === 'number' && Number.isFinite(value));
+
 function validProjection(kind: string, value: unknown): boolean {
+  const projected = ['host_run.upsert', 'command.receipt', 'actor.upsert', 'conversation.upsert',
+    'request.upsert', 'job.upsert', 'envelope.upsert', 'entity.remove'];
+  if (!projected.includes(kind)) return true; // Auxiliary events only occupy sequence numbers.
   if (!isObject(value)) return false;
-  const id = () => typeof value.id === 'string' && value.id.length > 0;
+  const id = () => text(value.id) && value.id.length > 0;
+  const version = () => optional(value, 'version', count);
   switch (kind) {
-    case 'host_run.upsert': return typeof value.run === 'string' && value.run.length > 0;
+    case 'host_run.upsert': return text(value.run) && value.run.length > 0;
     case 'command.receipt': return isCommandReceipt(value);
     case 'actor.upsert': return isHostIdentity(value.identity) && (value.parent === null || isHostIdentity(value.parent))
       && ['model', 'workflow'].includes(value.kind as string)
       && ['running', 'waiting', 'retiring', 'retired', 'lost'].includes(value.lifecycle as string)
-      && (value.modelConversation === null || typeof value.modelConversation === 'string')
-      && (value.activeRound === undefined || typeof value.activeRound === 'string');
-    case 'conversation.upsert': return id() && typeof value.path === 'string'
-      && ['idle', 'requesting', 'paused', 'cancelled'].includes(value.state as string);
-    case 'request.upsert': return id() && typeof value.conversationId === 'string'
-      && ['running', 'completed', 'failed'].includes(value.state as string);
-    case 'job.upsert': return id() && typeof value.conversationId === 'string'
-      && ['running', 'settled', 'cancelled', 'interrupted'].includes(value.state as string);
-    case 'envelope.upsert': return id() && typeof value.sender === 'string' && typeof value.recipient === 'string'
-      && typeof value.payload === 'string' && ['NEW_TASK', 'MESSAGE', 'FINAL_ANSWER', 'PROGRESS'].includes(value.type as string);
+      && nullableId(value.modelConversation) && optional(value, 'activeRound', isOperationId);
+    case 'conversation.upsert': return id() && text(value.path) && version()
+      && ['idle', 'requesting', 'paused', 'cancelled'].includes(value.state as string)
+      && optional(value, 'parentId', nullableId) && optional(value, 'forkSourceRequestId', nullableId);
+    case 'request.upsert': return id() && text(value.conversationId) && version()
+      && ['running', 'completed', 'failed'].includes(value.state as string)
+      && optional(value, 'parentId', nullableId) && optional(value, 'createdAtMs', nullableTime)
+      && optional(value, 'endedAtMs', nullableTime) && optional(value, 'commandId', text)
+      && optional(value, 'command', text) && optional(value, 'detail', text)
+      && optional(value, 'outcome', (field) => ['accepted', 'pending', 'queued', 'presented', 'acted', 'completed', 'cancelled', 'failed'].includes(field as string));
+    case 'job.upsert': return id() && text(value.conversationId) && version()
+      && ['running', 'settled', 'cancelled', 'interrupted'].includes(value.state as string)
+      && optional(value, 'startedAtMs', nullableTime) && optional(value, 'endedAtMs', nullableTime)
+      && optional(value, 'toolKind', (field) => field === 'function' || field === 'custom')
+      && optional(value, 'requestId', text) && optional(value, 'callId', text) && optional(value, 'toolName', text)
+      && optional(value, 'delivered', (field) => typeof field === 'boolean');
+    case 'envelope.upsert': return id() && version() && text(value.sender) && text(value.recipient)
+      && text(value.payload) && ['NEW_TASK', 'MESSAGE', 'FINAL_ANSWER', 'PROGRESS'].includes(value.type as string)
+      && optional(value, 'ordinal', count);
     case 'entity.remove': return id() && ['actor', 'conversation', 'request', 'job', 'envelope'].includes(value.entity as string);
-    default: return true; // Auxiliary events occupy sequence numbers without projecting a table.
+    default: return false;
   }
 }
 

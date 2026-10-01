@@ -86,11 +86,11 @@ it('preserves valid legacy evidence and malformed original bytes during v2 migra
   expect(migrated.records).toMatchObject([{ ...valid, authority: 'legacy' }])
   expect(isSettledCommand(migrated.records[0]!)).toBe(false)
   expect(needsCommandLookup(migrated.records[0]!)).toBe(true)
-  writePendingCommands(migrated.records, 'run-1')
+  writePendingCommands(migrated.records)
   expect(sessionStorage.getItem('harness.embeddedCommands.v1')).toBe(original)
   expect(readCommandLedger().quarantine.some((entry) => entry.raw.includes(' exact λ '))).toBe(true)
   sessionStorage.setItem('harness.embeddedCommands.v2', ' malformed λ ')
-  writePendingCommands(readPendingCommands(), 'run-1')
+  writePendingCommands(readPendingCommands())
   expect(readCommandLedger().quarantine.some((entry) => entry.raw === ' malformed λ ')).toBe(true)
 })
 
@@ -128,14 +128,14 @@ it('keeps local channel refusal and 404 separate from Store unconfirmed, which s
   expect(isSettledCommand(unconfirmed[0]!)).toBe(false)
 })
 
-it('caps resolved current-run history without resurrecting v1 or evicting unresolved and older runs', () => {
+it('caps resolved history globally without resurrecting v1 or evicting unresolved operations across runs', () => {
   sessionStorage.clear()
   const unresolved = retainCommand([], 'run-1', { operation_id: '00000000-0000-4000-8000-000000000000', command })
   const old = retainCommand([], 'old-run', { operation_id: '00000000-0000-4000-8000-000000000001', command: { ...command, target: { ...command.target, run: 'old-run' } } })
   const settled = Array.from({ length: 140 }, (_, index) => ({ ...unresolved[0]!, authority: 'status' as const, state: 'refused' as const,
-    submission: { operation_id: `00000000-0000-4000-8000-${String(index + 2).padStart(12, '0')}`, command } }))
+    submission: { operation_id: `00000000-0000-4000-8000-${String(index + 2).padStart(12, '0')}`, command: { ...command, target: { ...command.target, run: index % 2 ? 'run-1' : 'old-run' } } }, hostRun: index % 2 ? 'run-1' : 'old-run' }))
   sessionStorage.setItem('harness.embeddedCommands.v1', JSON.stringify(settled))
-  writePendingCommands([...old, ...unresolved, ...settled], 'run-1')
+  writePendingCommands([...old, ...unresolved, ...settled])
   const restored = readPendingCommands()
   expect(restored).toHaveLength(130)
   expect(restored).toContainEqual(old[0])
@@ -151,4 +151,33 @@ it('preserves original UUID spelling and immutable payload while comparing round
   expect(records[0]?.submission.command).toEqual(interrupt)
   expect(Object.isFrozen(records[0]?.submission.command.target)).toBe(true)
   expect(() => retainCommand(records, 'run-1', { operation_id, command: { ...interrupt, target: { ...command.target, actor: '/ROOT' } } })).toThrow(/different contents/)
+})
+
+it('blocks writing when original storage is unreadable and preserves unseen records after recovery', () => {
+  const prior = retainCommand([], 'run-1', { operation_id, command })
+  writePendingCommands(prior)
+  const original = sessionStorage.getItem('harness.embeddedCommands.v2')
+  const reader = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('read denied') })
+  expect(readCommandLedger().available).toBe(false)
+  expect(() => writePendingCommands([])).toThrow(/existing data was preserved/)
+  reader.mockRestore()
+  expect(sessionStorage.getItem('harness.embeddedCommands.v2')).toBe(original)
+  writePendingCommands([])
+  expect(readPendingCommands()).toEqual(prior)
+})
+
+it('quarantines persisted authoritative receipts that contradict immutable target, action, UUID or envelope', () => {
+  const local = retainCommand([], 'run-1', { operation_id, command })[0]!
+  for (const changes of [
+    { state: 'control_requested', receipt: { ...admittedReceipt, outcome: 'control_requested', control: 'retire' } },
+    { receipt: { ...admittedReceipt, commandId: '00000000-0000-4000-8000-000000000000' } },
+    { receipt: { ...admittedReceipt, target: { ...command.target, incarnation: 'OTHER' } } },
+    { envelopeId: 43 },
+  ]) {
+    sessionStorage.setItem('harness.embeddedCommands.v2', JSON.stringify({ version: 2, records: [
+      { ...local, authority: 'receipt', state: 'input_admitted', receipt: admittedReceipt, ...changes },
+    ] }))
+    expect(readCommandLedger().records).toHaveLength(0)
+    expect(readCommandLedger().quarantine).toHaveLength(1)
+  }
 })

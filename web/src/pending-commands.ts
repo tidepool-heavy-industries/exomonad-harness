@@ -29,6 +29,7 @@ interface QuarantinedStorage {
 }
 export interface CommandLedger {
   readonly records: BrowserCommandRecord[]
+  readonly available: boolean
   readonly quarantine: readonly QuarantinedStorage[]
   readonly issues: readonly string[]
 }
@@ -78,7 +79,16 @@ function decodeRecord(value: unknown, legacy: boolean): BrowserCommandRecord | u
   if (value.localRefusal !== undefined && !isCommandRefusal(value.localRefusal)) return
   if (value.issues !== undefined && (!Array.isArray(value.issues) || !value.issues.every((item) => typeof item === 'string'))) return
   // Retain valid legacy evidence and unknown metadata in the original JSON shape.
-  return { ...value, authority: legacy ? 'legacy' : value.authority } as unknown as BrowserCommandRecord
+  const record = { ...value, authority: legacy ? 'legacy' : value.authority } as unknown as BrowserCommandRecord
+  if (!legacy && (record.authority === 'status' || record.authority === 'receipt')) {
+    if ((record.state === 'input_admitted' && record.submission.command.action !== 'input')
+      || (record.state === 'control_requested' && record.submission.command.action === 'input')) return
+    if (record.authority === 'receipt' && (!record.receipt || !record.receipt.target)) return
+    if (record.receipt && (!receiptMatches(record, record.receipt) || receiptState(record.receipt) !== record.state)) return
+    if (record.receipt?.outcome === 'admitted' && record.envelopeId != null
+      && String(record.envelopeId) !== record.receipt.envelopeId) return
+  }
+  return record
 }
 
 export function readCommandLedger(): CommandLedger {
@@ -86,9 +96,10 @@ export function readCommandLedger(): CommandLedger {
   const quarantine: QuarantinedStorage[] = []
   const issues: string[] = []
   let legacyImported = false
+  let available = true
   for (const [key, source] of [[storageKey, 'v2'], [legacyStorageKey, 'v1']] as const) {
     let raw: string | null
-    try { raw = sessionStorage.getItem(key) } catch { issues.push('This browser could not read retained operations.'); continue }
+    try { raw = sessionStorage.getItem(key) } catch { available = false; issues.push('This browser could not read retained operations.'); continue }
     if (raw === null || (source === 'v1' && legacyImported)) continue
     try {
       const decoded: unknown = JSON.parse(raw)
@@ -115,24 +126,27 @@ export function readCommandLedger(): CommandLedger {
     } catch { quarantine.push({ source, raw, reason: 'The original ledger could not be decoded.' }) }
   }
   if (quarantine.length) issues.push('Some retained operation data was quarantined; its original content is preserved.')
-  return { records, quarantine, issues }
+  return { records, quarantine, issues, available }
 }
 
 export function readPendingCommands(): BrowserCommandRecord[] { return readCommandLedger().records }
 
-function compact(records: readonly BrowserCommandRecord[], activeRun?: string): BrowserCommandRecord[] {
-  if (activeRun === undefined) return [...records]
-  const settled = records.filter((record) => record.hostRun === activeRun && isSettledCommand(record))
+function compact(records: readonly BrowserCommandRecord[]): BrowserCommandRecord[] {
+  const settled = records.filter(isSettledCommand)
   const discard = new Set(settled.slice(0, Math.max(0, settled.length - 128)).map(operationKey))
   return records.filter((record) => !discard.has(operationKey(record)))
 }
 
-export function writePendingCommands(records: readonly BrowserCommandRecord[], activeRun?: string): void {
+export function writePendingCommands(records: readonly BrowserCommandRecord[]): BrowserCommandRecord[] {
   const prior = readCommandLedger()
+  if (!prior.available) throw new Error('Retained operations could not be read; their existing data was preserved.')
+  const keys = new Set(records.map(operationKey))
+  const retained = compact([...prior.records.filter((record) => !keys.has(operationKey(record))), ...records])
   const quarantine = prior.quarantine.filter((entry, index, all) =>
     all.findIndex((other) => other.source === entry.source && other.raw === entry.raw && other.reason === entry.reason) === index)
-  sessionStorage.setItem(storageKey, JSON.stringify({ version: 2, legacyImported: true, records: compact(records, activeRun), quarantine }))
+  sessionStorage.setItem(storageKey, JSON.stringify({ version: 2, legacyImported: true, records: retained, quarantine }))
   // Never remove or overwrite v1: recovery can inspect its exact original bytes.
+  return retained
 }
 
 export function retainCommand(records: readonly BrowserCommandRecord[], hostRun: string, submission: HostCommandSubmission): BrowserCommandRecord[] {
@@ -150,7 +164,7 @@ export function retainCommand(records: readonly BrowserCommandRecord[], hostRun:
   Object.freeze(immutable.command.target)
   Object.freeze(immutable.command)
   Object.freeze(immutable)
-  return compact([...records, { hostRun, submission: immutable, authority: 'local', state: 'queued' }], hostRun)
+  return compact([...records, { hostRun, submission: immutable, authority: 'local', state: 'queued' }])
 }
 
 function receiptState(receipt: CommandReceipt): EmbeddedCommandRecord['state'] {
@@ -187,7 +201,7 @@ function mergeEvidence(record: BrowserCommandRecord, state: EmbeddedCommandRecor
   if (isSettledCommand(record) && record.state !== state) return issue(record, `Contradictory handoff evidence: retained ${record.state}, observed ${state}.`)
   if (record.envelopeId != null && envelopeId != null && record.envelopeId !== envelopeId)
     return issue(record, 'Contradictory admitted envelope identity.')
-  let combined = receipt ?? record.receipt
+  let combined = receipt === undefined ? record.receipt : receipt === null ? record.receipt ?? null : receipt
   if (record.receipt && receipt) {
     if (record.receipt.outcome !== receipt.outcome) {
       if (isSettledCommand(record)) return issue(record, 'Contradictory receipt outcome.')
