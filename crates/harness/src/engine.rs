@@ -1985,13 +1985,25 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let store = self.store.clone();
         let request = request.clone();
         let expected = expected_head.cloned();
-        let agent = matches!(self.origin, ConversationIdentity::Embedded { .. })
-            .then(|| self.config.agent.clone());
+        let identity = match &self.origin {
+            ConversationIdentity::Embedded {
+                run,
+                actor,
+                incarnation,
+            } => Some(crate::embedding::HostIdentity {
+                run: run.clone(),
+                actor: actor.clone(),
+                incarnation: incarnation.clone(),
+            }),
+            ConversationIdentity::Standalone { .. } => None,
+        };
         match blocking(move || {
             store.record_failed_model_request(
                 &request,
                 &failure,
-                agent.as_ref().map(|agent| (agent, expected.as_ref())),
+                identity
+                    .as_ref()
+                    .map(|identity| (identity, expected.as_ref())),
             )
         })
         .await

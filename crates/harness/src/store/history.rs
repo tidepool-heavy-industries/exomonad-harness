@@ -51,14 +51,17 @@ impl Store {
         &self,
         request: &RequestId,
         failure: &crate::transport::RequestFailure,
-        agent_head: Option<(&crate::model::AgentPath, Option<&RequestId>)>,
+        agent_head: Option<(&crate::embedding::HostIdentity, Option<&RequestId>)>,
     ) -> Result<bool> {
         let mut connection = self.lock();
         let transaction = connection.transaction()?;
-        if let Some((agent, expected)) = agent_head {
+        if let Some((identity, expected)) = agent_head {
+            if !super::embedded::matches_binding(&transaction, identity)? {
+                return Err(StoreError::InvalidEmbeddedBinding);
+            }
             if transaction.execute(
                 "UPDATE agents SET head_request=?3 WHERE path=?1 AND head_request IS ?2",
-                params![agent.0, expected.map(|head| &head.0), request.0],
+                params![identity.actor.0, expected.map(|head| &head.0), request.0],
             )? != 1
             {
                 return Ok(false);
@@ -207,19 +210,33 @@ mod tests {
             std::env::temp_dir().join(format!("rejected-head-{}.sqlite", uuid::Uuid::new_v4()));
         let agent = AgentPath("/root".into());
         let request = RequestId("rejected-head".into());
+        let identity = crate::embedding::HostIdentity {
+            run: "run".into(),
+            actor: agent.clone(),
+            incarnation: "1".into(),
+        };
         {
             let store = Store::open(&path).unwrap();
-            store
-                .admit_agent(&agent, None, None, &json!({}), &json!({"kind":"root"}))
-                .unwrap();
+            store.bind_embedded_actor(&identity, None).unwrap();
             store.create_request(&request, None, &agent.0).unwrap();
+            let mut stale = identity.clone();
+            stale.incarnation = "0".into();
+            assert!(matches!(
+                store.record_failed_model_request(
+                    &request,
+                    &RequestFailure::Authentication,
+                    Some((&stale, None))
+                ),
+                Err(StoreError::InvalidEmbeddedBinding)
+            ));
+
             store.lock().execute_batch("CREATE TRIGGER reject_failure BEFORE INSERT ON events WHEN NEW.kind='request_failed' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
             assert!(
                 store
                     .record_failed_model_request(
                         &request,
                         &RequestFailure::Authentication,
-                        Some((&agent, None))
+                        Some((&identity, None))
                     )
                     .is_err()
             );
@@ -234,7 +251,7 @@ mod tests {
                     .record_failed_model_request(
                         &request,
                         &RequestFailure::Authentication,
-                        Some((&agent, Some(&RequestId("stale".into()))))
+                        Some((&identity, Some(&RequestId("stale".into()))))
                     )
                     .unwrap()
             );
@@ -244,7 +261,7 @@ mod tests {
                     .record_failed_model_request(
                         &request,
                         &RequestFailure::Authentication,
-                        Some((&agent, None))
+                        Some((&identity, None))
                     )
                     .unwrap()
             );

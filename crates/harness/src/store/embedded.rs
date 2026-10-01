@@ -15,10 +15,7 @@ pub(crate) enum EmbeddedInputState {
     Included(crate::model::RequestId),
 }
 
-fn matches_binding(
-    c: &Connection,
-    identity: &HostIdentity,
-) -> std::result::Result<bool, EmbeddedError> {
+pub(super) fn matches_binding(c: &Connection, identity: &HostIdentity) -> rusqlite::Result<bool> {
     Ok(c.query_row(
         "SELECT run_id,incarnation FROM embedded_bindings WHERE agent_path=?1",
         [&identity.actor.0],
@@ -166,7 +163,7 @@ impl Store {
         &self,
         identity: &HostIdentity,
     ) -> std::result::Result<bool, EmbeddedError> {
-        matches_binding(&self.lock(), identity)
+        matches_binding(&self.lock(), identity).map_err(Into::into)
     }
 
     pub(crate) fn bind_embedded_actor(
