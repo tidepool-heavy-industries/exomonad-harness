@@ -1,4 +1,4 @@
-//! Bounded, ordered reads of one durable request's exact Items.
+//! Durable model request outcomes and bounded, ordered reads of exact Items.
 
 use super::{Request, Result, Store, StoreError};
 use crate::{item::Item, model::RequestId};

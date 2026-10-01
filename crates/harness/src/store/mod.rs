@@ -48,7 +48,7 @@ pub enum StoreError {
     ConflictingCommand,
     #[error("command does not have the required durable claim or outcome")]
     InvalidCommandState,
-    #[error("checkpoint child does not match its host binding")]
+    #[error("embedded conversation does not match its host binding")]
     InvalidEmbeddedBinding,
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
