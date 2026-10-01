@@ -1506,7 +1506,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         finalize_schema: Option<&serde_json::Value>,
         manifest: &crate::transport::ToolManifest,
     ) -> crate::transport::ToolManifest {
-        if self.config.tools.is_empty() && finalize_schema.is_none() {
+        if self.config.tools.is_empty()
+            && finalize_schema.is_none()
+            && !manifest.has_duplicate_names()
+        {
             return manifest.clone();
         }
         let mut tools = self.config.tools.clone();

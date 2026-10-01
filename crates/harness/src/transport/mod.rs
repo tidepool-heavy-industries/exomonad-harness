@@ -22,6 +22,7 @@ struct ManifestData {
     tools: Vec<Value>,
     json: String,
     hash: crate::item::ItemHash,
+    duplicate_names: bool,
 }
 
 impl Default for ToolManifest {
@@ -34,13 +35,28 @@ impl ToolManifest {
     pub(crate) fn encoded(&self) -> (&crate::item::ItemHash, &str) {
         (&self.0.hash, &self.0.json)
     }
+
+    pub(crate) fn has_duplicate_names(&self) -> bool {
+        self.0.duplicate_names
+    }
 }
 
 impl From<Vec<Value>> for ToolManifest {
     fn from(tools: Vec<Value>) -> Self {
         let json = serde_json::to_string(&tools).expect("tool Values serialize");
         let hash = crate::item::ItemHash(blake3::hash(json.as_bytes()).to_hex().to_string());
-        Self(Arc::new(ManifestData { tools, json, hash }))
+        let mut names = std::collections::HashSet::new();
+        let duplicate_names = tools.iter().any(|tool| {
+            tool.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| !names.insert(name))
+        });
+        Self(Arc::new(ManifestData {
+            tools,
+            json,
+            hash,
+            duplicate_names,
+        }))
     }
 }
 

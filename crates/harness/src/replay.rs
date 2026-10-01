@@ -38,7 +38,7 @@ type ReplayObserver = dyn Fn(&ResponsesRequest, &mut ResponsesTurn, usize) + Sen
 pub struct ReplayProvider {
     store: Arc<Store>,
     turns: Mutex<VecDeque<RecordedReplayTurn>>,
-    tool_schemas: Vec<serde_json::Value>,
+    tool_schemas: crate::transport::ToolManifest,
     calls: HashMap<OperationId, (String, ToolKind, serde_json::Value)>,
     local_requests: Mutex<HashMap<RequestId, RequestId>>,
 }
@@ -61,7 +61,7 @@ impl ReplayProvider {
         let turns = store.replay_turns(root)?;
         let tool_schemas = turns
             .first()
-            .map(|turn| turn.model_request.tools.to_vec())
+            .map(|turn| turn.model_request.tools.clone())
             .unwrap_or_default();
         let mut calls = HashMap::new();
         for turn in &turns {
@@ -277,6 +277,10 @@ impl Provider for ReplayProvider {
     }
 
     fn tools(&self) -> Vec<serde_json::Value> {
+        self.tool_schemas.to_vec()
+    }
+
+    fn tool_manifest(&self) -> crate::transport::ToolManifest {
         self.tool_schemas.clone()
     }
 }
