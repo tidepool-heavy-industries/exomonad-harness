@@ -226,4 +226,12 @@ describe('linked operator views', () => {
     expect(JSON.parse(sessionStorage.getItem('harness.draft.v1:' + JSON.stringify(['run', '/worker', 'old']))!)).toEqual({ key: JSON.stringify(['run', '/worker', 'old']), text: '', lastSubmitted: '' });
   });
 
+  it('flushes pending drafts on pagehide before a fast reload', () => {
+    route('?view=host'); render(<App data={data} />); choose();
+    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: ' last typed characters ' } });
+    act(() => window.dispatchEvent(new Event('pagehide')));
+    const stored = JSON.parse(sessionStorage.getItem('harness.draft.v1:' + JSON.stringify(['run', '/worker', 'old']))!);
+    expect(stored.text).toBe(' last typed characters ');
+  });
+
 });

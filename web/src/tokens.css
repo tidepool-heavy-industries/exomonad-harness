@@ -104,3 +104,4 @@ pre { margin-block: 8px; max-width: 100%; }
   .session-bar { flex-wrap: wrap; }
 }
 @media (forced-colors: active) { .tab[aria-current="page"], .row[aria-selected="true"] { border-color: Highlight; } }
+.snapshot-status { margin: 0; padding: 8px 16px; color: var(--pending); background: var(--panel); border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }

@@ -86,9 +86,26 @@ export function clearDrafts(): void {
   catch { /* Memory still clears on deliberate signout. */ }
   notify();
 }
+function flushPendingDrafts(): void {
+  const pending = [...timers.keys()];
+  timers.forEach(clearTimeout);
+  timers.clear();
+  pending.forEach(persistDraft);
+}
 export function useDraft(key?: string) {
   const [, update] = useState(0);
-  useEffect(() => { const listener = () => update(value => value + 1); listeners.add(listener); return () => { listeners.delete(listener); }; }, []);
+  useEffect(() => {
+    const listener = () => update(value => value + 1);
+    if (listeners.size === 0) window.addEventListener('pagehide', flushPendingDrafts);
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) {
+        flushPendingDrafts();
+        window.removeEventListener('pagehide', flushPendingDrafts);
+      }
+    };
+  }, []);
   const draft = key ? readDraft(key) : { text: '', lastSubmitted: '' };
   return {
     ...draft, setText: (text: string) => {

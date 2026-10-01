@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from 'react';
 import NodeWindow from './NodeWindow';
 import type { CommandReceipt, HostActorIdentity, HostCommand } from './protocol';
 import { actorIdentityKey } from './protocol';
-import { isSettledCommand, type BrowserCommandRecord } from './pending-commands';
+import { isSettledCommand, operationKey, type BrowserCommandRecord } from './pending-commands';
 import type { HarnessViewModel } from './view-model';
 import type { RouteState, Screen, Selection, SubmitHostCommand, RetryHostCommand, SubmitDemoCommand, TransportPhase } from './client-contract';
 import { createViewSelector, formatActivityTime, orderConversationTree, pageRows, resolveSelection, needsActivityClock } from './selectors';
@@ -87,7 +87,7 @@ function RetainedCommands({ commands, run, ready, onRetry }: {
     return null;
   return <section aria-label="Retained browser operations">
     <h2>Retained browser operations</h2>
-    {commands.map(record => <article className="operation" data-operation-id={record.submission.operation_id} key={record.submission.operation_id}>
+    {commands.map(record => <article className="operation" data-operation-id={record.submission.operation_id} key={operationKey(record)}>
       <strong>
         {record.submission.command.action} · {record.authority === 'legacy' ? `Previously observed ${record.state}; fresh lookup required` : record.authority === 'local' ? 'Locally retained; host admission unknown' : record.state}
       </strong>
@@ -181,11 +181,11 @@ function HostComposer({ data, route, navigate, unavailable, ready, onHostCommand
 }
 export default function App({ data, onHostCommand, onDemoCommand, onRetry, transportPhase = 'ready', pendingCommands = [], acceptedCommandIds = [], demoFeedback, onAuthExpired }: AppProps) {
   const { route, issue, navigate } = useRoute();
-  const resolved = resolveSelection(data, route.selection);
+  const resolved = useMemo(() => resolveSelection(data, route.selection), [data.actors, data.nodes, route.selection]);
   const selector = useMemo(() => createViewSelector(), []);
-  const view = selector(data, route.selection, route.global, route.messageFilters);
+  const view = useMemo(() => selector(data, route.selection, route.global, route.messageFilters), [selector, data, route.selection, route.global, route.messageFilters]);
   const embedded = data.hostRun !== undefined;
-  const screens: Screen[] = ['tree', 'timeline', 'inbox', embedded ? 'host' : 'command'];
+  const screens = useMemo<Screen[]>(() => ['tree', 'timeline', 'inbox', embedded ? 'host' : 'command'], [embedded]);
   const heading = useRef<HTMLHeadingElement>(null);
   const previousScreen = useRef(route.screen);
   const inspectionTrigger = useRef<HTMLElement | null>(null);
@@ -202,8 +202,9 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
     } setSearch(''); setPage(0); setActorPage(0);
   }, [route.screen]);
   useEffect(() => { setPage(0); setActorPage(0); }, [route.selection, route.global, route.messageFilters]);
-  const filteredTimeline = view.timeline.filter(item => `${item.label} ${item.id} ${item.detail ?? ''}`.toLowerCase().includes(search.toLowerCase()));
-  const activity = pageRows(filteredTimeline, page, 50);
+  const searchTerm = search.toLowerCase();
+  const filteredTimeline = useMemo(() => searchTerm ? view.timeline.filter(item => `${item.label} ${item.id} ${item.detail ?? ''}`.toLowerCase().includes(searchTerm)) : view.timeline, [view.timeline, searchTerm]);
+  const activity = useMemo(() => pageRows(filteredTimeline, page, 50), [filteredTimeline, page]);
   const activeVisible = (route.screen === 'timeline' || route.screen === 'command') && activity.rows.some(needsActivityClock);
   useEffect(() => {
     if (!activeVisible)
@@ -250,7 +251,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
     window.addEventListener('keydown', handle);
     return () => { window.removeEventListener('keydown', handle); clearTimeout(timer); };
   }, [route, embedded]);
-  const link = (selection: Selection, label: string, screen = route.screen) => {
+  const link = useCallback((selection: Selection, label: string, screen = route.screen) => {
     const next = { ...route, screen, selection };
     return <a href={routeUrl(next, new URL(window.location.href)).toString()} onClick={(event: MouseEvent<HTMLAnchorElement>) => {
       if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
@@ -260,29 +261,55 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
     }}>
       {label}
     </a>;
-  };
-  const inspect = (requestId: string, element?: HTMLElement) => { inspectionTrigger.current = element ?? null; navigate({ ...route, requestId }); };
-  const closeInspector = () => {
+  }, [route, navigate]);
+  const inspect = useCallback((requestId: string, element?: HTMLElement) => { inspectionTrigger.current = element ?? null; navigate({ ...route, requestId }); }, [route, navigate]);
+  const closeInspector = useCallback(() => {
     navigate({ ...route, requestId: undefined }); setTimeout(() => {
       if (inspectionTrigger.current?.isConnected)
         inspectionTrigger.current.focus();
       else
         heading.current?.focus();
     }, 0);
-  };
+  }, [route, navigate]);
   const selectedDescription = route.selection.kind === 'actor' ? `${route.selection.identity.actor} · run ${route.selection.identity.run} · incarnation ${route.selection.identity.incarnation}` : route.selection.kind === 'conversation' ? `Conversation ${route.selection.conversationId}` : 'All contexts';
-  const nodes = orderConversationTree(data.nodes).filter(({ node }) => `${node.name} ${node.id}`.toLowerCase().includes(search.toLowerCase()));
-  const conversations = pageRows(nodes, page, 100);
-  const actors = pageRows((data.actors ?? []).filter(actor => `${actor.name} ${actor.incarnation}`.toLowerCase().includes(search.toLowerCase())), actorPage, 100);
-  const inbox = pageRows(view.inbox.filter(item => `${item.message} ${item.sender} ${item.recipient ?? ''}`.toLowerCase().includes(search.toLowerCase())), page, 50);
-  const endpoints = [...new Set(['/operator', ...data.inbox.flatMap(item => [item.sender, ...(item.recipient ? [item.recipient] : [])])])].sort();
+  const orderedNodes = useMemo(() => orderConversationTree(data.nodes), [data.nodes]);
+  const nodes = useMemo(() => searchTerm ? orderedNodes.filter(({ node }) => `${node.name} ${node.id}`.toLowerCase().includes(searchTerm)) : orderedNodes, [orderedNodes, searchTerm]);
+  const conversations = useMemo(() => pageRows(nodes, page, 100), [nodes, page]);
+  const filteredActors = useMemo(() => (data.actors ?? []).filter(actor => !searchTerm || `${actor.name} ${actor.incarnation}`.toLowerCase().includes(searchTerm)), [data.actors, searchTerm]);
+  const actors = useMemo(() => pageRows(filteredActors, actorPage, 100), [filteredActors, actorPage]);
+  const filteredInbox = useMemo(() => searchTerm ? view.inbox.filter(item => `${item.message} ${item.sender} ${item.recipient ?? ''}`.toLowerCase().includes(searchTerm)) : view.inbox, [view.inbox, searchTerm]);
+  const inbox = useMemo(() => pageRows(filteredInbox, page, 50), [filteredInbox, page]);
+  const endpoints = useMemo(() => [...new Set(['/operator', ...data.inbox.flatMap(item => [item.sender, ...(item.recipient ? [item.recipient] : [])])])].sort(), [data.inbox]);
+  const endpointNodes = useMemo(() => {
+    const index = new Map<string, HarnessViewModel['nodes']>();
+    for (const node of data.nodes) {
+      const rows = index.get(node.name) ?? [];
+      rows.push(node);
+      index.set(node.name, rows);
+    }
+    return index;
+  }, [data.nodes]);
+  const endpointActors = useMemo(() => {
+    const index = new Map<string, NonNullable<HarnessViewModel['actors']>>();
+    for (const actor of data.actors ?? []) {
+      const rows = index.get(actor.name) ?? [];
+      rows.push(actor);
+      index.set(actor.name, rows);
+    }
+    return index;
+  }, [data.actors]);
+  const requestIndex = useMemo(() => new Map(data.timeline.filter(item => item.kind === 'request').map(item => [item.id, item])), [data.timeline]);
+  const commandIds = useMemo(() => new Set(data.timeline.flatMap(item => item.commandId ? [item.commandId] : [])), [data.timeline]);
   const sendDemo = (text: string) => {
     if (transportPhase !== 'ready' || !text.trim())
-      return; const result = onDemoCommand?.(text); if (!result)
-      return; setDemoLocalFeedback(result.kind === 'blocked' ? result.reason : 'Sent to the demo channel; server result remains separate.'); if (result.kind === 'sent')
+      return;
+    const result = onDemoCommand?.(text);
+    if (!result) return;
+    setDemoLocalFeedback(result.kind === 'blocked' ? result.reason : 'Sent to the demo channel; server result remains separate.');
+    if (result.kind === 'sent')
       demo.submitted(text);
   };
-  const timeline = <>
+  const timeline = useMemo(() => <>
     <div role="table" aria-label="Conversation activity timeline" className="rows">
       <div className="row" role="row">
         <strong role="columnheader">Activity</strong>
@@ -308,55 +335,8 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
     </div>
     {!activity.total && <Empty>No activity is available for this context.</Empty>}
     <Pager page={activity.page} count={activity.pageCount} total={activity.total} onPage={setPage} />
-  </>;
-  const inspected = data.timeline.find(item => item.kind === 'request' && item.id === route.requestId);
-  return <div className="harness">
-    <a className="skip-link" href="#main-content">Skip to content</a>
-    <header className="top">
-      <span className="brand">Harness <span className="hint">/ operator</span>
-      </span>
-      <nav className="tabs" aria-label="Views">
-        {screens.map(screen => <button className="tab" key={screen} aria-current={route.screen === screen ? 'page' : undefined} onClick={() => navigate({ ...route, screen })}>
-          {screenNames[screen]}
-        </button>)}
-      </nav>
-    </header>
-    <div className="selection-context">
-      <strong>Selected context:</strong> <span>
-        {selectedDescription}
-      </span>
-      <button disabled={route.selection.kind === 'none' && !issue} onClick={() => navigate({ ...route, selection: { kind: 'none' } })}>Clear selection</button>
-      <label>
-        <input type="checkbox" checked={route.global} onChange={event => navigate({ ...route, global: event.target.checked })} />Global activity</label>
-      {issue && <p className="error" role="status">
-        {issue}
-      </p>}{resolved.missing && <p className="error" role="status">The selected actor or conversation is unavailable. The exact selection remains preserved; choose a new context explicitly.</p>}{resolved.actor?.kind === 'workflow' && !resolved.conversationId && <p role="status">Workflow actor model history is unavailable.</p>}
-    </div>
-    <main id="main-content" tabIndex={-1}>
-      <div className="toolbar">
-        <h1 ref={heading} tabIndex={-1}>
-          {screenNames[route.screen]}
-        </h1>
-        <span className="hint">Keyboard: g then t / l / i / {embedded ? 'h' : 'c'}
-        </span>
-      </div>
-      {!screens.includes(route.screen) ? <Empty>This view is unavailable in this host mode. Choose a view above.</Empty> : <>
-        {['tree', 'timeline', 'inbox'].includes(route.screen) && <div className="toolbar">
-          <label>Search <input type="search" value={search} onChange={event => { setSearch(event.target.value); setPage(0); setActorPage(0); }} />
-          </label>
-          {route.screen === 'tree' && <button disabled={route.selection.kind === 'none'} onClick={() => {
-            setSearch(''); if (route.selection.kind === 'actor') {
-              const index = (data.actors ?? []).findIndex(actor => sameSelection(route.selection, { kind: 'actor', identity: identityOf(actor) }));
-              setActorPage(Math.max(0, Math.floor(index / 100)));
-            }
-            else if (route.selection.kind === 'conversation') {
-              const selectedId = route.selection.conversationId;
-              const index = orderConversationTree(data.nodes).findIndex(({ node }) => node.id === selectedId);
-              setPage(Math.max(0, Math.floor(index / 100)));
-            }
-          }}>Jump to selected</button>}
-        </div>}
-        {route.screen === 'tree' && <>
+  </>, [activity, now, inspect, link]);
+  const tree = useMemo(() => <>
           <section aria-label="Host actors">
             <h2>Host actors</h2>
             <div role="table" aria-label="Host actor lifecycles">
@@ -396,9 +376,8 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
             {!conversations.total && <Empty>No conversations are available.</Empty>}
             <Pager page={conversations.page} count={conversations.pageCount} total={conversations.total} onPage={setPage} />
           </section>
-        </>}
-        {route.screen === 'timeline' && timeline}
-        {route.screen === 'inbox' && <>
+        </>, [actors, conversations, link, inspect, route.selection]);
+  const inboxScreen = useMemo(() => <>
           <div className="toolbar filters">
             {(['sender', 'recipient'] as const).map(key => <label key={key}>
               {key === 'sender' ? 'Sender' : 'Recipient'}
@@ -435,10 +414,10 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
                 </span>
               </span>
               <div>
-                {[item.sender, item.recipient].filter((endpoint): endpoint is string => Boolean(endpoint)).map(endpoint => {
+                {[...new Set([item.sender, item.recipient].filter((endpoint): endpoint is string => Boolean(endpoint)))].map(endpoint => {
                   return <span key={endpoint}>
-                    {data.nodes.filter(node => node.name === endpoint).map(node => <span key={node.id}>
-                      {link({ kind: 'conversation', conversationId: node.id }, `Open conversation ${node.name} · ${node.id}`)} </span>)}{(data.actors ?? []).filter(actor => actor.name === endpoint).map(actor => <span key={actorIdentityKey(identityOf(actor))}>
+                    {(endpointNodes.get(endpoint) ?? []).map(node => <span key={node.id}>
+                      {link({ kind: 'conversation', conversationId: node.id }, `Open conversation ${node.name} · ${node.id}`)} </span>)}{(endpointActors.get(endpoint) ?? []).map(actor => <span key={actorIdentityKey(identityOf(actor))}>
                         {link({ kind: 'actor', identity: identityOf(actor) }, `Select actor ${actor.name} · run ${actor.run} · incarnation ${actor.incarnation}`)} </span>)}
                     <button onClick={() => navigate({ ...route, messageFilters: { ...route.messageFilters, sender: endpoint } })}>Filter {endpoint}
                     </button>
@@ -449,7 +428,58 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
           </div>
           {!inbox.total && <Empty>No messages match this context and filters.</Empty>}
           <Pager page={inbox.page} count={inbox.pageCount} total={inbox.total} onPage={setPage} />
-        </>}
+        </>, [inbox, endpoints, endpointNodes, endpointActors, link, route, navigate]);
+  const inspected = route.requestId ? requestIndex.get(route.requestId) : undefined;
+  return <div className="harness">
+    <a className="skip-link" href="#main-content">Skip to content</a>
+    <header className="top">
+      <span className="brand">Harness <span className="hint">/ operator</span>
+      </span>
+      <nav className="tabs" aria-label="Views">
+        {screens.map(screen => <button className="tab" key={screen} aria-current={route.screen === screen ? 'page' : undefined} onClick={() => navigate({ ...route, screen })}>
+          {screenNames[screen]}
+        </button>)}
+      </nav>
+    </header>
+    {transportPhase !== 'ready' && <p className="snapshot-status" role="status">Showing last snapshot · {transportPhase}; controls await a fresh snapshot.</p>}
+    <div className="selection-context">
+      <strong>Selected context:</strong> <span>
+        {selectedDescription}
+      </span>
+      <button disabled={route.selection.kind === 'none' && !issue} onClick={() => navigate({ ...route, selection: { kind: 'none' } })}>Clear selection</button>
+      <label>
+        <input type="checkbox" checked={route.global} onChange={event => navigate({ ...route, global: event.target.checked })} />Global activity</label>
+      {issue && <p className="error" role="status">
+        {issue}
+      </p>}{resolved.missing && <p className="error" role="status">The selected actor or conversation is unavailable. The exact selection remains preserved; choose a new context explicitly.</p>}{resolved.actor?.kind === 'workflow' && !resolved.conversationId && <p role="status">Workflow actor model history is unavailable.</p>}
+    </div>
+    <main id="main-content" tabIndex={-1}>
+      <div className="toolbar">
+        <h1 ref={heading} tabIndex={-1}>
+          {screenNames[route.screen]}
+        </h1>
+        <span className="hint">Keyboard: g then t / l / i / {embedded ? 'h' : 'c'}
+        </span>
+      </div>
+      {!screens.includes(route.screen) ? <Empty>This view is unavailable in this host mode. Choose a view above.</Empty> : <>
+        {['tree', 'timeline', 'inbox'].includes(route.screen) && <div className="toolbar">
+          <label>Search <input type="search" value={search} onChange={event => { setSearch(event.target.value); setPage(0); setActorPage(0); }} />
+          </label>
+          {route.screen === 'tree' && <button disabled={route.selection.kind === 'none'} onClick={() => {
+            setSearch(''); if (route.selection.kind === 'actor') {
+              const index = (data.actors ?? []).findIndex(actor => sameSelection(route.selection, { kind: 'actor', identity: identityOf(actor) }));
+              setActorPage(Math.max(0, Math.floor(index / 100)));
+            }
+            else if (route.selection.kind === 'conversation') {
+              const selectedId = route.selection.conversationId;
+              const index = orderedNodes.findIndex(({ node }) => node.id === selectedId);
+              setPage(Math.max(0, Math.floor(index / 100)));
+            }
+          }}>Jump to selected</button>}
+        </div>}
+        {route.screen === 'tree' && tree}
+        {route.screen === 'timeline' && timeline}
+        {route.screen === 'inbox' && inboxScreen}
         {route.screen === 'host' && <>
           <HostComposer data={data} route={route} navigate={navigate} unavailable={Boolean(issue || resolved.missing)} ready={transportPhase === 'ready'} onHostCommand={onHostCommand} />
           <RetainedCommands commands={pendingCommands} run={data.hostRun} ready={transportPhase === 'ready'} onRetry={onRetry} />
@@ -485,7 +515,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
               {demo.lastSubmitted}
             </pre>
             <button onClick={demo.restore}>Restore last demo command</button>
-          </div>}{acceptedCommandIds.filter(id => !data.timeline.some(item => item.commandId === id)).map(id => <p role="status" key={id}>Server accepted command {id}; this acknowledgment is not a terminal outcome.</p>)}
+          </div>}{acceptedCommandIds.filter(id => !commandIds.has(id)).map(id => <p role="status" key={id}>Server accepted command {id}; this acknowledgment is not a terminal outcome.</p>)}
           <h2>Authoritative activity</h2>
           {timeline}
         </section>}

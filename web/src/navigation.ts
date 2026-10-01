@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { RouteState, Screen } from './client-contract';
 const keys = ['view', 'run', 'actor', 'incarnation', 'conversation', 'global', 'request', 'sender', 'recipient', 'type'] as const;
 const screens: Screen[] = ['tree', 'timeline', 'inbox', 'host', 'command'];
@@ -41,9 +41,9 @@ export function routeUrl(route: RouteState, base: URL): URL {
 export function useRoute() {
   const [parsed, setParsed] = useState(() => parseRoute(new URL(window.location.href)));
   useEffect(() => { const pop = () => setParsed(parseRoute(new URL(window.location.href))); window.addEventListener('popstate', pop); return () => window.removeEventListener('popstate', pop); }, []);
-  const navigate = (route: RouteState, replace = false) => {
+  const navigate = useCallback((route: RouteState, replace = false) => {
     window.history[replace ? 'replaceState' : 'pushState'](null, '', routeUrl(route, new URL(window.location.href)));
     setParsed({ route });
-  };
+  }, []);
   return { ...parsed, navigate };
 }
