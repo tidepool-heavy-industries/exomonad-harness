@@ -230,6 +230,93 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_projection_is_claim_local_with_competing_settlement() {
+        for interrupt_original in [true, false] {
+            let store = Store::memory().unwrap();
+            let operation = operation(&store, "original");
+            let child = RequestId("child-claim".into());
+            store
+                .create_request(&child, Some(&operation.request), "/root/child")
+                .unwrap();
+            store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) SELECT origin,origin_request_id,call_id,?1,'pending' FROM claims WHERE request_id=?2", params![child.0,operation.request.0]).unwrap();
+            let interrupted = if interrupt_original {
+                &operation.request
+            } else {
+                &child
+            };
+            let settled = if interrupt_original {
+                &child
+            } else {
+                &operation.request
+            };
+            store
+                .interrupt_operation_claim(&operation, interrupted)
+                .unwrap();
+            store
+                .write_job_output(
+                    &operation,
+                    ToolKind::Function,
+                    &JobOutput::Completed(Ok(json!({"answer":42}))),
+                )
+                .unwrap();
+            assert_eq!(
+                store
+                    .replay_tool_output_claim(&operation, interrupted)
+                    .unwrap()
+                    .unwrap()
+                    .terminal,
+                TerminalOutcome::Interrupted
+            );
+            assert_eq!(
+                store
+                    .replay_tool_output_claim(&operation, settled)
+                    .unwrap()
+                    .unwrap()
+                    .terminal,
+                TerminalOutcome::Success
+            );
+            assert_eq!(
+                store
+                    .replay_tool_output_operation(&operation)
+                    .unwrap()
+                    .unwrap()
+                    .terminal,
+                if interrupt_original {
+                    TerminalOutcome::Interrupted
+                } else {
+                    TerminalOutcome::Success
+                }
+            );
+            assert!(
+                store
+                    .replay_tool_output_claim(&operation, &RequestId("absent".into()))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn pending_claim_cannot_replay_a_siblings_settlement() {
+        let store = Store::memory().unwrap();
+        let operation = operation(&store, "original");
+        store
+            .write_job_output(&operation, ToolKind::Function, &JobOutput::Cancelled)
+            .unwrap();
+        let child = RequestId("late-pending-child".into());
+        store
+            .create_request(&child, Some(&operation.request), "/root/child")
+            .unwrap();
+        store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) SELECT origin,origin_request_id,call_id,?1,'pending' FROM claims WHERE request_id=?2", params![child.0,operation.request.0]).unwrap();
+        assert!(
+            store
+                .replay_tool_output_claim(&operation, &child)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn schema_seven_unmarked_settlement_is_refused_without_changing_bytes() {
         let path = path();
         let (operation, before, hash) = {

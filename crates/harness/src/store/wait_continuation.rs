@@ -53,7 +53,7 @@ impl Store {
         next: Option<&RecordedReplayTurn>,
     ) -> Result<Option<RecordedWaitContinuation>> {
         let invocation = self.invocation_item(&original.request, &original.call)?;
-        if invocation.as_ref().and_then(|item| item.0["name"].as_str()) != Some("wait_agent")
+        if invocation.as_ref().map(|call| call.name.as_str()) != Some("wait_agent")
             || local.call != original.call
         {
             return Err(StoreError::InvalidWaitContinuation {
