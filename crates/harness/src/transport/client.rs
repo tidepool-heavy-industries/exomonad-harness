@@ -38,6 +38,7 @@ struct RequestBody<'a> {
 #[derive(Serialize)]
 struct Reasoning {
     effort: crate::model::Effort,
+    summary: &'static str,
 }
 
 #[derive(Serialize)]
@@ -94,6 +95,7 @@ fn normalized_request(request: &ResponsesRequest) -> Result<RequestBody<'_>, Tra
         parallel_tool_calls: true,
         reasoning: Reasoning {
             effort: request.pinned_effort,
+            summary: "auto",
         },
         stream: true,
         store: false,
@@ -238,6 +240,7 @@ mod tests {
         assert_eq!(body["stream"], true);
         assert_eq!(body["store"], false);
         assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(body["reasoning"]["summary"], "auto");
         assert_eq!(body["prompt_cache_key"], "shared");
         assert_eq!(body["instructions"], "fixed");
         assert_eq!(body["input"][0]["content"], "hello");
