@@ -36,8 +36,11 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
   const retained = context ? retainedChats.get(context) : undefined
   const conversationId = !issue && identity && (resolved.actor?.kind === 'model' || resolved.missing)
     ? resolved.conversationId ?? retained?.conversationId : undefined
-  // A retained conversation ID cannot authorize adopting a replacement actor's head.
-  const requests = resolved.actor?.kind === 'model' && resolved.conversationId
+  const ambiguousConversation = conversationId !== undefined && new Set((data.actors ?? [])
+    .filter(actor => actor.kind === 'model' && actor.modelConversation === conversationId)
+    .map(actor => actorIdentityKey(identityOf(actor)))).size > 1
+  // Conversation association alone cannot establish head ownership across incarnations.
+  const requests = !ambiguousConversation && resolved.actor?.kind === 'model' && resolved.conversationId
     ? data.timeline.filter(item => item.kind === 'request' && item.nodeId === resolved.conversationId) : []
   const parents = new Set(requests.flatMap(item => item.parentId ? [item.parentId] : []))
   const currentHead = requests.filter(item => !parents.has(item.id)).at(-1)
@@ -87,11 +90,12 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
           {resolved.actor && !['running', 'waiting'].includes(resolved.actor.lifecycle) &&
             <p role="status">This actor is {resolved.actor.lifecycle}. Its Chat is read-only; retained history remains available.</p>}
           {resolved.missing && <p role="status">This exact actor is unavailable. Retained history remains read-only; choose a different worker explicitly.</p>}
+          {ambiguousConversation && <p role="status">The host associates this conversation with multiple exact actors. Its current history head is unavailable; only previously retained exact history can be shown.</p>}
           {conversationId && head ? <ChatHistory key={JSON.stringify([context, conversationId])}
             cacheKey={JSON.stringify([context, conversationId])} requestId={head.id}
             requests={new Map(data.timeline.filter(item => item.kind === 'request').map(item => [item.id, item]))}
             refreshKey={refreshKey} ready={transportPhase === 'ready'} onAuthExpired={onAuthExpired} /> :
-            <p>{resolved.missing ? 'The host has no retained conversation association for this exact actor.' : 'No retained model exchange is available yet.'}</p>}
+            <p>{ambiguousConversation ? 'No exact history head is available for this actor.' : resolved.missing ? 'The host has no retained conversation association for this exact actor.' : 'No retained model exchange is available yet.'}</p>}
         </>}
       {children}
     </section>

@@ -85,6 +85,34 @@ describe('exact worker Chat', () => {
     expect(screen.queryByText('Messages for replacement-head')).toBeNull()
     expect(vi.mocked(readHistoryPage).mock.calls.every(call => call[0] === 'head')).toBe(true)
   })
+  it('keeps the known retired head when both old and replacement identities remain projected on the same conversation', async () => {
+    const mounted = render(chat())
+    await screen.findByText('Messages for head')
+    const replacementIdentity = { ...identity, incarnation: 'two' }
+    const replacement = { ...actor, id: actorIdentityKey(replacementIdentity), incarnation: 'two' }
+    const shared = { ...data, actors: [{ ...actor, lifecycle: 'retired' }, replacement],
+      timeline: [...data.timeline, { ...data.timeline[0]!, id: 'replacement-head', parentId: 'head' }] }
+    mounted.rerender(chat(shared))
+    await waitFor(() => expect(readHistoryPage).toHaveBeenCalledTimes(2))
+    expect(screen.getByText('Messages for head')).toBeVisible()
+    expect(screen.getByText(/multiple exact actors/)).toBeVisible()
+    expect(vi.mocked(readHistoryPage).mock.calls.every(call => call[0] === 'head')).toBe(true)
+    mounted.rerender(chat(shared, { ...route, selection: { kind: 'actor', identity: replacementIdentity } }))
+    expect(screen.getByText('No exact history head is available for this actor.')).toBeVisible()
+    expect(screen.queryByText('Messages for head')).toBeNull()
+    expect(screen.queryByText('Messages for replacement-head')).toBeNull()
+    expect(readHistoryPage).toHaveBeenCalledTimes(2)
+  })
+  it.each(['retired', 'running'])('does not guess a fresh %s actor head when exact conversation associations are ambiguous', lifecycle => {
+    const replacementIdentity = { ...identity, incarnation: 'two' }
+    const replacement = { ...actor, id: actorIdentityKey(replacementIdentity), incarnation: 'two', lifecycle }
+    const shared = { ...data, actors: [{ ...actor, lifecycle: 'retired' }, replacement],
+      timeline: [...data.timeline, { ...data.timeline[0]!, id: 'replacement-head', parentId: 'head' }] }
+    render(chat(shared, lifecycle === 'retired' ? route : { ...route, selection: { kind: 'actor', identity: replacementIdentity } }))
+    expect(screen.getByText(/multiple exact actors/)).toBeVisible()
+    expect(screen.getByText('No exact history head is available for this actor.')).toBeVisible()
+    expect(readHistoryPage).not.toHaveBeenCalled()
+  })
   it('loads only the selected conversation and uses ordinary exact worker anchors', async () => {
     const childIdentity = { ...identity, actor: '/root/child', incarnation: 'child' }
     const child = { ...actor, id: actorIdentityKey(childIdentity), name: childIdentity.actor, incarnation: childIdentity.incarnation, modelConversation: 'child' }
