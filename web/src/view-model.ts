@@ -36,6 +36,7 @@ export type HarnessViewModel = {
     /** Composite request/job identity for rendering; id retains the wire ID. */
     key?: string;
     nodeId: string;
+    parentId?: string | null;
     label: string;
     kind: "request" | "job" | "wait";
     state: string;
