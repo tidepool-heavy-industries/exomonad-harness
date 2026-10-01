@@ -41,7 +41,6 @@ type ReplayObserver = dyn Fn(&ResponsesRequest, &mut ResponsesTurn, usize) + Sen
 pub struct ReplayProvider {
     store: Arc<Store>,
     turns: Arc<[RecordedReplayTurn]>,
-    cursor: Mutex<usize>,
     progress: Arc<ReplayProgress>,
     tool_schemas: crate::transport::ToolManifest,
     calls: HashMap<OperationId, RecordedCall>,
@@ -55,6 +54,7 @@ struct RecordedCall {
 }
 
 struct ReplayProgress {
+    cursor: Mutex<usize>,
     local_requests: Mutex<HashMap<RequestId, LocalReplayRequest>>,
     changed: Notify,
 }
@@ -156,8 +156,8 @@ impl ReplayProvider {
         Ok(Self {
             store,
             turns: turns.into(),
-            cursor: Mutex::new(0),
             progress: Arc::new(ReplayProgress {
+                cursor: Mutex::new(0),
                 local_requests: Mutex::new(HashMap::new()),
                 changed: Notify::new(),
             }),
@@ -394,7 +394,7 @@ impl ReplayProvider {
             tokio::pin!(changed);
             changed.as_mut().enable();
             let ready_turn = cut.map(|(index, _)| index).unwrap_or(self.turns.len());
-            let ready = *lock(&self.cursor) >= ready_turn;
+            let ready = *lock(&self.progress.cursor) >= ready_turn;
             let preceding_waits = if name == "wait_agent" {
                 vec![]
             } else {
@@ -496,7 +496,7 @@ impl ReplayProvider {
         local: Option<&RequestId>,
         request: ResponsesRequest,
     ) -> Result<ResponsesTurn, TransportError> {
-        let mut cursor = lock(&self.cursor);
+        let mut cursor = lock(&self.progress.cursor);
         let mut mappings = lock(&self.progress.local_requests);
         if let Some(local) = local {
             if mappings.contains_key(local) {
@@ -532,7 +532,7 @@ impl ReplayProvider {
 
     /// Number of recorded model turns not yet consumed.
     pub fn turns_remaining(&self) -> usize {
-        self.turns.len() - *lock(&self.cursor)
+        self.turns.len() - *lock(&self.progress.cursor)
     }
 }
 

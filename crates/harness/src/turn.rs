@@ -387,7 +387,7 @@ impl JobScheduler {
             match retained {
                 Ok(Some(retained)) => {
                     let output = match retained.into_parts(&task_operation) {
-                        Ok((output, None, barrier)) if barrier.is_empty() => output,
+                        Ok((output, None, barrier, None)) if barrier.is_empty() => output,
                         Ok(_) => JobOutput::Completed(Err(
                             "retained builtin continuation requires Engine dispatch".into(),
                         )),
