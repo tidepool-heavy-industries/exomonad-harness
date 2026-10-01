@@ -11,23 +11,27 @@ export interface ResolvedSelection {
   actor?: ActorRow
   conversationId?: string
   endpoint?: string
+  endpoints: readonly string[]
   missing: boolean
 }
 
 export function resolveSelection(data: HarnessViewModel, selection: Selection): ResolvedSelection {
-  if (selection.kind === 'none') return { missing: false }
+  if (selection.kind === 'none') return { missing: false, endpoints: [] }
   if (selection.kind === 'actor') {
     const id = actorIdentityKey(selection.identity)
     const actor = data.actors?.find((row) => row.id === id && row.run === selection.identity.run
       && row.name === selection.identity.actor && row.incarnation === selection.identity.incarnation)
-    if (!actor) return { missing: true }
+    if (!actor) return { missing: true, endpoints: [] }
     const conversationId = actor.modelConversation
+    const conversationEndpoint = conversationId ? data.nodes.find((row) => row.id === conversationId)?.name : undefined
+    const endpoints = [...new Set([actor.name, ...(conversationEndpoint === undefined ? [] : [conversationEndpoint])])]
     return { actor, conversationId,
-      endpoint: conversationId ? data.nodes.find((row) => row.id === conversationId)?.name : undefined,
+      endpoint: conversationEndpoint ?? actor.name, endpoints,
       missing: false }
   }
   const node = data.nodes.find((row) => row.id === selection.conversationId)
-  return node ? { conversationId: node.id, endpoint: node.name, missing: false } : { missing: true }
+  return node ? { conversationId: node.id, endpoint: node.name, endpoints: [node.name], missing: false }
+    : { missing: true, endpoints: [] }
 }
 
 const messageTypes: readonly Envelope['type'][] = ['NEW_TASK', 'MESSAGE', 'FINAL_ANSWER', 'PROGRESS']
@@ -54,7 +58,7 @@ export function createViewSelector(): typeof selectViewModel {
   return (data, selection, global, filters) => {
     const resolved = resolveSelection(data, selection)
     const contextual = !global && selection.kind !== 'none'
-    const context = JSON.stringify([contextual, resolved.conversationId, resolved.endpoint,
+    const context = JSON.stringify([contextual, resolved.conversationId, resolved.endpoints,
       resolved.missing, filters.sender, filters.recipient, filters.type])
     const sameContext = previousContext === context
     let nodes = sameContext && previous?.nodes === data.nodes && result ? result.nodes
@@ -64,8 +68,7 @@ export function createViewSelector(): typeof selectViewModel {
     const hasFilters = filters.sender !== undefined || filters.recipient !== undefined || filters.type !== undefined
     let inbox = sameContext && previous?.inbox === data.inbox && result ? result.inbox
       : contextual || hasFilters ? data.inbox.filter((row) =>
-        (!contextual || (resolved.endpoint !== undefined
-          && (row.sender === resolved.endpoint || row.recipient === resolved.endpoint)))
+        (!contextual || resolved.endpoints.some((endpoint) => row.sender === endpoint || row.recipient === endpoint))
         && (filters.sender === undefined || row.sender === filters.sender)
         && (filters.recipient === undefined || row.recipient === filters.recipient)
         && (filters.type === undefined || messageType(row) === filters.type)) : data.inbox
@@ -87,6 +90,9 @@ type PathIndex = { children: Map<string, PathIndex>; id?: string | null }
 
 /** Index paths once. Ambiguous reused paths never select an arbitrary identity. */
 export function resolveParentIds(nodes: readonly ParentNode[]): Map<string, string | null | undefined> {
+  if (nodes.every((node) => Object.hasOwn(node, 'parentId'))) {
+    return new Map(nodes.map((node) => [node.id, node.parentId]))
+  }
   const root: PathIndex = { children: new Map() }
   for (const node of nodes) {
     let cursor = root
@@ -101,7 +107,7 @@ export function resolveParentIds(nodes: readonly ParentNode[]): Map<string, stri
   for (const node of nodes) {
     if (Object.hasOwn(node, 'parentId')) { parents.set(node.id, node.parentId); continue }
     let cursor = root
-    let parent: string | undefined
+    let parent: string | undefined = node.name !== '/' && node.name.startsWith('/') && root.id != null ? root.id : undefined
     const parts = node.name.split('/').filter(Boolean)
     for (let i = 0; i < parts.length - 1; i++) {
       cursor = cursor.children.get(parts[i]!)!
@@ -154,6 +160,7 @@ export function orderConversationTree(nodes: readonly NodeRow[]): TreeRow[] {
     }
   }
   for (const root of roots) append(root)
+  for (const node of nodes) if (cyclic.has(node.id) && !visited.has(node.id)) append(node)
   for (const node of nodes) if (!visited.has(node.id)) append(node)
   return output
 }
@@ -169,20 +176,28 @@ export function pageRows<T>(rows: readonly T[], page: number, pageSize: number):
 
 export function sortActivity(rows: readonly ActivityRow[]): ActivityRow[] {
   return [...rows].sort((a, b) => {
-    const left = a.startedAtMs, right = b.startedAtMs
+    const left = a.startedAtMs !== undefined && Number.isFinite(a.startedAtMs) ? a.startedAtMs : undefined
+    const right = b.startedAtMs !== undefined && Number.isFinite(b.startedAtMs) ? b.startedAtMs : undefined
     if (left === undefined) return right === undefined ? 0 : 1
     if (right === undefined) return -1
     return left - right
   })
 }
 
-export function formatActivityTime(row: Pick<ActivityRow, 'startedAtMs' | 'endedAtMs'>,
+type ActivityTiming = Pick<ActivityRow, 'startedAtMs' | 'endedAtMs'> & { state?: string }
+
+export function needsActivityClock(row: ActivityTiming): boolean {
+  return row.startedAtMs !== undefined && Number.isFinite(row.startedAtMs) && row.endedAtMs === undefined
+    && row.state !== undefined && ['running', 'active', 'waiting', 'pending'].includes(row.state)
+}
+
+export function formatActivityTime(row: ActivityTiming,
   nowMs?: number): { start: string; duration: string } {
   const start = row.startedAtMs
   if (start === undefined || !Number.isFinite(start)) return { start: 'Unavailable', duration: 'Unavailable' }
   const date = new Date(start)
   const rendered = Number.isFinite(date.getTime()) ? date.toISOString() : 'Unavailable'
-  const end = row.endedAtMs ?? nowMs
+  const end = row.endedAtMs ?? (needsActivityClock(row) ? nowMs : undefined)
   if (end === undefined || !Number.isFinite(end) || end < start) return { start: rendered, duration: 'Unavailable' }
   const seconds = (end - start) / 1000
   return { start: rendered, duration: `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)}s` }

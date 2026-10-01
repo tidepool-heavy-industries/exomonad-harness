@@ -70,7 +70,7 @@ export function createViewProjector(): (state: NormalizedState) => HarnessViewMo
       for (const job of state.jobs.values()) {
         // Active progress/version changes do not refresh a retained history page.
         if (!job.requestId || (job.state === 'running' && job.delivered !== true)) continue
-        const evidence = [job.id, job.state, job.delivered ?? null, job.version ?? null, job.endedAtMs ?? null]
+        const evidence = [job.id, job.state, job.delivered === true]
         const group = grouped.get(job.requestId)
         if (group) group.push(evidence)
         else grouped.set(job.requestId, [evidence])
