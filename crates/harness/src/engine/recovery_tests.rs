@@ -222,6 +222,29 @@ async fn engine_recovery_zero_row_interrupt_uses_durable_settlement_output() {
         Some("{\"error\":\"job interrupted\"}"),
         "durable settlement output must not be replaced with Interrupted"
     );
+    // The same stale pending observation must not bypass the migration refusal
+    // when the winning settlement has no authoritative terminal marker.
+    store
+        .lock()
+        .execute(
+            "UPDATE claims SET terminal_json=NULL WHERE state='settled'",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        engine.recover_missing_job(&stale_pending_claim).await,
+        Err(EngineError::Store(StoreError::UnsupportedReplayOutcome { operation })) if operation == stale_pending_claim.operation
+    ));
+    assert_eq!(
+        store
+            .replay_output_operation(&stale_pending_claim.operation)
+            .unwrap(),
+        Some(actual_output)
+    );
+    assert_eq!(
+        store.claims(&call).unwrap()[0].state,
+        crate::store::ClaimState::Settled
+    );
 }
 
 #[tokio::test]

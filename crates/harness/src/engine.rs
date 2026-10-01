@@ -567,16 +567,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         &crate::turn::JobOutput::Interrupted,
                     ),
                     crate::store::ClaimState::Settled => {
-                        let hash = claim.output.as_ref().ok_or_else(|| {
-                            EngineError::MissingInheritedOutput(claim.call_id.0.clone())
-                        })?;
-                        let store = self.store.clone();
-                        let hash = hash.clone();
-                        blocking(move || store.get_item(&hash))
-                            .await?
-                            .ok_or_else(|| {
-                                EngineError::MissingInheritedOutput(claim.call_id.0.clone())
-                            })?
+                        self.read_settled_output(&claim.operation).await?
                     }
                 };
                 if already_output[0] != &expected {
@@ -588,15 +579,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 continue;
             }
             if claim.state == crate::store::ClaimState::Settled {
-                let Some(hash) = claim.output else {
-                    return Err(EngineError::MissingInheritedOutput(claim.call_id.0.clone()));
-                };
-                let store = self.store.clone();
-                let item = blocking(move || store.get_item(&hash)).await?;
-                let Some(item) = item else {
-                    return Err(EngineError::MissingInheritedOutput(claim.call_id.0));
-                };
-                validate_tool_output(&claim.call_id, tool_kind, &item)?;
+                let item = self.read_settled_output(&claim.operation).await?;
                 self.acknowledge_output(&claim.operation).await?;
                 replay_items.push(item);
                 continue;
@@ -1476,15 +1459,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         .await?;
         match current {
             Some(current) if current.state == crate::store::ClaimState::Settled => {
-                let Some(hash) = current.output else {
-                    return Err(EngineError::MissingInheritedOutput(claim.call_id.0.clone()));
-                };
-                let store = self.store.clone();
-                let item = blocking(move || store.get_item(&hash))
-                    .await?
-                    .ok_or_else(|| EngineError::MissingInheritedOutput(claim.call_id.0.clone()))?;
-                validate_tool_output(&claim.call_id, tool_kind, &item)?;
-                Ok(item)
+                self.read_settled_output(&current.operation).await
             }
             Some(current) if current.state == crate::store::ClaimState::Interrupted => {
                 Ok(Item::tool_output(
@@ -1495,6 +1470,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
             _ => Err(EngineError::ClaimRecoveryConflict(claim.call_id.0.clone())),
         }
+    }
+
+    async fn read_settled_output(&self, operation: &OperationId) -> Result<Item, EngineError> {
+        let store = self.store.clone();
+        let operation = operation.clone();
+        let call_id = operation.call.0.clone();
+        blocking(move || store.replay_tool_output_operation(&operation))
+            .await?
+            .map(|recorded| recorded.item)
+            .ok_or(EngineError::MissingInheritedOutput(call_id))
     }
 
     fn tools(&self, finalize_schema: Option<&serde_json::Value>) -> crate::transport::ToolManifest {
@@ -2467,6 +2452,63 @@ mod tests {
         (store, source_head, snapshot, call_id)
     }
 
+    #[tokio::test]
+    async fn inherited_settled_legacy_outcome_refuses_before_provider_request() {
+        for already_in_history in [false, true] {
+            let (store, source, snapshot, call) = inherited_claim_fixture().await;
+            let operation = store.operation_for_request(&source, &call).unwrap();
+            let output = Item::tool_output(
+                &call,
+                ToolKind::Function,
+                &crate::turn::JobOutput::Completed(Ok(json!({"result":"legacy"}))),
+            );
+            store
+                .write_output(&operation, &output, crate::store::TerminalOutcome::Success)
+                .unwrap();
+            if already_in_history {
+                store.append_items(&snapshot, &[output.clone()]).unwrap();
+            }
+            store
+                .lock()
+                .execute(
+                    "UPDATE claims SET terminal_json=NULL WHERE state='settled'",
+                    [],
+                )
+                .unwrap();
+            let before = store.items(&snapshot).unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+                Replay {
+                    requests: requests.clone(),
+                    turns: Mutex::new(Default::default()),
+                },
+                store.clone(),
+                Arc::new(JobScheduler::new(1).unwrap()),
+                Arc::new(Echo),
+                EngineConfig {
+                    instructions: "instruction".into(),
+                    tools: vec![],
+                    model: "test".into(),
+                    effort: Effort::Low,
+                    session_id: "legacy-child".into(),
+                    agent: AgentPath("/root/child".into()),
+                },
+            );
+            assert_ne!(operation.origin, engine.origin);
+            let (_cancel, cancellation) = watch::channel(false);
+            assert!(matches!(
+                engine.run(Some(snapshot.clone()), vec![], cancellation, empty_mailbox()).await,
+                Err(EngineError::Store(StoreError::UnsupportedReplayOutcome { operation: refused })) if refused == operation
+            ));
+            assert!(requests.lock().unwrap().is_empty());
+            assert_eq!(store.items(&snapshot).unwrap(), before);
+            assert_eq!(
+                store.replay_output_operation(&operation).unwrap(),
+                Some(output)
+            );
+        }
+    }
+
     struct Echo;
     #[async_trait]
     impl Provider for Echo {
@@ -2786,6 +2828,9 @@ mod tests {
                     )
                     .await,
                 Err(EngineError::ClaimRecoveryConflict(_))
+                    | Err(EngineError::Store(
+                        StoreError::ConflictingReplayOutcome { .. }
+                    ))
             ));
         }
         assert!(
@@ -2825,7 +2870,9 @@ mod tests {
                     &origin,
                 )
                 .await,
-            Err(EngineError::ClaimRecoveryConflict(_))
+            Err(EngineError::Store(
+                StoreError::ConflictingReplayOutcome { .. }
+            ))
         ));
         engine
             .retain_settled_output(
