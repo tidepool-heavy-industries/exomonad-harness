@@ -167,19 +167,21 @@ impl Store {
     }
 
     /// Observe the logical agent head only under its exact current host binding.
-    /// Binding and head share the connection lock, preventing successor races.
+    /// One statement reads the binding and head from the same SQLite snapshot,
+    /// including when another Store connection commits a successor concurrently.
     pub fn embedded_agent_head(&self, identity: &HostIdentity) -> Result<Option<RequestId>> {
-        let connection = self.lock();
-        if !matches_binding(&connection, identity)? {
-            return Err(StoreError::InvalidEmbeddedBinding);
-        }
-        Ok(connection
+        let head = self
+            .lock()
             .query_row(
-                "SELECT head_request FROM agents WHERE path=?1",
-                [&identity.actor.0],
+                "SELECT a.head_request FROM embedded_bindings b \
+             JOIN agents a ON a.path=b.agent_path \
+             WHERE b.agent_path=?1 AND b.run_id=?2 AND b.incarnation=?3",
+                params![identity.actor.0, identity.run, identity.incarnation],
                 |row| row.get::<_, Option<String>>(0),
-            )?
-            .map(RequestId))
+            )
+            .optional()?
+            .ok_or(StoreError::InvalidEmbeddedBinding)?;
+        Ok(head.map(RequestId))
     }
 
     pub(crate) fn bind_embedded_actor(
@@ -515,6 +517,83 @@ mod tests {
             store.embedded_agent_head(&foreign),
             Err(StoreError::InvalidEmbeddedBinding)
         ));
+    }
+
+    #[test]
+    fn exact_head_read_is_atomic_across_separately_opened_store_connections() {
+        let root = std::env::temp_dir().join(format!(
+            "harness-head-cross-connection-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("store.sqlite");
+        let reader = Store::open(&path).unwrap();
+        let identity = root_identity();
+        reader.bind_embedded_actor(&identity, None).unwrap();
+        assert_eq!(reader.embedded_agent_head(&identity).unwrap(), None);
+        let predecessor_head = RequestId("predecessor-head".into());
+        let successor_head = RequestId("successor-head".into());
+        for head in [&predecessor_head, &successor_head] {
+            reader
+                .create_request(head, None, &identity.actor.0)
+                .unwrap();
+        }
+        assert!(
+            reader
+                .advance_agent_head(&identity.actor, None, Some(&predecessor_head))
+                .unwrap()
+        );
+        let writer = Store::open(&path).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let writer_barrier = barrier.clone();
+        let writing = std::thread::spawn(move || {
+            writer_barrier.wait();
+            for index in 0..4000 {
+                // Each commit exposes one internally consistent binding/head snapshot.
+                let (incarnation, head) = if index % 2 == 0 {
+                    ("1", "predecessor-head")
+                } else {
+                    ("2", "successor-head")
+                };
+                let mut connection = writer.lock();
+                let transaction = connection.transaction().unwrap();
+                transaction
+                    .execute(
+                        "UPDATE embedded_bindings SET incarnation=?1 WHERE agent_path='/root'",
+                        [incarnation],
+                    )
+                    .unwrap();
+                transaction
+                    .execute(
+                        "UPDATE agents SET head_request=?1 WHERE path='/root'",
+                        [head],
+                    )
+                    .unwrap();
+                transaction.commit().unwrap();
+                std::thread::yield_now();
+            }
+        });
+        barrier.wait();
+        let mut incoherent = None;
+        for _ in 0..4000 {
+            match reader.embedded_agent_head(&identity) {
+                Ok(Some(head)) if head == predecessor_head => {}
+                Err(StoreError::InvalidEmbeddedBinding) => {}
+                other => incoherent = Some(format!("{other:?}")),
+            }
+            std::thread::yield_now();
+        }
+        writing.join().unwrap();
+        assert!(matches!(
+            reader.embedded_agent_head(&identity),
+            Err(StoreError::InvalidEmbeddedBinding)
+        ));
+        drop(reader);
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            incoherent.is_none(),
+            "exact predecessor read observed another snapshot: {incoherent:?}"
+        );
     }
 
     #[test]
