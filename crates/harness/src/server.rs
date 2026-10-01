@@ -972,7 +972,6 @@ async fn websocket_session(
                 }
             }
             received = receiver.recv() => {
-                if authenticate_request(&headers, peer, &state.auth).await.is_err() { break; }
                 match received {
                     Ok(event) if event.sequence > last_sent => {
                         let frame = WsServerFrame::Event {
@@ -988,6 +987,7 @@ async fn websocket_session(
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if authenticate_request(&headers, peer, &state.auth).await.is_err() { break; }
                         match send_snapshot(&mut socket, &state).await {
                             Ok(seq) => last_sent = seq,
                             Err(_) => break,
@@ -1288,7 +1288,6 @@ async fn event_stream(
                         if authenticate_request(&headers, peer, &auth).await.is_err() { return None; }
                     }
                     received = receiver.recv() => {
-                        if authenticate_request(&headers, peer, &auth).await.is_err() { return None; }
                         match received {
                             Ok(event) => {
                                 let data = serde_json::to_string(&event).expect("ServerEvent serializes");
@@ -2416,6 +2415,54 @@ mod tests {
         })
         .await
         .expect("idle streams revoked within their 30 second interval");
+        server_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_peer_auth_revokes_busy_sse_without_verifying_every_event() {
+        use futures_util::StreamExt;
+        let auth = Arc::new(TestPeerAuth::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (app, control, _) = peer_server(auth.clone(), format!("http://{address}"));
+        let server_task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap()
+        });
+        let response = reqwest::get(format!("http://{address}/api/events"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(auth.peers.lock().unwrap().len(), 1);
+        let mut events = response.bytes_stream();
+        auth.outcome.store(1, std::sync::atomic::Ordering::SeqCst);
+        let publisher = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(10));
+            loop {
+                interval.tick().await;
+                control.publish("token", json!({"text":"live output"}));
+            }
+        });
+        let mut chunks = 0;
+        tokio::time::timeout(Duration::from_secs(35), async {
+            while let Some(chunk) = events.next().await {
+                chunk.unwrap();
+                chunks += 1;
+            }
+        })
+        .await
+        .expect("periodic peer revalidation must run while events remain ready");
+        assert!(chunks > 0);
+        assert_eq!(
+            auth.peers.lock().unwrap().len(),
+            2,
+            "initial and periodic checks only"
+        );
+        publisher.abort();
         server_task.abort();
     }
 
