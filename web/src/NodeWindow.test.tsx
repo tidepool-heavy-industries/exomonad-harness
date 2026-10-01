@@ -1,43 +1,201 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import App from './App'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import NodeWindow from './NodeWindow'
+
+const hash = 'a'.repeat(64)
+const page = (requestId = 'request-1', offset = 0, count = 1, nextOffset: number | null = null, text = 'text') => ({
+  requestId, parentId: 'parent-1', branch: '/root',
+  items: Array.from({ length: count }, (_, index) => ({ position: offset + index, hash, byteLen: 91,
+    item: { type: 'message', role: 'assistant', content: `${text} ${offset + index}` } })),
+  nextOffset, oversizedItem: null,
+})
+const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status })
+function deferred() {
+  let resolve!: (response: Response) => void
+  let reject!: (error: Error) => void
+  const promise = new Promise<Response>((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
+const list = () => screen.getByRole('list', { name: 'Retained request items' })
+const idle = async () => waitFor(() => expect(screen.getByRole('button', { name: 'Refresh history' })).toBeEnabled())
 
 afterEach(() => vi.unstubAllGlobals())
 
 describe('retained request inspection', () => {
-  it('opens a protected page, shows exact Items, and requires an explicit oversized skip', async () => {
-    const pages = [
-      { requestId: 'request-1', parentId: 'parent-1', branch: '/root',
-        items: [{ position: 0, hash: 'hash-0', byteLen: 91,
-          item: { type: 'message', role: 'assistant', content: 'model text' } }],
-        nextOffset: 1,
-        oversizedItem: { position: 1, hash: 'hash-large', byteLen: 270000, skipOffset: 2 } },
-      { requestId: 'request-1', parentId: 'parent-1', branch: '/root',
-        items: [{ position: 2, hash: 'hash-2', byteLen: 101,
-          item: { type: 'custom_tool_call_output', call_id: 'raw-call', output: 'retained result' } }],
-        nextOffset: null, oversizedItem: null },
-    ]
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => pages[0] })
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => pages[1] })
+  it('replaces each 50-item page, returns through the previous-offset stack, and rereads the same offset', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(response(page('request-1', 0, 50, 50)))
+      .mockResolvedValueOnce(response(page('request-1', 50, 50, 100)))
+      .mockResolvedValueOnce(response(page('request-1', 100, 1)))
+      .mockResolvedValueOnce(response(page('request-1', 50, 50, 100)))
+      .mockResolvedValueOnce(response(page('request-1', 0, 50, 50)))
     vi.stubGlobal('fetch', fetchMock)
-    render(<App data={{
-      nodes: [{ id: 'root', name: '/root', state: 'idle' }],
-      timeline: [{ id: 'request-1', nodeId: 'root', label: 'Response request', kind: 'request', state: 'completed' }],
-      inbox: [],
-    }} />)
-    fireEvent.click(screen.getByRole('button', { name: /timeline/i }))
-    fireEvent.click(screen.getByRole('button', { name: 'Inspect history' }))
-    await waitFor(() => expect(screen.getByRole('list', { name: 'Retained request items' }).textContent).toContain('model text'))
-    expect(fetchMock).toHaveBeenCalledWith('/api/history/request-1?offset=0&limit=50', {
-      credentials: 'same-origin', cache: 'no-store',
-    })
-    expect(screen.getByText(/hash-large/)).toBeInTheDocument()
+    render(<NodeWindow requestId="request-1" onClose={() => {}} />)
+    await idle()
+    expect(screen.getAllByRole('listitem')).toHaveLength(50)
+    expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    await idle()
+    expect(screen.getAllByRole('listitem')).toHaveLength(50)
+    expect(list().textContent).toContain('text 50')
+    expect(screen.queryByText('Item 0')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    await idle()
+    expect(screen.getAllByRole('listitem')).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: 'Next page' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Previous page' }))
+    await idle()
+    expect(list().textContent).toContain('text 50')
+    fireEvent.click(screen.getByRole('button', { name: 'Previous page' }))
+    await idle()
+    expect(screen.getByText('Item 0')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([0, 50, 100, 50, 0].map((offset) => `/api/history/request-1?offset=${offset}&limit=50`))
+  })
+
+  it('requires explicit oversized skip even for a 413 empty page and preserves return offsets', async () => {
+    const blocked = { ...page('request-1', 50, 0), nextOffset: 50,
+      oversizedItem: { position: 50, hash, byteLen: 270_000, skipOffset: 51 } }
+    const fetchMock = vi.fn().mockResolvedValueOnce(response(page('request-1', 0, 50, 50)))
+      .mockResolvedValueOnce(response(blocked, 413)).mockResolvedValueOnce(response(page('request-1', 51)))
+      .mockResolvedValueOnce(response(blocked, 413))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<NodeWindow requestId="request-1" onClose={() => {}} />)
+    await idle()
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    await idle()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(screen.queryAllByRole('listitem')).toHaveLength(0)
+    expect(screen.getByText(/Full large-item retrieval is unavailable/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Next page' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Skip this item' }))
-    await waitFor(() => expect(screen.getByRole('list', { name: 'Retained request items' }).textContent).toContain('retained result'))
-    expect(fetchMock).toHaveBeenCalledWith('/api/history/request-1?offset=2&limit=50', {
-      credentials: 'same-origin', cache: 'no-store',
-    })
-    expect(screen.getByRole('list', { name: 'Retained request items' }).textContent).toContain('model text')
+    await idle()
+    expect(screen.getByText('Item 51')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Previous page' }))
+    await idle()
+    expect(screen.getByRole('button', { name: 'Skip this item' })).toBeEnabled()
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([0, 50, 51, 50].map((offset) => `/api/history/request-1?offset=${offset}&limit=50`))
+  })
+
+  it('offers first-load Retry and keeps a loaded page through failed next/refresh reads', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(response({}, 503))
+      .mockResolvedValueOnce(response(page('request-1', 0, 1, 1)))
+      .mockRejectedValueOnce(new Error('network lost'))
+      .mockResolvedValueOnce(response(page('request-1', 1)))
+      .mockResolvedValueOnce(response({}, 503))
+      .mockResolvedValueOnce(response(page('request-1', 1, 1, null, 'fresh')))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<NodeWindow requestId="request-1" onClose={() => {}} />)
+    await idle()
+    expect(screen.getByRole('alert').textContent).toContain('unavailable')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry history' }))
+    await idle()
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    await idle()
+    expect(screen.getByRole('alert').textContent).toContain('network lost')
+    expect(screen.getByText('Item 0')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry history' }))
+    await idle()
+    expect(screen.getByText('Item 1')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh history' }))
+    await idle()
+    expect(screen.getByText('Item 1')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry history' }))
+    await idle()
+    expect(list().textContent).toContain('fresh 1')
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([0, 0, 1, 1, 1, 1].map((offset) => `/api/history/request-1?offset=${offset}&limit=50`))
+  })
+
+  it('aborts old selection and ignores reverse completion after A -> B -> A', async () => {
+    const first = deferred(), second = deferred(), third = deferred()
+    const fetchMock = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise).mockReturnValueOnce(third.promise)
+    vi.stubGlobal('fetch', fetchMock)
+    const { rerender } = render(<NodeWindow requestId="A" onClose={() => {}} />)
+    rerender(<NodeWindow requestId="B" onClose={() => {}} />)
+    expect(fetchMock.mock.calls[0]?.[1].signal.aborted).toBe(true)
+    rerender(<NodeWindow requestId="A" onClose={() => {}} />)
+    expect(fetchMock.mock.calls[1]?.[1].signal.aborted).toBe(true)
+    await act(async () => third.resolve(response(page('A', 0, 1, null, 'new A'))))
+    await idle()
+    await act(async () => second.resolve(response(page('B', 0, 1, null, 'old B'))))
+    await act(async () => first.resolve(response(page('A', 0, 1, null, 'old A'))))
+    expect(list().textContent).toContain('new A')
+    expect(list().textContent).not.toContain('old A')
+    expect(list().textContent).not.toContain('old B')
+  })
+
+  it('resets the same request ID in a new host/conversation and rejects stale failures/auth transitions', async () => {
+    const old = deferred(), replacement = deferred()
+    const auth = vi.fn()
+    const fetchMock = vi.fn().mockResolvedValueOnce(response(page('same', 0, 1, 1)))
+      .mockReturnValueOnce(old.promise).mockReturnValueOnce(replacement.promise)
+    vi.stubGlobal('fetch', fetchMock)
+    const { rerender } = render(<NodeWindow requestId="same" hostRun="host1" conversationId="c1" onAuthExpired={auth} onClose={() => {}} />)
+    await idle()
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    rerender(<NodeWindow requestId="same" hostRun="host2" conversationId="c2" onAuthExpired={auth} onClose={() => {}} />)
+    expect(fetchMock.mock.calls[1]?.[1].signal.aborted).toBe(true)
+    expect(screen.queryAllByRole('listitem')).toHaveLength(0)
+    await act(async () => replacement.resolve(response(page('same', 0, 1, null, 'new host'))))
+    await idle()
+    await act(async () => old.resolve(response({}, 401)))
+    expect(auth).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(list().textContent).toContain('new host')
+    expect(fetchMock.mock.calls[2]?.[0]).toBe('/api/history/same?offset=0&limit=50')
+  })
+
+  it('refreshes only on the passed durable signature and retains current paging through callback rerenders', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(response(page('request-1', 0, 1, 1)))
+      .mockResolvedValueOnce(response(page('request-1', 1)))
+      .mockResolvedValueOnce(response(page('request-1', 1, 1, null, 'durable')))
+    vi.stubGlobal('fetch', fetchMock)
+    const { rerender } = render(<NodeWindow requestId="request-1" refreshKey="v1" onClose={() => {}} />)
+    await idle()
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    await idle()
+    rerender(<NodeWindow requestId="request-1" refreshKey="v1" onClose={() => {}} onAuthExpired={() => {}} />)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    rerender(<NodeWindow requestId="request-1" refreshKey="v2" onClose={() => {}} />)
+    await idle()
+    expect(fetchMock.mock.calls[2]?.[0]).toContain('offset=1&limit=50')
+    expect(list().textContent).toContain('durable')
+  })
+
+  it('supersedes a pending refresh without letting old failures clear the fresh page', async () => {
+    const old = deferred(), fresh = deferred()
+    const fetchMock = vi.fn().mockResolvedValueOnce(response(page()))
+      .mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise)
+    vi.stubGlobal('fetch', fetchMock)
+    const { rerender } = render(<NodeWindow requestId="request-1" refreshKey="v1" onClose={() => {}} />)
+    await idle()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh history' }))
+    rerender(<NodeWindow requestId="request-1" refreshKey="v2" onClose={() => {}} />)
+    expect(fetchMock.mock.calls[1]?.[1].signal.aborted).toBe(true)
+    await act(async () => fresh.resolve(response(page('request-1', 0, 1, null, 'fresh'))))
+    await idle()
+    await act(async () => old.reject(new Error('stale failure')))
+    expect(list().textContent).toContain('fresh')
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('reports current confirmed auth refusal and aborts outstanding reads on unmount', async () => {
+    const pending = deferred(), auth = vi.fn()
+    const fetchMock = vi.fn().mockResolvedValueOnce(response({}, 403)).mockReturnValueOnce(pending.promise)
+    vi.stubGlobal('fetch', fetchMock)
+    const { unmount } = render(<NodeWindow requestId="request-1" onAuthExpired={auth} onClose={() => {}} />)
+    await idle()
+    expect(auth).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry history' }))
+    unmount()
+    expect(fetchMock.mock.calls[1]?.[1].signal.aborted).toBe(true)
+    await act(async () => pending.resolve(response({}, 401)))
+    expect(auth).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects a response for another request instead of displaying its data', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(page('another-request'))))
+    render(<NodeWindow requestId="request-1" onClose={() => {}} />)
+    await idle()
+    expect(screen.getByRole('alert').textContent).toContain('invalid page')
+    expect(screen.queryAllByRole('listitem')).toHaveLength(0)
   })
 })
