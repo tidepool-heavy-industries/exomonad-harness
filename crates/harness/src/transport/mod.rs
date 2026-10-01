@@ -118,6 +118,8 @@ pub enum TransportError {
     Http(u16),
     #[error("stream failed: {0}")]
     Stream(String),
+    #[error("replay request {request} already has a recorded owner")]
+    ReplayRequestReuse { request: crate::model::RequestId },
 }
 
 /// Read-only credential source. An implementation must never refresh Codex's

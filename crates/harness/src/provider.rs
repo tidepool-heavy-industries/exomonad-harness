@@ -129,6 +129,18 @@ impl ProviderError {
     }
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct WaitReplayBarrier {
+    pub(crate) before: Vec<OperationId>,
+    pub(crate) after: Vec<OperationId>,
+}
+
+impl WaitReplayBarrier {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.before.is_empty() && self.after.is_empty()
+    }
+}
+
 /// Exact retained terminal output. Only the replay owner can attach a sealed
 /// builtin continuation; ordinary providers can supply terminal output alone.
 #[derive(Debug)]
@@ -136,7 +148,7 @@ pub struct RetainedOutput {
     output: crate::turn::JobOutput,
     wait_operation: Option<OperationId>,
     continuation: Option<crate::store::RecordedWaitContinuation>,
-    wait_barrier: Vec<OperationId>,
+    wait_barrier: WaitReplayBarrier,
 }
 
 impl RetainedOutput {
@@ -145,7 +157,7 @@ impl RetainedOutput {
             output,
             wait_operation: None,
             continuation: None,
-            wait_barrier: vec![],
+            wait_barrier: WaitReplayBarrier::default(),
         }
     }
 
@@ -157,7 +169,7 @@ impl RetainedOutput {
         operation: OperationId,
         output: crate::turn::JobOutput,
         continuation: Option<crate::store::RecordedWaitContinuation>,
-        wait_barrier: Vec<OperationId>,
+        wait_barrier: WaitReplayBarrier,
     ) -> Self {
         Self {
             output,
@@ -174,7 +186,7 @@ impl RetainedOutput {
         (
             crate::turn::JobOutput,
             Option<crate::store::RecordedWaitContinuation>,
-            Vec<OperationId>,
+            WaitReplayBarrier,
         ),
         ProviderError,
     > {
