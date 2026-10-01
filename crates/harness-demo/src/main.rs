@@ -2463,6 +2463,9 @@ fn safe_transport_error(error: &TransportError) -> String {
             format!("API returned HTTP status {status}")
         }
         harness::transport::TransportError::Stream(_) => "API request or response failed".into(),
+        harness::transport::TransportError::ReplayRequestReuse { .. } => {
+            "replay request already has a recorded owner".into()
+        }
     }
 }
 
