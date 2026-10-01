@@ -1,0 +1,9 @@
+.worker-chat { display: grid; grid-template-columns: minmax(13rem, 20rem) minmax(0, 1fr); gap: 1.25rem; align-items: start; }
+.worker-chat-list { border: 1px solid var(--border, #68758a); border-radius: .5rem; padding: 1rem; max-height: 75vh; overflow: auto; }
+.worker-chat-list label, .worker-chat-list .meta { display: block; }
+.worker-chat-list input { width: 100%; box-sizing: border-box; }
+.worker-chat-list ul { list-style: none; padding: 0; }
+.worker-chat-list li { padding: .75rem 0; overflow-wrap: anywhere; }
+.worker-chat-list a[aria-current="page"] { font-weight: bold; text-decoration-thickness: .2rem; }
+.worker-chat-conversation { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 700px) { .worker-chat { grid-template-columns: minmax(0, 1fr); } .worker-chat-list { max-height: 16rem; } }

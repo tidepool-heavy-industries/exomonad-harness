@@ -7,6 +7,18 @@ const MAX_REQUESTS = 8
 const MAX_ITEMS = 200
 interface Cursor { requestId: string; offset: number }
 interface Loaded { cursor: Cursor; page: HistoryPage }
+interface RetainedSlice { browsing?: Cursor; pages: Loaded[]; failures: Map<string, RequestStatus> }
+const retainedSlices = new Map<string, RetainedSlice>()
+const MAX_RETAINED_SLICES = 4
+
+/** Message content stays in memory and is cleared on deliberate signout. */
+export function clearChatHistoryRetention() { retainedSlices.clear() }
+
+function retainSlice(key: string, slice: RetainedSlice) {
+  retainedSlices.delete(key)
+  retainedSlices.set(key, slice)
+  while (retainedSlices.size > MAX_RETAINED_SLICES) retainedSlices.delete(retainedSlices.keys().next().value!)
+}
 type RequestStatus = Pick<HarnessViewModel['timeline'][number], 'id' | 'state' | 'detail' | 'failure'>
 
 function FailedExchange({ request }: { request: RequestStatus }) {
@@ -29,16 +41,18 @@ function FailedExchange({ request }: { request: RequestStatus }) {
 }
 
 /** The store retains request-local items; only its parent edges establish lineage. */
-export default function ChatHistory({ requestId, requests, refreshKey, ready, onAuthExpired }: {
-  requestId: string; requests: ReadonlyMap<string, RequestStatus>; refreshKey: string; ready: boolean; onAuthExpired?: () => void
+export default function ChatHistory({ requestId, requests, refreshKey, ready, onAuthExpired, cacheKey }: {
+  requestId: string; requests: ReadonlyMap<string, RequestStatus>; refreshKey: string; ready: boolean; onAuthExpired?: () => void; cacheKey?: string
 }) {
-  const [browsing, setBrowsing] = useState<Cursor>()
+  const initial = useRef(cacheKey ? retainedSlices.get(cacheKey) : undefined)
+  const [browsing, setBrowsing] = useState<Cursor | undefined>(initial.current?.browsing)
   const cursor = browsing ?? { requestId, offset: 0 }
-  const [pages, setPages] = useState<Loaded[]>([])
+  const [pages, setPages] = useState<Loaded[]>(initial.current?.pages ?? [])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [attempt, setAttempt] = useState(0)
-  const retainedFailures = useRef(new Map<string, RequestStatus>())
+  const retainedFailures = useRef(new Map<string, RequestStatus>(initial.current?.failures))
+  initial.current = undefined
   const auth = useRef(onAuthExpired)
   auth.current = onAuthExpired
   useEffect(() => {
@@ -85,6 +99,9 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
     else if (status) retainedFailures.current.delete(id)
   }
   for (const id of retainedFailures.current.keys()) if (!visibleRequests.has(id)) retainedFailures.current.delete(id)
+  useEffect(() => {
+    if (cacheKey) retainSlice(cacheKey, { browsing, pages, failures: new Map(retainedFailures.current) })
+  }, [cacheKey, browsing, pages, requests])
   const cursorFailure = !pages.some(({ page }) => page.requestId === cursor.requestId) ? retainedFailures.current.get(cursor.requestId) : undefined
   function go(next?: Cursor) { setPages([]); setBrowsing(next) }
   return <section className="chat-history" aria-label="Conversation messages" aria-busy={loading}>
