@@ -1,4 +1,4 @@
-import { actorIdentityKey, applyStateEvent, normalizeSnapshot, type SequencedEvent, type Snapshot } from "./protocol";
+import { actorIdentityKey, applyStateEvent, isSequencedEvent, isSnapshot, normalizeSnapshot, type SequencedEvent, type Snapshot } from "./protocol";
 import { describe, expect, it } from "vitest";
 
 // Recorded-shaped fixture: consumers can replace this with captured server JSON
@@ -10,6 +10,45 @@ const fixture: Snapshot = {
   jobs: [],
   envelopes: [{ id: "e/2", recipient: "/root", sender: "/operator", type: "MESSAGE", payload: "continue" }],
 };
+
+describe('request failure wire validation', () => {
+  it.each([
+    null,
+    { kind: 'authentication' },
+    { kind: 'http', status: 400, diagnostic: null },
+    { kind: 'http', status: 429, diagnostic: { code: 'rate_limit', error_type: 'quota', param: 'model', message: 'Try later' } },
+    { kind: 'http', status: 400, diagnostic: { code: '😀'.repeat(256), message: '😀'.repeat(2048) } },
+  ])('preserves a valid failure in snapshots and request updates: %j', failure => {
+    const request = { ...fixture.requests[0]!, state: 'failed', failure };
+    const snapshot = { ...fixture, requests: [request] };
+    const event = { seq: 42, event: { kind: 'request.upsert', value: request } };
+    expect(isSnapshot(snapshot)).toBe(true);
+    expect(isSequencedEvent(event)).toBe(true);
+    if (isSnapshot(snapshot)) expect(normalizeSnapshot(snapshot).requests.get(request.id)?.failure).toEqual(failure);
+    if (isSequencedEvent(event)) {
+      const result = applyStateEvent(normalizeSnapshot(fixture), event);
+      expect(result.kind).toBe('applied');
+      if (result.kind === 'applied') expect(result.state.requests.get(request.id)?.failure).toEqual(failure);
+    }
+  });
+  it.each([
+    'failed', {}, { kind: 'future' },
+    { kind: 'http', status: -1, diagnostic: null },
+    { kind: 'http', status: 65536, diagnostic: null },
+    { kind: 'http', status: 400.5, diagnostic: null },
+    { kind: 'http', status: '400', diagnostic: null },
+    { kind: 'http', status: 400 },
+    { kind: 'http', status: 400, diagnostic: [] },
+    { kind: 'http', status: 400, diagnostic: { error_type: null } },
+    { kind: 'http', status: 400, diagnostic: { code: 123 } },
+    { kind: 'http', status: 400, diagnostic: { param: 'x'.repeat(257) } },
+    { kind: 'http', status: 400, diagnostic: { message: 'x'.repeat(2049) } },
+  ])('rejects malformed failures in snapshots and request updates: %j', failure => {
+    const request = { ...fixture.requests[0]!, state: 'failed', failure };
+    expect(isSnapshot({ ...fixture, requests: [request] })).toBe(false);
+    expect(isSequencedEvent({ seq: 42, event: { kind: 'request.upsert', value: request } })).toBe(false);
+  });
+});
 
 describe("stable JSON state adapter", () => {
   it("normalizes snapshots and applies contiguous events immutably", () => {

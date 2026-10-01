@@ -520,7 +520,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
         {route.screen === 'inbox' && inboxScreen}
         {route.screen === 'chat' && <div className="chat-layout">
           {chatConversation ? (chatHead ?
-            <ChatHistory key={JSON.stringify([route.selection, chatConversation])} requestId={chatHead.id} refreshKey={chatRefreshKey} ready={chatReady} onAuthExpired={onAuthExpired} /> :
+            <ChatHistory key={JSON.stringify([route.selection, chatConversation])} requestId={chatHead.id} requests={requestIndex} refreshKey={chatRefreshKey} ready={chatReady} onAuthExpired={onAuthExpired} /> :
             <Empty>No retained model exchange is available yet.</Empty>) : <Empty>Select an exact model actor to open its conversation.</Empty>}
           <HostComposer key={route.selection.kind === 'actor' ? actorIdentityKey(route.selection.identity) : 'none'} chat data={data} route={route} navigate={navigate} unavailable={Boolean(issue || resolved.missing)} ready={transportPhase === 'ready'} onHostCommand={onHostCommand} />
           <RetainedCommands commands={chatCommands} run={data.hostRun} ready={transportPhase === 'ready' && Boolean(resolved.actor && ['running', 'waiting'].includes(resolved.actor.lifecycle))} onRetry={onRetry} />

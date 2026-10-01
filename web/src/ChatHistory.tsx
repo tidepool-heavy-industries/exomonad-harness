@@ -1,15 +1,36 @@
 import { useEffect, useRef, useState } from 'react'
 import HistoryItem from './HistoryItem'
 import { HistoryReadError, MAX_HISTORY_BYTES, readHistoryPage, type HistoryPage } from './history-client'
+import type { HarnessViewModel } from './view-model'
 
 const MAX_REQUESTS = 8
 const MAX_ITEMS = 200
 interface Cursor { requestId: string; offset: number }
 interface Loaded { cursor: Cursor; page: HistoryPage }
+type RequestStatus = Pick<HarnessViewModel['timeline'][number], 'id' | 'state' | 'detail' | 'failure'>
+
+function FailedExchange({ request }: { request: RequestStatus }) {
+  const failure = request.failure
+  const diagnostic = failure?.kind === 'http' ? failure.diagnostic : undefined
+  return <div className="error" role="alert" aria-label={`Failed exchange ${request.id}`}>
+    <strong>Exchange failed</strong>
+    <p className="meta">Exchange {request.id}</p>
+    {failure?.kind === 'authentication' ? <p>Provider authentication failed. Check the host's provider credentials before sending a new reply.</p> :
+      failure?.kind === 'http' ? <>
+        <p>Provider returned HTTP {failure.status}.</p>
+        {diagnostic && <>
+          {diagnostic.message && <p>{diagnostic.message}</p>}
+          <dl>{diagnostic.code && <><dt>Code</dt><dd>{diagnostic.code}</dd></>}
+            {diagnostic.error_type && <><dt>Type</dt><dd>{diagnostic.error_type}</dd></>}
+            {diagnostic.param && <><dt>Parameter</dt><dd>{diagnostic.param}</dd></>}</dl>
+        </>}
+      </> : <p>{request.detail ?? 'The model request failed.'}</p>}
+  </div>
+}
 
 /** The store retains request-local items; only its parent edges establish lineage. */
-export default function ChatHistory({ requestId, refreshKey, ready, onAuthExpired }: {
-  requestId: string; refreshKey: string; ready: boolean; onAuthExpired?: () => void
+export default function ChatHistory({ requestId, requests, refreshKey, ready, onAuthExpired }: {
+  requestId: string; requests: ReadonlyMap<string, RequestStatus>; refreshKey: string; ready: boolean; onAuthExpired?: () => void
 }) {
   const [browsing, setBrowsing] = useState<Cursor>()
   const cursor = browsing ?? { requestId, offset: 0 }
@@ -17,6 +38,7 @@ export default function ChatHistory({ requestId, refreshKey, ready, onAuthExpire
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [attempt, setAttempt] = useState(0)
+  const retainedFailures = useRef(new Map<string, RequestStatus>())
   const auth = useRef(onAuthExpired)
   auth.current = onAuthExpired
   useEffect(() => {
@@ -55,6 +77,15 @@ export default function ChatHistory({ requestId, refreshKey, ready, onAuthExpire
   }, [cursor.requestId, cursor.offset, refreshKey, ready, attempt])
   const oldest = pages[0]
   const paged = pages.find(({ page }) => page.nextOffset !== null)
+  // Retain only evidence for the current slice and its exact cursor during an outage.
+  const visibleRequests = new Set([cursor.requestId, ...pages.map(({ page }) => page.requestId)])
+  for (const id of visibleRequests) {
+    const status = requests.get(id)
+    if (status?.state === 'failed') retainedFailures.current.set(id, status)
+    else if (status) retainedFailures.current.delete(id)
+  }
+  for (const id of retainedFailures.current.keys()) if (!visibleRequests.has(id)) retainedFailures.current.delete(id)
+  const cursorFailure = !pages.some(({ page }) => page.requestId === cursor.requestId) ? retainedFailures.current.get(cursor.requestId) : undefined
   function go(next?: Cursor) { setPages([]); setBrowsing(next) }
   return <section className="chat-history" aria-label="Conversation messages" aria-busy={loading}>
     <div className="toolbar"><h2>Conversation</h2><div className="history-controls">
@@ -64,10 +95,12 @@ export default function ChatHistory({ requestId, refreshKey, ready, onAuthExpire
     {!ready && <p role="status">Host unavailable; retained messages remain visible. Reconnect to refresh or reply.</p>}
     {error && <div role="alert"><p>{error}</p><button disabled={!ready || loading} onClick={() => setAttempt(value => value + 1)}>Retry messages</button></div>}
     {loading && <p role="status">Loading conversation messages…</p>}
+    {cursorFailure && <FailedExchange request={cursorFailure} />}
     <div role="list" aria-label="Retained conversation items">
       {pages.map(({ page, cursor: source }) => <div className="chat-exchange" key={`${page.requestId}:${source.offset}`}>
         <p className="meta">Exchange {page.requestId}{source.offset > 0 ? ` · offset ${source.offset}` : ''}</p>
         {page.items.map(entry => <HistoryItem key={`${page.requestId}:${entry.position}:${entry.hash}`} entry={entry} />)}
+        {retainedFailures.current.has(page.requestId) && <FailedExchange request={retainedFailures.current.get(page.requestId)!} />}
       </div>)}
     </div>
     {!loading && !error && pages.length > 0 && pages.every(({ page }) => page.items.length === 0) && <p>No retained messages in this slice.</p>}

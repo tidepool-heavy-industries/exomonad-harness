@@ -103,8 +103,20 @@ export interface RequestRecord {
   readonly command?: string;
   readonly outcome?: "accepted" | "pending" | "queued" | "presented" | "acted" | "completed" | "cancelled" | "failed";
   readonly detail?: string;
+  readonly failure?: RequestFailure | null;
   readonly version?: number;
 }
+
+export interface HttpDiagnostic {
+  readonly code?: string;
+  readonly error_type?: string;
+  readonly param?: string;
+  readonly message?: string;
+}
+
+export type RequestFailure =
+  | { readonly kind: 'authentication' }
+  | { readonly kind: 'http'; readonly status: number; readonly diagnostic: HttpDiagnostic | null };
 
 export interface Job {
   readonly id: EntityId;
@@ -374,6 +386,19 @@ const nullableId = (value: unknown) => value === null || (text(value) && value.l
 const count = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0;
 const nullableTime = (value: unknown) => value === null || (typeof value === 'number' && Number.isFinite(value));
 
+function validRequestFailure(value: unknown): boolean {
+  if (value === null) return true;
+  if (!isObject(value)) return false;
+  if (value.kind === 'authentication') return true;
+  if (value.kind !== 'http' || !count(value.status) || (value.status as number) > 65535) return false;
+  const diagnostic = value.diagnostic;
+  if (diagnostic === null) return true;
+  if (!isObject(diagnostic)) return false;
+  const boundedText = (limit: number) => (field: unknown) => text(field) && Array.from(field).length <= limit;
+  return ['code', 'error_type', 'param'].every(key => optional(diagnostic, key, boundedText(256)))
+    && optional(diagnostic, 'message', boundedText(2048));
+}
+
 function validProjection(kind: string, value: unknown): boolean {
   const projected = ['host_run.upsert', 'command.receipt', 'actor.upsert', 'conversation.upsert',
     'request.upsert', 'job.upsert', 'envelope.upsert', 'entity.remove'];
@@ -396,6 +421,7 @@ function validProjection(kind: string, value: unknown): boolean {
       && optional(value, 'parentId', nullableId) && optional(value, 'createdAtMs', nullableTime)
       && optional(value, 'endedAtMs', nullableTime) && optional(value, 'commandId', text)
       && optional(value, 'command', text) && optional(value, 'detail', text)
+      && optional(value, 'failure', validRequestFailure)
       && optional(value, 'outcome', (field) => ['accepted', 'pending', 'queued', 'presented', 'acted', 'completed', 'cancelled', 'failed'].includes(field as string));
     case 'job.upsert': return id() && text(value.conversationId) && version()
       && ['running', 'settled', 'cancelled', 'interrupted'].includes(value.state as string)

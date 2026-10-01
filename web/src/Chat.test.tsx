@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { clearDrafts } from './drafts'
@@ -6,6 +6,8 @@ import { HistoryReadError, type HistoryPage } from './history-client'
 import { readHistoryPage } from './history-client'
 import type { HarnessViewModel } from './view-model'
 import type { BrowserCommandRecord } from './pending-commands'
+import { isSnapshot, normalizeSnapshot, type Snapshot } from './protocol'
+import { toViewModel } from './integration'
 vi.mock('./history-client', async importOriginal => ({ ...await importOriginal<typeof import('./history-client')>(), readHistoryPage: vi.fn() }))
 const target = { run: 'run', actor: '/root', incarnation: 'original' }
 const actor = { id: JSON.stringify(['run', '/root', 'original']), name: '/root', run: 'run', incarnation: 'original', kind: 'model' as const, parentIdentity: null, lifecycle: 'running', modelConversation: 'root-conv', activeRound: 'round' }
@@ -22,6 +24,81 @@ beforeEach(() => {
 })
 afterEach(() => { vi.clearAllMocks(); clearDrafts() })
 describe('embedded actor chat', () => {
+  it('renders the failed request wire diagnostic separately and admits a new reply without changing retained history', async () => {
+    const failure = { kind: 'http' as const, status: 400, diagnostic: { code: 'invalid_parameter', error_type: 'invalid_request_error', param: 'tools[0]', message: '<b>Tool schema rejected</b>' } }
+    const snapshot: Snapshot = { seq: 1, hostRun: 'run', actors: [{ identity: target, parent: null, kind: 'model', lifecycle: 'running', modelConversation: 'root-conv' }], conversations: [{ id: 'root-conv', path: '/root', state: 'idle' }], requests: [
+      { id: 'first', conversationId: 'root-conv', parentId: null, state: 'completed', failure: null },
+      { id: 'latest', conversationId: 'root-conv', parentId: 'first', state: 'failed', failure },
+      { id: 'child', conversationId: 'child-conv', state: 'failed', failure: { kind: 'http', status: 500, diagnostic: { message: 'Unrelated child failure' } } },
+    ], jobs: [], envelopes: [] }
+    expect(isSnapshot(snapshot)).toBe(true)
+    const failedPage = page('latest', 'first', [])
+    const originalHistory = JSON.stringify([failedPage, histories.first])
+    vi.mocked(readHistoryPage).mockImplementation(async id => id === 'latest' ? failedPage : histories[id as keyof typeof histories]!)
+    const submit = vi.fn().mockReturnValue({ kind: 'retained', operationId: 'next-operation', send: 'sent' })
+    const commandId = '00000000-0000-4000-8000-000000000001'
+    const admitted: BrowserCommandRecord = { hostRun: 'run', authority: 'receipt', state: 'input_admitted', receipt: { commandId, target, outcome: 'admitted', envelopeId: '1' }, submission: { operation_id: commandId, command: { action: 'input', target, text: 'Original question' } } }
+    const mounted = render(<App data={toViewModel(normalizeSnapshot(snapshot))} onHostCommand={submit} pendingCommands={[admitted]} />)
+    await screen.findByText('Original question')
+    const notice = screen.getByRole('alert', { name: 'Failed exchange latest' })
+    expect(notice).toHaveTextContent('Provider returned HTTP 400.')
+    expect(notice).toHaveTextContent('invalid_request_error')
+    expect(notice).toHaveTextContent('invalid_parameter')
+    expect(notice).toHaveTextContent('tools[0]')
+    expect(within(notice).getByText('<b>Tool schema rejected</b>')).toBeVisible()
+    expect(notice.querySelector('b')).toBeNull()
+    expect(screen.queryByText('Unrelated child failure')).toBeNull()
+    expect(screen.getAllByRole('listitem')).toHaveLength(histories.first.items.length)
+    expect(screen.getByRole('region', { name: 'Retained browser operations' })).toHaveTextContent('input_admitted')
+    expect(screen.getByRole('region', { name: 'Retained browser operations' })).not.toHaveTextContent('refused')
+    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'Try again with the corrected schema' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send input' }))
+    expect(submit).toHaveBeenCalledWith({ action: 'input', target, text: 'Try again with the corrected schema' })
+    expect(screen.getByRole('alert', { name: 'Failed exchange latest' })).toBeVisible()
+    expect(screen.queryByText('Try again with the corrected schema')).toBeNull()
+    const nextPage = page('next', 'latest', [{ type: 'message', role: 'assistant', content: 'Recovered answer' }])
+    vi.mocked(readHistoryPage).mockImplementation(async id => id === 'next' ? nextPage : id === 'latest' ? failedPage : histories[id as keyof typeof histories]!)
+    const nextSnapshot: Snapshot = { ...snapshot, seq: 2, requests: [...snapshot.requests, { id: 'next', conversationId: 'root-conv', parentId: 'latest', state: 'completed', failure: null }] }
+    mounted.rerender(<App data={toViewModel(normalizeSnapshot(nextSnapshot))} onHostCommand={submit} />)
+    await screen.findByText('Recovered answer')
+    expect(screen.getByRole('alert', { name: 'Failed exchange latest' })).toBeVisible()
+    expect(screen.queryByRole('alert', { name: 'Failed exchange next' })).toBeNull()
+    expect(JSON.stringify([failedPage, histories.first])).toBe(originalHistory)
+    const unavailable: Snapshot = { ...nextSnapshot, actors: [{ ...snapshot.actors![0]!, lifecycle: 'lost', modelConversation: null }], requests: [] }
+    mounted.rerender(<App data={toViewModel(normalizeSnapshot(unavailable))} transportPhase="disconnected" onHostCommand={submit} />)
+    expect(screen.getByRole('alert', { name: 'Failed exchange latest' })).toBeVisible()
+    expect(screen.getByText('Recovered answer')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Send input' })).toBeDisabled()
+    mounted.rerender(<App data={toViewModel(normalizeSnapshot({ ...unavailable, actors: [] }))} onHostCommand={submit} />)
+    expect(screen.getByRole('alert', { name: 'Failed exchange latest' })).toBeVisible()
+  })
+  it('shows authentication failure before its empty history resolves and matches failures while paging older requests', async () => {
+    let resolvePage: ((value: HistoryPage) => void) | undefined
+    vi.mocked(readHistoryPage).mockImplementationOnce(() => new Promise(resolve => { resolvePage = resolve }))
+    const failed = { ...data, timeline: data.timeline.map(request => request.id === 'latest' ? { ...request, state: 'failed', failure: { kind: 'authentication' as const } } : request) }
+    render(<App data={failed} onHostCommand={vi.fn()} />)
+    expect(screen.getByRole('alert', { name: 'Failed exchange latest' })).toHaveTextContent(/Provider authentication failed/)
+    expect(screen.getByRole('alert', { name: 'Failed exchange latest' })).toHaveTextContent(/Check the host's provider credentials/)
+    await act(async () => { resolvePage?.(page('latest', 'first', [], 1)) })
+    fireEvent.click(screen.getByRole('button', { name: 'Earlier exchanges' }))
+    await screen.findByText('Original question')
+    expect(screen.queryByRole('alert', { name: 'Failed exchange latest' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Latest messages' }))
+    await screen.findByText('Latest answer')
+    expect(screen.getByRole('alert', { name: 'Failed exchange latest' })).toBeVisible()
+  })
+  it('matches an earlier failed exchange by its fetched parent ID without attributing it to the successful head', async () => {
+    const olderFailure = { ...data, timeline: data.timeline.map(request => request.id === 'first' ? { ...request, nodeId: 'ancestor-conv', state: 'failed', failure: { kind: 'http' as const, status: 503, diagnostic: { message: 'Earlier provider failure' } } } : request) }
+    vi.mocked(readHistoryPage).mockImplementation(async id => id === 'latest' ? page('latest', 'first', [{ type: 'message', role: 'assistant', content: 'Successful newer exchange' }], 1) : histories.first)
+    render(<App data={olderFailure} />)
+    await screen.findByText('Successful newer exchange')
+    expect(screen.queryByRole('alert', { name: 'Failed exchange first' })).toBeNull()
+    expect(screen.queryByRole('alert', { name: 'Failed exchange latest' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Earlier exchanges' }))
+    await screen.findByText('Original question')
+    expect(screen.getByRole('alert', { name: 'Failed exchange first' })).toHaveTextContent('Earlier provider failure')
+    expect(screen.queryByRole('alert', { name: 'Failed exchange latest' })).toBeNull()
+  })
   it('opens the exact parent-null model actor by default with inherited messages, tool inputs and output beside its composer', async () => {
     render(<App data={data} />)
     expect(screen.getByRole('heading', { name: 'Chat', level: 1 })).toBeVisible()

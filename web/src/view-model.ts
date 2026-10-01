@@ -1,4 +1,4 @@
-import type { CommandReceipt, Envelope, HostActorIdentity } from "./protocol";
+import type { CommandReceipt, Envelope, HostActorIdentity, RequestFailure } from "./protocol";
 
 /**
  * Presentation rows derived from normalized server state. The integration
@@ -48,6 +48,7 @@ export type HarnessViewModel = {
     historyRefreshKey?: string;
     detail?: string;
     commandId?: string;
+    failure?: RequestFailure | null;
     command?: string;
     toolKind?: "function" | "custom";
     outcome?: "accepted" | "pending" | "queued" | "presented" | "acted" | "completed" | "cancelled" | "failed";

@@ -123,7 +123,7 @@ export function createViewProjector(): (state: NormalizedState) => HarnessViewMo
           label: request.command ?? 'Response request', kind: 'request', state: request.state,
           ...timing(request.createdAtMs, request.endedAtMs), version: request.version,
           historyRefreshKey, parentId: request.parentId,
-          commandId: request.commandId, command: request.command, outcome: request.outcome, detail: request.detail,
+          commandId: request.commandId, command: request.command, outcome: request.outcome, detail: request.detail, failure: request.failure,
         })))
       }
       for (const job of state.jobs.values()) rows.push(reuse(jobsCache, nextJobs, job.id, job, '', () => jobRow(job)))
