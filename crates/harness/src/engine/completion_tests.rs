@@ -156,11 +156,11 @@ async fn admit(
         )
         .unwrap();
     engine.store.set_effort(&head, Effort::Low).unwrap();
-    let pending = engine
-        .dispatch_completed_item(item, &head)
-        .await
-        .unwrap()
-        .unwrap();
+    let DispatchResult::Pending(pending) =
+        engine.dispatch_completed_item(item, &head).await.unwrap()
+    else {
+        panic!("live ordinary call must retain its pending scheduler job");
+    };
     (head, pending)
 }
 
