@@ -567,7 +567,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         &crate::turn::JobOutput::Interrupted,
                     ),
                     crate::store::ClaimState::Settled => {
-                        self.read_settled_output(&claim.operation).await?
+                        self.read_settled_output(&claim.operation, &claim.request)
+                            .await?
                     }
                 };
                 if already_output[0] != &expected {
@@ -579,7 +580,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 continue;
             }
             if claim.state == crate::store::ClaimState::Settled {
-                let item = self.read_settled_output(&claim.operation).await?;
+                let item = self
+                    .read_settled_output(&claim.operation, &claim.request)
+                    .await?;
                 self.acknowledge_output(&claim.operation).await?;
                 replay_items.push(item);
                 continue;
@@ -1459,7 +1462,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         .await?;
         match current {
             Some(current) if current.state == crate::store::ClaimState::Settled => {
-                self.read_settled_output(&current.operation).await
+                self.read_settled_output(&current.operation, &current.request)
+                    .await
             }
             Some(current) if current.state == crate::store::ClaimState::Interrupted => {
                 Ok(Item::tool_output(
@@ -1472,11 +1476,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         }
     }
 
-    async fn read_settled_output(&self, operation: &OperationId) -> Result<Item, EngineError> {
+    async fn read_settled_output(
+        &self,
+        operation: &OperationId,
+        claimant: &RequestId,
+    ) -> Result<Item, EngineError> {
         let store = self.store.clone();
         let operation = operation.clone();
         let call_id = operation.call.0.clone();
-        blocking(move || store.replay_tool_output_operation(&operation))
+        let claimant = claimant.clone();
+        blocking(move || store.replay_tool_output_claim(&operation, &claimant))
             .await?
             .map(|recorded| recorded.item)
             .ok_or(EngineError::MissingInheritedOutput(call_id))

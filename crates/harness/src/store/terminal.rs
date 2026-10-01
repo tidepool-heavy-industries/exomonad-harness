@@ -2,7 +2,7 @@
 use super::{Result, Store, StoreError};
 use crate::{
     item::{Item, ItemHash},
-    model::OperationId,
+    model::{OperationId, RequestId},
     provider::ToolFailure,
     turn::JobOutput,
 };
@@ -87,10 +87,40 @@ impl Store {
         &self,
         operation: &OperationId,
     ) -> Result<Option<RecordedToolOutput>> {
+        self.replay_tool_output_claim(operation, &operation.request)
+    }
+
+    /// Claim-local interruption never substitutes for another claimant's result.
+    pub fn replay_tool_output_claim(
+        &self,
+        operation: &OperationId,
+        claimant: &RequestId,
+    ) -> Result<Option<RecordedToolOutput>> {
         let c = self.lock();
         let Some(kind) = super::invocation_kind(&c, &operation.request, &operation.call)? else {
             return Ok(None);
         };
+        let origin = serde_json::to_string(&operation.origin)?;
+        let state: Option<String> = c.query_row(
+            "SELECT state FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?4",
+            params![origin,operation.request.0,operation.call.0,claimant.0],
+            |row| row.get(0),
+        ).optional()?;
+        match state.as_deref() {
+            Some("interrupted") => {
+                return Ok(Some(RecordedToolOutput {
+                    item: Item::tool_output(&operation.call, kind, &JobOutput::Interrupted),
+                    terminal: TerminalOutcome::Interrupted,
+                }));
+            }
+            Some("settled") => {}
+            Some("pending") | None => return Ok(None),
+            _ => {
+                return Err(StoreError::UnsupportedReplayOutcome {
+                    operation: operation.clone(),
+                });
+            }
+        }
         let terminal = exact_terminal(&c, operation)?;
         let Some((hash, terminal)) = terminal else {
             return Ok(None);

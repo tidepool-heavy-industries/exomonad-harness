@@ -9,8 +9,10 @@ pub mod schema;
 mod schema_migration;
 mod terminal;
 mod validation;
+mod wait_continuation;
 pub use replay::IssuedReplayRequest;
 pub use terminal::{RecordedToolOutput, TerminalOutcome};
+pub(crate) use wait_continuation::RecordedWaitContinuation;
 
 use crate::{
     item::{Item, ItemHash, ToolKind},
@@ -34,6 +36,8 @@ pub const SQL: &str = schema::SQL;
 pub enum StoreError {
     #[error("settled operation {operation:?} has no typed replay outcome; preserve its bytes")]
     UnsupportedReplayOutcome { operation: OperationId },
+    #[error("wait replay continuation does not match exact issued operation {operation:?}")]
+    InvalidWaitContinuation { operation: OperationId },
     #[error("settled operation {operation:?} has conflicting replay outcomes")]
     ConflictingReplayOutcome { operation: OperationId },
     #[error("replay event {event} has unsupported format; preserve its bytes")]
