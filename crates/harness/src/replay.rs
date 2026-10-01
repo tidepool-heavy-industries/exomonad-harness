@@ -427,6 +427,8 @@ impl ReplayProvider {
                 ProviderError::Tool(format!("loading replay wait continuation: {error}").into())
             })?;
         let mut barrier = WaitReplayBarrier::default();
+        let mut before = vec![];
+        let mut after = vec![];
         if let Some((index, position)) = cut {
             let mut next_wait = self.turns[index].model_request.input.len();
             for (original, call) in &self.calls {
@@ -469,14 +471,18 @@ impl ReplayProvider {
                 if let Some((output_cut, output_position)) = self.output_cut(original, &output)? {
                     if output_cut == index {
                         if output_position < position {
-                            barrier.before.push(operation);
+                            before.push((output_position, operation));
                         } else if output_position < next_wait {
-                            barrier.after.push(operation);
+                            after.push((output_position, operation));
                         }
                     }
                 }
             }
         }
+        before.sort_by_key(|(position, _)| *position);
+        after.sort_by_key(|(position, _)| *position);
+        barrier.before = before.into_iter().map(|(_, operation)| operation).collect();
+        barrier.after = after.into_iter().map(|(_, operation)| operation).collect();
         let commit = ReplayWaitCommit {
             operation: local.clone(),
             item: crate::item::Item::tool_output(&local.call, self.calls[&original].kind, &output),
@@ -1682,6 +1688,165 @@ mod tests {
         assert_eq!(provider.turns_remaining(), 0);
     }
 
+    #[tokio::test]
+    async fn replay_wait_barriers_preserve_history_order_for_every_terminal() {
+        for wait_output in [
+            JobOutput::Completed(Ok(json!({"wait":true}))),
+            JobOutput::Cancelled,
+            JobOutput::Interrupted,
+            JobOutput::CancellationUnconfirmed("lost".into()),
+        ] {
+            let store = Arc::new(Store::memory().unwrap());
+            let root = RequestId("wait-source".into());
+            let next = RequestId("wait-next".into());
+            store.create_request(&root, None, "/root").unwrap();
+            let mut first = request("wait-session");
+            first.input.clear();
+            let calls: Vec<Item> = [
+                ("before", "echo"),
+                ("wait", "wait_agent"),
+                ("after", "echo"),
+            ]
+            .into_iter()
+            .map(|(id, name)| {
+                Item(json!({"type":"function_call", "call_id":id, "name":name, "arguments":"{}"}))
+            })
+            .collect();
+            store.append_items(&root, &calls).unwrap();
+            let mut outputs = vec![];
+            for (id, output) in [
+                ("before", JobOutput::Completed(Ok(json!(1)))),
+                ("wait", wait_output.clone()),
+                ("after", JobOutput::Completed(Ok(json!(2)))),
+            ] {
+                let operation = store.claim(&CallId(id.into()), &root).unwrap();
+                store
+                    .write_job_output(&operation, ToolKind::Function, &output)
+                    .unwrap();
+                outputs.push(Item::tool_output(
+                    &operation.call,
+                    ToolKind::Function,
+                    &output,
+                ));
+            }
+            let message = Item(
+                json!({"type":"message", "role":"user", "content":[{"type":"input_text", "text":"delivered while waiting"}]}),
+            );
+            store
+                .append_items(
+                    &root,
+                    &[
+                        outputs[0].clone(),
+                        outputs[1].clone(),
+                        message.clone(),
+                        outputs[2].clone(),
+                    ],
+                )
+                .unwrap();
+            store
+                .record_replay_turn(
+                    &root,
+                    &first,
+                    &ResponsesTurn {
+                        response_id: "wait-issued".into(),
+                        items: calls,
+                        usage: Usage::default(),
+                    },
+                )
+                .unwrap();
+            store.create_request(&next, Some(&root), "/root").unwrap();
+            let mut second = first.clone();
+            second.input = store.items(&root).unwrap();
+            store
+                .record_replay_turn(&next, &second, &final_turn())
+                .unwrap();
+            let provider = ReplayProvider::new(store, &root).unwrap();
+            let local = RequestId("replay-direct".into());
+            let (sink, _stream) = tokio::sync::mpsc::channel(4);
+            provider
+                .create_streaming_for_request(&local, first, sink)
+                .await
+                .unwrap();
+            let before = call_context(CallId("before".into())).operation.unwrap();
+            let wait = call_context(CallId("wait".into())).operation.unwrap();
+            let after = call_context(CallId("after".into())).operation.unwrap();
+            let args = ToolInput::Function(json!({}));
+            let mut after_lookup = Box::pin(provider.retained_output("echo", &args, &after));
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(10), &mut after_lookup)
+                    .await
+                    .is_err()
+            );
+            provider.output_committed(&wait).await.unwrap();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(10), &mut after_lookup)
+                    .await
+                    .is_err(),
+                "durable acknowledgment published wait history"
+            );
+            let retained = provider
+                .retained_output("wait_agent", &args, &wait)
+                .await
+                .unwrap()
+                .unwrap();
+            let (saved, continuation, barrier, commit) = retained.into_parts(&wait).unwrap();
+            assert_eq!(saved, wait_output);
+            assert_eq!(barrier.before, vec![before.clone()]);
+            assert_eq!(barrier.after, vec![after.clone()]);
+            let messages = continuation
+                .unwrap()
+                .into_items(&wait, &outputs[1])
+                .unwrap();
+            assert_eq!(messages, vec![message]);
+            assert_eq!(
+                provider
+                    .retained_output("echo", &args, &before)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .output(),
+                &JobOutput::Completed(Ok(json!(1)))
+            );
+            commit.unwrap().commit(&wait, &outputs[1]).unwrap();
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), after_lookup)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+                    .output(),
+                &JobOutput::Completed(Ok(json!(2)))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_refuses_wait_without_an_immediate_immutable_input_cut() {
+        let (store, root, call) = recorded_terminal(&JobOutput::Completed(Ok(json!({}))), false);
+        let mut provider = ReplayProvider::new(store, &root).unwrap();
+        let original = provider.calls.keys().next().unwrap().clone();
+        provider.calls.get_mut(&original).unwrap().name = "wait_agent".into();
+        let (sink, _stream) = tokio::sync::mpsc::channel(4);
+        provider
+            .create_streaming_for_request(
+                &RequestId("replay-direct".into()),
+                request("terminal-session"),
+                sink,
+            )
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            provider.retained_output(
+                "wait_agent",
+                &ToolInput::Function(json!({})),
+                call_context(call).operation.as_ref().unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_err());
+    }
     #[tokio::test]
     async fn replay_provider_rejects_missing_and_malformed_tool_outputs() {
         let store = Arc::new(Store::memory().unwrap());
