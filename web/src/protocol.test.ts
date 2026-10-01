@@ -138,3 +138,24 @@ describe("stable JSON state adapter", () => {
     }
   });
 });
+
+it('validates every receipt outcome and rejects unsupported or incomplete handoff evidence', async () => {
+  const { isCommandReceipt, isEmbeddedCommandRecord } = await import('./protocol')
+  const target = { run: 'Run', actor: '/ROOT', incarnation: 'Inc' }
+  const commandId = '11111111-1111-4111-8111-111111111111'
+  for (const receipt of [
+    { commandId, target, outcome: 'admitted', envelopeId: '42', wakeError: 'wake failed' },
+    { commandId, target, outcome: 'control_requested', control: 'interrupt' },
+    { commandId, target, outcome: 'refused', reason: 'denied' },
+    { commandId, target, outcome: 'unconfirmed', reason: 'ack lost' },
+  ]) expect(isCommandReceipt(receipt)).toBe(true)
+  for (const receipt of [
+    { commandId, target, outcome: 'future_success' },
+    { commandId, outcome: 'unconfirmed', reason: 'unknown' },
+    { commandId, target, outcome: 'admitted', envelopeId: 42 },
+    { commandId, target, outcome: 'control_requested', control: 'kill' },
+  ]) {
+    expect(isCommandReceipt(receipt)).toBe(false)
+    expect(isEmbeddedCommandRecord({ operationId: commandId, command: { action: 'retire', target }, state: 'queued', envelopeId: null, receipt })).toBe(false)
+  }
+})
