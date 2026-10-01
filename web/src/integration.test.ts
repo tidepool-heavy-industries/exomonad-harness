@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createElement } from 'react'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { normalizeSnapshot, type Snapshot, type RequestRecord } from './protocol'
 import { createViewProjector, toViewModel } from './integration'
 import { customJobJourney, customSuccessJourney } from './fixture'
@@ -25,9 +25,11 @@ describe('web outcome integration', () => {
     expect(view.actors).toHaveLength(2);
     render(createElement(App, { data: view }));
     const actorTable = screen.getByRole('table', { name: 'Host actor lifecycles' });
-    expect(actorTable.textContent).toContain('reviewer (workflow)');
-    expect(actorTable.textContent).toContain('incarnation second');
-    expect(actorTable.textContent).toContain('waiting');
+    const reviewerRow = within(actorTable).getByRole('row', { name: /reviewer/ });
+    expect(within(reviewerRow).getByRole('link', { name: 'reviewer' })).toBeInTheDocument();
+    expect(within(reviewerRow).getByRole('cell', { name: 'reviewer · workflow' })).toBeInTheDocument();
+    expect(within(reviewerRow).getByRole('cell', { name: /incarnation second/ })).toBeInTheDocument();
+    expect(within(reviewerRow).getByRole('cell', { name: 'waiting' })).toBeInTheDocument();
     expect(screen.getByRole('table', { name: 'Conversation tree' }).textContent).not.toContain('reviewer');
   });
 

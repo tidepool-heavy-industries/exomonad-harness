@@ -75,6 +75,48 @@ describe('retained request inspection', () => {
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([0, 50, 51, 50].map((offset) => `/api/history/request-1?offset=${offset}&limit=50`))
   })
 
+  it('keeps the complete mixed-page return path after a failed next-page read', async () => {
+    const blocked = { ...page('request-1', 50, 0), nextOffset: 50,
+      oversizedItem: { position: 50, hash, byteLen: 270_000, skipOffset: 51 } }
+    const fetchMock = vi.fn().mockResolvedValueOnce(response(page('request-1', 0, 50, 50)))
+      .mockResolvedValueOnce(response(blocked, 413))
+      .mockResolvedValueOnce(response(page('request-1', 51, 50, 101)))
+      .mockResolvedValueOnce(response({}, 503))
+      .mockResolvedValueOnce(response(page('request-1', 101, 1)))
+      .mockResolvedValueOnce(response(page('request-1', 51, 50, 101)))
+      .mockResolvedValueOnce(response(blocked, 413))
+      .mockResolvedValueOnce(response(page('request-1', 0, 50, 50)))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<NodeWindow requestId="request-1" onClose={() => {}} />)
+    await idle()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    await idle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip this item' }))
+    await idle()
+    expect(screen.getByText('Item 51')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    await idle()
+    expect(screen.getByRole('alert').textContent).toContain('unavailable')
+    expect(screen.getByText('Item 51')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry history' }))
+    await idle()
+    expect(screen.getByText('Item 101')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Previous page' }))
+    await idle()
+    expect(screen.getByText('Item 51')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Previous page' }))
+    await idle()
+    expect(screen.getByRole('button', { name: 'Skip this item' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Previous page' }))
+    await idle()
+    expect(screen.getByText('Item 0')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([0, 50, 51, 101, 101, 51, 50, 0]
+      .map((offset) => `/api/history/request-1?offset=${offset}&limit=50`))
+  })
+
   it('offers first-load Retry and keeps a loaded page through failed next/refresh reads', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(response({}, 503))
       .mockResolvedValueOnce(response(page('request-1', 0, 1, 1)))

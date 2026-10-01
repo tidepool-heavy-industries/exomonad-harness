@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import { clearDrafts } from './drafts';
@@ -171,9 +171,42 @@ describe('linked operator views', () => {
     act(() => vi.advanceTimersByTime(0));
     expect(trigger).toHaveFocus();
   });
+  it('restores inspector trigger focus when native URL history closes the inspector', async () => {
+    route('?view=timeline');
+    render(<App data={data} />);
+    const trigger = screen.getByRole('button', { name: 'Inspect history' });
+    fireEvent.click(trigger);
+    screen.getByRole('button', { name: 'Close history' }).focus();
+    expect(screen.getByRole('button', { name: 'Close history' })).toHaveFocus();
+    act(() => {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('request');
+      window.history.replaceState(null, '', url);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    expect(screen.queryByRole('region', { name: 'Request history' })).toBeNull();
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+  it('focuses the heading after URL inspector closure when the original trigger disappeared', async () => {
+    route('?view=timeline');
+    const mounted = render(<App data={data} />);
+    const trigger = screen.getByRole('button', { name: 'Inspect history' });
+    fireEvent.click(trigger);
+    screen.getByRole('button', { name: 'Close history' }).focus();
+    mounted.rerender(<App data={{ ...data, timeline: [] }} />);
+    expect(trigger.isConnected).toBe(false);
+    act(() => {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('request');
+      window.history.replaceState(null, '', url);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    expect(screen.queryByRole('region', { name: 'Request history' })).toBeNull();
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Timeline', level: 1 })).toHaveFocus());
+  });
   it('renders all receipt outcomes distinctly and keeps legacy/local observations separate', () => {
     route('?view=host');
-    const record: BrowserCommandRecord = { hostRun: 'run', authority: 'legacy', state: 'input_admitted', submission: { operation_id: 'op', command: { action: 'input', target, text: ' exact retained ' } }, send: 'unknown', lookup: { kind: 'unavailable', reason: 'offline' } };
+    const record: BrowserCommandRecord = { hostRun: 'run', authority: 'legacy', state: 'input_admitted', submission: { operation_id: '00000000-0000-4000-8000-000000000001', command: { action: 'input', target, text: ' exact retained ' } }, send: 'unknown', lookup: { kind: 'unavailable', reason: 'offline' } };
     render(<App data={{ ...data, commandReceipts: [{ commandId: '1', outcome: 'admitted', envelopeId: 'e' }, { commandId: '2', outcome: 'control_requested', control: 'retire', target }, { commandId: '3', outcome: 'refused', reason: 'no' }, { commandId: '4', outcome: 'unconfirmed', target, reason: 'unknown' }] }} pendingCommands={[record]} />);
     expect(screen.getByText('Unconfirmed')).toBeVisible();
     expect(screen.getByText('Refused')).toBeVisible();

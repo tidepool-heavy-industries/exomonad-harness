@@ -22,11 +22,19 @@ test('malformed result and missing execution remain diagnostics',()=>{
 test('evidence recorder rejects missing, zero and stale reports and preserves a nonzero browser exit', async () => {
   const { mkdtemp, mkdir, writeFile, readFile, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
-  const { resolve, join } = await import('node:path');
+  const { resolve, join, dirname } = await import('node:path');
   const { execFileSync, spawnSync } = await import('node:child_process');
   const recorder = resolve(import.meta.dirname, 'evidence.mjs');
   const scratch = await mkdtemp(join(tmpdir(), 'harness-report-contract-'));
   try {
+    // The recorder only reads browser provenance; this fixture never runs a browser.
+    const browserEnv = { ...process.env, PLAYWRIGHT_BROWSERS_PATH: join(scratch, 'browsers') };
+    const playwrightModule = import.meta.resolve('@playwright/test');
+    const browserExecutable = execFileSync(process.execPath, ['--input-type=module', '-e',
+      `import { chromium } from ${JSON.stringify(playwrightModule)}; console.log(chromium.executablePath());`
+    ], { env: browserEnv, encoding: 'utf8' }).trim();
+    await mkdir(dirname(browserExecutable), { recursive: true });
+    await writeFile(browserExecutable, '#!/bin/sh\n[ "$1" = "--version" ] || exit 2\nprintf "Synthetic Chromium provenance fixture\\n"\n', { mode: 0o755 });
     for (const directory of ['web/dist/assets','web/e2e','scripts','target/gui-browser']) await mkdir(join(scratch,directory),{recursive:true});
     for (const path of ['web/dist/assets/fixture.js','web/e2e/fixtures.mjs','web/package-lock.json','web/playwright.config.ts','web/tsconfig.browser.json','scripts/verify-frontend-browser','flake.nix','flake.lock']) await writeFile(join(scratch,path),'Synthetic evidence-consumer test input\n');
     execFileSync('git',['init','--quiet',scratch]);
@@ -38,11 +46,13 @@ test('evidence recorder rejects missing, zero and stale reports and preserves a 
       await mkdir(directory);
       if(value) await writeFile(join(directory,'results.json'),JSON.stringify(value));
       const runId=name==='stale'?'different-run':'current';
-      const result=spawnSync(process.execPath,[recorder,String(browserExit),directory],{cwd:scratch,env:{...process.env,HARNESS_BROWSER_RUN_ID:runId},encoding:'utf8'});
+      const result=spawnSync(process.execPath,[recorder,String(browserExit),directory],{cwd:scratch,env:{...browserEnv,HARNESS_BROWSER_RUN_ID:runId},encoding:'utf8'});
       assert.equal(result.status,expectedExit,result.stderr);
       const evidence=JSON.parse(await readFile(join(directory,'evidence.json'),'utf8'));
       assert.equal(evidence.exitStatus,expectedExit);
       assert.equal(evidence.testExitStatus,browserExit);
+      assert.equal(evidence.browserExecutable,browserExecutable);
+      assert.equal(evidence.browserVersion,'Synthetic Chromium provenance fixture');
       if(name==='missing'||name==='zero'||name==='stale') assert.equal(evidence.validation.valid,false);
       assert.ok(evidence.inputs['web/e2e/fixtures.mjs']);
     }

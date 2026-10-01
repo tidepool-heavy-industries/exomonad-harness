@@ -189,6 +189,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
   const heading = useRef<HTMLHeadingElement>(null);
   const previousScreen = useRef(route.screen);
   const inspectionTrigger = useRef<HTMLElement | null>(null);
+  const previousInspection = useRef(route.requestId);
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(0);
   const [actorPage, setActorPage] = useState(0);
@@ -201,6 +202,16 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
       previousScreen.current = route.screen;
     } setSearch(''); setPage(0); setActorPage(0);
   }, [route.screen]);
+  useEffect(() => {
+    if (previousInspection.current !== undefined && route.requestId === undefined) {
+      if (inspectionTrigger.current?.isConnected)
+        inspectionTrigger.current.focus();
+      else
+        heading.current?.focus();
+      inspectionTrigger.current = null;
+    }
+    previousInspection.current = route.requestId;
+  }, [route.requestId]);
   useEffect(() => { setPage(0); setActorPage(0); }, [route.selection, route.global, route.messageFilters]);
   const searchTerm = search.toLowerCase();
   const filteredTimeline = useMemo(() => searchTerm ? view.timeline.filter(item => `${item.label} ${item.id} ${item.detail ?? ''}`.toLowerCase().includes(searchTerm)) : view.timeline, [view.timeline, searchTerm]);
@@ -264,12 +275,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
   }, [route, navigate]);
   const inspect = useCallback((requestId: string, element?: HTMLElement) => { inspectionTrigger.current = element ?? null; navigate({ ...route, requestId }); }, [route, navigate]);
   const closeInspector = useCallback(() => {
-    navigate({ ...route, requestId: undefined }); setTimeout(() => {
-      if (inspectionTrigger.current?.isConnected)
-        inspectionTrigger.current.focus();
-      else
-        heading.current?.focus();
-    }, 0);
+    navigate({ ...route, requestId: undefined });
   }, [route, navigate]);
   const selectedDescription = route.selection.kind === 'actor' ? `${route.selection.identity.actor} · run ${route.selection.identity.run} · incarnation ${route.selection.identity.incarnation}` : route.selection.kind === 'conversation' ? `Conversation ${route.selection.conversationId}` : 'All contexts';
   const orderedNodes = useMemo(() => orderConversationTree(data.nodes), [data.nodes]);

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Operator } from './Operator'
 import { readPendingCommands, writePendingCommands, retainCommand } from './pending-commands'
@@ -125,7 +125,7 @@ describe('optional browser session', () => {
     expect(screen.queryByText('/root/web_ui/web_ui')).not.toBeInTheDocument()
   })
 
-  it('reconciles a retained operation after reload without replaying it automatically', async () => {
+  it('reconciles an admitted operation after reload without allowing replay', async () => {
     const submission = {
       operation_id: '11111111-1111-4111-8111-111111111111',
       command: { action: 'input' as const, target: { run: 'run-1', actor: '/root', incarnation: 'inc-1' }, text: 'continue' },
@@ -163,13 +163,13 @@ describe('optional browser session', () => {
     expect(await screen.findByRole('heading', { name: 'Tree' })).toBeInTheDocument()
     expect(socket.send).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'Host' }))
-    expect(await screen.findByText('input_admitted')).toBeInTheDocument()
-    expect(screen.getByText(/never replayed automatically/)).toBeInTheDocument()
+    const operations = screen.getByRole('region', { name: 'Retained browser operations' })
+    expect(await within(operations).findByText('input · input_admitted')).toBeInTheDocument()
+    expect(within(operations).getByText(/Reconnect never automatically resubmits an operation/)).toBeInTheDocument()
+    const retry = within(operations).getByRole('button', { name: 'Retry same operation' })
+    expect(retry).toBeDisabled()
+    fireEvent.click(retry)
     expect(socket.send).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByRole('button', { name: 'Retry same operation' }))
-    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({
-      type: 'host_command', operation_id: submission.operation_id, command: submission.command,
-    }))
   })
 
   it('does not show standalone async guidance in an embedded host session', async () => {

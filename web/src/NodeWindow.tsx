@@ -6,17 +6,22 @@ import { HistoryReadError, readHistoryPage, type HistoryPage } from './history-c
 interface LoadedPage {
   readonly page: HistoryPage
   readonly offset: number
-  readonly previous: readonly number[]
+  readonly previous?: PageOffset
+}
+
+interface PageOffset {
+  readonly offset: number
+  readonly previous?: PageOffset
 }
 
 interface ReadIntent {
   readonly offset: number
-  readonly previous: readonly number[]
+  readonly previous?: PageOffset
   readonly attempt: number
 }
 
 function visiblePageIntent(current: ReadIntent, loaded?: LoadedPage): ReadIntent {
-  return { offset: loaded?.offset ?? current.offset, previous: loaded?.previous ?? current.previous, attempt: current.attempt + 1 }
+  return { offset: loaded?.offset ?? current.offset, previous: loaded ? loaded.previous : current.previous, attempt: current.attempt + 1 }
 }
 
 /** One bounded retained page belongs to one exact inspection context. */
@@ -25,7 +30,7 @@ export default function NodeWindow({ requestId, conversationId, hostRun, refresh
   const [loaded, setLoaded] = useState<LoadedPage>()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>()
-  const [intent, setIntent] = useState<ReadIntent>({ offset: 0, previous: [], attempt: 0 })
+  const [intent, setIntent] = useState<ReadIntent>({ offset: 0, attempt: 0 })
   const currentContext = useRef(context)
   currentContext.current = context
   const generation = useRef(0)
@@ -39,7 +44,7 @@ export default function NodeWindow({ requestId, conversationId, hostRun, refresh
     setStateContext(context)
     setLoaded(undefined)
     setError(undefined)
-    setIntent({ offset: 0, previous: [], attempt: 0 })
+    setIntent({ offset: 0, attempt: 0 })
     setStateRefreshKey(refreshKey)
   } else if (stateRefreshKey !== refreshKey) {
     setStateRefreshKey(refreshKey)
@@ -74,13 +79,13 @@ export default function NodeWindow({ requestId, conversationId, hostRun, refresh
 
   function next(offset: number) {
     if (!loaded) return
-    setIntent({ offset, previous: [...loaded.previous, loaded.offset], attempt: 0 })
+    setIntent({ offset, previous: { offset: loaded.offset, previous: loaded.previous }, attempt: 0 })
   }
 
   function previous() {
     if (!loaded) return
-    const offset = loaded.previous.at(-1)
-    if (offset !== undefined) setIntent({ offset, previous: loaded.previous.slice(0, -1), attempt: 0 })
+    const previous = loaded.previous
+    if (previous) setIntent({ offset: previous.offset, previous: previous.previous, attempt: 0 })
   }
 
   const page = loaded?.page
@@ -102,7 +107,7 @@ export default function NodeWindow({ requestId, conversationId, hostRun, refresh
       <button type="button" disabled={loading} onClick={() => next(page.oversizedItem!.skipOffset)}>Skip this item</button>
     </p>}
     <div className="history-controls">
-      <button type="button" disabled={loading || !loaded?.previous.length} onClick={previous}>Previous page</button>
+      <button type="button" disabled={loading || !loaded?.previous} onClick={previous}>Previous page</button>
       {!page?.oversizedItem && page?.nextOffset !== null && page?.nextOffset !== undefined &&
         <button type="button" disabled={loading} onClick={() => next(page.nextOffset!)}>Next page</button>}
     </div>
