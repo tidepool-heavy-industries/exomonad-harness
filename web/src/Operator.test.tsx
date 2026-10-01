@@ -160,7 +160,7 @@ describe('optional browser session', () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
     expect(fetchMock.mock.calls[1]?.[0]).toBe(`/api/commands/${submission.operation_id}`)
-    expect(await screen.findByRole('heading', { name: 'Tree' })).toBeInTheDocument()
+    expect(await screen.findByText('Session authenticated · ready')).toBeInTheDocument()
     expect(socket.send).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'Host' }))
     const operations = screen.getByRole('region', { name: 'Retained browser operations' })
