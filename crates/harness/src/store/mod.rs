@@ -1970,6 +1970,14 @@ impl Store {
         let mut c = self.lock();
         let tx = c.transaction()?;
         let h = Self::put_item_tx(&tx, output)?;
+        if let Some((previous_hash, previous_terminal)) = terminal::exact_terminal(&tx, operation)?
+        {
+            if previous_hash != h || previous_terminal != terminal {
+                return Err(StoreError::ConflictingReplayOutcome {
+                    operation: operation.clone(),
+                });
+            }
+        }
         let origin = serde_json::to_string(&operation.origin)?;
         let n = tx.execute(
             "UPDATE claims SET state='settled',output_hash=?4,terminal_json=?5 WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND state='pending'",

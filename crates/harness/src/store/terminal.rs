@@ -39,7 +39,7 @@ pub struct RecordedToolOutput {
     pub terminal: TerminalOutcome,
 }
 
-fn exact_terminal(
+pub(super) fn exact_terminal(
     c: &Connection,
     operation: &OperationId,
 ) -> Result<Option<(ItemHash, TerminalOutcome)>> {
@@ -309,6 +309,57 @@ mod tests {
             .unwrap();
         assert!(
             matches!(store.replay_tool_output_operation(&operation),Err(StoreError::ConflictingReplayOutcome {operation: conflicting}) if conflicting==operation)
+        );
+    }
+
+    #[test]
+    fn settlement_refuses_same_hash_different_terminal_before_updating_inherited_claims() {
+        let store = Store::memory().unwrap();
+        let operation = operation(&store, "atomic-original");
+        let output = JobOutput::Cancelled;
+        store
+            .write_job_output(&operation, ToolKind::Function, &output)
+            .unwrap();
+        let item = Item::tool_output(&operation.call, ToolKind::Function, &output);
+        let child = RequestId("atomic-inherited".into());
+        store
+            .create_request(&child, Some(&operation.request), "/root/child")
+            .unwrap();
+        store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) SELECT origin,origin_request_id,call_id,?1,'pending' FROM claims WHERE request_id=?2",params![child.0,operation.request.0]).unwrap();
+        assert!(
+            matches!(store.write_output(&operation,&item,TerminalOutcome::Success),Err(StoreError::ConflictingReplayOutcome {operation: conflicting}) if conflicting==operation)
+        );
+        let inherited = store.claims_on(&child).unwrap();
+        assert_eq!(inherited[0].state, super::super::ClaimState::Pending);
+        assert!(inherited[0].output.is_none());
+        let marker: Option<String> = store
+            .lock()
+            .query_row(
+                "SELECT terminal_json FROM claims WHERE request_id=?1",
+                [&child.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(marker.is_none());
+        assert_eq!(
+            store
+                .write_output(&operation, &item, TerminalOutcome::Cancelled)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .write_output(&operation, &item, TerminalOutcome::Cancelled)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .replay_tool_output_operation(&operation)
+                .unwrap()
+                .unwrap()
+                .terminal,
+            TerminalOutcome::Cancelled
         );
     }
 }
