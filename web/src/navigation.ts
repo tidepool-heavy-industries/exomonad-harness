@@ -10,9 +10,9 @@ const screenPaths: Record<Exclude<Screen, 'chat'>, string> = {
 const pathScreens = new Map<string, Screen>(Object.entries(screenPaths).map(([screen, path]) => [path, screen as Screen]));
 export const defaultRoute: RouteState = { screen: 'tree', selection: { kind: 'none' }, global: false, messageFilters: {} };
 
-function invalidRoute(): { route: RouteState; issue: string } {
+function invalidRoute(screen: Screen): { route: RouteState; issue: string } {
   return {
-    route: { screen: 'tree', selection: { kind: 'none' }, global: false, messageFilters: {} },
+    route: { screen, selection: { kind: 'none' }, global: false, messageFilters: {} },
     issue: 'This URL contains an invalid or incomplete selection. Choose an exact context again.',
   };
 }
@@ -58,32 +58,31 @@ export function parseRoute(url: URL): { route: RouteState; issue?: string } {
   }
 
   const hasIdentityFields = run !== null || actor !== null || incarnation !== null;
-  const legacyActorSelection = url.pathname === '/' && view === 'chat' && hasIdentityFields;
   const canonicalActorSelection = pathActor !== undefined;
+  const queryActorSelection = !canonicalActorSelection && hasIdentityFields;
   const actorMatchesPath = canonicalActorSelection && actor !== null
     && actorPath(actor) !== undefined
     && (actor.startsWith('/') ? actor.slice(1) : actor) === pathActor?.slice(1);
   const selectionConflict = (canonicalActorSelection && (conversation !== null || (actor !== null && !actorMatchesPath)))
-    || (screen !== 'chat' && hasIdentityFields)
-    || (screen === 'chat' && conversation !== null && hasIdentityFields)
+    || (queryActorSelection && conversation !== null)
     || (view !== null && url.pathname !== '/' && view !== screen);
   const missingIdentity = canonicalActorSelection
     ? (!run || !incarnation)
-    : legacyActorSelection && (!run || !actor || !incarnation);
+    : queryActorSelection && (!run || !actor || !incarnation);
   const invalid = duplicate
     || pathIssue
     || selectionConflict
     || missingIdentity
     || (view !== null && !screens.includes(view as Screen))
-    || (hasIdentityFields && !legacyActorSelection && !canonicalActorSelection)
+    || (hasIdentityFields && !queryActorSelection && !canonicalActorSelection)
     || (conversation !== null && conversation.length === 0)
     || (p.has('global') && p.get('global') !== '1')
     || (type !== null && !kinds.includes(type as typeof kinds[number]));
-  if (invalid) return invalidRoute();
+  if (invalid) return invalidRoute(screen);
 
   const selection: RouteState['selection'] = canonicalActorSelection && run && incarnation
     ? { kind: 'actor', identity: { run, actor: actor ?? pathActor!, incarnation } }
-    : legacyActorSelection && run && actor && incarnation
+    : queryActorSelection && run && actor && incarnation
       ? { kind: 'actor', identity: { run, actor, incarnation } }
       : conversation
         ? { kind: 'conversation', conversationId: conversation }
@@ -122,8 +121,10 @@ export function routeUrl(route: RouteState, base: URL): URL {
     url.searchParams.set('incarnation', route.selection.identity.incarnation);
     // The readable actor path omits its root slash, so retain that bit when
     // the exact actor identity uses the slashless spelling.
-    if (!route.selection.identity.actor.startsWith('/'))
-      url.searchParams.set('actor', route.selection.identity.actor);
+    if (!route.selection.identity.actor.startsWith('/')) url.searchParams.set('actor', route.selection.identity.actor);
+  } else if (route.selection.kind === 'actor') {
+    url.pathname = route.screen === 'chat' ? '/chat' : screenPaths[route.screen];
+    Object.entries(route.selection.identity).forEach(([key, value]) => url.searchParams.set(key, value));
   } else {
     url.pathname = route.screen === 'chat' ? '/chat' : screenPaths[route.screen];
     if (route.selection.kind === 'conversation') url.searchParams.set('conversation', route.selection.conversationId);

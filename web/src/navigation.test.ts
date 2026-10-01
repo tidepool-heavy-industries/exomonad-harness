@@ -39,11 +39,40 @@ describe('native route codec', () => {
     expect(parseRoute(url)).toEqual({ route, issue: undefined });
   });
 
+  it.each(['tree', 'timeline', 'inbox', 'host', 'command', 'chat'] as const)(
+    'preserves exact actor identity on the %s page', screen => {
+      const route = {
+        ...defaultRoute,
+        screen,
+        selection: { kind: 'actor' as const, identity: { run: 'run-7', actor: '/root/worker', incarnation: 'inc-2' } },
+      };
+      const url = routeUrl(route, new URL('https://host/chat/root/worker?run=old&incarnation=old'));
+      expect(parseRoute(url)).toEqual({ route, issue: undefined });
+      if (screen === 'chat') expect(url.pathname).toBe('/chat/root/worker');
+      else {
+        expect(url.pathname).toBe(`/${screen}`);
+        expect(url.searchParams.getAll('run')).toEqual(['run-7']);
+        expect(url.searchParams.getAll('actor')).toEqual(['/root/worker']);
+        expect(url.searchParams.getAll('incarnation')).toEqual(['inc-2']);
+      }
+    },
+  );
+
   it('allows an unselected chat page and reads unambiguous legacy query links', () => {
     expect(parseRoute(new URL('https://host/chat'))).toEqual({ route: { ...defaultRoute, screen: 'chat' } });
     expect(parseRoute(new URL('https://host/?view=chat&run=r&actor=%2Froot%2Fworker&incarnation=i'))).toEqual({
       route: { ...defaultRoute, screen: 'chat', selection: { kind: 'actor', identity: { run: 'r', actor: '/root/worker', incarnation: 'i' } } },
     });
+    expect(parseRoute(new URL('https://host/?view=host&run=r&actor=%2Froot%2Fworker&incarnation=i'))).toEqual({
+      route: { ...defaultRoute, screen: 'host', selection: { kind: 'actor', identity: { run: 'r', actor: '/root/worker', incarnation: 'i' } } },
+    });
+  });
+
+  it('keeps a page and issue when its exact actor identity is incomplete', () => {
+    const parsed = parseRoute(new URL('https://host/host?run=r&incarnation=i'));
+    expect(parsed.issue).toBeTruthy();
+    expect(parsed.route.screen).toBe('host');
+    expect(parsed.route.selection.kind).toBe('none');
   });
 
   it.each([
@@ -53,10 +82,12 @@ describe('native route codec', () => {
     '/chat/root//worker?run=r&incarnation=i',
     '/chat/../worker?run=r&incarnation=i',
     '/tree?view=chat',
-    '/chat?actor=%2Froot&run=r&incarnation=i',
+    '/chat?actor=%2Froot&run=r&incarnation=i&conversation=c',
     '/chat?run=r&incarnation=i',
+    '/host?run=r&incarnation=i',
     '/?view=nope',
     '/?view=chat&actor=%2Froot&run=r',
+    '/?view=host&run=r&incarnation=i',
     '/?actor=a&actor=b&run=r&incarnation=i&view=chat',
     '/?type=BOGUS',
     '/?global=0',
