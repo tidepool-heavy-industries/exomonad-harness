@@ -12,7 +12,7 @@ import {
   retainCommand, writePendingCommands, type BrowserCommandRecord,
 } from './pending-commands'
 import { createCommandLookups } from './command-lookups'
-import { CommandStatusError, getCommandStatus, getSessionStatus, login, logout, SessionApiError } from './session-api'
+import { CommandStatusError, getCommandStatus, getSessionStatus, login, logout, SessionApiError, type AuthenticationMode } from './session-api'
 import { connectHarness, type HarnessConnection } from './ws-client'
 import type { DemoSubmissionResult, LocalSubmissionResult, TransportPhase } from './client-contract'
 
@@ -25,6 +25,8 @@ export function Operator() {
   const [project] = useState(createViewProjector)
   const [snapshotLoaded, setSnapshotLoaded] = useState(false)
   const [authenticated, setAuthenticated] = useState<boolean | undefined>()
+  const [authentication, setAuthentication] = useState<AuthenticationMode | undefined>()
+  const [authenticationAvailable, setAuthenticationAvailable] = useState<boolean | undefined>()
   const [secret, setSecret] = useState('')
   const [failure, setFailure] = useState('')
   const [demoFeedback, setDemoFeedback] = useState('')
@@ -77,6 +79,8 @@ export function Operator() {
     const pending = getSessionStatus(controller.signal).then((result) => {
       if (!mounted.current || generation !== sessionGeneration.current) return
       setAuthenticated(result.authenticated)
+      setAuthentication(result.authentication)
+      setAuthenticationAvailable(result.available)
     }, (error: unknown) => {
       if (!mounted.current || generation !== sessionGeneration.current || controller.signal.aborted) return
       if (error instanceof SessionApiError && (error.status === 401 || error.status === 403)) setAuthenticated(false)
@@ -313,7 +317,11 @@ export function Operator() {
     setChecking(true)
     try {
       const result = await login(suppliedSecret, controller.signal)
-      if (mounted.current && generation === sessionGeneration.current) setAuthenticated(result.authenticated)
+      if (mounted.current && generation === sessionGeneration.current) {
+        setAuthenticated(result.authenticated)
+        setAuthentication(result.authentication)
+        setAuthenticationAvailable(result.available)
+      }
     } catch (error) {
       if (!mounted.current || generation !== sessionGeneration.current) return
       if (error instanceof SessionApiError && (error.status === 401 || error.status === 403)) setAuthenticated(false)
@@ -335,6 +343,8 @@ export function Operator() {
       if (!mounted.current || generation !== sessionGeneration.current) return
       try { clearDrafts() } catch { setFailure('Signed out; some browser draft storage could not be cleared.') }
       setAuthenticated(false)
+      setAuthentication('secret')
+      setAuthenticationAvailable(true)
       phaseRef.current = 'disconnected'
       setTransportPhase('disconnected')
     } catch (error) {
@@ -348,25 +358,34 @@ export function Operator() {
 
   if (authenticated !== true) return (
     <main className="session-screen" aria-labelledby="session-heading">
-      <h1 id="session-heading">{authenticated === false ? 'Operator sign in' : 'Check operator session'}</h1>
-      <p className="hint">Enter the browser session secret. Trusted-proxy access is checked automatically.</p>
+      <h1 id="session-heading">{authentication === 'tailscale' ? 'Tailscale access required'
+        : authentication === 'disabled' || authenticationAvailable === false ? 'Operator access unavailable'
+          : authenticated === false ? 'Operator sign in' : 'Check operator session'}</h1>
+      <p className="hint">{authentication === 'tailscale'
+        ? authenticationAvailable === false
+          ? 'Tailscale authentication is unavailable on this server. Check the server configuration, then retry.'
+          : 'Connect to the authorized Tailscale network, then retry the session check.'
+        : authentication === 'disabled' || authenticationAvailable === false
+          ? 'Browser operator authentication is unavailable on this server. Check the server configuration, then retry.'
+          : authentication === 'secret' ? 'Enter the browser session secret.'
+            : 'Check the operator session, then retry if needed.'}</p>
       {failure && <p className="session-error" role="alert">{failure}</p>}
-      <form className="session-form" onSubmit={(event) => void submitLogin(event)}>
+      {authentication === 'secret' && authenticationAvailable !== false && <form className="session-form" onSubmit={(event) => void submitLogin(event)}>
         <label htmlFor="session-secret">Session secret</label>
         <input id="session-secret" type="password" autoComplete="current-password" value={secret}
           onChange={(event) => setSecret(event.target.value)} />
         <button type="submit" disabled={!secret || checking}>Sign in</button>
-      </form>
+      </form>}
       <button type="button" onClick={() => void checkSession()} disabled={checking}>
-        {checking ? 'Checking…' : 'Check session / retry'}
+        {checking ? 'Checking…' : 'Retry session check'}
       </button>
     </main>
   )
 
   return <>
     <header className="session-bar">
-      <span role="status">Session authenticated · {transportPhase}</span>
-      <button type="button" onClick={() => void signOut()} disabled={checking}>Sign out</button>
+      <span role="status">Session authenticated{authentication === 'tailscale' ? ' · Tailscale' : authentication === 'disabled' ? ' · No browser authentication' : ''} · {transportPhase}</span>
+      {authentication === 'secret' && <button type="button" onClick={() => void signOut()} disabled={checking}>Sign out</button>}
       <button type="button" onClick={() => void checkSession()} disabled={checking}>Recheck session</button>
     </header>
     {failure && <p className="session-error" role="alert">{failure}</p>}

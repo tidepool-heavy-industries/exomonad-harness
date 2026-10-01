@@ -10,7 +10,17 @@ export class SessionApiError extends Error {
   }
 }
 
-export interface SessionStatus { authenticated: boolean }
+export type AuthenticationMode = 'secret' | 'tailscale' | 'disabled'
+export interface SessionStatus { authenticated: boolean; authentication: AuthenticationMode; available: boolean }
+
+export function decodeSessionStatus(value: unknown): SessionStatus {
+  if (!isObject(value) || typeof value.authenticated !== 'boolean'
+    || (value.authentication !== 'secret' && value.authentication !== 'tailscale' && value.authentication !== 'disabled')
+    || typeof value.available !== 'boolean') {
+    throw new Error('The session endpoint returned an invalid status.')
+  }
+  return { authenticated: value.authenticated, authentication: value.authentication, available: value.available }
+}
 
 /** Every protected read has a deadline, including connection and JSON body. */
 async function request<T>(url: string, init: RequestInit, decode: (response: Response) => Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -38,8 +48,7 @@ export async function getSessionStatus(signal?: AbortSignal): Promise<SessionSta
   return request('/api/session', { method: 'GET', headers: { Accept: 'application/json' } }, async (response) => {
     if (!response.ok) throw new SessionApiError(response.status, 'check')
     const result: unknown = await response.json()
-    if (!isObject(result) || typeof result.authenticated !== 'boolean') throw new Error('The session endpoint returned an invalid status.')
-    return { authenticated: result.authenticated }
+    return decodeSessionStatus(result)
   }, signal)
 }
 
@@ -49,8 +58,9 @@ export async function login(secret: string, signal?: AbortSignal): Promise<Sessi
   }, async (response) => {
     if (!response.ok) throw new SessionApiError(response.status, 'login')
     const result: unknown = await response.json()
-    if (!isObject(result) || result.authenticated !== true) throw new Error('The login endpoint did not confirm authentication.')
-    return { authenticated: true }
+    const status = decodeSessionStatus(result)
+    if (!status.authenticated) throw new Error('The login endpoint did not confirm authentication.')
+    return status
   }, signal)
 }
 

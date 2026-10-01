@@ -1,9 +1,26 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { CommandStatusError, getCommandStatus } from './session-api'
+import { CommandStatusError, decodeSessionStatus, getCommandStatus } from './session-api'
 
 afterEach(() => vi.unstubAllGlobals())
 const operationId = '11111111-1111-4111-8111-111111111111'
 const record = { operationId, command: { action: 'retire', target: { run: 'run', actor: '/root', incarnation: 'one' } }, state: 'queued', envelopeId: null, receipt: null }
+
+it('decodes each browser authentication mode and rejects incomplete status contracts', () => {
+  expect(decodeSessionStatus({ authenticated: true, authentication: 'tailscale', available: true }))
+    .toEqual({ authenticated: true, authentication: 'tailscale', available: true })
+  expect(decodeSessionStatus({ authenticated: false, authentication: 'tailscale', available: false }))
+    .toEqual({ authenticated: false, authentication: 'tailscale', available: false })
+  expect(decodeSessionStatus({ authenticated: false, authentication: 'secret', available: true }))
+    .toEqual({ authenticated: false, authentication: 'secret', available: true })
+  expect(decodeSessionStatus({ authenticated: true, authentication: 'disabled', available: false }))
+    .toEqual({ authenticated: true, authentication: 'disabled', available: false })
+  for (const value of [
+    { authenticated: true },
+    { authenticated: true, authentication: 'proxy', available: true },
+    { authenticated: 'yes', authentication: 'secret', available: true },
+    { authenticated: false, authentication: 'secret', available: 'yes' },
+  ]) expect(() => decodeSessionStatus(value)).toThrow(/invalid status/)
+})
 
 it('preserves typed status authentication failure and treats only 404 as absent', async () => {
   const fetcher = vi.fn().mockResolvedValueOnce({ status: 401, ok: false }).mockResolvedValueOnce({ status: 404, ok: false })
