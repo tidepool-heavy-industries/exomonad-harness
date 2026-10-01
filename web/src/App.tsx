@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from 'react';
 import NodeWindow from './NodeWindow';
-import ChatHistory from './ChatHistory';
+import WorkerChat from './WorkerChat';
+import ActiveWorkerTree from './ActiveWorkerTree';
 import type { CommandReceipt, HostActorIdentity, HostCommand } from './protocol';
 import { actorIdentityKey } from './protocol';
 import { isSettledCommand, operationKey, type BrowserCommandRecord } from './pending-commands';
@@ -147,15 +148,15 @@ function HostComposer({ data, route, navigate, unavailable, ready, onHostCommand
   };
   return <section className="host-controls">
     <h2>{chat ? 'Reply' : 'Embedded host controls'}</h2>
-    <label htmlFor="host-target">Target actor</label>
+    {!chat && <><label htmlFor="host-target">Target actor</label>
     <select id="host-target" value={selectedKey} onChange={event => { const selected = actors.find(item => actorIdentityKey(identityOf(item)) === event.target.value); navigate({ ...route, selection: selected ? { kind: 'actor', identity: identityOf(selected) } : { kind: 'none' } }); setFeedback(''); }}>
       <option value="">Choose an actor…</option>
       {target && !actor && <option value={selectedKey}>Previously selected actor is no longer present</option>}{actors.map(item => <option key={actorIdentityKey(identityOf(item))} value={actorIdentityKey(identityOf(item))}>
         {item.name} · {item.kind} · {item.lifecycle} · incarnation {item.incarnation}
       </option>)}
-    </select>
+    </select></>}
     {!ready && <p role="status">Host controls await a fresh connected snapshot.</p>}{!onHostCommand && <p role="status">Host command channel is unavailable; this view is read-only.</p>}
-    {actor && actor.lifecycle !== 'running' && actor.lifecycle !== 'waiting' && <p role="status">This actor is {actor.lifecycle}; controls are unavailable.</p>}
+    {!chat && actor && actor.lifecycle !== 'running' && actor.lifecycle !== 'waiting' && <p role="status">This actor is {actor.lifecycle}; controls are unavailable.</p>}
     <form onSubmit={(event: FormEvent) => {
       event.preventDefault(); if (target && canControl && draft.text.trim())
         send({ action: 'input', target, text: draft.text });
@@ -187,24 +188,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
   const selector = useMemo(() => createViewSelector(), []);
   const view = useMemo(() => selector(data, route.selection, route.global, route.messageFilters), [selector, data, route.selection, route.global, route.messageFilters]);
   const embedded = data.hostRun !== undefined;
-  const screens = useMemo<Screen[]>(() => embedded ? ['chat', 'tree', 'timeline', 'inbox', 'host'] : ['tree', 'timeline', 'inbox', 'command'], [embedded]);
-  const defaultChat = useRef(!new URL(window.location.href).searchParams.has('view'));
-  const rootChosen = useRef(false);
-  useEffect(() => {
-    if (!embedded) return;
-    if (route.selection.kind !== 'none') rootChosen.current = true;
-    if (defaultChat.current && !issue) {
-      defaultChat.current = false;
-      navigate({ ...route, screen: 'chat' }, true);
-      return;
-    }
-    if (route.screen !== 'chat' || route.selection.kind !== 'none' || issue || rootChosen.current || transportPhase !== 'ready') return;
-    const roots = (data.actors ?? []).filter(actor => actor.run === data.hostRun && actor.kind === 'model' && actor.parentIdentity === null);
-    if (roots.length === 1) {
-      rootChosen.current = true;
-      navigate({ ...route, selection: { kind: 'actor', identity: identityOf(roots[0]!) } }, true);
-    }
-  }, [embedded, data.actors, data.hostRun, route, issue, transportPhase, navigate]);
+  const screens = useMemo<Screen[]>(() => embedded ? ['tree', 'chat', 'timeline', 'inbox', 'host'] : ['tree', 'timeline', 'inbox', 'command'], [embedded]);
   const heading = useRef<HTMLHeadingElement>(null);
   const previousScreen = useRef(route.screen);
   const inspectionTrigger = useRef<HTMLElement | null>(null);
@@ -454,18 +438,6 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
           {!inbox.total && <Empty>No messages match this context and filters.</Empty>}
           <Pager page={inbox.page} count={inbox.pageCount} total={inbox.total} onPage={setPage} />
         </>, [inbox, endpoints, endpointNodes, endpointActors, link, route, navigate]);
-  const chatContext = JSON.stringify(route.selection);
-  const retainedChat = useRef<{ context: string; conversationId: string; head?: HarnessViewModel['timeline'][number] }>();
-  const retainedConversation = retainedChat.current?.context === chatContext ? retainedChat.current : undefined;
-  const chatConversation = resolved.actor?.kind === 'model' ? resolved.conversationId ?? retainedConversation?.conversationId :
-    resolved.missing ? retainedConversation?.conversationId : undefined;
-  const chatRequests = data.timeline.filter(item => item.kind === 'request' && item.nodeId === chatConversation);
-  const parentRequests = new Set(chatRequests.flatMap(item => item.parentId ? [item.parentId] : []));
-  const currentChatHead = chatRequests.filter(item => !parentRequests.has(item.id)).at(-1);
-  const chatHead = currentChatHead ?? (retainedChat.current?.context === chatContext && retainedChat.current.conversationId === chatConversation ? retainedChat.current.head : undefined);
-  if (chatConversation) retainedChat.current = { context: chatContext, conversationId: chatConversation, head: chatHead };
-  const chatReady = transportPhase === 'ready' && route.selection.kind === 'actor' && route.selection.identity.run === data.hostRun && !resolved.missing && resolved.actor?.lifecycle !== 'lost';
-  const chatRefreshKey = JSON.stringify([data.nodes.find(node => node.id === chatConversation)?.version, chatRequests.map(item => [item.id, item.historyRefreshKey])]);
   const chatCommands = pendingCommands.filter(record => route.selection.kind === 'actor' && actorIdentityKey(record.submission.command.target) === actorIdentityKey(route.selection.identity));
   const inspected = route.requestId ? requestIndex.get(route.requestId) : undefined;
   return <div className="harness">
@@ -474,13 +446,18 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
       <span className="brand">Harness <span className="hint">/ operator</span>
       </span>
       <nav className="tabs" aria-label="Views">
-        {screens.map(screen => <button className="tab" key={screen} aria-current={route.screen === screen ? 'page' : undefined} onClick={() => navigate({ ...route, screen })}>
+        {screens.map(screen => <a className="tab" key={screen} href={routeUrl({ ...route, screen }, new URL(window.location.href)).toString()} aria-current={route.screen === screen ? 'page' : undefined} onClick={(event: MouseEvent<HTMLAnchorElement>) => {
+          if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+            event.preventDefault();
+            navigate({ ...route, screen });
+          }
+        }}>
           {screenNames[screen]}
-        </button>)}
+        </a>)}
       </nav>
     </header>
     {transportPhase !== 'ready' && <p className="snapshot-status" role="status">{route.screen === 'chat' ? 'Host unavailable · ' : ''}Showing last snapshot · {transportPhase}; controls await a fresh snapshot.</p>}
-    <div className="selection-context">
+    {route.screen !== 'chat' && <div className="selection-context">
       <strong>Selected context:</strong> <span>
         {selectedDescription}
       </span>
@@ -490,7 +467,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
       {issue && <p className="error" role="status">
         {issue}
       </p>}{resolved.missing && <p className="error" role="status">The selected actor or conversation is unavailable. The exact selection remains preserved; choose a new context explicitly.</p>}{resolved.actor?.kind === 'workflow' && !resolved.conversationId && <p role="status">Workflow actor model history is unavailable.</p>}
-    </div>
+    </div>}
     <main id="main-content" tabIndex={-1}>
       <div className="toolbar">
         <h1 ref={heading} tabIndex={-1}>
@@ -500,7 +477,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
         </span>
       </div>
       {!screens.includes(route.screen) ? <Empty>This view is unavailable in this host mode. Choose a view above.</Empty> : <>
-        {['tree', 'timeline', 'inbox'].includes(route.screen) && <div className="toolbar">
+        {((route.screen === 'tree' && !embedded) || ['timeline', 'inbox'].includes(route.screen)) && <div className="toolbar">
           <label>Search <input type="search" value={search} onChange={event => { setSearch(event.target.value); setPage(0); setActorPage(0); }} />
           </label>
           {route.screen === 'tree' && <button disabled={route.selection.kind === 'none'} onClick={() => {
@@ -515,16 +492,13 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
             }
           }}>Jump to selected</button>}
         </div>}
-        {route.screen === 'tree' && tree}
+        {route.screen === 'tree' && (embedded ? <ActiveWorkerTree data={data} route={route} navigate={navigate} /> : tree)}
         {route.screen === 'timeline' && timeline}
         {route.screen === 'inbox' && inboxScreen}
-        {route.screen === 'chat' && <div className="chat-layout">
-          {chatConversation ? (chatHead ?
-            <ChatHistory key={JSON.stringify([route.selection, chatConversation])} requestId={chatHead.id} requests={requestIndex} refreshKey={chatRefreshKey} ready={chatReady} onAuthExpired={onAuthExpired} /> :
-            <Empty>No retained model exchange is available yet.</Empty>) : <Empty>Select an exact model actor to open its conversation.</Empty>}
+        {route.screen === 'chat' && <WorkerChat data={data} route={route} navigate={navigate} transportPhase={transportPhase} issue={issue} onAuthExpired={onAuthExpired}>
           <HostComposer key={route.selection.kind === 'actor' ? actorIdentityKey(route.selection.identity) : 'none'} chat data={data} route={route} navigate={navigate} unavailable={Boolean(issue || resolved.missing)} ready={transportPhase === 'ready'} onHostCommand={onHostCommand} />
           <RetainedCommands commands={chatCommands} run={data.hostRun} ready={transportPhase === 'ready' && Boolean(resolved.actor && ['running', 'waiting'].includes(resolved.actor.lifecycle))} onRetry={onRetry} />
-        </div>}
+        </WorkerChat>}
         {route.screen === 'host' && <>
           <HostComposer data={data} route={route} navigate={navigate} unavailable={Boolean(issue || resolved.missing)} ready={transportPhase === 'ready'} onHostCommand={onHostCommand} />
           <RetainedCommands commands={pendingCommands} run={data.hostRun} ready={transportPhase === 'ready'} onRetry={onRetry} />

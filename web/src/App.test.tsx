@@ -21,14 +21,14 @@ const target = { run: 'run', actor: '/worker', incarnation: 'old' };
 const actor = { id: JSON.stringify(['run', '/worker', 'old']), name: '/worker', run: 'run', incarnation: 'old', kind: 'model' as const, lifecycle: 'running', modelConversation: 'conv', activeRound: '00000000-0000-4000-8000-000000000001' };
 const data: HarnessViewModel = { hostRun: 'run', actors: [actor, { ...actor, id: JSON.stringify(['run', '/workflow', 'w']), name: '/workflow', incarnation: 'w', kind: 'workflow', modelConversation: undefined }], nodes: [{ id: 'conv', name: 'Conversation A', state: 'active' }, { id: 'other', name: 'Unattached conversation', state: 'idle' }], timeline: [{ id: 'req', key: 'request:req', nodeId: 'conv', label: 'Selected request', kind: 'request', state: 'completed', startedAtMs: 1000, endedAtMs: 2000, historyRefreshKey: 'stable' }, { id: 'req', key: 'job:req', nodeId: 'other', label: 'Unrelated job', kind: 'job', state: 'completed', delivered: false, output: ' retained output ' }], inbox: [{ id: 'one', sender: '/worker', recipient: '/operator', message: 'selected message', type: 'MESSAGE', state: 'MESSAGE' }, { id: 'two', sender: '/other', recipient: '/operator', message: 'other progress', type: 'PROGRESS', state: 'PROGRESS' }] };
 function route(query = '?view=tree') { window.history.replaceState(null, '', '/' + query); }
-function tab(name: string) { fireEvent.click(screen.getByRole('button', { name })); }
+function tab(name: string) { fireEvent.click(screen.getByRole('link', { name })); }
 function choose() { fireEvent.change(screen.getByLabelText('Target actor'), { target: { value: JSON.stringify(['run', '/worker', 'old']) } }); }
 beforeEach(() => { route(); sessionStorage.clear(); clearDrafts(); });
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); clearDrafts(); });
 describe('linked operator views', () => {
   it('links exact actors to supplied model conversation, keeps selection across screens and uses global toggle', () => {
     render(<App data={data} />);
-    fireEvent.click(within(screen.getByRole('table', { name: 'Host actor lifecycles' })).getByRole('link', { name: '/worker' }));
+    fireEvent.click(screen.getByRole('link', { name: 'Open chat with /worker, running' }));
     expect(window.location.search).toContain('incarnation=old');
     tab('Timeline');
     expect(screen.getByText('Selected request', { exact: false })).toBeVisible();
@@ -76,10 +76,15 @@ describe('linked operator views', () => {
     expect(screen.getByText(/invalid or incomplete selection/)).toBeVisible();
     expect(screen.getByRole('button', { name: 'Send input' })).toBeDisabled();
   });
-  it('shows workflow history unavailable and retains unattached conversation links', () => {
-    render(<App data={data} />);
-    fireEvent.click(screen.getByRole('link', { name: '/workflow' }));
+  it('links workflow actors to exact host details and preserves standalone conversation links', () => {
+    const mounted = render(<App data={data} />);
+    fireEvent.click(screen.getByRole('link', { name: 'View host details for workflow actor /workflow, running' }));
     expect(screen.getByText('Workflow actor model history is unavailable.')).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Host', level: 1 })).toBeVisible();
+    expect(window.location.search).toContain('incarnation=w');
+    mounted.unmount();
+    route();
+    render(<App data={{ ...data, hostRun: undefined }} />);
     expect(screen.getByRole('link', { name: 'Unattached conversation' })).toBeVisible();
   });
   it('requires fresh transport and callback, retaining text across disconnection', () => {
@@ -217,7 +222,7 @@ describe('linked operator views', () => {
     expect(screen.getByRole('button', { name: 'Retry same operation' })).toBeDisabled();
   });
   it('bounds large conversation/activity lists and exposes paging/search', () => {
-    const large = { ...data, nodes: Array.from({ length: 205 }, (_, i) => ({ id: `c${i}`, name: `Conversation ${i}`, state: 'active' })), timeline: Array.from({ length: 105 }, (_, i) => ({ id: `r${i}`, nodeId: 'c0', label: `Request ${i}`, kind: 'request' as const, state: 'completed' })) };
+    const large = { ...data, hostRun: undefined, nodes: Array.from({ length: 205 }, (_, i) => ({ id: `c${i}`, name: `Conversation ${i}`, state: 'active' })), timeline: Array.from({ length: 105 }, (_, i) => ({ id: `r${i}`, nodeId: 'c0', label: `Request ${i}`, kind: 'request' as const, state: 'completed' })) };
     render(<App data={large} />);
     expect(within(screen.getByRole('table', { name: 'Conversation tree' })).getAllByRole('row')).toHaveLength(100);
     fireEvent.change(screen.getByLabelText('Search'), { target: { value: 'Conversation 204' } });

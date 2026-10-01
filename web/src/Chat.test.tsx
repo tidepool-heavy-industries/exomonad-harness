@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { clearDrafts } from './drafts'
+import { clearWorkerChatRetention } from './WorkerChat'
 import { HistoryReadError, type HistoryPage } from './history-client'
 import { readHistoryPage } from './history-client'
 import type { HarnessViewModel } from './view-model'
@@ -18,11 +19,11 @@ const histories = {
   latest: page('latest', 'first', [{ type: 'function_call', name: 'read_file', call_id: 'call-1', arguments: '{"path":"README"}' }, { type: 'function_call_output', call_id: 'call-1', output: 'File contents' }, { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Latest answer' }] }]),
 }
 beforeEach(() => {
-  window.history.replaceState(null, '', '/')
-  sessionStorage.clear(); clearDrafts()
+  window.history.replaceState(null, '', '/chat/root?run=run&incarnation=original')
+  sessionStorage.clear(); clearDrafts(); clearWorkerChatRetention()
   vi.mocked(readHistoryPage).mockImplementation(async id => histories[id as keyof typeof histories] ?? page(id, null, []))
 })
-afterEach(() => { vi.clearAllMocks(); clearDrafts() })
+afterEach(() => { vi.clearAllMocks(); clearDrafts(); clearWorkerChatRetention() })
 describe('embedded actor chat', () => {
   it('renders the failed request wire diagnostic separately and admits a new reply without changing retained history', async () => {
     const failure = { kind: 'http' as const, status: 400, diagnostic: { code: 'invalid_parameter', error_type: 'invalid_request_error', param: 'tools[0]', message: '<b>Tool schema rejected</b>' } }
@@ -48,7 +49,7 @@ describe('embedded actor chat', () => {
     expect(within(notice).getByText('<b>Tool schema rejected</b>')).toBeVisible()
     expect(notice.querySelector('b')).toBeNull()
     expect(screen.queryByText('Unrelated child failure')).toBeNull()
-    expect(screen.getAllByRole('listitem')).toHaveLength(histories.first.items.length)
+    expect(within(screen.getByRole('list', { name: 'Retained conversation items' })).getAllByRole('listitem')).toHaveLength(histories.first.items.length)
     expect(screen.getByRole('region', { name: 'Retained browser operations' })).toHaveTextContent('input_admitted')
     expect(screen.getByRole('region', { name: 'Retained browser operations' })).not.toHaveTextContent('refused')
     fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'Try again with the corrected schema' } })
@@ -99,7 +100,7 @@ describe('embedded actor chat', () => {
     expect(screen.getByRole('alert', { name: 'Failed exchange first' })).toHaveTextContent('Earlier provider failure')
     expect(screen.queryByRole('alert', { name: 'Failed exchange latest' })).toBeNull()
   })
-  it('opens the exact parent-null model actor by default with inherited messages, tool inputs and output beside its composer', async () => {
+  it('opens the exact root link with inherited messages, tool inputs and output beside its composer', async () => {
     render(<App data={data} />)
     expect(screen.getByRole('heading', { name: 'Chat', level: 1 })).toBeVisible()
     await screen.findByText('Original question')
@@ -138,7 +139,7 @@ describe('embedded actor chat', () => {
     expect(screen.getByText('Latest answer')).toBeVisible()
     expect(screen.getByLabelText('Message to selected actor')).toHaveValue('Keep my draft')
     expect(screen.getByText(/This actor is lost/)).toBeVisible()
-    expect(screen.getByText(/Host unavailable; retained messages remain visible/)).toBeVisible()
+    expect(screen.getByText(/Its Chat is read-only; retained history remains available/)).toBeVisible()
     expect(screen.getByRole('button', { name: 'Send input' })).toBeDisabled()
     const replacement = { ...actor, id: JSON.stringify(['run', '/root', 'replacement']), incarnation: 'replacement' }
     mounted.rerender(<App data={{ ...data, actors: [replacement] }} onHostCommand={submit} />)
@@ -191,12 +192,12 @@ describe('embedded actor chat', () => {
     await waitFor(() => expect(readHistoryPage).toHaveBeenCalled())
     const oldSignal = vi.mocked(readHistoryPage).mock.calls[0]![2]
     fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'Root draft' } })
-    fireEvent.change(screen.getByLabelText('Target actor'), { target: { value: replacement.id } })
+    fireEvent.click(screen.getByRole('link', { name: replacement.name }))
     expect(oldSignal.aborted).toBe(true)
     expect(screen.getByLabelText('Message to selected actor')).toHaveValue('')
     await act(async () => { resolveOld?.(histories.latest) })
     expect(screen.queryByText('Latest answer')).toBeNull()
-    fireEvent.change(screen.getByLabelText('Target actor'), { target: { value: actor.id } })
+    fireEvent.click(screen.getByRole('link', { name: actor.name }))
     expect(screen.getByLabelText('Message to selected actor')).toHaveValue('Root draft')
     await screen.findByText('Latest answer')
   })
@@ -246,7 +247,7 @@ describe('embedded actor chat', () => {
       return { ...result, items: result.items.map(entry => ({ ...entry, byteLen })) }
     })
     render(<App data={data} />)
-    await waitFor(() => expect(screen.getAllByRole('listitem')).toHaveLength(visible))
+    await waitFor(() => expect(within(screen.getByRole('list', { name: 'Retained conversation items' })).getAllByRole('listitem')).toHaveLength(visible))
     expect(readHistoryPage).toHaveBeenCalledTimes(reads)
     expect(screen.getByRole('button', { name: 'Earlier exchanges' })).toBeEnabled()
   })
@@ -268,6 +269,7 @@ describe('embedded actor chat', () => {
     await screen.findByText('Original question')
   })
   it('does not infer roots from labels or follow ambiguous roots, and preserves explicit admin and demo views', () => {
+    window.history.replaceState(null, '', '/chat')
     const mounted = render(<App data={{ ...data, actors: [actor, { ...actor, id: 'other', incarnation: 'two' }] }} />)
     expect(screen.getByRole('button', { name: 'Send input' })).toBeDisabled()
     expect(window.location.search).not.toContain('incarnation=')
@@ -279,7 +281,7 @@ describe('embedded actor chat', () => {
     window.history.replaceState(null, '', '/')
     render(<App data={{ ...data, hostRun: undefined }} />)
     expect(screen.getByRole('heading', { name: 'Tree', level: 1 })).toBeVisible()
-    expect(screen.queryByRole('button', { name: 'Chat' })).toBeNull()
+    expect(screen.queryByRole('link', { name: 'Chat' })).toBeNull()
   })
   it('preserves incomplete exact actor links until an explicit selection is made', () => {
     window.history.replaceState(null, '', '/?run=run&actor=/root')

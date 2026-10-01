@@ -162,7 +162,7 @@ describe('optional browser session', () => {
     expect(fetchMock.mock.calls[1]?.[0]).toBe(`/api/commands/${submission.operation_id}`)
     expect(await screen.findByText('Session authenticated · ready')).toBeInTheDocument()
     expect(socket.send).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByRole('button', { name: 'Host' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Host' }))
     const operations = screen.getByRole('region', { name: 'Retained browser operations' })
     expect(await within(operations).findByText('input · input_admitted')).toBeInTheDocument()
     expect(within(operations).getByText(/Reconnect never automatically resubmits an operation/)).toBeInTheDocument()
@@ -185,7 +185,7 @@ describe('optional browser session', () => {
         snapshot: { seq: 1, hostRun: 'run-1', conversations: [], requests: [], jobs: [], envelopes: [] },
       }),
     })))
-    expect(await screen.findByRole('button', { name: 'Host' })).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: 'Host' })).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'Standalone async command scenario' })).not.toBeInTheDocument()
     expect(screen.queryByText('async start')).not.toBeInTheDocument()
   })
@@ -244,7 +244,7 @@ it('retains before sending and leaves host effects untouched when tab storage fa
   const socket = sockets[0]!
   socket.readyState = FakeSocket.OPEN
   socket.listeners.get('message')?.forEach((listener) => listener(new MessageEvent('message', { data: JSON.stringify({ type: 'snapshot', snapshot: { seq: 1, hostRun: 'run-1', actors: [{ identity: { run: 'run-1', actor: '/root', incarnation: 'one' }, parent: null, kind: 'model', lifecycle: 'waiting', modelConversation: '/root' }], conversations: [], requests: [], jobs: [], envelopes: [] } }) })))
-  fireEvent.click(await screen.findByRole('button', { name: 'Host' }))
+  fireEvent.click(await screen.findByRole('link', { name: 'Host' }))
   fireEvent.change(screen.getByLabelText('Target actor'), { target: { value: '["run-1","/root","one"]' } })
   fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: '  λ preserved  ' } })
   vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('storage unavailable') })

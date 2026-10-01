@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import App from './App'
 import { clearDrafts } from './drafts'
+import { clearWorkerChatRetention } from './WorkerChat'
 import { createViewProjector } from './integration'
 import {
   canonicalOperationId, isOperationId, normalizeSnapshot, sameHostCommand,
@@ -330,6 +331,7 @@ export function Operator() {
     setChecking(true)
     try {
       await logout(controller.signal)
+      clearWorkerChatRetention()
       if (!mounted.current || generation !== sessionGeneration.current) return
       try { clearDrafts() } catch { setFailure('Signed out; some browser draft storage could not be cleared.') }
       setAuthenticated(false)

@@ -58,16 +58,16 @@ describe('web outcome integration', () => {
     expect(reopenedView.inbox).toEqual(settledView.inbox)
 
     const app = render(createElement(App, { data: runningView }))
-    fireEvent.click(screen.getByRole('button', { name: /timeline/i }))
+    fireEvent.click(screen.getByRole('link', { name: /timeline/i }))
     let timeline = screen.getByRole('table', { name: 'Conversation activity timeline' })
     expect(timeline.textContent).toContain('call call-success-1')
     expect(timeline.textContent).toContain('tool kind custom')
     expect(timeline.textContent).toContain('delivered false')
-    fireEvent.click(screen.getByRole('button', { name: /inbox/i }))
+    fireEvent.click(screen.getByRole('link', { name: /inbox/i }))
     expect(screen.getByRole('list', { name: 'Inbox messages' }).textContent).toContain('custom run evaluating')
 
     app.rerender(createElement(App, { data: settledView }))
-    fireEvent.click(screen.getByRole('button', { name: /timeline/i }))
+    fireEvent.click(screen.getByRole('link', { name: /timeline/i }))
     timeline = screen.getByRole('table', { name: 'Conversation activity timeline' })
     expect(timeline.textContent).toContain('settled')
     expect(timeline.textContent).toContain('call call-success-1')
@@ -150,7 +150,7 @@ describe('web outcome integration', () => {
     // Exercise the actual App toolJobs/timeline presentation as the browser
     // receives each deterministic server snapshot (including after reopen).
     const app = render(createElement(App, { data: toViewModel(runningState) }))
-    fireEvent.click(screen.getByRole('button', { name: /timeline/i }))
+    fireEvent.click(screen.getByRole('link', { name: /timeline/i }))
     expect(screen.getByRole('table', { name: 'Conversation activity timeline' }).textContent)
       .toContain('custom:render_preview')
     expect(screen.getByRole('table', { name: 'Conversation activity timeline' }).textContent)
