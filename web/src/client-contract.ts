@@ -1,4 +1,4 @@
-import type { HostActorIdentity, HostCommand, HostCommandSubmission } from './protocol'
+import type { Envelope, HostActorIdentity, HostCommand, HostCommandSubmission } from './protocol'
 
 /** Client interaction state; normalized server Maps remain authoritative. */
 export type Screen = 'tree' | 'timeline' | 'inbox' | 'command' | 'host'
@@ -9,7 +9,11 @@ export type Selection =
   | { readonly kind: 'actor'; readonly identity: HostActorIdentity }
   | { readonly kind: 'conversation'; readonly conversationId: string }
 
-export type MessageFilter = 'all' | 'operator'
+export interface MessageFilters {
+  readonly sender?: string
+  readonly recipient?: string
+  readonly type?: Envelope['type']
+}
 
 /** Encoded by native URL APIs, preserving unrelated query parameters. */
 export interface RouteState {
@@ -17,7 +21,7 @@ export interface RouteState {
   readonly selection: Selection
   readonly global: boolean
   readonly requestId?: string
-  readonly messageFilter: MessageFilter
+  readonly messageFilters: MessageFilters
 }
 
 /** Local retention and socket observation do not establish host admission. */
@@ -31,7 +35,10 @@ export type LocalSubmissionResult =
 
 export type SubmitHostCommand = (command: HostCommand) => LocalSubmissionResult
 export type RetryHostCommand = (submission: HostCommandSubmission) => LocalSubmissionResult
-export type SubmitDemoCommand = (command: string) => void
+export type DemoSubmissionResult =
+  | { readonly kind: 'sent' }
+  | { readonly kind: 'blocked'; readonly reason: string }
+export type SubmitDemoCommand = (command: string) => DemoSubmissionResult
 
 export type TransportPhase =
   | 'connecting'

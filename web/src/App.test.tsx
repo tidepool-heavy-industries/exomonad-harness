@@ -3,9 +3,11 @@ import { describe, expect, it, vi } from 'vitest'
 import App from './App'
 import type { HarnessViewModel } from './view-model'
 
+const emptyData: HarnessViewModel = { nodes: [], timeline: [], inbox: [] }
+
 describe('operator views', () => {
   it('teaches the empty inbox and navigates between views by keyboard', () => {
-    render(<App />)
+    render(<App data={emptyData} />)
     fireEvent.click(screen.getByRole('button', { name: 'Inbox' }))
     expect(screen.getByText('Inbox is clear')).toBeInTheDocument()
     fireEvent.keyDown(window, { key: 'g' })
@@ -35,7 +37,7 @@ describe('operator views', () => {
 
   it('offers deterministic actions and preserves payload whitespace after the verb', () => {
     const onCommand = vi.fn()
-    render(<App onCommand={onCommand} />)
+    render(<App data={emptyData} onCommand={onCommand} />)
     fireEvent.click(screen.getByRole('button', { name: 'Command' }))
     expect(screen.getByText(/Deterministic mode/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Cancel wait' }))

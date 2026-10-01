@@ -5,14 +5,14 @@ import type { HarnessViewModel } from "./view-model";
 import type { Screen } from "./client-contract";
 
 export type AppProps = {
-  data?: HarnessViewModel;
+  data: HarnessViewModel;
+  demoFeedback?: string;
   onCommand?: (command: string | HostCommand) => void;
   onRetry?: (submission: HostCommandSubmission) => void;
   pendingCommands?: Array<{ submission: HostCommandSubmission; state: string }>;
   acceptedCommandIds?: readonly string[];
 };
 
-const emptyData: HarnessViewModel = { nodes: [], timeline: [], inbox: [] };
 const commonScreens: Array<{ id: Screen; title: string; shortcut: string }> = [
   { id: "tree", title: "Tree", shortcut: "g t" },
   { id: "timeline", title: "Timeline", shortcut: "g l" },
@@ -290,7 +290,7 @@ function Inbox({ data }: { data: HarnessViewModel }) {
   );
 }
 
-export default function App({ data = emptyData, onCommand, onRetry, pendingCommands = [], acceptedCommandIds = [] }: AppProps) {
+export default function App({ data, onCommand, onRetry, pendingCommands = [], acceptedCommandIds = [] }: AppProps) {
   const [screen, setScreen] = useState<Screen>("tree");
   const [command, setCommand] = useState("");
   const [inspectedRequest, setInspectedRequest] = useState<string>();
