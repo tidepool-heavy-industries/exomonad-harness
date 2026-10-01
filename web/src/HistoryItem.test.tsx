@@ -44,10 +44,20 @@ describe('retained Item presentation', () => {
     if ('type' in item && item.type.includes('call')) expect(screen.getByRole('heading').textContent).toContain(item.type)
   })
 
-  it.each([null, false, 0, { type: 'future_item', extra: ['λ'] }, { type: 'custom_tool_call_output', call_id: 'c', output: false }, { type: 'function_call', call_id: 'c', name: 'f', arguments: { z: 1 } }])('shows genuine arbitrary or unfamiliar JSON %j', (item) => {
+  it.each([null, false, 0, { type: 'future_item', extra: ['λ'] }, { type: 'custom_tool_call_output', call_id: 'c', output: false }, { type: 'custom_tool_call', call_id: 'c', name: 'f', input: { z: 1 } }])('shows genuine arbitrary or unfamiliar JSON %j', (item) => {
     render(<HistoryItem entry={entry(item)} />)
     expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
     expect(screen.queryByText(/success/i)).toBeNull()
+  })
+
+  it('renders valid object function arguments as structured JSON with exact call metadata and a Raw toggle', () => {
+    const argumentsObject = { z: 1, nested: { unicode: '  λ\n🐈  ', nullable: null }, choices: [false, 0] }
+    const item = { type: 'function_call', call_id: 'call λ', name: 'structured', arguments: argumentsObject }
+    render(<HistoryItem entry={entry(item)} />)
+    expect(screen.getByRole('heading', { name: 'function_call · structured · call call λ' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Arguments JSON item 7').textContent).toBe(JSON.stringify(argumentsObject, null, 2))
+    fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
+    expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
   })
 
   it('bounds readable and raw previews and expands only the fetched full text', () => {

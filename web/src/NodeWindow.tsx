@@ -9,19 +9,30 @@ interface LoadedPage {
   readonly previous: readonly number[]
 }
 
+interface ReadIntent {
+  readonly offset: number
+  readonly previous: readonly number[]
+  readonly attempt: number
+}
+
+function visiblePageIntent(current: ReadIntent, loaded?: LoadedPage): ReadIntent {
+  return { offset: loaded?.offset ?? current.offset, previous: loaded?.previous ?? current.previous, attempt: current.attempt + 1 }
+}
+
 /** One bounded retained page belongs to one exact inspection context. */
 export default function NodeWindow({ requestId, conversationId, hostRun, refreshKey, onClose, onAuthExpired }: NodeWindowProps) {
   const context = JSON.stringify([requestId, conversationId, hostRun])
   const [loaded, setLoaded] = useState<LoadedPage>()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>()
-  const [intent, setIntent] = useState({ offset: 0, previous: [] as readonly number[], attempt: 0 })
+  const [intent, setIntent] = useState<ReadIntent>({ offset: 0, previous: [], attempt: 0 })
   const currentContext = useRef(context)
   currentContext.current = context
   const generation = useRef(0)
   const authCallback = useRef(onAuthExpired)
   authCallback.current = onAuthExpired
   const [stateContext, setStateContext] = useState(context)
+  const [stateRefreshKey, setStateRefreshKey] = useState(refreshKey)
 
   // A context change resets paging before rendering any data from the old host.
   if (stateContext !== context) {
@@ -29,6 +40,10 @@ export default function NodeWindow({ requestId, conversationId, hostRun, refresh
     setLoaded(undefined)
     setError(undefined)
     setIntent({ offset: 0, previous: [], attempt: 0 })
+    setStateRefreshKey(refreshKey)
+  } else if (stateRefreshKey !== refreshKey) {
+    setStateRefreshKey(refreshKey)
+    setIntent((current) => visiblePageIntent(current, loaded))
   }
 
   useEffect(() => {
@@ -47,10 +62,14 @@ export default function NodeWindow({ requestId, conversationId, hostRun, refresh
       if (isCurrent()) setLoading(false)
     })
     return () => controller.abort()
-  }, [context, requestId, intent, refreshKey])
+  }, [context, requestId, intent])
 
   function reload() {
     setIntent((current) => ({ ...current, attempt: current.attempt + 1 }))
+  }
+
+  function refresh() {
+    setIntent((current) => visiblePageIntent(current, loaded))
   }
 
   function next(offset: number) {
@@ -67,7 +86,7 @@ export default function NodeWindow({ requestId, conversationId, hostRun, refresh
   const page = loaded?.page
   return <section aria-label="Retained request history" aria-busy={loading}>
     <div className="toolbar"><h2>Request history · {requestId}</h2><div className="history-controls">
-      <button type="button" disabled={loading} onClick={reload}>Refresh history</button>
+      <button type="button" disabled={loading} onClick={refresh}>Refresh history</button>
       <button type="button" onClick={onClose}>Close history</button>
     </div></div>
     {page && <p className="meta">Branch {page.branch}{page.parentId !== null ? ` · parent ${page.parentId}` : ''} · Offset {loaded?.offset} · {page.items.length} items</p>}

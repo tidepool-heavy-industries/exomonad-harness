@@ -41,9 +41,10 @@ function readable(value: unknown): ReadableItem | undefined {
   if ((value.type === 'function_call' || value.type === 'custom_tool_call')
     && typeof value.name === 'string' && typeof value.call_id === 'string') {
     const input = value.type === 'function_call' ? value.arguments : value.input
-    if (typeof input !== 'string') return undefined
+    if (typeof input !== 'string' && !(value.type === 'function_call' && object(input))) return undefined
     return { label: `${value.type} · ${value.name} · call ${value.call_id}`,
-      texts: [{ label: value.type === 'function_call' ? 'Arguments' : 'Input', text: input }] }
+      texts: [{ label: value.type === 'function_call' ? (typeof input === 'string' ? 'Arguments' : 'Arguments JSON') : 'Input',
+        text: typeof input === 'string' ? input : JSON.stringify(input, null, 2) }] }
   }
   if ((value.type === 'function_call_output' || value.type === 'custom_tool_call_output')
     && typeof value.call_id === 'string' && typeof value.output === 'string') {

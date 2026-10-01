@@ -6,7 +6,7 @@ const page = () => ({ requestId: 'request λ/1', parentId: null, branch: '/root'
   items: [{ position: 0, hash, byteLen: 4, item: null }], nextOffset: null, oversizedItem: null })
 const signal = () => new AbortController().signal
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
 
 describe('protected retained history client', () => {
   it('reads the exact encoded request at one bounded offset with no-store credentials and abort signal', async () => {
@@ -15,7 +15,7 @@ describe('protected retained history client', () => {
     const abortSignal = signal()
     expect(await readHistoryPage('request λ/1', 0, abortSignal)).toEqual(page())
     expect(fetchMock).toHaveBeenCalledWith('/api/history/request%20%CE%BB%2F1?offset=0&limit=50', {
-      credentials: 'same-origin', cache: 'no-store', signal: abortSignal,
+      credentials: 'same-origin', cache: 'no-store', signal: expect.any(AbortSignal),
     })
   })
 
@@ -75,5 +75,49 @@ describe('protected retained history client', () => {
     await expect(readHistoryPage(page().requestId, 0, signal())).rejects.toMatchObject({ kind: 'invalid' })
     await expect(readHistoryPage(page().requestId, 0, signal())).rejects.toThrow('retrieval limit')
     await expect(readHistoryPage(page().requestId, 0, signal())).rejects.toThrow('retrieval limit')
+  })
+
+  it('bounds stalled response headers to 10 seconds and leaves the next retry with a fresh deadline', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn().mockReturnValueOnce(new Promise(() => {}))
+      .mockResolvedValueOnce(new Response(JSON.stringify(page())))
+    vi.stubGlobal('fetch', fetchMock)
+    const read = readHistoryPage(page().requestId, 0, signal())
+    const failure = expect(read).rejects.toMatchObject({ kind: 'unavailable', message: 'Request history timed out. Retry this page.' })
+    await vi.advanceTimersByTimeAsync(10_000)
+    await failure
+    expect(fetchMock.mock.calls[0]?.[1].signal.aborted).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(await readHistoryPage(page().requestId, 0, signal())).toEqual(page())
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(fetchMock.mock.calls[1]?.[1].signal.aborted).toBe(false)
+  })
+
+  it('applies the same deadline to a stalled response body and cancels its reader', async () => {
+    vi.useFakeTimers()
+    const cancel = vi.fn()
+    const body = new ReadableStream<Uint8Array>({ cancel })
+    const fetchMock = vi.fn().mockResolvedValue(new Response(body))
+    vi.stubGlobal('fetch', fetchMock)
+    const read = readHistoryPage(page().requestId, 0, signal())
+    const failure = expect(read).rejects.toMatchObject({ kind: 'unavailable', message: 'Request history timed out. Retry this page.' })
+    await vi.advanceTimersByTimeAsync(10_000)
+    await failure
+    expect(cancel).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('cancels a parent-aborted read immediately and cleans its timer without reporting timeout/authentication', async () => {
+    vi.useFakeTimers()
+    const parent = new AbortController()
+    const fetchMock = vi.fn().mockReturnValue(new Promise(() => {}))
+    vi.stubGlobal('fetch', fetchMock)
+    const read = readHistoryPage(page().requestId, 0, parent.signal)
+    const failure = expect(read).rejects.toMatchObject({ name: 'AbortError' })
+    parent.abort()
+    await failure
+    expect(fetchMock.mock.calls[0]?.[1].signal.aborted).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

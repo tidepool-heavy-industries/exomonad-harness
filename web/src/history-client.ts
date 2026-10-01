@@ -1,5 +1,6 @@
 export const HISTORY_PAGE_SIZE = 50
 export const MAX_HISTORY_BYTES = 256 * 1024
+const READ_TIMEOUT_MS = 10_000
 const ITEM_BUDGET = MAX_HISTORY_BYTES - 16 * 1024
 
 export interface HistoryEntry {
@@ -79,7 +80,7 @@ export function decodeHistoryPage(value: unknown, requestId: string, offset: num
   return value as unknown as HistoryPage
 }
 
-async function boundedJson(response: Response): Promise<unknown> {
+async function boundedJson(response: Response, signal: AbortSignal): Promise<unknown> {
   const declaredLength = response.headers.get('content-length')
   if (declaredLength !== null && Number(declaredLength) > MAX_HISTORY_BYTES) {
     await response.body?.cancel()
@@ -87,11 +88,14 @@ async function boundedJson(response: Response): Promise<unknown> {
   }
   if (!response.body) invalid()
   const reader = response.body.getReader()
+  const cancel = () => { void reader.cancel().catch(() => {}) }
+  signal.addEventListener('abort', cancel, { once: true })
   const decoder = new TextDecoder('utf-8', { fatal: true })
   let bytes = 0
   let text = ''
   try {
     while (true) {
+      signal.throwIfAborted()
       const part = await reader.read()
       if (part.done) break
       bytes += part.value.byteLength
@@ -107,15 +111,17 @@ async function boundedJson(response: Response): Promise<unknown> {
     if (cause instanceof HistoryReadError || (cause instanceof Error && cause.name === 'AbortError')) throw cause
     invalid()
   } finally {
+    signal.removeEventListener('abort', cancel)
     reader.releaseLock()
   }
 }
 
-export async function readHistoryPage(requestId: string, offset: number, signal: AbortSignal): Promise<HistoryPage> {
-  if (!natural(offset)) invalid()
+async function requestPage(requestId: string, offset: number, signal: AbortSignal): Promise<HistoryPage> {
+  signal.throwIfAborted()
   const response = await fetch(`/api/history/${encodeURIComponent(requestId)}?offset=${offset}&limit=${HISTORY_PAGE_SIZE}`, {
     credentials: 'same-origin', cache: 'no-store', signal,
   })
+  signal.throwIfAborted()
   if (response.status === 401 || response.status === 403) {
     throw new HistoryReadError('Sign in again to read request history.', 'authentication')
   }
@@ -124,5 +130,31 @@ export async function readHistoryPage(requestId: string, offset: number, signal:
       : response.status === 503 ? 'Request history is unavailable.'
       : `Request history failed (${response.status}).`)
   }
-  return decodeHistoryPage(await boundedJson(response), requestId, offset, response.status)
+  return decodeHistoryPage(await boundedJson(response, signal), requestId, offset, response.status)
+}
+
+/** One deadline covers response headers and body; parent cancellation stays silent. */
+export async function readHistoryPage(requestId: string, offset: number, signal: AbortSignal): Promise<HistoryPage> {
+  if (!natural(offset)) invalid()
+  signal.throwIfAborted()
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let cancel = () => {}
+  const deadline = new Promise<never>((_, reject) => {
+    cancel = () => {
+      controller.abort()
+      reject(new DOMException('Request history read was aborted.', 'AbortError'))
+    }
+    signal.addEventListener('abort', cancel, { once: true })
+    timer = setTimeout(() => {
+      controller.abort()
+      reject(new HistoryReadError('Request history timed out. Retry this page.'))
+    }, READ_TIMEOUT_MS)
+  })
+  try {
+    return await Promise.race([requestPage(requestId, offset, controller.signal), deadline])
+  } finally {
+    clearTimeout(timer)
+    signal.removeEventListener('abort', cancel)
+  }
 }
