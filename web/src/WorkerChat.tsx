@@ -36,7 +36,9 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
   const retained = context ? retainedChats.get(context) : undefined
   const conversationId = !issue && identity && (resolved.actor?.kind === 'model' || resolved.missing)
     ? resolved.conversationId ?? retained?.conversationId : undefined
-  const requests = data.timeline.filter(item => item.kind === 'request' && item.nodeId === conversationId)
+  // A retained conversation ID cannot authorize adopting a replacement actor's head.
+  const requests = resolved.actor?.kind === 'model' && resolved.conversationId
+    ? data.timeline.filter(item => item.kind === 'request' && item.nodeId === resolved.conversationId) : []
   const parents = new Set(requests.flatMap(item => item.parentId ? [item.parentId] : []))
   const currentHead = requests.filter(item => !parents.has(item.id)).at(-1)
   const head = currentHead ?? (retained?.conversationId === conversationId ? retained?.head : undefined)

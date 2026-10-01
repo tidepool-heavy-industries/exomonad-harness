@@ -72,6 +72,19 @@ describe('exact worker Chat', () => {
     const oldLink = screen.getByRole('link', { name: '/root/worker', current: 'page' })
     expect(new URL(oldLink.getAttribute('href')!).searchParams.get('incarnation')).toBe('one')
   })
+  it.each(['missing', 'lost association'])('keeps the exact old head when its %s and a replacement reuses its conversation', async availability => {
+    const mounted = render(chat())
+    await screen.findByText('Messages for head')
+    const replacementIdentity = { ...identity, incarnation: 'two' }
+    const replacement = { ...actor, id: actorIdentityKey(replacementIdentity), incarnation: 'two' }
+    const old = { ...actor, lifecycle: 'lost', modelConversation: undefined }
+    mounted.rerender(chat({ ...data, actors: availability === 'missing' ? [replacement] : [old, replacement],
+      timeline: [...data.timeline, { ...data.timeline[0]!, id: 'replacement-head', parentId: 'head' }] }))
+    await waitFor(() => expect(readHistoryPage).toHaveBeenCalledTimes(2))
+    expect(screen.getByText('Messages for head')).toBeVisible()
+    expect(screen.queryByText('Messages for replacement-head')).toBeNull()
+    expect(vi.mocked(readHistoryPage).mock.calls.every(call => call[0] === 'head')).toBe(true)
+  })
   it('loads only the selected conversation and uses ordinary exact worker anchors', async () => {
     const childIdentity = { ...identity, actor: '/root/child', incarnation: 'child' }
     const child = { ...actor, id: actorIdentityKey(childIdentity), name: childIdentity.actor, incarnation: childIdentity.incarnation, modelConversation: 'child' }
