@@ -755,6 +755,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         }
         if let Some(turn) = &recorded_response {
             if is_final(turn, finalize_schema.is_some())
+                && initial.is_empty()
                 && pending.is_empty()
                 && replay_items.is_empty()
                 && replay_outputs.is_empty()
