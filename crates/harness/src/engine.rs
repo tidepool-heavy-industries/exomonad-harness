@@ -75,6 +75,8 @@ mod recovery_tests;
 mod completion_tests;
 
 #[cfg(test)]
+mod embedded_restart_tests;
+#[cfg(test)]
 #[path = "engine/rejection_tests.rs"]
 mod rejection_tests;
 
@@ -125,6 +127,10 @@ pub enum EngineError {
     Compact(#[from] CompactError),
     #[error("cannot resume a forked wait_agent call before its parent settles it")]
     UnresumableForkedWaitAgent,
+    #[error("cannot recover unclaimed tool call {call:?} in request {request:?}")]
+    UnclaimedInheritedCall { request: RequestId, call: CallId },
+    #[error("recorded provider response is not fully present in request {0:?}")]
+    IncompleteRecordedResponse(RequestId),
     #[error("inherited settled call {0} has no durable output item")]
     MissingInheritedOutput(String),
     #[error("claim {0} changed during missing-job recovery and could not be reconciled")]
@@ -293,6 +299,21 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     pub(crate) fn with_origin(mut self, origin: ConversationIdentity) -> Self {
         self.origin = origin;
         self
+    }
+
+    fn embedded_identity(&self) -> Option<crate::embedding::HostIdentity> {
+        match &self.origin {
+            ConversationIdentity::Embedded {
+                run,
+                actor,
+                incarnation,
+            } => Some(crate::embedding::HostIdentity {
+                run: run.clone(),
+                actor: actor.clone(),
+                incarnation: incarnation.clone(),
+            }),
+            ConversationIdentity::Standalone { .. } => None,
+        }
     }
 
     /// Private program-driven profile: no mailbox, sequential cooperative callbacks.
@@ -502,6 +523,39 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         finalize_schema: Option<&serde_json::Value>,
         recovering: bool,
     ) -> Result<EngineCompletion, EngineError> {
+        let settled_head = head.clone();
+        let identity = self.embedded_identity();
+        let pending_head = if let Some(identity) = &identity {
+            let frontier = self.store.embedded_round_frontier(identity)?;
+            if frontier.settled_head != head || (!recovering && frontier.pending_head.is_some()) {
+                return Err(StoreError::InvalidEmbeddedFrontier.into());
+            }
+            frontier.pending_head
+        } else {
+            None
+        };
+        let resuming = pending_head.is_some();
+        let head = pending_head.or(head);
+        let recorded_response = if resuming {
+            self.store
+                .recorded_response(head.as_ref().expect("pending request"))?
+        } else {
+            None
+        };
+        if let Some(response) = &recorded_response {
+            let request = head.as_ref().expect("pending request");
+            let local = self.store.items(request)?;
+            let mut expected = response.items.iter();
+            let mut next = expected.next();
+            for item in &local {
+                if next == Some(item) {
+                    next = expected.next();
+                }
+            }
+            if next.is_some() {
+                return Err(EngineError::IncompleteRecordedResponse(request.clone()));
+            }
+        }
         self.await_here_invocation_output(&head, &mut cancellation)
             .await?;
         let inherited_pairs = match &head {
@@ -528,6 +582,32 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
             None => Vec::new(),
         };
+        if resuming {
+            for (request, item) in &inherited_pairs {
+                let Some(call) = item
+                    .tool_call()
+                    .map_err(|_| EngineError::InvalidFunctionCall)?
+                else {
+                    continue;
+                };
+                if self
+                    .store
+                    .request(request)?
+                    .is_some_and(|row| row.branch != self.config.agent.0)
+                {
+                    continue;
+                }
+                if !inherited_claims.iter().any(|claim| {
+                    claim.call_id == call.call_id
+                        && (&claim.request == request || &claim.operation.request == request)
+                }) {
+                    return Err(EngineError::UnclaimedInheritedCall {
+                        request: request.clone(),
+                        call: call.call_id,
+                    });
+                }
+            }
+        }
         let mut pending = Vec::<PendingCall>::new();
         let mut replay_items = Vec::<Item>::new();
         let mut replay_outputs =
@@ -673,19 +753,40 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }),
             }
         }
+        if let Some(turn) = &recorded_response {
+            if is_final(turn, finalize_schema.is_some())
+                && pending.is_empty()
+                && replay_items.is_empty()
+                && replay_outputs.is_empty()
+            {
+                return Ok(EngineCompletion {
+                    turn: turn.clone(),
+                    transcript: inherited_history,
+                    head_request: head.expect("pending request"),
+                });
+            }
+        }
         let id = RequestId(uuid::Uuid::new_v4().to_string());
         let store = self.store.clone();
         let request = id.clone();
         let branch = self.config.agent.0.clone();
         let parent = head.clone();
-        blocking(move || {
-            store.write_request(
+        let identity_for_write = identity.clone();
+        blocking(move || match identity_for_write {
+            Some(identity) => store.write_embedded_request(
+                &identity,
+                &request,
+                parent.as_ref(),
+                &initial,
+                StoredUsage::default(),
+            ),
+            None => store.write_request(
                 &request,
                 parent.as_ref(),
                 &branch,
                 &initial,
                 StoredUsage::default(),
-            )
+            ),
         })
         .await?;
         if !inherited_history.iter().any(Item::is_configuration_update) {
@@ -1061,7 +1162,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     result = &mut create => match result {
                         Ok(turn) => break turn,
                         Err(error) => {
-                            return Err(self.reject_or_cleanup(error, head.as_ref(), &parent, &pending).await);
+                            return Err(self.reject_or_cleanup(error, settled_head.as_ref(), &parent, &pending).await);
                         }
                     },
                     changed = cancellation.changed() => {
@@ -1554,14 +1655,22 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let branch = self.config.agent.0.clone();
             let parent_for_write = parent.clone();
             let request = next_id.clone();
-            if let Err(error) = blocking(move || {
-                store.write_request(
+            let identity = identity.clone();
+            if let Err(error) = blocking(move || match identity {
+                Some(identity) => store.write_embedded_request(
+                    &identity,
+                    &request,
+                    Some(&parent_for_write),
+                    &[],
+                    StoredUsage::default(),
+                ),
+                None => store.write_request(
                     &request,
                     Some(&parent_for_write),
                     &branch,
                     &[],
                     StoredUsage::default(),
-                )
+                ),
             })
             .await
             {
@@ -2535,6 +2644,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .filter(|call| !call.is_wait_agent)
             .map(|call| call.operation.clone())
             .collect::<Vec<_>>();
+        let identity = self.embedded_identity();
         blocking(move || {
             store.write_compaction_request_with_claims(
                 &successor,
@@ -2542,6 +2652,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 &branch,
                 &window.items,
                 &pending_operations,
+                identity.as_ref(),
             )
         })
         .await?;

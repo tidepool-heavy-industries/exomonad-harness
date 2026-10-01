@@ -56,14 +56,13 @@ impl Store {
         let mut connection = self.lock();
         let transaction = connection.transaction()?;
         if let Some((identity, expected)) = agent_head {
-            if !super::embedded::matches_binding(&transaction, identity)? {
-                return Err(StoreError::InvalidEmbeddedBinding);
-            }
-            if transaction.execute(
-                "UPDATE agents SET head_request=?3 WHERE path=?1 AND head_request IS ?2",
-                params![identity.actor.0, expected.map(|head| &head.0), request.0],
-            )? != 1
-            {
+            if !super::embedded_round::settle_tx(
+                &transaction,
+                identity,
+                expected,
+                request,
+                super::EmbeddedRoundOutcome::Rejected,
+            )? {
                 return Ok(false);
             }
         }
@@ -218,7 +217,15 @@ mod tests {
         {
             let store = Store::open(&path).unwrap();
             store.bind_embedded_actor(&identity, None).unwrap();
-            store.create_request(&request, None, &agent.0).unwrap();
+            store
+                .write_embedded_request(
+                    &identity,
+                    &request,
+                    None,
+                    &[],
+                    super::super::Usage::default(),
+                )
+                .unwrap();
             let mut stale = identity.clone();
             stale.incarnation = "0".into();
             assert!(matches!(

@@ -1,4 +1,4 @@
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 pub const SQL: &str = include_str!("schema.sql");
 const MODEL_REQUEST_INDEXES: &str = "
     CREATE INDEX IF NOT EXISTS events_model_turn_recent ON events(id DESC,request_id) WHERE kind='model_turn';
@@ -75,6 +75,11 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
             tx.execute_batch(&format!(
                 "ALTER TABLE requests ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0;"
             ))?;
+        }
+    }
+    for column in ["embedded_run", "embedded_incarnation", "round_phase"] {
+        if !columns.iter().any(|existing| existing == column) {
+            tx.execute_batch(&format!("ALTER TABLE requests ADD COLUMN {column} TEXT;"))?;
         }
     }
     let legacy_claims: bool = tx.query_row(

@@ -1,8 +1,10 @@
 //! Durable SQLite event and content-addressed request store.
 mod embedded;
 mod embedded_commands;
+mod embedded_round;
 pub(crate) use embedded::{CommandInputAdmission, EmbeddedInputState};
 pub use embedded_commands::{EmbeddedCommandRecord, EmbeddedCommandState};
+pub use embedded_round::{EmbeddedRoundFrontier, EmbeddedRoundOutcome};
 pub mod history;
 mod replay;
 pub mod schema;
@@ -48,6 +50,10 @@ pub enum StoreError {
     ConflictingCommand,
     #[error("command does not have the required durable claim or outcome")]
     InvalidCommandState,
+    #[error("embedded request frontier is unavailable or conflicts with the retained branch")]
+    InvalidEmbeddedFrontier,
+    #[error("embedded pending request has no durable admission provenance")]
+    UnownedEmbeddedRequest,
     #[error("embedded conversation does not match its host binding")]
     InvalidEmbeddedBinding,
     #[error(transparent)]
@@ -932,7 +938,7 @@ impl Store {
         branch: &str,
         items: &[Item],
     ) -> Result<()> {
-        self.write_compaction_request_with_claims(request, parent, branch, items, &[])
+        self.write_compaction_request_with_claims(request, parent, branch, items, &[], None)
     }
     pub(crate) fn write_compaction_request_with_claims(
         &self,
@@ -941,13 +947,30 @@ impl Store {
         branch: &str,
         items: &[Item],
         pending: &[OperationId],
+        identity: Option<&crate::embedding::HostIdentity>,
     ) -> Result<()> {
         let mut c = self.lock();
         let tx = c.transaction()?;
+        if let Some(identity) = identity {
+            let current = embedded_round::frontier(&tx, identity)?;
+            if branch != identity.actor.0
+                || current
+                    .pending_head
+                    .as_ref()
+                    .or(current.settled_head.as_ref())
+                    != Some(parent)
+            {
+                return Err(StoreError::InvalidEmbeddedFrontier);
+            }
+        }
         tx.execute(
             "INSERT INTO requests(id,parent_id,branch,created_at) VALUES (?1,?2,?3,?4)",
             params![request.0, parent.0, branch, utc_millis()],
         )?;
+        if let Some(identity) = identity {
+            tx.execute("UPDATE requests SET embedded_run=?2,embedded_incarnation=?3,round_phase='pending' WHERE id=?1",
+                params![request.0,identity.run,identity.incarnation])?;
+        }
         for (position, item) in items.iter().enumerate() {
             let hash = Self::put_item_tx(&tx, item)?;
             tx.execute(
@@ -1935,7 +1958,8 @@ impl Store {
     /// (including Here-fork starts) inspect only claims attached to their
     /// supplied head. Process-restart recovery may opt into this query to find
     /// claims on older requests of the same agent branch, without inheriting
-    /// claims across a fork boundary.
+    /// claims across a fork boundary. A compacted window owns its copied
+    /// pending claims; completed calls discarded by that cut are not inherited.
     pub fn claims_on_branch_lineage(
         &self,
         request: &RequestId,
@@ -1948,7 +1972,10 @@ impl Store {
                  UNION ALL
                  SELECT parent.id,parent.parent_id,parent.branch
                  FROM requests parent JOIN lineage child ON parent.id=child.parent_id
-                 WHERE parent.branch=?2
+                 WHERE parent.branch=?2 AND NOT EXISTS(
+                     SELECT 1 FROM session_state s
+                     WHERE s.session_id='harness:compaction:' || child.id
+                 )
              )
              SELECT c.origin,c.origin_request_id,c.call_id,c.request_id,c.state,c.output_hash
              FROM claims c JOIN lineage l ON l.id=c.request_id
@@ -2952,7 +2979,7 @@ mod tests {
         let version: u32 = conn
             .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, VERSION);
         assert!(schema::initialize(&mut conn).is_ok());
     }
 
@@ -2976,7 +3003,7 @@ mod tests {
         let version: u32 = conn
             .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, VERSION);
     }
 
     #[test]
@@ -3093,6 +3120,7 @@ mod tests {
                 "/root",
                 &[tool.clone(), spawn, tool],
                 &[first_op, second_op],
+                None,
             )
             .unwrap();
         let root = AgentPath("/root".into());

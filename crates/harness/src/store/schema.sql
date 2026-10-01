@@ -5,7 +5,12 @@ CREATE TABLE IF NOT EXISTS requests (
  id TEXT PRIMARY KEY, parent_id TEXT REFERENCES requests(id), branch TEXT NOT NULL,
  created_at INTEGER NOT NULL DEFAULT(CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
  input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
- cost_micros INTEGER NOT NULL DEFAULT 0, UNIQUE(parent_id, branch)
+ cost_micros INTEGER NOT NULL DEFAULT 0,
+ embedded_run TEXT, embedded_incarnation TEXT,
+ round_phase TEXT CHECK(round_phase IN ('pending','completed','cancelled','rejected')),
+ CHECK((embedded_run IS NULL AND embedded_incarnation IS NULL AND round_phase IS NULL) OR
+       (embedded_run IS NOT NULL AND embedded_incarnation IS NOT NULL AND round_phase IS NOT NULL)),
+ UNIQUE(parent_id, branch)
 );
 CREATE TABLE IF NOT EXISTS request_items (
  request_id TEXT NOT NULL REFERENCES requests(id), position INTEGER NOT NULL,

@@ -374,7 +374,7 @@ mod tests {
             .lock()
             .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, super::super::VERSION);
         drop(store);
         std::fs::remove_file(path).unwrap();
     }
