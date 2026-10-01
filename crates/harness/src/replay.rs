@@ -1848,6 +1848,106 @@ mod tests {
         assert!(result.is_err());
     }
     #[tokio::test]
+    async fn cancelled_read_only_lookup_never_dispatches_or_claims_live_cleanup() {
+        use crate::provider::{CancellationAcknowledgment, CancellationOwner};
+        struct Owner(Arc<std::sync::atomic::AtomicUsize>);
+        #[async_trait]
+        impl CancellationOwner for Owner {
+            async fn cancel(&self, _: &OperationId, _: &JobHandle) -> CancellationAcknowledgment {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                CancellationAcknowledgment::Stopped
+            }
+        }
+        struct Lookup {
+            entered: Notify,
+            release: Notify,
+            live: Arc<std::sync::atomic::AtomicUsize>,
+            owner: Arc<Owner>,
+            retained: bool,
+        }
+        #[async_trait]
+        impl Provider for Lookup {
+            async fn retained_output(
+                &self,
+                _: &str,
+                _: &ToolInput,
+                _: &OperationId,
+            ) -> Result<Option<RetainedOutput>, ProviderError> {
+                self.entered.notify_one();
+                self.release.notified().await;
+                Ok(self
+                    .retained
+                    .then(|| RetainedOutput::terminal(JobOutput::Interrupted)))
+            }
+            async fn call(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+            ) -> Result<serde_json::Value, ProviderError> {
+                self.live.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({}))
+            }
+            fn cancellation_owner(&self) -> Option<Arc<dyn CancellationOwner>> {
+                Some(self.owner.clone())
+            }
+            fn tools(&self) -> Vec<serde_json::Value> {
+                vec![]
+            }
+        }
+        for retained in [false, true] {
+            let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let cleanups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let provider = Arc::new(Lookup {
+                entered: Notify::new(),
+                release: Notify::new(),
+                live: live.clone(),
+                owner: Arc::new(Owner(cleanups.clone())),
+                retained,
+            });
+            let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+            let operation = call_context(CallId("lookup-race".into()))
+                .operation
+                .unwrap();
+            scheduler
+                .start_operation(
+                    provider.clone(),
+                    operation.clone(),
+                    AgentPath("/root".into()),
+                    Some(operation.request.clone()),
+                    "echo".into(),
+                    json!({}),
+                )
+                .await
+                .unwrap();
+            provider.entered.notified().await;
+            let cancelling = {
+                let scheduler = scheduler.clone();
+                let operation = operation.clone();
+                tokio::spawn(async move { scheduler.cancel(&operation).await.unwrap() })
+            };
+            assert_eq!(
+                scheduler.wait(&operation).await.unwrap(),
+                JobOutput::Cancelled
+            );
+            provider.release.notify_one();
+            assert!(cancelling.await.unwrap().is_some());
+            assert_eq!(
+                scheduler.output(&operation).await.unwrap(),
+                Some(JobOutput::Cancelled)
+            );
+            assert_eq!(
+                scheduler.provider_completion(&operation).await.unwrap(),
+                None
+            );
+            assert_eq!(live.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                cleanups.load(Ordering::SeqCst),
+                0,
+                "read-only replay was treated as external execution"
+            );
+        }
+    }
+    #[tokio::test]
     async fn replay_provider_rejects_missing_and_malformed_tool_outputs() {
         let store = Arc::new(Store::memory().unwrap());
         let root = RequestId("replay-output-root".into());
