@@ -81,6 +81,27 @@ pub(super) fn exact_terminal(
     Ok(found)
 }
 
+fn exact_claim_state(
+    c: &Connection,
+    operation: &OperationId,
+    claimant: &RequestId,
+) -> Result<Option<super::ClaimState>> {
+    let origin = serde_json::to_string(&operation.origin)?;
+    let state: Option<String> = c.query_row(
+        "SELECT state FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?4",
+        params![origin,operation.request.0,operation.call.0,claimant.0], |row| row.get(0),
+    ).optional()?;
+    match state.as_deref() {
+        Some("pending") => Ok(Some(super::ClaimState::Pending)),
+        Some("settled") => Ok(Some(super::ClaimState::Settled)),
+        Some("interrupted") => Ok(Some(super::ClaimState::Interrupted)),
+        None => Ok(None),
+        _ => Err(StoreError::UnsupportedReplayOutcome {
+            operation: operation.clone(),
+        }),
+    }
+}
+
 impl Store {
     /// Exact original operation; inherited claimants must retain identical evidence.
     pub fn replay_tool_output_operation(
@@ -100,26 +121,15 @@ impl Store {
         let Some(kind) = super::invocation_kind(&c, &operation.request, &operation.call)? else {
             return Ok(None);
         };
-        let origin = serde_json::to_string(&operation.origin)?;
-        let state: Option<String> = c.query_row(
-            "SELECT state FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?4",
-            params![origin,operation.request.0,operation.call.0,claimant.0],
-            |row| row.get(0),
-        ).optional()?;
-        match state.as_deref() {
-            Some("interrupted") => {
+        match exact_claim_state(&c, operation, claimant)? {
+            Some(super::ClaimState::Interrupted) => {
                 return Ok(Some(RecordedToolOutput {
                     item: Item::tool_output(&operation.call, kind, &JobOutput::Interrupted),
                     terminal: TerminalOutcome::Interrupted,
                 }));
             }
-            Some("settled") => {}
-            Some("pending") | None => return Ok(None),
-            _ => {
-                return Err(StoreError::UnsupportedReplayOutcome {
-                    operation: operation.clone(),
-                });
-            }
+            Some(super::ClaimState::Settled) => {}
+            Some(super::ClaimState::Pending) | None => return Ok(None),
         }
         let terminal = exact_terminal(&c, operation)?;
         let Some((hash, terminal)) = terminal else {
@@ -137,14 +147,17 @@ impl Store {
     }
 
     pub(crate) fn has_completed_output(&self, operation: &OperationId) -> Result<bool> {
-        Ok(
-            exact_terminal(&self.lock(), operation)?.is_some_and(|(_, outcome)| {
-                matches!(
-                    outcome,
-                    TerminalOutcome::Success | TerminalOutcome::Failure(_)
-                )
-            }),
-        )
+        let c = self.lock();
+        if exact_claim_state(&c, operation, &operation.request)? != Some(super::ClaimState::Settled)
+        {
+            return Ok(false);
+        }
+        Ok(exact_terminal(&c, operation)?.is_some_and(|(_, outcome)| {
+            matches!(
+                outcome,
+                TerminalOutcome::Success | TerminalOutcome::Failure(_)
+            )
+        }))
     }
 }
 
@@ -286,6 +299,10 @@ mod tests {
                 } else {
                     TerminalOutcome::Success
                 }
+            );
+            assert_eq!(
+                store.has_completed_output(&operation).unwrap(),
+                !interrupt_original
             );
             assert!(
                 store
