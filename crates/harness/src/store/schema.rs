@@ -1,4 +1,4 @@
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 pub const SQL: &str = include_str!("schema.sql");
 const MODEL_TURN_RECENT_INDEX: &str = "CREATE INDEX IF NOT EXISTS events_model_turn_recent ON events(id DESC,request_id) WHERE kind='model_turn';";
 
@@ -91,6 +91,15 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
         tx.execute_batch("ALTER TABLE embedded_inputs RENAME TO legacy_embedded_inputs;")?;
     }
     tx.execute_batch(SQL)?;
+    let claim_columns = {
+        let mut statement = tx.prepare("PRAGMA table_info(claims)")?;
+        statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if !claim_columns.iter().any(|column| column == "terminal_json") {
+        tx.execute_batch("ALTER TABLE claims ADD COLUMN terminal_json TEXT;")?;
+    }
     tx.execute_batch(MODEL_TURN_RECENT_INDEX)?;
     tx.execute_batch(super::validation::INDEXES)?;
     if legacy_inputs && version < 7 {

@@ -403,12 +403,20 @@ impl Store {
                 params![snapshot_request.0, position as i64, hash.0],
             )?;
         }
-        let claims: Vec<(String, String, String, String, String, Option<String>)> = {
+        let claims: Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        )> = {
             let mut q = tx.prepare(
                 "WITH RECURSIVE lineage(id,parent_id,depth) AS (
                      SELECT id,parent_id,0 FROM requests WHERE id=?1
                      UNION ALL SELECT r.id,r.parent_id,lineage.depth+1 FROM requests r JOIN lineage ON r.id=lineage.parent_id
-                 ) SELECT c.origin,c.origin_request_id,c.call_id,c.request_id,c.state,c.output_hash FROM claims c
+                 ) SELECT c.origin,c.origin_request_id,c.call_id,c.request_id,c.state,c.output_hash,c.terminal_json FROM claims c
                    JOIN lineage ON lineage.id=c.request_id ORDER BY lineage.depth ASC",
             )?;
             q.query_map([&source_request.0], |row| {
@@ -419,16 +427,19 @@ impl Store {
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?
         };
         let mut pending_claims = Vec::new();
         let mut copied = std::collections::HashSet::new();
-        let boundary_claimed = claims.iter().any(|(_, _, call, request, _, _)| {
+        let boundary_claimed = claims.iter().any(|(_, _, call, request, _, _, _)| {
             call == &boundary_call.0 && request == &source_request.0
         });
-        for (origin, original_request, call_id, claim_request, state, output_hash) in claims {
+        for (origin, original_request, call_id, claim_request, state, output_hash, outcome) in
+            claims
+        {
             let key = (RequestId(claim_request.clone()), CallId(call_id.clone()));
             if let Some(kind) = call_kinds.get(&key) {
                 let terminal = match state.as_str() {
@@ -493,8 +504,8 @@ impl Store {
                     });
                 }
                 tx.execute(
-                    "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash) VALUES (?1,?2,?3,?4,?5,?6)",
-                    params![origin,original_request,call_id,snapshot_request.0,state,output_hash],
+                    "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash,terminal_json) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                    params![origin,original_request,call_id,snapshot_request.0,state,output_hash,outcome],
                 )?;
             }
         }
@@ -581,9 +592,16 @@ impl Store {
             "INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros) VALUES (?1,?2,?3,?4,0,0,0)",
             params![snapshot_request.0,checkpoint.snapshot_request.0,child.path.0,utc_millis()],
         )?;
-        let inherited_claims: Vec<(String, String, String, String, Option<String>)> = {
+        let inherited_claims: Vec<(
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        )> = {
             let mut q =
-                tx.prepare("SELECT origin,origin_request_id,call_id,state,output_hash FROM claims WHERE request_id=?1")?;
+                tx.prepare("SELECT origin,origin_request_id,call_id,state,output_hash,terminal_json FROM claims WHERE request_id=?1")?;
             q.query_map([&checkpoint.snapshot_request.0], |row| {
                 Ok((
                     row.get(0)?,
@@ -591,14 +609,15 @@ impl Store {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?
         };
-        for (origin, original_request, call_id, state, output_hash) in inherited_claims {
+        for (origin, original_request, call_id, state, output_hash, terminal) in inherited_claims {
             tx.execute(
-                "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash) VALUES (?1,?2,?3,?4,?5,?6)",
-                params![origin,original_request,call_id,snapshot_request.0,state,output_hash],
+                "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash,terminal_json) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![origin,original_request,call_id,snapshot_request.0,state,output_hash,terminal],
             )?;
         }
         let source = json!({

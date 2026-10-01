@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS claims (
  call_id TEXT NOT NULL, request_id TEXT NOT NULL REFERENCES requests(id),
  state TEXT NOT NULL CHECK(state IN ('pending','settled','interrupted')),
  output_hash TEXT REFERENCES items(hash),
+ terminal_json TEXT,
  PRIMARY KEY(origin, origin_request_id, call_id, request_id)
 );
 CREATE INDEX IF NOT EXISTS claims_request ON claims(request_id, state);

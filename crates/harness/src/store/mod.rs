@@ -7,8 +7,10 @@ pub mod history;
 mod replay;
 pub mod schema;
 mod schema_migration;
+mod terminal;
 mod validation;
 pub use replay::IssuedReplayRequest;
+pub use terminal::{RecordedToolOutput, TerminalOutcome};
 
 use crate::{
     item::{Item, ItemHash, ToolKind},
@@ -30,6 +32,10 @@ pub const SQL: &str = schema::SQL;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("settled operation {operation:?} has no typed replay outcome; preserve its bytes")]
+    UnsupportedReplayOutcome { operation: OperationId },
+    #[error("settled operation {operation:?} has conflicting replay outcomes")]
+    ConflictingReplayOutcome { operation: OperationId },
     #[error("replay event {event} has unsupported format; preserve its bytes")]
     UnsupportedReplayFormat { event: i64 },
     #[error("replay event references missing item {0}")]
@@ -102,22 +108,6 @@ pub enum StoreError {
 #[path = "recovery_tests.rs"]
 mod recovery_tests;
 pub type Result<T> = std::result::Result<T, StoreError>;
-
-#[derive(Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum OutputDisposition {
-    Completed,
-    Cancelled,
-    Interrupted,
-    CancellationUnconfirmed,
-}
-
-#[derive(Serialize, Deserialize)]
-struct OperationOutput {
-    operation: OperationId,
-    output_hash: ItemHash,
-    disposition: OutputDisposition,
-}
 
 fn invocation_kind(c: &Connection, request: &RequestId, call: &CallId) -> Result<Option<ToolKind>> {
     Ok(validation::invocation_item(c, request, call)?.map(|item| item.input.kind()))
@@ -992,9 +982,14 @@ impl Store {
         let key = format!("harness:compaction:{}", request.0);
         Ok(self.session_state(&key)?.is_some())
     }
-    /// Store a completed output and settle all claimants atomically.
-    pub fn write_output(&self, operation: &OperationId, output: &Item) -> Result<usize> {
-        self.settle_claims(operation, output)
+    /// Store an explicitly classified output and settle all claimants atomically.
+    pub fn write_output(
+        &self,
+        operation: &OperationId,
+        output: &Item,
+        terminal: TerminalOutcome,
+    ) -> Result<usize> {
+        self.settle_claims(operation, output, terminal)
     }
 
     pub(crate) fn write_job_output(
@@ -1003,36 +998,11 @@ impl Store {
         kind: ToolKind,
         output: &crate::turn::JobOutput,
     ) -> Result<usize> {
-        let disposition = match output {
-            crate::turn::JobOutput::Completed(_) => OutputDisposition::Completed,
-            crate::turn::JobOutput::Cancelled => OutputDisposition::Cancelled,
-            crate::turn::JobOutput::Interrupted => OutputDisposition::Interrupted,
-            crate::turn::JobOutput::CancellationUnconfirmed(_) => {
-                OutputDisposition::CancellationUnconfirmed
-            }
-        };
-        self.settle_claims_classified(
+        self.settle_claims(
             operation,
             &Item::tool_output(&operation.call, kind, output),
-            Some(disposition),
+            TerminalOutcome::from(output),
         )
-    }
-
-    pub(crate) fn has_completed_output(&self, operation: &OperationId) -> Result<bool> {
-        for event in self.events(Some(&operation.request))? {
-            if event.kind != "operation_output" {
-                continue;
-            }
-            let output: OperationOutput = serde_json::from_str(&event.payload)?;
-            if output.operation == *operation && output.disposition == OutputDisposition::Completed
-            {
-                return Ok(self.claims_for_operation(operation)?.iter().any(|claim| {
-                    claim.state == ClaimState::Settled
-                        && claim.output.as_ref() == Some(&output.output_hash)
-                }));
-            }
-        }
-        Ok(false)
     }
     /// Crash recovery exposes all still-pending durable claims for the caller's resumption policy.
     pub fn recover_pending(&self) -> Result<Vec<PendingCall>> {
@@ -1979,15 +1949,11 @@ impl Store {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
-    pub fn settle_claims(&self, operation: &OperationId, output: &Item) -> Result<usize> {
-        self.settle_claims_classified(operation, output, None)
-    }
-
-    fn settle_claims_classified(
+    pub fn settle_claims(
         &self,
         operation: &OperationId,
         output: &Item,
-        disposition: Option<OutputDisposition>,
+        terminal: TerminalOutcome,
     ) -> Result<usize> {
         let kind = self
             .tool_invocation_kind(&operation.request, &operation.call)?
@@ -2010,22 +1976,9 @@ impl Store {
         let h = Self::put_item_tx(&tx, output)?;
         let origin = serde_json::to_string(&operation.origin)?;
         let n = tx.execute(
-            "UPDATE claims SET state='settled',output_hash=?4 WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND state='pending'",
-            params![origin,operation.request.0,operation.call.0,h.0],
+            "UPDATE claims SET state='settled',output_hash=?4,terminal_json=?5 WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND state='pending'",
+            params![origin,operation.request.0,operation.call.0,h.0,serde_json::to_string(&terminal)?],
         )?;
-        if n > 0 {
-            if let Some(disposition) = disposition {
-                let record = OperationOutput {
-                    operation: operation.clone(),
-                    output_hash: h,
-                    disposition,
-                };
-                tx.execute(
-                    "INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,'operation_output',?2,?3)",
-                    params![operation.request.0, serde_json::to_string(&record)?, utc_millis()],
-                )?;
-            }
-        }
         tx.commit()?;
         Ok(n)
     }
