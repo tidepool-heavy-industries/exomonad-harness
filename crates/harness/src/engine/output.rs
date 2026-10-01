@@ -45,14 +45,20 @@ pub(super) struct OutputLifetime {
     pub origin: ConversationIdentity,
     pub request_id: RequestId,
 }
-impl Drop for OutputLifetime {
-    fn drop(&mut self) {
-        if let Some(observer) = &self.observer {
+impl OutputLifetime {
+    pub fn stop(&mut self) {
+        if let Some(observer) = self.observer.take() {
             observer.observe(ModelOutput {
                 origin: self.origin.clone(),
                 request_id: self.request_id.clone(),
                 update: ModelOutputUpdate::Stopped,
             });
         }
+    }
+}
+
+impl Drop for OutputLifetime {
+    fn drop(&mut self) {
+        self.stop();
     }
 }

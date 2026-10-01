@@ -1162,7 +1162,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 return Err(self.cleanup_pending(error, &pending).await);
             }
             let model_request_id = parent.clone();
-            let output_lifetime = output::OutputLifetime {
+            let mut output_lifetime = output::OutputLifetime {
                 observer: self.output_observer.clone(),
                 origin: self.origin.clone(),
                 request_id: parent.clone(),
@@ -1205,11 +1205,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     result = &mut create => match result {
                         Ok(turn) => break turn,
                         Err(error) => {
+                            output_lifetime.stop();
                             return Err(self.reject_or_cleanup(error, settled_head.as_ref(), &parent, &pending).await);
                         }
                     },
                     changed = cancellation.changed() => {
                         if changed.is_err() || *cancellation.borrow() {
+                            output_lifetime.stop();
                             return Err(self.cleanup_pending(EngineError::Cancelled { head_request: Some(parent.clone()) }, &pending).await);
                         }
                     }
