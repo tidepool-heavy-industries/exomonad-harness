@@ -135,7 +135,14 @@ impl ReplayProvider {
                             (ToolKind::Custom, serde_json::Value::String(text))
                         }
                     };
-                    let id = store.operation_for_request(&turn.request, &call.call_id)?;
+                    let Some(id) =
+                        store.recorded_operation_for_request(&turn.request, &call.call_id)?
+                    else {
+                        if call.name == crate::finalize::FINALIZE_TOOL_NAME {
+                            continue;
+                        }
+                        return Err(ReplayError::MissingInvocation(call.call_id.0));
+                    };
                     if calls
                         .insert(
                             id.clone(),
@@ -180,9 +187,12 @@ impl ReplayProvider {
             })?;
         let recorded_operation = self
             .store
-            .operation_for_request(&recorded_request, &local.call)
+            .recorded_operation_for_request(&recorded_request, &local.call)
             .map_err(|error| {
                 ProviderError::Tool(format!("loading replay invocation: {error}").into())
+            })?
+            .ok_or_else(|| {
+                ProviderError::Tool(format!("no recorded tool call for `{}`", local.call.0).into())
             })?;
         let recorded_call = self.calls.get(&recorded_operation).ok_or_else(|| {
             ProviderError::Tool(format!("no recorded tool call for `{}`", local.call.0).into())
@@ -759,7 +769,7 @@ impl ReplayTransport {
     /// boundary and been recorded.
     pub async fn wait_requested(&self, count: usize) {
         loop {
-            let changed = self.progress.changed.notified();
+            let changed = self.changed.notified();
             if self.recorded_requests().len() >= count {
                 return;
             }
@@ -770,7 +780,7 @@ impl ReplayTransport {
     /// Permit exactly one gated model response to return to the caller.
     pub fn release_next(&self) {
         *lock(&self.response_permits) += 1;
-        self.progress.changed.notify_waiters();
+        self.changed.notify_waiters();
     }
 
     async fn wait_for_response_release(&self) {
@@ -778,7 +788,7 @@ impl ReplayTransport {
             return;
         }
         loop {
-            let changed = self.progress.changed.notified();
+            let changed = self.changed.notified();
             {
                 let mut permits = lock(&self.response_permits);
                 if *permits > 0 {
@@ -806,7 +816,7 @@ impl ResponsesTransport for ReplayTransport {
         if let Some(observer) = &self.observer {
             observer(&request, &mut turn, ordinal);
         }
-        self.progress.changed.notify_waiters();
+        self.changed.notify_waiters();
         self.wait_for_response_release().await;
         Ok(turn)
     }
@@ -903,7 +913,7 @@ impl FakeResidentCell {
     /// Wait until at least `count` cell calls have entered `run`.
     pub async fn wait_started(&self, count: usize) {
         loop {
-            let changed = self.progress.changed.notified();
+            let changed = self.changed.notified();
             if self.start_count() >= count {
                 return;
             }
@@ -914,7 +924,7 @@ impl FakeResidentCell {
     /// Make one waiting call complete with this exact output.
     pub fn release(&self, output: CellOutput) {
         lock(&self.control).released.push_back(output);
-        self.progress.changed.notify_waiters();
+        self.changed.notify_waiters();
     }
 
     pub fn query_state(&self, store: &Store) -> crate::store::Result<ReplayCellState> {
@@ -923,7 +933,7 @@ impl FakeResidentCell {
 
     async fn take_release(&self) -> CellOutput {
         loop {
-            let changed = self.progress.changed.notified();
+            let changed = self.changed.notified();
             if let Some(output) = lock(&self.control).released.pop_front() {
                 return output;
             }
@@ -960,7 +970,7 @@ impl CellJob for FakeResidentCell {
         _context: CallContext,
     ) -> Result<CellOutput, ProviderError> {
         lock(&self.control).starts += 1;
-        self.progress.changed.notify_waiters();
+        self.changed.notify_waiters();
         let pending = PendingRun {
             cell: self,
             completed: AtomicBool::new(false),
@@ -1542,7 +1552,14 @@ mod tests {
     }
 
     fn recorded_terminal(output: &JobOutput, tombstone: bool) -> (Arc<Store>, RequestId, CallId) {
-        let store = Arc::new(Store::memory().unwrap());
+        recorded_terminal_in(Arc::new(Store::memory().unwrap()), output, tombstone)
+    }
+
+    fn recorded_terminal_in(
+        store: Arc<Store>,
+        output: &JobOutput,
+        tombstone: bool,
+    ) -> (Arc<Store>, RequestId, CallId) {
         let root = RequestId("terminal-root".into());
         let call_id = CallId("terminal-call".into());
         let call = Item(
@@ -1626,11 +1643,19 @@ mod tests {
 
     #[tokio::test]
     async fn replay_restores_original_process_loss_claim_without_borrowing_child_success() {
-        let (store, root, call) = recorded_terminal(&JobOutput::Interrupted, true);
+        let path = std::env::temp_dir().join(format!(
+            "harness-interrupted-replay-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let (store, root, call) = recorded_terminal_in(
+            Arc::new(Store::open(&path).unwrap()),
+            &JobOutput::Interrupted,
+            true,
+        );
         let child = RequestId("terminal-child".into());
         store.create_request(&child, Some(&root), "/root").unwrap();
         let parent_op = store.operation_for_request(&root, &call).unwrap();
-        store.claim(&call, &child).unwrap();
+        store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) SELECT origin,origin_request_id,call_id,?1,'pending' FROM claims WHERE request_id=?2", rusqlite::params![child.0, root.0]).unwrap();
         store
             .write_job_output(
                 &parent_op,
@@ -1638,6 +1663,32 @@ mod tests {
                 &JobOutput::Completed(Ok(json!({"child":true}))),
             )
             .unwrap();
+        assert_eq!(
+            store
+                .replay_tool_output_claim(&parent_op, &child)
+                .unwrap()
+                .unwrap()
+                .terminal,
+            TerminalOutcome::Success
+        );
+        drop(store);
+        let store = Arc::new(Store::open(&path).unwrap());
+        assert_eq!(
+            store
+                .replay_tool_output_claim(&parent_op, &root)
+                .unwrap()
+                .unwrap()
+                .terminal,
+            TerminalOutcome::Interrupted
+        );
+        assert_eq!(
+            store
+                .replay_tool_output_claim(&parent_op, &child)
+                .unwrap()
+                .unwrap()
+                .terminal,
+            TerminalOutcome::Success
+        );
         let provider = ReplayProvider::new(store, &root).unwrap();
         let (sink, _stream) = tokio::sync::mpsc::channel(4);
         provider
@@ -1658,6 +1709,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(result.output(), &JobOutput::Interrupted);
+        drop(provider);
+        std::fs::remove_file(&path).unwrap();
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 
     #[tokio::test]
@@ -1937,6 +1992,10 @@ mod tests {
             );
             assert_eq!(
                 scheduler.provider_completion(&operation).await.unwrap(),
+                None
+            );
+            assert_eq!(
+                scheduler.retry_cancellation(&operation).await.unwrap(),
                 None
             );
             assert_eq!(live.load(Ordering::SeqCst), 0);

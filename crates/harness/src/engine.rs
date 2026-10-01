@@ -6986,7 +6986,11 @@ mod tests {
 
     #[tokio::test]
     async fn durable_envelope_wake_appends_store_item_after_wait_output_once() {
-        let store = Arc::new(Store::memory().unwrap());
+        let path = std::env::temp_dir().join(format!(
+            "harness-wait-replay-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Arc::new(Store::open(&path).unwrap());
         let recipient = AgentPath("/root".into());
         let sender = AgentPath("/root/worker".into());
         let envelope = Envelope {
@@ -7064,6 +7068,60 @@ mod tests {
             "the wake hint must not be rendered/appended a second time"
         );
         assert!(store.unread(&recipient.0).unwrap().is_empty());
+        let root = store.claims(&wait_call).unwrap()[0]
+            .operation
+            .request
+            .clone();
+        drop(recorded);
+        drop(store);
+        let reopened = Arc::new(Store::open(&path).unwrap());
+        let replay = Arc::new(crate::replay::ReplayProvider::new(reopened.clone(), &root).unwrap());
+        assert_eq!(replay.turns_remaining(), 2);
+        let engine = Engine::<FakeAuth, crate::replay::ReplayProvider, _>::with_transport(
+            replay.clone(),
+            reopened.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            replay.clone(),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "durable-session".into(),
+                agent: AgentPath("/offline-replay".into()),
+            },
+        );
+        let (_cancel, cancellation) = watch::channel(false);
+        let replayed = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            engine.run(None, vec![], cancellation, empty_mailbox()),
+        )
+        .await
+        .expect("retained wait must continue without a fresh envelope")
+        .unwrap();
+        assert_eq!(replay.turns_remaining(), 0);
+        assert_eq!(replayed.transcript, completion.transcript);
+        assert_eq!(
+            replayed
+                .transcript
+                .iter()
+                .filter(|item| **item == stored_item)
+                .count(),
+            1
+        );
+        assert_eq!(
+            replayed
+                .transcript
+                .iter()
+                .filter(|item| item.0["type"] == "function_call_output"
+                    && item.0["call_id"] == "wait-envelope")
+                .count(),
+            1
+        );
+        drop(engine);
+        drop(replay);
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]

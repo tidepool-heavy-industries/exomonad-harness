@@ -2,7 +2,7 @@
 use super::{Result, Store, StoreError};
 use crate::{
     item::{Item, ToolCall},
-    model::{CallId, RequestId},
+    model::{CallId, OperationId, RequestId},
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -55,6 +55,35 @@ impl Store {
         invocation_item(&self.lock(), request, call)
     }
 
+    /// Historical origin is owned by the original claim, never today's binding.
+    pub fn recorded_operation_for_request(
+        &self,
+        request: &RequestId,
+        call: &CallId,
+    ) -> Result<Option<OperationId>> {
+        let c = self.lock();
+        if invocation_item(&c, request, call)?.is_none() {
+            return Ok(None);
+        }
+        let mut query = c.prepare(
+            "SELECT origin FROM claims WHERE origin_request_id=?1 AND request_id=?1 AND call_id=?2 ORDER BY origin",
+        )?;
+        let origins = query
+            .query_map(params![request.0, call.0], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        match origins.as_slice() {
+            [] => Ok(None),
+            [origin] => Ok(Some(OperationId {
+                origin: serde_json::from_str(origin)?,
+                request: request.clone(),
+                call: call.clone(),
+            })),
+            _ => Err(StoreError::AmbiguousReplayCall {
+                call_id: call.0.clone(),
+            }),
+        }
+    }
+
     pub fn latest_tool_surface(&self, request: &RequestId) -> Result<Option<serde_json::Value>> {
         let payload: Option<String> = self.lock().query_row(
             "SELECT payload FROM events WHERE request_id=?1 AND kind='tool_surface' ORDER BY id DESC LIMIT 1",
@@ -76,6 +105,59 @@ mod tests {
         let root = RequestId("root".into());
         store.create_request(&root, None, "/root").unwrap();
         root
+    }
+
+    #[test]
+    fn recorded_origin_survives_current_embedded_rebind() {
+        use crate::{
+            embedding::HostIdentity,
+            model::{AgentPath, ConversationIdentity},
+        };
+        let store = Store::memory().unwrap();
+        let identity = HostIdentity {
+            run: "old-run".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "old".into(),
+        };
+        store.bind_embedded_actor(&identity, None).unwrap();
+        let request = root(&store);
+        let call = CallId("recorded".into());
+        store.append_items(&request,&[Item(json!({"type":"function_call","call_id":call.0,"name":"probe","arguments":"{}"}))]).unwrap();
+        let original = store.claim(&call, &request).unwrap();
+        store.lock().execute("UPDATE embedded_bindings SET run_id='new-run',incarnation='new' WHERE agent_path='/root'",[]).unwrap();
+        assert_ne!(
+            store.operation_for_request(&request, &call).unwrap(),
+            original
+        );
+        assert_eq!(
+            store
+                .recorded_operation_for_request(&request, &call)
+                .unwrap(),
+            Some(original.clone())
+        );
+        assert_eq!(
+            original.origin,
+            ConversationIdentity::Embedded {
+                run: identity.run,
+                actor: identity.actor,
+                incarnation: identity.incarnation,
+            }
+        );
+    }
+
+    #[test]
+    fn recorded_origin_refuses_competing_original_claimants() {
+        let store = Store::memory().unwrap();
+        let request = root(&store);
+        let call = CallId("recorded".into());
+        store.append_items(&request,&[Item(json!({"type":"function_call","call_id":call.0,"name":"probe","arguments":"{}"}))]).unwrap();
+        store.claim(&call, &request).unwrap();
+        let foreign = store.standalone_identity(crate::model::AgentPath("/foreign".into()));
+        store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES(?1,?2,?3,?2,'pending')",params![serde_json::to_string(&foreign).unwrap(),request.0,call.0]).unwrap();
+        assert!(matches!(
+            store.recorded_operation_for_request(&request, &call),
+            Err(StoreError::AmbiguousReplayCall { .. })
+        ));
     }
 
     #[test]

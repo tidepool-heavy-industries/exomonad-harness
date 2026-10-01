@@ -836,7 +836,11 @@ impl JobScheduler {
             let jobs = self.jobs.lock().await;
             let job = jobs.get(&call_id).ok_or(JobError::UnknownCall)?;
             (
-                job.cancellation_owner.clone(),
+                if job.started {
+                    job.cancellation_owner.clone()
+                } else {
+                    None
+                },
                 job.cancellation_gate.clone(),
             )
         };
