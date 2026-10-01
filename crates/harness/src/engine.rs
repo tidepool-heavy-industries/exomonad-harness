@@ -57,7 +57,13 @@ enum DispatchResult {
         operation: OperationId,
         continuation: Option<crate::store::RecordedWaitContinuation>,
         barrier: crate::provider::WaitReplayBarrier,
+        commit: Option<crate::replay::ReplayWaitCommit>,
     },
+}
+
+enum ReplayBarrierStage {
+    BeforeWait,
+    AfterWait,
 }
 
 #[cfg(test)]
@@ -1019,6 +1025,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 OperationId,
                 Option<crate::store::RecordedWaitContinuation>,
                 crate::provider::WaitReplayBarrier,
+                Option<crate::replay::ReplayWaitCommit>,
             )>::new();
             let mut wait_call = None;
             let mut persisted_items = Vec::<Item>::new();
@@ -1093,14 +1100,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                             pending.push(call);
                                         }
                                     }
-                                    Ok(DispatchResult::Settled { operation, continuation, barrier }) => {
+                                    Ok(DispatchResult::Settled { operation, continuation, barrier, commit }) => {
                                         if wait_call.is_some() || !inline_settled.is_empty() {
                                             deferred_dispatch_error = Some(EngineError::MultipleWaitAgents);
                                             continue;
                                         }
                                         turn_call_ids.push(operation.call.clone());
                                         turn_call_items.push((operation.call.clone(), call_item));
-                                        inline_settled.push((operation, continuation, barrier));
+                                        inline_settled.push((operation, continuation, barrier, commit));
                                     }
                                     Ok(DispatchResult::NotCall) => {}
                                     Err(error) => deferred_dispatch_error = Some(error),
@@ -1191,6 +1198,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             operation,
                             continuation,
                             barrier,
+                            commit,
                         }) => {
                             if wait_call.is_some() || !inline_settled.is_empty() {
                                 return Err(self
@@ -1199,7 +1207,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             }
                             turn_call_ids.push(operation.call.clone());
                             turn_call_items.push((operation.call.clone(), call_item));
-                            inline_settled.push((operation, continuation, barrier));
+                            inline_settled.push((operation, continuation, barrier, commit));
                         }
                         Ok(DispatchResult::NotCall) => {}
                         Err(error) => {
@@ -1277,6 +1285,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 operation,
                                 continuation,
                                 barrier,
+                                commit,
                             }) => {
                                 if wait_call.is_some() || !inline_settled.is_empty() {
                                     return Err(self
@@ -1285,7 +1294,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 }
                                 turn_call_ids.push(operation.call.clone());
                                 turn_call_items.push((operation.call.clone(), item.clone()));
-                                inline_settled.push((operation, continuation, barrier));
+                                inline_settled.push((operation, continuation, barrier, commit));
                             }
                             Ok(DispatchResult::NotCall) => {
                                 return Err(self
@@ -1334,9 +1343,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .is_some_and(|threshold| turn.usage.input_tokens >= threshold);
 
             let had_inline_wait = !inline_settled.is_empty();
-            for (_, _, barrier) in &inline_settled {
+            for (_, _, barrier, _) in &inline_settled {
                 if let Err(error) = self
-                    .await_replay_barrier(&barrier.before, &pending, &parent, &mut cancellation)
+                    .await_replay_barrier(
+                        barrier,
+                        ReplayBarrierStage::BeforeWait,
+                        &pending,
+                        &parent,
+                        &mut cancellation,
+                    )
                     .await
                 {
                     return Err(self.cleanup_pending(error, &pending).await);
@@ -1350,7 +1365,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
 
             // Retained builtin output follows every model Item and the ready
             // job drain, matching the live wait boundary's history order.
-            for (operation, continuation, barrier) in inline_settled {
+            for (operation, continuation, barrier, commit) in inline_settled {
+                if commit.is_some() && settled_this_turn != barrier.before {
+                    return Err(self
+                        .cleanup_pending(
+                            EngineError::ClaimRecoveryConflict(operation.call.0.clone()),
+                            &pending,
+                        )
+                        .await);
+                }
                 let item = match self
                     .read_settled_output(&operation, &operation.request)
                     .await
@@ -1367,20 +1390,44 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         }
                     }
                 }
-                if let Err(error) = self.append(&parent, attached).await {
-                    return Err(self.cleanup_pending(error, &pending).await);
+                let published = match self.append_retaining_items(&parent, attached).await {
+                    Ok(items) => items,
+                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                };
+                let recorded_wait = commit.is_some();
+                if let Some(commit) = commit {
+                    if let Err(error) = commit.commit(&operation, &published[0]) {
+                        return Err(self.cleanup_pending(error.into(), &pending).await);
+                    }
                 }
+                drop(published);
                 if let Err(error) = self.acknowledge_output(&operation).await {
                     return Err(self.cleanup_pending(error, &pending).await);
                 }
                 if let Err(error) = self
-                    .await_replay_barrier(&barrier.after, &pending, &parent, &mut cancellation)
+                    .await_replay_barrier(
+                        &barrier,
+                        ReplayBarrierStage::AfterWait,
+                        &pending,
+                        &parent,
+                        &mut cancellation,
+                    )
                     .await
                 {
                     return Err(self.cleanup_pending(error, &pending).await);
                 }
                 match self.persist_settled(&mut pending, &parent).await {
-                    Ok(settled) => settled_this_turn.extend(settled),
+                    Ok(settled) => {
+                        if recorded_wait && settled != barrier.after {
+                            return Err(self
+                                .cleanup_pending(
+                                    EngineError::ClaimRecoveryConflict(operation.call.0.clone()),
+                                    &pending,
+                                )
+                                .await);
+                        }
+                        settled_this_turn.extend(settled)
+                    }
                     Err(error) => return Err(self.cleanup_pending(error, &pending).await),
                 }
             }
@@ -1528,10 +1575,21 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     }
 
     async fn append(&self, id: &RequestId, items: Vec<Item>) -> Result<(), EngineError> {
+        self.append_retaining_items(id, items).await.map(drop)
+    }
+
+    async fn append_retaining_items(
+        &self,
+        id: &RequestId,
+        items: Vec<Item>,
+    ) -> Result<Vec<Item>, EngineError> {
         let store = self.store.clone();
         let id = id.clone();
-        blocking(move || store.append_items(&id, &items)).await?;
-        Ok(())
+        blocking(move || {
+            store.append_items(&id, &items)?;
+            Ok(items)
+        })
+        .await
     }
 
     async fn append_unread_envelopes(&self, request: &RequestId) -> Result<(), EngineError> {
@@ -1715,13 +1773,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     return Err(error);
                 }
             };
-            if let Some((output, continuation, barrier)) = retained {
+            if let Some((output, continuation, barrier, commit)) = retained {
                 self.retain_output(&operation, tool_kind, &output, request)
                     .await?;
                 return Ok(DispatchResult::Settled {
                     operation,
                     continuation,
                     barrier,
+                    commit,
                 });
             }
             if *cancellation.borrow() || cancellation.has_changed().is_err() {
@@ -1798,21 +1857,31 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
 
     async fn await_replay_barrier(
         &self,
-        barrier: &[OperationId],
+        barrier: &crate::provider::WaitReplayBarrier,
+        stage: ReplayBarrierStage,
         pending: &[PendingCall],
         request: &RequestId,
         cancellation: &mut watch::Receiver<bool>,
     ) -> Result<(), EngineError> {
         let mut seen = HashSet::new();
-        for operation in barrier {
-            if operation.origin != self.origin
-                || !seen.insert(operation)
-                || !pending
-                    .iter()
-                    .any(|call| call.operation == *operation && !call.is_wait_agent)
+        for operation in barrier.before.iter().chain(&barrier.after) {
+            if operation.origin != self.origin || !seen.insert(operation) {
+                return Err(EngineError::ClaimRecoveryConflict(operation.call.0.clone()));
+            }
+        }
+        let (first, second, wait): (&[OperationId], &[OperationId], &[OperationId]) = match stage {
+            ReplayBarrierStage::BeforeWait => (&barrier.before, &barrier.after, &barrier.before),
+            ReplayBarrierStage::AfterWait => (&[], &barrier.after, &barrier.after),
+        };
+        for operation in first.iter().chain(second) {
+            if !pending
+                .iter()
+                .any(|call| call.operation == *operation && !call.is_wait_agent)
             {
                 return Err(EngineError::ClaimRecoveryConflict(operation.call.0.clone()));
             }
+        }
+        for operation in wait {
             tokio::select! {
                 biased;
                 _ = await_cancellation(cancellation) => return Err(EngineError::Cancelled { head_request: Some(request.clone()) }),
