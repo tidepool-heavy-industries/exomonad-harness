@@ -461,7 +461,7 @@ impl PinnedProvider {
         input: &ToolInput,
         context: &CallContext,
     ) -> Result<(), ProviderError> {
-        let fail = |message: &str| ProviderError::Tool(message.to_owned());
+        let fail = |message: &str| ProviderError::Tool(message.to_owned().into());
         let _admission = self.host.admit().map_err(|e| fail(&e.to_string()))?;
         if context.agent != self.host.identity().actor {
             return Err(fail("foreign actor call"));
@@ -533,14 +533,14 @@ impl Provider for BoundProvider {
         self.host
             .output_committed(operation)
             .await
-            .map_err(ProviderError::Tool)
+            .map_err(|error| ProviderError::Tool(error.into()))
     }
 
     fn request_snapshot(&self) -> Result<Option<Arc<dyn Provider>>, ProviderError> {
         let surface = self
             .host
             .tool_surface()
-            .map_err(|error| ProviderError::Tool(error.to_string()))?;
+            .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
         Ok(Some(Arc::new(PinnedProvider {
             store: self.store.clone(),
             host: self.host.clone(),

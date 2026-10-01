@@ -118,7 +118,11 @@ async fn unsupported_custom_provider_returns_explicit_refusal() {
     let JobOutput::Completed(Err(error)) = output else {
         panic!("unsupported custom tool must settle with an explicit error");
     };
-    assert!(error.contains("custom tool `cell` is not supported"));
+    assert!(
+        error
+            .message()
+            .contains("custom tool `cell` is not supported")
+    );
 }
 
 #[tokio::test]

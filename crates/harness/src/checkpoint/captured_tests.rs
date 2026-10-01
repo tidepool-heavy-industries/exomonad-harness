@@ -427,7 +427,7 @@ impl Provider for CaptureProvider {
                 &json!({"name":"live"}),
                 Arc::new(()),
             )
-            .map_err(|e| ProviderError::Tool(e.to_string()))?;
+            .map_err(|e| ProviderError::Tool(e.to_string().into()))?;
         self.captured
             .lock()
             .unwrap()

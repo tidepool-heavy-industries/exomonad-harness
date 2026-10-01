@@ -86,7 +86,7 @@ impl Provider for TreeProvider {
             args,
         )
         .await
-        .map_err(|error| ProviderError::Tool(error.to_string()))
+        .map_err(|error| ProviderError::Tool(error.to_string().into()))
     }
 
     fn tools(&self) -> Vec<Value> {

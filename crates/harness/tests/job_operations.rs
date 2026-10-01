@@ -117,12 +117,12 @@ impl Provider for JobProvider {
                 },
             )
             .await
-            .map_err(|e| ProviderError::Tool(e.to_string()))?;
+            .map_err(|e| ProviderError::Tool(e.to_string().into()))?;
         context
             .verbs
             .send_message(AgentPath("/root/worker/child".into()), "hello")
             .await
-            .map_err(|e| ProviderError::Tool(e.to_string()))?;
+            .map_err(|e| ProviderError::Tool(e.to_string().into()))?;
         let denied = context
             .verbs
             .send_message(AgentPath("/root/sibling".into()), "no")
@@ -223,7 +223,9 @@ async fn job_verbs_refuse_when_request_identity_or_backend_is_missing() {
                 .await
                 .expect("refusal operation timed out")
                 .unwrap();
-        assert!(matches!(output, JobOutput::Completed(Err(message)) if message.contains(expected)));
+        assert!(
+            matches!(output, JobOutput::Completed(Err(message)) if message.message().contains(expected))
+        );
     }
 }
 

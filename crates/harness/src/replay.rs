@@ -165,9 +165,9 @@ impl Provider for ReplayProvider {
         name: &str,
         _args: serde_json::Value,
     ) -> Result<serde_json::Value, ProviderError> {
-        Err(ProviderError::Tool(format!(
-            "replay provider requires call context for tool `{name}`"
-        )))
+        Err(ProviderError::Tool(
+            format!("replay provider requires call context for tool `{name}`").into(),
+        ))
     }
 
     async fn call_with_context(
@@ -189,42 +189,54 @@ impl Provider for ReplayProvider {
         let recorded_operation = self
             .store
             .operation_for_request(&recorded_request, &context.call_id)
-            .map_err(|error| ProviderError::Tool(format!("loading replay invocation: {error}")))?;
+            .map_err(|error| {
+                ProviderError::Tool(format!("loading replay invocation: {error}").into())
+            })?;
         let (recorded_name, kind, recorded_input) =
             self.calls.get(&recorded_operation).ok_or_else(|| {
-                ProviderError::Tool(format!("no recorded tool call for `{}`", context.call_id.0))
+                ProviderError::Tool(
+                    format!("no recorded tool call for `{}`", context.call_id.0).into(),
+                )
             })?;
         if recorded_name != name || recorded_input != &args {
-            return Err(ProviderError::Tool(format!(
-                "replay call `{}` does not match its recorded identity or input",
-                context.call_id.0
-            )));
+            return Err(ProviderError::Tool(
+                format!(
+                    "replay call `{}` does not match its recorded identity or input",
+                    context.call_id.0
+                )
+                .into(),
+            ));
         }
         let output = self
             .store
             .replay_output_operation(&recorded_operation)
-            .map_err(|error| ProviderError::Tool(format!("loading replay output: {error}")))?
+            .map_err(|error| ProviderError::Tool(format!("loading replay output: {error}").into()))?
             .ok_or_else(|| {
-                ProviderError::Tool(format!(
-                    "no settled replay output for call `{}`",
-                    context.call_id.0
-                ))
+                ProviderError::Tool(
+                    format!("no settled replay output for call `{}`", context.call_id.0).into(),
+                )
             })?;
         let expected_type = match kind {
             ToolKind::Function => "function_call_output",
             ToolKind::Custom => "custom_tool_call_output",
         };
         if output.0["type"] != expected_type || output.0["call_id"] != context.call_id.0 {
-            return Err(ProviderError::Tool(format!(
-                "stored replay output kind or identity does not match call `{}`",
-                context.call_id.0
-            )));
+            return Err(ProviderError::Tool(
+                format!(
+                    "stored replay output kind or identity does not match call `{}`",
+                    context.call_id.0
+                )
+                .into(),
+            ));
         }
         let value = output.0.get("output").cloned().ok_or_else(|| {
-            ProviderError::Tool(format!(
-                "stored replay output for call `{}` has no output value",
-                context.call_id.0
-            ))
+            ProviderError::Tool(
+                format!(
+                    "stored replay output for call `{}` has no output value",
+                    context.call_id.0
+                )
+                .into(),
+            )
         })?;
         match (kind, value) {
             (ToolKind::Custom, serde_json::Value::String(text)) => {
@@ -232,10 +244,13 @@ impl Provider for ReplayProvider {
             }
             (ToolKind::Function, serde_json::Value::String(serialized)) => {
                 serde_json::from_str(&serialized).map_err(|error| {
-                    ProviderError::Tool(format!(
-                        "decoding replay output for call `{}`: {error}",
-                        context.call_id.0
-                    ))
+                    ProviderError::Tool(
+                        format!(
+                            "decoding replay output for call `{}`: {error}",
+                            context.call_id.0
+                        )
+                        .into(),
+                    )
                 })
             }
             (_, value) => Ok(value),
@@ -262,7 +277,9 @@ impl Provider for ReplayProvider {
         let recorded_operation = self
             .store
             .operation_for_request(&recorded_request, &context.call_id)
-            .map_err(|error| ProviderError::Tool(format!("loading replay invocation: {error}")))?;
+            .map_err(|error| {
+                ProviderError::Tool(format!("loading replay invocation: {error}").into())
+            })?;
         if !self
             .calls
             .get(&recorded_operation)
@@ -573,17 +590,21 @@ impl CellJob for FakeResidentCell {
             completed: AtomicBool::new(false),
         };
         let output = self.take_release().await;
-        let state = ReplayCellState::load(&self.store, &self.key)
-            .map_err(|error| ProviderError::Tool(format!("loading replay cell state: {error}")))?;
+        let state = ReplayCellState::load(&self.store, &self.key).map_err(|error| {
+            ProviderError::Tool(format!("loading replay cell state: {error}").into())
+        })?;
         let state = ReplayCellState {
             evaluations: state.evaluations + 1,
             last_source: Some(input.source),
         };
-        let json = serde_json::to_value(state)
-            .map_err(|error| ProviderError::Tool(format!("encoding replay cell state: {error}")))?;
+        let json = serde_json::to_value(state).map_err(|error| {
+            ProviderError::Tool(format!("encoding replay cell state: {error}").into())
+        })?;
         self.store
             .save_session_state(self.key.key(), &json)
-            .map_err(|error| ProviderError::Tool(format!("saving replay cell state: {error}")))?;
+            .map_err(|error| {
+                ProviderError::Tool(format!("saving replay cell state: {error}").into())
+            })?;
         pending.complete();
         Ok(output)
     }
@@ -629,7 +650,9 @@ mod tests {
             args: serde_json::Value,
         ) -> Result<serde_json::Value, ProviderError> {
             if name != "echo" {
-                return Err(ProviderError::Tool(format!("unexpected tool `{name}`")));
+                return Err(ProviderError::Tool(
+                    format!("unexpected tool `{name}`").into(),
+                ));
             }
             Ok(json!({"echo": args["value"]}))
         }

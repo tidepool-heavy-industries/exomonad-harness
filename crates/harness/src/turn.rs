@@ -8,7 +8,7 @@ use crate::{
     item::{Item, ToolInput},
     mailbox::{Envelope, MailboxSignal},
     model::{AgentPath, CallId, ConversationIdentity, OperationId, RequestId},
-    provider::{CallContext, JobHandle, Provider, ProviderError},
+    provider::{CallContext, JobHandle, Provider, ProviderError, ToolFailure},
 };
 use serde_json::Value;
 use std::{
@@ -27,7 +27,7 @@ const JOB_CANCELLATION_GRACE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum JobOutput {
-    Completed(Result<Value, String>),
+    Completed(Result<Value, ToolFailure>),
     Cancelled,
     Interrupted,
     CancellationUnconfirmed(String),
@@ -154,7 +154,7 @@ struct Job {
     output: Option<JobOutput>,
     /// The actual provider-future result, retained independently from the
     /// terminal output that was already published to claimants.
-    provider_completion: Option<Result<Value, String>>,
+    provider_completion: Option<Result<Value, ToolFailure>>,
     progress: Vec<Value>,
     cancel: tokio_util::sync::CancellationToken,
     settled: tokio::sync::watch::Sender<Option<JobOutput>>,
@@ -447,7 +447,7 @@ impl JobScheduler {
                             }
                         }
                     }
-                    result = &mut call => break result.map_err(|e: ProviderError| e.to_string()),
+                    result = &mut call => break result.map_err(ProviderError::into_tool_failure),
                 }
             };
             while let Ok(event) = progress_rx.try_recv() {
@@ -610,7 +610,7 @@ impl JobScheduler {
     pub async fn provider_completion<K: JobKey>(
         &self,
         call_id: &K,
-    ) -> Result<Option<Result<Value, String>>, JobError> {
+    ) -> Result<Option<Result<Value, ToolFailure>>, JobError> {
         let call_id = call_id.operation(self);
         Ok(self
             .jobs
@@ -1054,7 +1054,7 @@ async fn settle(
     jobs: &Mutex<HashMap<OperationId, Job>>,
     operation: OperationId,
     output: JobOutput,
-    provider_completion: Option<Result<Value, String>>,
+    provider_completion: Option<Result<Value, ToolFailure>>,
 ) -> JobSettlement {
     let settlement = {
         let mut jobs = jobs.lock().await;

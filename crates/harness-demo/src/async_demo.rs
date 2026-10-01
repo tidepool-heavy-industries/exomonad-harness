@@ -405,7 +405,9 @@ impl<P: Provider> TrackedProvider<P> {
         let kind = self
             .store
             .tool_invocation_kind(request, &context.call_id)
-            .map_err(|error| ProviderError::Tool(format!("scoped invocation kind: {error}")))?
+            .map_err(|error| {
+                ProviderError::Tool(format!("scoped invocation kind: {error}").into())
+            })?
             .ok_or_else(|| {
                 ProviderError::Tool("tool job has no durable scoped invocation".into())
             })?;
@@ -417,7 +419,7 @@ impl<P: Provider> TrackedProvider<P> {
                 name,
                 Some(kind),
             )
-            .map_err(ProviderError::Tool)?;
+            .map_err(|error| ProviderError::Tool(error.into()))?;
         let mut guard = CancellationGuard {
             jobs: self.jobs.clone(),
             call_id: context.call_id.clone(),
@@ -427,11 +429,11 @@ impl<P: Provider> TrackedProvider<P> {
         if let Ok(value) = &result {
             self.jobs
                 .settle(&context.call_id, json!(value))
-                .map_err(ProviderError::Tool)?;
+                .map_err(|error| ProviderError::Tool(error.into()))?;
         } else if let Err(error) = &result {
             self.jobs
                 .settle(&context.call_id, json!({"error":error.to_string()}))
-                .map_err(ProviderError::Tool)?;
+                .map_err(|error| ProviderError::Tool(error.into()))?;
         }
         guard.completed = true;
         result

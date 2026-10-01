@@ -1403,7 +1403,7 @@ mod tests {
                     }
                     Err(error) => {
                         *self.error.lock().unwrap() = Some(error.to_string());
-                        Err(ProviderError::Tool(error.to_string()))
+                        Err(ProviderError::Tool(error.to_string().into()))
                     }
                 }
             }

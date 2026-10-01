@@ -94,7 +94,7 @@ impl Item {
     pub fn tool_output(call_id: &CallId, kind: ToolKind, output: &JobOutput) -> Self {
         let value = match output {
             JobOutput::Completed(Ok(value)) => value.clone(),
-            JobOutput::Completed(Err(error)) => json!({ "error": error }),
+            JobOutput::Completed(Err(error)) => error.output_value(),
             JobOutput::Cancelled => json!({ "error": "job cancelled" }),
             JobOutput::Interrupted => json!({ "error": "job interrupted" }),
             JobOutput::CancellationUnconfirmed(detail) => {

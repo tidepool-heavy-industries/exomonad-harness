@@ -53,9 +53,9 @@ impl<E> CellJobProvider<E> {
 #[async_trait]
 impl<E: CellJob> Provider for CellJobProvider<E> {
     async fn call(&self, name: &str, _args: Value) -> Result<Value, ProviderError> {
-        Err(ProviderError::Tool(format!(
-            "`{name}` requires an asynchronous call context"
-        )))
+        Err(ProviderError::Tool(
+            format!("`{name}` requires an asynchronous call context").into(),
+        ))
     }
 
     async fn call_with_context(
@@ -65,13 +65,15 @@ impl<E: CellJob> Provider for CellJobProvider<E> {
         context: CallContext,
     ) -> Result<Value, ProviderError> {
         if name != CELL_TOOL {
-            return Err(ProviderError::Tool(format!("unknown cell tool `{name}`")));
+            return Err(ProviderError::Tool(
+                format!("unknown cell tool `{name}`").into(),
+            ));
         }
         let input: CellInput = serde_json::from_value(args)
-            .map_err(|error| ProviderError::Tool(format!("invalid cell input: {error}")))?;
+            .map_err(|error| ProviderError::Tool(format!("invalid cell input: {error}").into()))?;
         let output = self.evaluator.run(input, context).await?;
         serde_json::to_value(output)
-            .map_err(|error| ProviderError::Tool(format!("invalid cell output: {error}")))
+            .map_err(|error| ProviderError::Tool(format!("invalid cell output: {error}").into()))
     }
 
     async fn call_custom_with_context(
@@ -81,14 +83,16 @@ impl<E: CellJob> Provider for CellJobProvider<E> {
         context: CallContext,
     ) -> Result<Value, ProviderError> {
         if name != CELL_TOOL {
-            return Err(ProviderError::Tool(format!("unknown cell tool `{name}`")));
+            return Err(ProviderError::Tool(
+                format!("unknown cell tool `{name}`").into(),
+            ));
         }
         let output = self
             .evaluator
             .run(CellInput { source: input }, context)
             .await?;
         serde_json::to_value(output)
-            .map_err(|error| ProviderError::Tool(format!("invalid cell output: {error}")))
+            .map_err(|error| ProviderError::Tool(format!("invalid cell output: {error}").into()))
     }
 
     fn tools(&self) -> Vec<Value> {
@@ -150,7 +154,7 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(
-                matches!(error, ProviderError::Tool(message) if message.starts_with("invalid cell input:")),
+                matches!(error, ProviderError::Tool(message) if message.message().starts_with("invalid cell input:")),
                 "malformed function arguments must be explicitly refused"
             );
         }
@@ -164,7 +168,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(error, ProviderError::Tool(message) if message.contains("unknown cell tool"))
+            matches!(error, ProviderError::Tool(message) if message.message().contains("unknown cell tool"))
         );
     }
 
@@ -193,7 +197,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(error, ProviderError::Tool(message) if message.contains("unknown cell tool"))
+            matches!(error, ProviderError::Tool(message) if message.message().contains("unknown cell tool"))
         );
     }
 

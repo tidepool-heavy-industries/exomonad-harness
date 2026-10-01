@@ -276,7 +276,7 @@ impl Provider for CallbackProvider {
         let output = self
             .store
             .replay_output_operation(operation)
-            .map_err(|error| ProviderError::Tool(error.to_string()))?
+            .map_err(|error| ProviderError::Tool(error.to_string().into()))?
             .ok_or_else(|| ProviderError::Tool("missing retained callback output".into()))?;
         let ordinal = self
             .store
@@ -285,7 +285,7 @@ impl Provider for CallbackProvider {
                 "model_tool_result",
                 &json!({"operation":operation,"output":output}),
             )
-            .map_err(|error| ProviderError::Tool(error.to_string()))?;
+            .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
         let (reply, receive) = oneshot::channel();
         let admission = Arc::new(AtomicU8::new(QUEUED));
         self.sender
@@ -305,7 +305,7 @@ impl Provider for CallbackProvider {
                 "model_tool_annotation",
                 &json!({"ordinal":ordinal,"annotation":annotation}),
             )
-            .map_err(|error| ProviderError::Tool(error.to_string()))?;
+            .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
         let text = match annotation {
             HookAnnotation::Annotated(text) => Some(text),
             HookAnnotation::Pruned {
@@ -327,7 +327,7 @@ impl Provider for CallbackProvider {
         };
         if let Some(text) = text.filter(|text| !text.is_empty()) {
             self.store.append_items(&operation.request,&[Item(json!({"type":"message","role":"developer","content":[{"type":"input_text","text":text}]}))])
-                .map_err(|error|ProviderError::Tool(error.to_string()))?;
+                .map_err(|error|ProviderError::Tool(error.to_string().into()))?;
         }
         self.acknowledged.lock().unwrap().insert(operation.clone());
         Ok(())
@@ -345,9 +345,9 @@ impl Provider for CallbackProvider {
         if self.closed.load(Ordering::Acquire) {
             return Err(ProviderError::Tool("invocation closed".into()));
         }
-        self.budget
-            .admit(true)
-            .map_err(|reason| ProviderError::Tool(format!("budget exhausted: {reason:?}")))?;
+        self.budget.admit(true).map_err(|reason| {
+            ProviderError::Tool(format!("budget exhausted: {reason:?}").into())
+        })?;
         self.invocation_counts.lock().unwrap().tools += 1;
         if kind != ToolKind::Function
             || !self
@@ -356,10 +356,14 @@ impl Provider for CallbackProvider {
                 .any(|tool| tool["name"].as_str() == Some(name))
             || crate::provider::is_harness_tool(name)
         {
-            return Err(ProviderError::Tool(format!("undeclared callback {name}")));
+            return Err(ProviderError::Tool(
+                format!("undeclared callback {name}").into(),
+            ));
         }
         self.budget.exhausted().map_or(Ok(()), |reason| {
-            Err(ProviderError::Tool(format!("budget exhausted: {reason:?}")))
+            Err(ProviderError::Tool(
+                format!("budget exhausted: {reason:?}").into(),
+            ))
         })
     }
     async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
@@ -377,11 +381,11 @@ impl Provider for CallbackProvider {
             .tools
             .iter()
             .find(|tool| tool["name"].as_str() == Some(name))
-            .ok_or_else(|| ProviderError::Tool(format!("undeclared callback {name}")))?;
+            .ok_or_else(|| ProviderError::Tool(format!("undeclared callback {name}").into()))?;
         let schema = &tool["parameters"];
         if let Err(error) = crate::finalize::validate_result(&args, schema, "$") {
             *self.failure.lock().unwrap() = Some(error.to_string());
-            return Err(ProviderError::Tool(error.to_string()));
+            return Err(ProviderError::Tool(error.to_string().into()));
         }
         let (reply, receive) = oneshot::channel();
         let admission = Arc::new(AtomicU8::new(QUEUED));
@@ -400,7 +404,7 @@ impl Provider for CallbackProvider {
             .map_err(|_| ProviderError::Tool("callback continuation closed".into()))?;
         self.continuation(receive, &admission)
             .await?
-            .map_err(ProviderError::Tool)
+            .map_err(|error| ProviderError::Tool(error.into()))
     }
 }
 struct BudgetTransport<C> {

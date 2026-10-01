@@ -2952,9 +2952,9 @@ mod tests {
             }
         }
         async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError> {
-            Err(ProviderError::Tool(format!(
-                "unexpected tool: {name} {args}"
-            )))
+            Err(ProviderError::Tool(
+                format!("unexpected tool: {name} {args}").into(),
+            ))
         }
         fn tools(&self) -> Vec<Value> {
             Vec::new()
@@ -2974,9 +2974,9 @@ mod tests {
         }
 
         async fn call(&self, name: &str, args: Value) -> Result<Value, ProviderError> {
-            Err(ProviderError::Tool(format!(
-                "unexpected tool: {name} {args}"
-            )))
+            Err(ProviderError::Tool(
+                format!("unexpected tool: {name} {args}").into(),
+            ))
         }
 
         fn tools(&self) -> Vec<Value> {
@@ -3424,9 +3424,9 @@ mod tests {
             context: crate::provider::CallContext,
         ) -> Result<Value, ProviderError> {
             if name != "set_effort" {
-                return Err(ProviderError::Tool(format!(
-                    "unexpected agent verb: {name}"
-                )));
+                return Err(ProviderError::Tool(
+                    format!("unexpected agent verb: {name}").into(),
+                ));
             }
             let effort = match args["effort"].as_str() {
                 Some("low") => Effort::Low,
@@ -3438,7 +3438,7 @@ mod tests {
                 .service
                 .set_effort(&context.agent, effort)
                 .await
-                .map_err(|error| ProviderError::Tool(error.to_string()))?;
+                .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
             self.completed.notify_one();
             Ok(result)
         }
@@ -3456,9 +3456,9 @@ mod tests {
     #[async_trait]
     impl Provider for BlockingHereProvider {
         async fn call(&self, name: &str, _args: Value) -> Result<Value, ProviderError> {
-            Err(ProviderError::Tool(format!(
-                "unexpected provider tool: {name}"
-            )))
+            Err(ProviderError::Tool(
+                format!("unexpected provider tool: {name}").into(),
+            ))
         }
 
         async fn call_agent_verb(
@@ -3478,7 +3478,7 @@ mod tests {
             let result =
                 dispatch_agent_verb(&self.service, &context.agent, Some(&invocation), name, args)
                     .await
-                    .map_err(|error| ProviderError::Tool(error.to_string()))?;
+                    .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
             self.admitted.notify_one();
             self.release
                 .lock()
@@ -4776,7 +4776,9 @@ mod tests {
                         .map_err(|_| ProviderError::Tool("B release dropped".into()))?;
                     Ok(json!({"original":"B-result"}))
                 }
-                _ => Err(ProviderError::Tool(format!("unexpected tool {name}"))),
+                _ => Err(ProviderError::Tool(
+                    format!("unexpected tool {name}").into(),
+                )),
             }
         }
 

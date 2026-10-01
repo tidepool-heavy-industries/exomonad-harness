@@ -2528,7 +2528,7 @@ impl DemoProvider {
             .current_dir(&self.root)
             .output()
             .await
-            .map_err(|e| ProviderError::Tool(format!("could not start shell: {e}")))?;
+            .map_err(|e| ProviderError::Tool(format!("could not start shell: {e}").into()))?;
         let (stdout, stdout_truncated) = capped(&output.stdout);
         let (stderr, stderr_truncated) = capped(&output.stderr);
         Ok(json!({
@@ -2555,34 +2555,34 @@ impl DemoProvider {
         let root = self
             .root
             .canonicalize()
-            .map_err(|e| ProviderError::Tool(format!("invalid provider root: {e}")))?;
+            .map_err(|e| ProviderError::Tool(format!("invalid provider root: {e}").into()))?;
         let target = root.join(rel);
         let parent = target
             .parent()
             .ok_or_else(|| ProviderError::Tool("invalid target".into()))?;
         let canonical_parent = parent
             .canonicalize()
-            .map_err(|e| ProviderError::Tool(format!("invalid parent: {e}")))?;
+            .map_err(|e| ProviderError::Tool(format!("invalid parent: {e}").into()))?;
         if !canonical_parent.starts_with(&root) {
             return Err(ProviderError::Tool("path escapes provider root".into()));
         }
         let canonical_target = target
             .canonicalize()
-            .map_err(|e| ProviderError::Tool(format!("target must already exist: {e}")))?;
+            .map_err(|e| ProviderError::Tool(format!("target must already exist: {e}").into()))?;
         if !canonical_target.starts_with(&root) || !canonical_target.is_file() {
             return Err(ProviderError::Tool(
                 "target escapes root or is not a file".into(),
             ));
         }
         let old = std::fs::read_to_string(&canonical_target)
-            .map_err(|e| ProviderError::Tool(format!("read failed: {e}")))?;
+            .map_err(|e| ProviderError::Tool(format!("read failed: {e}").into()))?;
         let before = string_arg(args, "before")?;
         let after = string_arg(args, "after")?;
         if before.is_empty() || old.matches(before).count() != 1 {
             return Err(ProviderError::Tool("before must match exactly once".into()));
         }
         std::fs::write(&canonical_target, old.replacen(before, after, 1))
-            .map_err(|e| ProviderError::Tool(format!("write failed: {e}")))?;
+            .map_err(|e| ProviderError::Tool(format!("write failed: {e}").into()))?;
         Ok(json!({"path": rel, "edited": true}))
     }
 }
@@ -2590,7 +2590,7 @@ impl DemoProvider {
 fn string_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, ProviderError> {
     args.get(key)
         .and_then(Value::as_str)
-        .ok_or_else(|| ProviderError::Tool(format!("{key} must be a string")))
+        .ok_or_else(|| ProviderError::Tool(format!("{key} must be a string").into()))
 }
 
 fn capped(bytes: &[u8]) -> (String, bool) {
@@ -2636,7 +2636,7 @@ impl Provider for DemoProvider {
                 "schema":args.get("schema").cloned().unwrap_or(Value::Null),
                 "status":"not_connected", "note":"wire this request to the host operator"}),
             ),
-            _ => Err(ProviderError::Tool(format!("unknown tool: {name}"))),
+            _ => Err(ProviderError::Tool(format!("unknown tool: {name}").into())),
         }
     }
 
@@ -2686,7 +2686,9 @@ impl Provider for DemoProvider {
         _context: CallContext,
     ) -> Result<Value, ProviderError> {
         if name != "run" {
-            return Err(ProviderError::Tool(format!("unknown custom tool: {name}")));
+            return Err(ProviderError::Tool(
+                format!("unknown custom tool: {name}").into(),
+            ));
         }
         self.run_raw_command(&input).await
     }

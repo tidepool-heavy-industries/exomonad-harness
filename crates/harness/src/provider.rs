@@ -5,9 +5,11 @@ use crate::{
 };
 use async_trait::async_trait;
 use serde_json::Value;
-use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+mod failure;
+pub use failure::{MetadataOmission, ToolFailure};
 
 /// Maximum number of progress events retained while a provider call runs.
 /// When full, the scheduler drops the newest event rather than blocking work.
@@ -76,10 +78,27 @@ impl CallContext {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum ProviderError {
-    #[error("tool failed: {0}")]
-    Tool(String),
+    Tool(ToolFailure),
+}
+
+impl std::fmt::Display for ProviderError {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tool(failure) => failure.fmt_provider(output),
+        }
+    }
+}
+
+impl std::error::Error for ProviderError {}
+
+impl ProviderError {
+    pub fn into_tool_failure(self) -> ToolFailure {
+        match self {
+            Self::Tool(failure) => failure.with_tool_prefix(),
+        }
+    }
 }
 
 /// Evidence from the owner of work that can outlive the provider future.
@@ -88,7 +107,7 @@ pub enum ProviderError {
 pub enum CancellationAcknowledgment {
     Stopped,
     /// The owner observed the operation's terminal result before cancellation won.
-    Completed(Result<Value, String>),
+    Completed(Result<Value, ToolFailure>),
     Unconfirmed(String),
 }
 
@@ -185,9 +204,9 @@ pub trait Provider: Send + Sync {
         _input: String,
         _context: CallContext,
     ) -> Result<Value, ProviderError> {
-        Err(ProviderError::Tool(format!(
-            "custom tool `{name}` is not supported by this provider"
-        )))
+        Err(ProviderError::Tool(
+            format!("custom tool `{name}` is not supported by this provider").into(),
+        ))
     }
 
     /// Runtime hook for crate-provided agent verbs. A provider integrating
@@ -198,9 +217,9 @@ pub trait Provider: Send + Sync {
         _args: Value,
         _context: CallContext,
     ) -> Result<Value, ProviderError> {
-        Err(ProviderError::Tool(format!(
-            "agent verb `{name}` has no AgentToolService runtime"
-        )))
+        Err(ProviderError::Tool(
+            format!("agent verb `{name}` has no AgentToolService runtime").into(),
+        ))
     }
 
     /// Complete stable model tool list (harness verbs plus provider-owned
