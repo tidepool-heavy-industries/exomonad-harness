@@ -378,12 +378,11 @@ async fn yield_cancellation_wakes_without_timer() {
 
 #[tokio::test]
 async fn yield_engine_timeout_then_result_preserves_output_order() {
+    let mut work = call("work-call", "work", json!({}));
+    work.0["async"] = json!(true);
     let (engine, requests, release) = engine(
         vec![
-            turn(vec![
-                call("work-call", "work", json!({})),
-                call("yield-call", "yield", json!({"until":0})),
-            ]),
+            turn(vec![work, call("yield-call", "yield", json!({"until":0}))]),
             turn(vec![call("yield-result", "yield", json!({}))]),
             final_turn(),
         ],

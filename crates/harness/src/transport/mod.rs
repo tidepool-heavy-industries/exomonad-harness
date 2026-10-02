@@ -1,6 +1,7 @@
-//! Streaming Codex Responses transport. Authentication never persists secrets.
+//! Streaming Responses transport with provider-bound credential sources.
 //!
-//! Stateless requests, read-only authentication, and SSE item assembly.
+//! Stateless requests, protected native authentication, and SSE item assembly.
+//! Codex-owned credentials remain a separate read-only source.
 
 pub mod auth;
 pub mod client;
@@ -181,10 +182,42 @@ fn diagnostic_suffix(diagnostic: Option<&HttpDiagnostic>) -> String {
     })
 }
 
-/// Read-only credential source. An implementation must never refresh Codex's
-/// credential file; a 401 is surfaced as Authentication.
+/// Request credentials bound to the provider that issued them. Deliberately
+/// has no Debug implementation: diagnostic formatting must not expose tokens.
+pub enum AuthCredentials {
+    Codex {
+        access_token: String,
+        account_id: String,
+    },
+    ChatGptPlan {
+        access_token: String,
+    },
+}
+
+/// The credential authority determines the fixed provider endpoint.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ResponsesRoute {
+    #[default]
+    Codex,
+    ChatGptPlan,
+}
+
+/// Credential source. Codex-owned files remain read-only; a native source may
+/// refresh only its own registration. A 401 is surfaced as Authentication.
 pub trait Auth: Send + Sync {
     fn access(&self) -> Result<(String, String), TransportError>;
+
+    fn route(&self) -> ResponsesRoute {
+        ResponsesRoute::Codex
+    }
+
+    fn credentials(&self) -> Result<AuthCredentials, TransportError> {
+        let (access_token, account_id) = self.access()?;
+        Ok(AuthCredentials::Codex {
+            access_token,
+            account_id,
+        })
+    }
 }
 
 /// Selected wire contract, independent of model-name spelling and Engine jobs.

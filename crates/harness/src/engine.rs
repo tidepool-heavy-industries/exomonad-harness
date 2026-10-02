@@ -1,8 +1,8 @@
 //! Single-agent, stateless Responses request loop.
 //!
 //! Each model request receives the full accumulated item history. Function
-//! calls are started immediately and their settled outputs are appended under
-//! their original call ids before the next request.
+//! calls are started immediately. Synchronous calls settle before another
+//! model request; asynchronous calls keep their original identities until settled.
 
 mod output;
 pub use output::{ModelOutput, ModelOutputObserver, ModelOutputUpdate};
@@ -13,7 +13,7 @@ use crate::{
         TypedTurnFuture,
     },
     finalize::{FINALIZE_TOOL_NAME, FinalizeError, FinalizeParser},
-    item::{Item, ItemHash, ToolInput, ToolKind},
+    item::{Item, ItemHash, ToolExecution, ToolInput, ToolKind},
     mailbox::{DurableMailboxWake, Envelope, MailboxSignal, MessageChannel},
     model::{AgentPath, CallId, ConversationIdentity, Effort, OperationId, RequestId},
     provider::{Provider, ToolScheduling},
@@ -60,6 +60,7 @@ struct PendingCall {
     claim_request: RequestId,
     wait: Option<WaitKind>,
     tool_kind: ToolKind,
+    execution: ToolExecution,
     persist_here_invocation_output: bool,
     cancel_job_on_cleanup: bool,
     scheduling: ToolScheduling,
@@ -127,6 +128,10 @@ mod scheduling_tests;
 #[cfg(test)]
 #[path = "engine/yield_tests.rs"]
 mod yield_tests;
+
+#[cfg(test)]
+#[path = "engine/tool_execution_tests.rs"]
+mod tool_execution_tests;
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -705,10 +710,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             Vec::<(OperationId, crate::turn::JobOutput, ToolKind, RequestId)>::new();
         let mut attachable = Vec::new();
         for claim in inherited_claims {
-            let tool_kind = self
+            let invocation = self
                 .store
-                .tool_invocation_kind(&claim.operation.request, &claim.call_id)?
+                .invocation_item(&claim.operation.request, &claim.call_id)?
                 .ok_or_else(|| EngineError::MissingInheritedOutput(claim.call_id.0.clone()))?;
+            let tool_kind = invocation.input.kind();
+            let execution = invocation.execution;
             let same_call = |item: &Item| {
                 item.tool_call()
                     .ok()
@@ -832,9 +839,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             } else {
                 PendingCompletion::BlocksCompletion
             };
-            attachable.push((claim, tool_kind, completion));
+            attachable.push((claim, tool_kind, execution, completion));
         }
-        for (claim, tool_kind, completion) in attachable {
+        for (claim, tool_kind, execution, completion) in attachable {
             let settlement = self
                 .scheduler
                 .fork_claim_exact(&claim.operation, self.origin.clone(), true)
@@ -849,6 +856,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     claim_request: claim.request,
                     wait: None,
                     tool_kind,
+                    execution,
                     persist_here_invocation_output: false,
                     cancel_job_on_cleanup: false,
                     scheduling: ToolScheduling::Async,
@@ -951,6 +959,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         &pending,
                     )
                     .await);
+            }
+            if let Err(error) = self
+                .settle_synchronous_calls(&mut pending, &parent, &mut cancellation)
+                .await
+            {
+                return Err(self.cleanup_pending(error, &pending).await);
             }
             // AtBoundary is a property of *every* model request, not of a
             // completed turn. Admission is a Store transaction and neither
@@ -2088,6 +2102,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let name = call.name;
         let input = call.input;
         let tool_kind = input.kind();
+        let execution = call.execution;
         let is_yield = name == "yield";
         let wait = if is_yield {
             if self.embedded_identity().is_none() || tool_kind != ToolKind::Function {
@@ -2164,6 +2179,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 claim_request: request.clone(),
                 wait,
                 tool_kind,
+                execution,
                 persist_here_invocation_output: false,
                 cancel_job_on_cleanup: false,
                 scheduling: ToolScheduling::Async,
@@ -2238,6 +2254,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             claim_request: request.clone(),
             wait,
             tool_kind,
+            execution,
             persist_here_invocation_output: is_here_spawn,
             cancel_job_on_cleanup: true,
             scheduling,
@@ -2564,6 +2581,48 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 self.append_unread_envelopes(request).await?;
             }
         }
+        Ok(())
+    }
+
+    /// A synchronous fallback must finish before another model request or
+    /// compaction. Other calls remain independently scheduled and owned.
+    async fn settle_synchronous_calls(
+        &self,
+        pending: &mut Vec<PendingCall>,
+        request: &RequestId,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> Result<(), EngineError> {
+        let operations = pending
+            .iter()
+            .filter(|call| {
+                call.wait.is_none()
+                    && call.operation.origin == self.origin
+                    && call.scheduling == ToolScheduling::Async
+                    && call.execution == ToolExecution::Synchronous
+            })
+            .map(|call| call.operation.clone())
+            .collect::<Vec<_>>();
+        if operations.is_empty() {
+            return Ok(());
+        }
+        let mut settlements = self.scheduler.operation_settlements();
+        for operation in operations {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = await_cancellation(cancellation) => {
+                        return Err(EngineError::Cancelled { head_request: Some(request.clone()) });
+                    }
+                    output = self.scheduler.wait(&operation) => { output?; break; }
+                    event = settlements.recv() => {
+                        if event.is_ok() || matches!(event, Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) {
+                            self.persist_settled(pending, request).await?;
+                        }
+                    }
+                }
+            }
+        }
+        self.persist_settled(pending, request).await?;
         Ok(())
     }
 
@@ -3490,6 +3549,7 @@ mod tests {
                     "type":"function_call",
                     "call_id":call_id.0,
                     "name":"slow",
+                    "async":true,
                     "arguments":"{}"
                 }))],
             )
@@ -4308,6 +4368,7 @@ mod tests {
                     "type":"function_call",
                     "call_id":call_id.0,
                     "name":"never",
+                    "async":true,
                     "arguments":"{}"
                 }))],
             )
@@ -4595,7 +4656,9 @@ mod tests {
             Arc::new(InjectSelection(injected.clone(), Some(vec!["slow".into()]))),
             EngineConfig {
                 instructions: "instruction".into(),
-                tools: vec![json!({"type":"function","name":"slow","strict":true})],
+                tools: vec![
+                    json!({"type":"function","name":"slow","strict":true,"parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}),
+                ],
                 model: "test".into(),
                 effort: Effort::Low,
                 session_id: "inject".into(),
@@ -5237,6 +5300,7 @@ mod tests {
             "type":"function_call",
             "call_id":other_call_id.0,
             "name":"slow",
+            "async":true,
             "arguments":"{}"
         }));
         let spawn_item = Item(json!({
@@ -5745,7 +5809,7 @@ mod tests {
             match index {
                 0 => {
                     let call = Item(json!({
-                        "type":"function_call","call_id":"slow-call","name":"slow","arguments":"{}"
+                        "type":"function_call","call_id":"slow-call","async":true,"name":"slow","arguments":"{}"
                     }));
                     sink.send(StreamEvent::ItemDone(call.clone()))
                         .await
@@ -6089,10 +6153,10 @@ mod tests {
                     "a-and-b",
                     vec![
                         Item(json!({
-                            "type":"function_call","call_id":"call-A","name":"A","arguments":"{}"
+                            "type":"function_call","call_id":"call-A","async":true,"name":"A","arguments":"{}"
                         })),
                         Item(json!({
-                            "type":"function_call","call_id":"call-B","name":"B","arguments":"{}"
+                            "type":"function_call","call_id":"call-B","async":true,"name":"B","arguments":"{}"
                         })),
                     ],
                 )),
@@ -6586,7 +6650,7 @@ mod tests {
             released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         let call = Item(json!({
-            "type":"function_call","call_id":"carried-slow","name":"slow","arguments":"{}"
+            "type":"function_call","call_id":"carried-slow","async":true,"name":"slow","arguments":"{}"
         }));
         let mut provisional = turn(
             "provisional",
@@ -6676,7 +6740,7 @@ mod tests {
                     turn(
                         "pending",
                         vec![Item(json!({
-                            "type":"function_call","call_id":"failed-compact","name":"slow","arguments":"{}"
+                            "type":"function_call","call_id":"failed-compact","async":true,"name":"slow","arguments":"{}"
                         }))],
                     ),
                     turn(

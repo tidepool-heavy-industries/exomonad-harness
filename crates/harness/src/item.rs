@@ -26,6 +26,14 @@ pub struct ToolCall {
     pub call_id: CallId,
     pub name: String,
     pub input: ToolInput,
+    pub execution: ToolExecution,
+}
+
+/// Scheduling selected by the returned invocation, independent of the declaration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolExecution {
+    Synchronous,
+    Asynchronous,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -59,6 +67,11 @@ impl Item {
             Some(Value::String(namespace)) if namespace == "functions" => {}
             _ => return Err("unsupported tool namespace"),
         }
+        let execution = match object.get("async") {
+            None | Some(Value::Bool(false)) => ToolExecution::Synchronous,
+            Some(Value::Bool(true)) => ToolExecution::Asynchronous,
+            _ => return Err("invalid tool async mode"),
+        };
         let call_id = object
             .get("call_id")
             .and_then(Value::as_str)
@@ -92,6 +105,7 @@ impl Item {
             call_id: CallId(call_id.to_owned()),
             name: name.to_owned(),
             input,
+            execution,
         }))
     }
 
@@ -101,6 +115,13 @@ impl Item {
             JobOutput::Completed(Ok(value)) => value.clone(),
             JobOutput::Completed(Err(error)) => error.output_value(),
             JobOutput::Cancelled => json!({ "error": "job cancelled" }),
+            JobOutput::CancelledWithReceipt(receipt) => json!({
+                "error": "job cancelled",
+                "receipt": match receipt {
+                    Ok(value) => value.clone(),
+                    Err(failure) => failure.output_value(),
+                },
+            }),
             JobOutput::Interrupted => json!({ "error": "job interrupted" }),
             JobOutput::CancellationUnconfirmed(detail) => {
                 json!({ "error": "cancellation unconfirmed", "detail": detail })

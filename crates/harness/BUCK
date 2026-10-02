@@ -6,6 +6,12 @@ load("//:rust_tests.bzl", "integration_test")
 HARNESS_DEPS = [
     "//third-party/rust:async-trait",
     "//third-party/rust:axum",
+    "//third-party/rust:base64",
+    "//third-party/rust:fs2",
+    "//third-party/rust:getrandom",
+    "//third-party/rust:jsonwebtoken",
+    "//third-party/rust:libc",
+    "//third-party/rust:sha2",
     "//third-party/rust:blake3",
     "//third-party/rust:futures-util",
     "//third-party/rust:reqwest",

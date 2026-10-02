@@ -208,6 +208,12 @@ rust_library(
     ],
 )
 
+alias(
+    name = "base64",
+    actual = ":base64-0.22",
+    visibility = ["PUBLIC"],
+)
+
 http_archive(
     name = "base64-0.22.1.crate",
     sha256 = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6",
@@ -709,6 +715,49 @@ rust_library(
     deps = [":percent-encoding-2"],
 )
 
+alias(
+    name = "fs2",
+    actual = ":fs2-0.4",
+    visibility = ["PUBLIC"],
+)
+
+http_archive(
+    name = "fs2-0.4.3.crate",
+    sha256 = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213",
+    strip_prefix = "fs2-0.4.3",
+    urls = ["https://static.crates.io/crates/fs2/0.4.3/download"],
+    visibility = [],
+)
+
+rust_library(
+    name = "fs2-0.4",
+    srcs = [":fs2-0.4.3.crate"],
+    crate = "fs2",
+    crate_root = "fs2-0.4.3.crate/src/lib.rs",
+    edition = "2015",
+    platform = {
+        "linux-arm64": dict(
+            deps = [":libc-0.2"],
+        ),
+        "linux-x86_64": dict(
+            deps = [":libc-0.2"],
+        ),
+        "macos-arm64": dict(
+            deps = [":libc-0.2"],
+        ),
+        "macos-x86_64": dict(
+            deps = [":libc-0.2"],
+        ),
+        "windows-gnu": dict(
+            deps = [":winapi-0.3"],
+        ),
+        "windows-msvc": dict(
+            deps = [":winapi-0.3"],
+        ),
+    },
+    visibility = [],
+)
+
 http_archive(
     name = "futures-channel-0.3.34.crate",
     sha256 = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4",
@@ -726,10 +775,15 @@ rust_library(
     features = [
         "alloc",
         "default",
+        "futures-sink",
+        "sink",
         "std",
     ],
     visibility = [],
-    deps = [":futures-core-0.3"],
+    deps = [
+        ":futures-core-0.3",
+        ":futures-sink-0.3",
+    ],
 )
 
 http_archive(
@@ -751,6 +805,24 @@ rust_library(
         "default",
         "std",
     ],
+    visibility = [],
+)
+
+http_archive(
+    name = "futures-io-0.3.34.crate",
+    sha256 = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed",
+    strip_prefix = "futures-io-0.3.34",
+    urls = ["https://static.crates.io/crates/futures-io/0.3.34/download"],
+    visibility = [],
+)
+
+rust_library(
+    name = "futures-io-0.3",
+    srcs = [":futures-io-0.3.34.crate"],
+    crate = "futures_io",
+    crate_root = "futures-io-0.3.34.crate/src/lib.rs",
+    edition = "2018",
+    features = ["std"],
     visibility = [],
 )
 
@@ -845,8 +917,11 @@ rust_library(
         "async-await",
         "async-await-macro",
         "default",
+        "futures-io",
         "futures-macro",
         "futures-sink",
+        "io",
+        "memchr",
         "sink",
         "slab",
         "std",
@@ -854,9 +929,11 @@ rust_library(
     visibility = [],
     deps = [
         ":futures-core-0.3",
+        ":futures-io-0.3",
         ":futures-macro-0.3",
         ":futures-sink-0.3",
         ":futures-task-0.3",
+        ":memchr-2",
         ":pin-project-lite-0.2",
         ":slab-0.4",
     ],
@@ -934,6 +1011,12 @@ rust_library(
     },
     visibility = [],
     deps = [":cfg-if-1"],
+)
+
+alias(
+    name = "getrandom",
+    actual = ":getrandom-0.3",
+    visibility = ["PUBLIC"],
 )
 
 http_archive(
@@ -1626,6 +1709,41 @@ rust_library(
     visibility = [],
 )
 
+alias(
+    name = "jsonwebtoken",
+    actual = ":jsonwebtoken-9",
+    visibility = ["PUBLIC"],
+)
+
+http_archive(
+    name = "jsonwebtoken-9.3.1.crate",
+    sha256 = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde",
+    strip_prefix = "jsonwebtoken-9.3.1",
+    urls = ["https://static.crates.io/crates/jsonwebtoken/9.3.1/download"],
+    visibility = [],
+)
+
+rust_library(
+    name = "jsonwebtoken-9",
+    srcs = [":jsonwebtoken-9.3.1.crate"],
+    crate = "jsonwebtoken",
+    crate_root = "jsonwebtoken-9.3.1.crate/src/lib.rs",
+    edition = "2021",
+    visibility = [],
+    deps = [
+        ":base64-0.22",
+        ":ring-0.17",
+        ":serde-1",
+        ":serde_json-1",
+    ],
+)
+
+alias(
+    name = "libc",
+    actual = ":libc-0.2",
+    visibility = ["PUBLIC"],
+)
+
 http_archive(
     name = "libc-0.2.189.crate",
     sha256 = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2",
@@ -2297,6 +2415,7 @@ rust_library(
         "__rustls",
         "__rustls-ring",
         "__tls",
+        "blocking",
         "json",
         "rustls-tls",
         "rustls-tls-webpki-roots",
@@ -2307,6 +2426,7 @@ rust_library(
     deps = [
         ":base64-0.22",
         ":bytes-1",
+        ":futures-channel-0.3",
         ":futures-core-0.3",
         ":futures-util-0.3",
         ":http-1",
@@ -2361,6 +2481,7 @@ rust_library(
         "alloc",
         "default",
         "dev_urandom_fallback",
+        "std",
     ],
     platform = {
         "linux-arm64": dict(
@@ -2396,6 +2517,7 @@ rust_binary(
         "alloc",
         "default",
         "dev_urandom_fallback",
+        "std",
     ],
     visibility = [],
     deps = [":cc-1"],
@@ -2416,6 +2538,7 @@ tidepool_buildscript_run(
         "alloc",
         "default",
         "dev_urandom_fallback",
+        "std",
     ],
     rustc_link_lib = True,
     rustc_link_search = True,
@@ -3034,6 +3157,38 @@ rust_library(
     srcs = [":sha1-0.10.7.crate"],
     crate = "sha1",
     crate_root = "sha1-0.10.7.crate/src/lib.rs",
+    edition = "2018",
+    features = [
+        "default",
+        "std",
+    ],
+    visibility = [],
+    deps = [
+        ":cfg-if-1",
+        ":cpufeatures-0.2",
+        ":digest-0.10",
+    ],
+)
+
+alias(
+    name = "sha2",
+    actual = ":sha2-0.10",
+    visibility = ["PUBLIC"],
+)
+
+http_archive(
+    name = "sha2-0.10.9.crate",
+    sha256 = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283",
+    strip_prefix = "sha2-0.10.9",
+    urls = ["https://static.crates.io/crates/sha2/0.10.9/download"],
+    visibility = [],
+)
+
+rust_library(
+    name = "sha2-0.10",
+    srcs = [":sha2-0.10.9.crate"],
+    crate = "sha2",
+    crate_root = "sha2-0.10.9.crate/src/lib.rs",
     edition = "2018",
     features = [
         "default",
@@ -4054,6 +4209,109 @@ rust_library(
         "pki_types": ":rustls-pki-types-1",
     },
     visibility = [],
+)
+
+http_archive(
+    name = "winapi-0.3.9.crate",
+    sha256 = "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419",
+    strip_prefix = "winapi-0.3.9",
+    urls = ["https://static.crates.io/crates/winapi/0.3.9/download"],
+    visibility = [],
+)
+
+rust_library(
+    name = "winapi-0.3",
+    srcs = [":winapi-0.3.9.crate"],
+    crate = "winapi",
+    crate_root = "winapi-0.3.9.crate/src/lib.rs",
+    edition = "2015",
+    env = {
+        "OUT_DIR": "$(location :winapi-0.3-build-script-run[out_dir])",
+    },
+    features = [
+        "fileapi",
+        "handleapi",
+        "processthreadsapi",
+        "std",
+        "winbase",
+        "winerror",
+    ],
+    platform = {
+        "windows-gnu": dict(
+            deps = [":winapi-x86_64-pc-windows-gnu-0.4"],
+        ),
+    },
+    rustc_flags = ["@$(location :winapi-0.3-build-script-run[rustc_flags])"],
+    visibility = [],
+)
+
+rust_binary(
+    name = "winapi-0.3-build-script-build",
+    srcs = [":winapi-0.3.9.crate"],
+    crate = "build_script_build",
+    crate_root = "winapi-0.3.9.crate/build.rs",
+    edition = "2015",
+    features = [
+        "fileapi",
+        "handleapi",
+        "processthreadsapi",
+        "std",
+        "winbase",
+        "winerror",
+    ],
+    visibility = [],
+)
+
+tidepool_buildscript_run(
+    name = "winapi-0.3-build-script-run",
+    package_name = "winapi",
+    buildscript_rule = ":winapi-0.3-build-script-build",
+    features = [
+        "fileapi",
+        "handleapi",
+        "processthreadsapi",
+        "std",
+        "winbase",
+        "winerror",
+    ],
+    version = "0.3.9",
+)
+
+http_archive(
+    name = "winapi-x86_64-pc-windows-gnu-0.4.0.crate",
+    sha256 = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f",
+    strip_prefix = "winapi-x86_64-pc-windows-gnu-0.4.0",
+    urls = ["https://static.crates.io/crates/winapi-x86_64-pc-windows-gnu/0.4.0/download"],
+    visibility = [],
+)
+
+rust_library(
+    name = "winapi-x86_64-pc-windows-gnu-0.4",
+    srcs = [":winapi-x86_64-pc-windows-gnu-0.4.0.crate"],
+    crate = "winapi_x86_64_pc_windows_gnu",
+    crate_root = "winapi-x86_64-pc-windows-gnu-0.4.0.crate/src/lib.rs",
+    edition = "2015",
+    env = {
+        "OUT_DIR": "$(location :winapi-x86_64-pc-windows-gnu-0.4-build-script-run[out_dir])",
+    },
+    rustc_flags = ["@$(location :winapi-x86_64-pc-windows-gnu-0.4-build-script-run[rustc_flags])"],
+    visibility = [],
+)
+
+rust_binary(
+    name = "winapi-x86_64-pc-windows-gnu-0.4-build-script-build",
+    srcs = [":winapi-x86_64-pc-windows-gnu-0.4.0.crate"],
+    crate = "build_script_build",
+    crate_root = "winapi-x86_64-pc-windows-gnu-0.4.0.crate/build.rs",
+    edition = "2015",
+    visibility = [],
+)
+
+tidepool_buildscript_run(
+    name = "winapi-x86_64-pc-windows-gnu-0.4-build-script-run",
+    package_name = "winapi-x86_64-pc-windows-gnu",
+    buildscript_rule = ":winapi-x86_64-pc-windows-gnu-0.4-build-script-build",
+    version = "0.4.0",
 )
 
 http_archive(

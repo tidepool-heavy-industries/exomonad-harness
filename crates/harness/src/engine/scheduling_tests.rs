@@ -10,7 +10,9 @@ impl Auth for Offline {
     }
 }
 fn call(id: &str, name: &str) -> Item {
-    Item(json!({"type":"function_call","call_id":id,"name":name,"arguments":"{}"}))
+    // A host-declared synchronous tool remains synchronous even when the
+    // provider returns async=true; ordinary tools retain their explicit mode.
+    Item(json!({"type":"function_call","call_id":id,"name":name,"async":true,"arguments":"{}"}))
 }
 fn turn(items: Vec<Item>) -> ResponsesTurn {
     ResponsesTurn {

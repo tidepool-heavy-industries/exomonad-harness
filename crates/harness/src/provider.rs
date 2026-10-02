@@ -101,6 +101,7 @@ pub enum ProviderError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NonValueTerminal {
     Cancelled,
+    CancelledWithReceipt(Result<Value, ToolFailure>),
     Interrupted,
     CancellationUnconfirmed(String),
 }
@@ -113,6 +114,12 @@ impl std::fmt::Display for ProviderError {
                 write!(
                     output,
                     "recorded cancellation requires terminal-aware scheduling"
+                )
+            }
+            Self::NonValueTerminal(NonValueTerminal::CancelledWithReceipt(_)) => {
+                write!(
+                    output,
+                    "recorded cancellation receipt requires terminal-aware scheduling"
                 )
             }
             Self::NonValueTerminal(NonValueTerminal::Interrupted) => {
@@ -231,6 +238,8 @@ impl RetainedOutput {
 #[serde(tag = "state", content = "detail", rename_all = "snake_case")]
 pub enum CancellationAcknowledgment {
     Stopped,
+    /// Cancellation stopped unfinished work; the receipt describes its actual prefix.
+    StoppedWithReceipt(Result<Value, ToolFailure>),
     /// The owner observed the operation's terminal result before cancellation won.
     Completed(Result<Value, ToolFailure>),
     Unconfirmed(String),
