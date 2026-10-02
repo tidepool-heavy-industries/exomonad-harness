@@ -95,6 +95,7 @@ struct Streaming {
     emitted: Arc<Notify>,
     finish: Arc<Notify>,
     fail: bool,
+    omit_sync: bool,
 }
 #[async_trait::async_trait]
 impl ResponsesTransport for Streaming {
@@ -127,6 +128,9 @@ impl ResponsesTransport for Streaming {
         if self.fail {
             return Err(TransportError::Stream("incomplete response".into()));
         }
+        if self.omit_sync {
+            return Ok(turn(vec![asynchronous]));
+        }
         Ok(turn(vec![
             first,
             asynchronous,
@@ -156,6 +160,7 @@ fn engine(
             emitted: emitted.clone(),
             finish: finish.clone(),
             fail,
+            omit_sync: false,
         },
         store.clone(),
         Arc::new(JobScheduler::new(3).unwrap()),
@@ -736,4 +741,20 @@ async fn refused_context_commit_aborts_publication_and_recovers_without_releasin
         2
     );
     assert_eq!(requests.lock().unwrap()[1].model, "model-old");
+}
+
+#[tokio::test]
+async fn sync_call_missing_from_final_response_is_refused_without_execution() {
+    let (mut engine, mut starts, emitted, finish, _) = engine(false);
+    Arc::get_mut(&mut engine).unwrap().client.omit_sync = true;
+    let (_cancel, cancelled) = watch::channel(false);
+    let running = tokio::spawn(async move { engine.run(None, vec![], cancelled, mailbox()).await });
+    emitted.notified().await;
+    assert_eq!(starts.recv().await.unwrap(), "async_work");
+    finish.notify_one();
+    assert!(matches!(
+        running.await.unwrap(),
+        Err(EngineError::InvalidFunctionCall)
+    ));
+    assert!(starts.try_recv().is_err());
 }

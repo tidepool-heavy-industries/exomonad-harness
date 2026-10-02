@@ -2399,6 +2399,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 })
             })
             .collect::<Vec<_>>();
+        if pending
+            .iter()
+            .any(|call| call.queued.is_some() && !operations.contains(&call.operation))
+        {
+            return Err(EngineError::InvalidFunctionCall);
+        }
         for operation in operations {
             let Some(index) = pending
                 .iter()
