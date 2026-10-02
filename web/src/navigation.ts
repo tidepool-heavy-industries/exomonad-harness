@@ -146,7 +146,10 @@ export function useRoute() {
     return () => window.removeEventListener('popstate', pop);
   }, []);
   const navigate = useCallback((route: RouteState, replace = false) => {
-    window.history[replace ? 'replaceState' : 'pushState'](null, '', routeUrl(route, new URL(window.location.href)));
+    const current = new URL(window.location.href);
+    const next = routeUrl(route, current);
+    if (next.href !== current.href)
+      window.history[replace ? 'replaceState' : 'pushState'](null, '', next);
     setParsed({ route });
   }, []);
   return { ...parsed, navigate };

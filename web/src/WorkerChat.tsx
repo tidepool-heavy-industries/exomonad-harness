@@ -80,7 +80,13 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
   const workers = [...(data.actors ?? [])].sort((a, b) =>
     Number(!['running', 'waiting'].includes(a.lifecycle)) - Number(!['running', 'waiting'].includes(b.lifecycle))
     || a.name.localeCompare(b.name) || a.incarnation.localeCompare(b.incarnation))
-  const shown = pageRows(workers.filter(actor => `${actor.name} ${actor.kind} ${actor.incarnation} ${actor.lifecycle}`.toLowerCase().includes(search.toLowerCase())), page, 100)
+  const shown = pageRows(workers.filter(actor => `${actor.name} ${actor.kind} ${actor.incarnation} ${actor.lifecycle} ${actor.run}`.toLowerCase().includes(search.toLowerCase())), page, 100)
+  function jumpToSelectedWorker() {
+    if (!identity) return
+    const selectedIndex = workers.findIndex(actor => actorIdentityKey(identityOf(actor)) === actorIdentityKey(identity))
+    setSearch('')
+    if (selectedIndex >= 0) setPage(Math.floor(selectedIndex / 100))
+  }
   function workerLink(target: HostActorIdentity, label: ReactNode) {
     const next: RouteState = { ...route, screen: 'chat', selection: { kind: 'actor', identity: target }, requestId: undefined, global: false }
     return <a href={routeUrl(next, new URL(window.location.href)).toString()}
@@ -94,6 +100,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
     <aside className="worker-chat-list" aria-label="Workers">
       <h2>Workers</h2>
       <label>Find worker<input type="search" value={search} onChange={event => { setSearch(event.target.value); setPage(0) }} /></label>
+      {identity && <button type="button" onClick={jumpToSelectedWorker}>Jump to selected worker</button>}
       {identity && !resolved.actor && <p>{workerLink(identity, identity.actor)} · selected exact actor unavailable</p>}
       <ul>{shown.rows.map(actor => <li key={actorIdentityKey(identityOf(actor))}>
         {workerLink(identityOf(actor), actor.name)}

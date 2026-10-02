@@ -1,7 +1,28 @@
-import { describe, expect, it } from 'vitest';
-import { defaultRoute, parseRoute, routeUrl } from './navigation';
+import { act, renderHook } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import { defaultRoute, parseRoute, routeUrl, useRoute } from './navigation';
 
 describe('native route codec', () => {
+  it('skips identical history entries while retaining replacement and canonicalization', () => {
+    window.history.replaceState(null, '', '/tree');
+    const push = vi.spyOn(window.history, 'pushState');
+    const replace = vi.spyOn(window.history, 'replaceState');
+    const { result } = renderHook(() => useRoute());
+
+    act(() => result.current.navigate(defaultRoute));
+    expect(push).not.toHaveBeenCalled();
+    act(() => result.current.navigate({ ...defaultRoute, screen: 'inbox' }, true));
+    expect(replace).toHaveBeenCalledOnce();
+    expect(window.location.pathname).toBe('/inbox');
+
+    window.history.replaceState(null, '', '/?view=tree');
+    act(() => result.current.navigate(defaultRoute));
+    expect(window.location.pathname).toBe('/tree');
+    expect(push).toHaveBeenCalledOnce();
+    push.mockRestore();
+    replace.mockRestore();
+  });
+
   it('roundtrips exact actor identity in canonical pathname and query', () => {
     const route = {
       ...defaultRoute,

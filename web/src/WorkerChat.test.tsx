@@ -188,6 +188,31 @@ describe('exact worker Chat', () => {
     expect(within(list).getAllByRole('link')).toHaveLength(100)
     expect(readHistoryPage).not.toHaveBeenCalled()
   })
+  it('searches displayed run values and jumps to the selected exact worker page', () => {
+    const actors = Array.from({ length: 205 }, (_, index) => {
+      const identity = { run: `run-${index}`, actor: `/worker/${String(index).padStart(3, '0')}`, incarnation: String(index) }
+      return { ...actor, id: actorIdentityKey(identity), name: identity.actor, run: identity.run, incarnation: identity.incarnation, lifecycle: 'running' }
+    })
+    const selected = actors[150]!
+    const selectedIdentity = { run: selected.run, actor: selected.name, incarnation: selected.incarnation }
+    const selectedRoute = { ...route, selection: { kind: 'actor' as const, identity: selectedIdentity } }
+    render(chat({ ...data, actors }, selectedRoute))
+
+    const list = screen.getByRole('complementary', { name: 'Workers' })
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Find worker' }), { target: { value: 'run-150' } })
+    expect(within(list).getByRole('link', { name: selected.name })).toBeVisible()
+    expect(within(list).queryByRole('link', { name: actors[0]!.name })).toBeNull()
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Find worker' }), { target: { value: 'no match' } })
+    expect(within(list).getByText('No workers match.')).toBeVisible()
+    fireEvent.click(within(list).getByRole('button', { name: 'Jump to selected worker' }))
+    expect(screen.getByRole('searchbox', { name: 'Find worker' })).toHaveValue('')
+    expect(within(list).getByText('Page 2 of 3')).toBeVisible()
+    const selectedLink = within(list).getByRole('link', { name: selected.name })
+    expect(selectedLink).toHaveAttribute('aria-current', 'page')
+    expect(navigate).not.toHaveBeenCalled()
+    expect(readHistoryPage).not.toHaveBeenCalled()
+  })
   it('clears retained messages and actor associations on deliberate signout', async () => {
     const mounted = render(chat())
     await screen.findByText('Messages for head'); mounted.unmount()
