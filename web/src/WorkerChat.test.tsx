@@ -213,6 +213,26 @@ describe('exact worker Chat', () => {
     expect(navigate).not.toHaveBeenCalled()
     expect(readHistoryPage).not.toHaveBeenCalled()
   })
+  it('keeps search, page, and URL unchanged when the selected exact worker is unavailable', () => {
+    const actors = Array.from({ length: 205 }, (_, index) => {
+      const identity = { run: `run-${index}`, actor: `/worker/${String(index).padStart(3, '0')}`, incarnation: String(index) }
+      return { ...actor, id: actorIdentityKey(identity), name: identity.actor, run: identity.run, incarnation: identity.incarnation, lifecycle: 'running' }
+    })
+    const unavailableRoute = { ...route, selection: { kind: 'actor' as const, identity: { run: 'old-run', actor: '/worker/old', incarnation: 'old-incarnation' } } }
+    window.history.replaceState(null, '', '/chat/worker/old?run=old-run&incarnation=old-incarnation')
+    const url = window.location.href
+    render(chat({ ...data, actors }, unavailableRoute))
+
+    const list = screen.getByRole('complementary', { name: 'Workers' })
+    const search = screen.getByRole('searchbox', { name: 'Find worker' })
+    fireEvent.change(search, { target: { value: 'run-' } })
+    fireEvent.click(within(list).getByRole('button', { name: 'Next workers' }))
+    expect(search).toHaveValue('run-')
+    expect(within(list).getByText('Page 2 of 3')).toBeVisible()
+    expect(within(list).queryByRole('button', { name: 'Jump to selected worker' })).toBeNull()
+    expect(window.location.href).toBe(url)
+    expect(navigate).not.toHaveBeenCalled()
+  })
   it('clears retained messages and actor associations on deliberate signout', async () => {
     const mounted = render(chat())
     await screen.findByText('Messages for head'); mounted.unmount()
