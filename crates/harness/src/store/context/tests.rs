@@ -1021,6 +1021,75 @@ fn closed_opaque_response_converts_to_notes_preserving_raw_evidence() {
 }
 
 #[test]
+fn blocks_preserve_duplicate_call_order_orphans_and_cut_opaque_groups() {
+    let store = Store::memory().unwrap();
+    let parent = RequestId("grouping-history".into());
+    let items = [
+        Item(json!({"type":"message","role":"user","content":"before"})),
+        Item(json!({"type":"custom_tool_call","call_id":"duplicate","name":"one","input":"1"})),
+        Item(json!({"type":"custom_tool_call_output","call_id":"duplicate","output":"first"})),
+        Item(json!({"type":"custom_tool_call","call_id":"duplicate","name":"two","input":"2"})),
+        Item(json!({"type":"custom_tool_call_output","call_id":"duplicate","output":"second"})),
+        Item(json!({"type":"function_call_output","call_id":"orphan","output":"unpaired"})),
+        Item(json!({"type":"reasoning","encrypted_content":"sealed-1"})),
+        Item(json!({"type":"message","role":"assistant","content":"between"})),
+        Item(json!({"type":"reasoning","encrypted_content":"sealed-2"})),
+        Item(json!({"type":"message","role":"assistant","content":"after"})),
+        Item(json!({"type":"reasoning","encrypted_content":"sealed-3"})),
+    ];
+    store
+        .write_request(&parent, None, "/root", &items, Usage::default())
+        .unwrap();
+    let hashes = [items[6].clone(), items[8].clone(), items[10].clone()]
+        .iter()
+        .map(|item| store.put_item(item).unwrap().0)
+        .collect::<Vec<_>>();
+    store
+        .lock()
+        .execute(
+            "INSERT INTO events(request_id,kind,payload,created_at) VALUES(?1,'model_turn',?2,0)",
+            params![parent.0, json!({"response":{"items":hashes}}).to_string()],
+        )
+        .unwrap();
+
+    let c = store.lock();
+    let all = history(&c, &parent, true).unwrap();
+    let grouped = blocks(&c, &all, 10).unwrap();
+    assert_eq!(grouped.len(), 5);
+    assert!(matches!(grouped[0].block, ContextBlock::Text { .. }));
+    assert_eq!(grouped[1].items.len(), 2);
+    assert_eq!(grouped[1].items[0].item.0["name"], "one");
+    assert_eq!(grouped[1].items[1].item.0["output"], "first");
+    assert_eq!(
+        grouped[1].block,
+        ContextBlock::Native {
+            reference: reference(&grouped[1].items),
+            kind: ContextNativeKind::CompletedExchange,
+            preview: preview(&grouped[1].items),
+            protected: false,
+        }
+    );
+    assert_eq!(grouped[2].items.len(), 2);
+    assert_eq!(grouped[2].items[0].item.0["name"], "two");
+    assert_eq!(grouped[2].items[1].item.0["output"], "second");
+    assert!(
+        grouped[3].mandatory,
+        "an output without an earlier call is pending"
+    );
+    assert_eq!(grouped[3].items[0].item.0["call_id"], "orphan");
+    assert_eq!(grouped[4].items.len(), 4);
+    assert!(grouped[4].opaque);
+    assert!(
+        grouped[4].mandatory,
+        "the opaque membership crosses the cut"
+    );
+    assert_eq!(grouped[4].items[0].item.0["encrypted_content"], "sealed-1");
+    assert_eq!(grouped[4].items[1].item.0["content"], "between");
+    assert_eq!(grouped[4].items[2].item.0["encrypted_content"], "sealed-2");
+    assert_eq!(grouped[4].items[3].item.0["content"], "after");
+}
+
+#[test]
 fn claim_lineage_selects_nearest_exact_operation_for_continuation() {
     use crate::store::ClaimState;
     let store = Store::memory().unwrap();

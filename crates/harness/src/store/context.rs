@@ -264,7 +264,78 @@ fn preview(items: &[Occurrence]) -> String {
 }
 
 fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBlock>> {
+    // Index the immutable history once for the grouping pass. Calls still pair
+    // with the first matching output after their own position, including when
+    // duplicate call IDs appear in the same history.
+    let mut outputs = HashMap::<String, Vec<usize>>::new();
+    for (index, occurrence) in all.iter().enumerate() {
+        if matches!(
+            occurrence.item.0["type"].as_str(),
+            Some("function_call_output" | "custom_tool_call_output")
+        ) && let Some(call_id) = occurrence.item.0["call_id"].as_str()
+        {
+            outputs.entry(call_id.into()).or_default().push(index);
+        }
+    }
+
+    // A model_turn payload describes opaque items by hash. Load each source
+    // request once, then reduce its membership to the first and last history
+    // positions in one pass. This keeps per-item work independent of history
+    // length while preserving repeated occurrences of a listed hash.
+    let opaque_items = all
+        .iter()
+        .take(cut)
+        .map(|occurrence| opaque(&occurrence.item))
+        .collect::<Vec<_>>();
+    let opaque_requests = all
+        .iter()
+        .take(cut)
+        .enumerate()
+        .filter(|(index, occurrence)| {
+            opaque_items[*index]
+                && !occurrence.item.is_configuration_update()
+                && !(occurrence.item.0["type"] == "message"
+                    && matches!(
+                        occurrence.item.0["role"].as_str(),
+                        Some("system" | "developer")
+                    ))
+        })
+        .map(|(_, occurrence)| occurrence.origin.request.clone())
+        .collect::<HashSet<_>>();
+    let mut opaque_hashes = HashMap::<RequestId, HashSet<String>>::new();
+    for request in opaque_requests {
+        let raw: Option<String> = c
+            .query_row(
+                "SELECT payload FROM events WHERE request_id=?1 AND kind='model_turn' ORDER BY id DESC LIMIT 1",
+                [&request.0],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let hashes = raw
+            .map(|raw| serde_json::from_str::<serde_json::Value>(&raw))
+            .transpose()?
+            .and_then(|r| r["response"]["items"].as_array().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        opaque_hashes.insert(request, hashes);
+    }
+    let mut opaque_bounds = HashMap::<RequestId, (usize, usize)>::new();
+    for (index, occurrence) in all.iter().enumerate() {
+        if opaque_hashes
+            .get(&occurrence.origin.request)
+            .is_some_and(|hashes| hashes.contains(&occurrence.origin.hash.0))
+        {
+            opaque_bounds
+                .entry(occurrence.origin.request.clone())
+                .and_modify(|bounds| bounds.1 = index)
+                .or_insert((index, index));
+        }
+    }
+
     let mut ranges = Vec::<(usize, usize, bool, bool)>::new();
+    let mut prior_calls = HashSet::<String>::new();
     for (index, occurrence) in all.iter().enumerate().take(cut) {
         let item = &occurrence.item;
         if item.is_configuration_update()
@@ -274,57 +345,35 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
             ranges.push((index, index + 1, false, true));
             continue;
         }
-        if let Some(call) = item
+        let call = item
             .tool_call()
-            .map_err(|_| ContextError::InvalidReference)?
-        {
-            let result = all.iter().enumerate().skip(index + 1).find(|(_, i)| {
-                i.item.0["call_id"] == call.call_id.0
-                    && matches!(
-                        i.item.0["type"].as_str(),
-                        Some("function_call_output" | "custom_tool_call_output")
-                    )
+            .map_err(|_| ContextError::InvalidReference)?;
+        if let Some(call) = &call {
+            let result = outputs.get(&call.call_id.0).and_then(|positions| {
+                let next = positions.partition_point(|position| *position <= index);
+                positions.get(next).copied()
             });
-            let end = result.map_or(index + 1, |(n, _)| n + 1);
+            let end = result.map_or(index + 1, |n| n + 1);
             ranges.push((
                 index,
                 end.min(cut),
-                opaque(item),
+                opaque_items[index],
                 result.is_none() || end > cut,
             ));
         } else if message(item).is_none() {
             let orphan = matches!(
                 item.0["type"].as_str(),
                 Some("function_call_output" | "custom_tool_call_output")
-            ) && !all[..index].iter().any(|i| {
-                i.item
-                    .tool_call()
-                    .ok()
-                    .flatten()
-                    .is_some_and(|call| item.0["call_id"] == call.call_id.0)
-            });
-            ranges.push((index, index + 1, opaque(item), orphan));
+            ) && !item.0["call_id"]
+                .as_str()
+                .is_some_and(|call_id| prior_calls.contains(call_id));
+            ranges.push((index, index + 1, opaque_items[index], orphan));
         }
-        if opaque(item) {
-            let raw:Option<String>=c.query_row("SELECT payload FROM events WHERE request_id=?1 AND kind='model_turn' ORDER BY id DESC LIMIT 1",[&occurrence.origin.request.0],|r|r.get(0)).optional()?;
-            let hashes: HashSet<String> = raw
-                .map(|raw| serde_json::from_str::<serde_json::Value>(&raw))
-                .transpose()?
-                .and_then(|r| r["response"]["items"].as_array().cloned())
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect();
-            let members = all
-                .iter()
-                .enumerate()
-                .filter(|(_, i)| {
-                    i.origin.request == occurrence.origin.request
-                        && hashes.contains(&i.origin.hash.0)
-                })
-                .map(|(n, _)| n)
-                .collect::<Vec<_>>();
-            if let (Some(start), Some(end)) = (members.first(), members.last()) {
+        if let Some(call) = call {
+            prior_calls.insert(call.call_id.0);
+        }
+        if opaque_items[index] {
+            if let Some((start, end)) = opaque_bounds.get(&occurrence.origin.request) {
                 ranges.push((*start, (*end + 1).min(cut), true, *end >= cut));
             } else {
                 ranges.push((index, index + 1, true, true));
