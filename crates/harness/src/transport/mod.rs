@@ -155,8 +155,21 @@ pub enum TransportError {
     },
     #[error("stream failed: {0}")]
     Stream(String),
+    #[error("stream failed: {0}")]
+    IncompleteResponse(StreamInterruption),
     #[error("replay request {request:?} already has a recorded owner")]
     ReplayRequestReuse { request: crate::model::RequestId },
+}
+
+/// The response ended without completion proof. This does not establish whether
+/// completed tool items escaped the stream or their external calls ran.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamInterruption {
+    #[error("missing response.completed")]
+    MissingCompletion,
+    #[error("SSE read failed")]
+    ReadFailed,
 }
 
 /// Allowlisted, bounded provider error fields. The transport removes credentials

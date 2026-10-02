@@ -39,12 +39,39 @@ pub struct HistoryPage {
     pub oversized_item: Option<OversizedItem>,
 }
 
-pub(crate) struct SettledModelRequest {
+pub(crate) struct ModelRequestObservation {
     pub request: Request,
     pub failure: Option<crate::transport::RequestFailure>,
+    pub interruption: Option<crate::transport::StreamInterruption>,
 }
 
 impl Store {
+    /// Retain a stopped provider attempt without certifying its request as
+    /// completed, cancelled or rejected. The exact pending frontier is fenced
+    /// in the same transaction as the diagnostic publication.
+    pub(crate) fn record_interrupted_model_request(
+        &self,
+        request: &RequestId,
+        cause: crate::transport::StreamInterruption,
+        agent_head: Option<(&crate::embedding::HostIdentity, Option<&RequestId>)>,
+    ) -> Result<bool> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+        if let Some((identity, expected)) = agent_head {
+            let frontier = super::embedded_round::frontier(&transaction, identity)?;
+            if frontier.settled_head.as_ref() != expected
+                || frontier.pending_head.as_ref() != Some(request)
+            {
+                return Ok(false);
+            }
+        }
+        transaction.execute(
+            "INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,'model_interrupted',?2,?3)",
+            params![request.0, serde_json::to_string(&cause)?, super::utc_millis()],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
     /// Failure publication and an embedded actor's head advance share one
     /// transaction. A failed CAS or event write publishes neither fact.
     pub(crate) fn record_failed_model_request(
@@ -74,19 +101,21 @@ impl Store {
         Ok(true)
     }
 
-    /// Read only durable success or failure metadata, without loading model inputs or Items.
-    pub(crate) fn completed_model_requests(
+    /// Read durable success, rejection and interruption metadata without loading
+    /// model inputs or Items. An interruption does not settle the request.
+    pub(crate) fn model_request_outcomes(
         &self,
         limit: usize,
-    ) -> Result<Vec<SettledModelRequest>> {
+    ) -> Result<Vec<ModelRequestObservation>> {
         let c = self.lock();
         let mut query = c.prepare(
             "WITH recent AS (
                 SELECT request_id,MAX(id) AS sequence FROM (
-                    SELECT id,request_id FROM events WHERE kind IN ('model_turn','request_failed')
+                    SELECT id,request_id FROM events WHERE kind IN ('model_turn','request_failed','model_interrupted')
                     ORDER BY id DESC LIMIT ?1
                 ) GROUP BY request_id
-             ) SELECT r.id,r.parent_id,r.branch,CASE WHEN e.kind='request_failed' THEN e.payload ELSE NULL END FROM recent
+             ) SELECT r.id,r.parent_id,r.branch,CASE WHEN e.kind='request_failed' THEN e.payload ELSE NULL END,
+                      CASE WHEN e.kind='model_interrupted' THEN e.payload ELSE NULL END FROM recent
              JOIN requests r ON r.id=recent.request_id JOIN events e ON e.id=recent.sequence
              ORDER BY recent.sequence",
         )?;
@@ -98,13 +127,17 @@ impl Store {
                     branch: row.get(2)?,
                 },
                 row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })?;
         rows.map(|row| {
-            let (request, payload) = row?;
-            Ok(SettledModelRequest {
+            let (request, payload, interruption) = row?;
+            Ok(ModelRequestObservation {
                 request,
                 failure: payload
+                    .map(|payload| serde_json::from_str(&payload))
+                    .transpose()?,
+                interruption: interruption
                     .map(|payload| serde_json::from_str(&payload))
                     .transpose()?,
             })
@@ -383,5 +416,95 @@ mod tests {
         assert_eq!(next.items[0].item, second);
         assert_eq!(next.next_offset, None);
         assert!(next.oversized_item.is_none());
+    }
+}
+
+#[cfg(test)]
+mod interruption_fencing_tests {
+    use super::*;
+    use crate::{embedding::HostIdentity, model::AgentPath, transport::StreamInterruption};
+    #[test]
+    fn interrupted_publication_is_fenced_and_survives_store_reopen_without_settlement() {
+        let path = std::env::temp_dir().join(format!(
+            "interrupted-frontier-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let identity = HostIdentity {
+            run: "interrupted".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "1".into(),
+        };
+        let request = RequestId("pending".into());
+        {
+            let store = Store::open(&path).unwrap();
+            store.bind_embedded_actor(&identity, None).unwrap();
+            store
+                .write_embedded_request(&identity, &request, None, &[], Default::default())
+                .unwrap();
+            let mut stale = identity.clone();
+            stale.incarnation = "0".into();
+            assert!(
+                store
+                    .record_interrupted_model_request(
+                        &request,
+                        StreamInterruption::MissingCompletion,
+                        Some((&stale, None))
+                    )
+                    .is_err()
+            );
+            assert!(
+                !store
+                    .record_interrupted_model_request(
+                        &request,
+                        StreamInterruption::MissingCompletion,
+                        Some((&identity, Some(&RequestId("stale".into()))))
+                    )
+                    .unwrap()
+            );
+            store.lock().execute_batch("CREATE TRIGGER reject_interruption BEFORE INSERT ON events WHEN NEW.kind='model_interrupted' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+            assert!(
+                store
+                    .record_interrupted_model_request(
+                        &request,
+                        StreamInterruption::MissingCompletion,
+                        Some((&identity, None))
+                    )
+                    .is_err()
+            );
+            assert!(store.events(Some(&request)).unwrap().is_empty());
+            store
+                .lock()
+                .execute_batch("DROP TRIGGER reject_interruption")
+                .unwrap();
+            assert!(
+                store
+                    .record_interrupted_model_request(
+                        &request,
+                        StreamInterruption::MissingCompletion,
+                        Some((&identity, None))
+                    )
+                    .unwrap()
+            );
+            // Emulate the previous v9 outcome index at a durable reopen cut.
+            store.lock().execute_batch("DROP INDEX events_model_outcomes_recent; CREATE INDEX events_model_settled_recent ON events(id DESC,request_id) WHERE kind IN ('model_turn','request_failed');").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let frontier = store.embedded_round_frontier(&identity).unwrap();
+        assert!(frontier.settled_head.is_none());
+        assert_eq!(frontier.pending_head, Some(request.clone()));
+        assert_eq!(
+            frontier.pending_interruption,
+            Some(StreamInterruption::MissingCompletion)
+        );
+        let outcomes = store.model_request_outcomes(128).unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(
+            outcomes[0].interruption,
+            Some(StreamInterruption::MissingCompletion)
+        );
+        assert!(outcomes[0].failure.is_none());
+        assert_eq!(store.events(Some(&request)).unwrap().len(), 1);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
     }
 }

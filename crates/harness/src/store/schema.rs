@@ -2,7 +2,8 @@ pub const VERSION: u32 = 10;
 pub const SQL: &str = include_str!("schema.sql");
 const MODEL_REQUEST_INDEXES: &str = "
     CREATE INDEX IF NOT EXISTS events_model_turn_recent ON events(id DESC,request_id) WHERE kind='model_turn';
-    CREATE INDEX IF NOT EXISTS events_model_settled_recent ON events(id DESC,request_id) WHERE kind IN ('model_turn','request_failed');
+    DROP INDEX IF EXISTS events_model_settled_recent;
+    CREATE INDEX IF NOT EXISTS events_model_outcomes_recent ON events(id DESC,request_id) WHERE kind IN ('model_turn','request_failed','model_interrupted');
 ";
 
 pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {

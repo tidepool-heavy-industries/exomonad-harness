@@ -3912,6 +3912,12 @@ rust_library(
     visibility = [],
 )
 
+alias(
+    name = "tracing",
+    actual = ":tracing-0.1",
+    visibility = ["PUBLIC"],
+)
+
 http_archive(
     name = "tracing-0.1.44.crate",
     sha256 = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100",

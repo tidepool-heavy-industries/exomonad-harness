@@ -5,7 +5,7 @@ use crate::{
     item::Item,
     model::{AgentPath, ConversationIdentity, RequestId},
 };
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EmbeddedRoundFrontier {
@@ -13,6 +13,9 @@ pub struct EmbeddedRoundFrontier {
     pub settled_head: Option<RequestId>,
     /// A durably admitted continuation exists even when its inbox is empty.
     pub pending_head: Option<RequestId>,
+    /// Cleanup-confirmed interruption of the pending provider attempt. It
+    /// requires fresh explicit input before another model request is admitted.
+    pub pending_interruption: Option<crate::transport::StreamInterruption>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,8 +86,17 @@ pub(super) fn frontier(c: &Connection, identity: &HostIdentity) -> Result<Embedd
         }
         tip = Some(RequestId(id.clone()));
     }
+    let pending_head = if tip == settled_head { None } else { tip };
+    let pending_interruption = match &pending_head {
+        Some(request) => c.query_row(
+            "SELECT payload FROM events WHERE request_id=?1 AND kind='model_interrupted' ORDER BY id DESC LIMIT 1",
+            [&request.0], |row| row.get::<_, String>(0),
+        ).optional()?.map(|payload| serde_json::from_str(&payload)).transpose()?,
+        None => None,
+    };
     Ok(EmbeddedRoundFrontier {
-        pending_head: if tip == settled_head { None } else { tip },
+        pending_head,
+        pending_interruption,
         settled_head,
     })
 }
@@ -332,7 +344,8 @@ mod tests {
                     store.embedded_round_frontier(&identity).unwrap(),
                     EmbeddedRoundFrontier {
                         settled_head: settled.clone(),
-                        pending_head: Some(pending.clone())
+                        pending_head: Some(pending.clone()),
+                        pending_interruption: None
                     }
                 );
                 assert_eq!(
