@@ -161,8 +161,30 @@ pub(super) fn response_envelopes(
             return Ok(vec![]);
         }
     }
-    if generated_origins(c, request, &record.source, &evidence.raw_response)? != evidence.origins {
-        return Ok(vec![]);
+    // Membership was sealed at boundary installation. Later response items
+    // appended to this request cannot invalidate it or enter this envelope.
+    let mut seen = HashSet::new();
+    for origin in &evidence.origins {
+        if origin.request != *request
+            || origin.position <= 0
+            || !seen.insert(&origin.hash)
+            || evidence
+                .raw_response
+                .iter()
+                .filter(|hash| **hash == origin.hash)
+                .count()
+                != 1
+        {
+            return Ok(vec![]);
+        }
+        let installed: Option<(String, String, i64)> = c.query_row(
+            "SELECT item_hash,COALESCE(source_request,request_id),COALESCE(source_position,position) FROM request_items WHERE request_id=?1 AND position=?2",
+            params![request.0, origin.position],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        if installed != Some((origin.hash.0.clone(), request.0.clone(), origin.position)) {
+            return Ok(vec![]);
+        }
     }
     Ok(vec![ResponseEnvelope {
         model: evidence.model,

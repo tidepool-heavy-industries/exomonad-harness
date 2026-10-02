@@ -262,3 +262,57 @@ fn evidence_failure_rolls_back_the_boundary_and_raw_items() {
             .unwrap()
     );
 }
+
+#[test]
+fn later_duplicate_summary_bytes_do_not_change_sealed_membership() {
+    let store = Store::memory().unwrap();
+    let opaque = Item(json!({"type":"compaction","encrypted_content":"opaque"}));
+    let visible = item("summary");
+    let target = boundary(
+        &store,
+        &[],
+        vec![opaque.clone(), visible.clone()],
+        vec![opaque, visible.clone()],
+    );
+    let before = response_envelopes(&store.lock(), &target).unwrap();
+    assert_eq!(before[0].origins.len(), 2);
+    store.append_items(&target, &[visible]).unwrap();
+    let c = store.lock();
+    let after = response_envelopes(&c, &target).unwrap();
+    assert_eq!(after, before);
+    let appended = context::request_occurrences(&c, &target)
+        .unwrap()
+        .last()
+        .unwrap()
+        .origin
+        .clone();
+    assert!(!after[0].origins.contains(&appended));
+}
+
+#[test]
+fn later_filtered_raw_bytes_do_not_enter_sealed_membership() {
+    let store = Store::memory().unwrap();
+    let opaque = Item(json!({"type":"compaction","encrypted_content":"opaque"}));
+    let pending = Item(
+        json!({"type":"function_call","call_id":"pending","name":"original","arguments":"{}"}),
+    );
+    let filtered_pending = Item(
+        json!({"type":"function_call","call_id":"pending","name":"server rewrite","arguments":"{}"}),
+    );
+    let target = boundary(
+        &store,
+        std::slice::from_ref(&pending),
+        vec![opaque.clone(), filtered_pending.clone()],
+        vec![opaque, pending.clone()],
+    );
+    let before = response_envelopes(&store.lock(), &target).unwrap();
+    assert_eq!(before[0].origins.len(), 1);
+    store
+        .append_items(&target, &[filtered_pending, item("later assistant")])
+        .unwrap();
+    let c = store.lock();
+    let after = response_envelopes(&c, &target).unwrap();
+    assert_eq!(after, before);
+    let occurrences = context::request_occurrences(&c, &target).unwrap();
+    assert!(!after[0].origins.contains(&occurrences[4].origin));
+}
