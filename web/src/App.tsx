@@ -256,7 +256,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
     return () => { window.removeEventListener('keydown', handle); clearTimeout(timer); };
   }, [route, embedded]);
   const link = useCallback((selection: Selection, label: string, screen = selection.kind === 'actor' && embedded ? 'chat' : route.screen) => {
-    const next = { ...route, screen, selection };
+    const next = { ...route, screen, selection, requestId: selection.kind === 'actor' ? undefined : route.requestId };
     return <a href={routeUrl(next, new URL(window.location.href)).toString()} onClick={(event: MouseEvent<HTMLAnchorElement>) => {
       if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
         event.preventDefault();

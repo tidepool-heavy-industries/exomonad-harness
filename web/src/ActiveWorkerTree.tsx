@@ -53,7 +53,7 @@ export default function ActiveWorkerTree({ data, route, navigate }: ActiveWorker
         </svg>
         {layout.nodes.map(node => {
           const actor = node.actor
-          const destination: RouteState = { ...route, screen: 'chat', selection: { kind: 'actor', identity: { run: actor.run, actor: actor.name, incarnation: actor.incarnation } } }
+          const destination: RouteState = { ...route, screen: 'chat', requestId: undefined, selection: { kind: 'actor', identity: { run: actor.run, actor: actor.name, incarnation: actor.incarnation } } }
           const href = urlFor(destination)
           const content = <>
             <strong className="worker-tree-name">{actor.name}</strong>

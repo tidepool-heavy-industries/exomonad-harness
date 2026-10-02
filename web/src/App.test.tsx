@@ -41,6 +41,17 @@ describe('linked operator views', () => {
     fireEvent.click(screen.getByLabelText('Global activity'));
     expect(screen.queryByText('other progress')).toBeNull();
   });
+  it.each(['Tree', 'Inbox'])('closes a previous request inspector when opening an actor from %s', source => {
+    route('?view=timeline&request=req');
+    render(<App data={data} />);
+    expect(screen.getByRole('region', { name: 'Request history' })).toBeVisible();
+    tab(source);
+    fireEvent.click(screen.getByRole('link', { name: source === 'Tree' ? 'Open chat with /worker, running' : 'Select actor /worker · run run · incarnation old' }));
+    expect(screen.getByRole('heading', { name: 'Chat', level: 1 })).toBeVisible();
+    expect(screen.queryByRole('region', { name: 'Request history' })).toBeNull();
+    expect(new URL(window.location.href).searchParams.has('request')).toBe(false);
+    expect(new URL(window.location.href).searchParams.get('incarnation')).toBe('old');
+  });
   it('conjoins endpoint/type filters and restores route on reload/popstate without losing unknown query', () => {
     route('?view=inbox&sender=%2Fother&type=PROGRESS&plugin=keep');
     const mounted = render(<App data={data} />);
