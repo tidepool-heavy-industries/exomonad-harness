@@ -51,6 +51,69 @@ describe('bounded retained Chat slices', () => {
     await waitFor(() => expect(readHistoryPage).toHaveBeenCalledTimes(4))
     expect(readHistoryPage).toHaveBeenLastCalledWith('one', 1, expect.any(AbortSignal))
   })
+  it('keeps the readable slice on a failed cursor read and retries that requested cursor', async () => {
+    let fail = true
+    vi.mocked(readHistoryPage).mockImplementation(async (id, offset) => {
+      if (id === 'one' && offset === 1 && fail) throw new Error('page unavailable')
+      return {...page(id, offset), nextOffset: offset < 2 ? offset + 1 : null}
+    })
+    render(chat('one'))
+    await screen.findByText('one slice 0')
+    fireEvent.click(screen.getByRole('button', { name: 'More items in this exchange' }))
+    await screen.findByText('page unavailable')
+    expect(screen.getByText('one slice 0')).toBeVisible()
+    fail = false
+    fireEvent.click(screen.getByRole('button', { name: 'Retry messages' }))
+    await screen.findByText('one slice 1')
+    expect(readHistoryPage).toHaveBeenLastCalledWith('one', 1, expect.any(AbortSignal))
+  })
+  it('keeps the oversized item visible when its skip cursor fails and retries the skip cursor', async () => {
+    let fail = true
+    const oversized = { position: 0, hash: 'c'.repeat(64), byteLen: 400_000, skipOffset: 1 }
+    vi.mocked(readHistoryPage).mockImplementation(async (id, offset) => {
+      if (id === 'one' && offset === 1 && fail) throw new Error('skip unavailable')
+      return offset === 0 ? { requestId: id, parentId: null, branch: 'main', items: [], nextOffset: 0, oversizedItem: oversized }
+        : page(id, offset)
+    })
+    render(chat('one'))
+    const notice = await screen.findByText(new RegExp(oversized.hash))
+    fireEvent.click(screen.getByRole('button', { name: 'Skip large item' }))
+    await screen.findByText('skip unavailable')
+    expect(notice).toBeVisible()
+    fail = false
+    fireEvent.click(screen.getByRole('button', { name: 'Retry messages' }))
+    await screen.findByText('one slice 1')
+    expect(readHistoryPage).toHaveBeenLastCalledWith('one', 1, expect.any(AbortSignal))
+  })
+  it('keeps a bounded cursor trail for moving back to newer pages', async () => {
+    vi.mocked(readHistoryPage).mockImplementation(async (id, offset) => ({
+      ...page(id, offset), nextOffset: offset < 39 ? offset + 1 : null,
+    }))
+    render(chat('one'))
+    await screen.findByText('one slice 0')
+    for (let offset = 0; offset < 39; offset++) {
+      fireEvent.click(screen.getByRole('button', { name: 'More items in this exchange' }))
+      await screen.findByText(`one slice ${offset + 1}`)
+    }
+    for (let offset = 39; offset > 7; offset--) {
+      fireEvent.click(screen.getByRole('button', { name: 'Newer messages' }))
+      await screen.findByText(`one slice ${offset - 1}`)
+    }
+    expect(screen.queryByRole('button', { name: 'Newer messages' })).toBeNull()
+    expect(screen.getByText('one slice 7')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Latest messages' }))
+    await screen.findByText('one slice 0')
+    expect(screen.queryByRole('button', { name: 'Newer messages' })).toBeNull()
+  })
+  it('shows the store supplied hash for an oversized item', async () => {
+    const hash = 'b'.repeat(64)
+    vi.mocked(readHistoryPage).mockResolvedValue({
+      requestId: 'one', parentId: null, branch: 'main', items: [], nextOffset: 0,
+      oversizedItem: { position: 0, hash, byteLen: 400_000, skipOffset: 1 },
+    })
+    render(chat('one'))
+    expect(await screen.findByText(new RegExp(hash))).toBeVisible()
+  })
   it('evicts older worker slices after four retained conversations while keeping the recent slice readable offline', async () => {
     for (let index = 0; index < 5; index++) {
       const mounted = render(chat(String(index)))

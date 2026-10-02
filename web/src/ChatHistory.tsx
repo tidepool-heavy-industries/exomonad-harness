@@ -8,9 +8,10 @@ const MAX_REQUESTS = 8
 const MAX_ITEMS = 200
 interface Cursor { requestId: string; offset: number }
 interface Loaded { cursor: Cursor; page: HistoryPage }
-interface RetainedSlice { browsing?: Cursor; pages: Loaded[]; failures: Map<string, RequestStatus> }
+interface RetainedSlice { browsing?: Cursor; backStack: Cursor[]; pages: Loaded[]; failures: Map<string, RequestStatus> }
 const retainedSlices = new Map<string, RetainedSlice>()
 const MAX_RETAINED_SLICES = 4
+const MAX_CURSOR_HISTORY = 32
 
 /** Message content stays in memory and is cleared on deliberate signout. */
 export function clearChatHistoryRetention() { retainedSlices.clear() }
@@ -48,6 +49,7 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
 }) {
   const initial = useRef(cacheKey ? retainedSlices.get(cacheKey) : undefined)
   const [browsing, setBrowsing] = useState<Cursor | undefined>(initial.current?.browsing)
+  const [backStack, setBackStack] = useState<Cursor[]>(initial.current?.backStack ?? [])
   const cursor = browsing ?? { requestId, offset: 0 }
   const [pages, setPages] = useState<Loaded[]>(initial.current?.pages ?? [])
   const [loading, setLoading] = useState(false)
@@ -122,14 +124,25 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
   }
   for (const id of retainedFailures.current.keys()) if (!visibleRequests.has(id)) retainedFailures.current.delete(id)
   useEffect(() => {
-    if (cacheKey) retainSlice(cacheKey, { browsing, pages, failures: new Map(retainedFailures.current) })
-  }, [cacheKey, browsing, pages, requests])
+    if (cacheKey) retainSlice(cacheKey, { browsing, backStack, pages, failures: new Map(retainedFailures.current) })
+  }, [cacheKey, browsing, backStack, pages, requests])
   const cursorFailure = !pages.some(({ page }) => page.requestId === cursor.requestId) ? retainedFailures.current.get(cursor.requestId) : undefined
-  function go(next?: Cursor) { setPages([]); setBrowsing(next) }
+  function go(next?: Cursor) {
+    if (next) setBackStack(stack => [...stack, cursor].slice(-MAX_CURSOR_HISTORY))
+    else setBackStack([])
+    setBrowsing(next)
+  }
+  function newer() {
+    const previous = backStack.at(-1)
+    if (!previous) return
+    setBackStack(stack => stack.slice(0, -1))
+    setBrowsing(previous)
+  }
   return <section tabIndex={0} className="chat-history" aria-label="Conversation messages" aria-busy={loading}>
     <div className="toolbar"><h2>Conversation</h2><div className="history-controls">
       <button disabled={!ready || loading} onClick={() => setAttempt(value => value + 1)}>Refresh messages</button>
       {browsing && <button disabled={!ready || loading} onClick={() => go()}>Latest messages</button>}
+      {backStack.length > 0 && <button disabled={!ready || loading} onClick={newer}>Newer messages</button>}
     </div></div>
     {oldest?.page.parentId && <div className="history-controls">
       <button disabled={!ready || loading} onClick={() => go({ requestId: oldest.page.parentId!, offset: 0 })}>Earlier exchanges</button>
@@ -154,7 +167,7 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
       </div>)}
     </div>}
     {!loading && !error && pages.length > 0 && pages.every(({ page }) => page.items.length === 0) && <p>No retained messages in this slice.</p>}
-    {paged?.page.oversizedItem && <p role="status">Item {paged.page.oversizedItem.position} is too large to display ({paged.page.oversizedItem.byteLen} bytes).
+    {paged?.page.oversizedItem && <p role="status">Item {paged.page.oversizedItem.position} ({paged.page.oversizedItem.hash}) is too large to display ({paged.page.oversizedItem.byteLen} bytes).
       <button disabled={!ready || loading} onClick={() => go({ requestId: paged.page.requestId, offset: paged.page.oversizedItem!.skipOffset })}>Skip large item</button></p>}
     <div className="history-controls">
       {paged && !paged.page.oversizedItem && <button disabled={!ready || loading} onClick={() => go({ requestId: paged.page.requestId, offset: paged.page.nextOffset! })}>More items in this exchange</button>}
