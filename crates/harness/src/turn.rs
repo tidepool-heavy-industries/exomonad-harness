@@ -1218,7 +1218,10 @@ async fn wait_until_exact<I: Into<MailboxSignal>>(
                 return WaitResumeExact::Cancelled;
             },
             event = settlements.recv() => match event {
-                Ok(operation) if outstanding.contains(&operation) => return WaitResumeExact::Job(operation),
+                Ok(operation) if outstanding.contains(&operation)
+                    && jobs.output(&operation).await.ok().flatten().is_some() => {
+                    return WaitResumeExact::Job(operation);
+                },
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => return WaitResumeExact::Cancelled,
             },

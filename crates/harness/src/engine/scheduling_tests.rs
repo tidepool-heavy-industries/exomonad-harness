@@ -869,6 +869,18 @@ async fn queued_sync_identity_is_claimable_but_foreign_output_waits_for_store_pu
         None
     );
     assert!(starts.try_recv().is_err());
+    let (_mailbox, mut inbox) = mpsc::unbounded_channel::<crate::turn::Envelope>();
+    let (_cancel, mut cancelled) = watch::channel(false);
+    let outstanding = [operation.clone()];
+    let waiting = crate::turn::wait_agent_and_drain_exact(
+        &mut inbox,
+        &engine.scheduler,
+        &mut cancelled,
+        &outstanding,
+    );
+    tokio::pin!(waiting);
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    let mut raw_settlements = engine.scheduler.operation_settlements();
     engine
         .scheduler
         .release_operation(&operation, None)
@@ -876,6 +888,11 @@ async fn queued_sync_identity_is_claimable_but_foreign_output_waits_for_store_pu
         .unwrap();
     assert_eq!(starts.recv().await.unwrap(), "async_work");
     let terminal = engine.scheduler.wait(&operation).await.unwrap();
+    assert_eq!(raw_settlements.recv().await.unwrap(), operation);
+    assert!(
+        futures_util::poll!(&mut waiting).is_pending(),
+        "raw completion cannot wake a foreign wait before Store publication"
+    );
     assert_eq!(engine.scheduler.output(&operation).await.unwrap(), None);
     assert_eq!(
         engine
@@ -894,6 +911,15 @@ async fn queued_sync_identity_is_claimable_but_foreign_output_waits_for_store_pu
         .mark_output_committed(&operation)
         .await
         .unwrap();
+    let drained = waiting.await.unwrap();
+    assert_eq!(
+        drained.resumed_by,
+        crate::turn::WaitResumeExact::Job(operation.clone())
+    );
+    assert_eq!(
+        drained.call_outputs,
+        vec![(operation.clone(), terminal.clone())]
+    );
     assert_eq!(
         engine.scheduler.output(&operation).await.unwrap(),
         Some(terminal.clone())
@@ -908,10 +934,13 @@ async fn queued_sync_identity_is_claimable_but_foreign_output_waits_for_store_pu
     );
 }
 
-struct FinalOnly;
+struct FinalOnly {
+    requests: Arc<Mutex<Vec<ResponsesRequest>>>,
+}
 #[async_trait::async_trait]
 impl ResponsesTransport for FinalOnly {
-    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        self.requests.lock().unwrap().push(request);
         Ok(final_turn())
     }
 }
@@ -956,8 +985,11 @@ async fn child_final_completes_while_parent_sync_waits_for_child() {
             &Item(json!({"type":"message","role":"assistant","content":"NEW_TASK"})),
         )
         .unwrap();
+    let child_requests = Arc::new(Mutex::new(Vec::new()));
     let child = Engine::<Offline, ContextEditor, FinalOnly>::with_transport(
-        FinalOnly,
+        FinalOnly {
+            requests: child_requests.clone(),
+        },
         parent.store.clone(),
         parent.scheduler.clone(),
         parent.provider.clone(),
@@ -971,7 +1003,7 @@ async fn child_final_completes_while_parent_sync_waits_for_child() {
         },
     );
     let (_child_cancel, cancelled) = watch::channel(false);
-    let completed = tokio::time::timeout(
+    let mut completed = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         child.run(Some(snapshot.clone()), vec![], cancelled, mailbox()),
     )
@@ -1003,4 +1035,42 @@ async fn child_final_completes_while_parent_sync_waits_for_child() {
             .iter()
             .all(|claim| claim.state == crate::store::ClaimState::Settled)
     );
+    // Ordinary follow-up uses the returned head, whose claim attachment remains
+    // on the earlier snapshot. The same-branch lineage owns that continuation.
+    for _ in 0..2 {
+        let (_cancel, cancelled) = watch::channel(false);
+        let followed = child
+            .run(
+                Some(completed.head_request.clone()),
+                vec![Item(
+                    json!({"type":"message","role":"user","content":"continue"}),
+                )],
+                cancelled,
+                mailbox(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            followed
+                .transcript
+                .iter()
+                .filter(|item| item.0["type"] == "function_call_output"
+                    && item.0["call_id"] == operation.call.0)
+                .count(),
+            1
+        );
+        completed = followed;
+        let requests = child_requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .last()
+                .unwrap()
+                .input
+                .iter()
+                .filter(|item| item.0["type"] == "function_call_output"
+                    && item.0["call_id"] == operation.call.0)
+                .count(),
+            1
+        );
+    }
 }

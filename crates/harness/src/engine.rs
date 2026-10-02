@@ -479,11 +479,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
 
     /// Recover after process restart from a durable request head.
     ///
-    /// Unlike `run`, this opts into reconciling outstanding claims on the
-    /// contiguous same-agent-branch ancestry of `head`. Missing in-memory jobs
-    /// are durably interrupted unless settlement already won; provider calls
-    /// are never replayed. Ordinary runs, especially Here-fork starts, retain
-    /// direct `claims_on` behavior.
+    /// Claims follow the contiguous same-agent-branch ancestry of `head`,
+    /// including foreign invocations attached by a Here snapshot. Missing
+    /// in-memory jobs are durably interrupted unless settlement already won;
+    /// provider calls are never replayed. Recovery also reconciles an unfinished
+    /// embedded request instead of starting a new round.
     pub async fn run_recovering(
         &self,
         head: Option<RequestId>,
@@ -656,14 +656,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 let store = self.store.clone();
                 let request = head.clone();
                 let branch = self.config.agent.0.clone();
-                blocking(move || {
-                    if recovering {
-                        store.claims_on_branch_lineage(&request, &branch)
-                    } else {
-                        store.claims_on(&request)
-                    }
-                })
-                .await?
+                blocking(move || store.claims_on_branch_lineage(&request, &branch)).await?
             }
             None => Vec::new(),
         };
