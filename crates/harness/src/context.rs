@@ -148,6 +148,7 @@ pub struct ContextCommitEvidence {
     pub(crate) original_operation: OperationId,
     pub(crate) prefix: Vec<(Item, Vec<ContextReference>)>,
     pub(crate) output: Item,
+    pub(crate) invocation: Item,
     pub(crate) model: Option<String>,
 }
 

@@ -212,6 +212,18 @@ impl Store {
         metadata: &Value,
         attachment: Arc<T>,
     ) -> Result<CheckpointCuts<T>> {
+        self.capture_checkpoint_cuts_at_head(operation, &operation.request, metadata, attachment)
+    }
+
+    /// Capture the current effective context at a synchronous invocation's
+    /// execution start while retaining its original operation identity.
+    pub fn capture_checkpoint_cuts_at_head<T: ?Sized + Send + Sync + 'static>(
+        &self,
+        operation: &OperationId,
+        head: &RequestId,
+        metadata: &Value,
+        attachment: Arc<T>,
+    ) -> Result<CheckpointCuts<T>> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let bound: Option<(String, String)> = tx
@@ -252,7 +264,7 @@ impl Store {
             &tx,
             CaptureBoundary {
                 origin: operation.origin.actor(),
-                source_request: &operation.request,
+                source_request: head,
                 boundary_call: &operation.call,
                 cut: CheckpointCut::Deferred,
                 operation: Some(operation),
@@ -264,7 +276,7 @@ impl Store {
             &tx,
             CaptureBoundary {
                 origin: operation.origin.actor(),
-                source_request: &operation.request,
+                source_request: head,
                 boundary_call: &operation.call,
                 cut: CheckpointCut::BeforeCall,
                 operation: Some(operation),
@@ -345,20 +357,22 @@ impl Store {
             })
             .collect::<Result<Vec<_>>>()?
         };
-        let boundary = stored
-            .iter()
-            .position(|(request, item)| {
-                request == source_request
-                    && matches!(
-                        item.0["type"].as_str(),
-                        Some("function_call" | "custom_tool_call")
-                    )
-                    && item.0["call_id"].as_str() == Some(&boundary_call.0)
-            })
-            .ok_or_else(|| StoreError::MissingCheckpointCall {
+        let boundary = stored.iter().position(|(request, item)| {
+            request == source_request
+                && matches!(
+                    item.0["type"].as_str(),
+                    Some("function_call" | "custom_tool_call")
+                )
+                && item.0["call_id"].as_str() == Some(&boundary_call.0)
+        });
+        let boundary = if let Some(operation) = operation {
+            Self::context_call_cut_tx(tx, operation, source_request)?
+        } else {
+            boundary.ok_or_else(|| StoreError::MissingCheckpointCall {
                 request: source_request.0.clone(),
                 call_id: boundary_call.0.clone(),
-            })?;
+            })?
+        };
         let prefix = match cut {
             CheckpointCut::Deferred => &stored[..=boundary],
             CheckpointCut::BeforeCall => &stored[..boundary],
@@ -588,10 +602,20 @@ impl Store {
         if !parent_exists {
             return Err(StoreError::MissingAgentParent(child.parent.0.clone()));
         }
+        let inherited_head = if checkpoint.cut == CheckpointCut::Deferred {
+            if let Some(operation) = &checkpoint.operation {
+                Self::context_committed_head_tx(&tx, operation)?
+                    .unwrap_or_else(|| checkpoint.snapshot_request.clone())
+            } else {
+                checkpoint.snapshot_request.clone()
+            }
+        } else {
+            checkpoint.snapshot_request.clone()
+        };
         let snapshot_request = RequestId(uuid::Uuid::new_v4().to_string());
         tx.execute(
             "INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros) VALUES (?1,?2,?3,?4,0,0,0)",
-            params![snapshot_request.0,checkpoint.snapshot_request.0,child.path.0,utc_millis()],
+            params![snapshot_request.0,inherited_head.0,child.path.0,utc_millis()],
         )?;
         let inherited_claims: Vec<(
             String,
@@ -603,7 +627,7 @@ impl Store {
         )> = {
             let mut q =
                 tx.prepare("SELECT origin,origin_request_id,call_id,state,output_hash,terminal_json FROM claims WHERE request_id=?1")?;
-            q.query_map([&checkpoint.snapshot_request.0], |row| {
+            q.query_map([&inherited_head.0], |row| {
                 Ok((
                     row.get(0)?,
                     row.get(1)?,
@@ -626,7 +650,7 @@ impl Store {
             "checkpoint_id":checkpoint.id,
             "origin_agent":checkpoint.origin,
             "source_request":checkpoint.source_request,
-            "snapshot_request":checkpoint.snapshot_request,
+            "snapshot_request":inherited_head,
             "boundary_call":checkpoint.boundary_call,
             "cut":checkpoint.cut,
             "operation":checkpoint.operation,

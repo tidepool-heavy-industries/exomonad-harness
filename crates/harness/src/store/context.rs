@@ -365,6 +365,31 @@ fn branch(c: &Connection, head: &RequestId) -> Result<String> {
 }
 
 impl Store {
+    pub(crate) fn context_call_cut_tx(
+        tx: &Transaction<'_>,
+        operation: &OperationId,
+        head: &RequestId,
+    ) -> Result<usize> {
+        let origin = original_call(tx, operation)?;
+        let matches = history(tx, head, true)?
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| i.origin == origin)
+            .map(|(n, _)| n)
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [cut] => Ok(*cut),
+            _ => Err(ContextError::MissingCall.into()),
+        }
+    }
+
+    pub(crate) fn context_committed_head_tx(
+        tx: &Transaction<'_>,
+        operation: &OperationId,
+    ) -> Result<Option<RequestId>> {
+        Ok(receipt(tx, operation)?.map(|r| r.receipt.head))
+    }
+
     pub(crate) fn preserve_context_origins_tx(
         tx: &Transaction<'_>,
         source: &RequestId,
@@ -567,6 +592,7 @@ impl Store {
             original_operation: record.original_operation.unwrap_or(record.operation),
             prefix,
             output,
+            invocation: load(&original_call(&c, operation)?.hash)?,
             model: record.receipt.model,
         }))
     }
@@ -604,6 +630,18 @@ impl Store {
         let output_item = Item::tool_output(&snapshot.operation.call, call.input.kind(), output);
         let output_hash = Self::put_item_tx(&tx, &output_item)?;
         if let Some(evidence) = replay {
+            let original = original_call(&tx, &snapshot.operation)?;
+            let raw: String = tx.query_row(
+                "SELECT json FROM items WHERE hash=?1",
+                [&original.hash.0],
+                |r| r.get(0),
+            )?;
+            let local_invocation: Item = serde_json::from_str(&raw)?;
+            let mut expected_invocation = evidence.invocation.clone();
+            expected_invocation.0["call_id"] = json!(snapshot.operation.call.0);
+            if expected_invocation != local_invocation {
+                return Err(ContextError::Ineligible.into());
+            }
             let mut expected = evidence.output.clone();
             expected.0["call_id"] = json!(snapshot.operation.call.0);
             if expected != output_item {
@@ -672,13 +710,15 @@ impl Store {
         let mut last_native = None;
         let mut retained_opaque = false;
         if let Some(evidence) = replay {
+            let mut used_occurrences = HashSet::new();
             for (item, sources) in &evidence.prefix {
                 let hash = Self::put_item_tx(&tx, item)?;
-                if let Some(existing) = snapshot
-                    .prefix
-                    .iter()
-                    .find(|i| i.hash == hash && i.item == *item)
+                if let Some((index, existing)) =
+                    snapshot.prefix.iter().enumerate().find(|(index, i)| {
+                        !used_occurrences.contains(index) && i.hash == hash && i.item == *item
+                    })
                 {
+                    used_occurrences.insert(index);
                     let mut occurrence = existing.clone();
                     occurrence.sources = sources.clone();
                     rewritten.push(occurrence);

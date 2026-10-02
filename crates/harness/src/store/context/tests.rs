@@ -21,7 +21,11 @@ fn setup(store: &Store) -> (RequestId, OperationId) {
 
 fn edited(snapshot: &ContextSnapshot) -> ContextDraft {
     let mut document = snapshot.document.clone();
-    if let ContextBlock::Text { text, .. } = &mut document.blocks[0] {
+    if let Some(ContextBlock::Text { text, .. }) = document
+        .blocks
+        .iter_mut()
+        .find(|b| matches!(b, ContextBlock::Text { .. }))
+    {
         *text = "edited context".into();
     } else {
         panic!("plain text");
@@ -435,4 +439,85 @@ fn replay_refuses_malformed_commit_evidence_and_wrong_output() {
     original.lock().execute("UPDATE events SET payload=json_remove(payload,'$.version') WHERE kind='context_commit'",[]).unwrap();
     assert!(original.context_commit_evidence(&operation).is_err());
     assert!(local.context_receipt(&local_operation).unwrap().is_none());
+}
+
+#[test]
+fn deferred_child_inherits_committed_context_and_terminal_before_call_stays_frozen() {
+    use crate::checkpoint::{CheckpointChild, CheckpointCut};
+    use std::sync::Arc;
+    let store = Store::memory().unwrap();
+    let (head, operation) = setup(&store);
+    store.lock().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)",[&head.0]).unwrap();
+    store
+        .lock()
+        .execute(
+            "UPDATE request_items SET position=-1 WHERE request_id=?1 AND position=2",
+            [&head.0],
+        )
+        .unwrap();
+    let cuts = store
+        .capture_checkpoint_cuts(&operation, &json!({}), Arc::new(()))
+        .unwrap();
+    assert_eq!(cuts.before_call().cut(), CheckpointCut::BeforeCall);
+    let frozen = store
+        .context_history(cuts.before_call().snapshot_request())
+        .unwrap();
+    let snapshot = store.begin_context(&operation, &head).unwrap();
+    store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &edited(&snapshot),
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    let parent = AgentPath("/root".into());
+    let deferred_path = AgentPath("/root/deferred".into());
+    let (child, _) = store
+        .attach_checkpoint_child(
+            cuts.deferred(),
+            CheckpointChild {
+                path: &deferred_path,
+                parent: &parent,
+                contract: &json!({}),
+                checkout: &json!({}),
+                task: None,
+            },
+        )
+        .unwrap();
+    let history = store
+        .context_history(child.head_request.as_ref().unwrap())
+        .unwrap();
+    assert!(
+        history
+            .iter()
+            .any(|(_, _, i)| i.0["content"] == "edited context")
+    );
+    assert!(
+        history
+            .iter()
+            .any(|(_, _, i)| i.0["type"] == "custom_tool_call_output")
+    );
+    let immediate_path = AgentPath("/root/immediate".into());
+    let (immediate, _) = store
+        .attach_checkpoint_child(
+            cuts.before_call(),
+            CheckpointChild {
+                path: &immediate_path,
+                parent: &parent,
+                contract: &json!({}),
+                checkout: &json!({}),
+                task: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .context_history(immediate.head_request.as_ref().unwrap())
+            .unwrap()
+            .iter()
+            .map(|(_, _, i)| i)
+            .collect::<Vec<_>>(),
+        frozen.iter().map(|(_, _, i)| i).collect::<Vec<_>>()
+    );
 }
