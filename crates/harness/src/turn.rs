@@ -568,7 +568,7 @@ impl JobScheduler {
             };
             let call = provider.complete_call(&name, input, context);
             tokio::pin!(call);
-            let result = loop {
+            let mut result = loop {
                 tokio::select! {
                     event = progress_rx.recv() => {
                         if let Some(event) = event {
@@ -586,17 +586,16 @@ impl JobScheduler {
                 }
             }
             drop(permit);
-            let output = result.result.clone();
+            result.full_success &= matches!(&result.output, JobOutput::Completed(Ok(_)));
+            let output = result.output.clone();
+            let provider_completion = match &output {
+                JobOutput::Completed(value) => Some(value.clone()),
+                _ => None,
+            };
             if let Some(job) = jobs.lock().await.get_mut(&task_operation) {
                 job.completion = Some(result);
             }
-            settle(
-                &jobs,
-                task_operation.clone(),
-                JobOutput::Completed(output.clone()),
-                Some(output),
-            )
-            .await;
+            settle(&jobs, task_operation.clone(), output, provider_completion).await;
             let _ = events.send(task_operation);
             let _ = legacy_events.send(task_call_id);
         });

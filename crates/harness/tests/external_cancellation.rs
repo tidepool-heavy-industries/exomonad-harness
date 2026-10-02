@@ -1,9 +1,10 @@
 use async_trait::async_trait;
 use harness::{
-    model::{CallId, OperationId},
+    item::ToolInput,
+    model::{AgentPath, CallId, ConversationIdentity, OperationId, RequestId},
     provider::{
-        CancellationAcknowledgment, CancellationOwner, JobHandle, Provider, ProviderError,
-        ToolFailure,
+        CallContext, CancellationAcknowledgment, CancellationOwner, ContextDisposition, JobHandle,
+        Provider, ProviderCompletion, ProviderError, ToolFailure,
     },
     turn::{JobOutput, JobScheduler},
 };
@@ -148,6 +149,140 @@ async fn stopped_owner_receipt_survives_waiter_abort_without_becoming_completion
             jobs.retry_cancellation(&call).await.unwrap(),
             Some(CancellationAcknowledgment::StoppedWithReceipt(receipt))
         );
+    }
+}
+
+struct ReplyBeforeCancelAcknowledgment {
+    started: Notify,
+    release_reply: Notify,
+    cancel_entered: Notify,
+    release_ack: Notify,
+    receipt: Result<Value, ToolFailure>,
+}
+
+#[async_trait]
+impl CancellationOwner for ReplyBeforeCancelAcknowledgment {
+    async fn cancel(&self, _: &OperationId, _: &JobHandle) -> CancellationAcknowledgment {
+        self.cancel_entered.notify_one();
+        self.release_ack.notified().await;
+        CancellationAcknowledgment::StoppedWithReceipt(self.receipt.clone())
+    }
+}
+
+struct TypedCancelledProvider(Arc<ReplyBeforeCancelAcknowledgment>);
+
+#[async_trait]
+impl Provider for TypedCancelledProvider {
+    async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+        unreachable!("scheduler must use typed complete_call")
+    }
+
+    fn cancellation_owner(&self) -> Option<Arc<dyn CancellationOwner>> {
+        Some(self.0.clone())
+    }
+
+    async fn complete_call(&self, _: &str, _: ToolInput, _: CallContext) -> ProviderCompletion {
+        self.0.started.notify_one();
+        self.0.release_reply.notified().await;
+        ProviderCompletion {
+            output: JobOutput::CancelledWithReceipt(self.0.receipt.clone()),
+            // Even a misreported success flag cannot make a cancellation eligible.
+            full_success: true,
+            context: ContextDisposition::Unedited,
+        }
+    }
+
+    fn tools(&self) -> Vec<Value> {
+        vec![]
+    }
+}
+
+#[tokio::test]
+async fn typed_cancelled_reply_precedes_owner_ack_without_becoming_completion() {
+    for queued in [false, true] {
+        for receipt in [
+            Ok(json!({"items":[{"status":"committed","output":"performed prefix"}],"nextIndex":1})),
+            Err(ToolFailure::with_metadata(
+                "partial result",
+                json!({"phase":"run"}),
+            )),
+        ] {
+            let jobs = Arc::new(JobScheduler::new(1).unwrap());
+            let owner = Arc::new(ReplyBeforeCancelAcknowledgment {
+                started: Notify::new(),
+                release_reply: Notify::new(),
+                cancel_entered: Notify::new(),
+                release_ack: Notify::new(),
+                receipt: receipt.clone(),
+            });
+            let agent = AgentPath("/root".into());
+            let operation = OperationId {
+                origin: ConversationIdentity::Standalone {
+                    store: "typed-cancellation-test".into(),
+                    actor: agent.clone(),
+                },
+                request: RequestId("issuing-response".into()),
+                call: CallId("reply-before-ack".into()),
+            };
+            let provider = Arc::new(TypedCancelledProvider(owner.clone()));
+            if queued {
+                jobs.queue_operation(
+                    provider,
+                    operation.clone(),
+                    agent,
+                    Some(operation.request.clone()),
+                    "run".into(),
+                    json!({}),
+                )
+                .await
+                .unwrap();
+                jobs.release_operation(&operation, None).await.unwrap();
+            } else {
+                jobs.start_operation(
+                    provider,
+                    operation.clone(),
+                    agent,
+                    Some(operation.request.clone()),
+                    "run".into(),
+                    json!({}),
+                )
+                .await
+                .unwrap();
+            }
+            owner.started.notified().await;
+            let mut settlements = jobs.operation_settlements();
+            let cancel_jobs = jobs.clone();
+            let cancel_operation = operation.clone();
+            let cancel = tokio::spawn(async move { cancel_jobs.cancel(&cancel_operation).await });
+            owner.cancel_entered.notified().await;
+            owner.release_reply.notify_one();
+            assert_eq!(settlements.recv().await.unwrap(), operation);
+            let expected = JobOutput::CancelledWithReceipt(receipt.clone());
+            assert_eq!(jobs.wait(&operation).await.unwrap(), expected);
+            assert_eq!(jobs.provider_completion(&operation).await.unwrap(), None);
+            let completion = jobs
+                .invocation_completion(&operation)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(completion.output, expected);
+            assert!(!completion.full_success);
+            if queued {
+                assert_eq!(jobs.output(&operation).await.unwrap(), None);
+                jobs.mark_output_committed(&operation).await.unwrap();
+            }
+            assert_eq!(
+                jobs.output(&operation).await.unwrap(),
+                Some(expected.clone())
+            );
+            owner.release_ack.notify_one();
+            assert_eq!(cancel.await.unwrap().unwrap(), None);
+            assert_eq!(jobs.output(&operation).await.unwrap(), Some(expected));
+            assert_eq!(
+                jobs.cancellation_acknowledgment(&operation).await.unwrap(),
+                Some(CancellationAcknowledgment::StoppedWithReceipt(receipt)),
+            );
+        }
     }
 }
 

@@ -275,6 +275,7 @@ struct ContextEditor {
     operations: Arc<Mutex<Vec<OperationId>>>,
     lose_ack: std::sync::atomic::AtomicBool,
     full_success: bool,
+    cancelled_receipt: bool,
     refuse_draft: bool,
     summarize_completed: bool,
     committed: std::sync::atomic::AtomicUsize,
@@ -358,7 +359,11 @@ impl Provider for ContextEditor {
             release.notified().await;
         }
         crate::provider::ProviderCompletion {
-            result: Ok(json!({"done":name})),
+            output: if self.cancelled_receipt {
+                crate::turn::JobOutput::CancelledWithReceipt(Ok(json!({"prefix":name})))
+            } else {
+                crate::turn::JobOutput::Completed(Ok(json!({"done":name})))
+            },
             full_success: self.full_success,
             context: crate::provider::ContextDisposition::Draft(crate::context::ContextDraft {
                 document,
@@ -451,6 +456,7 @@ fn context_engine(
             operations: operations.clone(),
             lose_ack: std::sync::atomic::AtomicBool::new(lose_ack),
             full_success: true,
+            cancelled_receipt: false,
             refuse_draft: false,
             summarize_completed: false,
             committed: std::sync::atomic::AtomicUsize::new(0),
@@ -564,6 +570,51 @@ async fn partial_success_cannot_publish_staged_context_or_model() {
         .unwrap();
     let operation = operations.lock().unwrap()[0].clone();
     assert!(engine.store.context_receipt(&operation).unwrap().is_none());
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].model, "model-old");
+    assert!(!requests[1].input.iter().any(|item| {
+        item.0["content"]
+            .as_str()
+            .is_some_and(|text| text.ends_with("first commit"))
+    }));
+}
+
+#[tokio::test]
+async fn typed_cancelled_receipt_cannot_publish_staged_context_or_model() {
+    let (mut engine, requests, operations) = context_engine(false, false);
+    Arc::get_mut(&mut engine.provider)
+        .unwrap()
+        .cancelled_receipt = true;
+    let (_cancel, cancelled) = watch::channel(false);
+    engine
+        .run(None, vec![], cancelled, mailbox())
+        .await
+        .unwrap();
+    let operation = operations.lock().unwrap()[0].clone();
+    assert!(engine.store.context_receipt(&operation).unwrap().is_none());
+    assert_eq!(
+        engine
+            .provider
+            .committed
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        engine.scheduler.output(&operation).await.unwrap(),
+        Some(crate::turn::JobOutput::CancelledWithReceipt(Ok(
+            json!({"prefix":"edit_first"})
+        ))),
+    );
+    assert!(
+        !engine
+            .scheduler
+            .invocation_completion(&operation)
+            .await
+            .unwrap()
+            .unwrap()
+            .full_success
+    );
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[1].model, "model-old");

@@ -718,7 +718,7 @@ impl Provider for ReplayProvider {
                 ));
             };
             Ok(ProviderCompletion {
-                result: Ok(value.clone()),
+                output: JobOutput::Completed(Ok(value.clone())),
                 full_success: true,
                 context: ContextDisposition::Replay(evidence),
             })

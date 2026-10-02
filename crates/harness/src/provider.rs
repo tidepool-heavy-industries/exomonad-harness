@@ -265,9 +265,11 @@ pub enum ContextDisposition {
 
 /// Exact provider-future completion. Embedded runtimes derive `full_success`
 /// from their typed exit and confirmed cleanup, independently from value JSON.
+/// The owner supplies the terminal kind even when cancellation is observed
+/// through the ordinary reply waiter before its cancellation acknowledgment.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProviderCompletion {
-    pub result: Result<Value, ToolFailure>,
+    pub output: crate::turn::JobOutput,
     pub full_success: bool,
     pub context: ContextDisposition,
 }
@@ -276,7 +278,7 @@ impl ProviderCompletion {
     pub fn unedited(result: Result<Value, ToolFailure>) -> Self {
         Self {
             full_success: result.is_ok(),
-            result,
+            output: crate::turn::JobOutput::Completed(result),
             context: ContextDisposition::Unedited,
         }
     }

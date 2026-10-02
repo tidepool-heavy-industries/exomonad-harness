@@ -88,9 +88,9 @@ impl Provider for Editor {
             }
         }
         ProviderCompletion {
-            result: Ok(
+            output: JobOutput::Completed(Ok(
                 json!({"error":"a successful payload is still successful","changed":self.rewrite}),
-            ),
+            )),
             full_success: true,
             context: ContextDisposition::Draft(ContextDraft {
                 document,
