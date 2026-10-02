@@ -875,8 +875,12 @@ impl Store {
             .iter()
             .flat_map(|i| i.sources.iter())
             .collect::<HashSet<_>>();
-        let historical_needed = replay.is_none()
-            && draft.document.blocks.iter().any(|b| match b {
+        let historical_needed = if let Some(evidence) = replay {
+            evidence.prefix.iter().any(|(item, _, _)| {
+                message(item).is_none() && !snapshot.prefix.iter().any(|i| i.item == *item)
+            })
+        } else {
+            draft.document.blocks.iter().any(|b| match b {
                 ContextBlock::Native { reference, .. }
                 | ContextBlock::Text {
                     reference: Some(reference),
@@ -889,7 +893,8 @@ impl Store {
                 } => sources
                     .iter()
                     .any(|r| !current_refs.contains(r) && !current_sources.contains(r)),
-            });
+            })
+        };
         let mut historic_blocks = Vec::new();
         if historical_needed {
             let mut q = tx.prepare("WITH RECURSIVE lineage(id,parent_id,depth) AS (SELECT id,parent_id,0 FROM requests WHERE id=?1 UNION ALL SELECT r.id,r.parent_id,lineage.depth+1 FROM requests r JOIN lineage ON r.id=lineage.parent_id) SELECT id FROM lineage ORDER BY depth DESC")?;
@@ -932,6 +937,7 @@ impl Store {
         let mut retained_opaque = false;
         if let Some(evidence) = replay {
             let mut used_occurrences = HashSet::new();
+            let mut used_origins = HashSet::new();
             for (item, sources, note) in &evidence.prefix {
                 let hash = Self::put_item_tx(&tx, item)?;
                 if let Some((index, existing)) =
@@ -940,11 +946,28 @@ impl Store {
                     })
                 {
                     used_occurrences.insert(index);
+                    used_origins.insert(existing.origin.clone());
+                    let mut occurrence = existing.clone();
+                    occurrence.sources = sources.clone();
+                    occurrence.note = *note;
+                    rewritten.push(occurrence);
+                } else if let Some(existing) =
+                    available.iter().flat_map(|block| &block.items).find(|i| {
+                        !used_origins.contains(&i.origin) && i.hash == hash && i.item == *item
+                    })
+                {
+                    // Restored native groups reuse bounded local occurrences,
+                    // including any text inside their provider envelope.
+                    used_origins.insert(existing.origin.clone());
                     let mut occurrence = existing.clone();
                     occurrence.sources = sources.clone();
                     occurrence.note = *note;
                     rewritten.push(occurrence);
                 } else {
+                    // Native replay bytes alone cannot manufacture authority.
+                    if message(item).is_none() {
+                        return Err(ContextError::ProtectedGroup.into());
+                    }
                     rewritten.push(Occurrence {
                         request: RequestId(String::new()),
                         position: 0,
@@ -1132,49 +1155,23 @@ impl Store {
         if text_changed {
             tx.execute("INSERT INTO requests(id,parent_id,branch,created_at,embedded_run,embedded_incarnation,round_phase) SELECT ?1,id,branch,?2,embedded_run,embedded_incarnation,round_phase FROM requests WHERE id=?3",params![head.0,utc_millis(),snapshot.head.0])?;
             rewritten.extend_from_slice(&all[snapshot.prefix.len()..]);
-            for (position, mut occurrence) in rewritten.into_iter().enumerate() {
+            for (position, occurrence) in rewritten.iter_mut().enumerate() {
                 if occurrence.origin.request.0.is_empty() {
                     occurrence.origin.request = head.clone();
                     occurrence.origin.position = position as i64;
                 }
-                insert_occurrence(&tx, &head, position as i64, &occurrence)?;
+                insert_occurrence(&tx, &head, position as i64, occurrence)?;
             }
             tx.execute(
                 "INSERT INTO session_state(session_id,state,updated_at) VALUES(?1,'true',?2)",
                 params![format!("harness:compaction:{}", head.0), utc_millis()],
             )?;
-            let mut carried = HashSet::<OperationId>::new();
-            for pending in pending.iter().chain(std::iter::once(&snapshot.operation)) {
-                if carried.insert(pending.clone()) {
-                    carry_claim(&tx, pending, &head)?;
-                }
-            }
-            // A completed exchange can remain native across several rewrites.
-            // Keep its existing terminal claim attached to the copied occurrence.
-            for occurrence in &all {
-                let Some(call) = occurrence
-                    .item
-                    .tool_call()
-                    .map_err(|_| ContextError::UnsupportedState)?
-                else {
-                    continue;
-                };
-                let mut q = tx.prepare("SELECT origin,origin_request_id FROM claims WHERE request_id=?1 AND call_id=?2")?;
-                let claims = q
-                    .query_map(params![occurrence.request.0, call.call_id.0], |r| {
-                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                for (origin, request) in claims {
-                    let operation = OperationId {
-                        origin: serde_json::from_str(&origin)?,
-                        request: RequestId(request),
-                        call: call.call_id.clone(),
-                    };
-                    let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 AND json_extract(i.json,'$.call_id')=?2 AND json_extract(i.json,'$.type') IN ('custom_tool_call','function_call'))",params![head.0,operation.call.0],|r|r.get(0))?;
-                    if exists && carried.insert(operation.clone()) {
-                        carry_claim(&tx, &operation, &head)?;
-                    }
+            // Saved native groups can come from ancestry hidden by a prior cut.
+            // Carry authority from every retained invocation's immutable origin.
+            let carried = carry_native_claims(&tx, &rewritten, &head, &self.store_id)?;
+            for operation in pending.iter().chain(std::iter::once(&snapshot.operation)) {
+                if !carried.contains(operation) {
+                    return Err(ContextError::ProtectedGroup.into());
                 }
             }
         }
@@ -1204,7 +1201,7 @@ impl Store {
             changed,
             model: current.model,
         };
-        let deferred_head = freeze_committed_context(&tx, &receipt.head)?;
+        let deferred_head = freeze_committed_context(&tx, &receipt.head, &self.store_id)?;
         let record = ReceiptRecord {
             deferred_head,
             version: 1,
@@ -1267,7 +1264,11 @@ fn receipt(c: &Connection, operation: &OperationId) -> Result<Option<ReceiptReco
 
 /// Deferred children inherit a bounded immutable cut, never the continuing
 /// request to which future arrivals can still be appended.
-fn freeze_committed_context(tx: &Transaction<'_>, head: &RequestId) -> Result<RequestId> {
+fn freeze_committed_context(
+    tx: &Transaction<'_>,
+    head: &RequestId,
+    store_id: &str,
+) -> Result<RequestId> {
     let snapshot = RequestId(uuid::Uuid::new_v4().to_string());
     tx.execute(
         "INSERT INTO requests(id,parent_id,branch,created_at) VALUES(?1,NULL,?2,?3)",
@@ -1281,34 +1282,7 @@ fn freeze_committed_context(tx: &Transaction<'_>, head: &RequestId) -> Result<Re
     for (position, occurrence) in all.iter().enumerate() {
         insert_occurrence(tx, &snapshot, position as i64, occurrence)?;
     }
-    let mut copied = HashSet::new();
-    for occurrence in &all {
-        let Some(call) = occurrence
-            .item
-            .tool_call()
-            .map_err(|_| ContextError::UnsupportedState)?
-        else {
-            continue;
-        };
-        let mut q = tx.prepare(
-            "SELECT origin,origin_request_id FROM claims WHERE request_id=?1 AND call_id=?2",
-        )?;
-        let claims = q
-            .query_map(params![occurrence.request.0, call.call_id.0], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        for (origin, request) in claims {
-            let operation = OperationId {
-                origin: serde_json::from_str(&origin)?,
-                request: RequestId(request),
-                call: call.call_id.clone(),
-            };
-            if copied.insert(operation.clone()) {
-                carry_claim(tx, &operation, &snapshot)?;
-            }
-        }
-    }
+    carry_native_claims(tx, &all, &snapshot, store_id)?;
     Ok(snapshot)
 }
 
@@ -1325,6 +1299,76 @@ fn settle_success(tx: &Transaction<'_>, operation: &OperationId, hash: &ItemHash
         return Err(ContextError::Conflict.into());
     }
     Ok(())
+}
+
+/// A copied occurrence retains its original claimant, independent of today's
+/// conversation binding and of other invocations sharing a provider call ID.
+fn carry_native_claims(
+    tx: &Transaction<'_>,
+    occurrences: &[Occurrence],
+    head: &RequestId,
+    store_id: &str,
+) -> Result<HashSet<OperationId>> {
+    let mut carried = HashSet::new();
+    for occurrence in occurrences {
+        let Some(call) = occurrence
+            .item
+            .tool_call()
+            .map_err(|_| ContextError::UnsupportedState)?
+        else {
+            continue;
+        };
+        let mut query = tx.prepare(
+            "SELECT origin FROM claims WHERE request_id=?1 AND origin_request_id=?1 AND call_id=?2",
+        )?;
+        let origins = query
+            .query_map(
+                params![occurrence.origin.request.0, call.call_id.0],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let [origin] = origins.as_slice() else {
+            return Err(ContextError::ProtectedGroup.into());
+        };
+        let operation = OperationId {
+            origin: serde_json::from_str(origin)?,
+            request: occurrence.origin.request.clone(),
+            call: call.call_id,
+        };
+        if original_call(tx, &operation)? != occurrence.origin {
+            return Err(ContextError::InvalidReference.into());
+        }
+        let (branch, run, incarnation): (String, Option<String>, Option<String>) = tx.query_row(
+            "SELECT branch,embedded_run,embedded_incarnation FROM requests WHERE id=?1",
+            [&operation.request.0],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let principal_matches = match &operation.origin {
+            ConversationIdentity::Standalone { store, actor } => {
+                store == store_id && actor.0 == branch && run.is_none() && incarnation.is_none()
+            }
+            ConversationIdentity::Embedded {
+                run: owner_run,
+                incarnation: owner_incarnation,
+                actor,
+            } => {
+                actor.0 == branch
+                    && !owner_run.is_empty()
+                    && !owner_incarnation.is_empty()
+                    && run.as_ref().is_none_or(|run| run == owner_run)
+                    && incarnation
+                        .as_ref()
+                        .is_none_or(|incarnation| incarnation == owner_incarnation)
+            }
+        };
+        if !principal_matches {
+            return Err(StoreError::OperationOriginMismatch);
+        }
+        if carried.insert(operation.clone()) {
+            carry_claim(tx, &operation, head)?;
+        }
+    }
+    Ok(carried)
 }
 
 fn carry_claim(tx: &Transaction<'_>, operation: &OperationId, head: &RequestId) -> Result<()> {

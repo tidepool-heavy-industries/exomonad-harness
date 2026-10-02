@@ -112,7 +112,7 @@ pub(crate) struct Occurrence {
     pub note: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct Origin {
     pub request: RequestId,
     pub position: i64,

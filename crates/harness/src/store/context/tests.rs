@@ -410,6 +410,110 @@ fn replay_restores_sealed_prefix_model_and_original_operation() {
 }
 
 #[test]
+fn replay_restores_historical_native_exchange_with_local_original_claim() {
+    fn exchange(store: &Store) -> (RequestId, OperationId, OperationId, OperationId) {
+        let head = RequestId("exchange".into());
+        let completed_output =
+            Item(json!({"type":"function_call_output","call_id":"done","output":"evidence"}));
+        store.write_request(&head, None, "/root", &[
+            Item(json!({"type":"function_call","call_id":"done","name":"read","arguments":"{}"})),
+            completed_output.clone(),
+            Item(json!({"type":"custom_tool_call","call_id":"delete","name":"haskell_sync","input":"delete"})),
+            Item(json!({"type":"custom_tool_call","call_id":"restore","name":"haskell_sync","input":"restore"})),
+        ], Usage::default()).unwrap();
+        let completed = store.claim(&CallId("done".into()), &head).unwrap();
+        store
+            .settle_claims(&completed, &completed_output, TerminalOutcome::Success)
+            .unwrap();
+        let first = store.claim(&CallId("delete".into()), &head).unwrap();
+        let second = store.claim(&CallId("restore".into()), &head).unwrap();
+        (head, completed, first, second)
+    }
+    let original = Store::memory().unwrap();
+    let (head, _, first, second) = exchange(&original);
+    let snapshot = original.begin_context(&first, &head).unwrap();
+    let mut saved = snapshot.document.clone();
+    let deleted = original
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &ContextDraft {
+                document: ContextDocument::default(),
+                next_model: None,
+            },
+            output: &output(),
+            pending: std::slice::from_ref(&second),
+        })
+        .unwrap();
+    let snapshot = original.begin_context(&second, &deleted.head).unwrap();
+    saved.blocks.extend(
+        snapshot
+            .document
+            .blocks
+            .iter()
+            .filter(|block| {
+                matches!(
+                    block,
+                    ContextBlock::Native {
+                        protected: true,
+                        ..
+                    }
+                )
+            })
+            .cloned(),
+    );
+    original
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &ContextDraft {
+                document: saved,
+                next_model: None,
+            },
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    let deletion = original.context_commit_evidence(&first).unwrap().unwrap();
+    let restoration = original.context_commit_evidence(&second).unwrap().unwrap();
+    let local = Store::memory().unwrap();
+    let (head, completed, first, second) = exchange(&local);
+    let snapshot = local.begin_context(&first, &head).unwrap();
+    let deleted = local
+        .restore_context_commit(
+            &snapshot,
+            &deletion,
+            &output(),
+            std::slice::from_ref(&second),
+        )
+        .unwrap();
+    let snapshot = local.begin_context(&second, &deleted.head).unwrap();
+    let restored = local
+        .restore_context_commit(&snapshot, &restoration, &output(), &[])
+        .unwrap();
+    let claims = local.claims_on(&restored.head).unwrap();
+    let restored_claim = claims
+        .iter()
+        .filter(|claim| claim.operation == completed)
+        .collect::<Vec<_>>();
+    assert_eq!(restored_claim.len(), 1);
+    assert_eq!(restored_claim[0].state, crate::store::ClaimState::Settled);
+    assert_eq!(
+        restored_claim[0].output,
+        Some(local.put_item(&local.items(&head).unwrap()[1]).unwrap())
+    );
+    let retained = history(&local.lock(), &restored.head, true).unwrap();
+    assert_eq!(retained[0].origin.request, completed.request);
+    assert_eq!(retained[0].origin.position, 0);
+    assert_eq!(
+        local
+            .context_commit_evidence(&second)
+            .unwrap()
+            .unwrap()
+            .original_operation(),
+        &restoration.original_operation
+    );
+}
+
+#[test]
 fn replay_refuses_malformed_commit_evidence_and_wrong_output() {
     let original = Store::memory().unwrap();
     let (head, operation) = setup(&original);
@@ -552,6 +656,14 @@ fn saved_context_restores_owned_prior_text_and_native_group_preserving_suffix() 
         Item(json!({"type":"custom_tool_call","call_id":"first","name":"haskell_sync","input":"first"})),
         Item(json!({"type":"custom_tool_call","call_id":"second","name":"haskell_sync","input":"second"})),
     ],Usage::default()).unwrap();
+    let completed = store.claim(&CallId("done".into()), &head).unwrap();
+    store
+        .settle_claims(
+            &completed,
+            &store.items(&head).unwrap()[2],
+            TerminalOutcome::Success,
+        )
+        .unwrap();
     let op1 = store.claim(&first, &head).unwrap();
     let op2 = store.claim(&second, &head).unwrap();
     let snap1 = store.begin_context(&op1, &head).unwrap();
@@ -604,6 +716,17 @@ fn saved_context_restores_owned_prior_text_and_native_group_preserving_suffix() 
             pending: &[],
         })
         .unwrap();
+    let claims = store.claims_on(&receipt.head).unwrap();
+    let restored = claims
+        .iter()
+        .filter(|claim| claim.operation == completed)
+        .collect::<Vec<_>>();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].state, crate::store::ClaimState::Settled);
+    assert_eq!(
+        restored[0].output,
+        Some(store.put_item(&store.items(&head).unwrap()[2]).unwrap())
+    );
     let items = store.context_history(&receipt.head).unwrap();
     assert_eq!(items[0].2.0["content"], "original");
     assert!(
@@ -613,6 +736,113 @@ fn saved_context_restores_owned_prior_text_and_native_group_preserving_suffix() 
     );
     assert!(items.iter().any(|(_, _, i)| i.0["content"] == "late"));
     assert!(items.iter().any(|(_,_,i)|i.0["call_id"]=="second" && i.0["type"]=="custom_tool_call_output"));
+}
+
+#[test]
+fn saved_native_restore_refuses_missing_or_forged_original_claim() {
+    for forged in [false, true] {
+        let store = Store::memory().unwrap();
+        let (head, first) = setup(&store);
+        let parent = RequestId("completed".into());
+        let invocation =
+            Item(json!({"type":"function_call","call_id":"done","name":"read","arguments":"{}"}));
+        let completed_output =
+            Item(json!({"type":"function_call_output","call_id":"done","output":"evidence"}));
+        store
+            .write_request(
+                &parent,
+                None,
+                "/root",
+                &[invocation, completed_output.clone()],
+                Usage::default(),
+            )
+            .unwrap();
+        let completed = store.claim(&CallId("done".into()), &parent).unwrap();
+        store
+            .settle_claims(&completed, &completed_output, TerminalOutcome::Success)
+            .unwrap();
+        store
+            .lock()
+            .execute(
+                "UPDATE requests SET parent_id=?2 WHERE id=?1",
+                params![head.0, parent.0],
+            )
+            .unwrap();
+        store.append_items(&head, &[Item(json!({"type":"custom_tool_call","call_id":"restore","name":"haskell_sync","input":"restore"}))]).unwrap();
+        let second = store.claim(&CallId("restore".into()), &head).unwrap();
+        let snapshot = store.begin_context(&first, &head).unwrap();
+        let mut saved = snapshot.document.clone();
+        let deleted = store
+            .commit_context(ContextCommit {
+                snapshot: &snapshot,
+                draft: &ContextDraft {
+                    document: ContextDocument::default(),
+                    next_model: None,
+                },
+                output: &output(),
+                pending: std::slice::from_ref(&second),
+            })
+            .unwrap();
+        if forged {
+            let foreign = store.standalone_identity(AgentPath("/foreign".into()));
+            store
+                .lock()
+                .execute(
+                    "UPDATE claims SET origin=?2 WHERE origin_request_id=?1",
+                    params![parent.0, serde_json::to_string(&foreign).unwrap()],
+                )
+                .unwrap();
+        } else {
+            store
+                .lock()
+                .execute("DELETE FROM claims WHERE origin_request_id=?1", [&parent.0])
+                .unwrap();
+        }
+        let restore = store.begin_context(&second, &deleted.head).unwrap();
+        saved.blocks.extend(
+            restore
+                .document
+                .blocks
+                .iter()
+                .filter(|block| {
+                    matches!(
+                        block,
+                        ContextBlock::Native {
+                            protected: true,
+                            ..
+                        }
+                    )
+                })
+                .cloned(),
+        );
+        let before = store.context_history(&deleted.head).unwrap();
+        let result = store.commit_context(ContextCommit {
+            snapshot: &restore,
+            draft: &ContextDraft {
+                document: saved,
+                next_model: None,
+            },
+            output: &output(),
+            pending: &[],
+        });
+        if forged {
+            assert!(matches!(result, Err(StoreError::OperationOriginMismatch)));
+        } else {
+            assert!(matches!(
+                result,
+                Err(StoreError::Context(ContextError::ProtectedGroup))
+            ));
+        }
+        assert_eq!(store.context_history(&deleted.head).unwrap(), before);
+        assert!(store.context_receipt(&second).unwrap().is_none());
+        assert!(
+            store
+                .replay_tool_output_operation(&second)
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.children_of(&deleted.head).unwrap().is_empty());
+    }
 }
 
 #[test]

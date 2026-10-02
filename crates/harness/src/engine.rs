@@ -118,6 +118,9 @@ mod completion_tests;
 
 #[cfg(test)]
 mod embedded_restart_tests;
+
+#[cfg(test)]
+mod context_restore_tests;
 #[cfg(test)]
 #[path = "engine/rejection_tests.rs"]
 mod rejection_tests;
