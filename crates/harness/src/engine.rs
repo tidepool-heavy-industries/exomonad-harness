@@ -6746,6 +6746,7 @@ mod tests {
         let draft = crate::context::ContextDraft {
             document: snapshot.document.clone(),
             next_model: Some(model_b.into()),
+            next_effort: None,
         };
         let selected = store
             .commit_context(crate::context::ContextCommit {

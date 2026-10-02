@@ -393,6 +393,7 @@ async fn embedded_restart_preserves_committed_model_for_retained_opaque_history(
         let draft = ContextDraft {
             document: snapshot.document.clone(),
             next_model: Some("model-b".into()),
+            next_effort: None,
         };
         let output = crate::turn::JobOutput::Completed(Ok(json!("switched")));
         let receipt = store

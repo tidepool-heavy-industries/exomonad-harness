@@ -92,6 +92,7 @@ async fn saved_native_exchange_restores_exact_claim_and_recovers_after_reopen() 
                 draft: &ContextDraft {
                     document: ContextDocument::default(),
                     next_model: None,
+                    next_effort: None,
                 },
                 output: &outcome,
                 pending: std::slice::from_ref(&second),
@@ -134,6 +135,7 @@ async fn saved_native_exchange_restores_exact_claim_and_recovers_after_reopen() 
                 draft: &ContextDraft {
                     document: saved,
                     next_model: None,
+                    next_effort: None,
                 },
                 output: &outcome,
                 pending: &[],
