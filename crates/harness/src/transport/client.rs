@@ -1,5 +1,6 @@
 use super::{
-    Auth, ResponsesProtocol, ResponsesRequest, ResponsesTurn, TransportError,
+    Auth, AuthCredentials, ResponsesProtocol, ResponsesRequest, ResponsesRoute, ResponsesTurn,
+    TransportError,
     sse::{ResponseAssembly, StreamEvent},
 };
 use futures_util::StreamExt;
@@ -10,6 +11,7 @@ use serde_json::json;
 use std::{borrow::Cow, time::Duration};
 
 pub const ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
+pub const CHATGPT_PLAN_ENDPOINT: &str = "https://api.openai.com/v1/responses";
 pub const CODEX_VERSION: &str = "0.160.0";
 const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 
@@ -25,8 +27,26 @@ pub fn request_body_for_protocol(
     request: &ResponsesRequest,
     protocol: ResponsesProtocol,
 ) -> Result<Value, TransportError> {
-    serde_json::to_value(normalized_request(request, protocol)?)
-        .map_err(|_| TransportError::Stream("request serialization failed".into()))
+    serde_json::to_value(normalized_request(
+        request,
+        protocol,
+        ResponsesRoute::Codex,
+    )?)
+    .map_err(|_| TransportError::Stream("request serialization failed".into()))
+}
+
+/// The native plan route uses the public Standard contract and retains host
+/// async tool declarations. This is also the serializer used for real traffic.
+pub fn request_body_for_route(
+    request: &ResponsesRequest,
+    route: ResponsesRoute,
+) -> Result<Value, TransportError> {
+    serde_json::to_value(normalized_request(
+        request,
+        ResponsesProtocol::Standard,
+        route,
+    )?)
+    .map_err(|_| TransportError::Stream("request serialization failed".into()))
 }
 
 #[derive(Serialize)]
@@ -36,7 +56,7 @@ struct RequestBody<'a> {
     instructions: Option<&'a str>,
     input: Cow<'a, [crate::item::Item]>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<super::StrictToolManifest<'a>>,
+    tools: Option<RequestTools<'a>>,
     tool_choice: ToolChoice<'a>,
     parallel_tool_calls: bool,
     reasoning: Reasoning,
@@ -44,6 +64,13 @@ struct RequestBody<'a> {
     store: bool,
     prompt_cache_key: &'a str,
     include: [&'static str; 1],
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum RequestTools<'a> {
+    Flat(super::StrictToolManifest<'a>),
+    Namespaced(Vec<Value>),
 }
 
 #[derive(Serialize)]
@@ -90,14 +117,35 @@ impl Serialize for AllowedTools<'_> {
 fn normalized_request(
     request: &ResponsesRequest,
     protocol: ResponsesProtocol,
+    route: ResponsesRoute,
 ) -> Result<RequestBody<'_>, TransportError> {
     if request.model.is_empty() || request.session_id.is_empty() {
         return Err(TransportError::Stream("empty model or session id".into()));
     }
     let admitted_tools = request.tools.strict_tools()?;
     let lite = protocol == ResponsesProtocol::Lite;
+    let public = route == ResponsesRoute::ChatGptPlan;
+    if public && lite {
+        return Err(TransportError::Stream(
+            "ChatGPT plan usage requires the public Standard contract".into(),
+        ));
+    }
     let input = if lite {
         Cow::Owned(lite_input(request)?)
+    } else if public {
+        if request.input.iter().any(|item| item.0["role"] == "system") {
+            return Err(TransportError::Stream(
+                "ChatGPT plan input requires instructions or developer messages".into(),
+            ));
+        }
+        Cow::Owned(
+            request
+                .input
+                .iter()
+                .filter(|item| !item.is_configuration_update())
+                .cloned()
+                .collect(),
+        )
     } else {
         Cow::Borrowed(request.input.as_slice())
     };
@@ -105,11 +153,38 @@ fn normalized_request(
         model: &request.model,
         instructions: (!lite).then_some(request.instructions.as_str()),
         input,
-        tools: (!lite).then_some(admitted_tools),
+        tools: if lite {
+            None
+        } else if public {
+            let mut tools = Vec::new();
+            for tool in request.tools.iter() {
+                if !matches!(tool["type"].as_str(), Some("function" | "custom")) {
+                    return Err(TransportError::Stream(
+                        "ChatGPT plan route requires function or custom host tools".into(),
+                    ));
+                }
+                if request
+                    .tools_allowed
+                    .as_ref()
+                    .is_none_or(|allowed| allowed.iter().any(|name| tool["name"] == name.as_str()))
+                {
+                    tools.push(tool.clone());
+                }
+            }
+            Some(RequestTools::Namespaced(if tools.is_empty() {
+                vec![]
+            } else {
+                vec![
+                    serde_json::json!({"type":"namespace","name":"functions","description":"Exomonad host tools","tools":tools}),
+                ]
+            }))
+        } else {
+            Some(RequestTools::Flat(admitted_tools))
+        },
         tool_choice: match request.tools_allowed.as_deref() {
             None => ToolChoice::Automatic("auto"),
             Some([]) => ToolChoice::Automatic("none"),
-            Some(_) if lite => ToolChoice::Automatic("auto"),
+            Some(_) if lite || public => ToolChoice::Automatic("auto"),
             Some(names) => ToolChoice::Allowed {
                 kind: "allowed_tools",
                 mode: "auto",
@@ -118,10 +193,9 @@ fn normalized_request(
         },
         parallel_tool_calls: !lite,
         reasoning: Reasoning {
-            // Project durable effort controls into the current wire setting.
-            // Sol uses a request-level field rather than configuration items;
-            // retaining the original history and baseline for other contracts.
-            effort: if lite {
+            // Project local effort controls into the selected request field;
+            // the original durable history remains immutable.
+            effort: if lite || public {
                 request
                     .input
                     .iter()
@@ -254,6 +328,43 @@ fn protocol_headers(protocol: ResponsesProtocol) -> reqwest::header::HeaderMap {
     headers
 }
 
+fn http_request(
+    http: &reqwest::Client,
+    route: ResponsesRoute,
+    protocol: ResponsesProtocol,
+    request: &ResponsesRequest,
+    body: &RequestBody<'_>,
+    token: &str,
+    account: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let call = http
+        .post(match route {
+            ResponsesRoute::Codex => ENDPOINT,
+            ResponsesRoute::ChatGptPlan => CHATGPT_PLAN_ENDPOINT,
+        })
+        .bearer_auth(token)
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .headers(protocol_headers(protocol))
+        .json(body);
+    if let Some(account) = account {
+        call.header("chatgpt-account-id", account)
+            .header("version", CODEX_VERSION)
+            .header("originator", "codex_cli_rs")
+            .header("session-id", &request.session_id)
+    } else {
+        call
+    }
+}
+
+fn http_client() -> Result<reqwest::Client, TransportError> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(300))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| TransportError::Stream("HTTP client initialization failed".into()))
+}
+
 /// Runs the stateless streaming request. Auth disk access happens in a
 /// blocking-pool task, never on an async executor worker. No credential value
 /// is included in errors, traces, stored items, or returned data.
@@ -263,25 +374,34 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
     request: ResponsesRequest,
     sink: Option<tokio::sync::mpsc::Sender<StreamEvent>>,
 ) -> Result<ResponsesTurn, TransportError> {
-    let body = normalized_request(&request, protocol)?;
-    let (token, account) = tokio::task::spawn_blocking(move || auth.access())
+    let route = auth.route();
+    let body = normalized_request(&request, protocol, route)?;
+    let credentials = tokio::task::spawn_blocking(move || auth.credentials())
         .await
         .map_err(|_| TransportError::Authentication)??;
-    let http = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(300))
-        .build()
-        .map_err(|_| TransportError::Stream("HTTP client initialization failed".into()))?;
-    let call = http
-        .post(ENDPOINT)
-        .bearer_auth(&token)
-        .header("chatgpt-account-id", &account)
-        .header("version", CODEX_VERSION)
-        .header("originator", "codex_cli_rs")
-        .header("session-id", &request.session_id)
-        .header(reqwest::header::ACCEPT, "text/event-stream")
-        .headers(protocol_headers(protocol))
-        .json(&body);
+    let http = http_client()?;
+    let (token, account) = match (route, credentials) {
+        (
+            ResponsesRoute::Codex,
+            AuthCredentials::Codex {
+                access_token,
+                account_id,
+            },
+        ) => (access_token, Some(account_id)),
+        (ResponsesRoute::ChatGptPlan, AuthCredentials::ChatGptPlan { access_token }) => {
+            (access_token, None)
+        }
+        _ => return Err(TransportError::Authentication),
+    };
+    let call = http_request(
+        &http,
+        route,
+        protocol,
+        &request,
+        &body,
+        &token,
+        account.as_deref(),
+    );
     let response = call
         .send()
         .await
@@ -291,7 +411,8 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
         return Err(TransportError::Authentication);
     }
     if status != 200 {
-        let diagnostic = super::http_error::read(response, &token, &account).await;
+        let diagnostic =
+            super::http_error::read(response, &token, account.as_deref().unwrap_or("")).await;
         return Err(TransportError::Http { status, diagnostic });
     }
     let mut stream = response.bytes_stream();
@@ -515,3 +636,7 @@ mod tests {
 #[cfg(test)]
 #[path = "client_lite_tests.rs"]
 mod lite_tests;
+
+#[cfg(test)]
+#[path = "client_plan_tests.rs"]
+mod plan_tests;
