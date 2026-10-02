@@ -492,6 +492,10 @@ mod interruption_fencing_tests {
         let frontier = store.embedded_round_frontier(&identity).unwrap();
         assert!(frontier.settled_head.is_none());
         assert_eq!(frontier.pending_head, Some(request.clone()));
+        assert_eq!(
+            frontier.pending_interruption,
+            Some(StreamInterruption::MissingCompletion)
+        );
         let outcomes = store.model_request_outcomes(128).unwrap();
         assert_eq!(outcomes.len(), 1);
         assert_eq!(
