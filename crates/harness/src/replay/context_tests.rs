@@ -1,6 +1,6 @@
 use super::{ReplayProvider, ReplayTransport};
 use crate::{
-    context::{ContextBlock, ContextDraft},
+    context::{ContextBlock, ContextCommit, ContextDraft, ContextRole},
     engine::{Engine, EngineConfig},
     item::{Item, ToolInput},
     mailbox::Envelope,
@@ -11,7 +11,7 @@ use crate::{
     },
     store::Store,
     transport::{Auth, ResponsesTurn, TransportError, Usage, client::request_body},
-    turn::JobScheduler,
+    turn::{JobOutput, JobScheduler},
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -25,6 +25,7 @@ impl Auth for Offline {
 
 struct Editor {
     rewrite: bool,
+    note: bool,
     operations: Arc<Mutex<Vec<OperationId>>>,
 }
 
@@ -61,14 +62,30 @@ impl Provider for Editor {
             .push(snapshot.operation.clone());
         let mut document = snapshot.document;
         if self.rewrite {
-            let Some(ContextBlock::Text { text, .. }) = document
+            let Some(block) = document
                 .blocks
                 .iter_mut()
                 .find(|block| matches!(block, ContextBlock::Text { .. }))
             else {
                 panic!("source context has an editable message")
             };
-            *text = "retained edited context".into();
+            if self.note {
+                let ContextBlock::Text {
+                    reference: Some(reference),
+                    ..
+                } = block
+                else {
+                    panic!("source reference")
+                };
+                *block = ContextBlock::Text {
+                    reference: None,
+                    role: ContextRole::Assistant,
+                    text: "retained edited context".into(),
+                    sources: vec![reference.clone()],
+                };
+            } else if let ContextBlock::Text { text, .. } = block {
+                *text = "retained edited context".into();
+            }
         }
         ProviderCompletion {
             result: Ok(
@@ -121,6 +138,10 @@ impl Drop for Recording {
 }
 
 async fn record(rewrite: bool) -> Recording {
+    record_with_note(rewrite, false).await
+}
+
+async fn record_with_note(rewrite: bool, note: bool) -> Recording {
     let path = std::env::temp_dir().join(format!(
         "harness-context-replay-{}.sqlite",
         uuid::Uuid::new_v4()
@@ -149,6 +170,7 @@ async fn record(rewrite: bool) -> Recording {
         Arc::new(JobScheduler::new(1).unwrap()),
         Arc::new(Editor {
             rewrite,
+            note,
             operations: operations.clone(),
         }),
         config(),
@@ -170,18 +192,15 @@ async fn record(rewrite: bool) -> Recording {
     let turns = store.replay_turns(&root).unwrap();
     assert_eq!(turns.len(), 2);
     assert_eq!(turns[1].model_request.model, "model-after-edit");
-    assert!(
-        turns[1]
-            .model_request
-            .input
-            .iter()
-            .any(|item| item.0["content"]
-                == if rewrite {
-                    "retained edited context"
-                } else {
-                    "original context"
-                })
-    );
+    assert!(turns[1].model_request.input.iter().any(|item| {
+        item.0["content"].as_str().is_some_and(|text| {
+            text.ends_with(if rewrite {
+                "retained edited context"
+            } else {
+                "original context"
+            })
+        })
+    }));
     Recording {
         path,
         root,
@@ -244,11 +263,12 @@ async fn replay(recording: &Recording) -> Result<(Arc<Store>, OperationId), Stri
             .history
             .iter()
             .any(|(_, _, item)| item.0["content"]
-                == if recording.rewrite {
+                .as_str()
+                .is_some_and(|text| text.ends_with(if recording.rewrite {
                     "retained edited context"
                 } else {
                     "original context"
-                })
+                })))
     );
     // Replay preserves raw source history and immutable sealed requests.
     assert!(
@@ -280,6 +300,81 @@ async fn sealed_context_replay_restores_edited_prefix_model_and_original_operati
 async fn sealed_context_replay_restores_model_only_edit() {
     let recording = record(false).await;
     replay(&recording).await.unwrap();
+}
+
+#[tokio::test]
+async fn sealed_context_replay_restores_note_attribution_and_reuses_its_sources() {
+    let recording = record_with_note(true, true).await;
+    let (destination, local) = replay(&recording).await.unwrap();
+    assert_ne!(local.request, recording.original.request);
+    let receipt = destination.context_receipt(&local).unwrap().unwrap();
+    let projection = destination
+        .context_request_state(&receipt.head, &local.origin)
+        .unwrap();
+    let note = projection
+        .history
+        .iter()
+        .find(|(_, _, item)| {
+            item.0["content"]
+                .as_str()
+                .is_some_and(|text| text.ends_with("retained edited context"))
+        })
+        .unwrap();
+    assert!(
+        note.2.0["content"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("sources: {}:0", recording.original.request.0))
+    );
+    let raw = destination.context_history(&receipt.head).unwrap();
+    assert!(
+        raw.iter()
+            .any(|(_, _, item)| item.0["content"] == "retained edited context")
+    );
+
+    destination.append_items(&receipt.head, &[Item(json!({"type":"function_call","call_id":"second-edit","name":"context_edit","arguments":"{}"}))]).unwrap();
+    let next = destination
+        .claim(&CallId("second-edit".into()), &receipt.head)
+        .unwrap();
+    let snapshot = destination.begin_context(&next, &receipt.head).unwrap();
+    let mut document = snapshot.document.clone();
+    let block = document.blocks.iter_mut().find(|block| matches!(block, ContextBlock::Text { text, .. } if text == "retained edited context")).unwrap();
+    let ContextBlock::Text {
+        reference: Some(reference),
+        sources,
+        ..
+    } = block
+    else {
+        panic!("restored note has a local reference")
+    };
+    assert!(!sources.is_empty());
+    assert!(reference.as_str().contains(&receipt.head.0));
+    *block = ContextBlock::Text {
+        reference: None,
+        role: ContextRole::Assistant,
+        text: "notes in the next transaction".into(),
+        sources: sources.clone(),
+    };
+    let next_receipt = destination
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &ContextDraft {
+                document,
+                next_model: None,
+            },
+            output: &JobOutput::Completed(Ok(json!("second edit done"))),
+            pending: &[],
+        })
+        .expect("recorded note citations remain valid in a subsequent transaction");
+    let next_projection = destination
+        .context_request_state(&next_receipt.head, &next.origin)
+        .unwrap();
+    assert!(next_projection.history.iter().any(|(_, _, item)| {
+        item.0["content"].as_str().is_some_and(|text| {
+            text.ends_with("notes in the next transaction")
+                && text.contains(&format!("sources: {}:0", recording.original.request.0))
+        })
+    }));
 }
 
 #[tokio::test]
