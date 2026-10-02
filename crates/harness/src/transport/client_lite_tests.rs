@@ -66,6 +66,12 @@ fn explicit_lite_header_and_body_preserve_engine_tool_contract() {
 fn lite_prefix_ids_track_exact_payload_across_sessions_and_followups() {
     let mut request = request();
     let before = lite(&request);
+    for (index, prefix) in [(0, "at_"), (1, "msg_")] {
+        let id = before["input"][index]["id"].as_str().unwrap();
+        assert!(id.starts_with(prefix));
+        assert!(id.len() <= 64, "backend item ID limit: {id}");
+        uuid::Uuid::parse_str(id.strip_prefix(prefix).unwrap()).unwrap();
+    }
     request.session_id = "new-exact-context".into();
     request.input.push(Item(
         json!({"type":"function_call_output","call_id":"original","output":"done"}),

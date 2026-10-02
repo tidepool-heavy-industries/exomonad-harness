@@ -274,5 +274,16 @@ mod lite_tests {
         assert_eq!(item_id, "exact-call");
         assert_eq!(channel, OutputChannel::ToolInput);
         assert_eq!(text, "λ");
+        let mut preferred = event.clone();
+        preferred["item_id"] = json!("native-item");
+        let Some(StreamEvent::Delta { item_id, .. }) =
+            assembly.accept(&preferred.to_string()).unwrap()
+        else {
+            panic!("tool input delta expected");
+        };
+        assert_eq!(item_id, "native-item");
+        preferred.as_object_mut().unwrap().remove("item_id");
+        preferred.as_object_mut().unwrap().remove("call_id");
+        assert!(assembly.accept(&preferred.to_string()).is_err());
     }
 }

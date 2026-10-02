@@ -141,6 +141,15 @@ fn normalized_request(
     })
 }
 
+// The backend caps item IDs at 64 characters. A UUID-size content digest
+// preserves stable identities without adding hashing dependencies or a registry.
+fn content_id(prefix: &str, payload: &[u8]) -> String {
+    let digest = blake3::hash(payload);
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    format!("{prefix}_{}", uuid::Uuid::from_bytes(bytes))
+}
+
 fn lite_input(request: &ResponsesRequest) -> Result<Vec<crate::item::Item>, TransportError> {
     use crate::item::Item;
     let mut tools = Vec::new();
@@ -172,10 +181,10 @@ fn lite_input(request: &ResponsesRequest) -> Result<Vec<crate::item::Item>, Tran
     let bytes = serde_json::to_vec(&tools)
         .map_err(|_| TransportError::Stream("tool serialization failed".into()))?;
     let mut input = vec![Item(
-        serde_json::json!({"type":"additional_tools","role":"developer","id":format!("at_{}",blake3::hash(&bytes).to_hex()),"tools":tools}),
+        serde_json::json!({"type":"additional_tools","role":"developer","id":content_id("at", &bytes),"tools":tools}),
     )];
     if !request.instructions.is_empty() {
-        input.push(Item(serde_json::json!({"type":"message","role":"developer","id":format!("msg_{}",blake3::hash(request.instructions.as_bytes()).to_hex()),"content":[{"type":"input_text","text":request.instructions}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["model.base_instructions"]}})));
+        input.push(Item(serde_json::json!({"type":"message","role":"developer","id":content_id("msg", request.instructions.as_bytes()),"content":[{"type":"input_text","text":request.instructions}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["model.base_instructions"]}})));
     }
     input.extend(
         request
