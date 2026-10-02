@@ -115,6 +115,13 @@ impl Item {
             JobOutput::Completed(Ok(value)) => value.clone(),
             JobOutput::Completed(Err(error)) => error.output_value(),
             JobOutput::Cancelled => json!({ "error": "job cancelled" }),
+            JobOutput::CancelledWithReceipt(receipt) => json!({
+                "error": "job cancelled",
+                "receipt": match receipt {
+                    Ok(value) => value.clone(),
+                    Err(failure) => failure.output_value(),
+                },
+            }),
             JobOutput::Interrupted => json!({ "error": "job interrupted" }),
             JobOutput::CancellationUnconfirmed(detail) => {
                 json!({ "error": "cancellation unconfirmed", "detail": detail })

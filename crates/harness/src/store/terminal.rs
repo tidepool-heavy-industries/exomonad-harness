@@ -15,6 +15,7 @@ pub enum TerminalOutcome {
     Success,
     Failure(ToolFailure),
     Cancelled,
+    CancelledWithReceipt(std::result::Result<serde_json::Value, ToolFailure>),
     Interrupted,
     CancellationUnconfirmed(String),
 }
@@ -25,6 +26,7 @@ impl From<&JobOutput> for TerminalOutcome {
             JobOutput::Completed(Ok(_)) => Self::Success,
             JobOutput::Completed(Err(failure)) => Self::Failure(failure.clone()),
             JobOutput::Cancelled => Self::Cancelled,
+            JobOutput::CancelledWithReceipt(receipt) => Self::CancelledWithReceipt(receipt.clone()),
             JobOutput::Interrupted => Self::Interrupted,
             JobOutput::CancellationUnconfirmed(detail) => {
                 Self::CancellationUnconfirmed(detail.clone())
@@ -194,6 +196,13 @@ mod tests {
                 json!({"class":"input_rejected","phase":"compile","cause":{"kind":"parser"}}),
             ))),
             JobOutput::Cancelled,
+            JobOutput::CancelledWithReceipt(Ok(json!({
+                "items": [{"status":"committed","output":"prefix"}], "nextIndex": 1
+            }))),
+            JobOutput::CancelledWithReceipt(Err(ToolFailure::with_metadata(
+                "cancelled after prefix",
+                json!({"class":"interrupted","phase":"run"}),
+            ))),
             JobOutput::Interrupted,
             JobOutput::CancellationUnconfirmed("owner still active".into()),
         ];

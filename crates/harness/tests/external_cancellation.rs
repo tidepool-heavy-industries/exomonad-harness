@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use harness::{
     model::{CallId, OperationId},
-    provider::{CancellationAcknowledgment, CancellationOwner, JobHandle, Provider, ProviderError},
+    provider::{
+        CancellationAcknowledgment, CancellationOwner, JobHandle, Provider, ProviderError,
+        ToolFailure,
+    },
     turn::{JobOutput, JobScheduler},
 };
 use serde_json::{Value, json};
@@ -74,6 +77,78 @@ fn external() -> Arc<External> {
         cancel_entered: Notify::new(),
         cancel_barrier: Mutex::new(None),
     })
+}
+
+struct StoppedWithReceipt {
+    started: Notify,
+    dropped: Arc<AtomicBool>,
+    receipt: Result<Value, ToolFailure>,
+}
+
+#[async_trait]
+impl CancellationOwner for StoppedWithReceipt {
+    async fn cancel(&self, _: &OperationId, _: &JobHandle) -> CancellationAcknowledgment {
+        CancellationAcknowledgment::StoppedWithReceipt(self.receipt.clone())
+    }
+}
+
+struct ReceiptProvider(Arc<StoppedWithReceipt>);
+
+#[async_trait]
+impl Provider for ReceiptProvider {
+    fn cancellation_owner(&self) -> Option<Arc<dyn CancellationOwner>> {
+        Some(self.0.clone())
+    }
+
+    async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+        let _drop = DropMark(self.0.dropped.clone());
+        self.0.started.notify_one();
+        std::future::pending().await
+    }
+
+    fn tools(&self) -> Vec<Value> {
+        vec![]
+    }
+}
+
+#[tokio::test]
+async fn stopped_owner_receipt_survives_waiter_abort_without_becoming_completion() {
+    for receipt in [
+        Ok(json!({"items":[{"status":"committed","output":"performed prefix"}],"nextIndex":1})),
+        Err(ToolFailure::with_metadata(
+            "cancelled after performed prefix",
+            json!({"class":"interrupted","phase":"run"}),
+        )),
+    ] {
+        let jobs = JobScheduler::new(1).unwrap();
+        let owner = Arc::new(StoppedWithReceipt {
+            started: Notify::new(),
+            dropped: Arc::new(AtomicBool::new(false)),
+            receipt: receipt.clone(),
+        });
+        let call = CallId("cancelled-with-prefix".into());
+        jobs.start(
+            Arc::new(ReceiptProvider(owner.clone())),
+            call.clone(),
+            "run".into(),
+            json!({}),
+        )
+        .await
+        .unwrap();
+        owner.started.notified().await;
+        let settlement = jobs.cancel(&call).await.unwrap().unwrap();
+        let expected = JobOutput::CancelledWithReceipt(receipt.clone());
+        assert_eq!(settlement.call_id, call);
+        assert_eq!(settlement.output, expected);
+        assert_eq!(jobs.wait(&call).await.unwrap(), expected);
+        assert_eq!(jobs.provider_completion(&call).await.unwrap(), None);
+        assert!(owner.dropped.load(Ordering::SeqCst));
+        assert_eq!(jobs.cancel(&call).await.unwrap(), None);
+        assert_eq!(
+            jobs.retry_cancellation(&call).await.unwrap(),
+            Some(CancellationAcknowledgment::StoppedWithReceipt(receipt))
+        );
+    }
 }
 
 struct CompletedDuringCancel {

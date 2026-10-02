@@ -29,6 +29,7 @@ const JOB_CANCELLATION_GRACE: Duration = Duration::from_millis(250);
 pub enum JobOutput {
     Completed(Result<Value, ToolFailure>),
     Cancelled,
+    CancelledWithReceipt(Result<Value, ToolFailure>),
     Interrupted,
     CancellationUnconfirmed(String),
 }
@@ -752,6 +753,9 @@ impl JobScheduler {
                 }
                 let output = match &ack {
                     crate::provider::CancellationAcknowledgment::Stopped => JobOutput::Cancelled,
+                    crate::provider::CancellationAcknowledgment::StoppedWithReceipt(receipt) => {
+                        JobOutput::CancelledWithReceipt(receipt.clone())
+                    }
                     crate::provider::CancellationAcknowledgment::Completed(result) => {
                         JobOutput::Completed(result.clone())
                     }
@@ -762,7 +766,11 @@ impl JobScheduler {
                 job.output = Some(output.clone());
                 job.settled_claimants = job.claimants.drain().collect();
                 job.settled.send_replace(Some(output.clone()));
-                let task = if matches!(ack, crate::provider::CancellationAcknowledgment::Stopped) {
+                let task = if matches!(
+                    ack,
+                    crate::provider::CancellationAcknowledgment::Stopped
+                        | crate::provider::CancellationAcknowledgment::StoppedWithReceipt(_)
+                ) {
                     job.task.take()
                 } else {
                     None
@@ -866,7 +874,10 @@ impl JobScheduler {
             // Its owner remains available to acknowledge cleanup.
             match &job.cancellation_ack {
                 None => return Ok(None),
-                Some(crate::provider::CancellationAcknowledgment::Stopped) => {
+                Some(
+                    crate::provider::CancellationAcknowledgment::Stopped
+                    | crate::provider::CancellationAcknowledgment::StoppedWithReceipt(_),
+                ) => {
                     return Ok(job.cancellation_ack.clone());
                 }
                 Some(crate::provider::CancellationAcknowledgment::Completed(_)) => {
@@ -886,8 +897,11 @@ impl JobScheduler {
             let mut jobs = self.jobs.lock().await;
             let job = jobs.get_mut(&call_id).ok_or(JobError::UnknownCall)?;
             job.cancellation_ack = Some(ack.clone());
-            if matches!(ack, crate::provider::CancellationAcknowledgment::Stopped)
-                && job.provider_completion.is_none()
+            if matches!(
+                ack,
+                crate::provider::CancellationAcknowledgment::Stopped
+                    | crate::provider::CancellationAcknowledgment::StoppedWithReceipt(_)
+            ) && job.provider_completion.is_none()
             {
                 job.task.take()
             } else {

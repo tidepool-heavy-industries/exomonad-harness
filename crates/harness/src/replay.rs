@@ -248,6 +248,9 @@ impl ReplayProvider {
         let restored = match terminal {
             TerminalOutcome::Failure(failure) => JobOutput::Completed(Err(failure)),
             TerminalOutcome::Cancelled => JobOutput::Cancelled,
+            TerminalOutcome::CancelledWithReceipt(receipt) => {
+                JobOutput::CancelledWithReceipt(receipt)
+            }
             TerminalOutcome::Interrupted => JobOutput::Interrupted,
             TerminalOutcome::CancellationUnconfirmed(detail) => {
                 JobOutput::CancellationUnconfirmed(detail)
@@ -627,6 +630,9 @@ impl Provider for ReplayProvider {
             JobOutput::Cancelled => {
                 Err(ProviderError::NonValueTerminal(NonValueTerminal::Cancelled))
             }
+            JobOutput::CancelledWithReceipt(receipt) => Err(ProviderError::NonValueTerminal(
+                NonValueTerminal::CancelledWithReceipt(receipt),
+            )),
             JobOutput::Interrupted => Err(ProviderError::NonValueTerminal(
                 NonValueTerminal::Interrupted,
             )),
@@ -654,6 +660,9 @@ impl Provider for ReplayProvider {
             JobOutput::Cancelled => {
                 Err(ProviderError::NonValueTerminal(NonValueTerminal::Cancelled))
             }
+            JobOutput::CancelledWithReceipt(receipt) => Err(ProviderError::NonValueTerminal(
+                NonValueTerminal::CancelledWithReceipt(receipt),
+            )),
             JobOutput::Interrupted => Err(ProviderError::NonValueTerminal(
                 NonValueTerminal::Interrupted,
             )),
@@ -1560,11 +1569,25 @@ mod tests {
         output: &JobOutput,
         tombstone: bool,
     ) -> (Arc<Store>, RequestId, CallId) {
+        recorded_terminal_kind_in(store, output, tombstone, ToolKind::Function)
+    }
+
+    fn recorded_terminal_kind_in(
+        store: Arc<Store>,
+        output: &JobOutput,
+        tombstone: bool,
+        kind: ToolKind,
+    ) -> (Arc<Store>, RequestId, CallId) {
         let root = RequestId("terminal-root".into());
         let call_id = CallId("terminal-call".into());
-        let call = Item(
-            json!({"type":"function_call", "call_id":call_id.0, "name":"echo", "arguments":"{}"}),
-        );
+        let call = Item(match kind {
+            ToolKind::Function => {
+                json!({"type":"function_call", "call_id":call_id.0, "name":"echo", "arguments":"{}"})
+            }
+            ToolKind::Custom => {
+                json!({"type":"custom_tool_call", "call_id":call_id.0, "name":"echo", "input":"raw prefix"})
+            }
+        });
         store.create_request(&root, None, "/root").unwrap();
         store
             .append_items(&root, std::slice::from_ref(&call))
@@ -1573,9 +1596,7 @@ mod tests {
         if tombstone {
             store.interrupt_operation_claim(&operation, &root).unwrap();
         } else {
-            store
-                .write_job_output(&operation, ToolKind::Function, output)
-                .unwrap();
+            store.write_job_output(&operation, kind, output).unwrap();
         }
         store
             .record_replay_turn(
@@ -1592,6 +1613,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_custom_receipt_survives_reopen_and_refuses_changed_payload() {
+        let path = std::env::temp_dir().join(format!(
+            "harness-cancelled-receipt-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let expected =
+            JobOutput::CancelledWithReceipt(Err(crate::provider::ToolFailure::with_metadata(
+                "input unit 2 cancelled; input unit 1 committed: prefix",
+                json!({"class":"interrupted","phase":"run"}),
+            )));
+        let (store, root, call) = recorded_terminal_kind_in(
+            Arc::new(Store::open(&path).unwrap()),
+            &expected,
+            false,
+            ToolKind::Custom,
+        );
+        let original = store.claims_on(&root).unwrap()[0].operation.clone();
+        drop(store);
+        let store = Arc::new(Store::open(&path).unwrap());
+        let provider = ReplayProvider::new(store.clone(), &root).unwrap();
+        let local = RequestId("replay-direct".into());
+        let (sink, _stream) = tokio::sync::mpsc::channel(4);
+        provider
+            .create_streaming_for_request(&local, request("terminal-session"), sink)
+            .await
+            .unwrap();
+        let context = call_context(call);
+        let operation = context.operation.as_ref().unwrap();
+        let restored = provider
+            .retained_output("echo", &ToolInput::Custom("raw prefix".into()), operation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.output(), &expected);
+        let recorded = store
+            .replay_tool_output_operation(&original)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.terminal, TerminalOutcome::from(&expected));
+        assert_eq!(
+            recorded.item,
+            Item::tool_output(&operation.call, ToolKind::Custom, &expected)
+        );
+        assert!(!store.has_completed_output(&original).unwrap());
+        let hash = store.claims_on(&root).unwrap()[0].output.clone().unwrap();
+        let changed = Item::tool_output(&operation.call, ToolKind::Custom, &JobOutput::Cancelled);
+        store
+            .lock()
+            .execute(
+                "UPDATE items SET json=?1 WHERE hash=?2",
+                rusqlite::params![serde_json::to_string(&changed).unwrap(), hash.0],
+            )
+            .unwrap();
+        let refusal = provider
+            .retained_output("echo", &ToolInput::Custom("raw prefix".into()), operation)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refusal, ProviderError::Tool(failure) if failure.message() == "recorded terminal does not match its immutable output item")
+        );
+        drop(provider);
+        drop(store);
+        std::fs::remove_file(&path).unwrap();
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
     async fn replay_restores_each_typed_terminal_without_interpreting_success_payload() {
         for expected in [
             JobOutput::Completed(Ok(
@@ -1599,6 +1688,13 @@ mod tests {
             )),
             JobOutput::Completed(Err("old plain failure".into())),
             JobOutput::Cancelled,
+            JobOutput::CancelledWithReceipt(Ok(json!({
+                "items": [{"status":"committed","output":"prefix"}], "nextIndex": 1
+            }))),
+            JobOutput::CancelledWithReceipt(Err(crate::provider::ToolFailure::with_metadata(
+                "cancelled after prefix",
+                json!({"class":"interrupted","phase":"run"}),
+            ))),
             JobOutput::Interrupted,
             JobOutput::CancellationUnconfirmed("owner unavailable".into()),
         ] {
@@ -1627,6 +1723,10 @@ mod tests {
                 JobOutput::Cancelled => assert!(matches!(
                     direct,
                     Err(ProviderError::NonValueTerminal(NonValueTerminal::Cancelled))
+                )),
+                JobOutput::CancelledWithReceipt(receipt) => assert!(matches!(
+                    direct,
+                    Err(ProviderError::NonValueTerminal(NonValueTerminal::CancelledWithReceipt(saved))) if saved == receipt
                 )),
                 JobOutput::Interrupted => assert!(matches!(
                     direct,
