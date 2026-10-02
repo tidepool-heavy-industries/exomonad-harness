@@ -132,7 +132,7 @@ fn equal_bytes_and_duplicate_raw_occurrences_have_unknown_provenance() {
         ],
         vec![
             reused.clone(),
-            reused,
+            reused.clone(),
             duplicate.clone(),
             duplicate,
             generated,
