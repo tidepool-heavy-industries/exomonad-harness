@@ -8,7 +8,7 @@ use crate::{
     item::{Item, ToolInput},
     mailbox::{Envelope, MailboxSignal},
     model::{AgentPath, CallId, ConversationIdentity, OperationId, RequestId},
-    provider::{CallContext, JobHandle, Provider, ProviderError, ToolFailure},
+    provider::{CallContext, JobHandle, Provider, ToolFailure},
 };
 use serde_json::Value;
 use std::{
@@ -155,6 +155,7 @@ struct Job {
     /// The actual provider-future result, retained independently from the
     /// terminal output that was already published to claimants.
     provider_completion: Option<Result<Value, ToolFailure>>,
+    completion: Option<crate::provider::ProviderCompletion>,
     progress: Vec<Value>,
     cancel: tokio_util::sync::CancellationToken,
     settled: tokio::sync::watch::Sender<Option<JobOutput>>,
@@ -319,6 +320,26 @@ impl JobScheduler {
         name: String,
         input: I,
     ) -> Result<JobHandle, JobError> {
+        self.start_operation_with_context(provider, operation, agent, request, name, input, None)
+            .await
+    }
+
+    pub async fn start_operation_with_context<I: Into<ToolInput>>(
+        &self,
+        provider: Arc<dyn Provider>,
+        operation: OperationId,
+        agent: AgentPath,
+        request: Option<RequestId>,
+        name: String,
+        input: I,
+        context_snapshot: Option<crate::context::ContextSnapshot>,
+    ) -> Result<JobHandle, JobError> {
+        if context_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.operation != operation)
+        {
+            return Err(JobError::OperationContextMismatch);
+        }
         let input = input.into();
         if !matches!(&operation.origin, ConversationIdentity::Standalone { store, .. } if store == &self.detached_store)
             && (operation.origin.actor() != &agent || request.as_ref() != Some(&operation.request))
@@ -350,6 +371,7 @@ impl JobScheduler {
                 settled_claimants: Vec::new(),
                 output: None,
                 provider_completion: None,
+                completion: None,
                 progress: Vec::new(),
                 cancel: tokio_util::sync::CancellationToken::new(),
                 settled,
@@ -370,7 +392,6 @@ impl JobScheduler {
             .expect("job inserted before launch")
             .cancel
             .clone();
-        let is_agent_verb = crate::provider::is_harness_tool(&name);
         let verb_backend = provider.job_agent_service();
         let holds_capacity = provider.holds_job_capacity();
         let (launch, launch_gate) = tokio::sync::oneshot::channel();
@@ -465,14 +486,9 @@ impl JobScheduler {
                 cancel: task_cancel,
                 verbs,
                 progress,
+                context: context_snapshot,
             };
-            let call = match input {
-                ToolInput::Function(args) if is_agent_verb => {
-                    provider.call_agent_verb(&name, args, context)
-                }
-                ToolInput::Function(args) => provider.call_with_context(&name, args, context),
-                ToolInput::Custom(raw) => provider.call_custom_with_context(&name, raw, context),
-            };
+            let call = provider.complete_call(&name, input, context);
             tokio::pin!(call);
             let result = loop {
                 tokio::select! {
@@ -483,7 +499,7 @@ impl JobScheduler {
                             }
                         }
                     }
-                    result = &mut call => break result.map_err(ProviderError::into_tool_failure),
+                    result = &mut call => break result,
                 }
             };
             while let Ok(event) = progress_rx.try_recv() {
@@ -492,11 +508,15 @@ impl JobScheduler {
                 }
             }
             drop(permit);
+            let output = result.result.clone();
+            if let Some(job) = jobs.lock().await.get_mut(&task_operation) {
+                job.completion = Some(result);
+            }
             settle(
                 &jobs,
                 task_operation.clone(),
-                JobOutput::Completed(result.clone()),
-                Some(result),
+                JobOutput::Completed(output.clone()),
+                Some(output),
             )
             .await;
             let _ = events.send(task_operation);
@@ -655,6 +675,21 @@ impl JobScheduler {
             .get(&call_id)
             .ok_or(JobError::UnknownCall)?
             .provider_completion
+            .clone())
+    }
+
+    pub async fn invocation_completion<K: JobKey>(
+        &self,
+        key: &K,
+    ) -> Result<Option<crate::provider::ProviderCompletion>, JobError> {
+        let operation = key.operation(self);
+        Ok(self
+            .jobs
+            .lock()
+            .await
+            .get(&operation)
+            .ok_or(JobError::UnknownCall)?
+            .completion
             .clone())
     }
 
@@ -1185,6 +1220,7 @@ async fn settle(
 
 #[cfg(test)]
 mod tests {
+    use crate::provider::ProviderError;
     use super::*;
     use crate::agents::{AgentInvocation, AgentToolService, Contract, dispatch_agent_verb};
     use crate::provider::Provider;

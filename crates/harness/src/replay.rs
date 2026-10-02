@@ -1129,6 +1129,7 @@ mod tests {
             cancel,
             verbs,
             progress,
+            context: None,
         }
     }
 
@@ -2229,6 +2230,7 @@ mod tests {
             cancel,
             verbs,
             progress,
+            context: None,
         };
         let running = {
             let cell = cell.clone();
@@ -2300,6 +2302,7 @@ mod tests {
             cancel,
             verbs,
             progress,
+            context: None,
         };
         let running = {
             let cell = cell.clone();

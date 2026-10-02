@@ -630,6 +630,20 @@ impl Provider for PinnedProvider {
     ) -> crate::hooks::BeforeRequestResult {
         self.surface.dispatcher.before_request(plan).await
     }
+    async fn complete_call(
+        &self,
+        name: &str,
+        input: ToolInput,
+        context: CallContext,
+    ) -> crate::provider::ProviderCompletion {
+        if let Err(error) = self.validate(name, &input, &context) {
+            return crate::provider::ProviderCompletion::unedited(Err(error.into_tool_failure()));
+        }
+        self.surface
+            .dispatcher
+            .complete_call(name, input, context)
+            .await
+    }
     async fn call_with_context(
         &self,
         name: &str,
@@ -669,8 +683,17 @@ mod tests {
         let policies = HashMap::from([("cell".to_owned(), ToolScheduling::BeforeNextInference)]);
         let synchronous = EmbeddedToolManifest::with_scheduling(vec![tool], policies).unwrap();
         assert_eq!(synchronous.tools()[0]["async"], false);
-        assert_eq!(synchronous.scheduling["cell"], ToolScheduling::BeforeNextInference);
-        assert!(EmbeddedToolManifest::with_scheduling(vec![], HashMap::from([("missing".to_owned(), ToolScheduling::Async)])).is_err());
+        assert_eq!(
+            synchronous.scheduling["cell"],
+            ToolScheduling::BeforeNextInference
+        );
+        assert!(
+            EmbeddedToolManifest::with_scheduling(
+                vec![],
+                HashMap::from([("missing".to_owned(), ToolScheduling::Async)])
+            )
+            .is_err()
+        );
     }
 
     #[test]

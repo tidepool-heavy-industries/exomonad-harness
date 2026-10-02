@@ -46,6 +46,9 @@ pub struct CallContext {
     pub verbs: crate::agents::JobVerbs,
     /// Bounded, best-effort out-of-band progress; a full queue rejects sends.
     pub progress: mpsc::Sender<Value>,
+    /// Store-issued prefix lease for this exact synchronous invocation. Async
+    /// calls and detached probes never receive editing authority.
+    pub context: Option<crate::context::ContextSnapshot>,
 }
 
 impl CallContext {
@@ -81,6 +84,7 @@ impl CallContext {
                 cancel,
                 verbs,
                 progress,
+                context: None,
             },
             receiver,
         )
@@ -242,6 +246,32 @@ pub trait CancellationOwner: Send + Sync {
     ) -> CancellationAcknowledgment;
 }
 
+/// Draft disposition belongs to the complete invocation, never streamed output.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ContextDisposition {
+    Unedited,
+    Draft(crate::context::ContextDraft),
+}
+
+/// Exact provider-future completion. Embedded runtimes derive `full_success`
+/// from their typed exit and confirmed cleanup, independently from value JSON.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProviderCompletion {
+    pub result: Result<Value, ToolFailure>,
+    pub full_success: bool,
+    pub context: ContextDisposition,
+}
+
+impl ProviderCompletion {
+    pub fn unedited(result: Result<Value, ToolFailure>) -> Self {
+        Self {
+            full_success: result.is_ok(),
+            result,
+            context: ContextDisposition::Unedited,
+        }
+    }
+}
+
 /// A provider owns tool meaning; the harness owns scheduling and history.
 #[async_trait]
 pub trait Provider: Send + Sync {
@@ -340,6 +370,28 @@ pub trait Provider: Send + Sync {
         _context: CallContext,
     ) -> Result<Value, ProviderError> {
         self.call(name, args).await
+    }
+
+    /// Whole-invocation completion, returned before Store settlement. Hosts
+    /// overriding this method must never await their own output acknowledgment.
+    async fn complete_call(
+        &self,
+        name: &str,
+        input: crate::item::ToolInput,
+        context: CallContext,
+    ) -> ProviderCompletion {
+        let result = match input {
+            crate::item::ToolInput::Function(args) if is_harness_tool(name) => {
+                self.call_agent_verb(name, args, context).await
+            }
+            crate::item::ToolInput::Function(args) => {
+                self.call_with_context(name, args, context).await
+            }
+            crate::item::ToolInput::Custom(raw) => {
+                self.call_custom_with_context(name, raw, context).await
+            }
+        };
+        ProviderCompletion::unedited(result.map_err(ProviderError::into_tool_failure))
     }
 
     /// Invoke a freeform custom tool. The input is not JSON: callers must
