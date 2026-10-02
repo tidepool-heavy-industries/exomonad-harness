@@ -1,0 +1,117 @@
+//! Editable conversation content. Native envelopes remain Store-owned evidence.
+use crate::{item::{Item, ItemHash}, model::{OperationId, RequestId}, turn::JobOutput};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ContextReference(pub(crate) String);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextRole { User, Assistant }
+
+impl ContextRole {
+    pub(crate) fn text(self) -> &'static str {
+        match self { Self::User => "user", Self::Assistant => "assistant" }
+    }
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value { "user" => Some(Self::User), "assistant" => Some(Self::Assistant), _ => None }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextNativeKind { CompletedExchange, Opaque, Pending }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ContextBlock {
+    Text { reference: Option<ContextReference>, role: ContextRole, text: String, sources: Vec<ContextReference> },
+    Native { reference: ContextReference, kind: ContextNativeKind, preview: String, protected: bool },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextDocument { pub blocks: Vec<ContextBlock> }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextDraft { pub document: ContextDocument, pub next_model: Option<String> }
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContextSnapshot {
+    pub document: ContextDocument,
+    pub generation: u64,
+    pub head: RequestId,
+    pub operation: OperationId,
+    pub(crate) prefix: Vec<Occurrence>,
+    pub(crate) blocks: Vec<StoredBlock>,
+    pub(crate) store_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Occurrence {
+    pub request: RequestId,
+    pub position: i64,
+    pub hash: ItemHash,
+    pub item: Item,
+    pub origin: Origin,
+    pub sources: Vec<ContextReference>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Origin { pub request: RequestId, pub position: i64, pub hash: ItemHash }
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct StoredBlock {
+    pub block: ContextBlock,
+    pub items: Vec<Occurrence>,
+    pub opaque: bool,
+    pub mandatory: bool,
+}
+
+pub struct ContextCommit<'a> {
+    pub snapshot: &'a ContextSnapshot,
+    pub draft: &'a ContextDraft,
+    pub output: &'a JobOutput,
+    pub pending: &'a [OperationId],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCommitReceipt {
+    pub head: RequestId,
+    pub generation: u64,
+    pub changed: bool,
+    pub model: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ContextRequestState {
+    pub history: Vec<(RequestId, ItemHash, Item)>,
+    pub model: Option<String>,
+    pub generation: u64,
+}
+
+#[derive(Debug, Error)]
+pub enum ContextError {
+    #[error("context changed since this synchronous invocation began")]
+    Conflict,
+    #[error("the exact issuing call is unavailable in this conversation")]
+    MissingCall,
+    #[error("context reference is not part of this editable prefix")]
+    InvalidReference,
+    #[error("native context envelopes are read-only; convert a completed group to notes")]
+    NativeEdit,
+    #[error("a pending or cross-boundary native group cannot be removed")]
+    ProtectedGroup,
+    #[error("retained native groups must keep their original order")]
+    NativeOrder,
+    #[error("opaque provider continuity has no established compatibility with the requested model")]
+    OpaqueModel,
+    #[error("context publication requires a successful complete invocation")]
+    Ineligible,
+    #[error("context state has an unsupported format")]
+    UnsupportedState,
+    #[error("context model must be a nonempty resolved model name")]
+    InvalidModel,
+}
