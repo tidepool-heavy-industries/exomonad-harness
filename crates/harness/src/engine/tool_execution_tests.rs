@@ -495,6 +495,21 @@ async fn yield_timeout_and_durable_input_do_not_bypass_synchronous_result() {
         tokio::spawn(async move { engine.run_embedded(None, vec![], cancel, mail).await });
     next_request(&mut requested).await;
     assert_eq!(started.recv().await.unwrap(), "slow");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if store
+                .claims(&CallId("native-yield".into()))
+                .unwrap()
+                .iter()
+                .any(|claim| claim.state == crate::store::ClaimState::Settled)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     let input = Item(
         json!({"type":"message","role":"user","content":"input while synchronous result is held"}),
     );
