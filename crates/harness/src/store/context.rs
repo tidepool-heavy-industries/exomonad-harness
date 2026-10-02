@@ -951,7 +951,12 @@ impl Store {
         let mut seen = HashSet::new();
         let mut last_native = None;
         let mut last_historical_native = None;
-        let mut retained_opaque = false;
+        let current_origins = snapshot
+            .prefix
+            .iter()
+            .map(|i| &i.origin)
+            .collect::<HashSet<_>>();
+        let mut retained_current_opaque = false;
         if let Some(evidence) = replay {
             let mut used_occurrences = HashSet::new();
             let mut used_origins = HashSet::new();
@@ -1013,7 +1018,9 @@ impl Store {
                     return Err(ContextError::ProtectedGroup.into());
                 }
             }
-            retained_opaque = rewritten.iter().any(|i| opaque(&i.item));
+            retained_current_opaque = rewritten
+                .iter()
+                .any(|i| opaque(&i.item) && current_origins.contains(&i.origin));
         } else {
             for block in &draft.document.blocks {
                 match block {
@@ -1040,7 +1047,7 @@ impl Store {
                             return Err(ContextError::NativeOrder.into());
                         }
                         *ordering = Some(index);
-                        retained_opaque |= stored.opaque;
+                        retained_current_opaque |= index < snapshot.blocks.len() && stored.opaque;
                         rewritten.extend(stored.items.clone());
                     }
                     ContextBlock::Text {
@@ -1134,7 +1141,25 @@ impl Store {
                 return Err(ContextError::InvalidModel.into());
             }
             if current.model.as_ref() != Some(model)
-                && (retained_opaque || all[snapshot.prefix.len()..].iter().any(|i| opaque(&i.item)))
+                && (retained_current_opaque
+                    || all[snapshot.prefix.len()..].iter().any(|i| opaque(&i.item)))
+            {
+                return Err(ContextError::OpaqueModel.into());
+            }
+        }
+        let selected_model = draft.next_model.as_deref().or(current.model.as_deref());
+        for occurrence in rewritten
+            .iter()
+            .filter(|i| opaque(&i.item) && !current_origins.contains(&i.origin))
+        {
+            let issuing_model = super::replay::response_item_model(
+                &tx,
+                &occurrence.origin.request,
+                &occurrence.origin.hash,
+            )?;
+            if issuing_model
+                .as_deref()
+                .is_none_or(|model| Some(model) != selected_model)
             {
                 return Err(ContextError::OpaqueModel.into());
             }
@@ -1472,5 +1497,7 @@ pub(super) fn compaction_generation(
     Ok(())
 }
 
+#[cfg(test)]
+mod opaque_model_tests;
 #[cfg(test)]
 mod tests;

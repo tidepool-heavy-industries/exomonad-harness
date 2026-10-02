@@ -5,7 +5,7 @@ use crate::{
     model::{Effort, RequestId},
     transport::{ResponsesRequest, ResponsesTurn, Usage},
 };
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 const FORMAT: u32 = 1;
@@ -38,6 +38,40 @@ struct ReplayResponse {
     response_id: String,
     items: Vec<ItemHash>,
     usage: Usage,
+}
+
+/// Equal bytes in another request do not establish the issuing model. Every
+/// retained response containing this origin must agree on supported evidence.
+pub(super) fn response_item_model(
+    c: &Connection,
+    request: &RequestId,
+    hash: &ItemHash,
+) -> Result<Option<String>> {
+    let mut query = c.prepare(
+        "SELECT CASE WHEN json_extract(payload,'$.format')=?3 \
+         AND json_extract(payload,'$.request')=?1 \
+         AND json_type(payload,'$.issued.model')='text' \
+         THEN json_extract(payload,'$.issued.model') END \
+         FROM events WHERE request_id=?1 AND kind='model_turn' \
+         AND json_type(payload,'$.response.items')='array' \
+         AND EXISTS(SELECT 1 FROM json_each(payload,'$.response.items') WHERE value=?2)",
+    )?;
+    let models = query
+        .query_map(params![request.0, hash.0, FORMAT], |row| {
+            row.get::<_, Option<String>>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let Some(Some(model)) = models.first() else {
+        return Ok(None);
+    };
+    if model.trim().is_empty()
+        || models
+            .iter()
+            .any(|candidate| candidate.as_ref() != Some(model))
+    {
+        return Ok(None);
+    }
+    Ok(Some(model.clone()))
 }
 
 fn read_item(tx: &Transaction<'_>, hash: &ItemHash) -> Result<Item> {
