@@ -1,5 +1,5 @@
 use super::{
-    Auth, ResponsesRequest, ResponsesTurn, TransportError,
+    Auth, ResponsesProtocol, ResponsesRequest, ResponsesTurn, TransportError,
     sse::{ResponseAssembly, StreamEvent},
 };
 use futures_util::StreamExt;
@@ -7,25 +7,36 @@ use serde::Serialize;
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
-use std::time::Duration;
+use std::{borrow::Cow, time::Duration};
 
 pub const ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
-pub const CODEX_VERSION: &str = "0.155.1";
+pub const CODEX_VERSION: &str = "0.160.0";
+const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 
 /// Only this transport builds the backend request; the stable session id is
 /// shared with prompt_cache_key, while caller controls the complete stateless
 /// item window. Never send previous_response_id or store:true.
 pub fn request_body(request: &ResponsesRequest) -> Result<Value, TransportError> {
-    serde_json::to_value(normalized_request(request)?)
+    request_body_for_protocol(request, ResponsesProtocol::Standard)
+}
+
+/// Serialize the selected client wire contract without credentials or traffic.
+pub fn request_body_for_protocol(
+    request: &ResponsesRequest,
+    protocol: ResponsesProtocol,
+) -> Result<Value, TransportError> {
+    serde_json::to_value(normalized_request(request, protocol)?)
         .map_err(|_| TransportError::Stream("request serialization failed".into()))
 }
 
 #[derive(Serialize)]
 struct RequestBody<'a> {
     model: &'a str,
-    instructions: &'a str,
-    input: &'a [crate::item::Item],
-    tools: super::StrictToolManifest<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<&'a str>,
+    input: Cow<'a, [crate::item::Item]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<super::StrictToolManifest<'a>>,
     tool_choice: ToolChoice<'a>,
     parallel_tool_calls: bool,
     reasoning: Reasoning,
@@ -39,6 +50,8 @@ struct RequestBody<'a> {
 struct Reasoning {
     effort: crate::model::Effort,
     summary: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -74,34 +87,104 @@ impl Serialize for AllowedTools<'_> {
     }
 }
 
-fn normalized_request(request: &ResponsesRequest) -> Result<RequestBody<'_>, TransportError> {
+fn normalized_request(
+    request: &ResponsesRequest,
+    protocol: ResponsesProtocol,
+) -> Result<RequestBody<'_>, TransportError> {
     if request.model.is_empty() || request.session_id.is_empty() {
         return Err(TransportError::Stream("empty model or session id".into()));
     }
+    let admitted_tools = request.tools.strict_tools()?;
+    let lite = protocol == ResponsesProtocol::Lite;
+    let input = if lite {
+        Cow::Owned(lite_input(request)?)
+    } else {
+        Cow::Borrowed(request.input.as_slice())
+    };
     Ok(RequestBody {
         model: &request.model,
-        instructions: &request.instructions,
-        input: &request.input,
-        tools: request.tools.strict_tools()?,
+        instructions: (!lite).then_some(request.instructions.as_str()),
+        input,
+        tools: (!lite).then_some(admitted_tools),
         tool_choice: match request.tools_allowed.as_deref() {
             None => ToolChoice::Automatic("auto"),
             Some([]) => ToolChoice::Automatic("none"),
+            Some(_) if lite => ToolChoice::Automatic("auto"),
             Some(names) => ToolChoice::Allowed {
                 kind: "allowed_tools",
                 mode: "auto",
                 tools: AllowedTools(names),
             },
         },
-        parallel_tool_calls: true,
+        parallel_tool_calls: !lite,
         reasoning: Reasoning {
-            effort: request.pinned_effort,
+            // Project durable effort controls into the current wire setting.
+            // Sol uses a request-level field rather than configuration items;
+            // retaining the original history and baseline for other contracts.
+            effort: if lite {
+                request
+                    .input
+                    .iter()
+                    .rev()
+                    .find_map(crate::item::Item::configuration_effort)
+                    .unwrap_or(request.pinned_effort)
+            } else {
+                request.pinned_effort
+            },
             summary: "auto",
+            context: lite.then_some("all_turns"),
         },
         stream: true,
         store: false,
         prompt_cache_key: &request.session_id,
         include: ["reasoning.encrypted_content"],
     })
+}
+
+fn lite_input(request: &ResponsesRequest) -> Result<Vec<crate::item::Item>, TransportError> {
+    use crate::item::Item;
+    let mut tools = Vec::new();
+    for tool in request.tools.iter() {
+        if request
+            .tools_allowed
+            .as_ref()
+            .is_some_and(|allowed| !allowed.iter().any(|name| tool["name"] == name.as_str()))
+        {
+            continue;
+        }
+        if !matches!(tool["type"].as_str(), Some("function" | "custom")) {
+            return Err(TransportError::Stream(
+                "Lite requires function or custom host tools".into(),
+            ));
+        }
+        let mut tool = tool.clone();
+        // Async ownership belongs to Engine, independently of wire scheduling.
+        tool.as_object_mut()
+            .expect("admitted tool declaration")
+            .remove("async");
+        tools.push(tool);
+    }
+    let tools = if tools.is_empty() {
+        serde_json::json!([])
+    } else {
+        serde_json::json!([{"type":"namespace","name":"functions","description":"","tools":tools}])
+    };
+    let bytes = serde_json::to_vec(&tools)
+        .map_err(|_| TransportError::Stream("tool serialization failed".into()))?;
+    let mut input = vec![Item(
+        serde_json::json!({"type":"additional_tools","role":"developer","id":format!("at_{}",blake3::hash(&bytes).to_hex()),"tools":tools}),
+    )];
+    if !request.instructions.is_empty() {
+        input.push(Item(serde_json::json!({"type":"message","role":"developer","id":format!("msg_{}",blake3::hash(request.instructions.as_bytes()).to_hex()),"content":[{"type":"input_text","text":request.instructions}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["model.base_instructions"]}})));
+    }
+    input.extend(
+        request
+            .input
+            .iter()
+            .filter(|item| !item.is_configuration_update())
+            .cloned(),
+    );
+    Ok(input)
 }
 
 /// A small SSE framer for the Codex endpoint. We keep it here rather than
@@ -151,15 +234,27 @@ impl SseFramer {
     }
 }
 
+fn protocol_headers(protocol: ResponsesProtocol) -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if protocol == ResponsesProtocol::Lite {
+        headers.insert(
+            RESPONSES_LITE_HEADER,
+            reqwest::header::HeaderValue::from_static("true"),
+        );
+    }
+    headers
+}
+
 /// Runs the stateless streaming request. Auth disk access happens in a
 /// blocking-pool task, never on an async executor worker. No credential value
 /// is included in errors, traces, stored items, or returned data.
 pub(super) async fn execute<A: Auth + Clone + 'static>(
     auth: A,
+    protocol: ResponsesProtocol,
     request: ResponsesRequest,
     sink: Option<tokio::sync::mpsc::Sender<StreamEvent>>,
 ) -> Result<ResponsesTurn, TransportError> {
-    let body = normalized_request(&request)?;
+    let body = normalized_request(&request, protocol)?;
     let (token, account) = tokio::task::spawn_blocking(move || auth.access())
         .await
         .map_err(|_| TransportError::Authentication)??;
@@ -168,7 +263,7 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
         .timeout(Duration::from_secs(300))
         .build()
         .map_err(|_| TransportError::Stream("HTTP client initialization failed".into()))?;
-    let response = http
+    let call = http
         .post(ENDPOINT)
         .bearer_auth(&token)
         .header("chatgpt-account-id", &account)
@@ -176,7 +271,9 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
         .header("originator", "codex_cli_rs")
         .header("session-id", &request.session_id)
         .header(reqwest::header::ACCEPT, "text/event-stream")
-        .json(&body)
+        .headers(protocol_headers(protocol))
+        .json(&body);
+    let response = call
         .send()
         .await
         .map_err(|_| TransportError::Stream("HTTP request failed".into()))?;
@@ -405,3 +502,7 @@ mod tests {
         assert!(!turn.response_id.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "client_lite_tests.rs"]
+mod lite_tests;
