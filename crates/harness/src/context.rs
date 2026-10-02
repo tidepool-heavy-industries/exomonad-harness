@@ -1,7 +1,7 @@
 //! Editable conversation content. Native envelopes remain Store-owned evidence.
 use crate::{
     item::{Item, ItemHash},
-    model::{OperationId, RequestId},
+    model::{Effort, OperationId, RequestId},
     turn::JobOutput,
 };
 use serde::{Deserialize, Serialize};
@@ -80,6 +80,7 @@ pub struct ContextDocument {
 pub struct ContextDraft {
     pub document: ContextDocument,
     pub next_model: Option<String>,
+    pub next_effort: Option<Effort>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -151,6 +152,7 @@ pub struct ContextCommitEvidence {
     pub(crate) output: Item,
     pub(crate) invocation: Item,
     pub(crate) model: Option<String>,
+    pub(crate) next_effort: Option<Effort>,
 }
 
 impl ContextCommitEvidence {

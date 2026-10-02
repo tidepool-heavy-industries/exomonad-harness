@@ -131,3 +131,15 @@ requests and the opt-in header, `tools/src/tool_spec.rs` groups the default
 `functions` namespace, and `codex-api/src/sse/responses.rs` interprets the same
 SSE events. Harness has no Codex code dependency. `request_body_for_protocol`
 provides the selected body for offline diagnostics without authentication.
+
+Synchronous context drafts may stage the next reasoning effort together with
+transcript and model edits. Successful publication appends the host-owned
+configuration update after the tool output, preserves the earlier request input,
+and supersedes effort choices pending at commit admission. Later pending choices
+retain their ordinary next-request behavior. Failed or cancelled publication
+leaves the context, model, effort and pending choice unchanged.
+
+Context commit receipts use internal format version 2. Version 1 receipts are
+rejected with `ContextError::UnsupportedState` when read for acknowledgment,
+recovery or replay; retained version 1 runs require explicit migration or
+recreation before this candidate can resume them.

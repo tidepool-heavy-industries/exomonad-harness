@@ -278,6 +278,7 @@ struct ContextEditor {
     cancelled_receipt: bool,
     refuse_draft: bool,
     summarize_completed: bool,
+    effort_only: bool,
     committed: std::sync::atomic::AtomicUsize,
     aborted: std::sync::atomic::AtomicUsize,
     paused: Option<(Arc<Notify>, Arc<Notify>)>,
@@ -378,17 +379,19 @@ impl Provider for ContextEditor {
                 sources,
             });
         }
-        document.blocks.push(crate::context::ContextBlock::Text {
-            reference: None,
-            role: crate::context::ContextRole::Assistant,
-            text: if name == "edit_first" {
-                "first commit"
-            } else {
-                "second commit"
-            }
-            .into(),
-            sources: vec![],
-        });
+        if !self.effort_only {
+            document.blocks.push(crate::context::ContextBlock::Text {
+                reference: None,
+                role: crate::context::ContextRole::Assistant,
+                text: if name == "edit_first" {
+                    "first commit"
+                } else {
+                    "second commit"
+                }
+                .into(),
+                sources: vec![],
+            });
+        }
         self.operations
             .lock()
             .unwrap()
@@ -405,8 +408,11 @@ impl Provider for ContextEditor {
             },
             full_success: self.full_success,
             context: crate::provider::ContextDisposition::Draft(crate::context::ContextDraft {
+                next_effort: self.effort_only.then_some(Effort::High),
                 document,
-                next_model: if self.refuse_draft {
+                next_model: if self.effort_only {
+                    None
+                } else if self.refuse_draft {
                     Some(String::new())
                 } else {
                     (name == "edit_first").then(|| "model-next".into())
@@ -715,6 +721,7 @@ fn context_engine(
             cancelled_receipt: false,
             refuse_draft: false,
             summarize_completed: false,
+            effort_only: false,
             committed: std::sync::atomic::AtomicUsize::new(0),
             aborted: std::sync::atomic::AtomicUsize::new(0),
             paused: None,
@@ -1127,6 +1134,7 @@ async fn round_cancellation_while_store_is_locked_refuses_context_publication() 
         sources: vec![],
     });
     let draft = crate::context::ContextDraft {
+        next_effort: None,
         document,
         next_model: Some("model-next".into()),
     };
@@ -1500,4 +1508,90 @@ async fn completed_own_exchange_notes_do_not_reattach_on_ordinary_followup() {
                 .as_str()
                 .is_some_and(|text| text.ends_with("summarized completed exchange")))
     );
+}
+
+#[tokio::test]
+async fn staged_effort_preserves_the_issued_request_prefix_and_changes_the_next_inference() {
+    use crate::transport::{ResponsesProtocol, client::request_body_for_protocol};
+    let (mut engine, requests, operations) = context_engine(false, false);
+    Arc::get_mut(&mut engine.provider).unwrap().effort_only = true;
+    let (_cancel, cancelled) = watch::channel(false);
+    engine
+        .run(
+            None,
+            vec![Item(
+                json!({"type":"message","role":"user","content":"keep this context"}),
+            )],
+            cancelled,
+            mailbox(),
+        )
+        .await
+        .unwrap();
+    let sent = requests.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].model, sent[1].model);
+    assert_eq!(sent[0].pinned_effort, Effort::Low);
+    assert_eq!(sent[1].pinned_effort, Effort::Low);
+    assert_eq!(&sent[1].input[..sent[0].input.len()], &sent[0].input);
+    assert_eq!(
+        sent[1].input.last(),
+        Some(&Item::configuration_update(Effort::High))
+    );
+    assert_eq!(
+        sent[1].input[sent[1].input.len() - 2].0["type"],
+        "function_call_output"
+    );
+    let first = request_body_for_protocol(&sent[0], ResponsesProtocol::Standard).unwrap();
+    let second = request_body_for_protocol(&sent[1], ResponsesProtocol::Standard).unwrap();
+    let first_prefix = serde_json::to_vec(&first["input"]).unwrap();
+    let second_prefix = serde_json::to_vec(
+        &second["input"].as_array().unwrap()[..first["input"].as_array().unwrap().len()],
+    )
+    .unwrap();
+    assert_eq!(first_prefix, second_prefix);
+    assert_eq!(first["reasoning"], second["reasoning"]);
+    assert_eq!(first["instructions"], second["instructions"]);
+    assert_eq!(first["tools"], second["tools"]);
+    assert_eq!(first["prompt_cache_key"], second["prompt_cache_key"]);
+    assert_eq!(
+        second["input"].as_array().unwrap().last().unwrap()["reasoning"]["effort"],
+        "high"
+    );
+    let lite = request_body_for_protocol(&sent[1], ResponsesProtocol::Lite).unwrap();
+    assert_eq!(lite["reasoning"]["effort"], "high");
+    let operation = operations.lock().unwrap()[0].clone();
+    let receipt = engine.store.context_receipt(&operation).unwrap().unwrap();
+    assert_eq!(receipt.head, operation.request);
+    assert_eq!(receipt.model.as_deref(), Some("model-old"));
+    assert!(receipt.changed);
+    assert_eq!(receipt.generation, 1);
+}
+
+#[tokio::test]
+async fn failed_or_cancelled_cell_keeps_the_next_inference_effort_unchanged() {
+    for cancelled_receipt in [false, true] {
+        let (mut engine, requests, operations) = context_engine(false, false);
+        let provider = Arc::get_mut(&mut engine.provider).unwrap();
+        provider.effort_only = true;
+        provider.full_success = false;
+        provider.cancelled_receipt = cancelled_receipt;
+        let (_cancel, cancelled) = watch::channel(false);
+        engine
+            .run(None, vec![], cancelled, mailbox())
+            .await
+            .unwrap();
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(
+            sent[1]
+                .input
+                .iter()
+                .rev()
+                .find_map(Item::configuration_effort),
+            Some(Effort::Low)
+        );
+        assert_eq!(sent[1].pinned_effort, Effort::Low);
+        let operation = operations.lock().unwrap()[0].clone();
+        assert!(engine.store.context_receipt(&operation).unwrap().is_none());
+    }
 }

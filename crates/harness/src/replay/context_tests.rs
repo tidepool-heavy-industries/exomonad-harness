@@ -26,6 +26,7 @@ impl Auth for Offline {
 struct Editor {
     rewrite: bool,
     note: bool,
+    next_effort: Option<Effort>,
     operations: Arc<Mutex<Vec<OperationId>>>,
 }
 
@@ -93,6 +94,7 @@ impl Provider for Editor {
             )),
             full_success: true,
             context: ContextDisposition::Draft(ContextDraft {
+                next_effort: self.next_effort,
                 document,
                 next_model: Some("model-after-edit".into()),
             }),
@@ -142,6 +144,10 @@ async fn record(rewrite: bool) -> Recording {
 }
 
 async fn record_with_note(rewrite: bool, note: bool) -> Recording {
+    record_with_effort(rewrite, note, None).await
+}
+
+async fn record_with_effort(rewrite: bool, note: bool, next_effort: Option<Effort>) -> Recording {
     let path = std::env::temp_dir().join(format!(
         "harness-context-replay-{}.sqlite",
         uuid::Uuid::new_v4()
@@ -171,6 +177,7 @@ async fn record_with_note(rewrite: bool, note: bool) -> Recording {
         Arc::new(Editor {
             rewrite,
             note,
+            next_effort,
             operations: operations.clone(),
         }),
         config(),
@@ -362,6 +369,7 @@ async fn sealed_context_replay_restores_note_attribution_and_reuses_its_sources(
         .commit_context(ContextCommit {
             snapshot: &snapshot,
             draft: &ContextDraft {
+                next_effort: None,
                 document,
                 next_model: None,
             },
@@ -401,4 +409,35 @@ async fn sealed_context_replay_cannot_silently_skip_missing_edit_evidence() {
         .err()
         .expect("missing edit evidence must fail");
     assert!(error.contains("replay request does not match"), "{error}");
+}
+
+#[tokio::test]
+async fn sealed_context_replay_restores_staged_effort_in_the_next_normalized_request() {
+    let recording = record_with_effort(false, false, Some(Effort::High)).await;
+    let source = Store::open(&recording.path).unwrap();
+    let issued = source.replay_turns(&recording.root).unwrap();
+    assert_eq!(issued[0].model_request.pinned_effort, Effort::Low);
+    assert_eq!(issued[1].model_request.pinned_effort, Effort::Low);
+    assert_eq!(
+        issued[1]
+            .model_request
+            .input
+            .last()
+            .unwrap()
+            .configuration_effort(),
+        Some(Effort::High)
+    );
+    let (destination, local) = replay(&recording).await.unwrap();
+    let receipt = destination.context_receipt(&local).unwrap().unwrap();
+    let history = destination
+        .context_request_state(&receipt.head, &local.origin)
+        .unwrap()
+        .history;
+    assert_eq!(
+        history
+            .iter()
+            .rev()
+            .find_map(|(_, _, item)| item.configuration_effort()),
+        Some(Effort::High)
+    );
 }

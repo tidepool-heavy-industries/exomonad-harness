@@ -31,6 +31,7 @@ fn edited(snapshot: &ContextSnapshot) -> ContextDraft {
         panic!("plain text");
     }
     ContextDraft {
+        next_effort: None,
         document,
         next_model: Some("sol".into()),
     }
@@ -173,6 +174,7 @@ fn no_op_does_not_change_generation_or_native_item_bytes() {
     let snapshot = store.begin_context(&operation, &head).unwrap();
     let before = store.items(&head).unwrap();
     let draft = ContextDraft {
+        next_effort: None,
         document: snapshot.document.clone(),
         next_model: None,
     };
@@ -279,6 +281,7 @@ fn pending_and_standing_groups_are_protected() {
         .unwrap();
     let snapshot = store.begin_context(&operation, &head).unwrap();
     let draft = ContextDraft {
+        next_effort: None,
         document: ContextDocument::default(),
         next_model: None,
     };
@@ -347,6 +350,7 @@ fn invalid_reference_and_duplicate_native_retention_are_refused() {
     let (head, operation) = setup(&store);
     let snapshot = store.begin_context(&operation, &head).unwrap();
     let draft = ContextDraft {
+        next_effort: None,
         document: ContextDocument {
             blocks: vec![ContextBlock::Text {
                 reference: Some(ContextReference("forged".into())),
@@ -672,6 +676,7 @@ fn saved_context_restores_owned_prior_text_and_native_group_preserving_suffix() 
         .commit_context(ContextCommit {
             snapshot: &snap1,
             draft: &ContextDraft {
+                next_effort: None,
                 document: ContextDocument { blocks: vec![] },
                 next_model: None,
             },
@@ -709,6 +714,7 @@ fn saved_context_restores_owned_prior_text_and_native_group_preserving_suffix() 
         .commit_context(ContextCommit {
             snapshot: &snap2,
             draft: &ContextDraft {
+                next_effort: None,
                 document: saved,
                 next_model: None,
             },
@@ -863,6 +869,7 @@ fn foreign_saved_context_reference_is_rejected() {
         )
         .unwrap();
     let draft = ContextDraft {
+        next_effort: None,
         document: store.read_context(&foreign).unwrap(),
         next_model: None,
     };
@@ -975,6 +982,7 @@ fn replay_keeps_duplicate_item_occurrences_distinct_for_later_edit() {
     let (head, operation) = duplicate_setup(&original);
     let snapshot = original.begin_context(&operation, &head).unwrap();
     let mut draft = ContextDraft {
+        next_effort: None,
         document: snapshot.document.clone(),
         next_model: None,
     };
@@ -1006,6 +1014,7 @@ fn replay_keeps_duplicate_item_occurrences_distinct_for_later_edit() {
         .commit_context(ContextCommit {
             snapshot: &nextsnapshot,
             draft: &ContextDraft {
+                next_effort: None,
                 document: nextsnapshot.document.clone(),
                 next_model: None,
             },
@@ -1109,6 +1118,7 @@ fn authored_notes_project_attribution_without_changing_retained_item_bytes() {
         _ => panic!("text"),
     };
     let draft = ContextDraft {
+        next_effort: None,
         document: ContextDocument {
             blocks: vec![ContextBlock::Text {
                 reference: None,
@@ -1207,6 +1217,7 @@ fn closed_opaque_response_converts_to_notes_preserving_raw_evidence() {
         store.commit_context(ContextCommit {
             snapshot: &snapshot,
             draft: &ContextDraft {
+                next_effort: None,
                 document: snapshot.document.clone(),
                 next_model: Some("sol".into())
             },
@@ -1219,6 +1230,7 @@ fn closed_opaque_response_converts_to_notes_preserving_raw_evidence() {
         .commit_context(ContextCommit {
             snapshot: &snapshot,
             draft: &ContextDraft {
+                next_effort: None,
                 document: ContextDocument {
                     blocks: vec![ContextBlock::Text {
                         reference: None,
@@ -1401,4 +1413,234 @@ fn claim_lineage_stops_at_fork_and_compaction_boundaries() {
     assert_eq!(claims.len(), 1);
     assert_eq!(claims[0].request, compacted);
     assert_eq!(claims[0].operation, operation);
+}
+
+#[test]
+fn staged_effort_is_atomic_preserves_native_prefix_and_consumes_older_pending() {
+    let store = Store::memory().unwrap();
+    let (head, operation) = setup(&store);
+    store
+        .append_items(
+            &head,
+            &[Item(
+                json!({"type":"reasoning","encrypted_content":"keep opaque continuity"}),
+            )],
+        )
+        .unwrap();
+    let snapshot = store.begin_context(&operation, &head).unwrap();
+    let before = store.context_history(&head).unwrap();
+    store
+        .save_pending_effort(operation.origin.actor(), Effort::Medium)
+        .unwrap();
+    let draft = ContextDraft {
+        document: snapshot.document.clone(),
+        next_model: None,
+        next_effort: Some(Effort::High),
+    };
+    let receipt = store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &draft,
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    assert_eq!(receipt.head, head);
+    assert_eq!(receipt.model.as_deref(), Some("luna"));
+    assert!(receipt.changed);
+    let after = store.context_history(&head).unwrap();
+    assert_eq!(&after[..before.len()], &before);
+    assert_eq!(
+        after[after.len() - 2].2.0["type"],
+        "custom_tool_call_output"
+    );
+    assert_eq!(
+        after.last().unwrap().2,
+        Item::configuration_update(Effort::High)
+    );
+    assert!(
+        store
+            .apply_pending_effort(operation.origin.actor(), &head)
+            .unwrap()
+            .is_none()
+    );
+    // A lost acknowledgment cannot append the setting or output twice.
+    assert_eq!(
+        store
+            .commit_context(ContextCommit {
+                snapshot: &snapshot,
+                draft: &draft,
+                output: &output(),
+                pending: &[]
+            })
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(store.context_history(&head).unwrap(), after);
+    // A later ordinary effort choice still uses the existing pending boundary.
+    store
+        .save_pending_effort(operation.origin.actor(), Effort::Low)
+        .unwrap();
+    let next = RequestId("next-effort-request".into());
+    store
+        .write_request(&next, Some(&head), "/root", &[], Usage::default())
+        .unwrap();
+    assert!(
+        store
+            .apply_pending_effort(operation.origin.actor(), &next)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        store
+            .context_history(&next)
+            .unwrap()
+            .last()
+            .unwrap()
+            .2
+            .configuration_effort(),
+        Some(Effort::Low)
+    );
+    assert_eq!(store.context_history(&head).unwrap(), after);
+}
+
+#[test]
+fn staged_effort_publication_failure_and_cancellation_restore_pending_and_terminal() {
+    for cancel in [false, true] {
+        let store = Store::memory().unwrap();
+        let (head, operation) = setup(&store);
+        let snapshot = store.begin_context(&operation, &head).unwrap();
+        let before = store.context_history(&head).unwrap();
+        store
+            .save_pending_effort(operation.origin.actor(), Effort::Medium)
+            .unwrap();
+        if !cancel {
+            store.lock().execute_batch("CREATE TRIGGER reject_effort_commit BEFORE INSERT ON events WHEN NEW.kind='context_commit' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+        }
+        let draft = edited(&snapshot);
+        let draft = ContextDraft {
+            next_effort: Some(Effort::High),
+            ..draft
+        };
+        let cancellation_checks = std::cell::Cell::new(0);
+        let result = store.commit_context_guarded(
+            ContextCommit {
+                snapshot: &snapshot,
+                draft: &draft,
+                output: &output(),
+                pending: &[],
+            },
+            || {
+                cancellation_checks.set(cancellation_checks.get() + 1);
+                cancel && cancellation_checks.get() == 3
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(store.context_history(&head).unwrap(), before);
+        assert_eq!(
+            store.context_model(&operation.origin).unwrap().as_deref(),
+            Some("luna")
+        );
+        assert!(store.context_receipt(&operation).unwrap().is_none());
+        assert!(
+            store
+                .replay_tool_output_operation(&operation)
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.children_of(&head).unwrap().is_empty());
+        assert!(
+            store
+                .apply_pending_effort(operation.origin.actor(), &head)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            store
+                .context_history(&head)
+                .unwrap()
+                .last()
+                .unwrap()
+                .2
+                .configuration_effort(),
+            Some(Effort::Medium)
+        );
+    }
+}
+
+#[test]
+fn sealed_replay_restores_staged_effort_after_local_output_without_rewriting_prefix() {
+    let source = Store::memory().unwrap();
+    let (head, operation) = setup(&source);
+    let snapshot = source.begin_context(&operation, &head).unwrap();
+    source
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &ContextDraft {
+                document: snapshot.document.clone(),
+                next_model: None,
+                next_effort: Some(Effort::High),
+            },
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    let evidence = source.context_commit_evidence(&operation).unwrap().unwrap();
+    let destination = Store::memory().unwrap();
+    let (local_head, local_operation) = setup(&destination);
+    let local_snapshot = destination
+        .begin_context(&local_operation, &local_head)
+        .unwrap();
+    let before = destination.context_history(&local_head).unwrap();
+    let receipt = destination
+        .restore_context_commit(&local_snapshot, &evidence, &output(), &[])
+        .unwrap();
+    let after = destination.context_history(&receipt.head).unwrap();
+    assert_eq!(&after[..before.len()], &before);
+    assert_eq!(
+        after.last().unwrap().2.configuration_effort(),
+        Some(Effort::High)
+    );
+    assert_eq!(
+        after[after.len() - 2].2.0["call_id"],
+        local_operation.call.0
+    );
+    assert_eq!(
+        destination
+            .context_commit_evidence(&local_operation)
+            .unwrap()
+            .unwrap()
+            .next_effort,
+        Some(Effort::High)
+    );
+}
+
+#[test]
+fn staged_effort_receipt_requires_the_current_internal_version() {
+    let store = Store::memory().unwrap();
+    let (head, operation) = setup(&store);
+    let snapshot = store.begin_context(&operation, &head).unwrap();
+    store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &ContextDraft {
+                document: snapshot.document.clone(),
+                next_model: None,
+                next_effort: Some(Effort::High),
+            },
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    store
+        .lock()
+        .execute(
+            "UPDATE events SET payload=json_set(payload,'$.version',1) WHERE kind='context_commit'",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        store.context_commit_evidence(&operation),
+        Err(StoreError::Context(ContextError::UnsupportedState))
+    ));
 }

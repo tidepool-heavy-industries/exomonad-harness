@@ -660,6 +660,7 @@ impl Store {
         let draft = ContextDraft {
             document: snapshot.document.clone(),
             next_model: evidence.model.clone(),
+            next_effort: evidence.next_effort,
         };
         self.commit_context_inner(
             ContextCommit {
@@ -683,6 +684,7 @@ impl Store {
         let draft = ContextDraft {
             document: snapshot.document.clone(),
             next_model: evidence.model.clone(),
+            next_effort: evidence.next_effort,
         };
         self.commit_context_inner(
             ContextCommit {
@@ -704,7 +706,7 @@ impl Store {
         let Some(record) = receipt(&c, operation)? else {
             return Ok(None);
         };
-        if record.version != 1
+        if record.version != 2
             || terminal::exact_terminal(&c, operation)?
                 != Some((record.output.clone(), TerminalOutcome::Success))
         {
@@ -741,6 +743,7 @@ impl Store {
             output,
             invocation: load(&original_call(&c, operation)?.hash)?,
             model: record.receipt.model,
+            next_effort: record.next_effort,
         }))
     }
 
@@ -804,6 +807,7 @@ impl Store {
                     .map(|(i, s, note)| (i, s, note))
                     .collect::<Vec<_>>(),
                 &evidence.model,
+                evidence.next_effort,
             ))?
         } else {
             serde_json::to_string(draft)?
@@ -1138,7 +1142,7 @@ impl Store {
             .next_model
             .as_ref()
             .is_some_and(|model| current.model.as_ref() != Some(model));
-        let changed = text_changed || model_changed;
+        let changed = text_changed || model_changed || draft.next_effort.is_some();
         let head = if text_changed {
             RequestId(uuid::Uuid::new_v4().to_string())
         } else {
@@ -1195,6 +1199,17 @@ impl Store {
             "INSERT INTO request_items(request_id,position,item_hash) VALUES(?1,?2,?3)",
             params![head.0, position, output_hash.0],
         )?;
+        if let Some(effort) = draft.next_effort {
+            // The successful output separates this update from every earlier
+            // setting, preserving the already-issued request's input prefix.
+            Self::set_effort_tx(&tx, &head, effort)?;
+            // Publication supersedes every choice still pending at commit
+            // admission; later choices keep the ordinary pending boundary.
+            tx.execute(
+                "DELETE FROM session_state WHERE session_id=?1",
+                [Self::pending_effort_key(snapshot.operation.origin.actor())],
+            )?;
+        }
         let receipt = ContextCommitReceipt {
             head,
             generation: current.generation,
@@ -1204,7 +1219,8 @@ impl Store {
         let deferred_head = freeze_committed_context(&tx, &receipt.head, &self.store_id)?;
         let record = ReceiptRecord {
             deferred_head,
-            version: 1,
+            version: 2,
+            next_effort: draft.next_effort,
             prefix: prefix_evidence,
             candidate,
             original_operation: replay.map(|e| e.original_operation.clone()),
@@ -1225,6 +1241,7 @@ impl Store {
 #[serde(deny_unknown_fields)]
 struct ReceiptRecord {
     version: u32,
+    next_effort: Option<crate::model::Effort>,
     deferred_head: RequestId,
     prefix: Vec<PrefixEvidence>,
     candidate: String,
@@ -1253,7 +1270,7 @@ fn receipt(c: &Connection, operation: &OperationId) -> Result<Option<ReceiptReco
         [] => Ok(None),
         [raw] => {
             let record: ReceiptRecord = serde_json::from_str(raw)?;
-            if record.version != 1 || record.operation != *operation {
+            if record.version != 2 || record.operation != *operation {
                 return Err(ContextError::UnsupportedState.into());
             }
             Ok(Some(record))
