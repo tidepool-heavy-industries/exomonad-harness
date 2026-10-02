@@ -143,10 +143,10 @@ describe('exact worker Chat', () => {
   })
   it('does not fetch workflow actors, unselected Chats or invalid routes and preserves composer children', () => {
     const mounted = render(<WorkerChat data={{ ...data, actors: [{ ...actor, kind: 'workflow' }] }} route={route} navigate={navigate} transportPhase="ready"><p>Composer from App</p></WorkerChat>)
-    expect(screen.getByText(/workflow actor has no model Chat/)).toBeVisible()
+    expect(screen.getByText(/Workflow actors have no model exchange/)).toBeVisible()
     expect(screen.getByText('Composer from App')).toBeVisible()
     mounted.rerender(chat(data, { ...route, selection: { kind: 'none' } }))
-    expect(screen.getByText(/Select an exact model worker/)).toBeVisible()
+    expect(screen.getByText(/Select a worker/)).toBeVisible()
     mounted.rerender(<WorkerChat data={data} route={route} navigate={navigate} transportPhase="ready" issue="Malformed exact link" />)
     expect(screen.getByRole('alert')).toHaveTextContent('Malformed exact link')
     expect(readHistoryPage).not.toHaveBeenCalled()

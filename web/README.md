@@ -14,6 +14,15 @@ launcher uses the prepared executable and `web/dist`; it does not build them.
 The embedded operator uses the host's existing actor capabilities, not the
 standalone demo command grammar.
 
+The embedded view starts at Tree. Each worker opens the same-tab `/chat/…` actor
+page, which combines its messages, live output, input, interrupt/retire controls,
+exact actor details, and host operation receipts. The worker list includes model
+and workflow actors. Workflow pages show retained mailbox endpoint observations;
+model pages show the exact associated model exchange history. Retired or lost
+workers remain readable with commands disabled. Selected operations appear by
+default; “All host operations” exposes the retained browser and host audit.
+Previous `/host` and `?view=host` links open this same actor page.
+
 ## Frontend and rendered browser checks
 
 From the repository root:

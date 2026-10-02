@@ -80,7 +80,7 @@ export default function HistoryItem({ entry }: { readonly entry: HistoryEntry })
   const raw = useMemo(() => rawVisible ? JSON.stringify(entry.item, null, 2) : undefined, [entry.item, rawVisible])
   // Opaque reasoning items contain no readable summary and add no chat content.
   if (object(entry.item) && entry.item.type === 'reasoning' && view?.texts.length === 0) return null
-  return <article role="listitem" className="message">
+  return <div role="listitem" className="message">
     {view ? <>
       <h3>{view.label}</h3>
       {view.texts.map((part, index) => <TextPreview key={index} text={part.text} label={`${part.label} item ${entry.position}${view.texts.length > 1 ? ` block ${index + 1}` : ''}`} />)}
@@ -88,5 +88,5 @@ export default function HistoryItem({ entry }: { readonly entry: HistoryEntry })
       <details className="history-controls"><summary>Message details</summary><p className="meta">Item {entry.position} · hash {entry.hash} · {entry.byteLen} bytes</p><button type="button" aria-expanded={showRaw} onClick={() => setShowRaw(!showRaw)}>{showRaw ? 'Hide' : 'Show'} Raw item {entry.position}</button></details>
     </> : <p>Unrecognized item · Raw data</p>}
     {rawVisible && <TextPreview key="raw" text={raw ?? 'Raw data could not be represented as JSON.'} label={`Raw item ${entry.position}`} />}
-  </article>
+  </div>
 }

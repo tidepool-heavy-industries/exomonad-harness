@@ -126,7 +126,7 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
   }, [cacheKey, browsing, pages, requests])
   const cursorFailure = !pages.some(({ page }) => page.requestId === cursor.requestId) ? retainedFailures.current.get(cursor.requestId) : undefined
   function go(next?: Cursor) { setPages([]); setBrowsing(next) }
-  return <section className="chat-history" aria-label="Conversation messages" aria-busy={loading}>
+  return <section tabIndex={0} className="chat-history" aria-label="Conversation messages" aria-busy={loading}>
     <div className="toolbar"><h2>Conversation</h2><div className="history-controls">
       <button disabled={!ready || loading} onClick={() => setAttempt(value => value + 1)}>Refresh messages</button>
       {browsing && <button disabled={!ready || loading} onClick={() => go()}>Latest messages</button>}
@@ -139,19 +139,19 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
     {error && <div role="alert"><p>{error}</p><button disabled={!ready || loading} onClick={() => setAttempt(value => value + 1)}>Retry messages</button></div>}
     {loading && <p role="status">Loading conversation messages…</p>}
     {cursorFailure && <FailedExchange request={cursorFailure} />}
-    <div role="list" aria-label="Retained conversation items">
+    <div role="group" aria-label="Retained conversation items">
       {pages.map(({ page, cursor: source }) => <div className="chat-exchange" key={`${page.requestId}:${source.offset}`}>
         <details className="meta"><summary>Exchange details</summary>Exchange {page.requestId}{source.offset > 0 ? ` · offset ${source.offset}` : ''}</details>
-        {page.items.map(entry => <HistoryItem key={`${page.requestId}:${entry.position}:${entry.hash}`} entry={entry} />)}
+        <div role="list" aria-label={`Messages in exchange ${page.requestId}`}>{page.items.map(entry => <HistoryItem key={`${page.requestId}:${entry.position}:${entry.hash}`} entry={entry} />)}</div>
         {retainedFailures.current.has(page.requestId) && <FailedExchange request={retainedFailures.current.get(page.requestId)!} />}
       </div>)}
     </div>
     {output.length > 0 && <div role="list" aria-label="Live model output">
-      {output.map(item => <article role="listitem" className="message" key={outputKey(item)}>
+      {output.map(item => <div role="listitem" className="message" key={outputKey(item)}>
         <h3>{outputLabels[item.channel]}{item.committedHash ? '' : item.streaming && ready && active ? ' · streaming' : ' · incomplete'}</h3>
         <pre className="history-content">{item.text}</pre>
         {item.overflow && <p role="status">Live preview is partial after its size or active-item limit. Completed content remains available in retained history.</p>}
-      </article>)}
+      </div>)}
     </div>}
     {!loading && !error && pages.length > 0 && pages.every(({ page }) => page.items.length === 0) && <p>No retained messages in this slice.</p>}
     {paged?.page.oversizedItem && <p role="status">Item {paged.page.oversizedItem.position} is too large to display ({paged.page.oversizedItem.byteLen} bytes).

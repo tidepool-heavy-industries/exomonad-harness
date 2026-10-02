@@ -18,12 +18,12 @@ export async function openFixture(page: Page, request: APIRequestContext, config
   await expect(page.getByRole('heading', { name: 'Tree', exact: true })).toBeVisible()
 }
 export async function view(page: Page, name: string) {
-  await page.getByRole('navigation', { name: 'Views' }).getByRole('button', { name, exact: true }).click()
+  await page.getByRole('navigation', { name: 'Views' }).getByRole('link', { name, exact: true }).click()
   await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
 }
 export async function chooseWorker(page: Page) {
-  await view(page, 'Host')
-  await page.getByLabel('Target actor', { exact: true }).selectOption(JSON.stringify([target.run,target.actor,target.incarnation]))
+  await view(page, 'Chat')
+  await page.getByRole('complementary', { name: 'Workers' }).getByRole('link', { name: target.actor, exact: true }).click()
   await expect(page.getByLabel('Message to selected actor', {exact:true})).toBeEnabled()
 }
 export async function noOverflow(page: Page) {

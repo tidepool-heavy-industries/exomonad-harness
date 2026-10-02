@@ -1,7 +1,7 @@
 import type { Envelope, HostActorIdentity, HostCommand, HostCommandSubmission } from './protocol'
 
 /** Client interaction state; normalized server Maps remain authoritative. */
-export type Screen = 'tree' | 'timeline' | 'inbox' | 'command' | 'host' | 'chat'
+export type Screen = 'tree' | 'timeline' | 'inbox' | 'command' | 'chat'
 
 /** Actor identity is opaque and exact; conversation IDs never imply an actor. */
 export type Selection =
