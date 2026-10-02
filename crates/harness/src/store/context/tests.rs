@@ -441,6 +441,7 @@ fn replay_restores_historical_native_exchange_with_local_original_claim() {
         .commit_context(ContextCommit {
             snapshot: &snapshot,
             draft: &ContextDraft {
+                next_effort: None,
                 document: ContextDocument::default(),
                 next_model: None,
             },
@@ -469,6 +470,7 @@ fn replay_restores_historical_native_exchange_with_local_original_claim() {
         .commit_context(ContextCommit {
             snapshot: &snapshot,
             draft: &ContextDraft {
+                next_effort: None,
                 document: saved,
                 next_model: None,
             },
@@ -782,6 +784,7 @@ fn saved_native_restore_refuses_missing_or_forged_original_claim() {
             .commit_context(ContextCommit {
                 snapshot: &snapshot,
                 draft: &ContextDraft {
+                    next_effort: None,
                     document: ContextDocument::default(),
                     next_model: None,
                 },
@@ -825,6 +828,7 @@ fn saved_native_restore_refuses_missing_or_forged_original_claim() {
         let result = store.commit_context(ContextCommit {
             snapshot: &restore,
             draft: &ContextDraft {
+                next_effort: None,
                 document: saved,
                 next_model: None,
             },
