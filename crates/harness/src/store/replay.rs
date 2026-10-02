@@ -1,11 +1,14 @@
 //! Exact issued windows reference immutable Store bytes, never later history.
 use super::{RecordedReplayTurn, Result, Store, StoreError, utc_millis};
 use crate::{
+    context::Origin,
+    finalize::{FINALIZE_TOOL_NAME, ValidatedFinalize},
     item::{Item, ItemHash},
     model::{Effort, RequestId},
     transport::{ResponsesRequest, ResponsesTurn, Usage},
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, params};
+
 use serde::{Deserialize, Serialize};
 
 const FORMAT: u32 = 1;
@@ -31,6 +34,14 @@ struct ReplayRecord {
     request: RequestId,
     issued: IssuedReplayRequest,
     response: ReplayResponse,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completion: Option<CompletionMarker>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum CompletionMarker {
+    Finalize { origin: Origin, schema: ItemHash },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -74,7 +85,7 @@ pub(super) fn response_item_model(
     Ok(Some(model.clone()))
 }
 
-fn read_item(tx: &Transaction<'_>, hash: &ItemHash) -> Result<Item> {
+fn read_item(tx: &Connection, hash: &ItemHash) -> Result<Item> {
     let json: String = tx
         .query_row("SELECT json FROM items WHERE hash=?1", [&hash.0], |row| {
             row.get(0)
@@ -178,6 +189,7 @@ impl Store {
             format: FORMAT,
             request: request.clone(),
             issued,
+            completion: None,
             response: ReplayResponse {
                 response_id: response.response_id.clone(),
                 items,
@@ -192,6 +204,56 @@ impl Store {
         let sequence = tx.last_insert_rowid();
         tx.commit()?;
         Ok(sequence)
+    }
+
+    /// Bind parser-validated Engine completion to the exact persisted response
+    /// occurrence. Provider tools and copied item bytes cannot mint this marker.
+    pub(crate) fn record_validated_finalize(
+        &self,
+        event: i64,
+        request: &RequestId,
+        completion: &ValidatedFinalize,
+    ) -> Result<()> {
+        let mut connection = self.lock();
+        let tx = connection.transaction()?;
+        let payload: Option<String> = tx
+            .query_row(
+                "SELECT payload FROM events WHERE id=?1 AND request_id=?2 AND kind='model_turn'",
+                params![event, request.0],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut record: ReplayRecord =
+            serde_json::from_str(&payload.ok_or(StoreError::InvalidCompletionMarker { event })?)?;
+        let hash = Self::put_item_tx(&tx, completion.item())?;
+        let mut query = tx.prepare(
+            "SELECT position FROM request_items WHERE request_id=?1 AND item_hash=?2 AND (source_request IS NULL OR (source_request=request_id AND source_position=position))",
+        )?;
+        let positions = query
+            .query_map(params![request.0, hash.0], |row| row.get::<_, i64>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let [position] = positions.as_slice() else {
+            return Err(StoreError::InvalidCompletionMarker { event });
+        };
+        let origin = Origin {
+            request: request.clone(),
+            position: *position,
+            hash,
+        };
+        let schema = Self::put_item_tx(&tx, &Item(completion.schema().clone()))?;
+        let marker = CompletionMarker::Finalize { origin, schema };
+        if record.completion.as_ref().is_some_and(|old| old != &marker) {
+            return Err(StoreError::InvalidCompletionMarker { event });
+        }
+        record.completion = Some(marker);
+        validate_completion_record(&tx, event, &record)?;
+        tx.execute(
+            "UPDATE events SET payload=?2 WHERE id=?1",
+            params![event, serde_json::to_string(&record)?],
+        )?;
+        drop(query);
+        tx.commit()?;
+        Ok(())
     }
 
     pub(super) fn decode_replay_record(
@@ -239,6 +301,97 @@ impl Store {
             model_response: response,
         })
     }
+}
+
+/// Context copies retain the immutable source occurrence, so the same sealed
+/// response evidence authenticates a marker after a rewrite or frozen cut.
+pub(super) fn is_validated_completion(c: &Connection, origin: &Origin) -> Result<bool> {
+    let mut query = c.prepare(
+        "SELECT id,payload FROM events WHERE request_id=?1 AND kind='model_turn' AND json_extract(payload,'$.completion.origin.position')=?2 AND json_extract(payload,'$.completion.origin.hash')=?3",
+    )?;
+    let records = query
+        .query_map(
+            params![origin.request.0, origin.position, origin.hash.0],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let [(event, payload)] = records.as_slice() else {
+        return if records.is_empty() {
+            Ok(false)
+        } else {
+            Err(StoreError::InvalidCompletionMarker {
+                event: records[0].0,
+            })
+        };
+    };
+    let record: ReplayRecord = serde_json::from_str(payload)?;
+    let validated = validate_completion_record(c, *event, &record)?;
+    Ok(validated == *origin)
+}
+
+fn validate_completion_record(c: &Connection, event: i64, record: &ReplayRecord) -> Result<Origin> {
+    let invalid = || StoreError::InvalidCompletionMarker { event };
+    let Some(CompletionMarker::Finalize { origin, schema }) = &record.completion else {
+        return Err(invalid());
+    };
+    if record.format != FORMAT || record.request != origin.request {
+        return Err(invalid());
+    }
+    let exact: Option<String> = c.query_row(
+        "SELECT item_hash FROM request_items WHERE request_id=?1 AND position=?2 AND (source_request IS NULL OR (source_request=request_id AND source_position=position))",
+        params![origin.request.0, origin.position], |row| row.get(0),
+    ).optional()?;
+    if exact.as_deref() != Some(origin.hash.0.as_str()) {
+        return Err(invalid());
+    }
+    let item = read_item(c, &origin.hash)?;
+    let schema_item = read_item(c, schema)?;
+    if ItemHash(
+        blake3::hash(&serde_json::to_vec(&item)?)
+            .to_hex()
+            .to_string(),
+    ) != origin.hash
+        || ItemHash(
+            blake3::hash(&serde_json::to_vec(&schema_item)?)
+                .to_hex()
+                .to_string(),
+        ) != *schema
+    {
+        return Err(invalid());
+    }
+    let tools = read_item(c, &record.issued.tools)?;
+    if tools
+        .0
+        .as_array()
+        .is_none_or(|tools| tools.iter().filter(|tool| **tool == schema_item.0).count() != 1)
+        || record
+            .issued
+            .tools_allowed
+            .as_ref()
+            .is_some_and(|allowed| !allowed.iter().any(|name| name == FINALIZE_TOOL_NAME))
+    {
+        return Err(invalid());
+    }
+    let calls = record
+        .response
+        .items
+        .iter()
+        .map(|hash| Ok((hash, read_item(c, hash)?)))
+        .collect::<Result<Vec<_>>>()?;
+    let finals = calls
+        .iter()
+        .filter(|(_, item)| {
+            item.0["type"] == "function_call" && item.0["name"] == FINALIZE_TOOL_NAME
+        })
+        .collect::<Vec<_>>();
+    let [final_call] = finals.as_slice() else {
+        return Err(invalid());
+    };
+    if *final_call.0 != origin.hash || final_call.1 != item {
+        return Err(invalid());
+    }
+    ValidatedFinalize::parse(&item, &schema_item.0).map_err(|_| invalid())?;
+    Ok(origin.clone())
 }
 
 #[cfg(test)]

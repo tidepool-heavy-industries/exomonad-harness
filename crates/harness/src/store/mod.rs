@@ -47,6 +47,8 @@ pub enum StoreError {
     ConflictingReplayOutcome { operation: OperationId },
     #[error("replay event {event} has unsupported format; preserve its bytes")]
     UnsupportedReplayFormat { event: i64 },
+    #[error("replay event {event} has invalid Engine completion evidence")]
+    InvalidCompletionMarker { event: i64 },
     #[error("replay event references missing item {0}")]
     MissingReplayItem(String),
     #[error("operation ID already identifies a different host command")]

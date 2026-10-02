@@ -478,6 +478,7 @@ impl Provider for ContextEditor {
 struct ContextScript {
     requests: Arc<Mutex<Vec<ResponsesRequest>>>,
     two_calls: bool,
+    finalize_calls: Option<Vec<Item>>,
 }
 
 fn completed_context_owner(register_source: bool) -> Arc<CompletedContextOwner> {
@@ -689,7 +690,15 @@ impl ResponsesTransport for ContextScript {
             if self.two_calls {
                 items.push(call("edit-second", "edit_second"));
             }
+            if let Some(completion) = &self.finalize_calls {
+                items.extend(completion.clone());
+            }
             Ok(turn(items))
+        } else if self.finalize_calls.is_some() {
+            Ok(turn(vec![context_finalize(
+                "after-edit-final",
+                json!({"answer":"ready"}),
+            )]))
         } else {
             Ok(final_turn())
         }
@@ -710,6 +719,7 @@ fn context_engine(
         ContextScript {
             requests: requests.clone(),
             two_calls,
+            finalize_calls: None,
         },
         store.clone(),
         Arc::new(JobScheduler::new(2).unwrap()),
@@ -1055,6 +1065,7 @@ async fn refused_context_commit_aborts_publication_and_recovers_without_releasin
         ContextScript {
             requests: requests.clone(),
             two_calls: false,
+            finalize_calls: None,
         },
         engine.store.clone(),
         Arc::new(JobScheduler::new(1).unwrap()),
@@ -1593,5 +1604,120 @@ async fn failed_or_cancelled_cell_keeps_the_next_inference_effort_unchanged() {
         assert_eq!(sent[1].pinned_effort, Effort::Low);
         let operation = operations.lock().unwrap()[0].clone();
         assert!(engine.store.context_receipt(&operation).unwrap().is_none());
+    }
+}
+
+fn context_finalize(id: &str, result: serde_json::Value) -> Item {
+    Item(
+        json!({"type":"function_call","call_id":id,"name":"finalize","arguments":{"result":result}}),
+    )
+}
+
+#[derive(Debug, PartialEq, serde::Deserialize, schemars::JsonSchema)]
+struct ContextFinalReply {
+    answer: String,
+}
+
+#[tokio::test]
+async fn validated_finalize_in_a_sync_edit_response_preserves_context_publication() {
+    let (mut engine, requests, operations) = context_engine(false, false);
+    engine.client.finalize_calls = Some(vec![context_finalize(
+        "first-final",
+        json!({"answer":"provisional"}),
+    )]);
+    let (_cancel, cancelled) = watch::channel(false);
+    let (completion, reply) = engine
+        .run_finalized::<ContextFinalReply>(None, vec![], cancelled, mailbox())
+        .await
+        .unwrap();
+    assert_eq!(reply.answer, "ready");
+    let operation = operations.lock().unwrap()[0].clone();
+    let receipt = engine
+        .store
+        .context_receipt(&operation)
+        .unwrap()
+        .expect("mixed response must publish the valid edit");
+    assert!(receipt.changed);
+    assert_eq!(receipt.model.as_deref(), Some("model-next"));
+    assert!(completion.transcript.iter().any(|item| {
+        item.0["content"]
+            .as_str()
+            .is_some_and(|text| text.ends_with("first commit"))
+    }));
+    let sent = requests.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1].model, "model-next");
+    assert!(
+        sent[1]
+            .input
+            .iter()
+            .any(|item| item.0["call_id"] == "first-final")
+    );
+    assert!(
+        engine
+            .store
+            .claims(&CallId("first-final".into()))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        engine
+            .store
+            .claims(&CallId("after-edit-final".into()))
+            .unwrap()
+            .is_empty()
+    );
+    let events = engine.store.events(Some(&operation.request)).unwrap();
+    let issued = events
+        .iter()
+        .find(|event| event.kind == "model_turn")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&issued.payload).unwrap()["completion"]["kind"],
+        "finalize"
+    );
+}
+
+#[tokio::test]
+async fn invalid_finalize_in_a_sync_edit_response_cannot_publish_or_mint_completion_evidence() {
+    for calls in [
+        vec![context_finalize("malformed-final", json!({"answer":7}))],
+        vec![
+            context_finalize("first-final", json!({"answer":"a"})),
+            context_finalize("second-final", json!({"answer":"b"})),
+        ],
+    ] {
+        let (mut engine, _, operations) = context_engine(false, false);
+        engine.client.finalize_calls = Some(calls);
+        let (_cancel, cancelled) = watch::channel(false);
+        assert!(
+            engine
+                .run_finalized::<ContextFinalReply>(None, vec![], cancelled, mailbox())
+                .await
+                .is_err()
+        );
+        assert!(operations.lock().unwrap().is_empty());
+        assert!(
+            engine
+                .store
+                .events(None)
+                .unwrap()
+                .iter()
+                .all(|event| event.kind != "context_commit")
+        );
+        for event in engine
+            .store
+            .events(None)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == "model_turn")
+        {
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&event.payload)
+                    .unwrap()
+                    .get("completion")
+                    .is_none()
+            );
+        }
     }
 }

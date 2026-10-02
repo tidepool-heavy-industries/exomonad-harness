@@ -1410,12 +1410,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             };
             // Once transport completed, its exact request/response pair is
             // durable even if a subsequent dispatch or output step fails.
-            let turn = {
+            let (turn, replay_event) = {
                 let store = self.store.clone();
                 let request = parent.clone();
                 match blocking(move || {
-                    store.record_issued_replay_turn(&request, replay_request, &turn)?;
-                    Ok(turn)
+                    let event = store.record_issued_replay_turn(&request, replay_request, &turn)?;
+                    Ok((turn, event))
                 })
                 .await
                 {
@@ -1643,6 +1643,40 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             compact_due = self
                 .compact_at_input_tokens
                 .is_some_and(|threshold| turn.usage.input_tokens >= threshold);
+
+            // Typed completion belongs to Engine, not the job scheduler. Seal
+            // its validated occurrence before a synchronous context copy needs
+            // to distinguish it from unclaimed provider tool calls.
+            if let Some(schema) = finalize_schema {
+                let calls = turn
+                    .items
+                    .iter()
+                    .filter(|item| is_finalize_call(item))
+                    .collect::<Vec<_>>();
+                if !calls.is_empty() {
+                    if calls.len() != 1 {
+                        return Err(self
+                            .cleanup_pending(EngineError::InvalidFinalizeCount, &pending)
+                            .await);
+                    }
+                    let completion =
+                        match crate::finalize::ValidatedFinalize::parse(calls[0], schema) {
+                            Ok(completion) => completion,
+                            Err(error) => {
+                                return Err(self.cleanup_pending(error.into(), &pending).await);
+                            }
+                        };
+                    let store = self.store.clone();
+                    let request = parent.clone();
+                    if let Err(error) = blocking(move || {
+                        store.record_validated_finalize(replay_event, &request, &completion)
+                    })
+                    .await
+                    {
+                        return Err(self.cleanup_pending(error, &pending).await);
+                    }
+                }
+            }
 
             // Every response item and original invocation is now durable. Serial
             // calls run in response order, and each terminal is committed before

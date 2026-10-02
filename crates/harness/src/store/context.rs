@@ -1382,6 +1382,9 @@ fn carry_native_claims(
                 |row| row.get::<_, String>(0),
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        if origins.is_empty() && super::replay::is_validated_completion(tx, &occurrence.origin)? {
+            continue;
+        }
         let [origin] = origins.as_slice() else {
             return Err(ContextError::ProtectedGroup.into());
         };

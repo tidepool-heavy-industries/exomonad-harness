@@ -1892,3 +1892,135 @@ fn here_child_context_freeze_refuses_forged_parent_authority() {
             .is_none()
     );
 }
+
+fn record_finalize_marker(store: &Store, head: &RequestId, item: &Item) -> i64 {
+    let schema = crate::finalize::tool_schema::<String>().unwrap();
+    let issued = crate::transport::ResponsesRequest {
+        input: vec![],
+        instructions: "typed reply".into(),
+        tools: vec![schema.clone()].into(),
+        tools_allowed: None,
+        model: "sol".into(),
+        pinned_effort: Effort::Low,
+        session_id: "marker".into(),
+    };
+    let event = store
+        .record_replay_turn(
+            head,
+            &issued,
+            &crate::transport::ResponsesTurn {
+                response_id: "finalize-response".into(),
+                items: vec![item.clone()],
+                usage: crate::transport::Usage::default(),
+            },
+        )
+        .unwrap();
+    let validated = crate::finalize::ValidatedFinalize::parse(item, &schema).unwrap();
+    store
+        .record_validated_finalize(event, head, &validated)
+        .unwrap();
+    event
+}
+
+#[test]
+fn validated_finalize_marker_survives_owned_context_rewrites_and_frozen_copies() {
+    let store = Store::memory().unwrap();
+    let (head, operation) = setup(&store);
+    let item = Item(
+        json!({"type":"function_call","call_id":"final","name":"finalize","arguments":{"result":"ready"}}),
+    );
+    store.append_items(&head, &[item]).unwrap();
+    record_finalize_marker(
+        &store,
+        &head,
+        &store.items(&head).unwrap().last().unwrap().clone(),
+    );
+    let snapshot = store.begin_context(&operation, &head).unwrap();
+    let receipt = store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &edited(&snapshot),
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    let mut connection = store.lock();
+    let tx = connection.transaction().unwrap();
+    let frozen = freeze_committed_context(&tx, &receipt.head, &store.store_id).unwrap();
+    let all = history(&tx, &frozen, true).unwrap();
+    let final_item = all
+        .iter()
+        .find(|item| item.item.0["call_id"] == "final")
+        .unwrap();
+    assert_eq!(final_item.origin.request, head);
+    assert!(super::super::replay::is_validated_completion(&tx, &final_item.origin).unwrap());
+    tx.commit().unwrap();
+}
+
+#[test]
+fn unclaimed_provider_calls_cannot_borrow_finalize_name_or_another_occurrences_marker() {
+    for name in ["ordinary", "finalize"] {
+        let store = Store::memory().unwrap();
+        let (head, operation) = setup(&store);
+        let item = Item(
+            json!({"type":"function_call","call_id":"unclaimed","name":name,"arguments":{"result":"ready"}}),
+        );
+        store.append_items(&head, &[item]).unwrap();
+        let snapshot = store.begin_context(&operation, &head).unwrap();
+        assert!(matches!(
+            store.commit_context(ContextCommit {
+                snapshot: &snapshot,
+                draft: &edited(&snapshot),
+                output: &output(),
+                pending: &[]
+            }),
+            Err(StoreError::Context(ContextError::ProtectedGroup))
+        ));
+        assert!(store.context_receipt(&operation).unwrap().is_none());
+    }
+    let store = Store::memory().unwrap();
+    let (head, operation) = setup(&store);
+    let item = Item(
+        json!({"type":"function_call","call_id":"final","name":"finalize","arguments":{"result":"ready"}}),
+    );
+    store.append_items(&head, &[item.clone()]).unwrap();
+    record_finalize_marker(&store, &head, &item);
+    // Identical newly appended bytes have a different immutable occurrence.
+    store.append_items(&head, &[item]).unwrap();
+    let snapshot = store.begin_context(&operation, &head).unwrap();
+    assert!(matches!(
+        store.commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &edited(&snapshot),
+            output: &output(),
+            pending: &[]
+        }),
+        Err(StoreError::Context(ContextError::ProtectedGroup))
+    ));
+}
+
+#[test]
+fn forged_finalize_marker_cannot_authenticate_a_schema_invalid_response() {
+    let store = Store::memory().unwrap();
+    let (head, operation) = setup(&store);
+    let item = Item(
+        json!({"type":"function_call","call_id":"final","name":"finalize","arguments":{"result":"ready"}}),
+    );
+    store.append_items(&head, &[item.clone()]).unwrap();
+    let event = record_finalize_marker(&store, &head, &item);
+    let invalid_schema = crate::finalize::tool_schema::<u32>().unwrap();
+    let schema_hash = store.put_item(&Item(invalid_schema.clone())).unwrap();
+    let tools_hash = store.put_item(&Item(json!([invalid_schema]))).unwrap();
+    store.lock().execute("UPDATE events SET payload=json_set(payload,'$.completion.schema',?2,'$.issued.tools',?3) WHERE id=?1", params![event, schema_hash.0, tools_hash.0]).unwrap();
+    let snapshot = store.begin_context(&operation, &head).unwrap();
+    assert!(matches!(
+        store.commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &edited(&snapshot),
+            output: &output(),
+            pending: &[]
+        }),
+        Err(StoreError::InvalidCompletionMarker { .. })
+    ));
+    assert!(store.context_receipt(&operation).unwrap().is_none());
+}

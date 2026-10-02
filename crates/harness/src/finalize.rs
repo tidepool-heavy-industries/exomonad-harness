@@ -12,6 +12,34 @@ use thiserror::Error;
 
 pub const FINALIZE_TOOL_NAME: &str = "finalize";
 
+/// Proof that an Engine-owned completion item satisfies its advertised schema.
+/// Only the existing finalize parser can produce this value.
+pub(crate) struct ValidatedFinalize {
+    item: Item,
+    schema: Value,
+}
+
+impl ValidatedFinalize {
+    pub(crate) fn parse(item: &Item, schema: &Value) -> Result<Self, FinalizeError> {
+        let result_schema = &schema["parameters"]["properties"]["result"];
+        if tool_schema_from_result_schema(result_schema.clone())? != *schema {
+            return Err(FinalizeError::WrongTool);
+        }
+        FinalizeParser::new().parse_completed_with_result_schema(item, result_schema)?;
+        Ok(Self {
+            item: item.clone(),
+            schema: schema.clone(),
+        })
+    }
+
+    pub(crate) fn item(&self) -> &Item {
+        &self.item
+    }
+    pub(crate) fn schema(&self) -> &Value {
+        &self.schema
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum FinalizeError {
     #[error("expected a finalize function_call")]
