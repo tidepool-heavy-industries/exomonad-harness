@@ -114,3 +114,20 @@ executable SHA-256, selection, exit status and libtest summaries. Source metadat
 is an observation, not a guarantee against concurrent source edits; run acceptance
 checks from a stable checkout. These artifacts can be removed with that target
 cache after their evidence is no longer needed.
+
+
+Embedded clients may select the Lite wire contract explicitly with
+`ResponsesClient::new(auth).with_protocol(ResponsesProtocol::Lite)`. The default
+is Standard. Lite uses the same Responses SSE endpoint and Engine scheduler;
+its transport header and input prefix carry namespaced tools and developer
+instructions. Strict schemas are admitted before projection, and content-derived
+prefix IDs stay stable across retries and exact-context forks. Durable effort
+controls remain in Store history; Lite projects the latest effort into the wire
+request. Tool calls retain their original names, call IDs and raw items.
+
+The contract follows the retained native Codex source at
+`d2d1d7c754a72f51087a54c230185831c649913b`: `core/src/client.rs` builds Lite
+requests and the opt-in header, `tools/src/tool_spec.rs` groups the default
+`functions` namespace, and `codex-api/src/sse/responses.rs` interprets the same
+SSE events. Harness has no Codex code dependency. `request_body_for_protocol`
+provides the selected body for offline diagnostics without authentication.

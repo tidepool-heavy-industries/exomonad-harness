@@ -54,6 +54,11 @@ impl Item {
             return Ok(None);
         }
         let object = self.0.as_object().ok_or("malformed tool call")?;
+        match object.get("namespace") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(namespace)) if namespace == "functions" => {}
+            _ => return Err("unsupported tool namespace"),
+        }
         let call_id = object
             .get("call_id")
             .and_then(Value::as_str)

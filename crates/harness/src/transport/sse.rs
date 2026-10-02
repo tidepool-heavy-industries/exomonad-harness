@@ -59,6 +59,13 @@ impl ResponseAssembly {
                 let item_id = event
                     .get("item_id")
                     .and_then(Value::as_str)
+                    .or_else(|| {
+                        if kind == "response.custom_tool_call_input.delta" {
+                            event.get("call_id").and_then(Value::as_str)
+                        } else {
+                            None
+                        }
+                    })
                     .ok_or_else(|| TransportError::Stream("delta missing item_id".into()))?;
                 Ok(event
                     .get("delta")
@@ -207,5 +214,85 @@ mod tests {
     #[test]
     fn missing_completed_is_error() {
         assert!(ResponseAssembly::default().finish().is_err());
+    }
+}
+
+#[cfg(test)]
+mod lite_tests {
+    use super::*;
+    use crate::item::ToolInput;
+    use serde_json::json;
+
+    #[test]
+    fn lite_namespaced_tool_done_uses_existing_call_and_completion_contract() {
+        let mut assembly = ResponseAssembly::default();
+        for (kind, name, payload) in [
+            (
+                "function_call",
+                "yield",
+                json!({"arguments":"{\"until\":null}"}),
+            ),
+            ("custom_tool_call", "cell", json!({"input":"raw Haskell λ"})),
+        ] {
+            let mut item = json!({"type":kind,"namespace":"functions","name":name,"call_id":format!("original-{name}"),"id":format!("item-{name}"),"encrypted_function_args":["retained"]});
+            item.as_object_mut()
+                .unwrap()
+                .extend(payload.as_object().unwrap().clone());
+            let event = json!({"type":"response.output_item.done","item":item});
+            let Some(StreamEvent::ItemDone(retained)) =
+                assembly.accept(&event.to_string()).unwrap()
+            else {
+                panic!("completed call expected");
+            };
+            assert_eq!(retained.0, item);
+            let call = retained.tool_call().unwrap().unwrap();
+            assert_eq!(call.call_id.0, format!("original-{name}"));
+            assert_eq!(call.name, name);
+            match call.input {
+                ToolInput::Function(args) => assert_eq!(args, json!({"until":null})),
+                ToolInput::Custom(input) => assert_eq!(input, "raw Haskell λ"),
+            }
+        }
+        assembly.accept(&json!({"type":"response.completed","response":{"id":"lite-response","output":[],"usage":{"input_tokens":12,"output_tokens":7,"input_tokens_details":{"cached_tokens":4}}}}).to_string()).unwrap();
+        let completed = assembly.finish().unwrap();
+        assert_eq!(completed.items.len(), 2);
+        assert_eq!(completed.response_id, "lite-response");
+        assert_eq!(completed.usage.cached_tokens, 4);
+    }
+
+    #[test]
+    fn custom_input_delta_uses_native_call_id_fallback_without_renaming() {
+        let mut assembly = ResponseAssembly::default();
+        let event = json!({"type":"response.custom_tool_call_input.delta","call_id":"exact-call","delta":"λ"});
+        let Some(StreamEvent::Delta {
+            item_id,
+            channel,
+            text,
+            ..
+        }) = assembly.accept(&event.to_string()).unwrap()
+        else {
+            panic!("tool input delta expected");
+        };
+        assert_eq!(item_id, "exact-call");
+        assert_eq!(channel, OutputChannel::ToolInput);
+        assert_eq!(text, "λ");
+        let mut preferred = event.clone();
+        preferred["item_id"] = Value::Null;
+        let Some(StreamEvent::Delta { item_id, .. }) =
+            assembly.accept(&preferred.to_string()).unwrap()
+        else {
+            panic!("tool input delta expected");
+        };
+        assert_eq!(item_id, "exact-call");
+        preferred["item_id"] = json!("native-item");
+        let Some(StreamEvent::Delta { item_id, .. }) =
+            assembly.accept(&preferred.to_string()).unwrap()
+        else {
+            panic!("tool input delta expected");
+        };
+        assert_eq!(item_id, "native-item");
+        preferred.as_object_mut().unwrap().remove("item_id");
+        preferred.as_object_mut().unwrap().remove("call_id");
+        assert!(assembly.accept(&preferred.to_string()).is_err());
     }
 }

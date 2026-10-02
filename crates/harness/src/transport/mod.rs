@@ -187,17 +187,34 @@ pub trait Auth: Send + Sync {
     fn access(&self) -> Result<(String, String), TransportError>;
 }
 
+/// Selected wire contract, independent of model-name spelling and Engine jobs.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ResponsesProtocol {
+    #[default]
+    Standard,
+    Lite,
+}
+
 pub struct ResponsesClient<A: Auth> {
     pub auth: A,
+    protocol: ResponsesProtocol,
 }
 
 impl<A: Auth + Clone + 'static> ResponsesClient<A> {
     pub fn new(auth: A) -> Self {
-        Self { auth }
+        Self {
+            auth,
+            protocol: ResponsesProtocol::Standard,
+        }
+    }
+
+    pub fn with_protocol(mut self, protocol: ResponsesProtocol) -> Self {
+        self.protocol = protocol;
+        self
     }
 
     pub async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
-        client::execute(self.auth.clone(), request, None).await
+        client::execute(self.auth.clone(), self.protocol, request, None).await
     }
 
     /// Sends completed items as they arrive; text deltas are best-effort.
@@ -207,6 +224,6 @@ impl<A: Auth + Clone + 'static> ResponsesClient<A> {
         request: ResponsesRequest,
         sink: tokio::sync::mpsc::Sender<sse::StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
-        client::execute(self.auth.clone(), request, Some(sink)).await
+        client::execute(self.auth.clone(), self.protocol, request, Some(sink)).await
     }
 }
