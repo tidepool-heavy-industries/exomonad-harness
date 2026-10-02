@@ -1103,6 +1103,25 @@ async fn child_final_completes_while_parent_sync_waits_for_child() {
     }
 }
 
+struct ContextNotesScript {
+    requests: Arc<Mutex<Vec<ResponsesRequest>>>,
+}
+#[async_trait::async_trait]
+impl ResponsesTransport for ContextNotesScript {
+    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        let index = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(request);
+            requests.len()
+        };
+        Ok(match index {
+            1 => turn(vec![call("edit-first", "edit_first")]),
+            2 => turn(vec![call("edit-second", "edit_second")]),
+            _ => final_turn(),
+        })
+    }
+}
+
 #[tokio::test]
 async fn completed_own_exchange_notes_do_not_reattach_on_ordinary_followup() {
     let (mut engine, requests, _) = context_engine(true, false);
