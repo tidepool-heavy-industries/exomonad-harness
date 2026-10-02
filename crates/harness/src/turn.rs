@@ -146,6 +146,7 @@ fn compare_priority(a: &(u64, RequestTicket), b: &(u64, RequestTicket)) -> Order
 struct Job {
     handle: JobHandle,
     started: bool,
+    requires_publication: bool,
     cancellation_owner: Option<Arc<dyn crate::provider::CancellationOwner>>,
     cancellation_gate: Arc<Mutex<()>>,
     cancellation_ack: Option<crate::provider::CancellationAcknowledgment>,
@@ -159,7 +160,9 @@ struct Job {
     progress: Vec<Value>,
     cancel: tokio_util::sync::CancellationToken,
     settled: tokio::sync::watch::Sender<Option<JobOutput>>,
+    published: tokio::sync::watch::Sender<bool>,
     task: Option<JoinHandle<()>>,
+    launch: Option<tokio::sync::oneshot::Sender<Option<crate::context::ContextSnapshot>>>,
 }
 
 fn retain_progress(progress: &mut Vec<Value>, event: Value) {
@@ -334,13 +337,83 @@ impl JobScheduler {
         input: I,
         context_snapshot: Option<crate::context::ContextSnapshot>,
     ) -> Result<JobHandle, JobError> {
+        self.admit_operation(
+            provider,
+            operation,
+            agent,
+            request,
+            name,
+            input.into(),
+            context_snapshot,
+            false,
+        )
+        .await
+    }
+
+    /// Register the original identity without entering provider code. Claims
+    /// can attach while the issuing response is still being retained.
+    pub async fn queue_operation<I: Into<ToolInput>>(
+        &self,
+        provider: Arc<dyn Provider>,
+        operation: OperationId,
+        agent: AgentPath,
+        request: Option<RequestId>,
+        name: String,
+        input: I,
+    ) -> Result<JobHandle, JobError> {
+        self.admit_operation(
+            provider,
+            operation,
+            agent,
+            request,
+            name,
+            input.into(),
+            None,
+            true,
+        )
+        .await
+    }
+
+    /// Open one admitted call after its current prefix lease has been resolved.
+    pub async fn release_operation(
+        &self,
+        operation: &OperationId,
+        context_snapshot: Option<crate::context::ContextSnapshot>,
+    ) -> Result<(), JobError> {
+        if context_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.operation != *operation)
+        {
+            return Err(JobError::OperationContextMismatch);
+        }
+        let mut jobs = self.jobs.lock().await;
+        let job = jobs.get_mut(operation).ok_or(JobError::UnknownCall)?;
+        if job.output.is_some() {
+            return Ok(());
+        }
+        let launch = job.launch.take().ok_or(JobError::DuplicateCall)?;
+        launch
+            .send(context_snapshot)
+            .map_err(|_| JobError::UnknownCall)
+    }
+
+    async fn admit_operation(
+        &self,
+        provider: Arc<dyn Provider>,
+        operation: OperationId,
+        agent: AgentPath,
+        request: Option<RequestId>,
+        name: String,
+        input: ToolInput,
+        context_snapshot: Option<crate::context::ContextSnapshot>,
+        deferred: bool,
+    ) -> Result<JobHandle, JobError> {
         if context_snapshot
             .as_ref()
             .is_some_and(|snapshot| snapshot.operation != operation)
         {
             return Err(JobError::OperationContextMismatch);
         }
-        let input = input.into();
         if !matches!(&operation.origin, ConversationIdentity::Standalone { store, .. } if store == &self.detached_store)
             && (operation.origin.actor() != &agent || request.as_ref() != Some(&operation.request))
         {
@@ -364,6 +437,7 @@ impl JobScheduler {
             Job {
                 handle: handle.clone(),
                 started: false,
+                requires_publication: deferred,
                 cancellation_owner: provider.cancellation_owner(),
                 cancellation_gate: Arc::new(Mutex::new(())),
                 cancellation_ack: None,
@@ -375,7 +449,9 @@ impl JobScheduler {
                 progress: Vec::new(),
                 cancel: tokio_util::sync::CancellationToken::new(),
                 settled,
+                published: tokio::sync::watch::channel(false).0,
                 task: None,
+                launch: None,
             },
         );
         let jobs = self.jobs.clone();
@@ -399,9 +475,10 @@ impl JobScheduler {
             // Do not enter provider code until its JoinHandle is installed in
             // the registry. Cancellation racing registration can then always
             // abort the actual work before side effects begin.
-            if launch_gate.await.is_err() {
-                return;
-            }
+            let context_snapshot = match launch_gate.await {
+                Ok(snapshot) => snapshot,
+                Err(_) => return,
+            };
             let retained = provider
                 .retained_output(&name, &input, &task_operation)
                 .await;
@@ -524,12 +601,15 @@ impl JobScheduler {
         });
         if let Some(job) = registry.get_mut(&operation) {
             job.task = Some(task);
+            job.launch = Some(launch);
         } else {
             task.abort();
             return Err(JobError::UnknownCall);
         }
         drop(registry);
-        let _ = launch.send(());
+        if !deferred {
+            self.release_operation(&operation, context_snapshot).await?;
+        }
         Ok(handle)
     }
 
@@ -585,8 +665,10 @@ impl JobScheduler {
     ) -> Result<Option<JobOutput>, JobError> {
         let mut jobs = self.jobs.lock().await;
         let job = jobs.get_mut(operation).ok_or(JobError::UnknownCall)?;
-        if let Some(output) = &job.output {
-            return Ok(Some(output.clone()));
+        if !job.requires_publication || *job.published.borrow() {
+            if let Some(output) = &job.output {
+                return Ok(Some(output.clone()));
+            }
         }
         job.claimants.insert(claimant);
         Ok(None)
@@ -650,12 +732,25 @@ impl JobScheduler {
     }
 
     pub async fn output<K: JobKey>(&self, call_id: &K) -> Result<Option<JobOutput>, JobError> {
-        let call_id = call_id.operation(self);
+        let operation = call_id.operation(self);
+        let jobs = self.jobs.lock().await;
+        let job = jobs.get(&operation).ok_or(JobError::UnknownCall)?;
+        if job.requires_publication && !*job.published.borrow() {
+            return Ok(None);
+        }
+        Ok(job.output.clone())
+    }
+
+    pub(crate) async fn unpublished_output<K: JobKey>(
+        &self,
+        key: &K,
+    ) -> Result<Option<JobOutput>, JobError> {
+        let operation = key.operation(self);
         Ok(self
             .jobs
             .lock()
             .await
-            .get(&call_id)
+            .get(&operation)
             .ok_or(JobError::UnknownCall)?
             .output
             .clone())
@@ -726,6 +821,23 @@ impl JobScheduler {
                 return Ok(output);
             }
         }
+    }
+
+    /// The owning Engine retained this terminal in Store. Provider completion
+    /// alone cannot release an inherited synchronous invocation for inference.
+    pub async fn mark_output_committed(&self, operation: &OperationId) -> Result<(), JobError> {
+        let mut jobs = self.jobs.lock().await;
+        let job = jobs.get_mut(operation).ok_or(JobError::UnknownCall)?;
+        if job.output.is_none() {
+            return Err(JobError::UnknownCall);
+        }
+        if !*job.published.borrow() {
+            job.settled_claimants.extend(job.claimants.drain());
+            job.published.send_replace(true);
+            let _ = self.events.send(operation.clone());
+            let _ = self.legacy_events.send(operation.call.clone());
+        }
+        Ok(())
     }
 
     /// Cancel an in-flight job. Cancellation is a typed terminal output; it

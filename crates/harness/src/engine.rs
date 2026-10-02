@@ -57,14 +57,7 @@ struct PendingCall {
     persist_here_invocation_output: bool,
     cancel_job_on_cleanup: bool,
     scheduling: ToolScheduling,
-    queued: Option<QueuedCall>,
-}
-
-#[derive(Clone)]
-struct QueuedCall {
-    provider: Arc<dyn Provider>,
-    name: String,
-    input: ToolInput,
+    queued: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -819,11 +812,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             attachable.push((claim, tool_kind));
         }
         for (claim, tool_kind) in attachable {
-            match self
+            let settlement = self
                 .scheduler
                 .fork_claim_exact(&claim.operation, self.origin.clone(), true)
-                .await?
-            {
+                .await?;
+            match settlement {
                 Some(output) => {
                     replay_outputs.push((claim.operation, output, tool_kind, claim.request))
                 }
@@ -836,7 +829,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     persist_here_invocation_output: false,
                     cancel_job_on_cleanup: false,
                     scheduling: ToolScheduling::Async,
-                    queued: None,
+                    queued: false,
                 }),
             }
         }
@@ -1595,7 +1588,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             // Every response item and original invocation is now durable. Serial
             // calls run in response order, and each terminal is committed before
             // the next call can inspect the canonical prefix.
-            let had_sync_calls = pending.iter().any(|call| call.queued.is_some());
+            let had_sync_calls = pending.iter().any(|call| call.queued);
             if let Err(error) = self
                 .execute_sync_calls(
                     &mut pending,
@@ -2144,7 +2137,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 persist_here_invocation_output: false,
                 cancel_job_on_cleanup: false,
                 scheduling: ToolScheduling::Async,
-                queued: None,
+                queued: false,
             }));
         }
         // Admission is durable before the provider can execute or capture a
@@ -2161,35 +2154,30 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             policy_store.record_event(Some(&policy_request), "tool_scheduling", &policy)
         })
         .await?;
-        if scheduling == ToolScheduling::BeforeNextInference {
-            return Ok(DispatchResult::Pending(PendingCall {
-                operation,
-                call_id,
-                claim_request: request.clone(),
-                wait,
-                tool_kind,
-                persist_here_invocation_output: is_here_spawn,
-                cancel_job_on_cleanup: false,
-                scheduling,
-                queued: Some(QueuedCall {
+        let admission = if scheduling == ToolScheduling::BeforeNextInference {
+            self.scheduler
+                .queue_operation(
                     provider,
+                    operation.clone(),
+                    self.config.agent.clone(),
+                    Some(request.clone()),
                     name,
                     input,
-                }),
-            }));
-        }
-        if let Err(error) = self
-            .scheduler
-            .start_operation(
-                provider,
-                operation.clone(),
-                self.config.agent.clone(),
-                Some(request.clone()),
-                name,
-                input,
-            )
-            .await
-        {
+                )
+                .await
+        } else {
+            self.scheduler
+                .start_operation(
+                    provider,
+                    operation.clone(),
+                    self.config.agent.clone(),
+                    Some(request.clone()),
+                    name,
+                    input,
+                )
+                .await
+        };
+        if let Err(error) = admission {
             let store = self.store.clone();
             let call = operation.clone();
             let request_id = request.clone();
@@ -2208,7 +2196,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             blocking(move || store.interrupt_operation_claim(&call, &request_id)).await?;
             return Err(EngineError::Job(error));
         }
-        if self.bounded_invocation {
+        if self.bounded_invocation && scheduling == ToolScheduling::Async {
             let output = self.scheduler.wait(&operation).await?;
             self.persist_output(&operation, tool_kind, &output, request, request)
                 .await?;
@@ -2222,7 +2210,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             persist_here_invocation_output: is_here_spawn,
             cancel_job_on_cleanup: true,
             scheduling,
-            queued: None,
+            queued: scheduling == ToolScheduling::BeforeNextInference,
         }))
     }
 
@@ -2272,7 +2260,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         first_error.get_or_insert_with(|| EngineError::Job(error));
                     }
                 }
-                match self.scheduler.output(&call.operation).await {
+                match self.scheduler.unpublished_output(&call.operation).await {
                     Ok(Some(output)) => {
                         if matches!(output, crate::turn::JobOutput::CancellationUnconfirmed(_)) {
                             first_error.get_or_insert_with(|| {
@@ -2401,14 +2389,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .collect::<Vec<_>>();
         if pending
             .iter()
-            .any(|call| call.queued.is_some() && !operations.contains(&call.operation))
+            .any(|call| call.queued && !operations.contains(&call.operation))
         {
             return Err(EngineError::InvalidFunctionCall);
         }
         for operation in operations {
             let Some(index) = pending
                 .iter()
-                .position(|call| call.operation == operation && call.queued.is_some())
+                .position(|call| call.operation == operation && call.queued)
             else {
                 continue;
             };
@@ -2423,21 +2411,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 let head = request.clone();
                 blocking(move || store.begin_context(&invocation, &head)).await?
             };
-            let queued = pending[index].queued.take().expect("queued call");
+            pending[index].queued = false;
             self.scheduler
-                .start_operation_with_context(
-                    queued.provider,
-                    operation.clone(),
-                    self.config.agent.clone(),
-                    Some(operation.request.clone()),
-                    queued.name,
-                    queued.input,
-                    Some(snapshot.clone()),
-                )
-                .await?;
-            pending[index].cancel_job_on_cleanup = true;
-            self.scheduler
-                .claim_exact(&operation, self.origin.clone())
+                .release_operation(&operation, Some(snapshot.clone()))
                 .await?;
             let mut settlements = self.scheduler.operation_settlements();
             let output = loop {
@@ -2536,6 +2512,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     other => other?,
                 };
                 *request = receipt.head;
+                self.scheduler.mark_output_committed(&operation).await?;
                 // Context, model and exact terminal are durable together. Even
                 // cancellation or a lost acknowledgment now reconciles that
                 // receipt instead of executing the invocation again.
@@ -2659,6 +2636,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             return Err(EngineError::ClaimRecoveryConflict(call_id.0.clone()));
         }
         self.append(&request, vec![item]).await?;
+        if operation.origin == self.origin {
+            match self.scheduler.mark_output_committed(operation).await {
+                Ok(()) | Err(JobError::UnknownCall) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         if matches!(output, crate::turn::JobOutput::Completed(_)) {
             self.acknowledge_output(operation).await?;
         }
@@ -2716,6 +2699,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         ) || retained.as_ref() != Some(&item)
         {
             return Err(EngineError::ClaimRecoveryConflict(call_id.0.clone()));
+        }
+        if operation.origin == self.origin {
+            match self.scheduler.mark_output_committed(operation).await {
+                Ok(()) | Err(JobError::UnknownCall) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
         Ok(())
     }

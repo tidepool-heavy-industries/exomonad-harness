@@ -833,3 +833,81 @@ async fn round_cancellation_while_store_is_locked_refuses_context_publication() 
             .any(|(_, _, item)| item.0["content"] == "must roll back")
     );
 }
+
+#[tokio::test]
+async fn queued_sync_identity_is_claimable_but_foreign_output_waits_for_store_publication() {
+    let (engine, mut starts, _, _, _) = engine(false);
+    let request = RequestId("queued-publication".into());
+    let item = call("queued", "async_work");
+    engine
+        .store
+        .write_request(&request, None, "/root", &[item], StoredUsage::default())
+        .unwrap();
+    let operation = OperationId {
+        origin: engine.origin.clone(),
+        request: request.clone(),
+        call: CallId("queued".into()),
+    };
+    engine.store.claim_operation(&operation, &request).unwrap();
+    engine
+        .scheduler
+        .queue_operation(
+            engine.provider.clone(),
+            operation.clone(),
+            engine.config.agent.clone(),
+            Some(request.clone()),
+            "async_work".into(),
+            json!({}),
+        )
+        .await
+        .unwrap();
+    let foreign = engine
+        .store
+        .standalone_identity(AgentPath("/root/child".into()));
+    assert_eq!(
+        engine
+            .scheduler
+            .fork_claim_exact(&operation, foreign.clone(), true)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(starts.try_recv().is_err());
+    engine
+        .scheduler
+        .release_operation(&operation, None)
+        .await
+        .unwrap();
+    assert_eq!(starts.recv().await.unwrap(), "async_work");
+    let terminal = engine.scheduler.wait(&operation).await.unwrap();
+    assert_eq!(engine.scheduler.output(&operation).await.unwrap(), None);
+    assert_eq!(
+        engine
+            .scheduler
+            .fork_claim_exact(&operation, foreign.clone(), true)
+            .await
+            .unwrap(),
+        None
+    );
+    engine
+        .store
+        .write_job_output(&operation, ToolKind::Function, &terminal)
+        .unwrap();
+    engine
+        .scheduler
+        .mark_output_committed(&operation)
+        .await
+        .unwrap();
+    assert_eq!(
+        engine.scheduler.output(&operation).await.unwrap(),
+        Some(terminal.clone())
+    );
+    assert_eq!(
+        engine
+            .scheduler
+            .fork_claim_exact(&operation, foreign, true)
+            .await
+            .unwrap(),
+        Some(terminal)
+    );
+}
