@@ -211,7 +211,11 @@ async fn mixed_sync_waits_for_complete_response_and_serial_terminal_persistence(
             requests[1]
                 .input
                 .iter()
-                .filter(|item| item.0["call_id"] == id && item.0["type"] == "function_call_output")
+                .filter(|item| item.0["call_id"] == id
+                    && matches!(
+                        item.0["type"].as_str(),
+                        Some("function_call_output" | "custom_tool_call_output")
+                    ))
                 .count(),
             1
         );
@@ -264,6 +268,9 @@ struct ContextEditor {
     operations: Arc<Mutex<Vec<OperationId>>>,
     lose_ack: std::sync::atomic::AtomicBool,
     full_success: bool,
+    refuse_draft: bool,
+    committed: std::sync::atomic::AtomicUsize,
+    aborted: std::sync::atomic::AtomicUsize,
     paused: Option<(Arc<Notify>, Arc<Notify>)>,
 }
 #[async_trait::async_trait]
@@ -321,11 +328,17 @@ impl Provider for ContextEditor {
             full_success: self.full_success,
             context: crate::provider::ContextDisposition::Draft(crate::context::ContextDraft {
                 document,
-                next_model: (name == "edit_first").then(|| "model-next".into()),
+                next_model: if self.refuse_draft {
+                    Some(String::new())
+                } else {
+                    (name == "edit_first").then(|| "model-next".into())
+                },
             }),
         }
     }
     async fn output_committed(&self, operation: &OperationId) -> Result<(), ProviderError> {
+        self.committed
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if !self.full_success {
             assert!(self.store.context_receipt(operation).unwrap().is_none());
             return Ok(());
@@ -350,6 +363,12 @@ impl Provider for ContextEditor {
         } else {
             Ok(())
         }
+    }
+    async fn output_aborted(&self, operation: &OperationId) -> Result<(), ProviderError> {
+        assert!(self.store.context_receipt(operation).unwrap().is_none());
+        self.aborted
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 }
 struct ContextScript {
@@ -398,6 +417,9 @@ fn context_engine(
             operations: operations.clone(),
             lose_ack: std::sync::atomic::AtomicBool::new(lose_ack),
             full_success: true,
+            refuse_draft: false,
+            committed: std::sync::atomic::AtomicUsize::new(0),
+            aborted: std::sync::atomic::AtomicUsize::new(0),
             paused: None,
         }),
         EngineConfig {
@@ -653,4 +675,65 @@ async fn scheduling_reload_during_stream_keeps_issuing_typed_policy() {
     finish.notify_one();
     started.notified().await;
     running.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn refused_context_commit_aborts_publication_and_recovers_without_releasing_children() {
+    let (mut engine, requests, operations) = context_engine(false, false);
+    Arc::get_mut(&mut engine.provider).unwrap().refuse_draft = true;
+    let (_cancel, cancelled) = watch::channel(false);
+    assert!(
+        engine
+            .run(None, vec![], cancelled, mailbox())
+            .await
+            .is_err()
+    );
+    let operation = operations.lock().unwrap()[0].clone();
+    assert!(engine.store.context_receipt(&operation).unwrap().is_none());
+    assert_eq!(
+        engine
+            .provider
+            .committed
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        engine
+            .provider
+            .aborted
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    // Replace the scheduler to exercise durable gating after process loss.
+    let recovered = Engine::<Offline, _, _>::with_transport(
+        ContextScript {
+            requests: requests.clone(),
+            two_calls: false,
+        },
+        engine.store.clone(),
+        Arc::new(JobScheduler::new(1).unwrap()),
+        engine.provider.clone(),
+        engine.config.clone(),
+    );
+    let (_cancel, cancelled) = watch::channel(false);
+    recovered
+        .run_recovering(Some(operation.request), vec![], cancelled, mailbox())
+        .await
+        .unwrap();
+    assert_eq!(operations.lock().unwrap().len(), 1);
+    assert_eq!(
+        engine
+            .provider
+            .committed
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        engine
+            .provider
+            .aborted
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+    assert_eq!(requests.lock().unwrap()[1].model, "model-old");
 }

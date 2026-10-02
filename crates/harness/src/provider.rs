@@ -310,6 +310,13 @@ pub trait Provider: Send + Sync {
         Ok(())
     }
 
+    /// Abort the unpublished editing boundary after retaining its terminal.
+    /// Hosts discard deferred children and staged state without rerunning work.
+    /// Recovery may repeat this exact operation notification.
+    async fn output_aborted(&self, _operation: &OperationId) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
     /// Execution policy supplied by the host, independent of transport projection.
     fn tool_scheduling(&self, _name: &str) -> ToolScheduling {
         ToolScheduling::Async

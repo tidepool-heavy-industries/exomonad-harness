@@ -96,6 +96,12 @@ enum DispatchResult {
     },
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ContextDispositionRecord {
+    operation: OperationId,
+    requires_context_commit: bool,
+}
+
 enum ReplayBarrierStage {
     BeforeWait,
     AfterWait,
@@ -2450,6 +2456,26 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .find(|call| call.operation == operation)
                 .expect("sync call retained");
             let completion = self.scheduler.invocation_completion(&operation).await?;
+            if completion.as_ref().is_some_and(|completion| {
+                !matches!(
+                    completion.context,
+                    crate::provider::ContextDisposition::Unedited
+                )
+            }) {
+                // Retain the requirement before validation. A refused draft
+                // cannot later masquerade as an unedited success after restart.
+                let store = self.store.clone();
+                let issuing = operation.request.clone();
+                let required = serde_json::to_value(ContextDispositionRecord {
+                    operation: operation.clone(),
+                    requires_context_commit: true,
+                })
+                .map_err(StoreError::from)?;
+                blocking(move || {
+                    store.record_event(Some(&issuing), "context_disposition", &required)
+                })
+                .await?;
+            }
             let disposition = completion
                 .and_then(|completion| completion.full_success.then_some(completion.context))
                 .filter(|context| {
@@ -2683,7 +2709,45 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         // A fork replays its ancestor's result; only the issuing conversation
         // can acknowledge the owner's live execution boundary.
         if operation.origin == self.origin && self.store.has_completed_output(operation)? {
-            self.provider.output_committed(operation).await?;
+            let required = self
+                .store
+                .events(Some(&operation.request))?
+                .into_iter()
+                .filter(|event| event.kind == "context_disposition")
+                .map(|event| serde_json::from_str::<ContextDispositionRecord>(&event.payload))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(StoreError::from)?
+                .iter()
+                .any(|event| event.requires_context_commit && event.operation == *operation);
+            let scheduled_draft = self
+                .scheduler
+                .invocation_completion(operation)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|completion| {
+                    !matches!(
+                        completion.context,
+                        crate::provider::ContextDisposition::Unedited
+                    )
+                });
+            if scheduled_draft && !required {
+                let required = serde_json::to_value(ContextDispositionRecord {
+                    operation: operation.clone(),
+                    requires_context_commit: true,
+                })
+                .map_err(StoreError::from)?;
+                self.store.record_event(
+                    Some(&operation.request),
+                    "context_disposition",
+                    &required,
+                )?;
+            }
+            if (required || scheduled_draft) && self.store.context_receipt(operation)?.is_none() {
+                self.provider.output_aborted(operation).await?;
+            } else {
+                self.provider.output_committed(operation).await?;
+            }
         }
         Ok(())
     }

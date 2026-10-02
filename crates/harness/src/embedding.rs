@@ -124,6 +124,10 @@ pub trait HostActor: Send + Sync {
     async fn output_committed(&self, _operation: &crate::model::OperationId) -> Result<(), String> {
         Ok(())
     }
+    /// Retained terminal did not publish its staged context transaction.
+    async fn output_aborted(&self, _operation: &crate::model::OperationId) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Immutable manifest and dispatcher published together by the host. Reload
@@ -555,6 +559,25 @@ impl Provider for BoundProvider {
         }
         self.host
             .output_committed(operation)
+            .await
+            .map_err(|error| ProviderError::Tool(error.into()))
+    }
+
+    async fn output_aborted(
+        &self,
+        operation: &crate::model::OperationId,
+    ) -> Result<(), ProviderError> {
+        let identity = self.host.identity();
+        let expected = ConversationIdentity::Embedded {
+            run: identity.run.clone(),
+            actor: identity.actor.clone(),
+            incarnation: identity.incarnation.clone(),
+        };
+        if operation.origin != expected {
+            return Err(ProviderError::Tool("foreign output abort".into()));
+        }
+        self.host
+            .output_aborted(operation)
             .await
             .map_err(|error| ProviderError::Tool(error.into()))
     }
