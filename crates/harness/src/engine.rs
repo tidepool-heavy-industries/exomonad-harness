@@ -2499,33 +2499,42 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 let terminal = output.clone();
                 let cancelled = cancellation.clone();
                 let receipt = blocking(move || {
-                    if *cancelled.borrow() {
-                        return Err(StoreError::Context(
-                            crate::context::ContextError::Ineligible,
-                        ));
-                    }
+                    let is_cancelled = || *cancelled.borrow() || cancelled.has_changed().is_err();
                     match disposition {
-                        crate::provider::ContextDisposition::Draft(draft) => {
-                            store.commit_context(crate::context::ContextCommit {
-                                snapshot: &snapshot,
-                                draft: &draft,
-                                output: &terminal,
-                                pending: &pending_operations,
-                            })
-                        }
+                        crate::provider::ContextDisposition::Draft(draft) => store
+                            .commit_context_guarded(
+                                crate::context::ContextCommit {
+                                    snapshot: &snapshot,
+                                    draft: &draft,
+                                    output: &terminal,
+                                    pending: &pending_operations,
+                                },
+                                is_cancelled,
+                            ),
                         crate::provider::ContextDisposition::Replay(evidence) => store
-                            .restore_context_commit(
+                            .restore_context_commit_guarded(
                                 &snapshot,
                                 &evidence,
                                 &terminal,
                                 &pending_operations,
+                                is_cancelled,
                             ),
                         crate::provider::ContextDisposition::Unedited => {
                             unreachable!("unedited disposition filtered")
                         }
                     }
                 })
-                .await?;
+                .await;
+                let receipt = match receipt {
+                    Err(EngineError::Store(StoreError::Context(
+                        crate::context::ContextError::Cancelled,
+                    ))) => {
+                        return Err(EngineError::Cancelled {
+                            head_request: Some(request.clone()),
+                        });
+                    }
+                    other => other?,
+                };
                 *request = receipt.head;
                 // Context, model and exact terminal are durable together. Even
                 // cancellation or a lost acknowledgment now reconciles that

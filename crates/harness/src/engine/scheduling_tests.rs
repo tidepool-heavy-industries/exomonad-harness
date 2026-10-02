@@ -758,3 +758,78 @@ async fn sync_call_missing_from_final_response_is_refused_without_execution() {
     ));
     assert!(starts.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn round_cancellation_while_store_is_locked_refuses_context_publication() {
+    let (engine, _, _) = context_engine(false, false);
+    let request = RequestId("blocked-context-publication".into());
+    let call = call("blocked", "edit_first");
+    engine
+        .store
+        .write_request(
+            &request,
+            None,
+            "/root",
+            &[Item::configuration_update(Effort::Low), call],
+            StoredUsage::default(),
+        )
+        .unwrap();
+    engine
+        .store
+        .initialize_context_model(&engine.origin, "model-old")
+        .unwrap();
+    let operation = OperationId {
+        origin: engine.origin.clone(),
+        request: request.clone(),
+        call: CallId("blocked".into()),
+    };
+    engine.store.claim_operation(&operation, &request).unwrap();
+    let snapshot = engine.store.begin_context(&operation, &request).unwrap();
+    let mut document = snapshot.document.clone();
+    document.blocks.push(crate::context::ContextBlock::Text {
+        reference: None,
+        role: crate::context::ContextRole::Assistant,
+        text: "must roll back".into(),
+        sources: vec![],
+    });
+    let draft = crate::context::ContextDraft {
+        document,
+        next_model: Some("model-next".into()),
+    };
+    let (cancel, cancelled) = watch::channel(false);
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let lock = engine.store.lock();
+    let store = engine.store.clone();
+    let publication = tokio::task::spawn_blocking(move || {
+        entered.send(()).unwrap();
+        store.commit_context_guarded(
+            crate::context::ContextCommit {
+                snapshot: &snapshot,
+                draft: &draft,
+                output: &crate::turn::JobOutput::Completed(Ok(json!({"done":true}))),
+                pending: &[],
+            },
+            || *cancelled.borrow() || cancelled.has_changed().is_err(),
+        )
+    });
+    ready.await.unwrap();
+    cancel.send(true).unwrap();
+    drop(lock);
+    assert!(matches!(
+        publication.await.unwrap(),
+        Err(StoreError::Context(crate::context::ContextError::Cancelled))
+    ));
+    assert!(engine.store.context_receipt(&operation).unwrap().is_none());
+    let state = engine
+        .store
+        .context_request_state(&request, &engine.origin)
+        .unwrap();
+    assert_eq!(state.model.as_deref(), Some("model-old"));
+    assert_eq!(state.generation, 0);
+    assert!(
+        !state
+            .history
+            .iter()
+            .any(|(_, _, item)| item.0["content"] == "must roll back")
+    );
+}
