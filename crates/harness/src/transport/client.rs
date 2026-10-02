@@ -415,13 +415,35 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
             super::http_error::read(response, &token, account.as_deref().unwrap_or("")).await;
         return Err(TransportError::Http { status, diagnostic });
     }
+    read_response(response, sink).await
+}
+
+async fn read_response(
+    response: reqwest::Response,
+    sink: Option<tokio::sync::mpsc::Sender<StreamEvent>>,
+) -> Result<ResponsesTurn, TransportError> {
     let mut stream = response.bytes_stream();
     let mut framer = SseFramer::new();
     let mut assembly = ResponseAssembly::default();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| {
-            TransportError::IncompleteResponse(super::StreamInterruption::ReadFailed)
-        })?;
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                // Body-read errors contain transport causes, never provider body data.
+                // Remove the request URL before retaining a bounded diagnostic.
+                let diagnostic: String = format!("{:?}", error.without_url())
+                    .chars()
+                    .take(512)
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect();
+                tracing::warn!(error = %diagnostic, "provider response body read failed");
+                // A valid completion remains authoritative even if the HTTP body
+                // fails afterwards. Otherwise retain the transport interruption cause.
+                return assembly.finish().map_err(|_| {
+                    TransportError::IncompleteResponse(super::StreamInterruption::ReadFailed)
+                });
+            }
+        };
         for data in framer.push(&chunk)? {
             if let Some(event) = assembly.accept(&data)? {
                 if let Some(sender) = &sink {
@@ -605,6 +627,56 @@ mod tests {
             f.push(b"\n").expect("end"),
             vec!["{\"type\":\n\"x\"}".to_owned()]
         );
+    }
+
+    #[tokio::test]
+    async fn body_truncation_preserves_terminal_proof_and_distinguishes_clean_eof() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (completed, truncated) in [(false, false), (false, true), (true, true)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let body = if completed {
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"terminal-proof\",\"output\":[]}}\n\n"
+            } else {
+                "data: {\"type\":\"response.created\"}\n\n"
+            };
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                socket.read(&mut request).await.unwrap();
+                let length = body.len() + usize::from(truncated) * 100;
+                socket.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}"
+                ).as_bytes()).await.unwrap();
+                socket.shutdown().await.unwrap();
+            });
+            let response = http_client()
+                .unwrap()
+                .get(format!("http://{address}/responses"))
+                .send()
+                .await
+                .unwrap();
+            let result = read_response(response, None).await;
+            server.await.unwrap();
+            match (completed, truncated, result) {
+                (true, _, Ok(turn)) => assert_eq!(turn.response_id, "terminal-proof"),
+                (
+                    false,
+                    false,
+                    Err(TransportError::IncompleteResponse(
+                        super::super::StreamInterruption::MissingCompletion,
+                    )),
+                ) => {}
+                (
+                    false,
+                    true,
+                    Err(TransportError::IncompleteResponse(
+                        super::super::StreamInterruption::ReadFailed,
+                    )),
+                ) => {}
+                (_, _, result) => panic!("unexpected response disposition: {result:?}"),
+            }
+        }
     }
 
     /// Explicit live smoke test; never run in ordinary CI. Only the public
