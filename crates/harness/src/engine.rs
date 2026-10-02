@@ -30,7 +30,11 @@ use crate::{
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde_json::json;
-use std::{collections::HashSet, num::NonZeroU64, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroU64,
+    sync::Arc,
+};
 use thiserror::Error;
 use tokio::sync::watch;
 
@@ -40,6 +44,7 @@ mod items;
 struct HistoryWindow {
     items: Vec<Item>,
     provenance: Vec<(RequestId, ItemHash)>,
+    model: Option<String>,
 }
 
 #[derive(Clone)]
@@ -592,6 +597,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         recovering: bool,
     ) -> Result<EngineCompletion, EngineError> {
         let settled_head = head.clone();
+        {
+            let store = self.store.clone();
+            let identity = self.origin.clone();
+            let model = self.config.model.clone();
+            blocking(move || store.initialize_context_model(&identity, &model)).await?;
+        }
         let identity = self.embedded_identity();
         let pending_head = if let Some(identity) = &identity {
             let frontier = self.store.embedded_round_frontier(identity)?;
@@ -924,7 +935,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     return Err(self.cleanup_pending(error, &pending).await);
                 }
             }
-            let history = match load_history_window(self.store.clone(), parent.clone()).await {
+            let history = match self.read_model_history_window(&parent).await {
                 Ok(history) => history,
                 Err(error) => return Err(self.cleanup_pending(error, &pending).await),
             };
@@ -970,7 +981,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
             }
             let history = if did_compact {
-                match load_history_window(self.store.clone(), parent.clone()).await {
+                match self.read_model_history_window(&parent).await {
                     Ok(history) => history,
                     Err(error) => return Err(self.cleanup_pending(error, &pending).await),
                 }
@@ -999,6 +1010,21 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 };
                 request_tools = Some((provider_tools, tools));
             }
+            let request_scheduling = request_tools
+                .as_ref()
+                .expect("request tools installed")
+                .1
+                .iter()
+                .filter_map(|tool| {
+                    tool["name"]
+                        .as_str()
+                        .map(|name| (name.to_owned(), request_provider.tool_scheduling(name)))
+                })
+                .collect::<HashMap<_, _>>();
+            let continuing_model = history
+                .model
+                .clone()
+                .unwrap_or_else(|| self.config.model.clone());
             let mut input_hashes = Vec::with_capacity(history.items.len());
             let model_input = history
                 .items
@@ -1026,7 +1052,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     .1
                     .clone(),
                 tools_allowed: None,
-                model: self.config.model.clone(),
+                model: continuing_model,
                 // The request-level field is only the cache-preserving mirror
                 // of the first positional update in the exact history sent.
                 pinned_effort,
@@ -1290,7 +1316,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                     continue;
                                 }
                                 let call_item = item.clone();
-                                match self.dispatch_with_provider(item, &parent, request_provider.clone(), &mut cancellation).await {
+                                match self.dispatch_with_provider(item, &parent, request_provider.clone(), Some(&request_scheduling), &mut cancellation).await {
                                     Ok(DispatchResult::Pending(call)) => {
                                         if !pending.iter().any(|current| current.operation == call.operation) {
                                             if call.wait.is_some() && (wait_call.is_some() || !inline_settled.is_empty()) {
@@ -1385,6 +1411,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             item,
                             &parent,
                             request_provider.clone(),
+                            Some(&request_scheduling),
                             &mut cancellation,
                         )
                         .await
@@ -1478,6 +1505,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 item.clone(),
                                 &parent,
                                 request_provider.clone(),
+                                Some(&request_scheduling),
                                 &mut cancellation,
                             )
                             .await
@@ -1997,8 +2025,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             return Ok(DispatchResult::NotCall);
         }
         let (_cancel, mut cancellation) = watch::channel(false);
-        self.dispatch_with_provider(item, request, self.provider.clone(), &mut cancellation)
-            .await
+        self.dispatch_with_provider(
+            item,
+            request,
+            self.provider.clone(),
+            None,
+            &mut cancellation,
+        )
+        .await
     }
 
     async fn dispatch_with_provider(
@@ -2006,6 +2040,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         item: Item,
         request: &RequestId,
         provider: Arc<dyn Provider>,
+        scheduling: Option<&HashMap<String, ToolScheduling>>,
         cancellation: &mut watch::Receiver<bool>,
     ) -> Result<DispatchResult, EngineError> {
         if item.0["type"] != "function_call" && item.0["type"] != "custom_tool_call" {
@@ -2042,7 +2077,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         {
             return Err(EngineError::InvalidFunctionCall);
         }
-        let scheduling = provider.operation_scheduling(&name, &operation)?;
+        let declared = scheduling
+            .and_then(|policies| policies.get(&name))
+            .copied()
+            .unwrap_or_else(|| provider.tool_scheduling(&name));
+        let scheduling = provider.operation_scheduling(&name, &operation, declared)?;
         let is_here_spawn = name == "spawn_agent"
             && matches!(&input, ToolInput::Function(args) if args["from"]["kind"].as_str() == Some("here"));
         if wait.is_some() {
@@ -2366,15 +2405,22 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     head_request: Some(request.clone()),
                 });
             }
+            let snapshot = {
+                let store = self.store.clone();
+                let invocation = operation.clone();
+                let head = request.clone();
+                blocking(move || store.begin_context(&invocation, &head)).await?
+            };
             let queued = pending[index].queued.take().expect("queued call");
             self.scheduler
-                .start_operation(
+                .start_operation_with_context(
                     queued.provider,
                     operation.clone(),
                     self.config.agent.clone(),
                     Some(operation.request.clone()),
                     queued.name,
                     queued.input,
+                    Some(snapshot.clone()),
                 )
                 .await?;
             pending[index].cancel_job_on_cleanup = true;
@@ -2403,14 +2449,66 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .iter()
                 .find(|call| call.operation == operation)
                 .expect("sync call retained");
-            self.persist_output(
-                &operation,
-                call.tool_kind,
-                &output,
-                request,
-                &call.claim_request,
-            )
-            .await?;
+            let completion = self.scheduler.invocation_completion(&operation).await?;
+            let disposition = completion
+                .and_then(|completion| completion.full_success.then_some(completion.context))
+                .filter(|context| {
+                    !matches!(context, crate::provider::ContextDisposition::Unedited)
+                });
+            if let Some(disposition) =
+                disposition.filter(|_| matches!(output, crate::turn::JobOutput::Completed(Ok(_))))
+            {
+                let store = self.store.clone();
+                let pending_operations = pending
+                    .iter()
+                    .filter(|call| call.operation != operation)
+                    .map(|call| call.operation.clone())
+                    .collect::<Vec<_>>();
+                let terminal = output.clone();
+                let cancelled = cancellation.clone();
+                let receipt = blocking(move || {
+                    if *cancelled.borrow() {
+                        return Err(StoreError::Context(
+                            crate::context::ContextError::Ineligible,
+                        ));
+                    }
+                    match disposition {
+                        crate::provider::ContextDisposition::Draft(draft) => {
+                            store.commit_context(crate::context::ContextCommit {
+                                snapshot: &snapshot,
+                                draft: &draft,
+                                output: &terminal,
+                                pending: &pending_operations,
+                            })
+                        }
+                        crate::provider::ContextDisposition::Replay(evidence) => store
+                            .restore_context_commit(
+                                &snapshot,
+                                &evidence,
+                                &terminal,
+                                &pending_operations,
+                            ),
+                        crate::provider::ContextDisposition::Unedited => {
+                            unreachable!("unedited disposition filtered")
+                        }
+                    }
+                })
+                .await?;
+                *request = receipt.head;
+                // Context, model and exact terminal are durable together. Even
+                // cancellation or a lost acknowledgment now reconciles that
+                // receipt instead of executing the invocation again.
+                self.acknowledge_output(&operation).await?;
+            } else {
+                self.persist_output(
+                    &operation,
+                    call.tool_kind,
+                    &output,
+                    request,
+                    &call.claim_request,
+                )
+                .await?;
+            }
             pending.retain(|call| call.operation != operation);
             if admit_inbox {
                 self.append_unread_envelopes(request).await?;
@@ -2778,6 +2876,30 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         Ok(())
     }
 
+    async fn read_model_history_window(
+        &self,
+        id: &RequestId,
+    ) -> Result<HistoryWindow, EngineError> {
+        let store = self.store.clone();
+        let request = id.clone();
+        let identity = self.origin.clone();
+        blocking(move || {
+            let state = store.context_request_state(&request, &identity)?;
+            let mut items = Vec::with_capacity(state.history.len());
+            let mut provenance = Vec::with_capacity(state.history.len());
+            for (request, hash, item) in state.history {
+                items.push(item);
+                provenance.push((request, hash));
+            }
+            Ok(HistoryWindow {
+                items,
+                provenance,
+                model: state.model,
+            })
+        })
+        .await
+    }
+
     async fn read_history(&self, id: &RequestId) -> Result<Vec<Item>, EngineError> {
         load_history(self.store.clone(), id.clone()).await
     }
@@ -3102,7 +3224,11 @@ async fn load_history_window(
             items.push(item);
             provenance.push((request, hash));
         }
-        Ok(HistoryWindow { items, provenance })
+        Ok(HistoryWindow {
+            items,
+            provenance,
+            model: None,
+        })
     })
     .await
 }
@@ -3416,7 +3542,13 @@ mod tests {
             assert!(matches!(
                 tokio::time::timeout(
                     std::time::Duration::from_secs(1),
-                    engine.dispatch_with_provider(item, &request, provider, &mut cancellation)
+                    engine.dispatch_with_provider(
+                        item,
+                        &request,
+                        provider,
+                        None,
+                        &mut cancellation
+                    )
                 )
                 .await
                 .unwrap(),

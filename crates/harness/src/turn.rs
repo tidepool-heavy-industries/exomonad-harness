@@ -1220,10 +1220,10 @@ async fn settle(
 
 #[cfg(test)]
 mod tests {
-    use crate::provider::ProviderError;
     use super::*;
     use crate::agents::{AgentInvocation, AgentToolService, Contract, dispatch_agent_verb};
     use crate::provider::Provider;
+    use crate::provider::ProviderError;
     use async_trait::async_trait;
     use serde_json::json;
     struct Slow;
