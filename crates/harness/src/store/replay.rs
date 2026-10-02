@@ -217,7 +217,7 @@ mod tests {
         ResponsesRequest {
             input,
             instructions: "exact immutable instructions".into(),
-            tools: vec![json!({"type":"function","name":"a","strict":true,"future":{"opaque":7}})]
+            tools: vec![json!({"type":"function","name":"a","strict":true,"parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false},"future":{"opaque":7}})]
                 .into(),
             tools_allowed: Some(vec!["a".into()]),
             model: "offline".into(),

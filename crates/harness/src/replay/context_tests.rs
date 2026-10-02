@@ -40,7 +40,7 @@ impl Provider for Editor {
 
     fn tools(&self) -> Vec<serde_json::Value> {
         vec![
-            json!({"type":"function","name":"context_edit","parameters":{"type":"object","properties":{},"additionalProperties":false}}),
+            json!({"type":"function","name":"context_edit","strict":true,"parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}),
         ]
     }
 
