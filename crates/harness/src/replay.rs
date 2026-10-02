@@ -12,7 +12,8 @@ use crate::{
     item::{ToolInput, ToolKind},
     model::{OperationId, RequestId},
     provider::{
-        CallContext, NonValueTerminal, Provider, ProviderError, RetainedOutput, WaitReplayBarrier,
+        CallContext, ContextDisposition, NonValueTerminal, Provider, ProviderCompletion,
+        ProviderError, RetainedOutput, WaitReplayBarrier,
     },
     store::{RecordedReplayTurn, Store, StoreError, TerminalOutcome},
     transport::{ResponsesRequest, ResponsesTurn, TransportError, sse::StreamEvent},
@@ -279,6 +280,25 @@ impl ReplayProvider {
             ));
         }
         Ok((recorded_operation, restored))
+    }
+
+    fn context_evidence(
+        &self,
+        original: &OperationId,
+        output: &JobOutput,
+    ) -> Result<Option<crate::context::ContextCommitEvidence>, ProviderError> {
+        let evidence = self
+            .store
+            .context_commit_evidence(original)
+            .map_err(|error| {
+                ProviderError::Tool(format!("loading sealed replay context: {error}").into())
+            })?;
+        if evidence.is_some() && !matches!(output, JobOutput::Completed(Ok(_))) {
+            return Err(ProviderError::Tool(
+                "recorded context edit has no successful invocation terminal".into(),
+            ));
+        }
+        Ok(evidence)
     }
 
     // Find the first immutable issued input containing this output after its
@@ -594,6 +614,7 @@ impl Provider for ReplayProvider {
         &self,
         name: &str,
         local: &OperationId,
+        _declared: crate::provider::ToolScheduling,
     ) -> Result<crate::provider::ToolScheduling, ProviderError> {
         let original_request = lock(&self.progress.local_requests)
             .get(&local.request)
@@ -601,6 +622,22 @@ impl Provider for ReplayProvider {
             .ok_or_else(|| {
                 ProviderError::Tool("replay scheduling has no matched request".into())
             })?;
+        let original = self
+            .store
+            .recorded_operation_for_request(&original_request, &local.call)
+            .map_err(|error| ProviderError::Tool(error.to_string().into()))?
+            .ok_or_else(|| {
+                ProviderError::Tool("replay scheduling has no recorded operation".into())
+            })?;
+        if self
+            .calls
+            .get(&original)
+            .is_none_or(|call| call.name != name)
+        {
+            return Err(ProviderError::Tool(
+                "replay scheduling does not match its recorded invocation".into(),
+            ));
+        }
         let events = self
             .store
             .events(Some(&original_request))
@@ -613,12 +650,11 @@ impl Provider for ReplayProvider {
                 .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
             let operation: OperationId = serde_json::from_value(value["operation"].clone())
                 .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
-            if operation.call == local.call {
+            if operation == original {
                 return serde_json::from_value(value["scheduling"].clone())
                     .map_err(|error| ProviderError::Tool(error.to_string().into()));
             }
         }
-        let _ = name;
         Ok(crate::provider::ToolScheduling::Async)
     }
 
@@ -638,7 +674,56 @@ impl Provider for ReplayProvider {
         input: &ToolInput,
         operation: &OperationId,
     ) -> Result<Option<RetainedOutput>, ProviderError> {
+        let (original, output) = self.recorded_job_output(name, input, operation)?;
+        if self.context_evidence(&original, &output)?.is_some() {
+            if self.operation_scheduling(name, operation, self.tool_scheduling(name))?
+                != crate::provider::ToolScheduling::BeforeNextInference
+            {
+                return Err(ProviderError::Tool(
+                    "recorded context edit has no synchronous scheduling evidence".into(),
+                ));
+            }
+            return Ok(None);
+        }
         self.ready_output(name, input, operation).await.map(Some)
+    }
+
+    async fn complete_call(
+        &self,
+        name: &str,
+        input: ToolInput,
+        context: CallContext,
+    ) -> ProviderCompletion {
+        let completion = async {
+            let local = aligned_operation(&context)?;
+            let (original, output) = self.recorded_job_output(name, &input, local)?;
+            let evidence = self.context_evidence(&original, &output)?.ok_or_else(|| {
+                ProviderError::Tool("recorded context completion has no sealed evidence".into())
+            })?;
+            if context.context.is_none()
+                || self.operation_scheduling(name, local, self.tool_scheduling(name))?
+                    != crate::provider::ToolScheduling::BeforeNextInference
+            {
+                return Err(ProviderError::Tool(
+                    "recorded context completion requires a synchronous local snapshot".into(),
+                ));
+            }
+            let retained = self.ready_output(name, &input, local).await?;
+            let JobOutput::Completed(Ok(value)) = retained.output() else {
+                return Err(ProviderError::Tool(
+                    "recorded context completion has no successful terminal".into(),
+                ));
+            };
+            Ok(ProviderCompletion {
+                result: Ok(value.clone()),
+                full_success: true,
+                context: ContextDisposition::Replay(evidence),
+            })
+        }
+        .await;
+        completion.unwrap_or_else(|error: ProviderError| {
+            ProviderCompletion::unedited(Err(error.into_tool_failure()))
+        })
     }
 
     async fn call_with_context(
@@ -1033,6 +1118,10 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+
+#[cfg(test)]
+#[path = "replay/context_tests.rs"]
+mod context_tests;
 
 #[cfg(test)]
 mod tests {
