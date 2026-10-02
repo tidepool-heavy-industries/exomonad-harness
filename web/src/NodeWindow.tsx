@@ -27,6 +27,7 @@ function visiblePageIntent(current: ReadIntent, loaded?: LoadedPage): ReadIntent
 /** One bounded retained page belongs to one exact inspection context. */
 export default function NodeWindow({ requestId, conversationId, hostRun, refreshKey, onClose, onAuthExpired }: NodeWindowProps) {
   const context = JSON.stringify([requestId, conversationId, hostRun])
+  const heading = useRef<HTMLHeadingElement>(null)
   const [loaded, setLoaded] = useState<LoadedPage>()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>()
@@ -38,6 +39,8 @@ export default function NodeWindow({ requestId, conversationId, hostRun, refresh
   authCallback.current = onAuthExpired
   const [stateContext, setStateContext] = useState(context)
   const [stateRefreshKey, setStateRefreshKey] = useState(refreshKey)
+
+  useEffect(() => { heading.current?.focus() }, [context])
 
   // A context change resets paging before rendering any data from the old host.
   if (stateContext !== context) {
@@ -90,7 +93,7 @@ export default function NodeWindow({ requestId, conversationId, hostRun, refresh
 
   const page = loaded?.page
   return <section aria-label="Retained request history" aria-busy={loading}>
-    <div className="toolbar"><h2>Request history · {requestId}</h2><div className="history-controls">
+    <div className="toolbar"><h2 ref={heading} tabIndex={-1}>Request history · {requestId}</h2><div className="history-controls">
       <button type="button" disabled={loading} onClick={refresh}>Refresh history</button>
       <button type="button" onClick={onClose}>Close history</button>
     </div></div>

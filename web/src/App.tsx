@@ -56,67 +56,59 @@ function receiptText(receipt: CommandReceipt): {
     case 'unconfirmed': return { title: 'Unconfirmed', detail: receipt.reason };
   }
 }
-function CommandReceipts({ receipts }: {
-  receipts: readonly CommandReceipt[];
-}) {
-  return receipts.length ? <section aria-label="Command handoff receipts">
-    <h2>Recent command handoffs</h2>
-    {receipts.map((receipt, index) => {
-      const text = receiptText(receipt);
-      return <article className="row" key={`${receipt.commandId}:${index}`}>
-        <strong>
-          {text.title}
-        </strong>
-        <span className="mono">
-          {receipt.commandId}
-        </span>
-        <span>
-          {receipt.target && `${receipt.target.actor} · run ${receipt.target.run} · incarnation ${receipt.target.incarnation} · `}{text.detail}
-        </span>
-      </article>;
-    })}
-    <p className="hint">Admission, request inclusion, execution, delivery and terminal outcome are separate observations.</p>
-  </section> : null;
+function receiptIdentity(receipt: CommandReceipt, commands: readonly BrowserCommandRecord[]): string | undefined {
+  const target = receipt.target ?? (isOperationId(receipt.commandId)
+    ? commands.find(record => isOperationId(record.submission.operation_id)
+      && canonicalOperationId(record.submission.operation_id) === canonicalOperationId(receipt.commandId))?.submission.command.target
+    : undefined);
+  return target ? `run ${target.run} · actor ${target.actor} · incarnation ${target.incarnation}` : undefined;
 }
-function RetainedCommands({ commands, run, ready, activeTargets, onRetry }: {
+function CommandPayload({ command }: { command: HostCommand }) {
+  const [opened, setOpened] = useState(false);
+  return <details open={opened}>
+    <summary onClick={event => { event.preventDefault(); setOpened(current => !current); }}>Original command JSON</summary>
+    {opened && <pre>{JSON.stringify(command, null, 2)}</pre>}
+  </details>;
+}
+function HostOperations({ commands, receipts, run, ready, activeTargets, onRetry }: {
   commands: readonly BrowserCommandRecord[];
+  receipts: readonly CommandReceipt[];
   run?: string;
   ready: boolean;
   activeTargets: ReadonlySet<string>;
   onRetry?: RetryHostCommand;
 }) {
   const [feedback, setFeedback] = useState('');
-  if (!commands.length)
+  const [page, setPage] = useState(0);
+  const rows = useMemo(() => [
+    ...commands.map((record, index) => ({ kind: 'command' as const, record, key: `command:${operationKey(record)}:${index}` })),
+    ...receipts.map((receipt, index) => ({ kind: 'receipt' as const, receipt, index, key: `receipt:${receipt.commandId}:${index}` })),
+  ], [commands, receipts]);
+  const visible = useMemo(() => pageRows(rows, page, 50), [rows, page]);
+  if (!rows.length)
     return null;
   return <section aria-label="Retained browser operations">
     <h2>Retained browser operations</h2>
-    {commands.map(record => <article className="operation" data-operation-id={record.submission.operation_id} key={operationKey(record)}>
-      <strong>
-        {record.submission.command.action} · {record.authority === 'legacy' ? `Previously observed ${record.state}; fresh lookup required` : record.authority === 'local' ? 'Locally retained; host admission unknown' : record.state}
-      </strong>
-      <div className="mono">
-        {record.submission.operation_id} · run {record.hostRun}
-      </div>
-      <pre>
-        {JSON.stringify(record.submission.command, null, 2)}
-      </pre>
-      <p>Socket send: {record.send ?? 'unknown'}{record.accepted ? ' · Server acknowledged handoff; terminal outcome unknown.' : ''}
-      </p>
-      {record.lookup && <p className="hint">Status lookup {record.lookup.kind}: {record.lookup.reason}
-      </p>}
-      {record.localRefusal && <p className="error">Local channel refusal: {record.localRefusal.reason}
-      </p>}
-      {record.issues?.map((issue, i) => <p className="error" key={i}>
-        {issue}
-      </p>)}
-      {record.receipt && <p>
-        {receiptText(record.receipt).title}: {receiptText(record.receipt).detail}
-      </p>}
-      <button disabled={!onRetry || !ready || record.hostRun !== run || !activeTargets.has(actorIdentityKey(record.submission.command.target)) || isSettledCommand(record)} onClick={() => {
-        const result = onRetry?.(record.submission); if (result)
+    {visible.rows.map(row => row.kind === 'command' ? <article className="operation" data-operation-id={row.record.submission.operation_id} key={row.key}>
+      <strong>{row.record.submission.command.action} · {row.record.authority === 'legacy' ? `Previously observed ${row.record.state}; fresh lookup required` : row.record.authority === 'local' ? 'Locally retained; host admission unknown' : row.record.state}</strong>
+      <div className="mono">{row.record.submission.operation_id} · run {row.record.hostRun} · actor {row.record.submission.command.target.actor} · incarnation {row.record.submission.command.target.incarnation}</div>
+      <CommandPayload command={row.record.submission.command} />
+      <p>Socket send: {row.record.send ?? 'unknown'}{row.record.accepted ? ' · Server acknowledged handoff; terminal outcome unknown.' : ''}</p>
+      {row.record.lookup && <p className="hint">Status lookup {row.record.lookup.kind}: {row.record.lookup.reason}</p>}
+      {row.record.localRefusal && <p className="error">Local channel refusal: {row.record.localRefusal.reason}</p>}
+      {row.record.issues?.map((issue, i) => <p className="error" key={i}>{issue}</p>)}
+      {row.record.receipt && <p>{receiptText(row.record.receipt).title}: {receiptText(row.record.receipt).detail}</p>}
+      <button disabled={!onRetry || !ready || row.record.hostRun !== run || !activeTargets.has(actorIdentityKey(row.record.submission.command.target)) || isSettledCommand(row.record)} onClick={() => {
+        const result = onRetry?.(row.record.submission); if (result)
           setFeedback(result.kind === 'blocked' ? result.reason : `Same operation retained; socket send ${result.send}.`);
       }}>Retry same operation</button>
-    </article>)}{feedback && <p role="status">
+    </article> : <article className="operation" key={row.key}>
+      <strong>{receiptText(row.receipt).title}</strong>
+      <div className="mono">{row.receipt.commandId}{receiptIdentity(row.receipt, commands) && ` · ${receiptIdentity(row.receipt, commands)}`}</div>
+      <p>{receiptText(row.receipt).detail}</p>
+    </article>)}<Pager page={visible.page} count={visible.pageCount} total={visible.total} onPage={setPage} />
+    <p className="hint">Admission, request inclusion, execution, delivery and terminal outcome are separate observations.</p>
+    {feedback && <p role="status">
       {feedback}
     </p>}
     <p className="hint">Original payloads are retained. Reconnect never automatically resubmits an operation.</p>
@@ -497,8 +489,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
             <div className="toolbar"><h2>Host operations</h2>
               {selectedIdentity && <label><input type="checkbox" checked={allOperations} onChange={event => setAllOperations(event.target.checked)} />All host operations</label>}
             </div>
-            <RetainedCommands commands={chatCommands} run={data.hostRun} activeTargets={activeTargets} ready={transportPhase === 'ready' && !issue} onRetry={onRetry} />
-            <CommandReceipts receipts={chatReceipts} />
+            <HostOperations key={JSON.stringify([selectedIdentity ?? 'all', showAllOperations])} commands={chatCommands} receipts={chatReceipts} run={data.hostRun} activeTargets={activeTargets} ready={transportPhase === 'ready' && !issue} onRetry={onRetry} />
             {!chatCommands.length && !chatReceipts.length && <p className="hint">No operations retained for {showAllOperations ? 'this browser or host' : 'this exact actor'}.</p>}
           </section>
         </WorkerChat>}

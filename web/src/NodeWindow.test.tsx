@@ -22,6 +22,12 @@ const idle = async () => waitFor(() => expect(screen.getByRole('button', { name:
 afterEach(() => vi.unstubAllGlobals())
 
 describe('retained request inspection', () => {
+  it('moves keyboard focus to the inspector heading when it opens', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(page('request-1'))))
+    render(<NodeWindow requestId="request-1" onClose={() => {}} />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Request history · request-1' })).toHaveFocus())
+  })
+
   it('replaces each 50-item page, returns through the previous-offset stack, and rereads the same offset', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(response(page('request-1', 0, 50, 50)))
       .mockResolvedValueOnce(response(page('request-1', 50, 50, 100)))

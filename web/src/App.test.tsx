@@ -127,21 +127,51 @@ describe('linked operator views', () => {
     const retry = vi.fn();
     const mounted = render(<App data={projected} pendingCommands={commands} onRetry={retry} />);
     const operations = screen.getByRole('region', { name: 'Host operations' });
-    expect(operations).toHaveTextContent('Selected payload');
+    expect(operations).toHaveTextContent('actor /worker · incarnation old');
     expect(operations).toHaveTextContent('Selected admission unknown');
     expect(operations).not.toHaveTextContent('Other payload');
+    expect(within(operations).queryByText('Selected payload')).toBeNull();
+    fireEvent.click(within(operations).getByText('Original command JSON'));
+    expect(operations).toHaveTextContent('Selected payload');
     fireEvent.click(screen.getByRole('checkbox', { name: 'All host operations' }));
-    expect(operations).toHaveTextContent('Other payload');
+    expect(operations).not.toHaveTextContent('Other payload');
+    expect(within(operations).getByRole('button', { name: 'Next page' })).toBeDisabled();
     expect(operations).toHaveTextContent('Other refused');
+    fireEvent.click(within(operations).getAllByText('Original command JSON')[1]!);
+    expect(operations).toHaveTextContent('Other payload');
     fireEvent.click(within(screen.getByRole('complementary', { name: 'Workers' })).getByRole('link', { name: '/workflow' }));
     expect(screen.getByRole('checkbox', { name: 'All host operations' })).not.toBeChecked();
-    expect(operations).toHaveTextContent('Other payload');
+    expect(operations).not.toHaveTextContent('Other payload');
     expect(operations).toHaveTextContent('Other refused');
     expect(operations).not.toHaveTextContent('Selected payload');
     expect(operations).not.toHaveTextContent('Selected admission unknown');
     mounted.rerender(<App data={{ ...projected, actors: projected.actors!.map(actor => ({ ...actor, lifecycle: 'retired' })) }} pendingCommands={commands} onRetry={retry} />);
     for (const button of within(operations).getAllByRole('button', { name: 'Retry same operation' })) expect(button).toBeDisabled();
     expect(retry).not.toHaveBeenCalled();
+  });
+  it('pages the combined operation and receipt history at 50 rows and resets feedback with its exact context', () => {
+    window.history.replaceState(null, '', '/chat/worker?run=run&incarnation=old');
+    const records: BrowserCommandRecord[] = Array.from({ length: 51 }, (_, index) => ({
+      hostRun: 'run', authority: 'local', state: 'queued',
+      submission: { operation_id: `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`, command: { action: 'input', target, text: `payload-${index}` } },
+    }));
+    const blocked = vi.fn(() => ({ kind: 'blocked' as const, reason: 'retry blocked' }));
+    const receipts = records.map(record => ({ commandId: record.submission.operation_id, target, outcome: 'refused' as const, reason: 'retained refusal' }));
+    const mounted = render(<App data={{ ...data, commandReceipts: receipts }} pendingCommands={records} onRetry={blocked} />);
+    const operations = screen.getByRole('region', { name: 'Host operations' });
+    expect(within(operations).getAllByRole('article')).toHaveLength(50);
+    expect(within(operations).getByRole('button', { name: 'Next page' })).toBeEnabled();
+    fireEvent.click(within(operations).getAllByRole('button', { name: 'Retry same operation' })[0]!);
+    expect(screen.getByText('retry blocked')).toBeVisible();
+    fireEvent.click(within(operations).getByRole('button', { name: 'Next page' }));
+    expect(within(operations).getAllByRole('article')).toHaveLength(50);
+    expect(within(operations).queryByText('payload-50')).toBeNull();
+    expect(screen.getByText('retry blocked')).toBeVisible();
+    fireEvent.click(within(operations).getByRole('button', { name: 'Previous page' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'All host operations' }));
+    expect(within(operations).getByRole('button', { name: 'Previous page' })).toBeDisabled();
+    expect(screen.queryByText('retry blocked')).toBeNull();
+    mounted.unmount();
   });
   it('requires fresh transport and callback, retaining text across disconnection', () => {
     route('?view=host');
@@ -274,6 +304,7 @@ describe('linked operator views', () => {
     expect(screen.getByText('Admitted for processing')).toBeVisible();
     expect(screen.getByText('Retire requested')).toBeVisible();
     expect(screen.getByText(/Previously observed input_admitted; fresh lookup required/)).toBeVisible();
+    fireEvent.click(screen.getByText('Original command JSON'));
     expect(screen.getByText(/exact retained/)).toBeVisible();
     expect(screen.getByRole('button', { name: 'Retry same operation' })).toBeDisabled();
   });
