@@ -873,6 +873,12 @@ impl Store {
                         if *block != stored.block {
                             return Err(ContextError::NativeEdit.into());
                         }
+                        if index >= snapshot.blocks.len() && stored.mandatory {
+                            // A past pending call cannot be resurrected without
+                            // its now-completed protocol companion, nor can a
+                            // historical owner instruction replace today's spine.
+                            return Err(ContextError::ProtectedGroup.into());
+                        }
                         if !seen.insert(reference.clone()) {
                             return Err(ContextError::InvalidReference.into());
                         }
@@ -942,7 +948,10 @@ impl Store {
                                 }
                                 | ContextBlock::Native { reference: r, .. } => r == source,
                                 _ => false,
-                            }) {
+                            }) && !available
+                                .iter()
+                                .any(|b| b.items.iter().any(|i| i.sources.contains(source)))
+                            {
                                 return Err(ContextError::InvalidReference.into());
                             }
                         }

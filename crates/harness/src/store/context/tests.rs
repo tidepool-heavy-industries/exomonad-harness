@@ -68,7 +68,10 @@ fn commit_replaces_prefix_preserves_suffix_and_original_evidence() {
         .context_request_state(&receipt.head, &operation.origin)
         .unwrap();
     assert_eq!(state.model.as_deref(), Some("sol"));
-    assert_eq!(state.history[0].2.0["content"], "edited context");
+    assert_eq!(
+        state.history[0].2.0["content"],
+        "[Agent-authored context note; sources: root:0]\nedited context"
+    );
     assert_eq!(state.history[0].2.0["unknown"], json!({"retain":true}));
     assert_eq!(state.history[1].2.0["call_id"], "edit");
     assert!(
@@ -911,4 +914,95 @@ fn authored_notes_project_attribution_without_changing_retained_item_bytes() {
     );
     let document = store.read_context(&receipt.head).unwrap();
     assert!(matches!(&document.blocks[0],ContextBlock::Text {text,..} if text=="summary"));
+}
+
+#[test]
+fn closed_opaque_response_converts_to_notes_preserving_raw_evidence() {
+    let store = Store::memory().unwrap();
+    let parent = RequestId("opaque-response".into());
+    let reasoning = Item(json!({"type":"reasoning","encrypted_content":"sealed","summary":[]}));
+    let answer = Item(json!({"type":"message","role":"assistant","content":"useful discovery"}));
+    store
+        .write_request(
+            &parent,
+            None,
+            "/root",
+            &[reasoning.clone(), answer.clone()],
+            Usage::default(),
+        )
+        .unwrap();
+    let hashes = store
+        .items(&parent)
+        .unwrap()
+        .iter()
+        .map(|item| store.put_item(item).unwrap().0)
+        .collect::<Vec<_>>();
+    store
+        .lock()
+        .execute(
+            "INSERT INTO events(request_id,kind,payload,created_at) VALUES(?1,'model_turn',?2,0)",
+            params![parent.0, json!({"response":{"items":hashes}}).to_string()],
+        )
+        .unwrap();
+    let head = RequestId("opaque-edit".into());
+    store.write_request(&head,Some(&parent),"/root",&[Item(json!({"type":"custom_tool_call","call_id":"edit","name":"haskell_sync","input":"edit"}))],Usage::default()).unwrap();
+    let operation = store.claim(&CallId("edit".into()), &head).unwrap();
+    store
+        .initialize_context_model(&operation.origin, "luna")
+        .unwrap();
+    let snapshot = store.begin_context(&operation, &head).unwrap();
+    let reference = match &snapshot.document.blocks[0] {
+        ContextBlock::Native {
+            reference,
+            kind: ContextNativeKind::Opaque,
+            protected: false,
+            ..
+        } => reference.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(matches!(
+        store.commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &ContextDraft {
+                document: snapshot.document.clone(),
+                next_model: Some("sol".into())
+            },
+            output: &output(),
+            pending: &[]
+        }),
+        Err(StoreError::Context(ContextError::OpaqueModel))
+    ));
+    let receipt = store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &ContextDraft {
+                document: ContextDocument {
+                    blocks: vec![ContextBlock::Text {
+                        reference: None,
+                        role: ContextRole::User,
+                        text: "useful discovery".into(),
+                        sources: vec![reference],
+                    }],
+                },
+                next_model: Some("sol".into()),
+            },
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    assert_eq!(
+        store.context_model(&operation.origin).unwrap().as_deref(),
+        Some("sol")
+    );
+    assert!(
+        !store
+            .context_history(&receipt.head)
+            .unwrap()
+            .iter()
+            .any(|(_, _, i)| i.0["encrypted_content"] == "sealed")
+    );
+    assert_eq!(
+        store.items(&parent).unwrap().iter().collect::<Vec<_>>(),
+        vec![&reasoning, &answer]
+    );
 }
