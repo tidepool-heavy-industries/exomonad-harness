@@ -387,7 +387,7 @@ impl Store {
         tx: &Transaction<'_>,
         operation: &OperationId,
     ) -> Result<Option<RequestId>> {
-        Ok(receipt(tx, operation)?.map(|r| r.receipt.head))
+        Ok(receipt(tx, operation)?.map(|r| r.deferred_head))
     }
 
     pub(crate) fn preserve_context_origins_tx(
@@ -524,7 +524,39 @@ impl Store {
     }
 
     pub fn commit_context(&self, commit: ContextCommit<'_>) -> Result<ContextCommitReceipt> {
-        self.commit_context_inner(commit, None)
+        self.commit_context_inner(commit, None, &|| false)
+    }
+
+    pub fn commit_context_guarded(
+        &self,
+        commit: ContextCommit<'_>,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<ContextCommitReceipt> {
+        self.commit_context_inner(commit, None, &cancelled)
+    }
+
+    pub fn restore_context_commit_guarded(
+        &self,
+        snapshot: &ContextSnapshot,
+        evidence: &ContextCommitEvidence,
+        output: &JobOutput,
+        pending: &[OperationId],
+        cancelled: impl Fn() -> bool,
+    ) -> Result<ContextCommitReceipt> {
+        let draft = ContextDraft {
+            document: snapshot.document.clone(),
+            next_model: evidence.model.clone(),
+        };
+        self.commit_context_inner(
+            ContextCommit {
+                snapshot,
+                draft: &draft,
+                output,
+                pending,
+            },
+            Some(evidence),
+            &cancelled,
+        )
     }
 
     pub fn restore_context_commit(
@@ -546,6 +578,7 @@ impl Store {
                 pending,
             },
             Some(evidence),
+            &|| false,
         )
     }
 
@@ -601,6 +634,7 @@ impl Store {
         &self,
         commit: ContextCommit<'_>,
         replay: Option<&ContextCommitEvidence>,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<ContextCommitReceipt> {
         let ContextCommit {
             snapshot,
@@ -668,6 +702,9 @@ impl Store {
             }
             tx.commit()?;
             return Ok(record.receipt);
+        }
+        if cancelled() {
+            return Err(ContextError::Cancelled.into());
         }
         let mut current = state(&tx, &snapshot.operation.origin)?;
         if current.generation != snapshot.generation {
@@ -902,6 +939,9 @@ impl Store {
                 return Err(ContextError::OpaqueModel.into());
             }
         }
+        if cancelled() {
+            return Err(ContextError::Cancelled.into());
+        }
         let text_changed = rewritten.iter().map(|i| &i.hash).collect::<Vec<_>>()
             != snapshot.prefix.iter().map(|i| &i.hash).collect::<Vec<_>>();
         let model_changed = draft
@@ -996,7 +1036,9 @@ impl Store {
             changed,
             model: current.model,
         };
+        let deferred_head = freeze_committed_context(&tx, &receipt.head)?;
         let record = ReceiptRecord {
+            deferred_head,
             version: 1,
             prefix: prefix_evidence,
             candidate,
@@ -1006,6 +1048,9 @@ impl Store {
             receipt: receipt.clone(),
         };
         tx.execute("INSERT INTO events(request_id,kind,payload,created_at) VALUES(?1,'context_commit',?2,?3)",params![receipt.head.0,serde_json::to_string(&record)?,utc_millis()])?;
+        if cancelled() {
+            return Err(ContextError::Cancelled.into());
+        }
         tx.commit()?;
         Ok(receipt)
     }
@@ -1015,6 +1060,7 @@ impl Store {
 #[serde(deny_unknown_fields)]
 struct ReceiptRecord {
     version: u32,
+    deferred_head: RequestId,
     prefix: Vec<PrefixEvidence>,
     candidate: String,
     original_operation: Option<OperationId>,
@@ -1048,6 +1094,53 @@ fn receipt(c: &Connection, operation: &OperationId) -> Result<Option<ReceiptReco
         }
         _ => Err(ContextError::UnsupportedState.into()),
     }
+}
+
+/// Deferred children inherit a bounded immutable cut, never the continuing
+/// request to which future arrivals can still be appended.
+fn freeze_committed_context(tx: &Transaction<'_>, head: &RequestId) -> Result<RequestId> {
+    let snapshot = RequestId(uuid::Uuid::new_v4().to_string());
+    tx.execute(
+        "INSERT INTO requests(id,parent_id,branch,created_at) VALUES(?1,NULL,?2,?3)",
+        params![
+            snapshot.0,
+            format!("harness:context-release:{}", snapshot.0),
+            utc_millis()
+        ],
+    )?;
+    let all = history(tx, head, true)?;
+    for (position, occurrence) in all.iter().enumerate() {
+        insert_occurrence(tx, &snapshot, position as i64, occurrence)?;
+    }
+    let mut copied = HashSet::new();
+    for occurrence in &all {
+        let Some(call) = occurrence
+            .item
+            .tool_call()
+            .map_err(|_| ContextError::UnsupportedState)?
+        else {
+            continue;
+        };
+        let mut q = tx.prepare(
+            "SELECT origin,origin_request_id FROM claims WHERE request_id=?1 AND call_id=?2",
+        )?;
+        let claims = q
+            .query_map(params![occurrence.request.0, call.call_id.0], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for (origin, request) in claims {
+            let operation = OperationId {
+                origin: serde_json::from_str(&origin)?,
+                request: RequestId(request),
+                call: call.call_id.clone(),
+            };
+            if copied.insert(operation.clone()) {
+                carry_claim(tx, &operation, &snapshot)?;
+            }
+        }
+    }
+    Ok(snapshot)
 }
 
 fn settle_success(tx: &Transaction<'_>, operation: &OperationId, hash: &ItemHash) -> Result<()> {

@@ -183,6 +183,8 @@ pub enum ContextError {
     OpaqueModel,
     #[error("context publication requires a successful complete invocation")]
     Ineligible,
+    #[error("context publication was cancelled before admission")]
+    Cancelled,
     #[error("context state has an unsupported format")]
     UnsupportedState,
     #[error("context model must be a nonempty resolved model name")]

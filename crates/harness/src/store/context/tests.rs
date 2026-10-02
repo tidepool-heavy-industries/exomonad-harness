@@ -471,6 +471,15 @@ fn deferred_child_inherits_committed_context_and_terminal_before_call_stays_froz
             pending: &[],
         })
         .unwrap();
+    let continuing = store.context_receipt(&operation).unwrap().unwrap().head;
+    store
+        .append_items(
+            &continuing,
+            &[Item(
+                json!({"type":"message","role":"user","content":"after commit"}),
+            )],
+        )
+        .unwrap();
     let parent = AgentPath("/root".into());
     let deferred_path = AgentPath("/root/deferred".into());
     let (child, _) = store
@@ -497,6 +506,11 @@ fn deferred_child_inherits_committed_context_and_terminal_before_call_stays_froz
         history
             .iter()
             .any(|(_, _, i)| i.0["type"] == "custom_tool_call_output")
+    );
+    assert!(
+        !history
+            .iter()
+            .any(|(_, _, i)| i.0["content"] == "after commit")
     );
     let immediate_path = AgentPath("/root/immediate".into());
     let (immediate, _) = store
@@ -766,4 +780,86 @@ fn replay_keeps_duplicate_item_occurrences_distinct_for_later_edit() {
             pending: &[],
         })
         .unwrap();
+}
+
+#[test]
+fn guarded_commit_cancellation_rolls_back_every_publication_write() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let store = Store::memory().unwrap();
+    let (head, operation) = setup(&store);
+    let snapshot = store.begin_context(&operation, &head).unwrap();
+    let checks = AtomicUsize::new(0);
+    let error = store
+        .commit_context_guarded(
+            ContextCommit {
+                snapshot: &snapshot,
+                draft: &edited(&snapshot),
+                output: &output(),
+                pending: &[],
+            },
+            || checks.fetch_add(1, Ordering::SeqCst) >= 2,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        StoreError::Context(ContextError::Cancelled)
+    ));
+    assert_eq!(
+        store.context_history(&head).unwrap()[0].2.0["content"],
+        "old context"
+    );
+    assert_eq!(
+        store.context_model(&operation.origin).unwrap().as_deref(),
+        Some("luna")
+    );
+    assert!(store.context_receipt(&operation).unwrap().is_none());
+    assert!(
+        terminal::exact_terminal(&store.lock(), &operation)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .lock()
+            .query_row("SELECT COUNT(*) FROM requests", [], |r| r.get::<_, u64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn second_sync_capture_uses_current_edited_context_and_original_call() {
+    use std::sync::Arc;
+    let store = Store::memory().unwrap();
+    let (head, operation) = setup(&store);
+    store.lock().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)",[&head.0]).unwrap();
+    store
+        .lock()
+        .execute(
+            "UPDATE request_items SET position=-1 WHERE request_id=?1 AND position=2",
+            [&head.0],
+        )
+        .unwrap();
+    store.append_items(&head,&[Item(json!({"type":"custom_tool_call","call_id":"second","name":"haskell_sync","input":"second"}))]).unwrap();
+    let second = store.claim(&CallId("second".into()), &head).unwrap();
+    let snapshot = store.begin_context(&operation, &head).unwrap();
+    let receipt = store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &edited(&snapshot),
+            output: &output(),
+            pending: std::slice::from_ref(&second),
+        })
+        .unwrap();
+    let cuts = store
+        .capture_checkpoint_cuts_at_head(&second, &receipt.head, &json!({}), Arc::new(()))
+        .unwrap();
+    assert!(
+        store
+            .context_history(cuts.before_call().snapshot_request())
+            .unwrap()
+            .iter()
+            .any(|(_, _, i)| i.0["content"] == "edited context")
+    );
+    assert_eq!(cuts.before_call().operation(), Some(&second));
 }
