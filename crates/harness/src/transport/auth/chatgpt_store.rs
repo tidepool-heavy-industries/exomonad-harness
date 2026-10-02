@@ -51,7 +51,7 @@ pub(super) fn read(path: &Path) -> Result<Option<Vec<u8>>, LoginError> {
     }
     let opened = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path);
     let mut file = match opened {
         Ok(file) => file,
@@ -80,7 +80,7 @@ pub(super) fn lock(path: &Path) -> Result<File, LoginError> {
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(PathBuf::from(name))
         .map_err(|_| LoginError::Storage)?;
     check(&file)?;
@@ -108,7 +108,7 @@ pub(super) fn write(path: &Path, bytes: &[u8]) -> Result<(), LoginError> {
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open(&temp)
             .map_err(|_| LoginError::Storage)?;
         f.write_all(bytes)

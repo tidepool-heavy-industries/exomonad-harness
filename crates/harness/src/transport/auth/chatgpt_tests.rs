@@ -409,3 +409,14 @@ fn token_expiry_starts_at_receipt_before_identity_verification() {
     let result = apply_tokens(record(now().unwrap()), tokens, None, received_at).unwrap();
     assert_eq!(result.expires_at, received_at + 3600);
 }
+
+#[test]
+fn fifo_credential_paths_are_refused_without_blocking() {
+    let temp = Temp::new();
+    let path = temp.path();
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+    assert!(store::read(&path).is_err());
+    assert!(load(&path).is_err());
+    assert!(save(&path, &record(now().unwrap() + 600)).is_err());
+}
