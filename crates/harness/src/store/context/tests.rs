@@ -1648,3 +1648,247 @@ fn staged_effort_receipt_requires_the_current_internal_version() {
         Err(StoreError::Context(ContextError::UnsupportedState))
     ));
 }
+
+fn here_context_snapshot() -> (Store, RequestId, RequestId, OperationId) {
+    let store = Store::memory().unwrap();
+    let (head, first) = setup(&store);
+    let snapshot = store.begin_context(&first, &head).unwrap();
+    let edited = store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &edited(&snapshot),
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    let spawn_call = CallId("spawn".into());
+    let spawn_output =
+        Item(json!({"type":"function_call_output","call_id":"spawn","output":"child admitted"}));
+    store.append_items(&edited.head, &[
+        Item(json!({"type":"function_call","call_id":"spawn","name":"spawn_agent","arguments":"{}"})),
+        spawn_output.clone(),
+    ]).unwrap();
+    let spawn = store.claim(&spawn_call, &edited.head).unwrap();
+    let source = RequestId("rewritten-parent".into());
+    let retained = store
+        .context_history(&edited.head)
+        .unwrap()
+        .into_iter()
+        .map(|(_, _, item)| item)
+        .collect::<Vec<_>>();
+    store
+        .write_compaction_request_with_claims(
+            &source,
+            &edited.head,
+            "/root",
+            &retained,
+            std::slice::from_ref(&spawn),
+            None,
+        )
+        .unwrap();
+    let parent = AgentPath("/root".into());
+    let child = AgentPath("/root/child".into());
+    store
+        .admit_agent(
+            &parent,
+            None,
+            Some(&source),
+            &json!({}),
+            &json!({"kind":"root"}),
+        )
+        .unwrap();
+    let target = RequestId("here-snapshot".into());
+    store
+        .admit_here_agent_from_invocation(
+            &child,
+            &parent,
+            &target,
+            &source,
+            &spawn_call,
+            &json!({}),
+            "/root",
+            "/root/child",
+            "AtBoundary",
+            &Item(json!({"type":"message","role":"user","content":"edit inherited context"})),
+        )
+        .unwrap();
+    assert!(
+        store
+            .claims_on(&target)
+            .unwrap()
+            .iter()
+            .any(|claim| claim.operation == spawn)
+    );
+    store
+        .settle_claims(&spawn, &spawn_output, TerminalOutcome::Success)
+        .unwrap();
+    (store, source, target, spawn)
+}
+
+#[test]
+fn here_output_copy_preserves_occurrences_and_child_context_freeze() {
+    let (store, source, target, spawn) = here_context_snapshot();
+    let before = request_occurrences(&store.lock(), &target).unwrap();
+    let source_output = request_occurrences(&store.lock(), &source)
+        .unwrap()
+        .into_iter()
+        .find(|occurrence| {
+            occurrence.item.0["type"] == "function_call_output"
+                && occurrence.item.0["call_id"] == spawn.call.0
+        })
+        .unwrap();
+    assert_ne!(source_output.origin.request, source);
+    assert!(
+        before
+            .iter()
+            .any(|occurrence| occurrence.note && !occurrence.sources.is_empty())
+    );
+    store.lock().execute_batch("CREATE TRIGGER refuse_here_copy BEFORE INSERT ON request_items WHEN NEW.request_id='here-snapshot' AND (SELECT json_extract(json,'$.type') FROM items WHERE hash=NEW.item_hash)='function_call_output' AND (SELECT json_extract(json,'$.call_id') FROM items WHERE hash=NEW.item_hash)='spawn' BEGIN SELECT RAISE(ABORT,'refuse output'); END;").unwrap();
+    assert!(
+        store
+            .copy_call_output_if_persisted(&source, &target, &spawn.call)
+            .is_err()
+    );
+    assert_eq!(request_occurrences(&store.lock(), &target).unwrap(), before);
+    store
+        .lock()
+        .execute_batch("DROP TRIGGER refuse_here_copy;")
+        .unwrap();
+    assert!(
+        store
+            .copy_call_output_if_persisted(&source, &target, &spawn.call)
+            .unwrap()
+    );
+    let copied = request_occurrences(&store.lock(), &target).unwrap();
+    let spawn_position = copied
+        .iter()
+        .position(|occurrence| {
+            occurrence.item.0["type"] == "function_call"
+                && occurrence.item.0["call_id"] == spawn.call.0
+        })
+        .unwrap();
+    assert_eq!(copied[spawn_position + 1].origin, source_output.origin);
+    assert_eq!(copied[spawn_position + 1].item, source_output.item);
+    for previous in &before {
+        let retained = copied
+            .iter()
+            .find(|occurrence| occurrence.origin == previous.origin)
+            .unwrap();
+        assert_eq!(retained.item, previous.item);
+        assert_eq!(retained.sources, previous.sources);
+        assert_eq!(retained.note, previous.note);
+    }
+    assert!(
+        store
+            .copy_call_output_if_persisted(&source, &target, &spawn.call)
+            .unwrap()
+    );
+    assert_eq!(request_occurrences(&store.lock(), &target).unwrap(), copied);
+    store.append_items(&target, &[Item(json!({"type":"custom_tool_call","call_id":"child-edit","name":"haskell_sync","input":"keep context"}))]).unwrap();
+    let operation = store.claim(&CallId("child-edit".into()), &target).unwrap();
+    let snapshot = store.begin_context(&operation, &target).unwrap();
+    let committed = store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &ContextDraft {
+                document: snapshot.document.clone(),
+                next_model: None,
+                next_effort: None,
+            },
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    assert!(!committed.changed);
+    let deferred = receipt(&store.lock(), &operation)
+        .unwrap()
+        .unwrap()
+        .deferred_head;
+    let frozen = request_occurrences(&store.lock(), &deferred).unwrap();
+    for occurrence in copied {
+        let retained = frozen
+            .iter()
+            .find(|retained| retained.origin == occurrence.origin)
+            .unwrap();
+        assert_eq!(retained.item, occurrence.item);
+        assert_eq!(retained.sources, occurrence.sources);
+        assert_eq!(retained.note, occurrence.note);
+    }
+    let claims = store.claims_on(&deferred).unwrap();
+    let inherited = claims
+        .iter()
+        .filter(|claim| claim.operation == spawn)
+        .collect::<Vec<_>>();
+    assert_eq!(inherited.len(), 1);
+    assert_eq!(inherited[0].state, crate::store::ClaimState::Settled);
+    assert_eq!(inherited[0].output, Some(source_output.hash));
+    assert!(
+        store
+            .context_request_state(&target, &operation.origin)
+            .unwrap()
+            .history
+            .iter()
+            .any(|(_, _, item)| item.0["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("sources: root:0")))
+    );
+}
+
+#[test]
+fn here_child_context_freeze_refuses_forged_parent_authority() {
+    let (store, source, target, spawn) = here_context_snapshot();
+    assert!(
+        store
+            .copy_call_output_if_persisted(&source, &target, &spawn.call)
+            .unwrap()
+    );
+    store.append_items(&target, &[Item(json!({"type":"custom_tool_call","call_id":"child-edit","name":"haskell_sync","input":"keep context"}))]).unwrap();
+    let operation = store.claim(&CallId("child-edit".into()), &target).unwrap();
+    let foreign = store.standalone_identity(AgentPath("/foreign".into()));
+    store
+        .lock()
+        .execute(
+            "UPDATE claims SET origin=?3 WHERE origin_request_id=?1 AND call_id=?2",
+            params![
+                spawn.request.0,
+                spawn.call.0,
+                serde_json::to_string(&foreign).unwrap()
+            ],
+        )
+        .unwrap();
+    let snapshot = store.begin_context(&operation, &target).unwrap();
+    let before = request_occurrences(&store.lock(), &target).unwrap();
+    let requests: i64 = store
+        .lock()
+        .query_row("SELECT COUNT(*) FROM requests", [], |row| row.get(0))
+        .unwrap();
+    assert!(matches!(
+        store.commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &ContextDraft {
+                document: snapshot.document.clone(),
+                next_model: None,
+                next_effort: None
+            },
+            output: &output(),
+            pending: &[],
+        }),
+        Err(StoreError::OperationOriginMismatch)
+    ));
+    assert_eq!(request_occurrences(&store.lock(), &target).unwrap(), before);
+    assert_eq!(
+        store
+            .lock()
+            .query_row("SELECT COUNT(*) FROM requests", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        requests
+    );
+    assert!(store.context_receipt(&operation).unwrap().is_none());
+    assert!(
+        store
+            .replay_tool_output_operation(&operation)
+            .unwrap()
+            .is_none()
+    );
+}

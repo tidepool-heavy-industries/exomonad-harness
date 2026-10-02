@@ -1450,53 +1450,33 @@ impl Store {
     ) -> Result<bool> {
         let mut c = self.lock();
         let tx = c.transaction()?;
-        let source_items = {
-            let mut q = tx.prepare(
-                "SELECT i.json FROM request_items ri JOIN items i ON i.hash=ri.item_hash
-                 WHERE ri.request_id=?1 ORDER BY ri.position",
-            )?;
-            q.query_map([&source.0], |row| row.get::<_, String>(0))?
-                .map(|raw| Ok(serde_json::from_str::<Item>(&raw?)?))
-                .collect::<Result<Vec<_>>>()?
-        };
-        let Some(output) = source_items.into_iter().find(|item| {
-            item.0["type"] == "function_call_output"
-                && item.0["call_id"].as_str() == Some(&call_id.0)
+        let source_items = context::request_occurrences(&tx, source)?;
+        let Some(output) = source_items.into_iter().find(|occurrence| {
+            occurrence.item.0["type"] == "function_call_output"
+                && occurrence.item.0["call_id"].as_str() == Some(&call_id.0)
         }) else {
             return Ok(false);
         };
-        let target_items = {
-            let mut q = tx.prepare(
-                "SELECT i.json FROM request_items ri JOIN items i ON i.hash=ri.item_hash
-                 WHERE ri.request_id=?1 ORDER BY ri.position",
-            )?;
-            q.query_map([&target.0], |row| row.get::<_, String>(0))?
-                .map(|raw| Ok(serde_json::from_str::<Item>(&raw?)?))
-                .collect::<Result<Vec<_>>>()?
-        };
-        if target_items.iter().any(|item| {
-            item.0["type"] == "function_call_output"
-                && item.0["call_id"].as_str() == Some(&call_id.0)
+        let target_items = context::request_occurrences(&tx, target)?;
+        if target_items.iter().any(|occurrence| {
+            occurrence.item.0["type"] == "function_call_output"
+                && occurrence.item.0["call_id"].as_str() == Some(&call_id.0)
         }) {
             tx.commit()?;
             return Ok(true);
         }
-        let Some(spawn_position) = target_items.iter().position(|item| {
-            item.0["type"] == "function_call"
-                && item.0["call_id"].as_str() == Some(&call_id.0)
-                && item.0["name"].as_str() == Some("spawn_agent")
+        let Some(spawn_position) = target_items.iter().position(|occurrence| {
+            occurrence.item.0["type"] == "function_call"
+                && occurrence.item.0["call_id"].as_str() == Some(&call_id.0)
+                && occurrence.item.0["name"].as_str() == Some("spawn_agent")
         }) else {
             return Ok(false);
         };
         let mut ordered = target_items;
         ordered.insert(spawn_position + 1, output);
         tx.execute("DELETE FROM request_items WHERE request_id=?1", [&target.0])?;
-        for (position, item) in ordered.iter().enumerate() {
-            let hash = Self::put_item_tx(&tx, item)?;
-            tx.execute(
-                "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
-                params![target.0, position as i64, hash.0],
-            )?;
+        for (position, occurrence) in ordered.iter().enumerate() {
+            context::insert_occurrence(&tx, target, position as i64, occurrence)?;
         }
         tx.commit()?;
         Ok(true)

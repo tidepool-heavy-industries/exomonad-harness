@@ -120,13 +120,26 @@ pub(super) fn history(
     head: &RequestId,
     boundaries: bool,
 ) -> Result<Vec<Occurrence>> {
-    let mut query = c.prepare("WITH RECURSIVE lineage(id,parent_id,depth) AS (
+    query_occurrences(c, "WITH RECURSIVE lineage(id,parent_id,depth) AS (
         SELECT id,parent_id,0 FROM requests WHERE id=?1
         UNION ALL SELECT r.id,r.parent_id,l.depth+1 FROM requests r JOIN lineage l ON r.id=l.parent_id
         WHERE ?2=0 OR NOT EXISTS(SELECT 1 FROM session_state s WHERE s.session_id='harness:compaction:'||l.id)
     ) SELECT l.id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note
-    FROM lineage l JOIN request_items ri ON ri.request_id=l.id JOIN items i ON i.hash=ri.item_hash ORDER BY l.depth DESC,ri.position")?;
-    let rows = query.query_map(params![head.0, boundaries], |r| {
+    FROM lineage l JOIN request_items ri ON ri.request_id=l.id JOIN items i ON i.hash=ri.item_hash ORDER BY l.depth DESC,ri.position", params![head.0, boundaries])
+}
+
+pub(super) fn request_occurrences(c: &Connection, request: &RequestId) -> Result<Vec<Occurrence>> {
+    query_occurrences(c, "SELECT ri.request_id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note
+        FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 ORDER BY ri.position", [&request.0])
+}
+
+fn query_occurrences(
+    c: &Connection,
+    sql: &str,
+    bindings: impl rusqlite::Params,
+) -> Result<Vec<Occurrence>> {
+    let mut query = c.prepare(sql)?;
+    let rows = query.query_map(bindings, |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, i64>(1)?,
@@ -441,7 +454,7 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
     Ok(result)
 }
 
-fn insert_occurrence(
+pub(super) fn insert_occurrence(
     tx: &Transaction<'_>,
     request: &RequestId,
     position: i64,
