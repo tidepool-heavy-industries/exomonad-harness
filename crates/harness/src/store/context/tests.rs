@@ -360,3 +360,79 @@ fn invalid_reference_and_duplicate_native_retention_are_refused() {
         Err(StoreError::Context(ContextError::InvalidReference))
     ));
 }
+
+#[test]
+fn replay_restores_sealed_prefix_model_and_original_operation() {
+    let original = Store::memory().unwrap();
+    let (head, operation) = setup(&original);
+    let snapshot = original.begin_context(&operation, &head).unwrap();
+    original
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &edited(&snapshot),
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    let evidence = original
+        .context_commit_evidence(&operation)
+        .unwrap()
+        .unwrap();
+    let local = Store::memory().unwrap();
+    let (local_head, local_operation) = setup(&local);
+    let local_snapshot = local.begin_context(&local_operation, &local_head).unwrap();
+    let receipt = local
+        .restore_context_commit(&local_snapshot, &evidence, &output(), &[])
+        .unwrap();
+    assert_eq!(receipt.model.as_deref(), Some("sol"));
+    assert_eq!(
+        local.context_history(&receipt.head).unwrap()[0].2.0["content"],
+        "edited context"
+    );
+    let restored = local
+        .context_commit_evidence(&local_operation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.original_operation(), &operation);
+    assert_eq!(
+        local
+            .restore_context_commit(&local_snapshot, &evidence, &output(), &[])
+            .unwrap(),
+        receipt
+    );
+}
+
+#[test]
+fn replay_refuses_malformed_commit_evidence_and_wrong_output() {
+    let original = Store::memory().unwrap();
+    let (head, operation) = setup(&original);
+    let snapshot = original.begin_context(&operation, &head).unwrap();
+    original
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &edited(&snapshot),
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    let evidence = original
+        .context_commit_evidence(&operation)
+        .unwrap()
+        .unwrap();
+    let local = Store::memory().unwrap();
+    let (local_head, local_operation) = setup(&local);
+    let local_snapshot = local.begin_context(&local_operation, &local_head).unwrap();
+    assert!(
+        local
+            .restore_context_commit(
+                &local_snapshot,
+                &evidence,
+                &JobOutput::Completed(Ok(json!({"different":true}))),
+                &[]
+            )
+            .is_err()
+    );
+    original.lock().execute("UPDATE events SET payload=json_remove(payload,'$.version') WHERE kind='context_commit'",[]).unwrap();
+    assert!(original.context_commit_evidence(&operation).is_err());
+    assert!(local.context_receipt(&local_operation).unwrap().is_none());
+}

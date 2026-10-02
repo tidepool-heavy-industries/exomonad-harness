@@ -2,9 +2,9 @@
 use super::{Result, Store, StoreError, TerminalOutcome, embedded_round, terminal, utc_millis};
 use crate::{
     context::{
-        ContextBlock, ContextCommit, ContextCommitReceipt, ContextDocument, ContextError,
-        ContextNativeKind, ContextReference, ContextRequestState, ContextRole, ContextSnapshot,
-        Occurrence, Origin, SnapshotSeal, StoredBlock,
+        ContextBlock, ContextCommit, ContextCommitEvidence, ContextCommitReceipt, ContextDocument,
+        ContextDraft, ContextError, ContextNativeKind, ContextReference, ContextRequestState,
+        ContextRole, ContextSnapshot, Occurrence, Origin, SnapshotSeal, StoredBlock,
     },
     item::{Item, ItemHash},
     model::{AgentPath, ConversationIdentity, OperationId, RequestId},
@@ -499,6 +499,83 @@ impl Store {
     }
 
     pub fn commit_context(&self, commit: ContextCommit<'_>) -> Result<ContextCommitReceipt> {
+        self.commit_context_inner(commit, None)
+    }
+
+    pub fn restore_context_commit(
+        &self,
+        snapshot: &ContextSnapshot,
+        evidence: &ContextCommitEvidence,
+        output: &JobOutput,
+        pending: &[OperationId],
+    ) -> Result<ContextCommitReceipt> {
+        let draft = ContextDraft {
+            document: snapshot.document.clone(),
+            next_model: evidence.model.clone(),
+        };
+        self.commit_context_inner(
+            ContextCommit {
+                snapshot,
+                draft: &draft,
+                output,
+                pending,
+            },
+            Some(evidence),
+        )
+    }
+
+    pub fn context_commit_evidence(
+        &self,
+        operation: &OperationId,
+    ) -> Result<Option<ContextCommitEvidence>> {
+        let c = self.lock();
+        let Some(record) = receipt(&c, operation)? else {
+            return Ok(None);
+        };
+        if record.version != 1
+            || terminal::exact_terminal(&c, operation)?
+                != Some((record.output.clone(), TerminalOutcome::Success))
+        {
+            return Err(ContextError::UnsupportedState.into());
+        }
+        let load = |hash: &ItemHash| -> Result<Item> {
+            let raw: String =
+                c.query_row("SELECT json FROM items WHERE hash=?1", [&hash.0], |r| {
+                    r.get(0)
+                })?;
+            let item = Item(serde_json::from_str(&raw)?);
+            if ItemHash(
+                blake3::hash(&serde_json::to_vec(&item)?)
+                    .to_hex()
+                    .to_string(),
+            ) != *hash
+            {
+                return Err(ContextError::UnsupportedState.into());
+            }
+            Ok(item)
+        };
+        let output = load(&record.output)?;
+        if output.0["call_id"].as_str() != Some(operation.call.0.as_str()) {
+            return Err(ContextError::UnsupportedState.into());
+        }
+        let prefix = record
+            .prefix
+            .iter()
+            .map(|p| Ok((load(&p.hash)?, p.sources.clone())))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Some(ContextCommitEvidence {
+            original_operation: record.original_operation.unwrap_or(record.operation),
+            prefix,
+            output,
+            model: record.receipt.model,
+        }))
+    }
+
+    fn commit_context_inner(
+        &self,
+        commit: ContextCommit<'_>,
+        replay: Option<&ContextCommitEvidence>,
+    ) -> Result<ContextCommitReceipt> {
         let ContextCommit {
             snapshot,
             draft,
@@ -526,8 +603,27 @@ impl Store {
         .ok_or(ContextError::MissingCall)?;
         let output_item = Item::tool_output(&snapshot.operation.call, call.input.kind(), output);
         let output_hash = Self::put_item_tx(&tx, &output_item)?;
+        if let Some(evidence) = replay {
+            let mut expected = evidence.output.clone();
+            expected.0["call_id"] = json!(snapshot.operation.call.0);
+            if expected != output_item {
+                return Err(ContextError::Ineligible.into());
+            }
+        }
+        let candidate = if let Some(evidence) = replay {
+            serde_json::to_string(&(
+                evidence
+                    .prefix
+                    .iter()
+                    .map(|(i, s)| (i, s))
+                    .collect::<Vec<_>>(),
+                &evidence.model,
+            ))?
+        } else {
+            serde_json::to_string(draft)?
+        };
         if let Some(record) = receipt(&tx, &snapshot.operation)? {
-            if record.output != output_hash {
+            if record.output != output_hash || record.candidate != candidate {
                 return Err(StoreError::ConflictingReplayOutcome {
                     operation: snapshot.operation.clone(),
                 });
@@ -575,97 +671,140 @@ impl Store {
         let mut seen = HashSet::new();
         let mut last_native = None;
         let mut retained_opaque = false;
-        for block in &draft.document.blocks {
-            match block {
-                ContextBlock::Native { reference, .. } => {
-                    let (index,stored)=snapshot.blocks.iter().enumerate().find(|(_,b)|matches!(&b.block,ContextBlock::Native{reference:r,..} if r==reference)).ok_or(ContextError::InvalidReference)?;
-                    if *block != stored.block {
-                        return Err(ContextError::NativeEdit.into());
-                    }
-                    if !seen.insert(reference.clone()) {
-                        return Err(ContextError::InvalidReference.into());
-                    }
-                    if last_native.is_some_and(|previous| index < previous) {
-                        return Err(ContextError::NativeOrder.into());
-                    }
-                    last_native = Some(index);
-                    retained_opaque |= stored.opaque;
-                    rewritten.extend(stored.items.clone());
-                }
-                ContextBlock::Text {
-                    reference: Some(reference),
-                    role,
-                    text,
-                    sources,
-                } => {
-                    let stored=snapshot.blocks.iter().find(|b|matches!(&b.block,ContextBlock::Text{reference:Some(r),..} if r==reference)).ok_or(ContextError::InvalidReference)?;
-                    if !seen.insert(reference.clone()) {
-                        return Err(ContextError::InvalidReference.into());
-                    }
-                    let ContextBlock::Text {
-                        role: old_role,
-                        sources: old_sources,
-                        ..
-                    } = &stored.block
-                    else {
-                        unreachable!()
-                    };
-                    if role != old_role || sources != old_sources {
-                        return Err(ContextError::InvalidReference.into());
-                    }
-                    let mut occurrence = stored.items[0].clone();
-                    if message(&occurrence.item).is_none_or(|(_, old)| old != *text) {
-                        match &mut occurrence.item.0["content"] {
-                            serde_json::Value::String(old) => *old = text.clone(),
-                            serde_json::Value::Array(parts) => parts[0]["text"] = json!(text),
-                            _ => return Err(ContextError::InvalidReference.into()),
-                        }
-                        occurrence.hash = Self::put_item_tx(&tx, &occurrence.item)?;
-                        occurrence.origin = Origin {
-                            request: RequestId(String::new()),
-                            position: 0,
-                            hash: occurrence.hash.clone(),
-                        };
-                    }
+        if let Some(evidence) = replay {
+            for (item, sources) in &evidence.prefix {
+                let hash = Self::put_item_tx(&tx, item)?;
+                if let Some(existing) = snapshot
+                    .prefix
+                    .iter()
+                    .find(|i| i.hash == hash && i.item == *item)
+                {
+                    let mut occurrence = existing.clone();
+                    occurrence.sources = sources.clone();
                     rewritten.push(occurrence);
-                }
-                ContextBlock::Text {
-                    reference: None,
-                    role,
-                    text,
-                    sources,
-                } => {
-                    for source in sources {
-                        if !snapshot.blocks.iter().any(|b| match &b.block {
-                            ContextBlock::Text {
-                                reference: Some(r), ..
-                            }
-                            | ContextBlock::Native { reference: r, .. } => r == source,
-                            _ => false,
-                        }) {
-                            return Err(ContextError::InvalidReference.into());
-                        }
-                    }
-                    let item = Item(json!({"type":"message","role":role.text(),"content":text}));
-                    let hash = Self::put_item_tx(&tx, &item)?;
+                } else {
                     rewritten.push(Occurrence {
                         request: RequestId(String::new()),
                         position: 0,
+                        hash: hash.clone(),
+                        item: item.clone(),
+                        sources: sources.clone(),
                         origin: Origin {
                             request: RequestId(String::new()),
                             position: 0,
-                            hash: hash.clone(),
+                            hash,
                         },
-                        hash,
-                        item,
-                        sources: sources.clone(),
                     });
                 }
             }
-        }
-        for stored in &snapshot.blocks {
-            if stored.mandatory && !draft.document.blocks.contains(&stored.block) {
-                return Err(ContextError::ProtectedGroup.into());
+            // Replay must preserve every protected local envelope as an intact
+            // group; foreign evidence cannot replace local pending operations.
+            for stored in &snapshot.blocks {
+                if stored.mandatory
+                    && !rewritten.windows(stored.items.len()).any(|w| {
+                        w.iter()
+                            .map(|i| &i.item)
+                            .eq(stored.items.iter().map(|i| &i.item))
+                    })
+                {
+                    return Err(ContextError::ProtectedGroup.into());
+                }
+            }
+            retained_opaque = rewritten.iter().any(|i| opaque(&i.item));
+        } else {
+            for block in &draft.document.blocks {
+                match block {
+                    ContextBlock::Native { reference, .. } => {
+                        let (index,stored)=snapshot.blocks.iter().enumerate().find(|(_,b)|matches!(&b.block,ContextBlock::Native{reference:r,..} if r==reference)).ok_or(ContextError::InvalidReference)?;
+                        if *block != stored.block {
+                            return Err(ContextError::NativeEdit.into());
+                        }
+                        if !seen.insert(reference.clone()) {
+                            return Err(ContextError::InvalidReference.into());
+                        }
+                        if last_native.is_some_and(|previous| index < previous) {
+                            return Err(ContextError::NativeOrder.into());
+                        }
+                        last_native = Some(index);
+                        retained_opaque |= stored.opaque;
+                        rewritten.extend(stored.items.clone());
+                    }
+                    ContextBlock::Text {
+                        reference: Some(reference),
+                        role,
+                        text,
+                        sources,
+                    } => {
+                        let stored=snapshot.blocks.iter().find(|b|matches!(&b.block,ContextBlock::Text{reference:Some(r),..} if r==reference)).ok_or(ContextError::InvalidReference)?;
+                        if !seen.insert(reference.clone()) {
+                            return Err(ContextError::InvalidReference.into());
+                        }
+                        let ContextBlock::Text {
+                            role: old_role,
+                            sources: old_sources,
+                            ..
+                        } = &stored.block
+                        else {
+                            unreachable!()
+                        };
+                        if role != old_role || sources != old_sources {
+                            return Err(ContextError::InvalidReference.into());
+                        }
+                        let mut occurrence = stored.items[0].clone();
+                        if message(&occurrence.item).is_none_or(|(_, old)| old != *text) {
+                            match &mut occurrence.item.0["content"] {
+                                serde_json::Value::String(old) => *old = text.clone(),
+                                serde_json::Value::Array(parts) => parts[0]["text"] = json!(text),
+                                _ => return Err(ContextError::InvalidReference.into()),
+                            }
+                            occurrence.hash = Self::put_item_tx(&tx, &occurrence.item)?;
+                            occurrence.origin = Origin {
+                                request: RequestId(String::new()),
+                                position: 0,
+                                hash: occurrence.hash.clone(),
+                            };
+                        }
+                        rewritten.push(occurrence);
+                    }
+                    ContextBlock::Text {
+                        reference: None,
+                        role,
+                        text,
+                        sources,
+                    } => {
+                        for source in sources {
+                            if !snapshot.blocks.iter().any(|b| match &b.block {
+                                ContextBlock::Text {
+                                    reference: Some(r), ..
+                                }
+                                | ContextBlock::Native { reference: r, .. } => r == source,
+                                _ => false,
+                            }) {
+                                return Err(ContextError::InvalidReference.into());
+                            }
+                        }
+                        let item =
+                            Item(json!({"type":"message","role":role.text(),"content":text}));
+                        let hash = Self::put_item_tx(&tx, &item)?;
+                        rewritten.push(Occurrence {
+                            request: RequestId(String::new()),
+                            position: 0,
+                            origin: Origin {
+                                request: RequestId(String::new()),
+                                position: 0,
+                                hash: hash.clone(),
+                            },
+                            hash,
+                            item,
+                            sources: sources.clone(),
+                        });
+                    }
+                }
+            }
+            for stored in &snapshot.blocks {
+                if stored.mandatory && !draft.document.blocks.contains(&stored.block) {
+                    return Err(ContextError::ProtectedGroup.into());
+                }
             }
         }
         if let Some(model) = &draft.next_model {
@@ -690,6 +829,13 @@ impl Store {
         } else {
             snapshot.head.clone()
         };
+        let prefix_evidence = rewritten
+            .iter()
+            .map(|i| PrefixEvidence {
+                hash: i.hash.clone(),
+                sources: i.sources.clone(),
+            })
+            .collect();
         if text_changed {
             tx.execute("INSERT INTO requests(id,parent_id,branch,created_at,embedded_run,embedded_incarnation,round_phase) SELECT ?1,id,branch,?2,embedded_run,embedded_incarnation,round_phase FROM requests WHERE id=?3",params![head.0,utc_millis(),snapshot.head.0])?;
             rewritten.extend_from_slice(&all[snapshot.prefix.len()..]);
@@ -704,10 +850,38 @@ impl Store {
                 "INSERT INTO session_state(session_id,state,updated_at) VALUES(?1,'true',?2)",
                 params![format!("harness:compaction:{}", head.0), utc_millis()],
             )?;
-            let mut carried = HashSet::new();
+            let mut carried = HashSet::<OperationId>::new();
             for pending in pending.iter().chain(std::iter::once(&snapshot.operation)) {
-                if carried.insert(pending) {
+                if carried.insert(pending.clone()) {
                     carry_claim(&tx, pending, &head)?;
+                }
+            }
+            // A completed exchange can remain native across several rewrites.
+            // Keep its existing terminal claim attached to the copied occurrence.
+            for occurrence in &all {
+                let Some(call) = occurrence
+                    .item
+                    .tool_call()
+                    .map_err(|_| ContextError::UnsupportedState)?
+                else {
+                    continue;
+                };
+                let mut q = tx.prepare("SELECT origin,origin_request_id FROM claims WHERE request_id=?1 AND call_id=?2")?;
+                let claims = q
+                    .query_map(params![occurrence.request.0, call.call_id.0], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                for (origin, request) in claims {
+                    let operation = OperationId {
+                        origin: serde_json::from_str(&origin)?,
+                        request: RequestId(request),
+                        call: call.call_id.clone(),
+                    };
+                    let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 AND json_extract(i.json,'$.call_id')=?2 AND json_extract(i.json,'$.type') IN ('custom_tool_call','function_call'))",params![head.0,operation.call.0],|r|r.get(0))?;
+                    if exists && carried.insert(operation.clone()) {
+                        carry_claim(&tx, &operation, &head)?;
+                    }
                 }
             }
         }
@@ -738,6 +912,10 @@ impl Store {
             model: current.model,
         };
         let record = ReceiptRecord {
+            version: 1,
+            prefix: prefix_evidence,
+            candidate,
+            original_operation: replay.map(|e| e.original_operation.clone()),
             operation: snapshot.operation.clone(),
             output: output_hash,
             receipt: receipt.clone(),
@@ -749,10 +927,22 @@ impl Store {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReceiptRecord {
+    version: u32,
+    prefix: Vec<PrefixEvidence>,
+    candidate: String,
+    original_operation: Option<OperationId>,
     operation: OperationId,
     output: ItemHash,
     receipt: ContextCommitReceipt,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrefixEvidence {
+    hash: ItemHash,
+    sources: Vec<ContextReference>,
 }
 
 fn receipt(c: &Connection, operation: &OperationId) -> Result<Option<ReceiptRecord>> {
@@ -764,7 +954,13 @@ fn receipt(c: &Connection, operation: &OperationId) -> Result<Option<ReceiptReco
         .collect::<std::result::Result<Vec<_>, _>>()?;
     match rows.as_slice() {
         [] => Ok(None),
-        [raw] => Ok(Some(serde_json::from_str(raw)?)),
+        [raw] => {
+            let record: ReceiptRecord = serde_json::from_str(raw)?;
+            if record.version != 1 || record.operation != *operation {
+                return Err(ContextError::UnsupportedState.into());
+            }
+            Ok(Some(record))
+        }
         _ => Err(ContextError::UnsupportedState.into()),
     }
 }

@@ -76,7 +76,7 @@ pub struct ContextDocument {
     pub blocks: Vec<ContextBlock>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextDraft {
     pub document: ContextDocument,
     pub next_model: Option<String>,
