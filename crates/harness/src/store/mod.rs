@@ -950,6 +950,7 @@ impl Store {
     ) -> Result<()> {
         self.write_compaction_request_with_claims(request, parent, branch, items, &[], None)
     }
+    #[cfg(test)]
     pub(crate) fn write_compaction_request_with_claims(
         &self,
         request: &RequestId,

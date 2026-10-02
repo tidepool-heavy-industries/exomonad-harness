@@ -1368,6 +1368,91 @@ impl ResponsesTransport for FinalOnly {
 }
 
 #[tokio::test]
+async fn cross_model_child_first_request_projects_parent_evidence_without_reexecuting_calls() {
+    let (mut parent, _, operations) = context_engine(false, false);
+    parent.client.opaque = true;
+    let (_cancel, cancelled) = watch::channel(false);
+    let completed = parent
+        .run(None, vec![], cancelled, mailbox())
+        .await
+        .unwrap();
+    let child_path = AgentPath("/root/portable-child".into());
+    let snapshot = RequestId("portable-child-snapshot".into());
+    parent
+        .store
+        .admit_agent(
+            &AgentPath("/root".into()),
+            None,
+            Some(&completed.head_request),
+            &json!({}),
+            &json!({"kind":"root"}),
+        )
+        .unwrap();
+    parent
+        .store
+        .admit_here_agent_with_snapshot(
+            &child_path,
+            &AgentPath("/root".into()),
+            &snapshot,
+            &json!({}),
+            "/root",
+            &child_path.0,
+            "AtBoundary",
+            &Item(json!({"type":"message","role":"user","content":"child task"})),
+        )
+        .unwrap();
+    let raw = parent.store.context_history(&snapshot).unwrap();
+    let child_requests = Arc::new(Mutex::new(vec![]));
+    let child = Engine::<Offline, ContextEditor, FinalOnly>::with_transport(
+        FinalOnly {
+            requests: child_requests.clone(),
+        },
+        parent.store.clone(),
+        parent.scheduler.clone(),
+        parent.provider.clone(),
+        EngineConfig {
+            instructions: "child".into(),
+            tools: vec![],
+            model: "model-next".into(),
+            effort: Effort::Low,
+            session_id: "portable-child".into(),
+            agent: child_path,
+        },
+    );
+    let (_cancel, cancelled) = watch::channel(false);
+    child
+        .run(Some(snapshot.clone()), vec![], cancelled, mailbox())
+        .await
+        .unwrap();
+    let sent = child_requests.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].model, "model-next");
+    let note = sent[0]
+        .input
+        .iter()
+        .find_map(|item| {
+            item.0["content"]
+                .as_str()
+                .filter(|text| text.starts_with("[Store-generated model portability note"))
+        })
+        .unwrap();
+    assert!(note.contains("visible plan") && note.contains("edit_first") && note.contains("done"));
+    assert!(
+        !serde_json::to_string(&sent[0].input)
+            .unwrap()
+            .contains("model-old-only")
+    );
+    assert_eq!(parent.store.context_history(&snapshot).unwrap(), raw);
+    assert!(
+        raw.iter()
+            .any(|(_, _, i)| i.0["encrypted_content"] == "model-old-only")
+    );
+    assert_eq!(operations.lock().unwrap().len(), 1);
+    let replay = parent.store.replay_turns(&snapshot).unwrap();
+    assert_eq!(replay[0].model_request.input, sent[0].input);
+}
+
+#[tokio::test]
 async fn child_final_completes_while_parent_sync_waits_for_child() {
     let (mut parent, _, operations) = context_engine(false, false);
     let started = Arc::new(Notify::new());
