@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS request_items (
  request_id TEXT NOT NULL REFERENCES requests(id), position INTEGER NOT NULL,
  item_hash TEXT NOT NULL REFERENCES items(hash),
  source_request TEXT, source_position INTEGER, context_sources TEXT,
+ context_note INTEGER NOT NULL DEFAULT 0,
  PRIMARY KEY(request_id, position)
 );
 CREATE TABLE IF NOT EXISTS events (

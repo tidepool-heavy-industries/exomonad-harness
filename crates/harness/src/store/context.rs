@@ -102,7 +102,7 @@ pub(super) fn history(
         SELECT id,parent_id,0 FROM requests WHERE id=?1
         UNION ALL SELECT r.id,r.parent_id,l.depth+1 FROM requests r JOIN lineage l ON r.id=l.parent_id
         WHERE ?2=0 OR NOT EXISTS(SELECT 1 FROM session_state s WHERE s.session_id='harness:compaction:'||l.id)
-    ) SELECT l.id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources
+    ) SELECT l.id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note
     FROM lineage l JOIN request_items ri ON ri.request_id=l.id JOIN items i ON i.hash=ri.item_hash ORDER BY l.depth DESC,ri.position")?;
     let rows = query.query_map(params![head.0, boundaries], |r| {
         Ok((
@@ -113,10 +113,11 @@ pub(super) fn history(
             r.get::<_, String>(4)?,
             r.get::<_, i64>(5)?,
             r.get::<_, Option<String>>(6)?,
+            r.get::<_, bool>(7)?,
         ))
     })?;
     rows.map(|row| {
-        let (request, position, hash, raw, origin_request, origin_position, sources) = row?;
+        let (request, position, hash, raw, origin_request, origin_position, sources, note) = row?;
         Ok(Occurrence {
             request: RequestId(request),
             position,
@@ -131,9 +132,43 @@ pub(super) fn history(
                 .map(|s| serde_json::from_str(&s))
                 .transpose()?
                 .unwrap_or_default(),
+            note,
         })
     })
     .collect()
+}
+
+/// Attribution is a request projection; canonical retained bytes and origin
+/// references remain unchanged in the Store.
+fn project_context_note(occurrence: &Occurrence) -> Item {
+    let mut item = occurrence.item.clone();
+    if !occurrence.note {
+        return item;
+    }
+    let Some((_, text)) = message(&item) else {
+        return item;
+    };
+    let sources = occurrence
+        .sources
+        .iter()
+        .flat_map(|r| serde_json::from_str::<Vec<Origin>>(r.as_str()).unwrap_or_default())
+        .map(|o| format!("{}:{}", o.request.0, o.position))
+        .collect::<Vec<_>>();
+    let attribution = if sources.is_empty() {
+        "[Agent-authored context note]".to_string()
+    } else {
+        format!(
+            "[Agent-authored context note; sources: {}]",
+            sources.join(", ")
+        )
+    };
+    let projected = format!("{attribution}\n{text}");
+    match &mut item.0["content"] {
+        serde_json::Value::String(content) => *content = projected,
+        serde_json::Value::Array(parts) => parts[0]["text"] = json!(projected),
+        _ => {}
+    }
+    item
 }
 
 fn reference(items: &[Occurrence]) -> ContextReference {
@@ -341,7 +376,7 @@ fn insert_occurrence(
     position: i64,
     occurrence: &Occurrence,
 ) -> Result<()> {
-    tx.execute("INSERT INTO request_items(request_id,position,item_hash,source_request,source_position,context_sources) VALUES(?1,?2,?3,?4,?5,?6)",params![request.0,position,occurrence.hash.0,occurrence.origin.request.0,occurrence.origin.position,serde_json::to_string(&occurrence.sources)?])?;
+    tx.execute("INSERT INTO request_items(request_id,position,item_hash,source_request,source_position,context_sources,context_note) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![request.0,position,occurrence.hash.0,occurrence.origin.request.0,occurrence.origin.position,serde_json::to_string(&occurrence.sources)?,occurrence.note])?;
     Ok(())
 }
 
@@ -438,7 +473,10 @@ impl Store {
         let current = state(&tx, identity)?;
         let history = history(&tx, head, true)?
             .into_iter()
-            .map(|i| (i.request, i.hash, i.item))
+            .map(|i| {
+                let projected = project_context_note(&i);
+                (i.request, i.hash, projected)
+            })
             .collect();
         tx.commit()?;
         Ok(ContextRequestState {
@@ -619,7 +657,7 @@ impl Store {
         let prefix = record
             .prefix
             .iter()
-            .map(|p| Ok((load(&p.hash)?, p.sources.clone())))
+            .map(|p| Ok((load(&p.hash)?, p.sources.clone(), p.note)))
             .collect::<Result<Vec<_>>>()?;
         Ok(Some(ContextCommitEvidence {
             original_operation: record.original_operation.unwrap_or(record.operation),
@@ -687,7 +725,7 @@ impl Store {
                 evidence
                     .prefix
                     .iter()
-                    .map(|(i, s)| (i, s))
+                    .map(|(i, s, note)| (i, s, note))
                     .collect::<Vec<_>>(),
                 &evidence.model,
             ))?
@@ -785,7 +823,7 @@ impl Store {
         let mut retained_opaque = false;
         if let Some(evidence) = replay {
             let mut used_occurrences = HashSet::new();
-            for (item, sources) in &evidence.prefix {
+            for (item, sources, note) in &evidence.prefix {
                 let hash = Self::put_item_tx(&tx, item)?;
                 if let Some((index, existing)) =
                     snapshot.prefix.iter().enumerate().find(|(index, i)| {
@@ -795,6 +833,7 @@ impl Store {
                     used_occurrences.insert(index);
                     let mut occurrence = existing.clone();
                     occurrence.sources = sources.clone();
+                    occurrence.note = *note;
                     rewritten.push(occurrence);
                 } else {
                     rewritten.push(Occurrence {
@@ -803,6 +842,7 @@ impl Store {
                         hash: hash.clone(),
                         item: item.clone(),
                         sources: sources.clone(),
+                        note: *note,
                         origin: Origin {
                             request: RequestId(String::new()),
                             position: 0,
@@ -879,6 +919,7 @@ impl Store {
                             if !occurrence.sources.contains(reference) {
                                 occurrence.sources.push(reference.clone());
                             }
+                            occurrence.note = true;
                             occurrence.hash = Self::put_item_tx(&tx, &occurrence.item)?;
                             occurrence.origin = Origin {
                                 request: RequestId(String::new()),
@@ -919,6 +960,7 @@ impl Store {
                             hash,
                             item,
                             sources: sources.clone(),
+                            note: true,
                         });
                     }
                 }
@@ -942,8 +984,15 @@ impl Store {
         if cancelled() {
             return Err(ContextError::Cancelled.into());
         }
-        let text_changed = rewritten.iter().map(|i| &i.hash).collect::<Vec<_>>()
-            != snapshot.prefix.iter().map(|i| &i.hash).collect::<Vec<_>>();
+        let text_changed = rewritten
+            .iter()
+            .map(|i| (&i.hash, &i.sources, i.note))
+            .collect::<Vec<_>>()
+            != snapshot
+                .prefix
+                .iter()
+                .map(|i| (&i.hash, &i.sources, i.note))
+                .collect::<Vec<_>>();
         let model_changed = draft
             .next_model
             .as_ref()
@@ -959,6 +1008,7 @@ impl Store {
             .map(|i| PrefixEvidence {
                 hash: i.hash.clone(),
                 sources: i.sources.clone(),
+                note: i.note,
             })
             .collect();
         if text_changed {
@@ -1074,6 +1124,7 @@ struct ReceiptRecord {
 struct PrefixEvidence {
     hash: ItemHash,
     sources: Vec<ContextReference>,
+    note: bool,
 }
 
 fn receipt(c: &Connection, operation: &OperationId) -> Result<Option<ReceiptRecord>> {
@@ -1193,7 +1244,7 @@ pub(super) fn preserve_origins(
     for item in target_items {
         let count = used.entry(item.hash.0.clone()).or_default();
         if let Some(source) = candidates.get(&item.hash.0).and_then(|v| v.get(*count)) {
-            tx.execute("UPDATE request_items SET source_request=?3,source_position=?4,context_sources=?5 WHERE request_id=?1 AND position=?2",params![target.0,item.position,source.origin.request.0,source.origin.position,serde_json::to_string(&source.sources)?])?;
+            tx.execute("UPDATE request_items SET source_request=?3,source_position=?4,context_sources=?5,context_note=?6 WHERE request_id=?1 AND position=?2",params![target.0,item.position,source.origin.request.0,source.origin.position,serde_json::to_string(&source.sources)?,source.note])?;
             *count += 1;
         }
     }

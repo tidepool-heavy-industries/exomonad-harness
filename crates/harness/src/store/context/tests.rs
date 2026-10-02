@@ -648,7 +648,7 @@ fn foreign_saved_context_reference_is_rejected() {
 fn v9_migration_preserves_raw_items_and_adds_nullable_provenance() {
     let mut connection = rusqlite::Connection::open_in_memory().unwrap();
     let old_schema = super::super::schema::SQL.replace(
-        " source_request TEXT, source_position INTEGER, context_sources TEXT,\n",
+        " source_request TEXT, source_position INTEGER, context_sources TEXT,\n context_note INTEGER NOT NULL DEFAULT 0,\n",
         "",
     );
     connection.execute_batch(&old_schema).unwrap();
@@ -862,4 +862,53 @@ fn second_sync_capture_uses_current_edited_context_and_original_call() {
             .any(|(_, _, i)| i.0["content"] == "edited context")
     );
     assert_eq!(cuts.before_call().operation(), Some(&second));
+}
+
+#[test]
+fn authored_notes_project_attribution_without_changing_retained_item_bytes() {
+    let store = Store::memory().unwrap();
+    let (head, operation) = setup(&store);
+    let snapshot = store.begin_context(&operation, &head).unwrap();
+    let source = match &snapshot.document.blocks[0] {
+        ContextBlock::Text {
+            reference: Some(r), ..
+        } => r.clone(),
+        _ => panic!("text"),
+    };
+    let draft = ContextDraft {
+        document: ContextDocument {
+            blocks: vec![ContextBlock::Text {
+                reference: None,
+                role: ContextRole::User,
+                text: "summary".into(),
+                sources: vec![source],
+            }],
+        },
+        next_model: None,
+    };
+    let receipt = store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &draft,
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    let raw = store.context_history(&receipt.head).unwrap();
+    let projected = store
+        .context_request_state(&receipt.head, &operation.origin)
+        .unwrap();
+    assert_eq!(raw[0].2.0["content"], "summary");
+    assert_eq!(raw[0].1, projected.history[0].1);
+    assert_eq!(
+        projected.history[0].2.0["content"],
+        "[Agent-authored context note; sources: root:0]\nsummary"
+    );
+    assert_eq!(raw[1..], projected.history[1..]);
+    assert_eq!(
+        store.context_history(&head).unwrap()[0].2.0["content"],
+        "old context"
+    );
+    let document = store.read_context(&receipt.head).unwrap();
+    assert!(matches!(&document.blocks[0],ContextBlock::Text {text,..} if text=="summary"));
 }

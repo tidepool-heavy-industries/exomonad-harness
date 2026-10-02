@@ -105,9 +105,16 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
             .query_map([], |row| row.get::<_, String>(1))?
             .collect::<Result<Vec<_>, _>>()?
     };
-    for column in ["source_request", "source_position", "context_sources"] {
+    for column in [
+        "source_request",
+        "source_position",
+        "context_sources",
+        "context_note",
+    ] {
         if !item_columns.iter().any(|existing| existing == column) {
-            let kind = if column == "source_position" {
+            let kind = if column == "context_note" {
+                "INTEGER NOT NULL DEFAULT 0"
+            } else if column == "source_position" {
                 "INTEGER"
             } else {
                 "TEXT"

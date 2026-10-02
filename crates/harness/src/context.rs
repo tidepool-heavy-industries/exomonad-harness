@@ -109,6 +109,7 @@ pub(crate) struct Occurrence {
     pub item: Item,
     pub origin: Origin,
     pub sources: Vec<ContextReference>,
+    pub note: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,7 +147,7 @@ pub struct ContextCommitReceipt {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContextCommitEvidence {
     pub(crate) original_operation: OperationId,
-    pub(crate) prefix: Vec<(Item, Vec<ContextReference>)>,
+    pub(crate) prefix: Vec<(Item, Vec<ContextReference>, bool)>,
     pub(crate) output: Item,
     pub(crate) invocation: Item,
     pub(crate) model: Option<String>,
