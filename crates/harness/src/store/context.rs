@@ -474,10 +474,15 @@ impl Store {
         let history = history(&tx, head, true)?
             .into_iter()
             .map(|i| {
-                let projected = project_context_note(&i);
-                (i.request, i.hash, projected)
+                if i.note {
+                    let projected = project_context_note(&i);
+                    let hash = Self::put_item_tx(&tx, &projected)?;
+                    Ok((i.request, hash, projected))
+                } else {
+                    Ok((i.request, i.hash, i.item))
+                }
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         tx.commit()?;
         Ok(ContextRequestState {
             history,

@@ -902,7 +902,20 @@ fn authored_notes_project_attribution_without_changing_retained_item_bytes() {
         .context_request_state(&receipt.head, &operation.origin)
         .unwrap();
     assert_eq!(raw[0].2.0["content"], "summary");
-    assert_eq!(raw[0].1, projected.history[0].1);
+    assert_eq!(raw[0].0, projected.history[0].0);
+    assert_ne!(raw[0].1, projected.history[0].1);
+    let sealed_raw: String = store
+        .lock()
+        .query_row(
+            "SELECT json FROM items WHERE hash=?1",
+            [&projected.history[0].1.0],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Item>(&sealed_raw).unwrap(),
+        projected.history[0].2
+    );
     assert_eq!(
         projected.history[0].2.0["content"],
         "[Agent-authored context note; sources: root:0]\nsummary"

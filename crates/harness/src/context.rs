@@ -161,6 +161,9 @@ impl ContextCommitEvidence {
 
 #[derive(Clone, Debug)]
 pub struct ContextRequestState {
+    /// Provider-facing projections and their exact interned hashes. Native
+    /// occurrences retain canonical request identity; editable references are
+    /// resolved independently against raw Store provenance.
     pub history: Vec<(RequestId, ItemHash, Item)>,
     pub model: Option<String>,
     pub generation: u64,
