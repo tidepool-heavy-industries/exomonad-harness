@@ -31,7 +31,7 @@ describe('native route codec', () => {
 
   it.each([
     ['tree', '/tree'], ['timeline', '/timeline'], ['inbox', '/inbox'],
-    ['host', '/host'], ['command', '/command'], ['chat', '/chat'],
+    ['command', '/command'], ['chat', '/chat'],
   ] as const)('uses %s as the page route', (screen, pathname) => {
     const route = { ...defaultRoute, screen };
     const url = routeUrl(route, new URL('https://host/'));
@@ -39,7 +39,7 @@ describe('native route codec', () => {
     expect(parseRoute(url)).toEqual({ route, issue: undefined });
   });
 
-  it.each(['tree', 'timeline', 'inbox', 'host', 'command', 'chat'] as const)(
+  it.each(['tree', 'timeline', 'inbox', 'command', 'chat'] as const)(
     'preserves exact actor identity on the %s page', screen => {
       const route = {
         ...defaultRoute,
@@ -64,14 +64,21 @@ describe('native route codec', () => {
       route: { ...defaultRoute, screen: 'chat', selection: { kind: 'actor', identity: { run: 'r', actor: '/root/worker', incarnation: 'i' } } },
     });
     expect(parseRoute(new URL('https://host/?view=host&run=r&actor=%2Froot%2Fworker&incarnation=i'))).toEqual({
-      route: { ...defaultRoute, screen: 'host', selection: { kind: 'actor', identity: { run: 'r', actor: '/root/worker', incarnation: 'i' } } },
+      route: { ...defaultRoute, screen: 'chat', selection: { kind: 'actor', identity: { run: 'r', actor: '/root/worker', incarnation: 'i' } } },
     });
+  });
+
+  it('maps old Host page links to the single actor page', () => {
+    const parsed = parseRoute(new URL('https://host/host?view=host&run=r&actor=%2Froot&incarnation=i'));
+    expect(parsed.issue).toBeUndefined();
+    expect(parsed.route.screen).toBe('chat');
+    expect(routeUrl(parsed.route, new URL('https://host/')).pathname).toBe('/chat/root');
   });
 
   it('keeps a page and issue when its exact actor identity is incomplete', () => {
     const parsed = parseRoute(new URL('https://host/host?run=r&incarnation=i'));
     expect(parsed.issue).toBeTruthy();
-    expect(parsed.route.screen).toBe('host');
+    expect(parsed.route.screen).toBe('chat');
     expect(parsed.route.selection.kind).toBe('none');
   });
 

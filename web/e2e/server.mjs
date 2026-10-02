@@ -62,7 +62,7 @@ const server = createServer(async (request, response) => {
     if (url.pathname === '/api/session') {
       if (request.method === 'DELETE') config.authenticated = false;
       if (request.method === 'POST') config.authenticated = true;
-      return json(response, {authenticated:config.authenticated});
+      return json(response, {authenticated:config.authenticated,authentication:'secret',available:true});
     }
     if (url.pathname.startsWith('/api/commands/')) {
       const id = decodeURIComponent(url.pathname.slice('/api/commands/'.length));

@@ -1,9 +1,19 @@
-.worker-chat { display: grid; grid-template-columns: minmax(13rem, 20rem) minmax(0, 1fr); gap: 1.25rem; align-items: start; }
-.worker-chat-list { border: 1px solid var(--border, #68758a); border-radius: .5rem; padding: 1rem; max-height: 75vh; overflow: auto; }
+.worker-chat { display: grid; grid-template-columns: minmax(13rem, 20rem) minmax(0, 1fr); gap: 16px; align-items: start; }
+.worker-chat-list { border-inline-end: 1px solid var(--line); padding-inline-end: 16px; max-height: 75vh; overflow: auto; }
 .worker-chat-list label, .worker-chat-list .meta { display: block; }
-.worker-chat-list input { width: 100%; box-sizing: border-box; }
+.worker-chat-list input { width: 100%; }
 .worker-chat-list ul { list-style: none; padding: 0; }
-.worker-chat-list li { padding: .75rem 0; overflow-wrap: anywhere; }
-.worker-chat-list a[aria-current="page"] { font-weight: bold; text-decoration-thickness: .2rem; }
+.worker-chat-list li { padding: 12px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.worker-chat-list a[aria-current="page"] { font-weight: 600; text-decoration-thickness: 2px; }
 .worker-chat-conversation { min-width: 0; overflow-wrap: anywhere; }
-@media (max-width: 700px) { .worker-chat { grid-template-columns: minmax(0, 1fr); } .worker-chat-list { max-height: 16rem; } }
+.actor-heading { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.actor-heading h2 { margin-top: 0; }
+.actor-details { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin-block: 12px 0; }
+.actor-details dt { color: var(--muted); }
+.actor-details dd { margin: 0; }
+.worker-chat-conversation .chat-history, .worker-chat-conversation [aria-label="Worker mailbox observations"] { max-height: 45vh; overflow: auto; margin-block: 12px; }
+.actor-operations { margin-top: 20px; border-top: 1px solid var(--line); }
+.actor-operations .toolbar { margin-top: 12px; }
+.actor-operations .toolbar h2 { margin: 0; }
+@media (min-width: 1000px) { .actor-details { grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr); } }
+@media (max-width: 700px) { .worker-chat { grid-template-columns: minmax(0, 1fr); } .worker-chat-list { max-height: 16rem; border-inline-end: 0; border-bottom: 1px solid var(--line); padding-inline-end: 0; } }

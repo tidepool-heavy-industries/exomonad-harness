@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { snapshot } from './fixtures.mjs'
-import { control, openFixture, view, audit, zoomContext, baseURL } from './support'
+import { control, openFixture, view, audit, zoomContext, baseURL, chooseWorker } from './support'
 
 for (const theme of ['light','dark'] as const) {
   test(`${theme} desktop and narrow production screens pass axe`, async ({page,request},testInfo)=>{
@@ -15,8 +15,9 @@ for (const theme of ['light','dark'] as const) {
     const data=snapshot()
     data.actors[0].identity.actor='/root/'+ 'long-identity-'.repeat(18)
     await openFixture(page,request,{snapshot:data})
-    for (const name of ['Tree','Timeline','Inbox','Host']) {
+    for (const name of ['Tree','Timeline','Inbox','Chat']) {
       await view(page,name)
+      if (name === 'Chat') await chooseWorker(page)
       await audit(page,testInfo,`${theme}-desktop-${name.toLowerCase()}`)
       await page.setViewportSize({width:390,height:844})
       await audit(page,testInfo,`${theme}-narrow-${name.toLowerCase()}`)
@@ -47,7 +48,7 @@ for (const theme of ['light','dark'] as const) {
       await control(request,'reset')
       await page.reload()
       await expect(page.getByRole('heading',{name:'Tree',exact:true})).toBeVisible()
-      for (const name of ['Tree','Timeline','Inbox','Host']) {
+      for (const name of ['Tree','Timeline','Inbox','Chat']) {
         await view(page,name)
         await audit(page,testInfo,`${theme}-zoom-${name.toLowerCase()}`)
       }

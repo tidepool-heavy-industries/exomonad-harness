@@ -2,10 +2,10 @@ import { useCallback, useEffect, useState } from 'react';
 import type { RouteState, Screen } from './client-contract';
 
 const keys = ['view', 'run', 'actor', 'incarnation', 'conversation', 'global', 'request', 'sender', 'recipient', 'type'] as const;
-const screens: readonly Screen[] = ['tree', 'timeline', 'inbox', 'host', 'command', 'chat'];
+const screens: readonly Screen[] = ['tree', 'timeline', 'inbox', 'command', 'chat'];
 const kinds = ['NEW_TASK', 'MESSAGE', 'FINAL_ANSWER', 'PROGRESS'] as const;
 const screenPaths: Record<Exclude<Screen, 'chat'>, string> = {
-  tree: '/tree', timeline: '/timeline', inbox: '/inbox', host: '/host', command: '/command',
+  tree: '/tree', timeline: '/timeline', inbox: '/inbox', command: '/command',
 };
 const pathScreens = new Map<string, Screen>(Object.entries(screenPaths).map(([screen, path]) => [path, screen as Screen]));
 export const defaultRoute: RouteState = { screen: 'tree', selection: { kind: 'none' }, global: false, messageFilters: {} };
@@ -33,7 +33,8 @@ function actorFromPath(pathname: string): string | undefined {
 export function parseRoute(url: URL): { route: RouteState; issue?: string } {
   const p = url.searchParams;
   const duplicate = keys.some(key => p.getAll(key).length > 1);
-  const view = p.get('view');
+  const suppliedView = p.get('view');
+  const view = suppliedView === 'host' ? 'chat' : suppliedView;
   const run = p.get('run');
   const actor = p.get('actor');
   const incarnation = p.get('incarnation');
@@ -45,7 +46,7 @@ export function parseRoute(url: URL): { route: RouteState; issue?: string } {
   let pathIssue = false;
   if (url.pathname === '/') {
     screen = view && screens.includes(view as Screen) ? view as Screen : 'tree';
-  } else if (url.pathname === '/chat') {
+  } else if (url.pathname === '/chat' || url.pathname === '/host') {
     screen = 'chat';
   } else if (url.pathname.startsWith('/chat/')) {
     screen = 'chat';

@@ -383,11 +383,11 @@ export function Operator() {
   )
 
   return <>
-    <header className="session-bar">
+    <section className="session-bar" aria-label="Browser session">
       <span role="status">Session authenticated{authentication === 'tailscale' ? ' · Tailscale' : authentication === 'disabled' ? ' · No browser authentication' : ''} · {transportPhase}</span>
       {authentication === 'secret' && <button type="button" onClick={() => void signOut()} disabled={checking}>Sign out</button>}
       <button type="button" onClick={() => void checkSession()} disabled={checking}>Recheck session</button>
-    </header>
+    </section>
     {failure && <p className="session-error" role="alert">{failure}</p>}
     {snapshotLoaded
       ? <App data={project(state)} onHostCommand={submitHostCommand} onDemoCommand={submitDemoCommand}

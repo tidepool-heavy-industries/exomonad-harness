@@ -22,7 +22,7 @@ const actor = { id: JSON.stringify(['run', '/worker', 'old']), name: '/worker', 
 const data: HarnessViewModel = { hostRun: 'run', actors: [actor, { ...actor, id: JSON.stringify(['run', '/workflow', 'w']), name: '/workflow', incarnation: 'w', kind: 'workflow', modelConversation: undefined }], nodes: [{ id: 'conv', name: 'Conversation A', state: 'active' }, { id: 'other', name: 'Unattached conversation', state: 'idle' }], timeline: [{ id: 'req', key: 'request:req', nodeId: 'conv', label: 'Selected request', kind: 'request', state: 'completed', startedAtMs: 1000, endedAtMs: 2000, historyRefreshKey: 'stable' }, { id: 'req', key: 'job:req', nodeId: 'other', label: 'Unrelated job', kind: 'job', state: 'completed', delivered: false, output: ' retained output ' }], inbox: [{ id: 'one', sender: '/worker', recipient: '/operator', message: 'selected message', type: 'MESSAGE', state: 'MESSAGE' }, { id: 'two', sender: '/other', recipient: '/operator', message: 'other progress', type: 'PROGRESS', state: 'PROGRESS' }] };
 function route(query = '?view=tree') { window.history.replaceState(null, '', '/' + query); }
 function tab(name: string) { fireEvent.click(screen.getByRole('link', { name })); }
-function choose() { fireEvent.change(screen.getByLabelText('Target actor'), { target: { value: JSON.stringify(['run', '/worker', 'old']) } }); }
+function choose() { fireEvent.click(within(screen.getByRole('complementary', { name: 'Workers' })).getByRole('link', { name: '/worker' })); }
 beforeEach(() => { route(); sessionStorage.clear(); clearDrafts(); });
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); clearDrafts(); });
 describe('linked operator views', () => {
@@ -60,7 +60,7 @@ describe('linked operator views', () => {
     const submit = vi.fn(() => ({ kind: 'retained' as const, operationId: 'op', send: 'unknown' as const }));
     const mounted = render(<App data={data} onHostCommand={submit} />);
     mounted.rerender(<App data={{ ...data, actors: [{ ...actor, incarnation: 'new' }] }} onHostCommand={submit} />);
-    expect(screen.getByText(/exact selection remains preserved/)).toBeVisible();
+    expect(screen.getByText(/This exact actor is unavailable/)).toBeVisible();
     expect(screen.getByRole('button', { name: 'Send input' })).toBeDisabled();
     expect(window.location.search).toContain('incarnation=old');
     fireEvent.click(screen.getByRole('button', { name: 'Retire' }));
@@ -78,14 +78,53 @@ describe('linked operator views', () => {
   });
   it('links workflow actors to exact host details and preserves standalone conversation links', () => {
     const mounted = render(<App data={data} />);
-    fireEvent.click(screen.getByRole('link', { name: 'View host details for workflow actor /workflow, running' }));
-    expect(screen.getByText('Workflow actor model history is unavailable.')).toBeVisible();
-    expect(screen.getByRole('heading', { name: 'Host', level: 1 })).toBeVisible();
+    fireEvent.click(screen.getByRole('link', { name: 'Open actor page for workflow actor /workflow, running' }));
+    expect(screen.getByText('Mailbox endpoint labels do not establish an actor incarnation. Workflow actors have no model exchange.')).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Chat', level: 1 })).toBeVisible();
     expect(window.location.search).toContain('incarnation=w');
     mounted.unmount();
     route();
     render(<App data={{ ...data, hostRun: undefined }} />);
     expect(screen.getByRole('link', { name: 'Unattached conversation' })).toBeVisible();
+  });
+  it('uses the single actor page for workflow messages, input and controls without model history', () => {
+    window.history.replaceState(null, '', '/chat/workflow?run=run&incarnation=w');
+    const workflow = data.actors![1]!;
+    const submit = vi.fn(() => ({ kind: 'retained' as const, operationId: 'op', send: 'sent' as const }));
+    render(<App data={{ ...data, inbox: [...data.inbox, { id: 'workflow-reply', sender: '/workflow', recipient: '/operator', message: 'Workflow progress', state: 'MESSAGE' }] }} onHostCommand={submit} />);
+    expect(screen.queryByRole('link', { name: 'Host' })).toBeNull();
+    expect(screen.getByRole('list', { name: 'Workflow messages' })).toHaveTextContent('Workflow progress');
+    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'Continue workflow' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send input' }));
+    const target = { run: workflow.run, actor: workflow.name, incarnation: workflow.incarnation };
+    expect(submit).toHaveBeenLastCalledWith({ action: 'input', target, text: 'Continue workflow' });
+    fireEvent.click(screen.getByRole('button', { name: 'Interrupt' }));
+    expect(submit).toHaveBeenLastCalledWith({ action: 'interrupt', target, expected_round: workflow.activeRound });
+    fireEvent.click(screen.getByRole('button', { name: 'Retire' }));
+    expect(submit).toHaveBeenLastCalledWith({ action: 'retire', target });
+  });
+  it('keeps selected operations and targetless receipts together, audits others, and disables replay to retired identities', () => {
+    window.history.replaceState(null, '', '/chat/worker?run=run&incarnation=old');
+    const other = { run: 'run', actor: '/workflow', incarnation: 'w' };
+    const selectedId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const unrelatedId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const commands: BrowserCommandRecord[] = [
+      { hostRun: 'run', authority: 'local', state: 'queued', submission: { operation_id: selectedId, command: { action: 'input', target, text: 'Selected payload' } } },
+      { hostRun: 'run', authority: 'local', state: 'queued', submission: { operation_id: unrelatedId, command: { action: 'input', target: other, text: 'Other payload' } } },
+    ];
+    const projected = { ...data, commandReceipts: [{ commandId: selectedId.toUpperCase(), outcome: 'refused' as const, reason: 'Selected admission unknown' }, { commandId: unrelatedId, target: other, outcome: 'refused' as const, reason: 'Other refused' }] };
+    const retry = vi.fn();
+    const mounted = render(<App data={projected} pendingCommands={commands} onRetry={retry} />);
+    const operations = screen.getByRole('region', { name: 'Host operations' });
+    expect(operations).toHaveTextContent('Selected payload');
+    expect(operations).toHaveTextContent('Selected admission unknown');
+    expect(operations).not.toHaveTextContent('Other payload');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'All host operations' }));
+    expect(operations).toHaveTextContent('Other payload');
+    expect(operations).toHaveTextContent('Other refused');
+    mounted.rerender(<App data={{ ...projected, actors: projected.actors!.map(actor => ({ ...actor, lifecycle: 'retired' })) }} pendingCommands={commands} onRetry={retry} />);
+    for (const button of within(operations).getAllByRole('button', { name: 'Retry same operation' })) expect(button).toBeDisabled();
+    expect(retry).not.toHaveBeenCalled();
   });
   it('requires fresh transport and callback, retaining text across disconnection', () => {
     route('?view=host');
@@ -120,9 +159,9 @@ describe('linked operator views', () => {
     choose();
     fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'actor draft' } });
     tab('Timeline');
-    tab('Host');
+    tab('Chat');
     expect(screen.getByLabelText('Message to selected actor')).toHaveValue('actor draft');
-    fireEvent.change(screen.getByLabelText('Target actor'), { target: { value: JSON.stringify(['run', '/workflow', 'w']) } });
+    fireEvent.click(within(screen.getByRole('complementary', { name: 'Workers' })).getByRole('link', { name: '/workflow' }));
     expect(screen.getByLabelText('Message to selected actor')).toHaveValue('');
     choose();
     expect(screen.getByLabelText('Message to selected actor')).toHaveValue('actor draft');
@@ -165,7 +204,7 @@ describe('linked operator views', () => {
     const input = screen.getByLabelText('Message to selected actor');
     fireEvent.keyDown(input, { key: 'g' });
     fireEvent.keyDown(input, { key: 'l' });
-    expect(screen.getByRole('heading', { name: 'Host', level: 1 })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Chat', level: 1 })).toBeVisible();
     fireEvent.keyDown(window, { key: 'g' });
     fireEvent.keyDown(window, { key: 'l' });
     expect(screen.getByRole('heading', { name: 'Timeline', level: 1 })).toHaveFocus();

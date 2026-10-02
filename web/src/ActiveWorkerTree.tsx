@@ -53,10 +53,7 @@ export default function ActiveWorkerTree({ data, route, navigate }: ActiveWorker
         </svg>
         {layout.nodes.map(node => {
           const actor = node.actor
-          const hostDestination: RouteState = { ...route, screen: 'host', selection: { kind: 'actor', identity: { run: actor.run, actor: actor.name, incarnation: actor.incarnation } } }
-          const destination: RouteState = actor.kind === 'model'
-            ? { ...route, screen: 'chat', selection: { kind: 'actor', identity: { run: actor.run, actor: actor.name, incarnation: actor.incarnation } } }
-            : hostDestination
+          const destination: RouteState = { ...route, screen: 'chat', selection: { kind: 'actor', identity: { run: actor.run, actor: actor.name, incarnation: actor.incarnation } } }
           const href = urlFor(destination)
           const content = <>
             <strong className="worker-tree-name">{actor.name}</strong>
@@ -66,7 +63,7 @@ export default function ActiveWorkerTree({ data, route, navigate }: ActiveWorker
             {actor.kind === 'workflow' && <span className="worker-tree-lineage">Workflow actors do not have model chat.</span>}
           </>
           return <article className={`worker-tree-node${node.context ? ' is-context' : ''}${actor.kind === 'workflow' ? ' is-workflow' : ''}`} key={node.key} style={{ left: node.x, top: node.y }}>
-            <a href={href} aria-label={actor.kind === 'model' ? `Open chat with ${actor.name}, ${actor.lifecycle}` : `View host details for workflow actor ${actor.name}, ${actor.lifecycle}`} onClick={event => followLink(event, destination, navigate)}>
+            <a href={href} aria-label={actor.kind === 'model' ? `Open chat with ${actor.name}, ${actor.lifecycle}` : `Open actor page for workflow actor ${actor.name}, ${actor.lifecycle}`} onClick={event => followLink(event, destination, navigate)}>
               {content}
             </a>
           </article>

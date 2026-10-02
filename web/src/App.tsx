@@ -3,7 +3,7 @@ import NodeWindow from './NodeWindow';
 import WorkerChat from './WorkerChat';
 import ActiveWorkerTree from './ActiveWorkerTree';
 import type { CommandReceipt, HostActorIdentity, HostCommand } from './protocol';
-import { actorIdentityKey } from './protocol';
+import { actorIdentityKey, canonicalOperationId, isOperationId } from './protocol';
 import { isSettledCommand, operationKey, type BrowserCommandRecord } from './pending-commands';
 import type { HarnessViewModel } from './view-model';
 import type { RouteState, Screen, Selection, SubmitHostCommand, RetryHostCommand, SubmitDemoCommand, TransportPhase } from './client-contract';
@@ -21,7 +21,7 @@ export type AppProps = {
   demoFeedback?: string;
   onAuthExpired?: () => void;
 };
-const screenNames: Record<Screen, string> = { tree: 'Tree', timeline: 'Timeline', inbox: 'Inbox', host: 'Host', command: 'Command', chat: 'Chat' };
+const screenNames: Record<Screen, string> = { tree: 'Tree', timeline: 'Timeline', inbox: 'Inbox', command: 'Command', chat: 'Chat' };
 const identityOf = (actor: NonNullable<HarnessViewModel['actors']>[number]): HostActorIdentity => ({ run: actor.run, actor: actor.name, incarnation: actor.incarnation });
 const sameSelection = (left: Selection, right: Selection) => JSON.stringify(left) === JSON.stringify(right);
 function Empty({ children }: {
@@ -78,10 +78,11 @@ function CommandReceipts({ receipts }: {
     <p className="hint">Admission, request inclusion, execution, delivery and terminal outcome are separate observations.</p>
   </section> : null;
 }
-function RetainedCommands({ commands, run, ready, onRetry }: {
+function RetainedCommands({ commands, run, ready, activeTargets, onRetry }: {
   commands: readonly BrowserCommandRecord[];
   run?: string;
   ready: boolean;
+  activeTargets: ReadonlySet<string>;
   onRetry?: RetryHostCommand;
 }) {
   const [feedback, setFeedback] = useState('');
@@ -111,7 +112,7 @@ function RetainedCommands({ commands, run, ready, onRetry }: {
       {record.receipt && <p>
         {receiptText(record.receipt).title}: {receiptText(record.receipt).detail}
       </p>}
-      <button disabled={!onRetry || !ready || record.hostRun !== run || isSettledCommand(record)} onClick={() => {
+      <button disabled={!onRetry || !ready || record.hostRun !== run || !activeTargets.has(actorIdentityKey(record.submission.command.target)) || isSettledCommand(record)} onClick={() => {
         const result = onRetry?.(record.submission); if (result)
           setFeedback(result.kind === 'blocked' ? result.reason : `Same operation retained; socket send ${result.send}.`);
       }}>Retry same operation</button>
@@ -121,23 +122,19 @@ function RetainedCommands({ commands, run, ready, onRetry }: {
     <p className="hint">Original payloads are retained. Reconnect never automatically resubmits an operation.</p>
   </section>;
 }
-function HostComposer({ data, route, navigate, unavailable, ready, onHostCommand, chat = false }: {
+function ActorComposer({ data, route, unavailable, ready, onHostCommand }: {
   data: HarnessViewModel;
   route: RouteState;
-  navigate: (route: RouteState) => void;
   unavailable: boolean;
   ready: boolean;
   onHostCommand?: SubmitHostCommand;
-  chat?: boolean;
 }) {
   const resolved = resolveSelection(data, route.selection);
   const actor = resolved.actor;
   const target = route.selection.kind === 'actor' ? route.selection.identity : undefined;
   const draft = useDraft(target ? actorDraftKey(target) : undefined);
   const [feedback, setFeedback] = useState('');
-  const actors = (data.actors ?? []).filter(item => item.run === data.hostRun && (!chat || item.kind === 'model'));
-  const selectedKey = target ? actorIdentityKey(target) : '';
-  const canControl = Boolean(target && actor && (!chat || actor.kind === 'model') && !unavailable && actor.run === data.hostRun && ready && onHostCommand && (actor.lifecycle === 'running' || actor.lifecycle === 'waiting'));
+  const canControl = Boolean(target && actor && !unavailable && actor.run === data.hostRun && ready && onHostCommand && (actor.lifecycle === 'running' || actor.lifecycle === 'waiting'));
   const send = (command: HostCommand) => {
     const result = onHostCommand?.(command);
     if (!result)
@@ -147,16 +144,8 @@ function HostComposer({ data, route, navigate, unavailable, ready, onHostCommand
       draft.submitted();
   };
   return <section className="host-controls">
-    <h2>{chat ? 'Reply' : 'Embedded host controls'}</h2>
-    {!chat && <><label htmlFor="host-target">Target actor</label>
-    <select id="host-target" value={selectedKey} onChange={event => { const selected = actors.find(item => actorIdentityKey(identityOf(item)) === event.target.value); navigate({ ...route, selection: selected ? { kind: 'actor', identity: identityOf(selected) } : { kind: 'none' } }); setFeedback(''); }}>
-      <option value="">Choose an actor…</option>
-      {target && !actor && <option value={selectedKey}>Previously selected actor is no longer present</option>}{actors.map(item => <option key={actorIdentityKey(identityOf(item))} value={actorIdentityKey(identityOf(item))}>
-        {item.name} · {item.kind} · {item.lifecycle} · incarnation {item.incarnation}
-      </option>)}
-    </select></>}
+    <h2>Message and controls</h2>
     {!ready && <p role="status">Host controls await a fresh connected snapshot.</p>}{!onHostCommand && <p role="status">Host command channel is unavailable; this view is read-only.</p>}
-    {!chat && actor && actor.lifecycle !== 'running' && actor.lifecycle !== 'waiting' && <p role="status">This actor is {actor.lifecycle}; controls are unavailable.</p>}
     <form onSubmit={(event: FormEvent) => {
       event.preventDefault(); if (target && canControl && draft.text.trim())
         send({ action: 'input', target, text: draft.text });
@@ -169,7 +158,7 @@ function HostComposer({ data, route, navigate, unavailable, ready, onHostCommand
           if (target && actor?.activeRound)
             send({ action: 'interrupt', target, expected_round: actor.activeRound });
         }}>Interrupt</button>
-        <button type="button" hidden={chat} disabled={!canControl} onClick={() => {
+        <button type="button" disabled={!canControl} onClick={() => {
           if (target)
             send({ action: 'retire', target });
         }}>Retire</button>
@@ -188,7 +177,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
   const selector = useMemo(() => createViewSelector(), []);
   const view = useMemo(() => selector(data, route.selection, route.global, route.messageFilters), [selector, data, route.selection, route.global, route.messageFilters]);
   const embedded = data.hostRun !== undefined;
-  const screens = useMemo<Screen[]>(() => embedded ? ['tree', 'chat', 'timeline', 'inbox', 'host'] : ['tree', 'timeline', 'inbox', 'command'], [embedded]);
+  const screens = useMemo<Screen[]>(() => embedded ? ['tree', 'chat', 'timeline', 'inbox'] : ['tree', 'timeline', 'inbox', 'command'], [embedded]);
   const heading = useRef<HTMLHeadingElement>(null);
   const previousScreen = useRef(route.screen);
   const inspectionTrigger = useRef<HTMLElement | null>(null);
@@ -196,6 +185,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(0);
   const [actorPage, setActorPage] = useState(0);
+  const [allOperations, setAllOperations] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const demo = useDraft(demoDraftKey);
   const [demoLocalFeedback, setDemoLocalFeedback] = useState('');
@@ -256,7 +246,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
       if (!prefix)
         return;
       prefix = false;
-      const target = ({ t: 'tree', l: 'timeline', i: 'inbox', h: 'host', c: 'command' } as Record<string, Screen>)[event.key];
+      const target = ({ t: 'tree', l: 'timeline', i: 'inbox', h: 'chat', c: embedded ? 'chat' : 'command' } as Record<string, Screen>)[event.key];
       if (target && screens.includes(target)) {
         event.preventDefault();
         navigate({ ...route, screen: target });
@@ -265,7 +255,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
     window.addEventListener('keydown', handle);
     return () => { window.removeEventListener('keydown', handle); clearTimeout(timer); };
   }, [route, embedded]);
-  const link = useCallback((selection: Selection, label: string, screen = route.screen) => {
+  const link = useCallback((selection: Selection, label: string, screen = selection.kind === 'actor' && embedded ? 'chat' : route.screen) => {
     const next = { ...route, screen, selection };
     return <a href={routeUrl(next, new URL(window.location.href)).toString()} onClick={(event: MouseEvent<HTMLAnchorElement>) => {
       if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
@@ -275,7 +265,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
     }}>
       {label}
     </a>;
-  }, [route, navigate]);
+  }, [route, navigate, embedded]);
   const inspect = useCallback((requestId: string, element?: HTMLElement) => { inspectionTrigger.current = element ?? null; navigate({ ...route, requestId }); }, [route, navigate]);
   const closeInspector = useCallback(() => {
     navigate({ ...route, requestId: undefined });
@@ -409,7 +399,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
           </div>
           <p className="hint">Filters match supplied endpoint labels. They do not prove an actor incarnation or that a question was answered.</p>
           <div role="list" aria-label="Inbox messages">
-            {inbox.rows.map(item => <article className="row" role="listitem" key={item.id}>
+            {inbox.rows.map(item => <div className="row" role="listitem" key={item.id}>
               <strong>
                 {item.sender}{item.recipient && ` → ${item.recipient}`}
               </strong>
@@ -433,12 +423,17 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
                   </span>;
                 })}
               </div>
-            </article>)}
+            </div>)}
           </div>
           {!inbox.total && <Empty>No messages match this context and filters.</Empty>}
           <Pager page={inbox.page} count={inbox.pageCount} total={inbox.total} onPage={setPage} />
         </>, [inbox, endpoints, endpointNodes, endpointActors, link, route, navigate]);
-  const chatCommands = pendingCommands.filter(record => route.selection.kind === 'actor' && actorIdentityKey(record.submission.command.target) === actorIdentityKey(route.selection.identity));
+  const selectedIdentity = route.selection.kind === 'actor' ? actorIdentityKey(route.selection.identity) : undefined;
+  const showAllOperations = allOperations || !selectedIdentity;
+  const chatCommands = pendingCommands.filter(record => showAllOperations || actorIdentityKey(record.submission.command.target) === selectedIdentity);
+  const activeTargets = new Set((data.actors ?? []).filter(actor => actor.run === data.hostRun && ['running', 'waiting'].includes(actor.lifecycle)).map(actor => actorIdentityKey(identityOf(actor))));
+  const chatCommandIds = new Set(chatCommands.map(record => canonicalOperationId(record.submission.operation_id)));
+  const chatReceipts = (data.commandReceipts ?? []).filter(receipt => showAllOperations || (receipt.target ? actorIdentityKey(receipt.target) === selectedIdentity : isOperationId(receipt.commandId) && chatCommandIds.has(canonicalOperationId(receipt.commandId))));
   const inspected = route.requestId ? requestIndex.get(route.requestId) : undefined;
   return <div className="harness">
     <a className="skip-link" href="#main-content">Skip to content</a>
@@ -457,7 +452,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
       </nav>
     </header>
     {transportPhase !== 'ready' && <p className="snapshot-status" role="status">{route.screen === 'chat' ? 'Host unavailable · ' : ''}Showing last snapshot · {transportPhase}; controls await a fresh snapshot.</p>}
-    {route.screen !== 'chat' && <div className="selection-context">
+    {route.screen !== 'chat' && <section className="selection-context" aria-label="Selected context">
       <strong>Selected context:</strong> <span>
         {selectedDescription}
       </span>
@@ -467,13 +462,13 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
       {issue && <p className="error" role="status">
         {issue}
       </p>}{resolved.missing && <p className="error" role="status">The selected actor or conversation is unavailable. The exact selection remains preserved; choose a new context explicitly.</p>}{resolved.actor?.kind === 'workflow' && !resolved.conversationId && <p role="status">Workflow actor model history is unavailable.</p>}
-    </div>}
+    </section>}
     <main id="main-content" tabIndex={-1}>
       <div className="toolbar">
         <h1 ref={heading} tabIndex={-1}>
           {screenNames[route.screen]}
         </h1>
-        <span className="hint">Keyboard: g then t / l / i / {embedded ? 'h' : 'c'}
+        <span className="hint">Keyboard: g then t / l / i / c
         </span>
       </div>
       {!screens.includes(route.screen) ? <Empty>This view is unavailable in this host mode. Choose a view above.</Empty> : <>
@@ -496,14 +491,16 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
         {route.screen === 'timeline' && timeline}
         {route.screen === 'inbox' && inboxScreen}
         {route.screen === 'chat' && <WorkerChat data={data} route={route} navigate={navigate} transportPhase={transportPhase} issue={issue} onAuthExpired={onAuthExpired}>
-          <HostComposer key={route.selection.kind === 'actor' ? actorIdentityKey(route.selection.identity) : 'none'} chat data={data} route={route} navigate={navigate} unavailable={Boolean(issue || resolved.missing)} ready={transportPhase === 'ready'} onHostCommand={onHostCommand} />
-          <RetainedCommands commands={chatCommands} run={data.hostRun} ready={transportPhase === 'ready' && Boolean(resolved.actor && ['running', 'waiting'].includes(resolved.actor.lifecycle))} onRetry={onRetry} />
+          <ActorComposer key={route.selection.kind === 'actor' ? actorIdentityKey(route.selection.identity) : 'none'} data={data} route={route} unavailable={Boolean(issue || resolved.missing)} ready={transportPhase === 'ready'} onHostCommand={onHostCommand} />
+          <section className="actor-operations" aria-label="Host operations">
+            <div className="toolbar"><h2>Host operations</h2>
+              {selectedIdentity && <label><input type="checkbox" checked={allOperations} onChange={event => setAllOperations(event.target.checked)} />All host operations</label>}
+            </div>
+            <RetainedCommands commands={chatCommands} run={data.hostRun} activeTargets={activeTargets} ready={transportPhase === 'ready' && !issue} onRetry={onRetry} />
+            <CommandReceipts receipts={chatReceipts} />
+            {!chatCommands.length && !chatReceipts.length && <p className="hint">No operations retained for {showAllOperations ? 'this browser or host' : 'this exact actor'}.</p>}
+          </section>
         </WorkerChat>}
-        {route.screen === 'host' && <>
-          <HostComposer data={data} route={route} navigate={navigate} unavailable={Boolean(issue || resolved.missing)} ready={transportPhase === 'ready'} onHostCommand={onHostCommand} />
-          <RetainedCommands commands={pendingCommands} run={data.hostRun} ready={transportPhase === 'ready'} onRetry={onRetry} />
-          <CommandReceipts receipts={data.commandReceipts ?? []} />
-        </>}
         {route.screen === 'command' && <section>
           <h2>Send a command</h2>
           <p className="hint">Standalone deterministic demo · sending is separate from server acceptance and completion.</p>
