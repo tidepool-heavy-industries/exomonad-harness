@@ -705,9 +705,46 @@ impl Store {
         {
             return Err(ContextError::Conflict.into());
         }
+        // Saved documents can retain content dropped by an earlier rewrite.
+        // Resolve those references only from immutable ancestry before the
+        // original issuing call; post-call envelopes never become editable.
+        let mut q = tx.prepare("WITH RECURSIVE lineage(id,parent_id,depth) AS (SELECT id,parent_id,0 FROM requests WHERE id=?1 UNION ALL SELECT r.id,r.parent_id,lineage.depth+1 FROM requests r JOIN lineage ON r.id=lineage.parent_id) SELECT id FROM lineage ORDER BY depth DESC")?;
+        let ancestors = q
+            .query_map([&snapshot.operation.request.0], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(q);
+        let mut historic_blocks = Vec::new();
+        for ancestor in ancestors {
+            let historic = history(&tx, &RequestId(ancestor), true)?;
+            let cut = historic
+                .iter()
+                .position(|i| i.origin == origin)
+                .unwrap_or(historic.len());
+            historic_blocks.extend(blocks(&tx, &historic, cut)?);
+        }
+        let mut available = snapshot.blocks.clone();
+        for block in historic_blocks {
+            let identity = match &block.block {
+                ContextBlock::Text {
+                    reference: Some(r), ..
+                }
+                | ContextBlock::Native { reference: r, .. } => r,
+                _ => continue,
+            };
+            if !available.iter().any(|b| match &b.block {
+                ContextBlock::Text {
+                    reference: Some(r), ..
+                }
+                | ContextBlock::Native { reference: r, .. } => r == identity,
+                _ => false,
+            }) {
+                available.push(block)
+            }
+        }
         let mut rewritten = Vec::<Occurrence>::new();
         let mut seen = HashSet::new();
         let mut last_native = None;
+        let mut last_historical_native = None;
         let mut retained_opaque = false;
         if let Some(evidence) = replay {
             let mut used_occurrences = HashSet::new();
@@ -755,17 +792,22 @@ impl Store {
             for block in &draft.document.blocks {
                 match block {
                     ContextBlock::Native { reference, .. } => {
-                        let (index,stored)=snapshot.blocks.iter().enumerate().find(|(_,b)|matches!(&b.block,ContextBlock::Native{reference:r,..} if r==reference)).ok_or(ContextError::InvalidReference)?;
+                        let (index,stored)=available.iter().enumerate().find(|(_,b)|matches!(&b.block,ContextBlock::Native{reference:r,..} if r==reference)).ok_or(ContextError::InvalidReference)?;
                         if *block != stored.block {
                             return Err(ContextError::NativeEdit.into());
                         }
                         if !seen.insert(reference.clone()) {
                             return Err(ContextError::InvalidReference.into());
                         }
-                        if last_native.is_some_and(|previous| index < previous) {
+                        let ordering = if index < snapshot.blocks.len() {
+                            &mut last_native
+                        } else {
+                            &mut last_historical_native
+                        };
+                        if ordering.is_some_and(|previous| index < previous) {
                             return Err(ContextError::NativeOrder.into());
                         }
-                        last_native = Some(index);
+                        *ordering = Some(index);
                         retained_opaque |= stored.opaque;
                         rewritten.extend(stored.items.clone());
                     }
@@ -775,7 +817,7 @@ impl Store {
                         text,
                         sources,
                     } => {
-                        let stored=snapshot.blocks.iter().find(|b|matches!(&b.block,ContextBlock::Text{reference:Some(r),..} if r==reference)).ok_or(ContextError::InvalidReference)?;
+                        let stored=available.iter().find(|b|matches!(&b.block,ContextBlock::Text{reference:Some(r),..} if r==reference)).ok_or(ContextError::InvalidReference)?;
                         if !seen.insert(reference.clone()) {
                             return Err(ContextError::InvalidReference.into());
                         }
@@ -797,6 +839,9 @@ impl Store {
                                 serde_json::Value::Array(parts) => parts[0]["text"] = json!(text),
                                 _ => return Err(ContextError::InvalidReference.into()),
                             }
+                            if !occurrence.sources.contains(reference) {
+                                occurrence.sources.push(reference.clone());
+                            }
                             occurrence.hash = Self::put_item_tx(&tx, &occurrence.item)?;
                             occurrence.origin = Origin {
                                 request: RequestId(String::new()),
@@ -813,7 +858,7 @@ impl Store {
                         sources,
                     } => {
                         for source in sources {
-                            if !snapshot.blocks.iter().any(|b| match &b.block {
+                            if !available.iter().any(|b| match &b.block {
                                 ContextBlock::Text {
                                     reference: Some(r), ..
                                 }

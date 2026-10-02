@@ -521,3 +521,249 @@ fn deferred_child_inherits_committed_context_and_terminal_before_call_stays_froz
         frozen.iter().map(|(_, _, i)| i).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn saved_context_restores_owned_prior_text_and_native_group_preserving_suffix() {
+    let store = Store::memory().unwrap();
+    let head = RequestId("saved".into());
+    let first = CallId("first".into());
+    let second = CallId("second".into());
+    store.write_request(&head,None,"/root",&[
+        Item(json!({"type":"message","role":"user","content":"original"})),
+        Item(json!({"type":"function_call","call_id":"done","name":"read","arguments":"{}"})),
+        Item(json!({"type":"function_call_output","call_id":"done","output":"evidence"})),
+        Item(json!({"type":"custom_tool_call","call_id":"first","name":"haskell_sync","input":"first"})),
+        Item(json!({"type":"custom_tool_call","call_id":"second","name":"haskell_sync","input":"second"})),
+    ],Usage::default()).unwrap();
+    let op1 = store.claim(&first, &head).unwrap();
+    let op2 = store.claim(&second, &head).unwrap();
+    let snap1 = store.begin_context(&op1, &head).unwrap();
+    let saved = snap1.document.clone();
+    let first_receipt = store
+        .commit_context(ContextCommit {
+            snapshot: &snap1,
+            draft: &ContextDraft {
+                document: ContextDocument { blocks: vec![] },
+                next_model: None,
+            },
+            output: &output(),
+            pending: std::slice::from_ref(&op2),
+        })
+        .unwrap();
+    store
+        .append_items(
+            &first_receipt.head,
+            &[Item(
+                json!({"type":"message","role":"user","content":"late"}),
+            )],
+        )
+        .unwrap();
+    let snap2 = store.begin_context(&op2, &first_receipt.head).unwrap();
+    let mut saved = saved;
+    saved.blocks.extend(
+        snap2
+            .document
+            .blocks
+            .iter()
+            .filter(|b| {
+                matches!(
+                    b,
+                    ContextBlock::Native {
+                        protected: true,
+                        ..
+                    }
+                )
+            })
+            .cloned(),
+    );
+    let receipt = store
+        .commit_context(ContextCommit {
+            snapshot: &snap2,
+            draft: &ContextDraft {
+                document: saved,
+                next_model: None,
+            },
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    let items = store.context_history(&receipt.head).unwrap();
+    assert_eq!(items[0].2.0["content"], "original");
+    assert!(
+        items
+            .iter()
+            .any(|(_, _, i)| i.0["call_id"] == "done" && i.0["type"] == "function_call_output")
+    );
+    assert!(items.iter().any(|(_, _, i)| i.0["content"] == "late"));
+    assert!(items.iter().any(|(_,_,i)|i.0["call_id"]=="second" && i.0["type"]=="custom_tool_call_output"));
+}
+
+#[test]
+fn foreign_saved_context_reference_is_rejected() {
+    let store = Store::memory().unwrap();
+    let (head, op) = setup(&store);
+    let snapshot = store.begin_context(&op, &head).unwrap();
+    let foreign = RequestId("foreign".into());
+    store
+        .write_request(
+            &foreign,
+            None,
+            "/other",
+            &[Item(
+                json!({"type":"message","role":"user","content":"secret"}),
+            )],
+            Usage::default(),
+        )
+        .unwrap();
+    let draft = ContextDraft {
+        document: store.read_context(&foreign).unwrap(),
+        next_model: None,
+    };
+    assert!(matches!(
+        store.commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &draft,
+            output: &output(),
+            pending: &[]
+        }),
+        Err(StoreError::Context(ContextError::InvalidReference))
+    ));
+}
+
+#[test]
+fn v9_migration_preserves_raw_items_and_adds_nullable_provenance() {
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let old_schema = super::super::schema::SQL.replace(
+        " source_request TEXT, source_position INTEGER, context_sources TEXT,\n",
+        "",
+    );
+    connection.execute_batch(&old_schema).unwrap();
+    connection
+        .execute("INSERT INTO schema_version VALUES(9)", [])
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO requests(id,branch,created_at) VALUES('old','/root',0)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO items(hash,json) VALUES('oldhash','{\"future\":true}')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute("INSERT INTO request_items VALUES('old',0,'oldhash')", [])
+        .unwrap();
+    super::super::schema::initialize(&mut connection).unwrap();
+    let data: (String,Option<String>,Option<i64>,Option<String>) = connection.query_row("SELECT i.json,ri.source_request,ri.source_position,ri.context_sources FROM request_items ri JOIN items i ON i.hash=ri.item_hash",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+    assert_eq!(data, ("{\"future\":true}".into(), None, None, None));
+    assert_eq!(
+        connection
+            .query_row("SELECT version FROM schema_version", [], |r| r
+                .get::<_, u32>(0))
+            .unwrap(),
+        10
+    );
+}
+
+#[test]
+fn model_switch_refuses_opaque_protected_suffix_without_settling_output() {
+    let store = Store::memory().unwrap();
+    let (head, operation) = setup(&store);
+    let snapshot = store.begin_context(&operation, &head).unwrap();
+    store
+        .append_items(
+            &head,
+            &[Item(
+                json!({"type":"reasoning","encrypted_content":"opaque"}),
+            )],
+        )
+        .unwrap();
+    assert!(matches!(
+        store.commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &edited(&snapshot),
+            output: &output(),
+            pending: &[]
+        }),
+        Err(StoreError::Context(ContextError::OpaqueModel))
+    ));
+    assert_eq!(
+        store.context_model(&operation.origin).unwrap().as_deref(),
+        Some("luna")
+    );
+    assert!(
+        terminal::exact_terminal(&store.lock(), &operation)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn replay_keeps_duplicate_item_occurrences_distinct_for_later_edit() {
+    fn duplicate_setup(store: &Store) -> (RequestId, OperationId) {
+        let (head, operation) = setup(store);
+        store
+            .lock()
+            .execute(
+                "UPDATE request_items SET position=-position-10 WHERE request_id=?1",
+                [&head.0],
+            )
+            .unwrap();
+        store
+            .lock()
+            .execute(
+                "UPDATE request_items SET position=-position-8 WHERE request_id=?1",
+                [&head.0],
+            )
+            .unwrap();
+        let item = Item(json!({"type":"message","role":"user","content":"same"}));
+        let hash = store.put_item(&item).unwrap();
+        store.lock().execute("INSERT INTO request_items(request_id,position,item_hash) VALUES(?1,0,?2),(?1,1,?2)",params![head.0,hash.0]).unwrap();
+        (head, operation)
+    }
+    let original = Store::memory().unwrap();
+    let (head, operation) = duplicate_setup(&original);
+    let snapshot = original.begin_context(&operation, &head).unwrap();
+    let mut draft = ContextDraft {
+        document: snapshot.document.clone(),
+        next_model: None,
+    };
+    if let ContextBlock::Text { text, .. } = &mut draft.document.blocks[2] {
+        *text = "changed".into()
+    };
+    original
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &draft,
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    let evidence = original
+        .context_commit_evidence(&operation)
+        .unwrap()
+        .unwrap();
+    let local = Store::memory().unwrap();
+    let (localhead, localop) = duplicate_setup(&local);
+    let localsnapshot = local.begin_context(&localop, &localhead).unwrap();
+    let receipt = local
+        .restore_context_commit(&localsnapshot, &evidence, &output(), &[])
+        .unwrap();
+    local.append_items(&receipt.head,&[Item(json!({"type":"custom_tool_call","call_id":"next","name":"haskell_sync","input":"noop"}))]).unwrap();
+    let next = local.claim(&CallId("next".into()), &receipt.head).unwrap();
+    let nextsnapshot = local.begin_context(&next, &receipt.head).unwrap();
+    local
+        .commit_context(ContextCommit {
+            snapshot: &nextsnapshot,
+            draft: &ContextDraft {
+                document: nextsnapshot.document.clone(),
+                next_model: None,
+            },
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+}
