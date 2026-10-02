@@ -1002,8 +1002,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             .is_some_and(|bytes| bytes >= previous.saturating_add(previous / 4))
                     }));
             if did_compact {
-                let compact =
-                    self.compact_window(&parent, &history.items, &pending, &previous_usage);
+                let compact_model = history.model.as_deref().unwrap_or(&self.config.model);
+                let compact = self.compact_window(
+                    &parent,
+                    &history.items,
+                    &pending,
+                    &previous_usage,
+                    compact_model,
+                );
                 let successor = match tokio::select! {
                     result = compact => result,
                     changed = cancellation.changed() => {
@@ -3178,6 +3184,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         history: &[Item],
         pending: &[PendingCall],
         usage: &Usage,
+        model: &str,
     ) -> Result<Option<RequestId>, EngineError> {
         let pending_items: Vec<Item> = pending
             .iter()
@@ -3215,7 +3222,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             .tools(None)
                             .map_err(|error| CompactError::Failed(error.to_string()))?,
                         tools_allowed: None,
-                        model: self.config.model.clone(),
+                        model: model.to_owned(),
                         pinned_effort: effective_effort,
                         session_id: self.config.session_id.clone(),
                     })
@@ -3240,7 +3247,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         instructions: self.config.instructions.clone(),
                         tools: vec![].into(),
                         tools_allowed: Some(vec![]),
-                        model: self.config.model.clone(),
+                        model: model.to_owned(),
                         pinned_effort: effective_effort,
                         session_id: self.config.session_id.clone(),
                     })
@@ -6691,6 +6698,166 @@ mod tests {
                 .parent
                 .is_some()
         );
+    }
+
+    fn committed_model_switch(
+        store: &Store,
+        origin: &crate::model::ConversationIdentity,
+        agent: &AgentPath,
+        model_a: &str,
+        model_b: &str,
+    ) -> RequestId {
+        let source = RequestId("model-switch-source".into());
+        let call = Item(json!({
+            "type":"custom_tool_call",
+            "call_id":"model-switch-call",
+            "name":"edit_context",
+            "input":"{}"
+        }));
+        let mut items = vec![Item(
+            json!({"type":"message","role":"user","content":"continue"}),
+        )];
+        items.extend((0..12).map(|index| {
+            Item(json!({
+                "type":"message",
+                "role":"assistant",
+                "content":format!("old assistant context {index}: {}", "x".repeat(512))
+            }))
+        }));
+        items.push(call);
+        store
+            .write_request(
+                &source,
+                None,
+                &agent.0,
+                &items,
+                crate::store::Usage::default(),
+            )
+            .unwrap();
+        store.set_effort(&source, Effort::Low).unwrap();
+        let operation = store
+            .claim(&CallId("model-switch-call".into()), &source)
+            .unwrap();
+        store.initialize_context_model(origin, model_a).unwrap();
+        let snapshot = store.begin_context(&operation, &source).unwrap();
+        let draft = crate::context::ContextDraft {
+            document: snapshot.document.clone(),
+            next_model: Some(model_b.into()),
+        };
+        let selected = store
+            .commit_context(crate::context::ContextCommit {
+                snapshot: &snapshot,
+                draft: &draft,
+                output: &crate::turn::JobOutput::Completed(Ok(json!({"updated":true}))),
+                pending: &[],
+            })
+            .unwrap()
+            .head;
+        store
+            .append_items(
+                &selected,
+                &[Item(json!({
+                    "type":"reasoning",
+                    "id":"reasoning-from-model-b",
+                    "encrypted_content":"opaque-model-b"
+                }))],
+            )
+            .unwrap();
+        selected
+    }
+
+    #[tokio::test]
+    async fn automatic_compaction_uses_committed_model_for_both_strategies() {
+        for strategy in [CompactionStrategy::Server, CompactionStrategy::PlainText] {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let compact_turn = match strategy {
+                CompactionStrategy::Server => turn(
+                    "server-compact",
+                    vec![Item(json!({
+                        "type":"compaction",
+                        "encrypted_content":"opaque"
+                    }))],
+                ),
+                CompactionStrategy::PlainText => turn(
+                    "text-summary",
+                    vec![Item(json!({
+                        "type":"message",
+                        "role":"assistant",
+                        "content":"A concise handoff."
+                    }))],
+                ),
+            };
+            let mut before_compact = turn(
+                "before-compact",
+                vec![Item(json!({
+                    "type":"function_call",
+                    "call_id":"compact-call",
+                    "name":"echo",
+                    "arguments":"{}"
+                }))],
+            );
+            before_compact.usage.input_tokens = 10;
+            let replay = Replay {
+                requests: requests.clone(),
+                turns: Mutex::new(
+                    [
+                        before_compact,
+                        compact_turn,
+                        turn(
+                            "after-compact",
+                            vec![Item(json!({
+                                "type":"message",
+                                "role":"assistant",
+                                "phase":"final_answer",
+                                "content":"done"
+                            }))],
+                        ),
+                    ]
+                    .into(),
+                ),
+            };
+            let store = Arc::new(Store::memory().unwrap());
+            let agent = AgentPath("/root".into());
+            let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+                replay,
+                store.clone(),
+                Arc::new(JobScheduler::new(1).unwrap()),
+                Arc::new(Echo),
+                EngineConfig {
+                    instructions: "instruction".into(),
+                    tools: vec![],
+                    model: "model-a".into(),
+                    effort: Effort::Low,
+                    session_id: "model-compaction".into(),
+                    agent: agent.clone(),
+                },
+            );
+            let head = committed_model_switch(&store, &engine.origin, &agent, "model-a", "model-b");
+            let engine = match strategy {
+                CompactionStrategy::Server => engine.with_compaction_threshold(1),
+                CompactionStrategy::PlainText => engine.with_plain_text_compaction(
+                    std::num::NonZeroU64::new(2).expect("positive context capacity"),
+                ),
+            };
+            let (_cancel_tx, cancel_rx) = watch::channel(false);
+            engine
+                .run(Some(head), vec![], cancel_rx, empty_mailbox())
+                .await
+                .unwrap();
+
+            let sent = requests.lock().unwrap();
+            assert_eq!(sent.len(), 3, "{strategy:?}");
+            assert_eq!(sent[0].model, "model-b", "{strategy:?} normal request");
+            assert_eq!(sent[1].model, "model-b", "{strategy:?} compaction request");
+            assert!(sent[0].input.iter().any(|item| {
+                item.0["id"] == "reasoning-from-model-b"
+                    && item.0["encrypted_content"] == "opaque-model-b"
+            }));
+            assert!(sent[1].input.iter().any(|item| {
+                item.0["id"] == "reasoning-from-model-b"
+                    && item.0["encrypted_content"] == "opaque-model-b"
+            }));
+        }
     }
 
     #[tokio::test]
