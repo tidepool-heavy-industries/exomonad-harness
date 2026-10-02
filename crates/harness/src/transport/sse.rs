@@ -103,6 +103,25 @@ impl ResponseAssembly {
                     .ok_or_else(|| TransportError::Stream("missing response id".into()))?;
                 let usage = response.get("usage").unwrap_or(&Value::Null);
                 let details = usage.get("input_tokens_details").unwrap_or(&Value::Null);
+                let output_details = usage.get("output_tokens_details").unwrap_or(&Value::Null);
+                // Opt-in diagnostics expose only provider-returned mode and counters.
+                // Missing fields remain unavailable; requested reasoning settings
+                // do not establish which context mode the provider actually used.
+                tracing::debug!(
+                    target: "harness::transport::completion",
+                    reasoning_context = match response["reasoning"]["context"].as_str() {
+                        Some("all_turns") => "all_turns",
+                        Some("current_turn") => "current_turn",
+                        Some(_) => "unrecognized",
+                        None => "unavailable",
+                    },
+                    reasoning_tokens = ?output_details["reasoning_tokens"].as_u64(),
+                    accepted_prediction_tokens = ?output_details["accepted_prediction_tokens"].as_u64(),
+                    rejected_prediction_tokens = ?output_details["rejected_prediction_tokens"].as_u64(),
+                    cached_tokens = ?details["cached_tokens"].as_u64(),
+                    cache_write_tokens = ?details["cache_write_tokens"].as_u64(),
+                    "provider completion diagnostics"
+                );
                 self.completed = Some((
                     id.to_owned(),
                     Usage {
