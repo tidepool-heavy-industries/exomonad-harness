@@ -420,6 +420,25 @@ async fn embedded_restart_preserves_committed_model_for_retained_opaque_history(
             )
             .unwrap();
         store.set_effort(&opaque_head, Effort::Low).unwrap();
+        store
+            .record_replay_turn(
+                &opaque_head,
+                &ResponsesRequest {
+                    input: vec![],
+                    instructions: "instructions".into(),
+                    tools: vec![].into(),
+                    tools_allowed: None,
+                    model: "model-b".into(),
+                    pinned_effort: Effort::Low,
+                    session_id: "embedded-restart".into(),
+                },
+                &ResponsesTurn {
+                    response_id: "model-b-output".into(),
+                    items: vec![opaque.clone()],
+                    usage: Usage::default(),
+                },
+            )
+            .unwrap();
         assert!(
             store
                 .settle_embedded_round(
