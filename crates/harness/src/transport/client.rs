@@ -419,7 +419,9 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
     let mut framer = SseFramer::new();
     let mut assembly = ResponseAssembly::default();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| TransportError::Stream("SSE read failed".into()))?;
+        let chunk = chunk.map_err(|_| {
+            TransportError::IncompleteResponse(super::StreamInterruption::ReadFailed)
+        })?;
         for data in framer.push(&chunk)? {
             if let Some(event) = assembly.accept(&data)? {
                 if let Some(sender) = &sink {

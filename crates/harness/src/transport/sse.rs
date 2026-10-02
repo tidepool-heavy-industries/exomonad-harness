@@ -136,9 +136,9 @@ impl ResponseAssembly {
     }
 
     pub fn finish(self) -> Result<ResponsesTurn, TransportError> {
-        let (response_id, usage) = self
-            .completed
-            .ok_or_else(|| TransportError::Stream("missing response.completed".into()))?;
+        let (response_id, usage) = self.completed.ok_or(TransportError::IncompleteResponse(
+            super::StreamInterruption::MissingCompletion,
+        ))?;
         Ok(ResponsesTurn {
             response_id,
             items: self.items,

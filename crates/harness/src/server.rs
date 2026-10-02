@@ -470,28 +470,34 @@ impl ServerControl {
         event
     }
 
-    /// Publish bounded settled model requests from their durable Store evidence.
+    /// Publish bounded observed model outcomes from their durable Store evidence.
     /// Request metadata and its event watermark become visible together. Reconnect
-    /// retains the same bounded window of the last 128 model completion events;
+    /// retains the same bounded window of the last 128 model outcome events;
     /// older requests leave the projection through explicit removal events.
     pub fn refresh_completed_model_requests(
         &self,
         store: &Store,
     ) -> Result<(), crate::store::StoreError> {
         let mut next_sequence = self.next_sequence.lock().expect("sequence lock poisoned");
-        let requests = store.completed_model_requests(128)?;
+        let requests = store.model_request_outcomes(128)?;
         let mut snapshot = self.snapshot.write().expect("snapshot lock poisoned");
         let rows = requests
             .into_iter()
             .map(|settled| {
                 let request = settled.request;
-                serde_json::json!({
+                let mut row = serde_json::json!({
                     "id": request.id.0,
                     "parentId": request.parent.map(|parent| parent.0),
                     "conversationId": request.branch,
-                    "state": if settled.failure.is_some() { "failed" } else { "completed" },
+                    "state": if settled.failure.is_some() || settled.interruption.is_some() { "failed" } else { "completed" },
                     "failure": settled.failure,
-                })
+                });
+                if let Some(cause) = settled.interruption {
+                    row["detail"] = serde_json::json!(format!(
+                        "Provider stream interrupted: {cause}. Send a new message to continue from retained history."
+                    ));
+                }
+                row
             })
             .collect::<Vec<_>>();
         let previous = conversation_rows_by_id(&snapshot.requests);
@@ -3215,6 +3221,61 @@ mod rejection_projection_tests {
         assert!(
             events.try_recv().is_err(),
             "failure was republished without change"
+        );
+    }
+}
+
+#[cfg(test)]
+mod interruption_projection_tests {
+    use super::*;
+    #[test]
+    fn interrupted_request_remains_pending_while_browser_retains_failed_exchange() {
+        let store = Store::memory().unwrap();
+        let identity = crate::embedding::HostIdentity {
+            run: "interruption".into(),
+            actor: crate::model::AgentPath("/root".into()),
+            incarnation: "1".into(),
+        };
+        store.bind_embedded_actor(&identity, None).unwrap();
+        let request = crate::model::RequestId("pending-stream".into());
+        store
+            .write_embedded_request(&identity, &request, None, &[], Default::default())
+            .unwrap();
+        assert!(
+            store
+                .record_interrupted_model_request(
+                    &request,
+                    crate::transport::StreamInterruption::MissingCompletion,
+                    Some((&identity, None))
+                )
+                .unwrap()
+        );
+        let (_, control, _) = server(PathBuf::from("."));
+        control.refresh_completed_model_requests(&store).unwrap();
+        let snapshot = control.snapshot.read().unwrap();
+        let row = &snapshot.requests[0];
+        assert_eq!(row["state"], "failed");
+        assert!(row["failure"].is_null());
+        assert!(
+            row["detail"]
+                .as_str()
+                .unwrap()
+                .contains("Send a new message")
+        );
+        assert_eq!(
+            store
+                .embedded_round_frontier(&identity)
+                .unwrap()
+                .pending_head,
+            Some(request)
+        );
+        assert!(
+            store
+                .agent(&identity.actor)
+                .unwrap()
+                .unwrap()
+                .head_request
+                .is_none()
         );
     }
 }

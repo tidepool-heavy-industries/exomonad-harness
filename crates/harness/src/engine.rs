@@ -113,6 +113,16 @@ mod tool_execution_tests;
 pub enum EngineError {
     #[error(transparent)]
     Transport(#[from] TransportError),
+    /// Stream completion is unknown, but every locally admitted outstanding
+    /// call was cleaned up and the interruption was durably recorded. The
+    /// pending request stays unresolved until deliberate recovery.
+    #[error("model request {head_request:?} interrupted: {cause}")]
+    InterruptedModelRound {
+        head_request: RequestId,
+        cause: crate::transport::StreamInterruption,
+    },
+    #[error("interrupted request lost its embedded agent head fence")]
+    InterruptedHeadMismatch,
     /// A provider refused this exact request before starting a response, and
     /// all outstanding call cleanup and failure persistence succeeded.
     #[error("provider rejected request {head_request:?}: {error}")]
@@ -2234,6 +2244,41 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         request: &RequestId,
         pending: &[PendingCall],
     ) -> EngineError {
+        if let TransportError::IncompleteResponse(cause) = &error {
+            let cause = *cause;
+            let primary = EngineError::Transport(error);
+            if let Err(cleanup) = self.cancel_pending(pending).await {
+                return EngineError::Cleanup {
+                    primary: Box::new(primary),
+                    cleanup: cleanup.to_string(),
+                };
+            }
+            let store = self.store.clone();
+            let request = request.clone();
+            let head_request = request.clone();
+            let expected = expected_head.cloned();
+            let identity = self.embedded_identity();
+            match blocking(move || {
+                store.record_interrupted_model_request(
+                    &request,
+                    cause,
+                    identity
+                        .as_ref()
+                        .map(|identity| (identity, expected.as_ref())),
+                )
+            })
+            .await
+            {
+                Ok(true) => {
+                    return EngineError::InterruptedModelRound {
+                        head_request,
+                        cause,
+                    };
+                }
+                Ok(false) => return EngineError::InterruptedHeadMismatch,
+                Err(error) => return error,
+            }
+        }
         let Some(failure) = error.request_failure() else {
             return self
                 .cleanup_pending(EngineError::Transport(error), pending)
