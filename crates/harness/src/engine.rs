@@ -47,6 +47,12 @@ struct HistoryWindow {
     model: Option<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingCompletion {
+    BlocksCompletion,
+    PreserveForFollowup,
+}
+
 #[derive(Clone)]
 struct PendingCall {
     operation: OperationId,
@@ -58,6 +64,7 @@ struct PendingCall {
     cancel_job_on_cleanup: bool,
     scheduling: ToolScheduling,
     queued: bool,
+    completion: PendingCompletion,
 }
 
 #[derive(Clone, Debug)]
@@ -809,9 +816,19 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
                 Err(error) => return Err(EngineError::Job(error)),
             }
-            attachable.push((claim, tool_kind));
+            let completion = if claim.operation.origin != self.origin
+                && self
+                    .scheduler
+                    .requires_store_publication(&claim.operation)
+                    .await?
+            {
+                PendingCompletion::PreserveForFollowup
+            } else {
+                PendingCompletion::BlocksCompletion
+            };
+            attachable.push((claim, tool_kind, completion));
         }
-        for (claim, tool_kind) in attachable {
+        for (claim, tool_kind, completion) in attachable {
             let settlement = self
                 .scheduler
                 .fork_claim_exact(&claim.operation, self.origin.clone(), true)
@@ -830,13 +847,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     cancel_job_on_cleanup: false,
                     scheduling: ToolScheduling::Async,
                     queued: false,
+                    completion,
                 }),
             }
         }
         if let Some(turn) = &recorded_response {
             if is_final(turn, finalize_schema.is_some())
                 && initial.is_empty()
-                && pending.is_empty()
+                && !pending
+                    .iter()
+                    .any(|call| call.completion == PendingCompletion::BlocksCompletion)
                 && replay_items.is_empty()
                 && replay_outputs.is_empty()
             {
@@ -1738,7 +1758,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
             } else if !had_inline_wait
                 && is_final(&turn, finalize_schema.is_some())
-                && !pending.is_empty()
+                && pending
+                    .iter()
+                    .any(|call| call.completion == PendingCompletion::BlocksCompletion)
                 && settled_this_turn.is_empty()
             {
                 let result = match self
@@ -1767,7 +1789,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             } else if !had_inline_wait
                 && !had_sync_calls
                 && is_final(&turn, finalize_schema.is_some())
-                && pending.is_empty()
+                && !pending
+                    .iter()
+                    .any(|call| call.completion == PendingCompletion::BlocksCompletion)
             {
                 if let Some(schema) = finalize_schema {
                     let calls: Vec<_> = turn
@@ -2138,6 +2162,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 cancel_job_on_cleanup: false,
                 scheduling: ToolScheduling::Async,
                 queued: false,
+                completion: PendingCompletion::BlocksCompletion,
             }));
         }
         // Admission is durable before the provider can execute or capture a
@@ -2211,6 +2236,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             cancel_job_on_cleanup: true,
             scheduling,
             queued: scheduling == ToolScheduling::BeforeNextInference,
+            completion: PendingCompletion::BlocksCompletion,
         }))
     }
 

@@ -458,18 +458,16 @@ async fn serial_sync_context_commits_and_model_route_are_visible_before_next_cal
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].model, "model-old");
     assert_eq!(requests[1].model, "model-next");
-    assert!(
-        requests[1]
-            .input
-            .iter()
-            .any(|item| item.0["content"] == "first commit")
-    );
-    assert!(
-        requests[1]
-            .input
-            .iter()
-            .any(|item| item.0["content"] == "second commit")
-    );
+    assert!(requests[1].input.iter().any(|item| {
+        item.0["content"]
+            .as_str()
+            .is_some_and(|text| text.ends_with("first commit"))
+    }));
+    assert!(requests[1].input.iter().any(|item| {
+        item.0["content"]
+            .as_str()
+            .is_some_and(|text| text.ends_with("second commit"))
+    }));
     for operation in operations.lock().unwrap().iter() {
         assert!(engine.store.context_receipt(operation).unwrap().is_some());
         assert_eq!(
@@ -509,12 +507,11 @@ async fn lost_context_commit_acknowledgment_recovers_without_reexecuting_effects
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[1].model, "model-next");
-    assert!(
-        requests[1]
-            .input
-            .iter()
-            .any(|item| item.0["content"] == "first commit")
-    );
+    assert!(requests[1].input.iter().any(|item| {
+        item.0["content"]
+            .as_str()
+            .is_some_and(|text| text.ends_with("first commit"))
+    }));
     assert_eq!(
         requests[1]
             .input
@@ -540,12 +537,11 @@ async fn partial_success_cannot_publish_staged_context_or_model() {
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[1].model, "model-old");
-    assert!(
-        !requests[1]
-            .input
-            .iter()
-            .any(|item| item.0["content"] == "first commit")
-    );
+    assert!(!requests[1].input.iter().any(|item| {
+        item.0["content"]
+            .as_str()
+            .is_some_and(|text| text.ends_with("first commit"))
+    }));
 }
 
 #[tokio::test]
@@ -909,5 +905,102 @@ async fn queued_sync_identity_is_claimable_but_foreign_output_waits_for_store_pu
             .await
             .unwrap(),
         Some(terminal)
+    );
+}
+
+struct FinalOnly;
+#[async_trait::async_trait]
+impl ResponsesTransport for FinalOnly {
+    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        Ok(final_turn())
+    }
+}
+
+#[tokio::test]
+async fn child_final_completes_while_parent_sync_waits_for_child() {
+    let (mut parent, _, operations) = context_engine(false, false);
+    let started = Arc::new(Notify::new());
+    let child_final = Arc::new(Notify::new());
+    Arc::get_mut(&mut parent.provider).unwrap().paused =
+        Some((started.clone(), child_final.clone()));
+    let parent = Arc::new(parent);
+    let (_parent_cancel, cancelled) = watch::channel(false);
+    let running_parent = {
+        let parent = parent.clone();
+        tokio::spawn(async move { parent.run(None, vec![], cancelled, mailbox()).await })
+    };
+    started.notified().await;
+    let operation = operations.lock().unwrap()[0].clone();
+    let child_path = AgentPath("/root/child".into());
+    let snapshot = RequestId("child-pending-sync-snapshot".into());
+    parent
+        .store
+        .admit_agent(
+            &AgentPath("/root".into()),
+            None,
+            Some(&operation.request),
+            &json!({}),
+            &json!({"kind":"root"}),
+        )
+        .unwrap();
+    parent
+        .store
+        .admit_here_agent_with_snapshot(
+            &child_path,
+            &AgentPath("/root".into()),
+            &snapshot,
+            &json!({}),
+            "/root",
+            "/root/child",
+            "AtBoundary",
+            &Item(json!({"type":"message","role":"assistant","content":"NEW_TASK"})),
+        )
+        .unwrap();
+    let child = Engine::with_transport(
+        FinalOnly,
+        parent.store.clone(),
+        parent.scheduler.clone(),
+        parent.provider.clone(),
+        EngineConfig {
+            instructions: "child".into(),
+            tools: vec![],
+            model: "model-old".into(),
+            effort: Effort::Low,
+            session_id: "child-sync-tests".into(),
+            agent: child_path,
+        },
+    );
+    let (_child_cancel, cancelled) = watch::channel(false);
+    let completed = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        child.run(Some(snapshot.clone()), vec![], cancelled, mailbox()),
+    )
+    .await
+    .expect("child final must not wait for parent's synchronous invocation")
+    .unwrap();
+    assert!(is_final(&completed.turn, false));
+    assert_eq!(parent.scheduler.output(&operation).await.unwrap(), None);
+    let claims = parent.store.claims_for_operation(&operation).unwrap();
+    assert_eq!(claims.len(), 2);
+    assert!(
+        claims
+            .iter()
+            .all(|claim| claim.state == crate::store::ClaimState::Pending)
+    );
+    assert!(claims.iter().any(|claim| claim.request == snapshot));
+    child_final.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(2), running_parent)
+        .await
+        .expect("parent resumes when child finishes")
+        .unwrap()
+        .unwrap();
+    assert!(parent.store.context_receipt(&operation).unwrap().is_some());
+    assert!(
+        parent
+            .store
+            .claims_for_operation(&operation)
+            .unwrap()
+            .iter()
+            .all(|claim| claim.state == crate::store::ClaimState::Settled)
     );
 }

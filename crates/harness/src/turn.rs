@@ -741,6 +741,21 @@ impl JobScheduler {
         Ok(job.output.clone())
     }
 
+    /// Synchronous invocation results become visible to attached conversations
+    /// only after their owning Engine publishes the terminal in Store.
+    pub(crate) async fn requires_store_publication(
+        &self,
+        operation: &OperationId,
+    ) -> Result<bool, JobError> {
+        Ok(self
+            .jobs
+            .lock()
+            .await
+            .get(operation)
+            .ok_or(JobError::UnknownCall)?
+            .requires_publication)
+    }
+
     pub(crate) async fn unpublished_output<K: JobKey>(
         &self,
         key: &K,
@@ -834,8 +849,10 @@ impl JobScheduler {
         if !*job.published.borrow() {
             job.settled_claimants.extend(job.claimants.drain());
             job.published.send_replace(true);
-            let _ = self.events.send(operation.clone());
-            let _ = self.legacy_events.send(operation.call.clone());
+            if job.requires_publication {
+                let _ = self.events.send(operation.clone());
+                let _ = self.legacy_events.send(operation.call.clone());
+            }
         }
         Ok(())
     }
