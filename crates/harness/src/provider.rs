@@ -251,6 +251,7 @@ pub trait CancellationOwner: Send + Sync {
 pub enum ContextDisposition {
     Unedited,
     Draft(crate::context::ContextDraft),
+    Replay(crate::context::ContextCommitEvidence),
 }
 
 /// Exact provider-future completion. Embedded runtimes derive `full_success`
