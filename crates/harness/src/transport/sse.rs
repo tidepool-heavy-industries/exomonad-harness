@@ -58,12 +58,14 @@ impl ResponseAssembly {
             ) => {
                 let item_id = event
                     .get("item_id")
-                    .or_else(|| {
-                        (kind == "response.custom_tool_call_input.delta")
-                            .then(|| event.get("call_id"))
-                            .flatten()
-                    })
                     .and_then(Value::as_str)
+                    .or_else(|| {
+                        if kind == "response.custom_tool_call_input.delta" {
+                            event.get("call_id").and_then(Value::as_str)
+                        } else {
+                            None
+                        }
+                    })
                     .ok_or_else(|| TransportError::Stream("delta missing item_id".into()))?;
                 Ok(event
                     .get("delta")
@@ -275,6 +277,13 @@ mod lite_tests {
         assert_eq!(channel, OutputChannel::ToolInput);
         assert_eq!(text, "λ");
         let mut preferred = event.clone();
+        preferred["item_id"] = Value::Null;
+        let Some(StreamEvent::Delta { item_id, .. }) =
+            assembly.accept(&preferred.to_string()).unwrap()
+        else {
+            panic!("tool input delta expected");
+        };
+        assert_eq!(item_id, "exact-call");
         preferred["item_id"] = json!("native-item");
         let Some(StreamEvent::Delta { item_id, .. }) =
             assembly.accept(&preferred.to_string()).unwrap()
