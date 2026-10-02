@@ -1,6 +1,47 @@
 # Visible context trim provider qualification — 2026-10-02
 
-Real requests used `gpt-6.1-sol` through the owning
+## Current trial: native ChatGPT plan route
+
+The running trial's configuration selects `provider:chatgpt_plan`,
+`gpt-6.1-sol`, and Medium effort. Four fresh requests qualified that exact
+provider path through the existing `ChatGptPlanAuth`,
+`ResponsesRoute::ChatGptPlan`, and production Standard serializer against
+`https://api.openai.com/v1/responses`. The existing native registration remained
+owned by the authentication service. No credentials, authorization headers, or
+Codex-issued reasoning were copied into this run.
+
+The production public serializer advertised tools in the `functions` namespace,
+retaining `async:true` on the custom background tool and `async:false` on the
+custom editor. A genuine diagnostic call supplied encrypted reasoning. The next
+response emitted an asynchronous raw-Haskell custom call (`async:true`), a new
+encrypted reasoning item, and a synchronous custom editor (absent `async`).
+
+After the editor, the host replaced only the earlier diagnostic output string
+(8,860 bytes to 102 bytes, including the explanatory trim marker and retained
+`calibration=47`). Both reasoning items and every native call remained exact
+under canonical JSON hashing. The editor's real completion was appended while
+the unrelated background call remained unresolved. The next response was
+`CONTEXT_OK calibration=47 pending=true`. Appending the eventual checksum result
+with the original background call ID then produced
+`BACKGROUND_OK checksum=91 calibration=47`.
+
+| ChatGPT plan request | Input tokens | Output tokens | Reasoning tokens | Returned reasoning context |
+| --- | ---: | ---: | ---: | --- |
+| Diagnostic call | 466 | 153 | 136 | `all_turns` |
+| Background and editor calls | 2,487 | 176 | 127 | `all_turns` |
+| Edited history and editor completion | 866 | 12 | 0 | `all_turns` |
+| Late background completion | 874 | 12 | 0 | `all_turns` |
+
+Requests omitted `reasoning.context`; opt-in completion tracing confirmed the
+returned effective mode on every response. All four requests completed; reported
+cache and cache-write counters were zero. Prediction-token counters were
+unavailable. This independently qualifies the live trial's provider route;
+tool execution remained the local diagnostic/checksum fixture, so it does not
+replace resident Haskell or browser acceptance.
+
+## Separate Codex endpoint qualification
+
+Earlier real requests used `gpt-6.1-sol` through the owning
 `ResponsesClient::create` and production request serializer, against
 `https://chatgpt.com/backend-api/codex/responses`. Authentication read the
 existing Codex credential file through `CodexFileAuth`; no credentials or
@@ -8,7 +49,7 @@ authorization headers were printed or retained. Each request replayed its
 complete native history with `store:false`, streaming, and encrypted reasoning
 included. No `previous_response_id` or reasoning reset was used.
 
-## Accepted curation and pending settlement
+## Codex Standard curation and pending settlement
 
 The Standard Codex route accepted four requests containing a diagnostic
 function call and asynchronous function call, followed by a synchronous editor,
@@ -42,9 +83,9 @@ visible answers for this fixture, rather than a general guarantee that edited
 facts leave earlier reasoning conclusions valid. Tool execution was a local
 diagnostic/checksum fixture; this was not a resident Haskell or browser test.
 
-## Lite capabilities and boundaries
+## Codex Lite capabilities and boundaries
 
-Production Lite normalization requests `reasoning.context:all_turns`, sets
+The Codex Lite serializer requests `reasoning.context:all_turns`, sets
 `parallel_tool_calls:false`, supplies tools as `additional_tools`, and removes
 their `async` declarations. A three-request **settled-history** Lite run accepted
 the same visible trim, retained both native reasoning items exactly, and
@@ -89,8 +130,10 @@ response and continued from it. An erroneous custom probe attempted inference
 before settling a synchronous editor; its 400 was preserved and the existing
 editor was then settled in the same history.
 
-Twenty live HTTP requests ran: seventeen completed and three returned the
-documented HTTP 400 outcomes. This is a provider gate, not a deployment gate.
+Twenty Codex HTTP requests ran: seventeen completed and three returned the
+documented HTTP 400 outcomes. The additional four ChatGPT plan requests all
+completed, bringing the total to twenty-four HTTP requests. These are provider
+gates, not a deployment gate.
 The changed harness library compiled with its pinned Rust 1.93 toolchain and
 declared cached dependencies. A narrow source test wrapper executed all five
 existing SSE tests (five passed, zero failed); it did not run the full Cargo
