@@ -146,13 +146,23 @@ before a synchronous model change commits. Notes retain supported visible text,
 reasoning summaries, tool inputs and results. Pending exchanges, incomplete or
 ambiguous response membership, unknown issuing models and unsupported content
 refuse portability. Opaque server compaction remains on its evidenced issuing
-model; a readable authored replacement is required to move it across models.
+model. Context drafts cannot remove or convert opaque native groups to notes.
 Raw history, claims, context documents and replay receipts retain their original
-native items and source references; `getContext` therefore shows the stored
-native groups rather than the provider request projection. Exact issued replay
-requests record the projected notes and their hashes. Portability runs no effects.
+native items and source references. `getContext` exposes editable message parts
+and exact settled result bodies inside native groups, including groups with
+other pending calls. Visible edits are occurrence-local overlays: outgoing
+same-model requests preserve every retained opaque item, native identity and
+position while carrying the edited body (for example, `[Trimmed: repetitive
+output]`). Tool inputs, reasoning and native metadata remain read-only. Edited
+opaque history refuses a model switch rather than dropping reasoning. Scheduling,
+recovery and terminal evidence always read the original canonical items.
+Snapshots, forks, saved-context restoration and reopen retain the overlays.
+Exact issued replay requests record the projected items and their hashes.
+Portability runs no effects.
 
-Context commit receipts use internal format version 2. Version 1 receipts are
-rejected with `ContextError::UnsupportedState` when read for acknowledgment,
+Context commit receipts use internal format version 3 and accept overlay-free
+version 2 receipts, including acknowledged or retried replay restorations. Database
+schema 11 adds nullable occurrence overlays; older rows retain identity projection.
+Version 1 receipts are rejected with `ContextError::UnsupportedState` when read for acknowledgment,
 recovery or replay; retained version 1 runs require explicit migration or
 recreation before this candidate can resume them.

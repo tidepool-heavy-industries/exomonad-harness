@@ -1,4 +1,4 @@
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 pub const SQL: &str = include_str!("schema.sql");
 const MODEL_REQUEST_INDEXES: &str = "
     CREATE INDEX IF NOT EXISTS events_model_turn_recent ON events(id DESC,request_id) WHERE kind='model_turn';
@@ -111,6 +111,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
         "source_position",
         "context_sources",
         "context_note",
+        "context_overlays",
     ] {
         if !item_columns.iter().any(|existing| existing == column) {
             let kind = if column == "context_note" {

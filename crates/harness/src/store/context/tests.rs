@@ -91,10 +91,7 @@ fn commit_replaces_prefix_preserves_suffix_and_original_evidence() {
         .context_request_state(&receipt.head, &operation.origin)
         .unwrap();
     assert_eq!(state.model.as_deref(), Some("sol"));
-    assert_eq!(
-        state.history[0].2.0["content"],
-        "[Agent-authored context note; sources: root:0]\nedited context"
-    );
+    assert_eq!(state.history[0].2.0["content"], "edited context");
     assert_eq!(state.history[0].2.0["unknown"], json!({"retain":true}));
     assert_eq!(state.history[1].2.0["call_id"], "edit");
     assert!(
@@ -419,7 +416,12 @@ fn replay_restores_sealed_prefix_model_and_original_operation() {
         .unwrap();
     assert_eq!(receipt.model.as_deref(), Some("sol"));
     assert_eq!(
-        local.context_history(&receipt.head).unwrap()[0].2.0["content"],
+        local
+            .context_request_state(&receipt.head, &local_operation.origin)
+            .unwrap()
+            .history[0]
+            .2
+            .0["content"],
         "edited context"
     );
     let restored = local
@@ -633,9 +635,19 @@ fn deferred_child_inherits_committed_context_and_terminal_before_call_stays_froz
         .context_history(child.head_request.as_ref().unwrap())
         .unwrap();
     assert!(
+        store
+            .read_context(child.head_request.as_ref().unwrap())
+            .unwrap()
+            .blocks
+            .iter()
+            .any(
+                |block| matches!(block, ContextBlock::Text {text, ..} if text == "edited context")
+            )
+    );
+    assert!(
         history
             .iter()
-            .any(|(_, _, i)| i.0["content"] == "edited context")
+            .any(|(_, _, item)| item.0["content"] == "old context")
     );
     assert!(
         history
@@ -862,7 +874,9 @@ fn saved_native_restore_refuses_missing_or_forged_original_claim() {
         } else {
             assert!(matches!(
                 result,
-                Err(StoreError::Context(ContextError::ProtectedGroup))
+                Err(StoreError::Context(
+                    ContextError::ProtectedGroup | ContextError::NativeEdit
+                ))
             ));
         }
         assert_eq!(store.context_history(&deleted.head).unwrap(), before);
@@ -934,7 +948,10 @@ fn v9_migration_preserves_raw_items_and_adds_nullable_provenance() {
         )
         .unwrap();
     connection
-        .execute("INSERT INTO request_items VALUES('old',0,'oldhash')", [])
+        .execute(
+            "INSERT INTO request_items(request_id,position,item_hash) VALUES('old',0,'oldhash')",
+            [],
+        )
         .unwrap();
     super::super::schema::initialize(&mut connection).unwrap();
     let data: (String,Option<String>,Option<i64>,Option<String>) = connection.query_row("SELECT i.json,ri.source_request,ri.source_position,ri.context_sources FROM request_items ri JOIN items i ON i.hash=ri.item_hash",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
@@ -944,7 +961,7 @@ fn v9_migration_preserves_raw_items_and_adds_nullable_provenance() {
             .query_row("SELECT version FROM schema_version", [], |r| r
                 .get::<_, u32>(0))
             .unwrap(),
-        10
+        super::super::schema::VERSION
     );
 }
 
@@ -1124,10 +1141,13 @@ fn second_sync_capture_uses_current_edited_context_and_original_call() {
         .unwrap();
     assert!(
         store
-            .context_history(cuts.before_call().snapshot_request())
+            .read_context(cuts.before_call().snapshot_request())
             .unwrap()
+            .blocks
             .iter()
-            .any(|(_, _, i)| i.0["content"] == "edited context")
+            .any(
+                |block| matches!(block, ContextBlock::Text {text, ..} if text == "edited context")
+            )
     );
     assert_eq!(cuts.before_call().operation(), Some(&second));
 }
@@ -1196,7 +1216,7 @@ fn authored_notes_project_attribution_without_changing_retained_item_bytes() {
 }
 
 #[test]
-fn closed_opaque_response_converts_to_notes_preserving_raw_evidence() {
+fn closed_opaque_response_conversion_is_rejected_preserving_raw_evidence() {
     let store = Store::memory().unwrap();
     let parent = RequestId("opaque-response".into());
     let reasoning = Item(json!({"type":"reasoning","encrypted_content":"sealed","summary":[]}));
@@ -1232,36 +1252,32 @@ fn closed_opaque_response_converts_to_notes_preserving_raw_evidence() {
         } => reference.clone(),
         other => panic!("{other:?}"),
     };
-    let receipt = store
-        .commit_context(ContextCommit {
-            snapshot: &snapshot,
-            draft: &ContextDraft {
-                next_effort: None,
-                document: ContextDocument {
-                    blocks: vec![ContextBlock::Text {
-                        reference: None,
-                        role: ContextRole::User,
-                        text: "useful discovery".into(),
-                        sources: vec![reference],
-                    }],
-                },
-                next_model: Some("sol".into()),
+    let result = store.commit_context(ContextCommit {
+        snapshot: &snapshot,
+        draft: &ContextDraft {
+            next_effort: None,
+            document: ContextDocument {
+                blocks: vec![ContextBlock::Text {
+                    reference: None,
+                    role: ContextRole::User,
+                    text: "useful discovery".into(),
+                    sources: vec![reference],
+                }],
             },
-            output: &output(),
-            pending: &[],
-        })
-        .unwrap();
+            next_model: Some("sol".into()),
+        },
+        output: &output(),
+        pending: &[],
+    });
+    assert!(matches!(
+        result,
+        Err(StoreError::Context(ContextError::ProtectedGroup))
+    ));
     assert_eq!(
         store.context_model(&operation.origin).unwrap().as_deref(),
-        Some("sol")
+        Some("luna")
     );
-    assert!(
-        !store
-            .context_history(&receipt.head)
-            .unwrap()
-            .iter()
-            .any(|(_, _, i)| i.0["encrypted_content"] == "sealed")
-    );
+    assert!(store.context_receipt(&operation).unwrap().is_none());
     assert_eq!(
         store.items(&parent).unwrap().iter().collect::<Vec<_>>(),
         vec![&reasoning, &answer]
@@ -1308,8 +1324,14 @@ fn blocks_preserve_duplicate_call_order_orphans_and_cut_opaque_groups() {
         ContextBlock::Native {
             reference: reference(&grouped[1].items),
             kind: ContextNativeKind::CompletedExchange,
-            preview: preview(&grouped[1].items),
+            preview: preview(&grouped[1].items).unwrap(),
             protected: false,
+            texts: vec![ContextVisibleText {
+                reference: reference(&grouped[1].items[1..]),
+                selector: ContextTextSelector::ToolResultText,
+                text: "first".into(),
+                editable: false,
+            }],
         }
     );
     assert_eq!(grouped[2].items.len(), 2);
@@ -1746,7 +1768,7 @@ fn here_output_copy_preserves_occurrences_and_child_context_freeze() {
     assert!(
         before
             .iter()
-            .any(|occurrence| occurrence.note && !occurrence.sources.is_empty())
+            .any(|occurrence| !occurrence.overlays.is_empty())
     );
     store.lock().execute_batch("CREATE TRIGGER refuse_here_copy BEFORE INSERT ON request_items WHEN NEW.request_id='here-snapshot' AND (SELECT json_extract(json,'$.type') FROM items WHERE hash=NEW.item_hash)='function_call_output' AND (SELECT json_extract(json,'$.call_id') FROM items WHERE hash=NEW.item_hash)='spawn' BEGIN SELECT RAISE(ABORT,'refuse output'); END;").unwrap();
     assert!(
@@ -1835,7 +1857,7 @@ fn here_output_copy_preserves_occurrences_and_child_context_freeze() {
             .iter()
             .any(|(_, _, item)| item.0["content"]
                 .as_str()
-                .is_some_and(|text| text.contains("sources: root:0")))
+                .is_some_and(|text| text == "edited context"))
     );
 }
 

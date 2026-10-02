@@ -53,6 +53,32 @@ pub enum ContextNativeKind {
     Pending,
 }
 
+/// Closed selectors for provider-visible bodies. Invocation inputs and opaque
+/// reasoning never grant editable text authority.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ContextTextSelector {
+    MessageText { part: u32 },
+    ToolResultText,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextVisibleText {
+    pub reference: ContextReference,
+    pub selector: ContextTextSelector,
+    pub text: String,
+    pub editable: bool,
+}
+
+/// Occurrence-local request projection; canonical item bytes stay unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContextTextOverlay {
+    pub selector: ContextTextSelector,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContextBlock {
@@ -67,6 +93,8 @@ pub enum ContextBlock {
         kind: ContextNativeKind,
         preview: String,
         protected: bool,
+        #[serde(default)]
+        texts: Vec<ContextVisibleText>,
     },
 }
 
@@ -111,6 +139,7 @@ pub(crate) struct Occurrence {
     pub origin: Origin,
     pub sources: Vec<ContextReference>,
     pub note: bool,
+    pub overlays: Vec<ContextTextOverlay>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -147,8 +176,9 @@ pub struct ContextCommitReceipt {
 /// fields prevent a provider from manufacturing replay authority.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContextCommitEvidence {
+    pub(crate) version: u32,
     pub(crate) original_operation: OperationId,
-    pub(crate) prefix: Vec<(Item, Vec<ContextReference>, bool)>,
+    pub(crate) prefix: Vec<(Item, Vec<ContextReference>, bool, Vec<ContextTextOverlay>)>,
     pub(crate) output: Item,
     pub(crate) invocation: Item,
     pub(crate) model: Option<String>,
@@ -179,9 +209,9 @@ pub enum ContextError {
     MissingCall,
     #[error("context reference is not part of this editable prefix")]
     InvalidReference,
-    #[error("native context envelopes are read-only; convert a completed group to notes")]
+    #[error("native context identity and text authority are read-only")]
     NativeEdit,
-    #[error("a pending or cross-boundary native group cannot be removed")]
+    #[error("a pending, opaque or cross-boundary native group cannot be removed")]
     ProtectedGroup,
     #[error("retained native groups must keep their original order")]
     NativeOrder,

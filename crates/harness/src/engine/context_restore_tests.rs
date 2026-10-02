@@ -129,6 +129,15 @@ async fn saved_native_exchange_restores_exact_claim_and_recovers_after_reopen() 
                 })
                 .cloned(),
         );
+        for block in &mut saved.blocks {
+            if let ContextBlock::Native { texts, .. } = block {
+                for field in texts {
+                    if field.text == "retained evidence" {
+                        field.text = "[Trimmed: lengthy evidence]\nretained observation".into();
+                    }
+                }
+            }
+        }
         let restored = store
             .commit_context(ContextCommit {
                 snapshot: &restore,
@@ -198,7 +207,8 @@ async fn saved_native_exchange_restores_exact_claim_and_recovers_after_reopen() 
     assert_eq!(
         input
             .iter()
-            .filter(|item| *item == &completed_output)
+            .filter(|item| item.0["call_id"] == "done"
+                && item.0["output"] == "[Trimmed: lengthy evidence]\nretained observation")
             .count(),
         1
     );

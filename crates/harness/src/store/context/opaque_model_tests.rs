@@ -97,24 +97,30 @@ fn prepare(provenance: Provenance<'_>, selected: &str) -> Restoration {
             _ => None,
         })
         .collect();
+    // A pre-overlay v2 rewrite could deliberately replace a closed opaque
+    // group. Preserve that historical fixture through the supported v2 replay
+    // reader; new drafts cannot remove the group.
+    let legacy = ContextCommitEvidence {
+        version: 2,
+        original_operation: first.clone(),
+        prefix: vec![(
+            Item(json!({"type":"message","role":"user","content":"discovery note"})),
+            sources,
+            true,
+            Vec::new(),
+        )],
+        output: Item::tool_output(&first.call, crate::item::ToolKind::Custom, &output()),
+        invocation: store
+            .items(&head)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.0["call_id"] == first.call.0)
+            .unwrap(),
+        model: Some(selected.into()),
+        next_effort: None,
+    };
     let dropped = store
-        .commit_context(ContextCommit {
-            snapshot: &snapshot,
-            draft: &ContextDraft {
-                document: ContextDocument {
-                    blocks: vec![ContextBlock::Text {
-                        reference: None,
-                        role: ContextRole::User,
-                        text: "discovery note".into(),
-                        sources,
-                    }],
-                },
-                next_model: Some(selected.into()),
-                next_effort: None,
-            },
-            output: &output(),
-            pending: std::slice::from_ref(&second),
-        })
+        .restore_context_commit(&snapshot, &legacy, &output(), std::slice::from_ref(&second))
         .unwrap();
     if matches!(provenance, Provenance::MissingModel) {
         store.lock().execute("UPDATE events SET payload=json_remove(payload,'$.issued.model') WHERE kind='model_turn'", []).unwrap();

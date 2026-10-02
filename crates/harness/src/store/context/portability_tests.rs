@@ -457,17 +457,42 @@ fn replay_collision_fixture(
             }
         )
     });
+    // Retain a historical v2 deletion fixture without reopening opaque-group
+    // deletion to new drafts.
+    let legacy = ContextCommitEvidence {
+        version: 2,
+        original_operation: drop_operation.clone(),
+        prefix: snapshot
+            .blocks
+            .iter()
+            .filter(|stored| document.blocks.contains(&stored.block))
+            .flat_map(|stored| {
+                stored.items.iter().map(|item| {
+                    (
+                        item.item.clone(),
+                        item.sources.clone(),
+                        item.note,
+                        Vec::new(),
+                    )
+                })
+            })
+            .collect(),
+        output: Item::tool_output(
+            &drop_operation.call,
+            crate::item::ToolKind::Custom,
+            &output(),
+        ),
+        invocation: store
+            .items(&drop_head)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.0["call_id"] == drop_operation.call.0)
+            .unwrap(),
+        model: Some("model-b".into()),
+        next_effort: None,
+    };
     let dropped = store
-        .commit_context(ContextCommit {
-            snapshot: &snapshot,
-            draft: &ContextDraft {
-                document,
-                next_model: Some("model-b".into()),
-                next_effort: None,
-            },
-            output: &output(),
-            pending: &[],
-        })
+        .restore_context_commit(&snapshot, &legacy, &output(), &[])
         .unwrap();
     let b = RequestId("current-b".into());
     let b_call = Item(
@@ -497,8 +522,8 @@ fn replay_collision_fixture(
     (store, snapshot, saved)
 }
 
-fn collision_evidence(identical_group: bool) -> ContextCommitEvidence {
-    let (store, snapshot, saved) = replay_collision_fixture(identical_group, false);
+fn collision_evidence() -> ContextCommitEvidence {
+    let (store, snapshot, saved) = replay_collision_fixture(false, false);
     store
         .commit_context(ContextCommit {
             snapshot: &snapshot,
@@ -519,7 +544,7 @@ fn collision_evidence(identical_group: bool) -> ContextCommitEvidence {
 
 #[test]
 fn replay_restores_a_whole_native_family_with_its_original_equal_byte_output() {
-    let evidence = collision_evidence(false);
+    let evidence = collision_evidence();
     let (store, snapshot, _) = replay_collision_fixture(false, false);
     let receipt = store
         .restore_context_commit(&snapshot, &evidence, &output(), &[])
@@ -556,7 +581,7 @@ fn replay_restores_a_whole_native_family_with_its_original_equal_byte_output() {
 
 #[test]
 fn replay_refuses_identical_native_groups_with_distinct_origins_atomically() {
-    let evidence = collision_evidence(true);
+    let evidence = collision_evidence();
     let (store, snapshot, _) = replay_collision_fixture(true, false);
     let before = store.context_history(&snapshot.head).unwrap();
     let result = store.restore_context_commit(&snapshot, &evidence, &output(), &[]);
@@ -585,7 +610,7 @@ fn replay_refuses_identical_native_groups_with_distinct_origins_atomically() {
 
 #[test]
 fn replay_cannot_substitute_equal_spine_bytes_for_another_protected_origin() {
-    let evidence = collision_evidence(false);
+    let evidence = collision_evidence();
     let (store, snapshot, _) = replay_collision_fixture(false, true);
     let before = store.context_history(&snapshot.head).unwrap();
     let result = store.restore_context_commit(&snapshot, &evidence, &output(), &[]);
@@ -607,7 +632,7 @@ fn replay_cannot_substitute_equal_spine_bytes_for_another_protected_origin() {
 
 #[test]
 fn whole_native_replay_preserves_later_async_output_with_reused_historical_call_id() {
-    let evidence = collision_evidence(false);
+    let evidence = collision_evidence();
     let (local, snapshot, _) = replay_collision_fixture(false, false);
     let receipt = local
         .restore_context_commit(&snapshot, &evidence, &output(), &[])

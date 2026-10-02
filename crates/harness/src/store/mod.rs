@@ -705,7 +705,12 @@ impl Store {
             )?;
         }
         if let Some(source_head) = &source_head {
-            context::preserve_origins(&tx, source_head, snapshot_request)?;
+            context::preserve_origins(
+                &tx,
+                source_head,
+                snapshot_request,
+                context::CopyRepresentation::Canonical,
+            )?;
         }
         for (origin, original_request, call_id) in inherited_operations {
             tx.execute(

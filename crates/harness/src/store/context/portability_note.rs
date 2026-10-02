@@ -288,6 +288,7 @@ mod tests {
             },
             sources: vec![],
             note: false,
+            overlays: Vec::new(),
         }
     }
 
