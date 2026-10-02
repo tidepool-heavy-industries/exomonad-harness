@@ -869,7 +869,7 @@ async fn queued_sync_identity_is_claimable_but_foreign_output_waits_for_store_pu
         None
     );
     assert!(starts.try_recv().is_err());
-    let (_mailbox, mut inbox) = mpsc::unbounded_channel::<crate::turn::Envelope>();
+    let (_mailbox, mut inbox) = mpsc::unbounded_channel::<crate::mailbox::Envelope>();
     let (_cancel, mut cancelled) = watch::channel(false);
     let outstanding = [operation.clone()];
     let waiting = crate::turn::wait_agent_and_drain_exact(
