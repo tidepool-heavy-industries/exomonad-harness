@@ -17,10 +17,12 @@ class FakeSocket {
 }
 
 function response(status: number, body?: unknown): Response {
+  const payload = typeof body === 'object' && body !== null && 'authenticated' in body
+    ? { authentication: 'secret', available: true, ...body } : body
   return {
     ok: status >= 200 && status < 300,
     status,
-    json: async () => body,
+    json: async () => payload,
   } as Response
 }
 
@@ -70,7 +72,7 @@ describe('optional browser session', () => {
     expect(sockets).toHaveLength(0)
   })
 
-  it('allows trusted-proxy authentication without login and logs out local cookie sessions', async () => {
+  it('opens authenticated sessions and logs out local cookie sessions', async () => {
     fetchMock
       .mockResolvedValueOnce(response(200, { authenticated: true }))
       .mockResolvedValueOnce(response(204))
@@ -83,7 +85,7 @@ describe('optional browser session', () => {
     expect(sockets).toHaveLength(1)
   })
 
-  it('keeps trusted-proxy access authenticated when cookie logout is unavailable', async () => {
+  it('keeps the session authenticated when cookie logout is unavailable', async () => {
     fetchMock
       .mockResolvedValueOnce(response(200, { authenticated: true }))
       .mockResolvedValueOnce(response(404))
@@ -94,6 +96,26 @@ describe('optional browser session', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Browser login is not enabled')
     expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument()
     expect(screen.queryByLabelText('Session secret')).not.toBeInTheDocument()
+  })
+
+  it('opens an authenticated Tailscale session without browser secret controls', async () => {
+    fetchMock.mockResolvedValueOnce(response(200, { authenticated: true, authentication: 'tailscale', available: true }))
+    render(<Operator />)
+
+    expect(await screen.findByText(/Session authenticated · Tailscale/)).toBeInTheDocument()
+    expect(screen.queryByLabelText('Session secret')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Sign out' })).not.toBeInTheDocument()
+    expect(sockets).toHaveLength(1)
+  })
+
+  it('shows retry guidance without a secret form when Tailscale denies access', async () => {
+    fetchMock.mockResolvedValueOnce(response(200, { authenticated: false, authentication: 'tailscale', available: true }))
+    render(<Operator />)
+
+    expect(await screen.findByText(/Connect to the authorized Tailscale network/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry session check' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Session secret')).not.toBeInTheDocument()
+    expect(sockets).toHaveLength(0)
   })
 
   it('shows only loading state until the authoritative WebSocket snapshot replaces it', async () => {

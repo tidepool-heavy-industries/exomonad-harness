@@ -6,9 +6,13 @@ const entry = (item: unknown) => ({ position: 7, hash: 'a'.repeat(64), byteLen: 
 const exact = '  λ 🐈\n"quoted" \\  <script>alert(1)</script>  '
 
 describe('retained Item presentation', () => {
-  it('shows role, phase and exact escaped string content without executing HTML', () => {
+  it('omits opaque reasoning items without a readable summary', () => {
+    const {container} = render(<HistoryItem entry={entry({type:'reasoning', summary:[], encrypted_content:'opaque'})} />)
+    expect(container.textContent).toBe('')
+  })
+  it('shows a readable role and exact escaped string content without executing HTML', () => {
     const { container } = render(<HistoryItem entry={entry({ type: 'message', role: 'assistant', phase: 'commentary', content: exact })} />)
-    expect(screen.getByRole('heading', { name: 'Message · assistant · commentary' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Assistant' })).toBeInTheDocument()
     expect(screen.getByLabelText('Text item 7').textContent).toBe(exact)
     expect(container.querySelector('script')).toBeNull()
   })
@@ -23,6 +27,7 @@ describe('retained Item presentation', () => {
     expect(screen.getByLabelText('Text item 7 block 2').textContent).toBe(' second\n')
     expect(screen.getByText(/Unknown content is retained/)).toBeInTheDocument()
     expect(screen.queryByLabelText('Raw item 7')).toBeNull()
+    fireEvent.click(screen.getByText('Message details'))
     fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
     expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
     fireEvent.click(screen.getByRole('button', { name: 'Hide Raw item 7' }))
@@ -30,6 +35,8 @@ describe('retained Item presentation', () => {
   })
 
   it.each([
+    [{type:'message',role:'assistant',content:[{type:'refusal',refusal:exact}]}, 'Text'],
+    [{type:'reasoning',summary:[],content:[{type:'reasoning_text',text:exact}]}, 'Reasoning'],
     [{ type: 'reasoning', summary: [{ type: 'summary_text', text: exact }] }, 'Summary'],
     [{ type: 'function_call', name: 'f', call_id: 'call λ', arguments: ' { "z":1, "a" : 2 }\n' }, 'Arguments'],
     [{ type: 'custom_tool_call', name: 'cell', call_id: 'call λ', input: exact }, 'Input'],
@@ -38,7 +45,7 @@ describe('retained Item presentation', () => {
     [{ type: 'configuration_update', reasoning: { effort: 'high' } }, 'Reasoning effort'],
   ] as const)('retains the original text for %j', (item, label) => {
     render(<HistoryItem entry={entry(item)} />)
-    const source = 'summary' in item ? exact : 'arguments' in item ? item.arguments : 'input' in item ? item.input
+    const source = 'content' in item || 'summary' in item ? exact : 'arguments' in item ? item.arguments : 'input' in item ? item.input
       : 'output' in item ? item.output : item.reasoning.effort
     expect(screen.getByLabelText(`${label} item 7`).textContent).toBe(source)
     if ('type' in item && item.type.includes('call')) expect(screen.getByRole('heading').textContent).toContain(item.type)
@@ -56,6 +63,7 @@ describe('retained Item presentation', () => {
     render(<HistoryItem entry={entry(item)} />)
     expect(screen.getByRole('heading', { name: 'function_call · structured · call call λ' })).toBeInTheDocument()
     expect(screen.getByLabelText('Arguments JSON item 7').textContent).toBe(JSON.stringify(argumentsObject, null, 2))
+    fireEvent.click(screen.getByText('Message details'))
     fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
     expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
   })
@@ -66,6 +74,7 @@ describe('retained Item presentation', () => {
     expect(screen.getByLabelText('Text item 7').textContent).toBe(text.slice(0, 2000))
     fireEvent.click(screen.getByRole('button', { name: 'Expand Text item 7' }))
     expect(screen.getByLabelText('Text item 7').textContent).toBe(text)
+    fireEvent.click(screen.getByText('Message details'))
     fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
     expect(screen.getByLabelText('Raw item 7').textContent?.length).toBe(2000)
     fireEvent.click(screen.getByRole('button', { name: 'Expand Raw item 7' }))
@@ -77,6 +86,7 @@ describe('retained Item presentation', () => {
     const serialize = vi.spyOn(JSON, 'stringify')
     render(<HistoryItem entry={entry(item)} />)
     expect(serialize.mock.calls.some(([value]) => value === item)).toBe(false)
+    fireEvent.click(screen.getByText('Message details'))
     fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
     expect(serialize.mock.calls.some(([value]) => value === item)).toBe(true)
     serialize.mockRestore()

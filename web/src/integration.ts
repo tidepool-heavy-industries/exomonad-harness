@@ -41,13 +41,14 @@ export function createViewProjector(): (state: NormalizedState) => HarnessViewMo
   let parents = new Map<string, string | null | undefined>()
 
   return (state) => {
+    const outputChanged = previous?.liveOutput !== state.liveOutput || previous?.historyRevisions !== state.historyRevisions
     const actorsChanged = previous?.actors !== state.actors
     const conversationsChanged = previous?.conversations !== state.conversations
     const requestsChanged = previous?.requests !== state.requests
     const jobsChanged = previous?.jobs !== state.jobs
     const inboxChanged = previous?.envelopes !== state.envelopes
     const receiptsChanged = previous?.commandReceipts !== state.commandReceipts
-    if (result && !actorsChanged && !conversationsChanged && !requestsChanged
+    if (result && !outputChanged && !actorsChanged && !conversationsChanged && !requestsChanged
       && !jobsChanged && !inboxChanged && !receiptsChanged && previous?.hostRun === state.hostRun) {
       previous = state
       return result
@@ -143,7 +144,9 @@ export function createViewProjector(): (state: NormalizedState) => HarnessViewMo
       if (inbox.every((row) => row.ordinal !== undefined)) inbox.sort((a, b) => a.ordinal! - b.ordinal!)
       inboxCache = next
     }
-    result = { hostRun: state.hostRun, actors, nodes, timeline, inbox,
+    result = { liveOutput: outputChanged ? [...(state.liveOutput?.values() ?? [])] : result?.liveOutput,
+      historyRevisions: outputChanged ? [...(state.historyRevisions?.values() ?? [])] : result?.historyRevisions,
+      hostRun: state.hostRun, actors, nodes, timeline, inbox,
       commandReceipts: receiptsChanged ? [...state.commandReceipts.values()] : result?.commandReceipts ?? [] }
     previous = state
     return result

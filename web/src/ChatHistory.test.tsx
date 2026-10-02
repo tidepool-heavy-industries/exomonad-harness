@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ChatHistory, { clearChatHistoryRetention } from './ChatHistory'
 import { readHistoryPage, type HistoryPage } from './history-client'
@@ -12,6 +12,29 @@ function chat(key: string, ready = true) {
 }
 beforeEach(() => { clearChatHistoryRetention(); vi.clearAllMocks(); vi.mocked(readHistoryPage).mockImplementation(async (id, offset) => page(id, offset)) })
 describe('bounded retained Chat slices', () => {
+  it('publishes the newest response while a retained ancestor is still pending and preserves it if that read fails', async () => {
+    let rejectAncestor!: (reason: unknown) => void
+    vi.mocked(readHistoryPage).mockImplementation(async (id) => id === 'newest'
+      ? {...page(id,0), parentId:'ancestor', nextOffset:null}
+      : await new Promise((_, reject) => {rejectAncestor = reject}))
+    render(<ChatHistory requestId="newest" requests={new Map()} refreshKey="1" ready />)
+    await screen.findByText('newest slice 0')
+    expect(screen.getByText('Loading conversation messages…')).toBeVisible()
+    await act(async () => rejectAncestor(new Error('ancestor unavailable')))
+    expect(screen.getByText('newest slice 0')).toBeVisible()
+    expect(screen.getByText('ancestor unavailable')).toBeVisible()
+  })
+  it('uses proven request lineage to refresh predecessor commits without restarting progressive loads', async () => {
+    const oldOrigin = {kind:'embedded' as const, run:'run', actor:'/root', incarnation:'old'}
+    vi.mocked(readHistoryPage).mockImplementation(async (id) => ({...page(id,0), parentId:id === 'newest' ? 'ancestor' : null, nextOffset:null}))
+    const props = {requestId:'newest', requests:new Map(), refreshKey:'stable', ready:true}
+    const mounted = render(<ChatHistory {...props} historyRevisions={[{origin:oldOrigin, requestId:'ancestor', version:1}]} />)
+    await screen.findByText('ancestor slice 0')
+    await waitFor(() => expect(readHistoryPage).toHaveBeenCalledTimes(2))
+    mounted.rerender(<ChatHistory {...props} historyRevisions={[{origin:oldOrigin, requestId:'ancestor', version:2}]} />)
+    await waitFor(() => expect(readHistoryPage).toHaveBeenCalledTimes(4))
+    expect(screen.getByText('ancestor slice 0')).toBeVisible()
+  })
   it('retains the exact older cursor across unmount and reconnect rather than replacing it with another worker', async () => {
     const mounted = render(chat('one'))
     await screen.findByText('one slice 0')

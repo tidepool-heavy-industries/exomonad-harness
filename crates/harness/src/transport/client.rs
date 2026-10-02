@@ -196,19 +196,9 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
         for data in framer.push(&chunk)? {
             if let Some(event) = assembly.accept(&data)? {
                 if let Some(sender) = &sink {
-                    match event {
-                        // State-bearing items are lossless. A closed sink
-                        // means its consumer has stopped; final turn remains
-                        // available from the returned ResponsesTurn.
-                        StreamEvent::ItemDone(_) => {
-                            let _ = sender.send(event).await;
-                        }
-                        // Text deltas are recoverable from the final item, so
-                        // a slow subscriber cannot stall the model stream.
-                        StreamEvent::Delta(_) => {
-                            let _ = sender.try_send(event);
-                        }
-                    }
+                    // Bounded backpressure preserves every provider delta and completed item.
+                    // A closed consumer has stopped; the final turn remains authoritative.
+                    let _ = sender.send(event).await;
                 }
             }
         }

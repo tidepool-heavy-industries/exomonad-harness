@@ -297,8 +297,9 @@ impl Conversation {
         Ok(Self { store, host })
     }
 
-    /// Construct the model loop for this binding. The host manifest is the sole
-    /// tool surface; the caller supplies shared Store/scheduler infrastructure.
+    /// Construct the model loop for this binding. The host manifest supplies
+    /// provider tools; Engine adds its reserved continuation intrinsic. The
+    /// caller supplies shared Store/scheduler infrastructure.
     pub fn engine<A: crate::transport::Auth, C: crate::engine::ResponsesTransport>(
         &self,
         transport: C,

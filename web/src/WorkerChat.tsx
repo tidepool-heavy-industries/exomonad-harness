@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
+import { belongsTo } from './live-output'
 import ChatHistory, { clearChatHistoryRetention } from './ChatHistory'
 import type { RouteState, TransportPhase } from './client-contract'
 import { routeUrl } from './navigation'
@@ -46,6 +47,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
   const parents = new Set(requests.flatMap(item => item.parentId ? [item.parentId] : []))
   const currentHead = exactHead ? { id: exactHead } : requests.filter(item => !parents.has(item.id)).at(-1)
   const head = currentHead ?? (retained?.conversationId === conversationId ? retained?.head : undefined)
+  const liveOutput = identity ? (data.liveOutput ?? []).filter(output => belongsTo(output, identity)) : []
   const refreshKey = JSON.stringify([exactHead, data.timeline.find(item => item.kind === 'request' && item.id === exactHead)?.historyRefreshKey,
     data.nodes.find(node => node.id === conversationId)?.version,
     requests.map(item => [item.id, item.historyRefreshKey])])
@@ -96,7 +98,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
           {(conversationId || exactHead) && head ? <ChatHistory key={JSON.stringify([context, conversationId])}
             cacheKey={JSON.stringify([context, conversationId])} requestId={head.id}
             requests={new Map(data.timeline.filter(item => item.kind === 'request').map(item => [item.id, item]))}
-            refreshKey={refreshKey} ready={transportPhase === 'ready'} onAuthExpired={onAuthExpired} /> :
+            historyRevisions={(data.historyRevisions ?? []).filter(revision => revision.origin.kind === 'embedded' && revision.origin.run === identity.run)} active={!!resolved.actor && ['running', 'waiting'].includes(resolved.actor.lifecycle)} liveOutput={liveOutput} refreshKey={refreshKey} ready={transportPhase === 'ready'} onAuthExpired={onAuthExpired} /> :
             <p>{ambiguousConversation ? 'No exact history head is available for this actor.' : resolved.missing ? 'The host has no retained conversation association for this exact actor.' : 'No retained model exchange is available yet.'}</p>}
         </>}
       {children}

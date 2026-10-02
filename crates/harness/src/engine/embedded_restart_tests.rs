@@ -648,3 +648,50 @@ async fn embedded_restart_recovers_actual_internal_compaction_without_reexecutin
     drop(store);
     std::fs::remove_file(path).unwrap();
 }
+
+#[tokio::test]
+async fn embedded_restart_retains_direct_followup_after_durable_final_response() {
+    let store = Arc::new(Store::memory().unwrap());
+    let identity = identity();
+    store.bind_embedded_actor(&identity, None).unwrap();
+    let first_input = Item(json!({"role":"user","content":"first direct input"}));
+    let next_input = Item(json!({"role":"user","content":"explicit direct followup"}));
+    let (first, _) = engine(store.clone(), &identity, vec![Ok(final_turn())]);
+    let (_cancel, cancel) = watch::channel(false);
+    let pending = first
+        .run_embedded(None, vec![first_input.clone()], cancel.clone(), incoming())
+        .await
+        .unwrap()
+        .head_request;
+    let (resumed, inputs) = engine(store.clone(), &identity, vec![Ok(final_turn())]);
+    let completion = resumed
+        .run_recovering_embedded(None, vec![next_input.clone()], cancel, incoming())
+        .await
+        .unwrap();
+    assert_eq!(inputs.lock().unwrap().len(), 1);
+    let inputs = inputs.lock().unwrap();
+    assert_eq!(
+        inputs[0]
+            .input
+            .iter()
+            .filter(|item| **item == first_input)
+            .count(),
+        1
+    );
+    assert_eq!(
+        inputs[0]
+            .input
+            .iter()
+            .filter(|item| **item == next_input)
+            .count(),
+        1
+    );
+    assert_eq!(
+        store
+            .request(&completion.head_request)
+            .unwrap()
+            .unwrap()
+            .parent,
+        Some(pending)
+    );
+}

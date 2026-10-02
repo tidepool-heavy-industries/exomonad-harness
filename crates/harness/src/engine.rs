@@ -4,6 +4,9 @@
 //! calls are started immediately and their settled outputs are appended under
 //! their original call ids before the next request.
 
+mod output;
+pub use output::{ModelOutput, ModelOutputObserver, ModelOutputUpdate};
+
 use crate::{
     compaction::{
         CompactContext, CompactError, Compactor, PlainText, Server, ServerCompactFuture, ToolName,
@@ -17,11 +20,11 @@ use crate::{
     store::{Store, StoreError, Usage as StoredUsage},
     transport::{
         Auth, ResponsesClient, ResponsesRequest, ResponsesTurn, TransportError, Usage,
-        sse::StreamEvent,
+        sse::{OutputChannel, StreamEvent},
     },
     turn::{
         JobError, JobScheduler, WaitAgentResultExact, WaitResumeExact, outputs_in_operation_order,
-        wait_agent_and_drain_exact,
+        wait_agent_and_drain_until_exact,
     },
 };
 use schemars::JsonSchema;
@@ -44,10 +47,28 @@ struct PendingCall {
     operation: OperationId,
     call_id: CallId,
     claim_request: RequestId,
-    is_wait_agent: bool,
+    wait: Option<WaitKind>,
     tool_kind: ToolKind,
     persist_here_invocation_output: bool,
     cancel_job_on_cleanup: bool,
+}
+
+#[derive(Clone, Debug)]
+enum WaitKind {
+    Agent,
+    Yield {
+        deadline: Option<tokio::time::Instant>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum YieldReason {
+    ToolResult,
+    UserInput,
+    WorkerInput,
+    Timeout,
+    Cancelled,
 }
 
 enum DispatchResult {
@@ -79,6 +100,9 @@ mod embedded_restart_tests;
 #[cfg(test)]
 #[path = "engine/rejection_tests.rs"]
 mod rejection_tests;
+#[cfg(test)]
+#[path = "engine/yield_tests.rs"]
+mod yield_tests;
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -123,6 +147,10 @@ pub enum EngineError {
     MissingEffortPin,
     #[error("a model response contained more than one wait_agent call")]
     MultipleWaitAgents,
+    #[error("tool name `yield` is reserved by the engine")]
+    ReservedYieldTool,
+    #[error("yield requires an object with optional nullable nonnegative finite `until` seconds")]
+    InvalidYieldArguments,
     #[error(transparent)]
     Compact(#[from] CompactError),
     #[error("cannot resume a forked wait_agent call before its parent settles it")]
@@ -221,6 +249,7 @@ pub struct Engine<A: Auth, P: Provider, C: ResponsesTransport = ResponsesClient<
     origin: ConversationIdentity,
     compact_at_input_tokens: Option<u64>,
     bounded_invocation: bool,
+    output_observer: Option<Arc<dyn ModelOutputObserver>>,
     compaction_strategy: CompactionStrategy,
     _auth: std::marker::PhantomData<fn() -> A>,
 }
@@ -292,8 +321,34 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             origin,
             compact_at_input_tokens: None,
             bounded_invocation: false,
+            output_observer: None,
             compaction_strategy: CompactionStrategy::Server,
             _auth: std::marker::PhantomData,
+        }
+    }
+    pub fn with_output_observer(mut self, observer: Arc<dyn ModelOutputObserver>) -> Self {
+        self.output_observer = Some(observer);
+        self
+    }
+    fn observe_delta(
+        &self,
+        request: &RequestId,
+        item_id: String,
+        channel: OutputChannel,
+        index: u64,
+        text: String,
+    ) {
+        if let Some(observer) = &self.output_observer {
+            observer.observe(ModelOutput {
+                origin: self.origin.clone(),
+                request_id: request.clone(),
+                update: ModelOutputUpdate::Delta {
+                    item_id,
+                    channel,
+                    index,
+                    text,
+                },
+            });
         }
     }
     pub(crate) fn with_origin(mut self, origin: ConversationIdentity) -> Self {
@@ -710,7 +765,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .iter()
                 .any(|item| {
                     items::function_call(item).is_some_and(|(call, name, _)| {
-                        call == claim.call_id && name == "wait_agent"
+                        call == claim.call_id && matches!(name.as_str(), "wait_agent" | "yield")
                     })
                 })
             {
@@ -746,7 +801,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     operation: claim.operation,
                     call_id: claim.call_id,
                     claim_request: claim.request,
-                    is_wait_agent: false,
+                    wait: None,
                     tool_kind,
                     persist_here_invocation_output: false,
                     cancel_job_on_cleanup: false,
@@ -755,6 +810,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         }
         if let Some(turn) = &recorded_response {
             if is_final(turn, finalize_schema.is_some())
+                && initial.is_empty()
                 && pending.is_empty()
                 && replay_items.is_empty()
                 && replay_outputs.is_empty()
@@ -922,7 +978,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .as_ref()
                 .is_none_or(|(previous, _)| previous != &provider_tools)
             {
-                let tools = self.compose_tools(finalize_schema, &provider_tools);
+                let tools = match self.compose_tools(finalize_schema, &provider_tools) {
+                    Ok(tools) => tools,
+                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                };
                 request_tools = Some((provider_tools, tools));
             }
             let mut input_hashes = Vec::with_capacity(history.items.len());
@@ -1131,6 +1190,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 return Err(self.cleanup_pending(error, &pending).await);
             }
             let model_request_id = parent.clone();
+            let mut output_lifetime = output::OutputLifetime {
+                observer: self.output_observer.clone(),
+                origin: self.origin.clone(),
+                request_id: parent.clone(),
+            };
+            if let Some(observer) = &self.output_observer {
+                observer.observe(ModelOutput {
+                    origin: self.origin.clone(),
+                    request_id: parent.clone(),
+                    update: ModelOutputUpdate::Started,
+                });
+            }
             let create = self
                 .client
                 .create_streaming_for_request(&model_request_id, req, event_tx);
@@ -1162,11 +1233,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     result = &mut create => match result {
                         Ok(turn) => break turn,
                         Err(error) => {
+                            output_lifetime.stop();
                             return Err(self.reject_or_cleanup(error, settled_head.as_ref(), &parent, &pending).await);
                         }
                     },
                     changed = cancellation.changed() => {
                         if changed.is_err() || *cancellation.borrow() {
+                            output_lifetime.stop();
                             return Err(self.cleanup_pending(EngineError::Cancelled { head_request: Some(parent.clone()) }, &pending).await);
                         }
                     }
@@ -1205,11 +1278,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 match self.dispatch_with_provider(item, &parent, request_provider.clone(), &mut cancellation).await {
                                     Ok(DispatchResult::Pending(call)) => {
                                         if !pending.iter().any(|current| current.operation == call.operation) {
-                                            if call.is_wait_agent && (wait_call.is_some() || !inline_settled.is_empty()) {
+                                            if call.wait.is_some() && (wait_call.is_some() || !inline_settled.is_empty()) {
                                                 deferred_dispatch_error = Some(EngineError::MultipleWaitAgents);
                                                 continue;
                                             }
-                                            if call.is_wait_agent { wait_call = Some(call.call_id.clone()); }
+                                            if call.wait.is_some() { wait_call = Some(call.call_id.clone()); }
                                             turn_call_ids.push(call.call_id.clone());
                                             turn_call_items.push((call.call_id.clone(), call_item));
                                             pending.push(call);
@@ -1228,7 +1301,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                     Err(error) => deferred_dispatch_error = Some(error),
                                 }
                             }
-                            Some(StreamEvent::Delta(_)) => {}
+                            Some(StreamEvent::Delta {item_id, channel, index, text}) => {
+                                self.observe_delta(&parent, item_id, channel, index, text);
+                            }
                             None => event_stream_open = false,
                         }
                     }
@@ -1251,6 +1326,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             };
             // A completed response can race the buffered final item events.
             while let Ok(event) = event_rx.try_recv() {
+                if let StreamEvent::Delta {
+                    item_id,
+                    channel,
+                    index,
+                    text,
+                } = event
+                {
+                    self.observe_delta(&parent, item_id, channel, index, text);
+                    continue;
+                }
                 if let StreamEvent::ItemDone(item) = event {
                     let call_id = match parsed_call_id(&item) {
                         Ok(call_id) => call_id,
@@ -1294,14 +1379,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 .iter()
                                 .any(|current| current.operation == call.operation)
                             {
-                                if call.is_wait_agent
+                                if call.wait.is_some()
                                     && (wait_call.is_some() || !inline_settled.is_empty())
                                 {
                                     return Err(self
                                         .cleanup_pending(EngineError::MultipleWaitAgents, &pending)
                                         .await);
                                 }
-                                if call.is_wait_agent {
+                                if call.wait.is_some() {
                                     wait_call = Some(call.call_id.clone());
                                 }
                                 turn_call_ids.push(call.call_id.clone());
@@ -1331,6 +1416,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                 }
             }
+            drop(output_lifetime);
             // Some injected transports may only return a turn, without emitting
             // item events. The production client emits every completed item.
             for item in &turn.items {
@@ -1382,14 +1468,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             .await
                         {
                             Ok(DispatchResult::Pending(call)) => {
-                                if call.is_wait_agent
+                                if call.wait.is_some()
                                     && (wait_call.is_some() || !inline_settled.is_empty())
                                 {
                                     return Err(self
                                         .cleanup_pending(EngineError::MultipleWaitAgents, &pending)
                                         .await);
                                 }
-                                if call.is_wait_agent {
+                                if call.wait.is_some() {
                                     wait_call = Some(call_id.clone());
                                 }
                                 turn_call_ids.push(call_id.clone());
@@ -1562,16 +1648,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         Err(error) => return Err(self.cleanup_pending(error, &pending).await),
                     }
                 };
-                if matches!(&result.resumed_by, WaitResumeExact::Cancelled) {
-                    return Err(self
-                        .cleanup_pending(
-                            EngineError::Cancelled {
-                                head_request: Some(parent.clone()),
-                            },
-                            &pending,
-                        )
-                        .await);
-                }
+                let cancelled = matches!(&result.resumed_by, WaitResumeExact::Cancelled);
                 let wait_operation = OperationId {
                     origin: self.origin.clone(),
                     request: parent.clone(),
@@ -1583,11 +1660,22 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         &parent,
                         Some(&wait_operation),
                         result,
+                        &settled_this_turn,
                         admit_inbox,
                     )
                     .await
                 {
                     return Err(self.cleanup_pending(error, &pending).await);
+                }
+                if cancelled {
+                    return Err(self
+                        .cleanup_pending(
+                            EngineError::Cancelled {
+                                head_request: Some(parent.clone()),
+                            },
+                            &pending,
+                        )
+                        .await);
                 }
             } else if !had_inline_wait
                 && is_final(&turn, finalize_schema.is_some())
@@ -1612,7 +1700,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         .await);
                 }
                 if let Err(error) = self
-                    .persist_wait_result(&mut pending, &parent, None, result, admit_inbox)
+                    .persist_wait_result(&mut pending, &parent, None, result, &[], admit_inbox)
                     .await
                 {
                     return Err(self.cleanup_pending(error, &pending).await);
@@ -1707,12 +1795,35 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         items: Vec<Item>,
     ) -> Result<Vec<Item>, EngineError> {
         let store = self.store.clone();
-        let id = id.clone();
-        blocking(move || {
-            store.append_items(&id, &items)?;
-            Ok(items)
+        let request = id.clone();
+        let observing = self.output_observer.is_some();
+        let (items, hashes, origin) = blocking(move || {
+            let hashes = store.append_items(&request, &items)?;
+            let origin = if observing {
+                Some(store.request_output_origin(&request)?)
+            } else {
+                None
+            };
+            Ok((items, hashes, origin))
         })
-        .await
+        .await?;
+        if let (Some(observer), Some(origin)) = (&self.output_observer, origin) {
+            for (item, hash) in items
+                .iter()
+                .filter(|i| !i.is_configuration_update())
+                .zip(hashes)
+            {
+                observer.observe(ModelOutput {
+                    origin: origin.clone(),
+                    request_id: id.clone(),
+                    update: ModelOutputUpdate::Committed {
+                        item_id: item.0["id"].as_str().map(str::to_owned),
+                        hash,
+                    },
+                });
+            }
+        }
+        Ok(items)
     }
 
     async fn append_unread_envelopes(&self, request: &RequestId) -> Result<(), EngineError> {
@@ -1789,7 +1900,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .ok_or(EngineError::MissingInheritedOutput(call_id))
     }
 
-    fn tools(&self, finalize_schema: Option<&serde_json::Value>) -> crate::transport::ToolManifest {
+    fn tools(
+        &self,
+        finalize_schema: Option<&serde_json::Value>,
+    ) -> Result<crate::transport::ToolManifest, EngineError> {
         self.compose_tools(finalize_schema, &self.provider.tool_manifest())
     }
 
@@ -1797,12 +1911,22 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         &self,
         finalize_schema: Option<&serde_json::Value>,
         manifest: &crate::transport::ToolManifest,
-    ) -> crate::transport::ToolManifest {
+    ) -> Result<crate::transport::ToolManifest, EngineError> {
+        if self
+            .config
+            .tools
+            .iter()
+            .chain(manifest.iter())
+            .any(|tool| tool["name"] == "yield")
+        {
+            return Err(EngineError::ReservedYieldTool);
+        }
         if self.config.tools.is_empty()
             && finalize_schema.is_none()
             && !manifest.has_duplicate_names()
+            && self.embedded_identity().is_none()
         {
-            return manifest.clone();
+            return Ok(manifest.clone());
         }
         let mut tools = self.config.tools.clone();
         if let Some(schema) = finalize_schema {
@@ -1824,7 +1948,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 tools.push(tool.clone());
             }
         }
-        tools.into()
+        if self.embedded_identity().is_some() {
+            tools.push(yield_tool_schema());
+        }
+        Ok(tools.into())
     }
 
     #[cfg(test)]
@@ -1864,16 +1991,27 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let name = call.name;
         let input = call.input;
         let tool_kind = input.kind();
-        provider.validate_call(&name, tool_kind)?;
+        let is_yield = name == "yield";
+        let wait = if is_yield {
+            if self.embedded_identity().is_none() || tool_kind != ToolKind::Function {
+                return Err(EngineError::InvalidFunctionCall);
+            }
+            self.compose_tools(None, &provider.tool_manifest())?;
+            Some(WaitKind::Yield {
+                deadline: yield_deadline(&input)?,
+            })
+        } else {
+            provider.validate_call(&name, tool_kind)?;
+            (name == "wait_agent").then_some(WaitKind::Agent)
+        };
         if tool_kind == ToolKind::Custom
             && (crate::provider::is_harness_tool(&name) || name == FINALIZE_TOOL_NAME)
         {
             return Err(EngineError::InvalidFunctionCall);
         }
-        let is_wait_agent = name == "wait_agent";
         let is_here_spawn = name == "spawn_agent"
             && matches!(&input, ToolInput::Function(args) if args["from"]["kind"].as_str() == Some("here"));
-        if is_wait_agent {
+        if wait.is_some() {
             let store = self.store.clone();
             let call = operation.clone();
             let request_id = request.clone();
@@ -1882,6 +2020,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 biased;
                 _ = await_cancellation(cancellation) => Err(EngineError::Cancelled { head_request: Some(request.clone()) }),
                 result = async {
+                    if is_yield {
+                        return Ok(None);
+                    }
                     provider.retained_output(&name, &input, &operation).await?
                         .map(|retained| retained.into_parts(&operation)).transpose()
                 } => result.map_err(EngineError::from),
@@ -1919,7 +2060,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 operation,
                 call_id,
                 claim_request: request.clone(),
-                is_wait_agent,
+                wait,
                 tool_kind,
                 persist_here_invocation_output: false,
                 cancel_job_on_cleanup: false,
@@ -1971,7 +2112,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             operation,
             call_id,
             claim_request: request.clone(),
-            is_wait_agent,
+            wait,
             tool_kind,
             persist_here_invocation_output: is_here_spawn,
             cancel_job_on_cleanup: true,
@@ -1999,7 +2140,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         for operation in first.iter().chain(second) {
             if !pending
                 .iter()
-                .any(|call| call.operation == *operation && !call.is_wait_agent)
+                .any(|call| call.operation == *operation && call.wait.is_none())
             {
                 return Err(EngineError::ClaimRecoveryConflict(operation.call.0.clone()));
             }
@@ -2018,7 +2159,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let mut first_error = None;
         for call in pending {
             let mut persisted_terminal = false;
-            if call.cancel_job_on_cleanup && !call.is_wait_agent {
+            if call.cancel_job_on_cleanup && call.wait.is_none() {
                 if let Err(error) = self.scheduler.cancel(&call.operation).await {
                     if !matches!(error, JobError::UnknownCall) {
                         first_error.get_or_insert_with(|| EngineError::Job(error));
@@ -2140,7 +2281,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     ) -> Result<Vec<OperationId>, EngineError> {
         let calls: Vec<_> = pending
             .iter()
-            .filter(|call| !call.is_wait_agent)
+            .filter(|call| call.wait.is_none())
             .map(|call| call.operation.clone())
             .collect();
         let outputs = outputs_in_operation_order(&self.scheduler, &calls).await?;
@@ -2178,7 +2319,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     ) -> Result<(), EngineError> {
         let operations = pending
             .iter()
-            .filter(|call| !call.is_wait_agent && !retained.contains(&call.operation))
+            .filter(|call| call.wait.is_none() && !retained.contains(&call.operation))
             .map(|call| call.operation.clone())
             .collect::<Vec<_>>();
         for (operation, output) in outputs_in_operation_order(&self.scheduler, &operations).await? {
@@ -2229,12 +2370,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         {
             return Err(EngineError::ClaimRecoveryConflict(call_id.0.clone()));
         }
-        let store = self.store.clone();
-        blocking(move || {
-            store.append_items(&request, &[item])?;
-            Ok(())
-        })
-        .await?;
+        self.append(&request, vec![item]).await?;
         if matches!(output, crate::turn::JobOutput::Completed(_)) {
             self.acknowledge_output(operation).await?;
         }
@@ -2313,16 +2449,27 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     ) -> Result<WaitAgentResultExact, EngineError> {
         let calls: Vec<_> = pending
             .iter()
-            .filter(|call| !call.is_wait_agent)
+            .filter(|call| call.wait.is_none())
             .map(|call| call.operation.clone())
             .collect();
+        let deadline = pending.iter().find_map(|call| match &call.wait {
+            Some(WaitKind::Yield { deadline }) => *deadline,
+            _ => None,
+        });
         loop {
-            let result =
-                wait_agent_and_drain_exact(envelopes, &self.scheduler, cancellation, &calls)
-                    .await?;
+            let result = wait_agent_and_drain_until_exact(
+                envelopes,
+                &self.scheduler,
+                cancellation,
+                &calls,
+                deadline,
+            )
+            .await?;
             match &result.resumed_by {
                 WaitResumeExact::Job(operation) if calls.contains(operation) => return Ok(result),
-                WaitResumeExact::Envelope(_) | WaitResumeExact::Cancelled => return Ok(result),
+                WaitResumeExact::Envelope(_)
+                | WaitResumeExact::TimedOut
+                | WaitResumeExact::Cancelled => return Ok(result),
                 WaitResumeExact::DurableWake(envelope_id) => {
                     let store = self.store.clone();
                     let recipient = self.config.agent.0.clone();
@@ -2348,8 +2495,51 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         request: &RequestId,
         wait_call: Option<&OperationId>,
         result: WaitAgentResultExact,
+        ready_before_wait: &[OperationId],
         durable_mailbox: bool,
     ) -> Result<(), EngineError> {
+        let yield_wait = wait_call.is_some_and(|operation| {
+            pending.iter().any(|call| {
+                call.operation == *operation && matches!(call.wait, Some(WaitKind::Yield { .. }))
+            })
+        });
+        let yield_reason = match &result.resumed_by {
+            WaitResumeExact::Job(_) => YieldReason::ToolResult,
+            WaitResumeExact::Envelope(envelope) if envelope.sender.0 == "/operator" => {
+                YieldReason::UserInput
+            }
+            WaitResumeExact::Envelope(_) => YieldReason::WorkerInput,
+            WaitResumeExact::DurableWake(id) => {
+                let store = self.store.clone();
+                let id = *id;
+                if blocking(move || {
+                    Ok(store.envelope(id)?.is_some_and(|envelope| {
+                        envelope.sender == "operator" || envelope.sender == "/operator"
+                    }))
+                })
+                .await?
+                {
+                    YieldReason::UserInput
+                } else {
+                    YieldReason::WorkerInput
+                }
+            }
+            WaitResumeExact::TimedOut => YieldReason::Timeout,
+            WaitResumeExact::Cancelled => YieldReason::Cancelled,
+        };
+        let mut operations: Vec<_> = ready_before_wait.to_vec();
+        operations.extend(
+            result
+                .call_outputs
+                .iter()
+                .map(|(operation, _)| operation.clone())
+                .filter(|operation| !ready_before_wait.contains(operation)),
+        );
+        if let WaitResumeExact::Job(operation) = &result.resumed_by {
+            if !operations.contains(operation) {
+                operations.insert(0, operation.clone());
+            }
+        }
         for (operation, output) in result.call_outputs {
             let call = pending
                 .iter()
@@ -2398,11 +2588,20 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 // A wake never supplies or appends a second copy of its content.
                 (None, None, json!({"resumed_by":"user_input"}))
             }
+            WaitResumeExact::TimedOut => (None, None, json!({"resumed_by":"timeout"})),
+            WaitResumeExact::Cancelled if yield_wait => {
+                (None, None, json!({"resumed_by":"cancelled"}))
+            }
             WaitResumeExact::Cancelled => {
                 return Err(EngineError::Cancelled {
                     head_request: Some(request.clone()),
                 });
             }
+        };
+        let output = if yield_wait {
+            json!({"reason": yield_reason, "ready_results": operations})
+        } else {
+            output
         };
         if let Some(wait_call) = wait_call {
             self.persist_output(
@@ -2529,7 +2728,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     .create(ResponsesRequest {
                         input: items,
                         instructions: self.config.instructions.clone(),
-                        tools: self.tools(None),
+                        tools: self
+                            .tools(None)
+                            .map_err(|error| CompactError::Failed(error.to_string()))?,
                         tools_allowed: None,
                         model: self.config.model.clone(),
                         pinned_effort: effective_effort,
@@ -2641,7 +2842,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let branch = self.config.agent.0.clone();
         let pending_operations = pending
             .iter()
-            .filter(|call| !call.is_wait_agent)
+            .filter(|call| call.wait.is_none())
             .map(|call| call.operation.clone())
             .collect::<Vec<_>>();
         let identity = self.embedded_identity();
@@ -2777,6 +2978,36 @@ fn is_final(turn: &ResponsesTurn, finalized: bool) -> bool {
             item.0["phase"] == "final_answer"
         }
     })
+}
+
+/// `until` is elapsed seconds, never a wall-clock timestamp. Strict schema
+/// requires the nullable field on the wire; direct calls may omit it.
+fn yield_tool_schema() -> serde_json::Value {
+    json!({"type":"function","name":"yield","strict":true,
+        "description":"Park until an owned tool result, user or worker input, cancellation, or optional maximum duration. until is seconds; null waits for the first event. Timeout leaves pending jobs running.",
+        "parameters":{"type":"object","properties":{"until":{"anyOf":[{"type":"number","minimum":0},{"type":"null"}]}},"required":["until"],"additionalProperties":false}})
+}
+
+fn yield_deadline(input: &ToolInput) -> Result<Option<tokio::time::Instant>, EngineError> {
+    let ToolInput::Function(value) = input else {
+        return Err(EngineError::InvalidYieldArguments);
+    };
+    let object = value
+        .as_object()
+        .ok_or(EngineError::InvalidYieldArguments)?;
+    if object.keys().any(|name| name != "until") {
+        return Err(EngineError::InvalidYieldArguments);
+    }
+    let Some(value) = object.get("until").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let seconds = value.as_f64().ok_or(EngineError::InvalidYieldArguments)?;
+    let duration = std::time::Duration::try_from_secs_f64(seconds)
+        .map_err(|_| EngineError::InvalidYieldArguments)?;
+    tokio::time::Instant::now()
+        .checked_add(duration)
+        .map(Some)
+        .ok_or(EngineError::InvalidYieldArguments)
 }
 
 async fn await_cancellation(cancellation: &mut watch::Receiver<bool>) {
@@ -5628,6 +5859,235 @@ mod tests {
                 item.0["type"] == "function_call_output" && item.0["call_id"] == "call-A"
             }),
             "A remains unanswered while B is delivered"
+        );
+    }
+
+    struct OutputRecorder(tokio::sync::mpsc::UnboundedSender<ModelOutput>);
+    impl ModelOutputObserver for OutputRecorder {
+        fn observe(&self, output: ModelOutput) {
+            self.0.send(output).unwrap();
+        }
+    }
+    struct PartialForever;
+    #[async_trait::async_trait]
+    impl ResponsesTransport for PartialForever {
+        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            unreachable!()
+        }
+        async fn create_streaming(
+            &self,
+            _: ResponsesRequest,
+            sink: tokio::sync::mpsc::Sender<StreamEvent>,
+        ) -> Result<ResponsesTurn, TransportError> {
+            sink.send(StreamEvent::Delta {
+                item_id: "partial".into(),
+                channel: OutputChannel::Assistant,
+                index: 0,
+                text: "incomplete".into(),
+            })
+            .await
+            .unwrap();
+            std::future::pending().await
+        }
+    }
+    #[tokio::test]
+    async fn live_output_provider_cancellation_stops_incomplete_partial() {
+        let (outputs, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            PartialForever,
+            Arc::new(Store::memory().unwrap()),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "partial-test".into(),
+                agent: AgentPath("/root".into()),
+            },
+        )
+        .with_output_observer(Arc::new(OutputRecorder(outputs)));
+        let (cancel, cancellation) = watch::channel(false);
+        let running = tokio::spawn(async move {
+            engine
+                .run(None, vec![], cancellation, empty_mailbox())
+                .await
+        });
+        let scope = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let output = received.recv().await.unwrap();
+                if matches!(output.update, ModelOutputUpdate::Delta { .. }) {
+                    break output.request_id;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        cancel.send_replace(true);
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), running)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(EngineError::Cancelled { .. })
+        ));
+        assert!(
+            matches!(received.recv().await.unwrap(),ModelOutput {request_id,update:ModelOutputUpdate::Stopped,..} if request_id == scope)
+        );
+    }
+    struct OutputBeforeTool {
+        stream_release: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+    #[async_trait::async_trait]
+    impl ResponsesTransport for OutputBeforeTool {
+        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            unreachable!()
+        }
+        async fn create_streaming(
+            &self,
+            _: ResponsesRequest,
+            sink: tokio::sync::mpsc::Sender<StreamEvent>,
+        ) -> Result<ResponsesTurn, TransportError> {
+            let release = self.stream_release.lock().await.take();
+            if let Some(release) = release {
+                sink.send(StreamEvent::Delta {
+                    item_id: "assistant-live".into(),
+                    channel: OutputChannel::Assistant,
+                    index: 0,
+                    text: "Before tool".into(),
+                })
+                .await
+                .unwrap();
+                let message = Item(
+                    json!({"id":"assistant-live","type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Before tool"}]}),
+                );
+                let call = Item(
+                    json!({"id":"tool-live","type":"function_call","call_id":"slow-live","name":"slow","arguments":"{}"}),
+                );
+                sink.send(StreamEvent::ItemDone(message.clone()))
+                    .await
+                    .unwrap();
+                sink.send(StreamEvent::ItemDone(call.clone()))
+                    .await
+                    .unwrap();
+                release.await.unwrap();
+                Ok(turn("streamed", vec![message, call]))
+            } else {
+                Ok(turn(
+                    "finished",
+                    vec![Item(
+                        json!({"id":"final-live","type":"message","role":"assistant","phase":"final_answer","content":"After tool"}),
+                    )],
+                ))
+            }
+        }
+    }
+    #[tokio::test]
+    async fn live_output_is_visible_before_provider_and_tool_complete() {
+        let (stream_release, stream_wait) = tokio::sync::oneshot::channel();
+        let (tool_release, tool_wait) = tokio::sync::oneshot::channel();
+        let started = Arc::new(Notify::new());
+        let provider = Arc::new(SlowProvider {
+            started: started.clone(),
+            release: tokio::sync::Mutex::new(Some(tool_wait)),
+            released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        let (outputs, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let store = Arc::new(Store::memory().unwrap());
+        let engine = Engine::<FakeAuth, SlowProvider, _>::with_transport(
+            OutputBeforeTool {
+                stream_release: tokio::sync::Mutex::new(Some(stream_wait)),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            provider,
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "live-test".into(),
+                agent: AgentPath("/root".into()),
+            },
+        )
+        .with_output_observer(Arc::new(OutputRecorder(outputs)));
+        let (_cancel, cancellation) = watch::channel(false);
+        let running = tokio::spawn(async move {
+            engine
+                .run(None, vec![], cancellation, empty_mailbox())
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        assert!(
+            !running.is_finished(),
+            "provider and tool gates remain closed"
+        );
+        let mut delta = None;
+        let committed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let output = received.recv().await.unwrap();
+                match &output.update {
+                    ModelOutputUpdate::Delta { text, item_id, .. } => {
+                        assert_eq!(text, "Before tool");
+                        assert_eq!(item_id, "assistant-live");
+                        delta = Some(output.request_id);
+                    }
+                    ModelOutputUpdate::Committed {
+                        item_id: Some(id),
+                        hash,
+                    } if id == "assistant-live" => break (output.request_id, hash.clone()),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(delta.as_ref(), Some(&committed.0));
+        assert_eq!(
+            store.get_item(&committed.1).unwrap().unwrap().0["id"],
+            "assistant-live"
+        );
+        assert!(
+            store
+                .items(&committed.0)
+                .unwrap()
+                .iter()
+                .any(|i| i.0["id"] == "assistant-live")
+        );
+        tool_release.send(()).unwrap();
+        stream_release.send(()).unwrap();
+        let completion = tokio::time::timeout(std::time::Duration::from_secs(2), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            completion
+                .transcript
+                .iter()
+                .any(|i| i.0["type"] == "function_call_output")
+        );
+        let tool_output = completion
+            .transcript
+            .iter()
+            .find(|i| i.0["type"] == "function_call_output")
+            .unwrap();
+        let tool_hash = blake3::hash(&serde_json::to_vec(tool_output).unwrap())
+            .to_hex()
+            .to_string();
+        let mut saw_tool_commit = false;
+        while let Ok(output) = received.try_recv() {
+            if matches!(output.update, ModelOutputUpdate::Committed {hash, ..} if hash.0 == tool_hash)
+            {
+                saw_tool_commit = true;
+            }
+        }
+        assert!(
+            saw_tool_commit,
+            "tool output storage also invalidates retained history"
         );
     }
 

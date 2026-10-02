@@ -422,9 +422,14 @@ mod tests {
             _: ResponsesRequest,
             sink: mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
-            sink.send(StreamEvent::Delta("sentinel-event".into()))
-                .await
-                .map_err(|_| TransportError::Stream("receiver closed".into()))?;
+            sink.send(StreamEvent::Delta {
+                item_id: "sentinel".into(),
+                channel: harness::transport::sse::OutputChannel::Assistant,
+                index: 0,
+                text: "sentinel-event".into(),
+            })
+            .await
+            .map_err(|_| TransportError::Stream("receiver closed".into()))?;
             Ok(ResponsesTurn {
                 response_id: "not traced".into(),
                 items: vec![],
@@ -580,7 +585,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             events_rx.recv().await,
-            Some(StreamEvent::Delta(text)) if text == "sentinel-event"
+            Some(StreamEvent::Delta {text, ..}) if text == "sentinel-event"
         ));
         sink.flush().await.unwrap();
         drop(sink);

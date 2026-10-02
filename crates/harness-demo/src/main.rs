@@ -3936,6 +3936,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Snapshot {
                 host_run: None,
+                live_output: vec![],
+                history_revisions: vec![],
                 seq: 5,
                 actors: vec![],
                 command_receipts: vec![],

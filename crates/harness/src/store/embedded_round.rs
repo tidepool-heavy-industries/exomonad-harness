@@ -1,6 +1,10 @@
 //! Request-owned admission and settlement for embedded Engine continuations.
 use super::{Request, Result, Store, StoreError, Usage, embedded};
-use crate::{embedding::HostIdentity, item::Item, model::RequestId};
+use crate::{
+    embedding::HostIdentity,
+    item::Item,
+    model::{AgentPath, ConversationIdentity, RequestId},
+};
 use rusqlite::{Connection, Transaction, params};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,6 +118,25 @@ pub(super) fn settle_tx(
 }
 
 impl Store {
+    /// Read immutable request issuer provenance, rather than its successor binding.
+    pub(crate) fn request_output_origin(&self, id: &RequestId) -> Result<ConversationIdentity> {
+        let c = self.lock();
+        let (branch, run, incarnation): (String, Option<String>, Option<String>) = c.query_row(
+            "SELECT branch,embedded_run,embedded_incarnation FROM requests WHERE id=?1",
+            [&id.0],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        match (run, incarnation) {
+            (Some(run), Some(incarnation)) => Ok(ConversationIdentity::Embedded {
+                run,
+                actor: AgentPath(branch),
+                incarnation,
+            }),
+            (None, None) => Ok(self.standalone_identity(AgentPath(branch))),
+            _ => Err(StoreError::UnownedEmbeddedRequest),
+        }
+    }
+
     /// Exact binding and the entire branch frontier share a SQLite snapshot.
     pub fn embedded_round_frontier(
         &self,
@@ -222,6 +245,42 @@ mod tests {
     }
     fn path() -> std::path::PathBuf {
         std::env::temp_dir().join(format!("embedded-frontier-{}.sqlite", uuid::Uuid::new_v4()))
+    }
+    struct TransferAuthority;
+    impl crate::embedding::BindingSuccessorAuthority for TransferAuthority {
+        fn validate_successor(
+            &self,
+            _: &HostIdentity,
+            _: &HostIdentity,
+        ) -> std::result::Result<bool, String> {
+            Ok(true)
+        }
+    }
+    #[test]
+    fn live_output_origin_keeps_request_issuer_after_binding_transfer() {
+        let store = Store::memory().unwrap();
+        let first = identity();
+        store.bind_embedded_actor(&first, None).unwrap();
+        let request = RequestId("pending".into());
+        store
+            .write_embedded_request(&first, &request, None, &[], Usage::default())
+            .unwrap();
+        let successor = HostIdentity {
+            incarnation: "second".into(),
+            ..first.clone()
+        };
+        store
+            .transfer_embedded_binding(&first, &successor, &TransferAuthority)
+            .unwrap();
+        assert!(store.embedded_binding_matches(&successor).unwrap());
+        assert_eq!(
+            store.request_output_origin(&request).unwrap(),
+            ConversationIdentity::Embedded {
+                run: first.run,
+                actor: first.actor,
+                incarnation: first.incarnation
+            }
+        );
     }
     #[test]
     fn frontier_survives_request_and_delivery_cuts_with_null_and_settled_heads() {
