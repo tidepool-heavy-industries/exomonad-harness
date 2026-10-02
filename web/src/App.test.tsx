@@ -114,7 +114,7 @@ describe('linked operator views', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retire' }));
     expect(submit).toHaveBeenLastCalledWith({ action: 'retire', target });
   });
-  it('keeps selected operations and targetless receipts together, audits others, and disables replay to retired identities', () => {
+  it('keeps operations scoped after changing actors, audits on request, and disables replay to retired identities', () => {
     window.history.replaceState(null, '', '/chat/worker?run=run&incarnation=old');
     const other = { run: 'run', actor: '/workflow', incarnation: 'w' };
     const selectedId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -133,6 +133,12 @@ describe('linked operator views', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: 'All host operations' }));
     expect(operations).toHaveTextContent('Other payload');
     expect(operations).toHaveTextContent('Other refused');
+    fireEvent.click(within(screen.getByRole('complementary', { name: 'Workers' })).getByRole('link', { name: '/workflow' }));
+    expect(screen.getByRole('checkbox', { name: 'All host operations' })).not.toBeChecked();
+    expect(operations).toHaveTextContent('Other payload');
+    expect(operations).toHaveTextContent('Other refused');
+    expect(operations).not.toHaveTextContent('Selected payload');
+    expect(operations).not.toHaveTextContent('Selected admission unknown');
     mounted.rerender(<App data={{ ...projected, actors: projected.actors!.map(actor => ({ ...actor, lifecycle: 'retired' })) }} pendingCommands={commands} onRetry={retry} />);
     for (const button of within(operations).getAllByRole('button', { name: 'Retry same operation' })) expect(button).toBeDisabled();
     expect(retry).not.toHaveBeenCalled();

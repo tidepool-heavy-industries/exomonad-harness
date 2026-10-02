@@ -206,6 +206,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
     previousInspection.current = route.requestId;
   }, [route.requestId]);
   useEffect(() => { setPage(0); setActorPage(0); }, [route.selection, route.global, route.messageFilters]);
+  useEffect(() => { setAllOperations(false); }, [route.selection]);
   const searchTerm = search.toLowerCase();
   const filteredTimeline = useMemo(() => searchTerm ? view.timeline.filter(item => `${item.label} ${item.id} ${item.detail ?? ''}`.toLowerCase().includes(searchTerm)) : view.timeline, [view.timeline, searchTerm]);
   const activity = useMemo(() => pageRows(filteredTimeline, page, 50), [filteredTimeline, page]);
