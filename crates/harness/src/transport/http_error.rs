@@ -46,19 +46,27 @@ fn parse(body: &[u8], token: &str, account: &str) -> Option<HttpDiagnostic> {
         return None;
     }
     let document: Value = serde_json::from_slice(body).ok()?;
-    let error = document.get("error")?.as_object()?;
+    let error = document.get("error").and_then(Value::as_object);
+    // The Codex backend also reports account/model refusals as a top-level
+    // detail string. Both known envelopes use the same bounded redaction path.
+    let bounded = |text: &str, limit| redact(text, token, account).chars().take(limit).collect();
     let field = |name: &str, limit| {
-        error.get(name)?.as_str().map(|text| {
+        error?.get(name)?.as_str().map(|text| {
             // Redact before truncation, so a cutoff cannot leave a credential
             // prefix visible. Unrecognized fields never enter the diagnostic.
-            redact(text, token, account).chars().take(limit).collect()
+            bounded(text, limit)
         })
     };
     let diagnostic = HttpDiagnostic {
         code: field("code", FIELD_LIMIT),
         error_type: field("type", FIELD_LIMIT),
         param: field("param", FIELD_LIMIT),
-        message: field("message", MESSAGE_LIMIT),
+        message: field("message", MESSAGE_LIMIT).or_else(|| {
+            document
+                .get("detail")?
+                .as_str()
+                .map(|text| bounded(text, MESSAGE_LIMIT))
+        }),
     };
     (diagnostic != HttpDiagnostic::default()).then_some(diagnostic)
 }
@@ -112,6 +120,46 @@ mod tests {
     use super::*;
     use futures_util::stream;
     use serde_json::json;
+
+    #[test]
+    fn diagnostics_read_observed_codex_account_model_detail_without_unknown_fields() {
+        let body = br#"{"detail":"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."}"#;
+        let diagnostic = parse(body, "", "").unwrap();
+        assert_eq!(diagnostic, HttpDiagnostic {
+            message:Some("The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.".into()),
+            ..HttpDiagnostic::default()
+        });
+        let token = "test-request-token";
+        let account = "test-request-account";
+        let body = serde_json::to_vec(&json!({
+            "detail":format!("{token} {account} Bearer other-token sk-other {}{token}","λ".repeat(2048)),
+            "unknown":token,"request":{"account":account}
+        })).unwrap();
+        let diagnostic = parse(&body, token, account).unwrap();
+        assert_eq!(
+            diagnostic.message.as_ref().unwrap().chars().count(),
+            MESSAGE_LIMIT
+        );
+        let serialized = serde_json::to_string(&diagnostic).unwrap();
+        for secret in [token, account, "other-token", "sk-other"] {
+            assert!(!serialized.contains(secret), "credential was retained");
+        }
+        let nested = serde_json::to_vec(&json!({"error":{"message":"specific provider message","code":"provider_code"},"detail":"fallback detail"})).unwrap();
+        let diagnostic = parse(&nested, "", "").unwrap();
+        assert_eq!(
+            diagnostic.message.as_deref(),
+            Some("specific provider message")
+        );
+        assert_eq!(diagnostic.code.as_deref(), Some("provider_code"));
+        for body in [
+            br#"{"detail":{"message":"unknown nested shape"}}"#.as_slice(),
+            br#"{"detail":["unknown array"]}"#,
+            br#"{"detail":42}"#,
+            br#"{"unknown":"unrecognized text"}"#,
+        ] {
+            assert!(parse(body, "", "").is_none());
+        }
+    }
 
     #[test]
     fn diagnostics_allowlist_fields_and_redact_before_bounds() {
