@@ -3974,6 +3974,7 @@ mod tests {
                     "type":"function_call",
                     "call_id":call_id.0,
                     "name":"never",
+                    "async":true,
                     "arguments":"{}"
                 }))],
             )
@@ -4261,7 +4262,9 @@ mod tests {
             Arc::new(InjectSelection(injected.clone(), Some(vec!["slow".into()]))),
             EngineConfig {
                 instructions: "instruction".into(),
-                tools: vec![json!({"type":"function","name":"slow","strict":true})],
+                tools: vec![
+                    json!({"type":"function","name":"slow","strict":true,"parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}),
+                ],
                 model: "test".into(),
                 effort: Effort::Low,
                 session_id: "inject".into(),
@@ -4903,6 +4906,7 @@ mod tests {
             "type":"function_call",
             "call_id":other_call_id.0,
             "name":"slow",
+            "async":true,
             "arguments":"{}"
         }));
         let spawn_item = Item(json!({

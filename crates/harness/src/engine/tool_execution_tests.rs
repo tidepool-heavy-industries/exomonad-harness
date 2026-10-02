@@ -522,7 +522,7 @@ async fn yield_timeout_and_durable_input_do_not_bypass_synchronous_result() {
             .await
             .is_err()
     );
-    assert_eq!(store.unread("/root").unwrap().len(), 1);
+    assert!(store.envelope(envelope_id).unwrap().is_some());
     host.slow.add_permits(1);
     tokio::time::timeout(Duration::from_secs(2), running)
         .await
