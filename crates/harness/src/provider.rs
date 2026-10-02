@@ -318,10 +318,11 @@ pub trait Provider: Send + Sync {
     /// later installation. Ordinary providers use their immutable host policy.
     fn operation_scheduling(
         &self,
-        name: &str,
+        _name: &str,
         _operation: &OperationId,
+        declared: ToolScheduling,
     ) -> Result<ToolScheduling, ProviderError> {
-        Ok(self.tool_scheduling(name))
+        Ok(declared)
     }
 
     /// A stable view retained for an entire model request, including its later
