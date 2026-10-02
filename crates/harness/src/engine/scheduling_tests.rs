@@ -956,7 +956,7 @@ async fn child_final_completes_while_parent_sync_waits_for_child() {
             &Item(json!({"type":"message","role":"assistant","content":"NEW_TASK"})),
         )
         .unwrap();
-    let child = Engine::with_transport(
+    let child = Engine::<Offline, ContextEditor, FinalOnly>::with_transport(
         FinalOnly,
         parent.store.clone(),
         parent.scheduler.clone(),
