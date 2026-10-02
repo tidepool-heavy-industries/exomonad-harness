@@ -557,6 +557,7 @@ fn apply_tokens(
     mut record: Record,
     tokens: Tokens,
     identity: Option<Identity>,
+    received_at: u64,
 ) -> Result<Record, LoginError> {
     let current = now()?;
     if tokens.access_token.is_empty()
@@ -575,9 +576,12 @@ fn apply_tokens(
     if !required_scopes(&scopes) {
         return Err(LoginError::Permissions);
     }
-    let expires_at = current
+    let expires_at = received_at
         .checked_add(tokens.expires_in)
         .ok_or(LoginError::InvalidCredentials)?;
+    if received_at > current || expires_at <= current {
+        return Err(LoginError::InvalidCredentials);
+    }
     if let Some(identity) = identity {
         record.subject = identity.sub;
         record.email = identity.email;
@@ -610,6 +614,7 @@ fn finish_login(
         ("redirect_uri", &attempt.redirect),
         ("resource", RESOURCE),
     ])?;
+    let received_at = now()?;
     let identity = verify(
         tokens.id_token.as_deref().ok_or(LoginError::Identity)?,
         &callback.client_id,
@@ -635,6 +640,7 @@ fn finish_login(
         },
         tokens,
         Some(identity),
+        received_at,
     )?;
     let _lock = store::lock(path)?;
     let latest = load(path)?;
@@ -655,6 +661,7 @@ fn credentials(path: &Path, service: &impl Service) -> Result<String, LoginError
             ("refresh_token", &record.refresh_token),
             ("resource", RESOURCE),
         ])?;
+        let received_at = now()?;
         let identity = tokens
             .id_token
             .as_deref()
@@ -668,7 +675,7 @@ fn credentials(path: &Path, service: &impl Service) -> Result<String, LoginError
                 )
             })
             .transpose()?;
-        record = apply_tokens(record, tokens, identity)?;
+        record = apply_tokens(record, tokens, identity, received_at)?;
         save(path, &record)?;
     }
     if record.expires_at <= now()? {

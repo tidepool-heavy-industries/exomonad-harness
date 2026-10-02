@@ -353,12 +353,12 @@ fn tokens_require_plan_scope_and_rotating_replacement() {
     let mut tokens = s.token(&[("resource", RESOURCE)]).unwrap();
     tokens.scope = "openid offline_access resource.invoke".into();
     assert!(matches!(
-        apply_tokens(record(now().unwrap()), tokens, None),
+        apply_tokens(record(now().unwrap()), tokens, None, now().unwrap()),
         Err(LoginError::Permissions)
     ));
     let mut tokens = s.token(&[("resource", RESOURCE)]).unwrap();
     tokens.refresh_token.clear();
-    assert!(apply_tokens(record(now().unwrap()), tokens, None).is_err());
+    assert!(apply_tokens(record(now().unwrap()), tokens, None, now().unwrap()).is_err());
 }
 #[tokio::test]
 async fn callback_listener_requires_exact_loopback_host() {
@@ -398,4 +398,14 @@ fn relative_credential_paths_create_no_artifacts() {
     assert!(store::read(&path).is_err());
     assert!(save(&path, &record(now().unwrap() + 600)).is_err());
     assert!(!parent.exists());
+}
+
+#[test]
+fn token_expiry_starts_at_receipt_before_identity_verification() {
+    let tokens = fake("subject", true)
+        .token(&[("resource", RESOURCE)])
+        .unwrap();
+    let received_at = now().unwrap() - 60;
+    let result = apply_tokens(record(now().unwrap()), tokens, None, received_at).unwrap();
+    assert_eq!(result.expires_at, received_at + 3600);
 }
