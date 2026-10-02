@@ -1,7 +1,10 @@
 //! Deterministic, loss-aware rendering for explicitly portable context groups.
-use super::{reference, Result};
-use crate::{context::{ContextError, Occurrence}, item::Item};
-use serde_json::{json, Map, Value};
+use super::{Result, reference};
+use crate::{
+    context::{ContextError, Occurrence},
+    item::Item,
+};
+use serde_json::{Map, Value, json};
 
 /// Render supported visible response items into one assistant note.
 ///
@@ -49,10 +52,7 @@ pub(super) fn render(items: &[Occurrence]) -> Result<Item> {
 }
 
 fn project_item(item: &Item) -> Result<(Value, bool)> {
-    let object = item
-        .0
-        .as_object()
-        .ok_or(ContextError::UnsupportedState)?;
+    let object = item.0.as_object().ok_or(ContextError::UnsupportedState)?;
     let kind = object
         .get("type")
         .and_then(Value::as_str)
@@ -70,8 +70,17 @@ fn project_item(item: &Item) -> Result<(Value, bool)> {
 }
 
 fn project_message(object: &Map<String, Value>) -> Result<(Value, bool)> {
-    validate_fields(object, &["type", "role", "content", "id", "status"])?;
-    let role = object
+    validate_fields(
+        object,
+        &["type", "role", "content", "phase", "id", "status"],
+    )?;
+    if object
+        .get("phase")
+        .is_some_and(|phase| !matches!(phase.as_str(), Some("commentary" | "final_answer")))
+    {
+        return Err(ContextError::UnsupportedState.into());
+    }
+    object
         .get("role")
         .and_then(Value::as_str)
         .filter(|role| matches!(*role, "user" | "assistant"))
@@ -84,9 +93,7 @@ fn project_message(object: &Map<String, Value>) -> Result<(Value, bool)> {
         Value::Array(parts) => {
             let mut any = false;
             for part in parts {
-                let object = part
-                    .as_object()
-                    .ok_or(ContextError::UnsupportedState)?;
+                let object = part.as_object().ok_or(ContextError::UnsupportedState)?;
                 let kind = object
                     .get("type")
                     .and_then(Value::as_str)
@@ -129,7 +136,15 @@ fn project_message(object: &Map<String, Value>) -> Result<(Value, bool)> {
 }
 
 fn project_tool_call(object: &Map<String, Value>, custom: bool) -> Result<(Value, bool)> {
-    let mut fields = vec!["type", "call_id", "name", "id", "status"];
+    let mut fields = vec![
+        "type",
+        "call_id",
+        "name",
+        "id",
+        "status",
+        "namespace",
+        "async",
+    ];
     if custom {
         fields.push("input");
     } else {
@@ -151,9 +166,7 @@ fn project_tool_call(object: &Map<String, Value>, custom: bool) -> Result<(Value
             return Err(ContextError::UnsupportedState.into());
         }
         if let Some(namespace) = object.get("namespace") {
-            if !matches!(namespace, Value::Null)
-                && namespace.as_str() != Some("functions")
-            {
+            if !matches!(namespace, Value::Null) && namespace.as_str() != Some("functions") {
                 return Err(ContextError::UnsupportedState.into());
             }
         }
@@ -170,9 +183,7 @@ fn project_tool_call(object: &Map<String, Value>, custom: bool) -> Result<(Value
 fn project_tool_output(object: &Map<String, Value>, _custom: bool) -> Result<(Value, bool)> {
     validate_fields(object, &["type", "call_id", "output", "id", "status"])?;
     required_nonempty_string(object, "call_id")?;
-    let output = object
-        .get("output")
-        .ok_or(ContextError::UnsupportedState)?;
+    let output = object.get("output").ok_or(ContextError::UnsupportedState)?;
     reject_encrypted(output)?;
     let visible = match output {
         Value::Null | Value::Bool(false) => false,
@@ -198,9 +209,7 @@ fn project_reasoning(object: &Map<String, Value>) -> Result<(Value, bool)> {
     if let Some(summary) = object.get("summary") {
         let summary = summary.as_array().ok_or(ContextError::UnsupportedState)?;
         for block in summary {
-            let block = block
-                .as_object()
-                .ok_or(ContextError::UnsupportedState)?;
+            let block = block.as_object().ok_or(ContextError::UnsupportedState)?;
             validate_fields(block, &["type", "text"])?;
             if block.get("type").and_then(Value::as_str) != Some("summary_text") {
                 return Err(ContextError::UnsupportedState.into());
@@ -344,13 +353,12 @@ mod tests {
 
     #[test]
     fn accepts_empty_reasoning_only_when_the_group_has_visible_content() {
-        let reasoning = occurrence(
-            json!({"type":"reasoning","encrypted_content":"opaque"}),
-            0,
-        );
+        let reasoning = occurrence(json!({"type":"reasoning","encrypted_content":"opaque"}), 0);
         assert!(matches!(
             render(std::slice::from_ref(&reasoning)),
-            Err(crate::store::StoreError::Context(ContextError::UnsupportedState))
+            Err(crate::store::StoreError::Context(
+                ContextError::UnsupportedState
+            ))
         ));
         let message = occurrence(
             json!({"type":"message","role":"user","content":"visible"}),
@@ -372,7 +380,9 @@ mod tests {
         ] {
             assert!(matches!(
                 render(&[occurrence(item, 0)]),
-                Err(crate::store::StoreError::Context(ContextError::UnsupportedState))
+                Err(crate::store::StoreError::Context(
+                    ContextError::UnsupportedState
+                ))
             ));
         }
     }

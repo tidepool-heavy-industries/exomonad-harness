@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
+mod portability_note;
+
 #[derive(Default, Serialize, Deserialize)]
 struct InferenceState {
     generation: u64,
@@ -276,6 +278,38 @@ fn preview(items: &[Occurrence]) -> String {
         .join("\n")
 }
 
+fn occurrence_positions(all: &[Occurrence]) -> HashMap<Origin, Vec<usize>> {
+    let mut positions = HashMap::<Origin, Vec<usize>>::new();
+    for (index, occurrence) in all.iter().enumerate() {
+        positions
+            .entry(occurrence.origin.clone())
+            .or_default()
+            .push(index);
+    }
+    positions
+}
+
+fn response_evidence(
+    c: &Connection,
+    all: &[Occurrence],
+) -> Result<HashMap<Origin, std::sync::Arc<super::replay::ResponseEnvelope>>> {
+    let requests = all
+        .iter()
+        .filter(|i| {
+            opaque(&i.item)
+                && !i.item.is_configuration_update()
+                && !(i.item.0["type"] == "message"
+                    && matches!(i.item.0["role"].as_str(), Some("system" | "developer")))
+        })
+        .map(|i| i.origin.request.clone())
+        .collect::<HashSet<_>>();
+    let mut evidence = HashMap::new();
+    for request in requests {
+        evidence.extend(super::replay::response_envelopes(c, &request)?);
+    }
+    Ok(evidence)
+}
+
 fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBlock>> {
     // Index the immutable history once for the grouping pass. Calls still pair
     // with the first matching output after their own position, including when
@@ -291,16 +325,14 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
         }
     }
 
-    // A model_turn payload describes opaque items by hash. Load each source
-    // request once, then reduce its membership to the first and last history
-    // positions in one pass. This keeps per-item work independent of history
-    // length while preserving repeated occurrences of a listed hash.
+    // The same strict evidence reader supplies request portability and editor
+    // groups. Equal bytes do not enlarge a provider response's membership.
     let opaque_items = all
         .iter()
         .take(cut)
         .map(|occurrence| opaque(&occurrence.item))
         .collect::<Vec<_>>();
-    let opaque_requests = all
+    let opaque_origins = all
         .iter()
         .take(cut)
         .enumerate()
@@ -313,37 +345,37 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
                         Some("system" | "developer")
                     ))
         })
-        .map(|(_, occurrence)| occurrence.origin.request.clone())
+        .map(|(_, occurrence)| occurrence.origin.clone())
         .collect::<HashSet<_>>();
-    let mut opaque_hashes = HashMap::<RequestId, HashSet<String>>::new();
-    for request in opaque_requests {
-        let raw: Option<String> = c
-            .query_row(
-                "SELECT payload FROM events WHERE request_id=?1 AND kind='model_turn' ORDER BY id DESC LIMIT 1",
-                [&request.0],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let hashes = raw
-            .map(|raw| serde_json::from_str::<serde_json::Value>(&raw))
-            .transpose()?
-            .and_then(|r| r["response"]["items"].as_array().cloned())
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|v| v.as_str().map(str::to_owned))
-            .collect();
-        opaque_hashes.insert(request, hashes);
-    }
-    let mut opaque_bounds = HashMap::<RequestId, (usize, usize)>::new();
-    for (index, occurrence) in all.iter().enumerate() {
-        if opaque_hashes
-            .get(&occurrence.origin.request)
-            .is_some_and(|hashes| hashes.contains(&occurrence.origin.hash.0))
-        {
-            opaque_bounds
-                .entry(occurrence.origin.request.clone())
-                .and_modify(|bounds| bounds.1 = index)
-                .or_insert((index, index));
+    let positions = occurrence_positions(all);
+    let evidence = response_evidence(c, all)?;
+    let mut opaque_bounds = HashMap::<Origin, (usize, usize, bool)>::new();
+    let mut grouped_envelopes = HashSet::new();
+    for origin in opaque_origins {
+        if let Some(envelope) = evidence.get(&origin) {
+            if !grouped_envelopes.insert(envelope.origins[0].clone()) {
+                continue;
+            }
+            let members = envelope
+                .origins
+                .iter()
+                .filter_map(|o| positions.get(o))
+                .collect::<Vec<_>>();
+            let complete =
+                members.len() == envelope.origins.len() && members.iter().all(|v| v.len() == 1);
+            let bounds = members.iter().flat_map(|v| v.iter()).fold(
+                None::<(usize, usize)>,
+                |bounds, index| {
+                    Some(bounds.map_or((*index, *index), |(start, end)| {
+                        (start.min(*index), end.max(*index))
+                    }))
+                },
+            );
+            if let Some((start, end)) = bounds {
+                for member in &envelope.origins {
+                    opaque_bounds.insert(member.clone(), (start, end, complete));
+                }
+            }
         }
     }
 
@@ -362,6 +394,7 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
             .tool_call()
             .map_err(|_| ContextError::InvalidReference)?;
         if let Some(call) = &call {
+            let completion = super::replay::is_validated_completion(c, &occurrence.origin)?;
             let result = outputs.get(&call.call_id.0).and_then(|positions| {
                 let next = positions.partition_point(|position| *position <= index);
                 positions.get(next).copied()
@@ -371,7 +404,7 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
                 index,
                 end.min(cut),
                 opaque_items[index],
-                result.is_none() || end > cut,
+                !completion && (result.is_none() || end > cut),
             ));
         } else if message(item).is_none() {
             let orphan = matches!(
@@ -386,8 +419,8 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
             prior_calls.insert(call.call_id.0);
         }
         if opaque_items[index] {
-            if let Some((start, end)) = opaque_bounds.get(&occurrence.origin.request) {
-                ranges.push((*start, (*end + 1).min(cut), true, *end >= cut));
+            if let Some((start, end, complete)) = opaque_bounds.get(&occurrence.origin) {
+                ranges.push((*start, (*end + 1).min(cut), true, !complete || *end >= cut));
             } else {
                 ranges.push((index, index + 1, true, true));
             }
@@ -452,6 +485,180 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
         }
     }
     Ok(result)
+}
+
+/// Construct the only provider-facing projection. Stored history, native
+/// references, claims and receipts continue to refer to the original bytes.
+fn portable_request(
+    c: &Connection,
+    all: &[Occurrence],
+    model: Option<&str>,
+    completing: Option<&OperationId>,
+) -> Result<Vec<(RequestId, Option<ItemHash>, Item)>> {
+    let evidence = response_evidence(c, all)?;
+    let positions = occurrence_positions(all);
+    let mut outputs = HashMap::<String, Vec<usize>>::new();
+    let mut calls = HashMap::<String, Vec<usize>>::new();
+    for (index, occurrence) in all.iter().enumerate() {
+        match occurrence.item.0["type"].as_str() {
+            Some("function_call_output" | "custom_tool_call_output") => {
+                if let Some(id) = occurrence.item.0["call_id"].as_str() {
+                    outputs.entry(id.into()).or_default().push(index);
+                }
+            }
+            Some("function_call" | "custom_tool_call") => {
+                if let Some(id) = occurrence.item.0["call_id"].as_str() {
+                    calls.entry(id.into()).or_default().push(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut removed = HashSet::new();
+    let mut notes = HashMap::new();
+    for occurrence in all.iter().filter(|i| opaque(&i.item)) {
+        if occurrence.item.is_configuration_update()
+            || (occurrence.item.0["type"] == "message"
+                && matches!(
+                    occurrence.item.0["role"].as_str(),
+                    Some("system" | "developer")
+                ))
+        {
+            continue;
+        }
+        let envelope = evidence
+            .get(&occurrence.origin)
+            .ok_or(ContextError::OpaqueModel)?;
+        let selected = model.ok_or(ContextError::OpaqueModel)?;
+        if envelope.model == selected || !seen.insert(envelope.origins[0].clone()) {
+            continue;
+        }
+        if envelope.kind == super::replay::ResponseEnvelopeKind::ServerCompaction {
+            return Err(ContextError::OpaqueModel.into());
+        }
+        let mut members = Vec::with_capacity(envelope.origins.len());
+        for origin in &envelope.origins {
+            let Some(indices) = positions.get(origin) else {
+                return Err(ContextError::OpaqueModel.into());
+            };
+            let [index] = indices.as_slice() else {
+                return Err(ContextError::OpaqueModel.into());
+            };
+            if members.last().is_some_and(|previous| previous >= index) {
+                return Err(ContextError::OpaqueModel.into());
+            }
+            members.push(*index);
+        }
+        let mut paired_outputs = HashSet::new();
+        let mut membership = members.iter().copied().collect::<HashSet<_>>();
+        for index in members.clone() {
+            let occurrence = &all[index];
+            let Some(call) = occurrence
+                .item
+                .tool_call()
+                .map_err(|_| ContextError::OpaqueModel)?
+            else {
+                continue;
+            };
+            if super::replay::is_validated_completion(c, &occurrence.origin)? {
+                continue;
+            }
+            let expected_kind = match call.input.kind() {
+                crate::item::ToolKind::Function => "function_call_output",
+                crate::item::ToolKind::Custom => "custom_tool_call_output",
+            };
+            let later_calls = calls
+                .get(&call.call_id.0)
+                .ok_or(ContextError::OpaqueModel)?;
+            let next = later_calls.partition_point(|position| *position <= index);
+            let end = later_calls.get(next).copied().unwrap_or(all.len());
+            let results = outputs
+                .get(&call.call_id.0)
+                .ok_or(ContextError::OpaqueModel)?;
+            let first = results.partition_point(|position| *position <= index);
+            let last = results.partition_point(|position| *position < end);
+            let [output_index] = &results[first..last] else {
+                return Err(ContextError::OpaqueModel.into());
+            };
+            let output = &all[*output_index];
+            if output.item.0["type"] != expected_kind || !paired_outputs.insert(*output_index) {
+                return Err(ContextError::OpaqueModel.into());
+            }
+            validate_portable_output(c, occurrence, output, &call.call_id, completing)?;
+            if membership.insert(*output_index) {
+                members.push(*output_index);
+            }
+        }
+        members.sort_unstable();
+        for index in &members {
+            if matches!(
+                all[*index].item.0["type"].as_str(),
+                Some("function_call_output" | "custom_tool_call_output")
+            ) && !paired_outputs.contains(index)
+            {
+                return Err(ContextError::OpaqueModel.into());
+            }
+            if !removed.insert(*index) {
+                return Err(ContextError::OpaqueModel.into());
+            }
+        }
+        let items = members
+            .iter()
+            .map(|index| all[*index].clone())
+            .collect::<Vec<_>>();
+        notes.insert(members[0], portability_note::render(&items)?);
+    }
+    let mut projected = Vec::with_capacity(all.len());
+    for (index, occurrence) in all.iter().enumerate() {
+        if let Some(note) = notes.remove(&index) {
+            projected.push((occurrence.request.clone(), None, note));
+        } else if !removed.contains(&index) {
+            projected.push((
+                occurrence.request.clone(),
+                (!occurrence.note).then(|| occurrence.hash.clone()),
+                project_context_note(occurrence),
+            ));
+        }
+    }
+    Ok(projected)
+}
+
+/// A retained output closes its original invocation only when Store owns that
+/// exact result. The committing call's real successful output is settled in
+/// this same transaction and is the sole prospective exception.
+fn validate_portable_output(
+    c: &Connection,
+    occurrence: &Occurrence,
+    output: &Occurrence,
+    call: &crate::model::CallId,
+    completing: Option<&OperationId>,
+) -> Result<()> {
+    let mut query = c.prepare(
+        "SELECT origin FROM claims WHERE request_id=?1 AND origin_request_id=?1 AND call_id=?2",
+    )?;
+    let owners = query
+        .query_map(params![occurrence.origin.request.0, call.0], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let [owner] = owners.as_slice() else {
+        return Err(ContextError::OpaqueModel.into());
+    };
+    let operation = OperationId {
+        origin: serde_json::from_str(owner)?,
+        request: occurrence.origin.request.clone(),
+        call: call.clone(),
+    };
+    if original_call(c, &operation)? != occurrence.origin {
+        return Err(ContextError::OpaqueModel.into());
+    }
+    if Some(&operation) != completing
+        && terminal::exact_terminal(c, &operation)?.is_none_or(|(hash, _)| hash != output.hash)
+    {
+        return Err(ContextError::OpaqueModel.into());
+    }
+    Ok(())
 }
 
 pub(super) fn insert_occurrence(
@@ -555,18 +762,21 @@ impl Store {
             return Err(StoreError::OperationOriginMismatch);
         }
         let current = state(&tx, identity)?;
-        let history = history(&tx, head, true)?
-            .into_iter()
-            .map(|i| {
-                if i.note {
-                    let projected = project_context_note(&i);
-                    let hash = Self::put_item_tx(&tx, &projected)?;
-                    Ok((i.request, hash, projected))
-                } else {
-                    Ok((i.request, i.hash, i.item))
-                }
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let history = portable_request(
+            &tx,
+            &history(&tx, head, true)?,
+            current.model.as_deref(),
+            None,
+        )?
+        .into_iter()
+        .map(|(request, hash, item)| {
+            let hash = match hash {
+                Some(hash) => hash,
+                None => Self::put_item_tx(&tx, &item)?,
+            };
+            Ok((request, hash, item))
+        })
+        .collect::<Result<Vec<_>>>()?;
         tx.commit()?;
         Ok(ContextRequestState {
             history,
@@ -951,12 +1161,6 @@ impl Store {
         let mut seen = HashSet::new();
         let mut last_native = None;
         let mut last_historical_native = None;
-        let current_origins = snapshot
-            .prefix
-            .iter()
-            .map(|i| &i.origin)
-            .collect::<HashSet<_>>();
-        let mut retained_current_opaque = false;
         if let Some(evidence) = replay {
             let mut used_occurrences = HashSet::new();
             let mut used_origins = HashSet::new();
@@ -1018,9 +1222,6 @@ impl Store {
                     return Err(ContextError::ProtectedGroup.into());
                 }
             }
-            retained_current_opaque = rewritten
-                .iter()
-                .any(|i| opaque(&i.item) && current_origins.contains(&i.origin));
         } else {
             for block in &draft.document.blocks {
                 match block {
@@ -1047,7 +1248,6 @@ impl Store {
                             return Err(ContextError::NativeOrder.into());
                         }
                         *ordering = Some(index);
-                        retained_current_opaque |= index < snapshot.blocks.len() && stored.opaque;
                         rewritten.extend(stored.items.clone());
                     }
                     ContextBlock::Text {
@@ -1140,30 +1340,24 @@ impl Store {
             if model.trim().is_empty() {
                 return Err(ContextError::InvalidModel.into());
             }
-            if current.model.as_ref() != Some(model)
-                && (retained_current_opaque
-                    || all[snapshot.prefix.len()..].iter().any(|i| opaque(&i.item)))
-            {
-                return Err(ContextError::OpaqueModel.into());
-            }
         }
         let selected_model = draft.next_model.as_deref().or(current.model.as_deref());
-        for occurrence in rewritten
-            .iter()
-            .filter(|i| opaque(&i.item) && !current_origins.contains(&i.origin))
-        {
-            let issuing_model = super::replay::response_item_model(
-                &tx,
-                &occurrence.origin.request,
-                &occurrence.origin.hash,
-            )?;
-            if issuing_model
-                .as_deref()
-                .is_none_or(|model| Some(model) != selected_model)
-            {
-                return Err(ContextError::OpaqueModel.into());
-            }
-        }
+        let mut prospective = rewritten.clone();
+        prospective.extend_from_slice(&all[snapshot.prefix.len()..]);
+        prospective.push(Occurrence {
+            request: snapshot.head.clone(),
+            position: i64::MAX,
+            hash: output_hash.clone(),
+            item: output_item,
+            origin: Origin {
+                request: snapshot.head.clone(),
+                position: i64::MAX,
+                hash: output_hash.clone(),
+            },
+            sources: Vec::new(),
+            note: false,
+        });
+        portable_request(&tx, &prospective, selected_model, Some(&snapshot.operation))?;
         if cancelled() {
             return Err(ContextError::Cancelled.into());
         }
@@ -1502,5 +1696,7 @@ pub(super) fn compaction_generation(
 
 #[cfg(test)]
 mod opaque_model_tests;
+#[cfg(test)]
+mod portability_tests;
 #[cfg(test)]
 mod tests;

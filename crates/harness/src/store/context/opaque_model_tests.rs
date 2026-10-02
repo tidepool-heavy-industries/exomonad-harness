@@ -67,15 +67,6 @@ fn prepare(provenance: Provenance<'_>, selected: &str) -> Restoration {
                 },
             )
             .unwrap();
-        if matches!(provenance, Provenance::MissingModel) {
-            store.lock().execute("UPDATE events SET payload=json_remove(payload,'$.issued.model') WHERE kind='model_turn'", []).unwrap();
-        }
-        if matches!(provenance, Provenance::NotInResponse) {
-            store.lock().execute("UPDATE events SET payload=json_remove(payload,'$.response.items[0]') WHERE kind='model_turn'", []).unwrap();
-        }
-        if matches!(provenance, Provenance::UnversionedTurn) {
-            store.lock().execute("UPDATE events SET payload=json_remove(payload,'$.format','$.issued') WHERE kind='model_turn'", []).unwrap();
-        }
     }
     let head = RequestId("edit".into());
     store.write_request(&head, Some(&parent), "/root", &[
@@ -125,6 +116,21 @@ fn prepare(provenance: Provenance<'_>, selected: &str) -> Restoration {
             pending: std::slice::from_ref(&second),
         })
         .unwrap();
+    if matches!(provenance, Provenance::MissingModel) {
+        store.lock().execute("UPDATE events SET payload=json_remove(payload,'$.issued.model') WHERE kind='model_turn'", []).unwrap();
+    }
+    if matches!(provenance, Provenance::NotInResponse) {
+        store.lock().execute("UPDATE events SET payload=json_remove(payload,'$.response.items[0]') WHERE kind='model_turn'", []).unwrap();
+    }
+    if matches!(provenance, Provenance::UnversionedTurn) {
+        store.lock().execute("UPDATE events SET payload=json_remove(payload,'$.format','$.issued') WHERE kind='model_turn'", []).unwrap();
+    }
+    if matches!(
+        provenance,
+        Provenance::MissingModel | Provenance::NotInResponse | Provenance::UnversionedTurn
+    ) {
+        saved = store.read_context(&parent).unwrap();
+    }
     let snapshot = store.begin_context(&second, &dropped.head).unwrap();
     saved.blocks.extend(
         snapshot
@@ -244,12 +250,32 @@ fn restore(fixture: &Restoration, next_model: Option<&str>) -> ContextCommitRece
 }
 
 #[test]
-fn historical_opaque_restore_refuses_mismatched_model_and_rolls_back() {
+fn historical_opaque_restore_projects_mismatched_model_and_keeps_raw_evidence() {
     for next in [None, Some("model-b")] {
-        refused(
-            &prepare(Provenance::Issued("model-a"), "model-b"),
-            next,
-            None,
+        let fixture = prepare(Provenance::Issued("model-a"), "model-b");
+        let receipt = restore(&fixture, next);
+        let projected = fixture
+            .store
+            .context_request_state(&receipt.head, &fixture.snapshot.operation.origin)
+            .unwrap();
+        assert!(
+            !projected
+                .history
+                .iter()
+                .any(|(_, _, i)| i.0["encrypted_content"] == "same-opaque-bytes")
+        );
+        assert!(projected.history.iter().any(|(_, _, i)| {
+            i.0["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("discovery"))
+        }));
+        assert!(
+            fixture
+                .store
+                .context_history(&receipt.head)
+                .unwrap()
+                .iter()
+                .any(|(_, _, i)| i.0["encrypted_content"] == "same-opaque-bytes")
         );
     }
 }
@@ -302,11 +328,21 @@ fn evidence() -> ContextCommitEvidence {
 }
 
 #[test]
-fn historical_opaque_replay_uses_local_issuing_model() {
-    refused(
-        &prepare(Provenance::Issued("model-b"), "model-a"),
-        None,
-        Some(&evidence()),
+fn historical_opaque_replay_projects_using_local_issuing_model() {
+    let fixture = prepare(Provenance::Issued("model-b"), "model-a");
+    let receipt = fixture
+        .store
+        .restore_context_commit(&fixture.snapshot, &evidence(), &output(), &[])
+        .unwrap();
+    assert_eq!(receipt.model.as_deref(), Some("model-a"));
+    assert!(
+        !fixture
+            .store
+            .context_request_state(&receipt.head, &fixture.snapshot.operation.origin)
+            .unwrap()
+            .history
+            .iter()
+            .any(|(_, _, i)| i.0["encrypted_content"] == "same-opaque-bytes")
     );
 }
 
@@ -387,7 +423,7 @@ fn historical_compaction_without_issuing_evidence_stays_protected() {
 }
 
 #[test]
-fn identical_current_opaque_bytes_do_not_authorize_another_origin() {
+fn identical_current_opaque_bytes_keep_distinct_origin_model_evidence() {
     let mut fixture = prepare(Provenance::Issued("model-a"), "model-b");
     let head = RequestId("model-b-equal-bytes".into());
     let opaque = Item(json!({"type":"reasoning","encrypted_content":"same-opaque-bytes"}));
@@ -433,11 +469,29 @@ fn identical_current_opaque_bytes_do_not_authorize_another_origin() {
         .saved
         .blocks
         .extend(fixture.snapshot.document.blocks.clone());
-    refused(&fixture, None, None);
+    let receipt = restore(&fixture, None);
+    let projected = fixture
+        .store
+        .context_request_state(&receipt.head, &fixture.snapshot.operation.origin)
+        .unwrap();
+    assert_eq!(
+        projected
+            .history
+            .iter()
+            .filter(|(_, _, i)| i.0["encrypted_content"] == "same-opaque-bytes")
+            .count(),
+        1
+    );
+    assert!(projected.history.iter().any(|(_, _, i)| {
+        i.0["content"].as_str().is_some_and(|t| {
+            t.starts_with("[Store-generated model portability note")
+                && t.contains("opaque-response")
+        })
+    }));
 }
 
 #[test]
-fn current_opaque_retention_needs_no_historical_provenance() {
+fn current_opaque_retention_refuses_unknown_issuing_provenance() {
     let store = Store::memory().unwrap();
     let head = RequestId("current-opaque".into());
     store.write_request(&head, None, "/root", &[
@@ -449,24 +503,23 @@ fn current_opaque_retention_needs_no_historical_provenance() {
         .initialize_context_model(&operation.origin, "model-a")
         .unwrap();
     let snapshot = store.begin_context(&operation, &head).unwrap();
-    let receipt = store
-        .commit_context(ContextCommit {
-            snapshot: &snapshot,
-            draft: &ContextDraft {
-                document: snapshot.document.clone(),
-                next_model: None,
-                next_effort: None,
-            },
-            output: &output(),
-            pending: &[],
-        })
-        .unwrap();
-    assert_eq!(receipt.model.as_deref(), Some("model-a"));
-    assert!(
-        store
-            .context_history(&receipt.head)
-            .unwrap()
-            .iter()
-            .any(|(_, _, item)| item.0["encrypted_content"] == "current-opaque")
+    let result = store.commit_context(ContextCommit {
+        snapshot: &snapshot,
+        draft: &ContextDraft {
+            document: snapshot.document.clone(),
+            next_model: None,
+            next_effort: None,
+        },
+        output: &output(),
+        pending: &[],
+    });
+    assert!(matches!(
+        result,
+        Err(StoreError::Context(ContextError::OpaqueModel))
+    ));
+    assert!(store.context_receipt(&operation).unwrap().is_none());
+    assert_eq!(
+        store.context_model(&operation.origin).unwrap().as_deref(),
+        Some("model-a")
     );
 }

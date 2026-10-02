@@ -139,6 +139,19 @@ and supersedes effort choices pending at commit admission. Later pending choices
 retain their ordinary next-request behavior. Failed or cancelled publication
 leaves the context, model, effort and pending choice unchanged.
 
+Store projects closed, evidenced Responses groups into readable, source-linked
+notes when their opaque provider state belongs to another model. This projection
+is mandatory before transport and is checked against the exact successful output
+before a synchronous model change commits. Notes retain supported visible text,
+reasoning summaries, tool inputs and results. Pending exchanges, incomplete or
+ambiguous response membership, unknown issuing models and unsupported content
+refuse portability. Opaque server compaction remains on its evidenced issuing
+model; a readable authored replacement is required to move it across models.
+Raw history, claims, context documents and replay receipts retain their original
+native items and source references; `getContext` therefore shows the stored
+native groups rather than the provider request projection. Exact issued replay
+requests record the projected notes and their hashes. Portability runs no effects.
+
 Context commit receipts use internal format version 2. Version 1 receipts are
 rejected with `ContextError::UnsupportedState` when read for acknowledgment,
 recovery or replay; retained version 1 runs require explicit migration or

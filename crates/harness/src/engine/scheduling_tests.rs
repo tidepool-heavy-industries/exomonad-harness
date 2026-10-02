@@ -478,6 +478,7 @@ impl Provider for ContextEditor {
 struct ContextScript {
     requests: Arc<Mutex<Vec<ResponsesRequest>>>,
     two_calls: bool,
+    opaque: bool,
     finalize_calls: Option<Vec<Item>>,
 }
 
@@ -686,7 +687,11 @@ impl ResponsesTransport for ContextScript {
             requests.len()
         };
         if index == 1 {
-            let mut items = vec![call("edit-first", "edit_first")];
+            let mut items = vec![];
+            if self.opaque {
+                items.push(Item(json!({"type":"reasoning","encrypted_content":"model-old-only","summary":[{"type":"summary_text","text":"visible plan"}]})));
+            }
+            items.push(call("edit-first", "edit_first"));
             if self.two_calls {
                 items.push(call("edit-second", "edit_second"));
             }
@@ -719,6 +724,7 @@ fn context_engine(
         ContextScript {
             requests: requests.clone(),
             two_calls,
+            opaque: false,
             finalize_calls: None,
         },
         store.clone(),
@@ -747,6 +753,64 @@ fn context_engine(
         },
     );
     (engine, requests, operations)
+}
+
+#[tokio::test]
+async fn opaque_issuing_sync_cell_switches_and_seals_only_portable_next_input() {
+    let (mut engine, requests, operations) = context_engine(false, false);
+    engine.client.opaque = true;
+    let (_cancel, cancelled) = watch::channel(false);
+    let completion = engine
+        .run(None, vec![], cancelled, mailbox())
+        .await
+        .unwrap();
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].model, "model-old");
+    assert_eq!(requests[1].model, "model-next");
+    assert!(
+        !serde_json::to_string(&requests[1].input)
+            .unwrap()
+            .contains("model-old-only")
+    );
+    let note = requests[1]
+        .input
+        .iter()
+        .find_map(|item| {
+            item.0["content"]
+                .as_str()
+                .filter(|text| text.starts_with("[Store-generated model portability note"))
+        })
+        .unwrap();
+    for visible in ["visible plan", "edit_first", "edit-first", "done"] {
+        assert!(note.contains(visible), "missing {visible}: {note}");
+    }
+    assert!(requests[1].input.iter().any(|i| {
+        i.0["content"]
+            .as_str()
+            .is_some_and(|t| t.ends_with("first commit"))
+    }));
+    let operation = operations.lock().unwrap()[0].clone();
+    assert!(engine.store.context_receipt(&operation).unwrap().is_some());
+    let raw = engine
+        .store
+        .context_history(&completion.head_request)
+        .unwrap();
+    assert!(
+        raw.iter()
+            .any(|(_, _, i)| i.0["encrypted_content"] == "model-old-only")
+    );
+    assert_eq!(
+        raw.iter()
+            .filter(
+                |(_, _, i)| i.0["type"] == "function_call_output" && i.0["call_id"] == "edit-first"
+            )
+            .count(),
+        1
+    );
+    let replay = engine.store.replay_turns(&operation.request).unwrap();
+    assert_eq!(replay[1].model_request.input, requests[1].input);
+    assert_eq!(engine.provider.operations.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -1065,6 +1129,7 @@ async fn refused_context_commit_aborts_publication_and_recovers_without_releasin
         ContextScript {
             requests: requests.clone(),
             two_calls: false,
+            opaque: false,
             finalize_calls: None,
         },
         engine.store.clone(),
@@ -1621,6 +1686,7 @@ struct ContextFinalReply {
 #[tokio::test]
 async fn validated_finalize_in_a_sync_edit_response_preserves_context_publication() {
     let (mut engine, requests, operations) = context_engine(false, false);
+    engine.client.opaque = true;
     engine.client.finalize_calls = Some(vec![context_finalize(
         "first-final",
         json!({"answer":"provisional"}),
@@ -1651,7 +1717,14 @@ async fn validated_finalize_in_a_sync_edit_response_preserves_context_publicatio
         sent[1]
             .input
             .iter()
-            .any(|item| item.0["call_id"] == "first-final")
+            .any(|item| item.0["content"].as_str().is_some_and(|text| text
+                .starts_with("[Store-generated model portability note")
+                && text.contains("first-final")))
+    );
+    assert!(
+        !serde_json::to_string(&sent[1].input)
+            .unwrap()
+            .contains("model-old-only")
     );
     assert!(
         engine

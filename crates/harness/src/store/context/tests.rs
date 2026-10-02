@@ -5,6 +5,28 @@ use crate::{
     store::Usage,
 };
 
+fn issued_response(store: &Store, head: &RequestId, items: Vec<Item>, model: &str) {
+    store
+        .record_replay_turn(
+            head,
+            &crate::transport::ResponsesRequest {
+                input: vec![],
+                instructions: "test".into(),
+                tools: vec![].into(),
+                tools_allowed: None,
+                model: model.into(),
+                pinned_effort: Effort::Low,
+                session_id: "test".into(),
+            },
+            &crate::transport::ResponsesTurn {
+                response_id: "response".into(),
+                items,
+                usage: Default::default(),
+            },
+        )
+        .unwrap();
+}
+
 fn setup(store: &Store) -> (RequestId, OperationId) {
     let head = RequestId("root".into());
     store.write_request(&head,None,"/root",&[
@@ -1188,19 +1210,12 @@ fn closed_opaque_response_converts_to_notes_preserving_raw_evidence() {
             Usage::default(),
         )
         .unwrap();
-    let hashes = store
-        .items(&parent)
-        .unwrap()
-        .iter()
-        .map(|item| store.put_item(item).unwrap().0)
-        .collect::<Vec<_>>();
-    store
-        .lock()
-        .execute(
-            "INSERT INTO events(request_id,kind,payload,created_at) VALUES(?1,'model_turn',?2,0)",
-            params![parent.0, json!({"response":{"items":hashes}}).to_string()],
-        )
-        .unwrap();
+    issued_response(
+        &store,
+        &parent,
+        vec![reasoning.clone(), answer.clone()],
+        "luna",
+    );
     let head = RequestId("opaque-edit".into());
     store.write_request(&head,Some(&parent),"/root",&[Item(json!({"type":"custom_tool_call","call_id":"edit","name":"haskell_sync","input":"edit"}))],Usage::default()).unwrap();
     let operation = store.claim(&CallId("edit".into()), &head).unwrap();
@@ -1217,19 +1232,6 @@ fn closed_opaque_response_converts_to_notes_preserving_raw_evidence() {
         } => reference.clone(),
         other => panic!("{other:?}"),
     };
-    assert!(matches!(
-        store.commit_context(ContextCommit {
-            snapshot: &snapshot,
-            draft: &ContextDraft {
-                next_effort: None,
-                document: snapshot.document.clone(),
-                next_model: Some("sol".into())
-            },
-            output: &output(),
-            pending: &[]
-        }),
-        Err(StoreError::Context(ContextError::OpaqueModel))
-    ));
     let receipt = store
         .commit_context(ContextCommit {
             snapshot: &snapshot,
@@ -1286,17 +1288,12 @@ fn blocks_preserve_duplicate_call_order_orphans_and_cut_opaque_groups() {
     store
         .write_request(&parent, None, "/root", &items, Usage::default())
         .unwrap();
-    let hashes = [items[6].clone(), items[8].clone(), items[10].clone()]
-        .iter()
-        .map(|item| store.put_item(item).unwrap().0)
-        .collect::<Vec<_>>();
-    store
-        .lock()
-        .execute(
-            "INSERT INTO events(request_id,kind,payload,created_at) VALUES(?1,'model_turn',?2,0)",
-            params![parent.0, json!({"response":{"items":hashes}}).to_string()],
-        )
-        .unwrap();
+    issued_response(
+        &store,
+        &parent,
+        vec![items[6].clone(), items[8].clone(), items[10].clone()],
+        "luna",
+    );
 
     let c = store.lock();
     let all = history(&c, &parent, true).unwrap();
@@ -1431,6 +1428,14 @@ fn staged_effort_is_atomic_preserves_native_prefix_and_consumes_older_pending() 
             )],
         )
         .unwrap();
+    issued_response(
+        &store,
+        &head,
+        vec![Item(
+            json!({"type":"reasoning","encrypted_content":"keep opaque continuity"}),
+        )],
+        "luna",
+    );
     let snapshot = store.begin_context(&operation, &head).unwrap();
     let before = store.context_history(&head).unwrap();
     store

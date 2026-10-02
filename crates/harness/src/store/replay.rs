@@ -51,38 +51,111 @@ struct ReplayResponse {
     usage: Usage,
 }
 
-/// Equal bytes in another request do not establish the issuing model. Every
-/// retained response containing this origin must agree on supported evidence.
-pub(super) fn response_item_model(
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum ResponseEnvelopeKind {
+    ModelTurn,
+    ServerCompaction,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ResponseEnvelope {
+    pub(super) model: String,
+    pub(super) origins: Vec<Origin>,
+    pub(super) kind: ResponseEnvelopeKind,
+}
+
+/// Group membership and the issuing model share one evidence reader. Hashes
+/// identify bytes, so response hashes must resolve to a unique ordered sequence
+/// of original occurrences before they authorize an envelope.
+pub(super) fn response_envelopes(
     c: &Connection,
     request: &RequestId,
-    hash: &ItemHash,
-) -> Result<Option<String>> {
-    let mut query = c.prepare(
-        "SELECT CASE WHEN json_extract(payload,'$.format')=?3 \
-         AND json_extract(payload,'$.request')=?1 \
-         AND json_type(payload,'$.issued.model')='text' \
-         THEN json_extract(payload,'$.issued.model') END \
-         FROM events WHERE request_id=?1 AND kind='model_turn' \
-         AND json_type(payload,'$.response.items')='array' \
-         AND EXISTS(SELECT 1 FROM json_each(payload,'$.response.items') WHERE value=?2)",
-    )?;
-    let models = query
-        .query_map(params![request.0, hash.0, FORMAT], |row| {
-            row.get::<_, Option<String>>(0)
-        })?
+) -> Result<std::collections::HashMap<Origin, std::sync::Arc<ResponseEnvelope>>> {
+    use std::collections::{HashMap, HashSet};
+    let mut query =
+        c.prepare("SELECT payload FROM events WHERE request_id=?1 AND kind='model_turn'")?;
+    let payloads = query
+        .query_map([&request.0], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let Some(Some(model)) = models.first() else {
-        return Ok(None);
-    };
-    if model.trim().is_empty()
-        || models
-            .iter()
-            .any(|candidate| candidate.as_ref() != Some(model))
-    {
-        return Ok(None);
+    let original = super::context::request_occurrences(c, request)?
+        .into_iter()
+        .filter(|i| i.request == i.origin.request && i.position == i.origin.position)
+        .collect::<Vec<_>>();
+    let mut envelopes = Vec::new();
+    let mut unknown = HashSet::new();
+    for payload in payloads {
+        let raw: serde_json::Value = serde_json::from_str(&payload)?;
+        let hashes = raw["response"]["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|h| h.as_str().map(|h| ItemHash(h.into())))
+            .collect::<Vec<_>>();
+        let Ok(record) = serde_json::from_str::<ReplayRecord>(&payload) else {
+            unknown.extend(hashes);
+            continue;
+        };
+        if record.format != FORMAT
+            || record.request != *request
+            || record.issued.model.trim().is_empty()
+        {
+            unknown.extend(hashes);
+            continue;
+        }
+        let hashes = &record.response.items;
+        let first = ordered_membership(&original, hashes, false);
+        let last = ordered_membership(&original, hashes, true);
+        let Some(origins) = first.filter(|first| Some(first) == last.as_ref()) else {
+            unknown.extend(hashes.iter().cloned());
+            continue;
+        };
+        envelopes.push(ResponseEnvelope {
+            model: record.issued.model,
+            origins,
+            kind: ResponseEnvelopeKind::ModelTurn,
+        });
     }
-    Ok(Some(model.clone()))
+    envelopes.extend(super::compaction::response_envelopes(c, request)?);
+    let mut matching = HashMap::new();
+    let mut ambiguous = HashSet::new();
+    for envelope in envelopes {
+        let envelope = std::sync::Arc::new(envelope);
+        for origin in &envelope.origins {
+            if matching
+                .insert(origin.clone(), std::sync::Arc::clone(&envelope))
+                .is_some()
+            {
+                ambiguous.insert(origin.clone());
+            }
+        }
+    }
+    matching.retain(|origin, _| !unknown.contains(&origin.hash) && !ambiguous.contains(origin));
+    Ok(matching)
+}
+
+fn ordered_membership(
+    original: &[crate::context::Occurrence],
+    hashes: &[ItemHash],
+    reverse: bool,
+) -> Option<Vec<Origin>> {
+    let mut positions = Vec::with_capacity(hashes.len());
+    if reverse {
+        let mut end = original.len();
+        for hash in hashes.iter().rev() {
+            let index = original[..end].iter().rposition(|i| &i.hash == hash)?;
+            positions.push(original[index].origin.clone());
+            end = index;
+        }
+        positions.reverse();
+    } else {
+        let mut start = 0;
+        for hash in hashes {
+            let index = start + original[start..].iter().position(|i| &i.hash == hash)?;
+            positions.push(original[index].origin.clone());
+            start = index + 1;
+        }
+    }
+    Some(positions)
 }
 
 fn read_item(tx: &Connection, hash: &ItemHash) -> Result<Item> {
