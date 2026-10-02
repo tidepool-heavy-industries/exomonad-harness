@@ -1959,14 +1959,11 @@ impl Store {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
-    /// Claims on the contiguous same-branch ancestry of `request`.
-    ///
-    /// This is intentionally distinct from `claims_on`: ordinary Engine runs
-    /// (including Here-fork starts) inspect only claims attached to their
-    /// supplied head. Process-restart recovery may opt into this query to find
-    /// claims on older requests of the same agent branch, without inheriting
-    /// claims across a fork boundary. A compacted window owns its copied
-    /// pending claims; completed calls discarded by that cut are not inherited.
+    /// Nearest claim for each exact operation on contiguous same-branch ancestry.
+    /// Ordinary continuation and restart recovery retain inherited attachments
+    /// on earlier requests of the same agent. Fork and compaction boundaries
+    /// stop traversal: a child or replacement must own its copied claims.
+    /// Repeated copies of one operation resolve to the closest request.
     pub fn claims_on_branch_lineage(
         &self,
         request: &RequestId,
@@ -1974,19 +1971,24 @@ impl Store {
     ) -> Result<Vec<Claim>> {
         let c = self.lock();
         let mut q = c.prepare(
-            "WITH RECURSIVE lineage(id,parent_id,branch) AS (
-                 SELECT id,parent_id,branch FROM requests WHERE id=?1 AND branch=?2
+            "WITH RECURSIVE lineage(id,parent_id,branch,depth) AS (
+                 SELECT id,parent_id,branch,0 FROM requests WHERE id=?1 AND branch=?2
                  UNION ALL
-                 SELECT parent.id,parent.parent_id,parent.branch
+                 SELECT parent.id,parent.parent_id,parent.branch,child.depth+1
                  FROM requests parent JOIN lineage child ON parent.id=child.parent_id
                  WHERE parent.branch=?2 AND NOT EXISTS(
                      SELECT 1 FROM session_state s
                      WHERE s.session_id='harness:compaction:' || child.id
                  )
+             ), ranked AS (
+                 SELECT c.origin,c.origin_request_id,c.call_id,c.request_id,c.state,c.output_hash,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY c.origin,c.origin_request_id,c.call_id ORDER BY l.depth
+                        ) AS nearest
+                 FROM claims c JOIN lineage l ON l.id=c.request_id
              )
-             SELECT c.origin,c.origin_request_id,c.call_id,c.request_id,c.state,c.output_hash
-             FROM claims c JOIN lineage l ON l.id=c.request_id
-             ORDER BY c.call_id",
+             SELECT origin,origin_request_id,call_id,request_id,state,output_hash
+             FROM ranked WHERE nearest=1 ORDER BY call_id,origin_request_id,origin",
         )?;
         q.query_map(params![request.0, branch], decode_claim)?
             .collect::<std::result::Result<Vec<_>, _>>()

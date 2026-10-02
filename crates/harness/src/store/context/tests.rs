@@ -1019,3 +1019,87 @@ fn closed_opaque_response_converts_to_notes_preserving_raw_evidence() {
         vec![&reasoning, &answer]
     );
 }
+
+#[test]
+fn claim_lineage_selects_nearest_exact_operation_for_continuation() {
+    use crate::store::ClaimState;
+    let store = Store::memory().unwrap();
+    let (root, operation) = setup(&store);
+    let initial = RequestId("child-initial".into());
+    let final_head = RequestId("child-final".into());
+    let next = RequestId("child-next".into());
+    for (request, parent) in [
+        (&initial, &root),
+        (&final_head, &initial),
+        (&next, &final_head),
+    ] {
+        store
+            .write_request(request, Some(parent), "/root/child", &[], Usage::default())
+            .unwrap();
+    }
+    let origin = serde_json::to_string(&operation.origin).unwrap();
+    let hash = store.put_item(&Item(json!({"result":"retained"}))).unwrap();
+    store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash) VALUES(?1,?2,?3,?4,'pending',NULL),(?1,?2,?3,?5,'settled',?6)",params![origin,operation.request.0,operation.call.0,initial.0,final_head.0,hash.0]).unwrap();
+    let claims = store
+        .claims_on_branch_lineage(&next, "/root/child")
+        .unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].operation, operation);
+    assert_eq!(claims[0].request, final_head);
+    assert_eq!(claims[0].state, ClaimState::Settled);
+    assert_eq!(claims[0].output, Some(hash));
+    assert!(
+        store
+            .claims_on_branch_lineage(&next, "/root/other")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn claim_lineage_stops_at_fork_and_compaction_boundaries() {
+    let store = Store::memory().unwrap();
+    let (root, operation) = setup(&store);
+    let initial = RequestId("isolated-child".into());
+    let compacted = RequestId("child-compacted".into());
+    store
+        .write_request(&initial, Some(&root), "/root/child", &[], Usage::default())
+        .unwrap();
+    assert!(
+        store
+            .claims_on_branch_lineage(&initial, "/root/child")
+            .unwrap()
+            .is_empty()
+    );
+    let origin = serde_json::to_string(&operation.origin).unwrap();
+    store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES(?1,?2,?3,?4,'pending')",params![origin,operation.request.0,operation.call.0,initial.0]).unwrap();
+    store
+        .write_request(
+            &compacted,
+            Some(&initial),
+            "/root/child",
+            &[],
+            Usage::default(),
+        )
+        .unwrap();
+    store
+        .lock()
+        .execute(
+            "INSERT INTO session_state(session_id,state,updated_at) VALUES(?1,'true',0)",
+            [format!("harness:compaction:{}", compacted.0)],
+        )
+        .unwrap();
+    assert!(
+        store
+            .claims_on_branch_lineage(&compacted, "/root/child")
+            .unwrap()
+            .is_empty()
+    );
+    store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES(?1,?2,?3,?4,'pending')",params![origin,operation.request.0,operation.call.0,compacted.0]).unwrap();
+    let claims = store
+        .claims_on_branch_lineage(&compacted, "/root/child")
+        .unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].request, compacted);
+    assert_eq!(claims[0].operation, operation);
+}
