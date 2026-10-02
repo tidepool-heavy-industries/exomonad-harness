@@ -587,6 +587,9 @@ impl Provider for BoundProvider {
 }
 #[async_trait]
 impl Provider for PinnedProvider {
+    fn holds_job_capacity(&self) -> bool {
+        self.surface.dispatcher.holds_job_capacity()
+    }
     fn tool_scheduling(&self, name: &str) -> ToolScheduling {
         self.surface
             .manifest
