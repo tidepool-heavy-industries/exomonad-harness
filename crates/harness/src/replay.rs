@@ -1228,6 +1228,7 @@ mod tests {
             verbs,
             progress,
             context: None,
+            completion: crate::provider::InvocationCompletionAuthority::new(None),
         }
     }
 
@@ -2420,6 +2421,7 @@ mod tests {
             verbs,
             progress,
             context: None,
+            completion: crate::provider::InvocationCompletionAuthority::new(None),
         };
         let running = {
             let cell = cell.clone();
@@ -2492,6 +2494,7 @@ mod tests {
             verbs,
             progress,
             context: None,
+            completion: crate::provider::InvocationCompletionAuthority::new(None),
         };
         let running = {
             let cell = cell.clone();

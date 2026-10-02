@@ -5,6 +5,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use serde_json::Value;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -49,6 +50,65 @@ pub struct CallContext {
     /// Store-issued prefix lease for this exact synchronous invocation. Async
     /// calls and detached probes never receive editing authority.
     pub context: Option<crate::context::ContextSnapshot>,
+    /// Exact invocation-local publication metadata, available even if the
+    /// native owner's terminal precedes the ordinary provider waiter.
+    pub completion: InvocationCompletionAuthority,
+}
+
+/// The exact invocation owner supplies immutable publication metadata after
+/// native settlement. Projection must not wait for the provider future or Store.
+pub trait InvocationCompletionSource: Send + Sync {
+    fn completion(&self, output: crate::turn::JobOutput) -> Option<ProviderCompletion>;
+}
+
+#[derive(Clone)]
+pub struct InvocationCompletionAuthority {
+    operation: Option<OperationId>,
+    source: Arc<OnceLock<Arc<dyn InvocationCompletionSource>>>,
+}
+
+impl std::fmt::Debug for InvocationCompletionAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InvocationCompletionAuthority")
+            .field("operation", &self.operation)
+            .field("registered", &self.source.get().is_some())
+            .finish()
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum CompletionRegistrationError {
+    #[error("completion authority belongs to another operation")]
+    ForeignOperation,
+    #[error("completion authority already has an invocation owner")]
+    AlreadyRegistered,
+}
+
+impl InvocationCompletionAuthority {
+    pub(crate) fn new(operation: Option<OperationId>) -> Self {
+        Self {
+            operation,
+            source: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub fn register(
+        &self,
+        operation: &OperationId,
+        source: Arc<dyn InvocationCompletionSource>,
+    ) -> Result<(), CompletionRegistrationError> {
+        if self.operation.as_ref() != Some(operation) {
+            return Err(CompletionRegistrationError::ForeignOperation);
+        }
+        self.source
+            .set(source)
+            .map_err(|_| CompletionRegistrationError::AlreadyRegistered)
+    }
+
+    pub(crate) fn project(&self, output: crate::turn::JobOutput) -> Option<ProviderCompletion> {
+        self.source.get()?.completion(output)
+    }
 }
 
 impl CallContext {
@@ -85,6 +145,7 @@ impl CallContext {
                 verbs,
                 progress,
                 context: None,
+                completion: InvocationCompletionAuthority::new(None),
             },
             receiver,
         )
@@ -259,6 +320,9 @@ pub trait CancellationOwner: Send + Sync {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ContextDisposition {
     Unedited,
+    /// A context-authorized owner completed without its publication metadata.
+    /// The terminal is retained, but staged state and children must be aborted.
+    Unavailable,
     Draft(crate::context::ContextDraft),
     Replay(crate::context::ContextCommitEvidence),
 }

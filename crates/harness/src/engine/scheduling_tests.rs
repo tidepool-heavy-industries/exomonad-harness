@@ -281,9 +281,45 @@ struct ContextEditor {
     committed: std::sync::atomic::AtomicUsize,
     aborted: std::sync::atomic::AtomicUsize,
     paused: Option<(Arc<Notify>, Arc<Notify>)>,
+    completion_owner: Option<Arc<CompletedContextOwner>>,
+}
+
+struct CompletedContextOwner {
+    ready: Notify,
+    release_waiter: Notify,
+    register_source: bool,
+    unedited: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::provider::CancellationOwner for CompletedContextOwner {
+    async fn cancel(
+        &self,
+        _: &OperationId,
+        _: &crate::provider::JobHandle,
+    ) -> crate::provider::CancellationAcknowledgment {
+        crate::provider::CancellationAcknowledgment::Completed(Ok(json!({"done":"edit_first"})))
+    }
+}
+
+struct RetainedContextCompletion(crate::provider::ProviderCompletion);
+impl crate::provider::InvocationCompletionSource for RetainedContextCompletion {
+    fn completion(
+        &self,
+        output: crate::turn::JobOutput,
+    ) -> Option<crate::provider::ProviderCompletion> {
+        let mut completion = self.0.clone();
+        completion.output = output;
+        Some(completion)
+    }
 }
 #[async_trait::async_trait]
 impl Provider for ContextEditor {
+    fn cancellation_owner(&self) -> Option<Arc<dyn crate::provider::CancellationOwner>> {
+        self.completion_owner
+            .clone()
+            .map(|owner| owner as Arc<dyn crate::provider::CancellationOwner>)
+    }
     fn tools(&self) -> Vec<serde_json::Value> {
         vec![]
     }
@@ -353,12 +389,15 @@ impl Provider for ContextEditor {
             .into(),
             sources: vec![],
         });
-        self.operations.lock().unwrap().push(snapshot.operation);
+        self.operations
+            .lock()
+            .unwrap()
+            .push(snapshot.operation.clone());
         if let Some((started, release)) = &self.paused {
             started.notify_one();
             release.notified().await;
         }
-        crate::provider::ProviderCompletion {
+        let mut completion = crate::provider::ProviderCompletion {
             output: if self.cancelled_receipt {
                 crate::turn::JobOutput::CancelledWithReceipt(Ok(json!({"prefix":name})))
             } else {
@@ -373,7 +412,27 @@ impl Provider for ContextEditor {
                     (name == "edit_first").then(|| "model-next".into())
                 },
             }),
+        };
+        if let Some(owner) = &self.completion_owner {
+            if owner.unedited {
+                completion.context = crate::provider::ContextDisposition::Unedited;
+            }
+            if owner.register_source {
+                context
+                    .completion
+                    .register(
+                        &snapshot.operation,
+                        Arc::new(RetainedContextCompletion(completion.clone())),
+                    )
+                    .unwrap();
+            }
+            owner.ready.notify_one();
+            owner.release_waiter.notified().await;
+            // The cancellation owner's immutable metadata is already retained.
+            // A later ordinary waiter must not replace that winning carrier.
+            return crate::provider::ProviderCompletion::unedited(Ok(json!({"late":"waiter"})));
         }
+        completion
     }
     async fn output_committed(&self, operation: &OperationId) -> Result<(), ProviderError> {
         self.committed
@@ -413,6 +472,203 @@ impl Provider for ContextEditor {
 struct ContextScript {
     requests: Arc<Mutex<Vec<ResponsesRequest>>>,
     two_calls: bool,
+}
+
+fn completed_context_owner(register_source: bool) -> Arc<CompletedContextOwner> {
+    Arc::new(CompletedContextOwner {
+        ready: Notify::new(),
+        release_waiter: Notify::new(),
+        register_source,
+        unedited: false,
+    })
+}
+
+#[tokio::test]
+async fn completed_operation_cancellation_retains_context_before_delayed_provider_waiter() {
+    let (mut engine, requests, operations) = context_engine(false, false);
+    let owner = completed_context_owner(true);
+    Arc::get_mut(&mut engine.provider).unwrap().completion_owner = Some(owner.clone());
+    let engine = Arc::new(engine);
+    let (_cancel, cancelled) = watch::channel(false);
+    let running = {
+        let engine = engine.clone();
+        tokio::spawn(async move { engine.run(None, vec![], cancelled, mailbox()).await })
+    };
+    owner.ready.notified().await;
+    let operation = operations.lock().unwrap()[0].clone();
+    engine.scheduler.cancel(&operation).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), running)
+        .await
+        .expect("owner completion must not wait for the provider waiter")
+        .unwrap()
+        .unwrap();
+    assert!(engine.store.context_receipt(&operation).unwrap().is_some());
+    assert_eq!(requests.lock().unwrap()[1].model, "model-next");
+    assert!(requests.lock().unwrap()[1].input.iter().any(|item| {
+        item.0["content"]
+            .as_str()
+            .is_some_and(|text| text.ends_with("first commit"))
+    }));
+    assert_eq!(
+        engine
+            .provider
+            .committed
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    let winning = engine
+        .scheduler
+        .invocation_completion(&operation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(winning.full_success);
+    assert!(matches!(
+        winning.context,
+        crate::provider::ContextDisposition::Draft(_)
+    ));
+    assert_eq!(
+        winning.output,
+        crate::turn::JobOutput::Completed(Ok(json!({"done":"edit_first"})))
+    );
+    owner.release_waiter.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while engine
+            .scheduler
+            .provider_completion(&operation)
+            .await
+            .unwrap()
+            .is_none()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        engine
+            .scheduler
+            .invocation_completion(&operation)
+            .await
+            .unwrap(),
+        Some(winning)
+    );
+}
+
+#[tokio::test]
+async fn round_cancellation_aborts_completed_owner_context_before_delayed_provider_waiter() {
+    round_cancellation_aborts_completed_owner(false).await;
+}
+
+#[tokio::test]
+async fn round_cancellation_aborts_unedited_sync_owner_before_store_publication() {
+    round_cancellation_aborts_completed_owner(true).await;
+}
+
+async fn round_cancellation_aborts_completed_owner(unedited: bool) {
+    let (mut engine, _, operations) = context_engine(false, false);
+    let mut owner = completed_context_owner(true);
+    Arc::get_mut(&mut owner).unwrap().unedited = unedited;
+    Arc::get_mut(&mut engine.provider).unwrap().completion_owner = Some(owner.clone());
+    let engine = Arc::new(engine);
+    let (cancel, cancelled) = watch::channel(false);
+    let running = {
+        let engine = engine.clone();
+        tokio::spawn(async move { engine.run(None, vec![], cancelled, mailbox()).await })
+    };
+    owner.ready.notified().await;
+    let operation = operations.lock().unwrap()[0].clone();
+    cancel.send(true).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), running)
+        .await
+        .expect("round cleanup must not wait for the ordinary provider waiter")
+        .unwrap();
+    assert!(matches!(result, Err(EngineError::Cancelled { .. })));
+    assert!(engine.store.context_receipt(&operation).unwrap().is_none());
+    assert_eq!(
+        engine.store.context_model(&operation.origin).unwrap(),
+        Some("model-old".into())
+    );
+    assert_eq!(
+        engine
+            .provider
+            .committed
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        engine
+            .provider
+            .aborted
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(
+        engine
+            .store
+            .events(Some(&operation.request))
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "context_disposition")
+    );
+    owner.release_waiter.notify_one();
+}
+
+#[tokio::test]
+async fn completed_owner_without_required_context_metadata_aborts_publication_promptly() {
+    let (mut engine, requests, operations) = context_engine(false, false);
+    let owner = completed_context_owner(false);
+    Arc::get_mut(&mut engine.provider).unwrap().completion_owner = Some(owner.clone());
+    let engine = Arc::new(engine);
+    let (_cancel, cancelled) = watch::channel(false);
+    let running = {
+        let engine = engine.clone();
+        tokio::spawn(async move { engine.run(None, vec![], cancelled, mailbox()).await })
+    };
+    owner.ready.notified().await;
+    let operation = operations.lock().unwrap()[0].clone();
+    engine.scheduler.cancel(&operation).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), running)
+        .await
+        .expect("missing metadata must not hang cancellation")
+        .unwrap()
+        .unwrap();
+    assert!(engine.store.context_receipt(&operation).unwrap().is_none());
+    assert_eq!(requests.lock().unwrap()[1].model, "model-old");
+    assert_eq!(
+        engine
+            .provider
+            .committed
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        engine
+            .provider
+            .aborted
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    let completion = engine
+        .scheduler
+        .invocation_completion(&operation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!completion.full_success);
+    assert!(matches!(
+        completion.context,
+        crate::provider::ContextDisposition::Unavailable
+    ));
+    assert!(
+        engine
+            .store
+            .events(Some(&operation.request))
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "context_disposition")
+    );
+    owner.release_waiter.notify_one();
 }
 #[async_trait::async_trait]
 impl ResponsesTransport for ContextScript {
@@ -462,6 +718,7 @@ fn context_engine(
             committed: std::sync::atomic::AtomicUsize::new(0),
             aborted: std::sync::atomic::AtomicUsize::new(0),
             paused: None,
+            completion_owner: None,
         }),
         EngineConfig {
             instructions: "instructions".into(),

@@ -158,6 +158,8 @@ struct Job {
     /// terminal output that was already published to claimants.
     provider_completion: Option<Result<Value, ToolFailure>>,
     completion: Option<crate::provider::ProviderCompletion>,
+    completion_authority: crate::provider::InvocationCompletionAuthority,
+    context_completion_required: bool,
     progress: Vec<Value>,
     cancel: tokio_util::sync::CancellationToken,
     settled: tokio::sync::watch::Sender<Option<JobOutput>>,
@@ -393,6 +395,7 @@ impl JobScheduler {
             return Ok(());
         }
         let launch = job.launch.take().ok_or(JobError::DuplicateCall)?;
+        job.context_completion_required = context_snapshot.is_some();
         launch
             .send(context_snapshot)
             .map_err(|_| JobError::UnknownCall)
@@ -447,6 +450,10 @@ impl JobScheduler {
                 output: None,
                 provider_completion: None,
                 completion: None,
+                completion_authority: crate::provider::InvocationCompletionAuthority::new(Some(
+                    operation.clone(),
+                )),
+                context_completion_required: false,
                 progress: Vec::new(),
                 cancel: tokio_util::sync::CancellationToken::new(),
                 settled,
@@ -468,6 +475,11 @@ impl JobScheduler {
             .get(&operation)
             .expect("job inserted before launch")
             .cancel
+            .clone();
+        let task_completion = registry
+            .get(&operation)
+            .expect("admitted job")
+            .completion_authority
             .clone();
         let verb_backend = provider.job_agent_service();
         let holds_capacity = provider.holds_job_capacity();
@@ -565,6 +577,7 @@ impl JobScheduler {
                 verbs,
                 progress,
                 context: context_snapshot,
+                completion: task_completion,
             };
             let call = provider.complete_call(&name, input, context);
             tokio::pin!(call);
@@ -593,7 +606,13 @@ impl JobScheduler {
                 _ => None,
             };
             if let Some(job) = jobs.lock().await.get_mut(&task_operation) {
-                job.completion = Some(result);
+                if job.completion.is_none() {
+                    result.full_success &= job
+                        .output
+                        .as_ref()
+                        .is_none_or(|output| matches!(output, JobOutput::Completed(Ok(_))));
+                    job.completion = Some(result);
+                }
             }
             settle(&jobs, task_operation.clone(), output, provider_completion).await;
             let _ = events.send(task_operation);
@@ -906,6 +925,39 @@ impl JobScheduler {
                         "owner acknowledgment timed out".into(),
                     )
                 });
+            // The native terminal can precede the ordinary result waiter. Its
+            // publication metadata must be retained before waking the Engine.
+            // Projection calls the invocation owner outside the scheduler lock.
+            let completion = if let crate::provider::CancellationAcknowledgment::Completed(value) =
+                &ack
+            {
+                let (authority, required, retained) = {
+                    let jobs = self.jobs.lock().await;
+                    let job = jobs.get(&call_id).ok_or(JobError::UnknownCall)?;
+                    (
+                        job.completion_authority.clone(),
+                        job.context_completion_required,
+                        job.completion.clone(),
+                    )
+                };
+                let output = JobOutput::Completed(value.clone());
+                let mut completion = retained
+                    .or_else(|| authority.project(output.clone()))
+                    .unwrap_or_else(|| {
+                        let mut completion =
+                            crate::provider::ProviderCompletion::unedited(value.clone());
+                        if required {
+                            completion.full_success = false;
+                            completion.context = crate::provider::ContextDisposition::Unavailable;
+                        }
+                        completion
+                    });
+                completion.output = output;
+                completion.full_success &= value.is_ok();
+                Some(completion)
+            } else {
+                None
+            };
             let (task, settlement) = {
                 let mut jobs = self.jobs.lock().await;
                 let job = jobs.get_mut(&call_id).ok_or(JobError::UnknownCall)?;
@@ -913,6 +965,9 @@ impl JobScheduler {
                 // Completion while the owner was answering wins unchanged.
                 if job.output.is_some() {
                     return Ok(None);
+                }
+                if let Some(completion) = completion {
+                    job.completion = Some(completion);
                 }
                 let output = match &ack {
                     crate::provider::CancellationAcknowledgment::Stopped => JobOutput::Cancelled,

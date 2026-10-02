@@ -2318,15 +2318,27 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 }
                             });
                         }
-                        match self
-                            .retain_settled_output(
+                        let retention = async {
+                            // A caller-round abort before Store settlement cannot
+                            // release this synchronous boundary's deferred work,
+                            // even when the native owner returned without edits.
+                            if call.scheduling == ToolScheduling::BeforeNextInference
+                                && matches!(output, crate::turn::JobOutput::Completed(_))
+                                && !self.store.has_completed_output(&call.operation)?
+                            {
+                                self.retain_context_requirement(&call.operation, true)
+                                    .await?;
+                            }
+                            self.retain_settled_output(
                                 &call.operation,
                                 call.tool_kind,
                                 &output,
                                 &call.claim_request,
                             )
                             .await
-                        {
+                        }
+                        .await;
+                        match retention {
                             Ok(()) => persisted_terminal = true,
                             Err(error) => {
                                 first_error.get_or_insert(error);
@@ -2487,26 +2499,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .find(|call| call.operation == operation)
                 .expect("sync call retained");
             let completion = self.scheduler.invocation_completion(&operation).await?;
-            if completion.as_ref().is_some_and(|completion| {
-                !matches!(
-                    completion.context,
-                    crate::provider::ContextDisposition::Unedited
-                )
-            }) {
-                // Retain the requirement before validation. A refused draft
-                // cannot later masquerade as an unedited success after restart.
-                let store = self.store.clone();
-                let issuing = operation.request.clone();
-                let required = serde_json::to_value(ContextDispositionRecord {
-                    operation: operation.clone(),
-                    requires_context_commit: true,
-                })
-                .map_err(StoreError::from)?;
-                blocking(move || {
-                    store.record_event(Some(&issuing), "context_disposition", &required)
-                })
-                .await?;
-            }
+            self.retain_context_requirement(&operation, false).await?;
             let disposition = completion
                 .and_then(|completion| completion.full_success.then_some(completion.context))
                 .filter(|context| {
@@ -2547,6 +2540,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         crate::provider::ContextDisposition::Unedited => {
                             unreachable!("unedited disposition filtered")
                         }
+                        crate::provider::ContextDisposition::Unavailable => Err(
+                            StoreError::Context(crate::context::ContextError::Ineligible),
+                        ),
                     }
                 })
                 .await;
@@ -2764,6 +2760,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         output: &crate::turn::JobOutput,
         claim_request: &RequestId,
     ) -> Result<(), EngineError> {
+        // Persist the refusal fence before the terminal: recovery must never
+        // acknowledge a completed editing operation as an unedited success.
+        self.retain_context_requirement(operation, false).await?;
         let call_id = &operation.call;
         let item = Item::tool_output(call_id, kind, output);
         let store = self.store.clone();
@@ -2800,45 +2799,54 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         Ok(())
     }
 
+    async fn retain_context_requirement(
+        &self,
+        operation: &OperationId,
+        abort_unpublished: bool,
+    ) -> Result<bool, EngineError> {
+        if operation.origin != self.origin {
+            return Ok(false);
+        }
+        let required = self
+            .store
+            .events(Some(&operation.request))?
+            .into_iter()
+            .filter(|event| event.kind == "context_disposition")
+            .map(|event| serde_json::from_str::<ContextDispositionRecord>(&event.payload))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)?
+            .iter()
+            .any(|event| event.requires_context_commit && event.operation == *operation);
+        let scheduled_draft = self
+            .scheduler
+            .invocation_completion(operation)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|completion| {
+                !matches!(
+                    completion.context,
+                    crate::provider::ContextDisposition::Unedited
+                )
+            });
+        if (scheduled_draft || abort_unpublished) && !required {
+            let required = serde_json::to_value(ContextDispositionRecord {
+                operation: operation.clone(),
+                requires_context_commit: true,
+            })
+            .map_err(StoreError::from)?;
+            self.store
+                .record_event(Some(&operation.request), "context_disposition", &required)?;
+        }
+        Ok(required || scheduled_draft || abort_unpublished)
+    }
+
     async fn acknowledge_output(&self, operation: &OperationId) -> Result<(), EngineError> {
         // A fork replays its ancestor's result; only the issuing conversation
         // can acknowledge the owner's live execution boundary.
         if operation.origin == self.origin && self.store.has_completed_output(operation)? {
-            let required = self
-                .store
-                .events(Some(&operation.request))?
-                .into_iter()
-                .filter(|event| event.kind == "context_disposition")
-                .map(|event| serde_json::from_str::<ContextDispositionRecord>(&event.payload))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(StoreError::from)?
-                .iter()
-                .any(|event| event.requires_context_commit && event.operation == *operation);
-            let scheduled_draft = self
-                .scheduler
-                .invocation_completion(operation)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|completion| {
-                    !matches!(
-                        completion.context,
-                        crate::provider::ContextDisposition::Unedited
-                    )
-                });
-            if scheduled_draft && !required {
-                let required = serde_json::to_value(ContextDispositionRecord {
-                    operation: operation.clone(),
-                    requires_context_commit: true,
-                })
-                .map_err(StoreError::from)?;
-                self.store.record_event(
-                    Some(&operation.request),
-                    "context_disposition",
-                    &required,
-                )?;
-            }
-            if (required || scheduled_draft) && self.store.context_receipt(operation)?.is_none() {
+            let required = self.retain_context_requirement(operation, false).await?;
+            if required && self.store.context_receipt(operation)?.is_none() {
                 self.provider.output_aborted(operation).await?;
             } else {
                 self.provider.output_committed(operation).await?;
