@@ -788,19 +788,52 @@ impl Store {
         // Saved documents can retain content dropped by an earlier rewrite.
         // Resolve those references only from immutable ancestry before the
         // original issuing call; post-call envelopes never become editable.
-        let mut q = tx.prepare("WITH RECURSIVE lineage(id,parent_id,depth) AS (SELECT id,parent_id,0 FROM requests WHERE id=?1 UNION ALL SELECT r.id,r.parent_id,lineage.depth+1 FROM requests r JOIN lineage ON r.id=lineage.parent_id) SELECT id FROM lineage ORDER BY depth DESC")?;
-        let ancestors = q
-            .query_map([&snapshot.operation.request.0], |r| r.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        drop(q);
+        let current_refs = snapshot
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.block {
+                ContextBlock::Text {
+                    reference: Some(r), ..
+                }
+                | ContextBlock::Native { reference: r, .. } => Some(r),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let current_sources = snapshot
+            .prefix
+            .iter()
+            .flat_map(|i| i.sources.iter())
+            .collect::<HashSet<_>>();
+        let historical_needed = replay.is_none()
+            && draft.document.blocks.iter().any(|b| match b {
+                ContextBlock::Native { reference, .. }
+                | ContextBlock::Text {
+                    reference: Some(reference),
+                    ..
+                } => !current_refs.contains(reference),
+                ContextBlock::Text {
+                    reference: None,
+                    sources,
+                    ..
+                } => sources
+                    .iter()
+                    .any(|r| !current_refs.contains(r) && !current_sources.contains(r)),
+            });
         let mut historic_blocks = Vec::new();
-        for ancestor in ancestors {
-            let historic = history(&tx, &RequestId(ancestor), true)?;
-            let cut = historic
-                .iter()
-                .position(|i| i.origin == origin)
-                .unwrap_or(historic.len());
-            historic_blocks.extend(blocks(&tx, &historic, cut)?);
+        if historical_needed {
+            let mut q = tx.prepare("WITH RECURSIVE lineage(id,parent_id,depth) AS (SELECT id,parent_id,0 FROM requests WHERE id=?1 UNION ALL SELECT r.id,r.parent_id,lineage.depth+1 FROM requests r JOIN lineage ON r.id=lineage.parent_id) SELECT id FROM lineage ORDER BY depth DESC")?;
+            let ancestors = q
+                .query_map([&snapshot.operation.request.0], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(q);
+            for ancestor in ancestors {
+                let historic = history(&tx, &RequestId(ancestor), true)?;
+                let cut = historic
+                    .iter()
+                    .position(|i| i.origin == origin)
+                    .unwrap_or(historic.len());
+                historic_blocks.extend(blocks(&tx, &historic, cut)?);
+            }
         }
         let mut available = snapshot.blocks.clone();
         for block in historic_blocks {
