@@ -403,6 +403,7 @@ impl Store {
                 params![snapshot_request.0, position as i64, hash.0],
             )?;
         }
+        Self::preserve_context_origins_tx(&tx, source_request, &snapshot_request)?;
         let claims: Vec<(
             String,
             String,

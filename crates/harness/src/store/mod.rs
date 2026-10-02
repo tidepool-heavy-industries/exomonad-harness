@@ -1,4 +1,5 @@
 //! Durable SQLite event and content-addressed request store.
+mod context;
 mod embedded;
 mod embedded_commands;
 mod embedded_round;
@@ -36,6 +37,8 @@ pub const SQL: &str = schema::SQL;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error(transparent)]
+    Context(#[from] crate::context::ContextError),
     #[error("settled operation {operation:?} has no typed replay outcome; preserve its bytes")]
     UnsupportedReplayOutcome { operation: OperationId },
     #[error("wait replay continuation does not match exact issued operation {operation:?}")]
@@ -697,6 +700,9 @@ impl Store {
                 params![snapshot_request.0, position as i64, hash.0],
             )?;
         }
+        if let Some(source_head) = &source_head {
+            context::preserve_origins(&tx, source_head, snapshot_request)?;
+        }
         for (origin, original_request, call_id) in inherited_operations {
             tx.execute(
                 "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES (?1,?2,?3,?4,'pending')",
@@ -1016,6 +1022,7 @@ impl Store {
                 utc_millis()
             ],
         )?;
+        context::compaction_generation(&tx, &self.store_id, parent, request, branch)?;
         tx.commit()?;
         Ok(())
     }
