@@ -57,6 +57,28 @@ fn save_state(
     Ok(())
 }
 
+/// Called only by the authorized exact binding transfer, in its transaction.
+/// Context seals and historical operations retain their issuing incarnation.
+pub(super) fn transfer_embedded_state(
+    tx: &Transaction<'_>,
+    predecessor: &crate::embedding::HostIdentity,
+    successor: &crate::embedding::HostIdentity,
+) -> Result<()> {
+    let identity = |host: &crate::embedding::HostIdentity| ConversationIdentity::Embedded {
+        run: host.run.clone(),
+        actor: host.actor.clone(),
+        incarnation: host.incarnation.clone(),
+    };
+    let predecessor = identity(predecessor);
+    let successor = identity(successor);
+    save_state(tx, &successor, &state(tx, &predecessor)?)?;
+    tx.execute(
+        "DELETE FROM session_state WHERE session_id=?1",
+        [state_key(&predecessor)?],
+    )?;
+    Ok(())
+}
+
 pub(super) fn identity_for_branch(
     c: &Connection,
     store_id: &str,

@@ -357,6 +357,134 @@ impl BindingSuccessorAuthority for Successor {
         Ok(true)
     }
 }
+
+#[tokio::test]
+async fn embedded_restart_preserves_committed_model_for_retained_opaque_history() {
+    use crate::context::{ContextCommit, ContextDraft};
+
+    let path = path();
+    let old = identity();
+    let mut next = old.clone();
+    next.incarnation = "successor".into();
+    let source = RequestId("model-switch".into());
+    let opaque_head = RequestId("model-b-output".into());
+    let opaque = Item(json!({"type":"reasoning","encrypted_content":"model-b-only"}));
+    let (snapshot, draft, output, receipt, old_origin) = {
+        let store = Store::open(&path).unwrap();
+        store.bind_embedded_actor(&old, None).unwrap();
+        store
+            .write_embedded_request(
+                &old,
+                &source,
+                None,
+                &[
+                    Item(json!({"type":"message","role":"user","content":"switch models"})),
+                    Item(json!({"type":"custom_tool_call","call_id":"switch","name":"haskell_sync","input":"modifyContext"})),
+                ],
+                StoredUsage::default(),
+            )
+            .unwrap();
+        store.set_effort(&source, Effort::Low).unwrap();
+        let operation = store.claim(&CallId("switch".into()), &source).unwrap();
+        store
+            .initialize_context_model(&operation.origin, "test")
+            .unwrap();
+        let snapshot = store.begin_context(&operation, &source).unwrap();
+        let draft = ContextDraft {
+            document: snapshot.document.clone(),
+            next_model: Some("model-b".into()),
+        };
+        let output = crate::turn::JobOutput::Completed(Ok(json!("switched")));
+        let receipt = store
+            .commit_context(ContextCommit {
+                snapshot: &snapshot,
+                draft: &draft,
+                output: &output,
+                pending: &[],
+            })
+            .unwrap();
+        assert_eq!(receipt.generation, 1);
+        assert!(
+            store
+                .settle_embedded_round(&old, None, &receipt.head, EmbeddedRoundOutcome::Completed)
+                .unwrap()
+        );
+        store
+            .write_embedded_request(
+                &old,
+                &opaque_head,
+                Some(&receipt.head),
+                std::slice::from_ref(&opaque),
+                StoredUsage::default(),
+            )
+            .unwrap();
+        store.set_effort(&opaque_head, Effort::Low).unwrap();
+        assert!(
+            store
+                .settle_embedded_round(
+                    &old,
+                    Some(&receipt.head),
+                    &opaque_head,
+                    EmbeddedRoundOutcome::Completed
+                )
+                .unwrap()
+        );
+        let old_origin = operation.origin;
+        store
+            .transfer_embedded_binding(&old, &next, &Successor)
+            .unwrap();
+        (snapshot, draft, output, receipt, old_origin)
+    };
+    let store = Arc::new(Store::open(&path).unwrap());
+    let next_origin = ConversationIdentity::Embedded {
+        run: next.run.clone(),
+        actor: next.actor.clone(),
+        incarnation: next.incarnation.clone(),
+    };
+    assert!(store.context_model(&old_origin).is_err());
+    assert!(store.initialize_context_model(&old_origin, "test").is_err());
+    assert!(
+        store
+            .context_request_state(&opaque_head, &old_origin)
+            .is_err()
+    );
+    assert!(
+        store
+            .commit_context(ContextCommit {
+                snapshot: &snapshot,
+                draft: &draft,
+                output: &output,
+                pending: &[],
+            })
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .transfer_embedded_binding(&old, &next, &Successor)
+            .unwrap(),
+        crate::embedding::BindingSuccessorCommit::AlreadyInstalled
+    );
+    let (engine, inputs) = engine(store.clone(), &next, vec![Ok(final_turn())]);
+    let (_cancel, cancel) = watch::channel(false);
+    engine
+        .run_recovering_embedded(Some(opaque_head.clone()), vec![], cancel, incoming())
+        .await
+        .unwrap();
+    let requests = inputs.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].input.contains(&opaque));
+    assert_eq!(requests[0].model, "model-b");
+    let state = store
+        .context_request_state(&opaque_head, &next_origin)
+        .unwrap();
+    assert_eq!(state.model.as_deref(), Some("model-b"));
+    assert_eq!(state.generation, receipt.generation);
+    drop(requests);
+    drop(engine);
+    drop(store);
+    std::fs::remove_file(path).unwrap();
+}
+
 #[tokio::test]
 async fn embedded_restart_replays_compacted_settled_claim_with_original_incarnation_once() {
     let path = path();

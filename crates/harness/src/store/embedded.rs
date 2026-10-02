@@ -106,8 +106,9 @@ impl Store {
         }
     }
 
-    /// Transfer only the existing exact binding. Historical inputs and command
-    /// receipts keep their original identities; this does not enqueue work.
+    /// Transfer the existing exact binding and its inferred model/generation.
+    /// Historical inputs, command receipts and context seals keep their original
+    /// identities; this does not enqueue work.
     /// FULL commit and WAL checkpoint confirmation precede success, including
     /// exact retries. An error can leave the successor visible; retry this same
     /// authorized transition to confirm durability before publishing attachment.
@@ -141,6 +142,7 @@ impl Store {
             let outcome = if matches_binding(tx, successor)? {
                 BindingSuccessorCommit::AlreadyInstalled
             } else if matches_binding(tx, predecessor)? {
+                super::context::transfer_embedded_state(tx, predecessor, successor)?;
                 let changed = tx.execute("UPDATE embedded_bindings SET incarnation=?1 WHERE agent_path=?2 AND run_id=?3 AND incarnation=?4",
                 params![successor.incarnation, predecessor.actor.0, predecessor.run, predecessor.incarnation])?;
                 if changed != 1 {
@@ -644,6 +646,15 @@ mod tests {
         store
             .bind_initial_embedded_binding(&old, None, &InitialAuthority(old.clone()))
             .unwrap();
+        let old_origin = super::super::context::identity_for_branch(
+            &store.lock(),
+            &store.store_id,
+            &old.actor.0,
+        )
+        .unwrap();
+        store
+            .initialize_context_model(&old_origin, "model-b")
+            .unwrap();
         let reader = Connection::open(&path).unwrap();
         reader
             .execute_batch("BEGIN; SELECT COUNT(*) FROM embedded_bindings;")
@@ -654,6 +665,16 @@ mod tests {
                 .is_err()
         );
         assert!(store.embedded_binding_matches(&new).unwrap());
+        let new_origin = super::super::context::identity_for_branch(
+            &store.lock(),
+            &store.store_id,
+            &new.actor.0,
+        )
+        .unwrap();
+        assert_eq!(
+            store.context_model(&new_origin).unwrap().as_deref(),
+            Some("model-b")
+        );
         let mode: i64 = store
             .lock()
             .pragma_query_value(None, "synchronous", |row| row.get(0))
@@ -676,6 +697,11 @@ mod tests {
         drop(store);
         let store = Store::open(&path).unwrap();
         assert!(store.embedded_binding_matches(&new).unwrap());
+        assert_eq!(
+            store.context_model(&new_origin).unwrap().as_deref(),
+            Some("model-b")
+        );
+        assert!(store.context_model(&old_origin).is_err());
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -689,6 +715,62 @@ mod tests {
         ) -> std::result::Result<bool, String> {
             Ok(self.0)
         }
+    }
+
+    #[test]
+    fn successor_context_transfer_rolls_back_with_binding_failure() {
+        let store = Store::memory().unwrap();
+        let old = root_identity();
+        let new = HostIdentity {
+            incarnation: "2".into(),
+            ..old.clone()
+        };
+        let old_origin = crate::model::ConversationIdentity::Embedded {
+            run: old.run.clone(),
+            actor: old.actor.clone(),
+            incarnation: old.incarnation.clone(),
+        };
+        let new_origin = crate::model::ConversationIdentity::Embedded {
+            run: new.run.clone(),
+            actor: new.actor.clone(),
+            incarnation: new.incarnation.clone(),
+        };
+        store.bind_embedded_actor(&old, None).unwrap();
+        store
+            .initialize_context_model(&old_origin, "model-b")
+            .unwrap();
+        assert!(
+            store
+                .transfer_embedded_binding(&old, &new, &TransferAuthority(false))
+                .is_err()
+        );
+        store.lock().execute_batch("CREATE TRIGGER reject_successor BEFORE UPDATE ON embedded_bindings BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+        assert!(
+            store
+                .transfer_embedded_binding(&old, &new, &TransferAuthority(true))
+                .is_err()
+        );
+        assert!(store.embedded_binding_matches(&old).unwrap());
+        assert_eq!(
+            store.context_model(&old_origin).unwrap().as_deref(),
+            Some("model-b")
+        );
+        assert!(store.context_model(&new_origin).is_err());
+        store
+            .lock()
+            .execute_batch("DROP TRIGGER reject_successor")
+            .unwrap();
+        store
+            .transfer_embedded_binding(&old, &new, &TransferAuthority(true))
+            .unwrap();
+        store
+            .transfer_embedded_binding(&old, &new, &TransferAuthority(true))
+            .unwrap();
+        assert_eq!(
+            store.context_model(&new_origin).unwrap().as_deref(),
+            Some("model-b")
+        );
+        assert!(store.context_model(&old_origin).is_err());
     }
 
     #[test]
