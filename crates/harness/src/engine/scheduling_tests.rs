@@ -1124,15 +1124,27 @@ impl ResponsesTransport for ContextNotesScript {
 
 #[tokio::test]
 async fn completed_own_exchange_notes_do_not_reattach_on_ordinary_followup() {
-    let (mut engine, requests, _) = context_engine(true, false);
-    Arc::get_mut(&mut engine.provider)
+    let (mut original, requests, _) = context_engine(false, false);
+    Arc::get_mut(&mut original.provider)
         .unwrap()
         .summarize_completed = true;
+    let engine = Engine::<Offline, ContextEditor, ContextNotesScript>::with_transport(
+        ContextNotesScript {
+            requests: requests.clone(),
+        },
+        original.store,
+        original.scheduler,
+        original.provider,
+        original.config,
+    );
     let (_cancel, cancelled) = watch::channel(false);
-    let completed = engine
-        .run(None, vec![], cancelled, mailbox())
-        .await
-        .unwrap();
+    let completed = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        engine.run(None, vec![], cancelled, mailbox()),
+    )
+    .await
+    .expect("separate completed exchange can be summarized")
+    .unwrap();
     assert_eq!(
         engine
             .provider
