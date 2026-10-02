@@ -129,6 +129,10 @@ mod rejection_tests;
 mod scheduling_tests;
 
 #[cfg(test)]
+#[path = "engine/native_async_boundary_tests.rs"]
+mod native_async_boundary_tests;
+
+#[cfg(test)]
 #[path = "engine/yield_tests.rs"]
 mod yield_tests;
 
