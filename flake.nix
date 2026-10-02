@@ -30,6 +30,11 @@
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
           PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers-chromium}";
         };
+        browser = pkgs.mkShell {
+          packages = [ (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml) pkgs.nodejs_24 ];
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
+          PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers-chromium}";
+        };
       });
 
       packages = forSystems (pkgs: {
