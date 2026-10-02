@@ -6805,14 +6805,31 @@ mod tests {
             })
             .unwrap()
             .head;
+        let opaque = Item(json!({
+            "type":"reasoning",
+            "id":"reasoning-from-model-b",
+            "encrypted_content":"opaque-model-b"
+        }));
         store
-            .append_items(
+            .append_items(&selected, std::slice::from_ref(&opaque))
+            .unwrap();
+        store
+            .record_replay_turn(
                 &selected,
-                &[Item(json!({
-                    "type":"reasoning",
-                    "id":"reasoning-from-model-b",
-                    "encrypted_content":"opaque-model-b"
-                }))],
+                &ResponsesRequest {
+                    input: vec![],
+                    instructions: "instruction".into(),
+                    tools: vec![].into(),
+                    tools_allowed: None,
+                    model: model_b.into(),
+                    pinned_effort: Effort::Low,
+                    session_id: "model-switch-fixture".into(),
+                },
+                &ResponsesTurn {
+                    response_id: "model-b-response".into(),
+                    items: vec![opaque],
+                    usage: Usage::default(),
+                },
             )
             .unwrap();
         selected
