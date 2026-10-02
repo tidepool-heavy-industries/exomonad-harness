@@ -332,11 +332,14 @@ async fn sealed_context_replay_restores_note_attribution_and_reuses_its_sources(
             .any(|(_, _, item)| item.0["content"] == "retained edited context")
     );
 
-    destination.append_items(&receipt.head, &[Item(json!({"type":"function_call","call_id":"second-edit","name":"context_edit","arguments":"{}"}))]).unwrap();
+    let children = destination.children_of(&receipt.head).unwrap();
+    assert_eq!(children.len(), 1);
+    let head = &children[0].id;
+    destination.append_items(head, &[Item(json!({"type":"function_call","call_id":"second-edit","name":"context_edit","arguments":"{}"}))]).unwrap();
     let next = destination
-        .claim(&CallId("second-edit".into()), &receipt.head)
+        .claim(&CallId("second-edit".into()), head)
         .unwrap();
-    let snapshot = destination.begin_context(&next, &receipt.head).unwrap();
+    let snapshot = destination.begin_context(&next, head).unwrap();
     let mut document = snapshot.document.clone();
     let block = document.blocks.iter_mut().find(|block| matches!(block, ContextBlock::Text { text, .. } if text == "retained edited context")).unwrap();
     let ContextBlock::Text {
