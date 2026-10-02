@@ -279,6 +279,9 @@ async fn rejected_request_does_not_continue_after_unconfirmed_external_cancellat
             execution: ToolExecution::Asynchronous,
             persist_here_invocation_output: false,
             cancel_job_on_cleanup: true,
+            scheduling: ToolScheduling::Async,
+            queued: false,
+            completion: PendingCompletion::BlocksCompletion,
         };
         let error = engine
             .reject_or_cleanup(transport_error, None, &request, &[pending])
