@@ -358,7 +358,7 @@ impl ResponsesTransport for StalledTransport {
         let round = self.round.fetch_add(1, Ordering::SeqCst);
         let items = if round == 0 {
             vec![Item(
-                json!({"type":"function_call", "call_id":"stalled-work", "name":"work", "arguments":"{}"}),
+                json!({"type":"function_call", "call_id":"stalled-work", "name":"work", "async":true, "arguments":"{}"}),
             )]
         } else {
             if round == 1 {
