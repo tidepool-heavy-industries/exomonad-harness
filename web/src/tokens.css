@@ -91,6 +91,10 @@ pre { margin-block: 8px; max-width: 100%; }
 .error { color: var(--failed); }
 .history-window { margin-block: 20px; padding: 12px; border: 1px solid var(--line); min-width: 0; }
 .history-content, .history-item { min-width: 0; }
+.history-prose { font-family: inherit; font-size: 14px; line-height: 1.5; }
+.history-code { font-family: var(--mono); }
+.history-reasoning { margin-block: 8px; }
+.history-reasoning > summary { cursor: pointer; }
 .history-controls { margin-block: 12px; }
 .skip-link { position: absolute; inset-inline-start: 8px; top: -80px; padding: 8px; background: var(--panel); z-index: 20; }
 .skip-link:focus { top: 8px; }
@@ -107,7 +111,6 @@ pre { margin-block: 8px; max-width: 100%; }
 .snapshot-status { margin: 0; padding: 8px 16px; color: var(--pending); background: var(--panel); border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
 .chat-history .message { padding: 14px 16px; margin-block: 10px; background: var(--panel); border: 1px solid var(--line);  }
 .chat-history .message > strong, .chat-history .message > .meta { font-size: 11px; }
-.chat-history .history-content { font-family: inherit; font-size: 14px; line-height: 1.5; }
 .worker-chat-conversation .host-controls { max-width: none; padding: 12px 16px; background: var(--panel); border: 1px solid var(--line);  }
 .worker-chat-conversation .host-controls textarea { min-height: 100px; }
 .worker-chat-conversation .host-controls h2 { margin-top: 0; }

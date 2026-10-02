@@ -9,8 +9,9 @@ function object(value: unknown): value is Record<string, unknown> {
 
 interface ReadableItem {
   readonly label: string
-  readonly texts: readonly { label: string; text: string }[]
+  readonly texts: readonly { label: string; text: string; kind: 'prose' | 'code' }[]
   readonly unknownBlocks?: boolean
+  readonly reasoning?: boolean
 }
 
 function blocks(value: unknown, types: readonly string[]): { texts: string[]; unknownBlocks: boolean } {
@@ -31,15 +32,20 @@ function readable(value: unknown): ReadableItem | undefined {
   if (!object(value) || typeof value.type !== 'string') return undefined
   if (value.type === 'message' && typeof value.role === 'string') {
     const content = blocks(value.content, ['input_text', 'output_text', 'refusal'])
-    return { label: value.role === 'assistant' ? 'Assistant' : value.role === 'user' ? 'You' : `Message · ${value.role}`,
-      texts: content.texts.map((text) => ({ label: 'Text', text })), unknownBlocks: content.unknownBlocks }
+    const phase = typeof value.phase === 'string' ? value.phase : undefined
+    const assistantLabel = phase === 'commentary' || phase === 'final'
+      ? `Assistant · ${phase}`
+      : phase === undefined ? 'Assistant' : `Assistant · unknown phase (${phase})`
+    return { label: value.role === 'assistant' ? assistantLabel : value.role === 'user' ? 'You' : `Message · ${value.role}`,
+      texts: content.texts.map((text) => ({ label: 'Text', text, kind: 'prose' })),
+      unknownBlocks: content.unknownBlocks || (value.role === 'assistant' && phase !== undefined && phase !== 'commentary' && phase !== 'final') }
   }
   if (value.type === 'reasoning') {
     const summary = blocks(value.summary, ['summary_text'])
     const content = value.content === undefined ? {texts:[],unknownBlocks:false} : blocks(value.content, ['reasoning_text', 'text'])
     return { label: summary.texts.length ? 'Reasoning summary' : 'Reasoning',
-      texts: [...summary.texts.map(text => ({label:'Summary',text})), ...content.texts.map(text => ({label:'Reasoning',text}))],
-      unknownBlocks: summary.unknownBlocks || content.unknownBlocks }
+      texts: [...summary.texts.map(text => ({label:'Summary',text,kind:'prose' as const})), ...content.texts.map(text => ({label:'Reasoning',text,kind:'prose' as const}))],
+      unknownBlocks: summary.unknownBlocks || content.unknownBlocks, reasoning: true }
   }
   if ((value.type === 'function_call' || value.type === 'custom_tool_call')
     && typeof value.name === 'string' && typeof value.call_id === 'string') {
@@ -47,26 +53,26 @@ function readable(value: unknown): ReadableItem | undefined {
     if (typeof input !== 'string' && !(value.type === 'function_call' && object(input))) return undefined
     return { label: `${value.type} · ${value.name} · call ${value.call_id}`,
       texts: [{ label: value.type === 'function_call' ? (typeof input === 'string' ? 'Arguments' : 'Arguments JSON') : 'Input',
-        text: typeof input === 'string' ? input : JSON.stringify(input, null, 2) }] }
+        text: typeof input === 'string' ? input : JSON.stringify(input, null, 2), kind: 'code' }] }
   }
   if ((value.type === 'function_call_output' || value.type === 'custom_tool_call_output')
     && typeof value.call_id === 'string' && typeof value.output === 'string') {
-    return { label: `${value.type} · call ${value.call_id}`, texts: [{ label: 'Output', text: value.output }] }
+    return { label: `${value.type} · call ${value.call_id}`, texts: [{ label: 'Output', text: value.output, kind: 'code' }] }
   }
   if (value.type === 'configuration_update' && object(value.reasoning) && typeof value.reasoning.effort === 'string') {
-    return { label: 'Configuration update', texts: [{ label: 'Reasoning effort', text: value.reasoning.effort }] }
+    return { label: 'Configuration update', texts: [{ label: 'Reasoning effort', text: value.reasoning.effort, kind: 'code' }] }
   }
   return undefined
 }
 
-function TextPreview({ text, label }: { readonly text: string; readonly label: string }) {
+function TextPreview({ text, label, kind }: { readonly text: string; readonly label: string; readonly kind: 'prose' | 'code' }) {
   const [expanded, setExpanded] = useState(false)
   const long = text.length > PREVIEW_LENGTH
   // Keep a preview boundary from splitting a Unicode surrogate pair.
   const end = /[\uD800-\uDBFF]/.test(text.charAt(PREVIEW_LENGTH - 1))
     && /[\uDC00-\uDFFF]/.test(text.charAt(PREVIEW_LENGTH)) ? PREVIEW_LENGTH - 1 : PREVIEW_LENGTH
   return <div>
-    <pre className="history-content" aria-label={label}>{long && !expanded ? text.slice(0, end) : text}</pre>
+    <pre className={`history-content history-${kind}`} aria-label={label}>{long && !expanded ? text.slice(0, end) : text}</pre>
     {long && <><p className="meta">{expanded ? 'Showing the full fetched text.' : 'Text preview is limited to 2000 characters.'}</p>
       <button type="button" onClick={() => setExpanded(!expanded)}>{expanded ? 'Collapse' : 'Expand'} {label}</button></>}
   </div>
@@ -83,10 +89,13 @@ export default function HistoryItem({ entry }: { readonly entry: HistoryEntry })
   return <div role="listitem" className="message">
     {view ? <>
       <h3>{view.label}</h3>
-      {view.texts.map((part, index) => <TextPreview key={index} text={part.text} label={`${part.label} item ${entry.position}${view.texts.length > 1 ? ` block ${index + 1}` : ''}`} />)}
+      {view.reasoning && view.texts.length > 0 ? <details className="history-reasoning">
+        <summary>{view.label} · show readable text</summary>
+        {view.texts.map((part, index) => <TextPreview key={index} text={part.text} kind={part.kind} label={`${part.label} item ${entry.position}${view.texts.length > 1 ? ` block ${index + 1}` : ''}`} />)}
+      </details> : view.texts.map((part, index) => <TextPreview key={index} text={part.text} kind={part.kind} label={`${part.label} item ${entry.position}${view.texts.length > 1 ? ` block ${index + 1}` : ''}`} />)}
       {view.unknownBlocks && <p>Unknown content is retained. Open Raw to inspect all blocks.</p>}
       <details className="history-controls"><summary>Message details</summary><p className="meta">Item {entry.position} · hash {entry.hash} · {entry.byteLen} bytes</p><button type="button" aria-expanded={showRaw} onClick={() => setShowRaw(!showRaw)}>{showRaw ? 'Hide' : 'Show'} Raw item {entry.position}</button></details>
     </> : <p>Unrecognized item · Raw data</p>}
-    {rawVisible && <TextPreview key="raw" text={raw ?? 'Raw data could not be represented as JSON.'} label={`Raw item ${entry.position}`} />}
+    {rawVisible && <TextPreview key="raw" text={raw ?? 'Raw data could not be represented as JSON.'} kind="code" label={`Raw item ${entry.position}`} />}
   </div>
 }

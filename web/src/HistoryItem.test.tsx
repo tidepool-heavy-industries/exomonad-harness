@@ -12,9 +12,23 @@ describe('retained Item presentation', () => {
   })
   it('shows a readable role and exact escaped string content without executing HTML', () => {
     const { container } = render(<HistoryItem entry={entry({ type: 'message', role: 'assistant', phase: 'commentary', content: exact })} />)
-    expect(screen.getByRole('heading', { name: 'Assistant' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Assistant · commentary' })).toBeInTheDocument()
     expect(screen.getByLabelText('Text item 7').textContent).toBe(exact)
+    expect(screen.getByLabelText('Text item 7')).toHaveClass('history-prose')
     expect(container.querySelector('script')).toBeNull()
+  })
+
+  it('labels final assistant text and exposes unknown phases through Raw', () => {
+    const finalItem = { type: 'message', role: 'assistant', phase: 'final', content: 'Done.' }
+    const { rerender } = render(<HistoryItem entry={entry(finalItem)} />)
+    expect(screen.getByRole('heading', { name: 'Assistant · final' })).toBeInTheDocument()
+    const futureItem = { type: 'message', role: 'assistant', phase: 'future_phase', content: 'Retained.' }
+    rerender(<HistoryItem entry={entry(futureItem)} />)
+    expect(screen.getByRole('heading', { name: 'Assistant · unknown phase (future_phase)' })).toBeInTheDocument()
+    expect(screen.getByText(/Unknown content is retained/)).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Message details'))
+    fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
+    expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(futureItem, null, 2))
   })
 
   it('keeps known text blocks readable and discloses unknown blocks in Raw', () => {
@@ -47,7 +61,15 @@ describe('retained Item presentation', () => {
     render(<HistoryItem entry={entry(item)} />)
     const source = 'content' in item || 'summary' in item ? exact : 'arguments' in item ? item.arguments : 'input' in item ? item.input
       : 'output' in item ? item.output : item.reasoning.effort
+    if ('type' in item && item.type === 'reasoning') {
+      const disclosure = screen.getByText(/show readable text/i)
+      expect(disclosure).toBeInTheDocument()
+      expect(disclosure.tagName).toBe('SUMMARY')
+      expect(disclosure.closest('details')).not.toHaveAttribute('open')
+      fireEvent.click(disclosure)
+    }
     expect(screen.getByLabelText(`${label} item 7`).textContent).toBe(source)
+    if ('type' in item && item.type.includes('call')) expect(screen.getByLabelText(`${label} item 7`)).toHaveClass('history-code')
     if ('type' in item && item.type.includes('call')) expect(screen.getByRole('heading').textContent).toContain(item.type)
   })
 
@@ -63,6 +85,7 @@ describe('retained Item presentation', () => {
     render(<HistoryItem entry={entry(item)} />)
     expect(screen.getByRole('heading', { name: 'function_call · structured · call call λ' })).toBeInTheDocument()
     expect(screen.getByLabelText('Arguments JSON item 7').textContent).toBe(JSON.stringify(argumentsObject, null, 2))
+    expect(screen.getByLabelText('Arguments JSON item 7')).toHaveClass('history-code')
     fireEvent.click(screen.getByText('Message details'))
     fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
     expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
@@ -77,6 +100,7 @@ describe('retained Item presentation', () => {
     fireEvent.click(screen.getByText('Message details'))
     fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
     expect(screen.getByLabelText('Raw item 7').textContent?.length).toBe(2000)
+    expect(screen.getByLabelText('Raw item 7')).toHaveClass('history-code')
     fireEvent.click(screen.getByRole('button', { name: 'Expand Raw item 7' }))
     expect(screen.getByLabelText('Raw item 7').textContent).toContain('original tail')
   })
