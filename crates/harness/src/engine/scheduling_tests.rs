@@ -1376,7 +1376,7 @@ async fn cross_model_child_first_request_projects_parent_evidence_without_reexec
         .run(None, vec![], cancelled, mailbox())
         .await
         .unwrap();
-    let child_path = AgentPath("/root/portable-child".into());
+    let child_path = AgentPath("/root/portable_child".into());
     let snapshot = RequestId("portable-child-snapshot".into());
     parent
         .store

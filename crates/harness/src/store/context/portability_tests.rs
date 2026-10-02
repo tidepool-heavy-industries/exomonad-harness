@@ -247,10 +247,10 @@ fn interleaved_unrelated_calls_arrivals_and_settings_remain_exact() {
                 Item(json!({"type":"message","role":"user","content":"outside user"})),
                 foreign_call,
                 Item(json!({"type":"message","role":"developer","content":"standing instruction"})),
-                Item::configuration_update(Effort::Medium),
             ],
         )
         .unwrap();
+    store.set_effort(&head, Effort::Medium).unwrap();
     let unrelated = store.claim(&CallId("unrelated".into()), &head).unwrap();
     let unrelated_output = Item(
         json!({"type":"custom_tool_call_output","call_id":"unrelated","output":"outside result"}),
@@ -285,6 +285,13 @@ fn interleaved_unrelated_calls_arrivals_and_settings_remain_exact() {
         .cloned()
         .collect::<Vec<_>>();
     assert_eq!(preserved, expected);
+    assert_eq!(
+        preserved
+            .iter()
+            .filter(|(_, _, i)| i.is_configuration_update())
+            .count(),
+        2
+    );
     let note = projected
         .history
         .iter()
@@ -392,4 +399,246 @@ fn identical_bytes_do_not_establish_ambiguous_response_origin_membership() {
         store.context_request_state(&head, &operation.origin),
         Err(StoreError::Context(ContextError::OpaqueModel))
     ));
+}
+
+fn replay_collision_fixture(
+    identical_group: bool,
+    duplicate_spine: bool,
+) -> (Store, ContextSnapshot, ContextDocument) {
+    let store = Store::memory().unwrap();
+    let a = RequestId("original-a".into());
+    store
+        .write_request(
+            &a,
+            None,
+            "/root",
+            &[Item::configuration_update(Effort::Low)],
+            Usage::default(),
+        )
+        .unwrap();
+    let a_call = Item(
+        json!({"type":"custom_tool_call","call_id":"shared","name":"haskell_sync","input":"original A"}),
+    );
+    let a_items = vec![reasoning(), a_call];
+    store.append_items(&a, &a_items).unwrap();
+    record(&store, &a, a_items, "model-a");
+    let a_operation = store.claim(&CallId("shared".into()), &a).unwrap();
+    store
+        .initialize_context_model(&a_operation.origin, "model-a")
+        .unwrap();
+    let same_output = Item(
+        json!({"type":"custom_tool_call_output","call_id":"shared","output":"identical result"}),
+    );
+    store
+        .write_output(&a_operation, &same_output, TerminalOutcome::Success)
+        .unwrap();
+    let a_output_request = RequestId("original-a-output".into());
+    store
+        .write_request(
+            &a_output_request,
+            Some(&a),
+            "/root",
+            std::slice::from_ref(&same_output),
+            Usage::default(),
+        )
+        .unwrap();
+    let saved = store.read_context(&a_output_request).unwrap();
+    let drop_head = RequestId("drop-original-a".into());
+    store.write_request(&drop_head, Some(&a_output_request), "/root", &[Item(json!({"type":"custom_tool_call","call_id":"drop","name":"haskell_sync","input":"drop"}))], Usage::default()).unwrap();
+    let drop_operation = store.claim(&CallId("drop".into()), &drop_head).unwrap();
+    let snapshot = store.begin_context(&drop_operation, &drop_head).unwrap();
+    let mut document = snapshot.document.clone();
+    document.blocks.retain(|block| {
+        matches!(
+            block,
+            ContextBlock::Native {
+                protected: true,
+                ..
+            }
+        )
+    });
+    let dropped = store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &ContextDraft {
+                document,
+                next_model: Some("model-b".into()),
+                next_effort: None,
+            },
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    let b = RequestId("current-b".into());
+    let b_call = Item(
+        json!({"type":"custom_tool_call","call_id":"shared","name":"haskell_sync","input":if identical_group {"original A"} else {"distinct B"}}),
+    );
+    let mut b_items = vec![];
+    if identical_group {
+        b_items.push(reasoning());
+    }
+    b_items.push(b_call);
+    store
+        .write_request(&b, Some(&dropped.head), "/root", &b_items, Usage::default())
+        .unwrap();
+    record(&store, &b, b_items, "model-b");
+    let b_operation = store.claim(&CallId("shared".into()), &b).unwrap();
+    store
+        .write_output(&b_operation, &same_output, TerminalOutcome::Success)
+        .unwrap();
+    store.append_items(&b, &[same_output]).unwrap();
+    if duplicate_spine {
+        store.set_effort(&b, Effort::Low).unwrap();
+    }
+    let restore = RequestId("restore-collision".into());
+    store.write_request(&restore, Some(&b), "/root", &[Item(json!({"type":"custom_tool_call","call_id":"restore","name":"haskell_sync","input":"restore"}))], Usage::default()).unwrap();
+    let operation = store.claim(&CallId("restore".into()), &restore).unwrap();
+    let snapshot = store.begin_context(&operation, &restore).unwrap();
+    (store, snapshot, saved)
+}
+
+fn collision_evidence(identical_group: bool) -> ContextCommitEvidence {
+    let (store, snapshot, saved) = replay_collision_fixture(identical_group, false);
+    store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &ContextDraft {
+                document: saved,
+                next_model: None,
+                next_effort: None,
+            },
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    store
+        .context_commit_evidence(&snapshot.operation)
+        .unwrap()
+        .unwrap()
+}
+
+#[test]
+fn replay_restores_a_whole_native_family_with_its_original_equal_byte_output() {
+    let evidence = collision_evidence(false);
+    let (store, snapshot, _) = replay_collision_fixture(false, false);
+    let receipt = store
+        .restore_context_commit(&snapshot, &evidence, &output(), &[])
+        .unwrap();
+    let raw = history(&store.lock(), &receipt.head, true).unwrap();
+    let shared = raw
+        .iter()
+        .filter(|i| i.item.0["call_id"] == "shared")
+        .collect::<Vec<_>>();
+    assert_eq!(shared.len(), 2);
+    assert_eq!(
+        shared
+            .iter()
+            .map(|i| i.origin.request.0.as_str())
+            .collect::<Vec<_>>(),
+        vec!["original-a", "original-a-output"]
+    );
+    assert_eq!(shared[0].item.0["input"], "original A");
+    let projected = store
+        .context_request_state(&receipt.head, &snapshot.operation.origin)
+        .unwrap();
+    let note = projected
+        .history
+        .iter()
+        .find_map(|(_, _, i)| {
+            i.0["content"]
+                .as_str()
+                .filter(|text| text.starts_with("[Store-generated model portability note"))
+        })
+        .unwrap();
+    assert!(note.contains("original-a") && note.contains("identical result"));
+    assert!(!note.contains("current-b"));
+}
+
+#[test]
+fn replay_refuses_identical_native_groups_with_distinct_origins_atomically() {
+    let evidence = collision_evidence(true);
+    let (store, snapshot, _) = replay_collision_fixture(true, false);
+    let before = store.context_history(&snapshot.head).unwrap();
+    let result = store.restore_context_commit(&snapshot, &evidence, &output(), &[]);
+    assert!(
+        matches!(
+            result,
+            Err(StoreError::Context(ContextError::ProtectedGroup))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(store.context_history(&snapshot.head).unwrap(), before);
+    assert!(
+        store
+            .context_receipt(&snapshot.operation)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .claims_for_operation(&snapshot.operation)
+            .unwrap()
+            .iter()
+            .all(|claim| claim.state == ClaimState::Pending && claim.output.is_none())
+    );
+}
+
+#[test]
+fn replay_cannot_substitute_equal_spine_bytes_for_another_protected_origin() {
+    let evidence = collision_evidence(false);
+    let (store, snapshot, _) = replay_collision_fixture(false, true);
+    let before = store.context_history(&snapshot.head).unwrap();
+    let result = store.restore_context_commit(&snapshot, &evidence, &output(), &[]);
+    assert!(
+        matches!(
+            result,
+            Err(StoreError::Context(ContextError::ProtectedGroup))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(store.context_history(&snapshot.head).unwrap(), before);
+    assert!(
+        store
+            .context_receipt(&snapshot.operation)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn whole_native_replay_preserves_later_async_output_with_reused_historical_call_id() {
+    let evidence = collision_evidence(false);
+    let (local, snapshot, _) = replay_collision_fixture(false, false);
+    let receipt = local
+        .restore_context_commit(&snapshot, &evidence, &output(), &[])
+        .unwrap();
+    let raw = history(&local.lock(), &receipt.head, true).unwrap();
+    let result = raw
+        .iter()
+        .find(|i| i.item.0["call_id"] == "shared" && i.item.0["type"] == "custom_tool_call_output")
+        .unwrap();
+    assert_eq!(result.origin.request.0, "original-a-output");
+    assert!(
+        local
+            .claims_on(&RequestId("original-a-output".into()))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        local
+            .claims_on(&RequestId("original-a".into()))
+            .unwrap()
+            .iter()
+            .any(|claim| claim.call_id.0 == "shared" && claim.state == ClaimState::Settled)
+    );
+    assert!(
+        local
+            .context_request_state(&receipt.head, &snapshot.operation.origin)
+            .unwrap()
+            .history
+            .iter()
+            .any(|(_, _, i)| i.0["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("identical result")))
+    );
 }

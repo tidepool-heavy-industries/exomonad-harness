@@ -1103,9 +1103,12 @@ impl Store {
             .flat_map(|i| i.sources.iter())
             .collect::<HashSet<_>>();
         let historical_needed = if let Some(evidence) = replay {
-            evidence.prefix.iter().any(|(item, _, _)| {
-                message(item).is_none() && !snapshot.prefix.iter().any(|i| i.item == *item)
-            })
+            // Equal current bytes cannot prove a native segment's owner.
+            // Include bounded ancestry before checking whole-group uniqueness.
+            evidence
+                .prefix
+                .iter()
+                .any(|(item, _, _)| message(item).is_none())
         } else {
             draft.document.blocks.iter().any(|b| match b {
                 ContextBlock::Native { reference, .. }
@@ -1162,38 +1165,75 @@ impl Store {
         let mut last_native = None;
         let mut last_historical_native = None;
         if let Some(evidence) = replay {
-            let mut used_occurrences = HashSet::new();
+            let mut native = HashMap::<ItemHash, Vec<&StoredBlock>>::new();
+            let mut text = HashMap::<ItemHash, Vec<&Occurrence>>::new();
+            for stored in &available {
+                match &stored.block {
+                    ContextBlock::Native { .. } => {
+                        native
+                            .entry(stored.items[0].hash.clone())
+                            .or_default()
+                            .push(stored);
+                    }
+                    ContextBlock::Text { .. } => {
+                        text.entry(stored.items[0].hash.clone())
+                            .or_default()
+                            .push(&stored.items[0]);
+                    }
+                }
+            }
             let mut used_origins = HashSet::new();
-            for (item, sources, note) in &evidence.prefix {
+            let mut cursor = 0;
+            while cursor < evidence.prefix.len() {
+                let (item, sources, note) = &evidence.prefix[cursor];
                 let hash = Self::put_item_tx(&tx, item)?;
-                if let Some((index, existing)) =
-                    snapshot.prefix.iter().enumerate().find(|(index, i)| {
-                        !used_occurrences.contains(index) && i.hash == hash && i.item == *item
+                let matching = native
+                    .get(&hash)
+                    .into_iter()
+                    .flatten()
+                    .filter(|stored| {
+                        let end = cursor + stored.items.len();
+                        let current = matches!(&stored.block, ContextBlock::Native {reference,..} if current_refs.contains(reference));
+                        (!stored.mandatory || current)
+                            && end <= evidence.prefix.len()
+                            && stored.items.iter().zip(&evidence.prefix[cursor..end]).all(
+                                |(local, (item, _, _))| {
+                                    local.item == *item && !used_origins.contains(&local.origin)
+                                },
+                            )
                     })
+                    .copied()
+                    .collect::<Vec<_>>();
+                match matching.as_slice() {
+                    [stored] => {
+                        // A native segment has one local owner. Resolve every
+                        // occurrence together so equal result bytes cannot splice
+                        // another invocation's companion into the restored group.
+                        for occurrence in &stored.items {
+                            used_origins.insert(occurrence.origin.clone());
+                        }
+                        rewritten.extend(stored.items.clone());
+                        cursor += stored.items.len();
+                        continue;
+                    }
+                    [] => {}
+                    _ => return Err(ContextError::ProtectedGroup.into()),
+                }
+                if message(item).is_none() {
+                    return Err(ContextError::ProtectedGroup.into());
+                }
+                if let Some(existing) = text
+                    .get(&hash)
+                    .into_iter()
+                    .flatten()
+                    .find(|i| !used_origins.contains(&i.origin) && i.item == *item)
                 {
-                    used_occurrences.insert(index);
                     used_origins.insert(existing.origin.clone());
-                    let mut occurrence = existing.clone();
-                    occurrence.sources = sources.clone();
-                    occurrence.note = *note;
-                    rewritten.push(occurrence);
-                } else if let Some(existing) =
-                    available.iter().flat_map(|block| &block.items).find(|i| {
-                        !used_origins.contains(&i.origin) && i.hash == hash && i.item == *item
-                    })
-                {
-                    // Restored native groups reuse bounded local occurrences,
-                    // including any text inside their provider envelope.
-                    used_origins.insert(existing.origin.clone());
-                    let mut occurrence = existing.clone();
+                    let mut occurrence = (*existing).clone();
                     occurrence.sources = sources.clone();
                     occurrence.note = *note;
                     rewritten.push(occurrence);
                 } else {
-                    // Native replay bytes alone cannot manufacture authority.
-                    if message(item).is_none() {
-                        return Err(ContextError::ProtectedGroup.into());
-                    }
                     rewritten.push(Occurrence {
                         request: RequestId(String::new()),
                         position: 0,
@@ -1208,6 +1248,7 @@ impl Store {
                         },
                     });
                 }
+                cursor += 1;
             }
             // Replay must preserve every protected local envelope as an intact
             // group; foreign evidence cannot replace local pending operations.
@@ -1215,8 +1256,8 @@ impl Store {
                 if stored.mandatory
                     && !rewritten.windows(stored.items.len()).any(|w| {
                         w.iter()
-                            .map(|i| &i.item)
-                            .eq(stored.items.iter().map(|i| &i.item))
+                            .map(|i| (&i.item, &i.origin))
+                            .eq(stored.items.iter().map(|i| (&i.item, &i.origin)))
                     })
                 {
                     return Err(ContextError::ProtectedGroup.into());
