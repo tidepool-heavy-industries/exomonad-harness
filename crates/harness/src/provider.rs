@@ -15,6 +15,15 @@ pub use failure::{MetadataOmission, ToolFailure};
 /// When full, the scheduler drops the newest event rather than blocking work.
 pub const JOB_PROGRESS_CAPACITY: usize = 64;
 
+/// Host policy pinned to the issuing tool installation and operation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolScheduling {
+    #[default]
+    Async,
+    BeforeNextInference,
+}
+
 /// Stable public identifier for asynchronous provider work.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct JobHandle(pub String);
@@ -270,6 +279,21 @@ pub trait Provider: Send + Sync {
         Ok(())
     }
 
+    /// Execution policy supplied by the host, independent of transport projection.
+    fn tool_scheduling(&self, _name: &str) -> ToolScheduling {
+        ToolScheduling::Async
+    }
+
+    /// Replay resolves the recorded operation policy instead of consulting a
+    /// later installation. Ordinary providers use their immutable host policy.
+    fn operation_scheduling(
+        &self,
+        name: &str,
+        _operation: &OperationId,
+    ) -> Result<ToolScheduling, ProviderError> {
+        Ok(self.tool_scheduling(name))
+    }
+
     /// A stable view retained for an entire model request, including its later
     /// tool calls. Reloadable providers return an immutable snapshot here.
     fn request_snapshot(&self) -> Result<Option<std::sync::Arc<dyn Provider>>, ProviderError> {
@@ -358,7 +382,9 @@ pub trait Provider: Send + Sync {
                 if is_wait_agent {
                     object.remove("async");
                 } else {
-                    object.insert("async".to_owned(), Value::Bool(true));
+                    let name = object.get("name").and_then(Value::as_str).unwrap_or("");
+                    let asynchronous = self.tool_scheduling(name) == ToolScheduling::Async;
+                    object.insert("async".to_owned(), Value::Bool(asynchronous));
                 }
             }
         }

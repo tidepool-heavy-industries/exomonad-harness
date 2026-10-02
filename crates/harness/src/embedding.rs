@@ -3,7 +3,7 @@
 use crate::{
     item::{Item, ToolInput, ToolKind},
     model::{AgentPath, ConversationIdentity, RequestId},
-    provider::{CallContext, CancellationOwner, Provider, ProviderError},
+    provider::{CallContext, CancellationOwner, Provider, ProviderError, ToolScheduling},
     store::{EmbeddedInputState, Store, StoreError},
 };
 use async_trait::async_trait;
@@ -138,15 +138,20 @@ pub struct ToolSurface {
 pub struct EmbeddedToolManifest {
     tools: crate::transport::ToolManifest,
     kinds: HashMap<String, ToolKind>,
+    scheduling: HashMap<String, ToolScheduling>,
 }
 
 impl EmbeddedToolManifest {
-    pub fn new(mut tools: Vec<Value>) -> Result<Self, EmbeddedError> {
+    pub fn new(tools: Vec<Value>) -> Result<Self, EmbeddedError> {
+        Self::with_scheduling(tools, HashMap::new())
+    }
+
+    pub fn with_scheduling(
+        mut tools: Vec<Value>,
+        scheduling: HashMap<String, ToolScheduling>,
+    ) -> Result<Self, EmbeddedError> {
         let mut kinds = HashMap::new();
         for tool in &mut tools {
-            if let Some(object) = tool.as_object_mut() {
-                object.insert("async".into(), Value::Bool(true));
-            }
             let name = tool["name"]
                 .as_str()
                 .filter(|s| !s.is_empty())
@@ -170,11 +175,27 @@ impl EmbeddedToolManifest {
                 return Err(EmbeddedError::Surface(format!("duplicate tool {name}")));
             }
         }
+        if scheduling.keys().any(|name| !kinds.contains_key(name)) {
+            return Err(EmbeddedError::Surface(
+                "scheduling policy names an undeclared tool".into(),
+            ));
+        }
+        for tool in &mut tools {
+            let name = tool["name"].as_str().expect("validated name");
+            let mode = scheduling.get(name).copied().unwrap_or_default();
+            tool.as_object_mut()
+                .expect("validated tool")
+                .insert("async".into(), Value::Bool(mode == ToolScheduling::Async));
+        }
         let tools: crate::transport::ToolManifest = tools.into();
         tools
             .strict_tools()
             .map_err(|error| EmbeddedError::Surface(error.to_string()))?;
-        Ok(Self { tools, kinds })
+        Ok(Self {
+            tools,
+            kinds,
+            scheduling,
+        })
     }
 
     pub fn tools(&self) -> &crate::transport::ToolManifest {
@@ -566,6 +587,14 @@ impl Provider for BoundProvider {
 }
 #[async_trait]
 impl Provider for PinnedProvider {
+    fn tool_scheduling(&self, name: &str) -> ToolScheduling {
+        self.surface
+            .manifest
+            .scheduling
+            .get(name)
+            .copied()
+            .unwrap_or_default()
+    }
     fn tool_manifest(&self) -> crate::transport::ToolManifest {
         self.surface.manifest.tools.clone()
     }
@@ -631,6 +660,18 @@ impl Provider for PinnedProvider {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn installed_manifest_pins_typed_scheduling_and_derives_wire_flag() {
+        let tool = serde_json::json!({"type":"custom","name":"cell","description":"Run a cell","async":false});
+        let asynchronous = EmbeddedToolManifest::new(vec![tool.clone()]).unwrap();
+        assert_eq!(asynchronous.tools()[0]["async"], true);
+        let policies = HashMap::from([("cell".to_owned(), ToolScheduling::BeforeNextInference)]);
+        let synchronous = EmbeddedToolManifest::with_scheduling(vec![tool], policies).unwrap();
+        assert_eq!(synchronous.tools()[0]["async"], false);
+        assert_eq!(synchronous.scheduling["cell"], ToolScheduling::BeforeNextInference);
+        assert!(EmbeddedToolManifest::with_scheduling(vec![], HashMap::from([("missing".to_owned(), ToolScheduling::Async)])).is_err());
+    }
 
     #[test]
     fn installed_manifest_refuses_false_strict_claim_and_keeps_metadata() {

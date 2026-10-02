@@ -590,6 +590,38 @@ impl ResponsesTransport for Arc<ReplayProvider> {
 
 #[async_trait]
 impl Provider for ReplayProvider {
+    fn operation_scheduling(
+        &self,
+        name: &str,
+        local: &OperationId,
+    ) -> Result<crate::provider::ToolScheduling, ProviderError> {
+        let original_request = lock(&self.progress.local_requests)
+            .get(&local.request)
+            .map(|request| request.original.clone())
+            .ok_or_else(|| {
+                ProviderError::Tool("replay scheduling has no matched request".into())
+            })?;
+        let events = self
+            .store
+            .events(Some(&original_request))
+            .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
+        for event in events
+            .into_iter()
+            .filter(|event| event.kind == "tool_scheduling")
+        {
+            let value: serde_json::Value = serde_json::from_str(&event.payload)
+                .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
+            let operation: OperationId = serde_json::from_value(value["operation"].clone())
+                .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
+            if operation.call == local.call {
+                return serde_json::from_value(value["scheduling"].clone())
+                    .map_err(|error| ProviderError::Tool(error.to_string().into()));
+            }
+        }
+        let _ = name;
+        Ok(crate::provider::ToolScheduling::Async)
+    }
+
     async fn call(
         &self,
         name: &str,

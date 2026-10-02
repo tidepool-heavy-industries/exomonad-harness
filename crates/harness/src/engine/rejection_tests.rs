@@ -189,6 +189,8 @@ async fn rejection_cleanup_error_remains_fatal_without_failed_event() {
         tool_kind: ToolKind::Function,
         persist_here_invocation_output: false,
         cancel_job_on_cleanup: false,
+        scheduling: ToolScheduling::Async,
+        queued: None,
     };
     // A damaged claim owner cannot certify that cleanup settled.
     store.lock().execute_batch("DROP TABLE claims").unwrap();
@@ -270,6 +272,8 @@ async fn rejected_request_does_not_continue_after_unconfirmed_external_cancellat
         tool_kind: ToolKind::Function,
         persist_here_invocation_output: false,
         cancel_job_on_cleanup: true,
+        scheduling: ToolScheduling::Async,
+        queued: None,
     };
     let error = engine
         .reject_or_cleanup(TransportError::Authentication, None, &request, &[pending])

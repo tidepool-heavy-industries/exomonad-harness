@@ -16,7 +16,7 @@ use crate::{
     item::{Item, ItemHash, ToolInput, ToolKind},
     mailbox::{DurableMailboxWake, Envelope, MailboxSignal, MessageChannel},
     model::{AgentPath, CallId, ConversationIdentity, Effort, OperationId, RequestId},
-    provider::Provider,
+    provider::{Provider, ToolScheduling},
     store::{Store, StoreError, Usage as StoredUsage},
     transport::{
         Auth, ResponsesClient, ResponsesRequest, ResponsesTurn, TransportError, Usage,
@@ -42,7 +42,7 @@ struct HistoryWindow {
     provenance: Vec<(RequestId, ItemHash)>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct PendingCall {
     operation: OperationId,
     call_id: CallId,
@@ -51,6 +51,15 @@ struct PendingCall {
     tool_kind: ToolKind,
     persist_here_invocation_output: bool,
     cancel_job_on_cleanup: bool,
+    scheduling: ToolScheduling,
+    queued: Option<QueuedCall>,
+}
+
+#[derive(Clone)]
+struct QueuedCall {
+    provider: Arc<dyn Provider>,
+    name: String,
+    input: ToolInput,
 }
 
 #[derive(Clone, Debug)]
@@ -100,6 +109,10 @@ mod embedded_restart_tests;
 #[cfg(test)]
 #[path = "engine/rejection_tests.rs"]
 mod rejection_tests;
+#[cfg(test)]
+#[path = "engine/scheduling_tests.rs"]
+mod scheduling_tests;
+
 #[cfg(test)]
 #[path = "engine/yield_tests.rs"]
 mod yield_tests;
@@ -805,6 +818,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     tool_kind,
                     persist_here_invocation_output: false,
                     cancel_job_on_cleanup: false,
+                    scheduling: ToolScheduling::Async,
+                    queued: None,
                 }),
             }
         }
@@ -1543,6 +1558,23 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .compact_at_input_tokens
                 .is_some_and(|threshold| turn.usage.input_tokens >= threshold);
 
+            // Every response item and original invocation is now durable. Serial
+            // calls run in response order, and each terminal is committed before
+            // the next call can inspect the canonical prefix.
+            let had_sync_calls = pending.iter().any(|call| call.queued.is_some());
+            if let Err(error) = self
+                .execute_sync_calls(
+                    &mut pending,
+                    &mut parent,
+                    &turn.items,
+                    &mut cancellation,
+                    admit_inbox,
+                )
+                .await
+            {
+                return Err(self.cleanup_pending(error, &pending).await);
+            }
+
             let had_inline_wait = !inline_settled.is_empty();
             for (_, _, barrier, _) in &inline_settled {
                 if let Err(error) = self
@@ -1706,6 +1738,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     return Err(self.cleanup_pending(error, &pending).await);
                 }
             } else if !had_inline_wait
+                && !had_sync_calls
                 && is_final(&turn, finalize_schema.is_some())
                 && pending.is_empty()
             {
@@ -2009,6 +2042,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         {
             return Err(EngineError::InvalidFunctionCall);
         }
+        let scheduling = provider.operation_scheduling(&name, &operation)?;
         let is_here_spawn = name == "spawn_agent"
             && matches!(&input, ToolInput::Function(args) if args["from"]["kind"].as_str() == Some("here"));
         if wait.is_some() {
@@ -2064,6 +2098,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 tool_kind,
                 persist_here_invocation_output: false,
                 cancel_job_on_cleanup: false,
+                scheduling: ToolScheduling::Async,
+                queued: None,
             }));
         }
         // Admission is durable before the provider can execute or capture a
@@ -2073,6 +2109,30 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let call = operation.clone();
         let request_id = request.clone();
         blocking(move || store.claim_operation(&call, &request_id)).await?;
+        let policy_store = self.store.clone();
+        let policy_request = request.clone();
+        let policy = json!({"operation":operation,"scheduling":scheduling});
+        blocking(move || {
+            policy_store.record_event(Some(&policy_request), "tool_scheduling", &policy)
+        })
+        .await?;
+        if scheduling == ToolScheduling::BeforeNextInference {
+            return Ok(DispatchResult::Pending(PendingCall {
+                operation,
+                call_id,
+                claim_request: request.clone(),
+                wait,
+                tool_kind,
+                persist_here_invocation_output: is_here_spawn,
+                cancel_job_on_cleanup: false,
+                scheduling,
+                queued: Some(QueuedCall {
+                    provider,
+                    name,
+                    input,
+                }),
+            }));
+        }
         if let Err(error) = self
             .scheduler
             .start_operation(
@@ -2116,6 +2176,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             tool_kind,
             persist_here_invocation_output: is_here_spawn,
             cancel_job_on_cleanup: true,
+            scheduling,
+            queued: None,
         }))
     }
 
@@ -2274,6 +2336,89 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         }
     }
 
+    async fn execute_sync_calls(
+        &self,
+        pending: &mut Vec<PendingCall>,
+        request: &mut RequestId,
+        response: &[Item],
+        cancellation: &mut watch::Receiver<bool>,
+        admit_inbox: bool,
+    ) -> Result<(), EngineError> {
+        let operations = response
+            .iter()
+            .filter_map(|item| {
+                item.tool_call().ok().flatten().map(|call| OperationId {
+                    origin: self.origin.clone(),
+                    request: request.clone(),
+                    call: call.call_id,
+                })
+            })
+            .collect::<Vec<_>>();
+        for operation in operations {
+            let Some(index) = pending
+                .iter()
+                .position(|call| call.operation == operation && call.queued.is_some())
+            else {
+                continue;
+            };
+            if *cancellation.borrow() {
+                return Err(EngineError::Cancelled {
+                    head_request: Some(request.clone()),
+                });
+            }
+            let queued = pending[index].queued.take().expect("queued call");
+            self.scheduler
+                .start_operation(
+                    queued.provider,
+                    operation.clone(),
+                    self.config.agent.clone(),
+                    Some(operation.request.clone()),
+                    queued.name,
+                    queued.input,
+                )
+                .await?;
+            pending[index].cancel_job_on_cleanup = true;
+            self.scheduler
+                .claim_exact(&operation, self.origin.clone())
+                .await?;
+            let mut settlements = self.scheduler.operation_settlements();
+            let output = loop {
+                tokio::select! {
+                    biased;
+                    _ = await_cancellation(cancellation) => return Err(EngineError::Cancelled { head_request: Some(request.clone()) }),
+                    result = self.scheduler.wait(&operation) => break result?,
+                    event = settlements.recv() => {
+                        if event.is_ok() || matches!(event, Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) {
+                            self.persist_settled(pending, request).await?;
+                        }
+                    }
+                }
+            };
+            if *cancellation.borrow() {
+                return Err(EngineError::Cancelled {
+                    head_request: Some(request.clone()),
+                });
+            }
+            let call = pending
+                .iter()
+                .find(|call| call.operation == operation)
+                .expect("sync call retained");
+            self.persist_output(
+                &operation,
+                call.tool_kind,
+                &output,
+                request,
+                &call.claim_request,
+            )
+            .await?;
+            pending.retain(|call| call.operation != operation);
+            if admit_inbox {
+                self.append_unread_envelopes(request).await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn persist_settled(
         &self,
         pending: &mut Vec<PendingCall>,
@@ -2281,7 +2426,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     ) -> Result<Vec<OperationId>, EngineError> {
         let calls: Vec<_> = pending
             .iter()
-            .filter(|call| call.wait.is_none())
+            .filter(|call| call.wait.is_none() && call.scheduling == ToolScheduling::Async)
             .map(|call| call.operation.clone())
             .collect();
         let outputs = outputs_in_operation_order(&self.scheduler, &calls).await?;
@@ -2319,7 +2464,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     ) -> Result<(), EngineError> {
         let operations = pending
             .iter()
-            .filter(|call| call.wait.is_none() && !retained.contains(&call.operation))
+            .filter(|call| {
+                call.wait.is_none()
+                    && call.scheduling == ToolScheduling::Async
+                    && !retained.contains(&call.operation)
+            })
             .map(|call| call.operation.clone())
             .collect::<Vec<_>>();
         for (operation, output) in outputs_in_operation_order(&self.scheduler, &operations).await? {
@@ -2449,7 +2598,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     ) -> Result<WaitAgentResultExact, EngineError> {
         let calls: Vec<_> = pending
             .iter()
-            .filter(|call| call.wait.is_none())
+            .filter(|call| call.wait.is_none() && call.scheduling == ToolScheduling::Async)
             .map(|call| call.operation.clone())
             .collect();
         let deadline = pending.iter().find_map(|call| match &call.wait {
@@ -2842,7 +2991,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let branch = self.config.agent.0.clone();
         let pending_operations = pending
             .iter()
-            .filter(|call| call.wait.is_none())
+            .filter(|call| call.wait.is_none() && call.scheduling == ToolScheduling::Async)
             .map(|call| call.operation.clone())
             .collect::<Vec<_>>();
         let identity = self.embedded_identity();
