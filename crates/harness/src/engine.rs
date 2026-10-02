@@ -17,7 +17,7 @@ use crate::{
     mailbox::{DurableMailboxWake, Envelope, MailboxSignal, MessageChannel},
     model::{AgentPath, CallId, ConversationIdentity, Effort, OperationId, RequestId},
     provider::{Provider, ToolScheduling},
-    store::{Store, StoreError, Usage as StoredUsage},
+    store::{ServerCompactionResponse, Store, StoreError, Usage as StoredUsage},
     transport::{
         Auth, ResponsesClient, ResponsesRequest, ResponsesTurn, TransportError, Usage,
         sse::{OutputChannel, StreamEvent},
@@ -3248,21 +3248,25 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .rev()
             .find_map(Item::configuration_effort)
             .ok_or(EngineError::MissingEffortPin)?;
+        let server_response = std::sync::Mutex::new(None::<ServerCompactionResponse>);
         let server_compact = |items: Vec<Item>| -> ServerCompactFuture<'_> {
+            let server_response = &server_response;
             Box::pin(async move {
+                let request = ResponsesRequest {
+                    input: items,
+                    instructions: self.config.instructions.clone(),
+                    tools: self
+                        .tools(None)
+                        .map_err(|error| CompactError::Failed(error.to_string()))?,
+                    tools_allowed: None,
+                    model: model.to_owned(),
+                    pinned_effort: effective_effort,
+                    session_id: self.config.session_id.clone(),
+                };
+                let issued_model = request.model.clone();
                 let turn = self
                     .client
-                    .create(ResponsesRequest {
-                        input: items,
-                        instructions: self.config.instructions.clone(),
-                        tools: self
-                            .tools(None)
-                            .map_err(|error| CompactError::Failed(error.to_string()))?,
-                        tools_allowed: None,
-                        model: model.to_owned(),
-                        pinned_effort: effective_effort,
-                        session_id: self.config.session_id.clone(),
-                    })
+                    .create(request)
                     .await
                     .map_err(|error| CompactError::Failed(error.to_string()))?;
                 if !turn.items.iter().any(|item| item.0["type"] == "compaction") {
@@ -3270,6 +3274,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         "server response lacks compaction item".into(),
                     ));
                 }
+                *server_response
+                    .lock()
+                    .expect("server response lock poisoned") = Some(ServerCompactionResponse {
+                    model: issued_model,
+                    items: turn.items.clone(),
+                });
                 Ok(turn.items)
             })
         };
@@ -3373,14 +3383,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .map(|call| call.operation.clone())
             .collect::<Vec<_>>();
         let identity = self.embedded_identity();
+        let server_response = server_response
+            .into_inner()
+            .expect("server response lock poisoned");
         blocking(move || {
-            store.write_compaction_request_with_claims(
+            store.write_compaction_request_with_evidence(
                 &successor,
                 &source_for_write,
                 &branch,
                 &window.items,
                 &pending_operations,
                 identity.as_ref(),
+                server_response.as_ref(),
             )
         })
         .await?;
@@ -6887,6 +6901,38 @@ mod tests {
             assert_eq!(sent.len(), 3, "{strategy:?}");
             assert_eq!(sent[0].model, "model-b", "{strategy:?} normal request");
             assert_eq!(sent[1].model, "model-b", "{strategy:?} compaction request");
+            let event = store
+                .events(None)
+                .unwrap()
+                .into_iter()
+                .find(|event| event.kind == "compaction")
+                .expect("boundary event");
+            let payload: serde_json::Value = serde_json::from_str(&event.payload).unwrap();
+            if strategy == CompactionStrategy::Server {
+                assert_eq!(payload["evidence"]["model"], sent[1].model);
+                assert_eq!(
+                    payload["evidence"]["raw_response"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                assert_eq!(payload["evidence"]["origins"].as_array().unwrap().len(), 1);
+                assert!(
+                    store
+                        .events(event.request.as_ref())
+                        .unwrap()
+                        .iter()
+                        .filter(|event| event.kind == "model_turn")
+                        .all(|event| {
+                            let payload: serde_json::Value =
+                                serde_json::from_str(&event.payload).unwrap();
+                            payload["response"]["response_id"] != "server-compact"
+                        })
+                );
+            } else {
+                assert!(payload.get("evidence").is_none());
+            }
             assert!(sent[0].input.iter().any(|item| {
                 item.0["id"] == "reasoning-from-model-b"
                     && item.0["encrypted_content"] == "opaque-model-b"

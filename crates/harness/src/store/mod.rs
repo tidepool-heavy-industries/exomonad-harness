@@ -1,8 +1,10 @@
 //! Durable SQLite event and content-addressed request store.
+mod compaction;
 mod context;
 mod embedded;
 mod embedded_commands;
 mod embedded_round;
+pub(crate) use compaction::ServerCompactionResponse;
 pub(crate) use embedded::{CommandInputAdmission, EmbeddedInputState};
 pub use embedded_commands::{EmbeddedCommandRecord, EmbeddedCommandState};
 pub use embedded_round::{EmbeddedRoundFrontier, EmbeddedRoundOutcome};
@@ -957,6 +959,20 @@ impl Store {
         pending: &[OperationId],
         identity: Option<&crate::embedding::HostIdentity>,
     ) -> Result<()> {
+        self.write_compaction_request_with_evidence(
+            request, parent, branch, items, pending, identity, None,
+        )
+    }
+    pub(crate) fn write_compaction_request_with_evidence(
+        &self,
+        request: &RequestId,
+        parent: &RequestId,
+        branch: &str,
+        items: &[Item],
+        pending: &[OperationId],
+        identity: Option<&crate::embedding::HostIdentity>,
+        response: Option<&ServerCompactionResponse>,
+    ) -> Result<()> {
         let mut c = self.lock();
         let tx = c.transaction()?;
         if let Some(identity) = identity {
@@ -1016,15 +1032,8 @@ impl Store {
             "INSERT INTO session_state(session_id,state,updated_at) VALUES (?1,'true',?2)",
             params![key, utc_millis()],
         )?;
-        tx.execute(
-            "INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,'compaction',?2,?3)",
-            params![
-                request.0,
-                serde_json::json!({"source":parent.0}).to_string(),
-                utc_millis()
-            ],
-        )?;
         context::compaction_generation(&tx, &self.store_id, parent, request, branch)?;
+        compaction::record(&tx, request, parent, response)?;
         tx.commit()?;
         Ok(())
     }
