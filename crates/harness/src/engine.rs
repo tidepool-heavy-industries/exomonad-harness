@@ -656,7 +656,20 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 let store = self.store.clone();
                 let request = head.clone();
                 let branch = self.config.agent.0.clone();
-                blocking(move || store.claims_on_branch_lineage(&request, &branch)).await?
+                let origin = self.origin.clone();
+                blocking(move || {
+                    let mut claims = store.claims_on_branch_lineage(&request, &branch)?;
+                    // Ordinary continuation carries foreign attachments across
+                    // its own branch. Previously completed local boundaries
+                    // remain represented by history instead of being reattached.
+                    if !recovering {
+                        claims.retain(|claim| {
+                            claim.operation.origin != origin || claim.request == request
+                        });
+                    }
+                    Ok(claims)
+                })
+                .await?
             }
             None => Vec::new(),
         };

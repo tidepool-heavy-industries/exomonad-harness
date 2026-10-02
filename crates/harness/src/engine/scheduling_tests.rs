@@ -274,6 +274,7 @@ struct ContextEditor {
     lose_ack: std::sync::atomic::AtomicBool,
     full_success: bool,
     refuse_draft: bool,
+    summarize_completed: bool,
     committed: std::sync::atomic::AtomicUsize,
     aborted: std::sync::atomic::AtomicUsize,
     paused: Option<(Arc<Notify>, Arc<Notify>)>,
@@ -311,6 +312,32 @@ impl Provider for ContextEditor {
                     .as_deref(),
                 Some("model-next")
             );
+        }
+        if self.summarize_completed && name == "edit_second" {
+            let mut sources = Vec::new();
+            document.blocks.retain(|block| {
+                if let crate::context::ContextBlock::Native {
+                    reference,
+                    kind: crate::context::ContextNativeKind::CompletedExchange,
+                    ..
+                } = block
+                {
+                    sources.push(reference.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            assert!(
+                !sources.is_empty(),
+                "completed first exchange available to summarize"
+            );
+            document.blocks.push(crate::context::ContextBlock::Text {
+                reference: None,
+                role: crate::context::ContextRole::Assistant,
+                text: "summarized completed exchange".into(),
+                sources,
+            });
         }
         document.blocks.push(crate::context::ContextBlock::Text {
             reference: None,
@@ -423,6 +450,7 @@ fn context_engine(
             lose_ack: std::sync::atomic::AtomicBool::new(lose_ack),
             full_success: true,
             refuse_draft: false,
+            summarize_completed: false,
             committed: std::sync::atomic::AtomicUsize::new(0),
             aborted: std::sync::atomic::AtomicUsize::new(0),
             paused: None,
@@ -1073,4 +1101,62 @@ async fn child_final_completes_while_parent_sync_waits_for_child() {
             1
         );
     }
+}
+
+#[tokio::test]
+async fn completed_own_exchange_notes_do_not_reattach_on_ordinary_followup() {
+    let (mut engine, requests, _) = context_engine(true, false);
+    Arc::get_mut(&mut engine.provider)
+        .unwrap()
+        .summarize_completed = true;
+    let (_cancel, cancelled) = watch::channel(false);
+    let completed = engine
+        .run(None, vec![], cancelled, mailbox())
+        .await
+        .unwrap();
+    assert_eq!(
+        engine
+            .provider
+            .committed
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+    assert!(
+        !completed
+            .transcript
+            .iter()
+            .any(|item| item.0["type"] == "function_call" && item.0["call_id"] == "edit-first")
+    );
+    let (_cancel, cancelled) = watch::channel(false);
+    engine
+        .run(
+            Some(completed.head_request),
+            vec![Item(json!({
+                "type":"message", "role":"user", "content":"continue"
+            }))],
+            cancelled,
+            mailbox(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        engine
+            .provider
+            .committed
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "ordinary followup must not acknowledge an old local boundary again"
+    );
+    assert!(
+        requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .input
+            .iter()
+            .any(|item| item.0["content"]
+                .as_str()
+                .is_some_and(|text| text.ends_with("summarized completed exchange")))
+    );
 }
