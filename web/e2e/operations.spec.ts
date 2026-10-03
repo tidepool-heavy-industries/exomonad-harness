@@ -74,7 +74,8 @@ test('transport reconnect is observational, preserves draft and gates sends on a
   await expect(retained.getByText('Original command JSON')).toBeVisible()
   await expect(retained.locator('details pre')).toHaveCount(0)
   await retained.getByText('Original command JSON').click()
-  await expect(retained.locator('details pre')).toContainText(original)
+  const commandJson = await retained.locator('details pre').textContent()
+  expect(JSON.parse(commandJson!).text).toBe(original)
   const draft='Unsubmitted reconnect draft'
   await composer(page).fill(draft)
   await control(request,'config',{holdSnapshot:true})

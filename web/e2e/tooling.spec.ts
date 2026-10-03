@@ -7,7 +7,7 @@ test('production assets use the isolated authenticated wire fixture', async ({ p
   await request.post('/__fixture/reset', { data: {} })
   await page.goto('/')
   await expect(page.getByRole('heading', { name: 'Tree', exact: true })).toBeVisible()
-  await expect(page.getByRole('table', { name: 'Conversation tree' })).toContainText('/root/worker')
+  await expect(page.getByRole('region', { name: 'Worker hierarchy' })).toContainText('/root/worker')
   await expect.poll(async () => (await (await request.get('/__fixture/observations')).json()).connections).toBeGreaterThan(0)
 })
 
