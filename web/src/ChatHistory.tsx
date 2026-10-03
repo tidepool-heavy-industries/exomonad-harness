@@ -150,6 +150,7 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
     </div>}
     {!ready && <p role="status">Host unavailable; retained messages remain visible. Reconnect to refresh or reply.</p>}
     {error && <div role="alert"><p>{error}</p><button disabled={!ready || loading} onClick={() => setAttempt(value => value + 1)}>Retry messages</button></div>}
+    {error && pages.some(({page}) => page.items.length > 0) && <p role="status">Showing previously loaded messages. The requested messages could not be loaded.</p>}
     {loading && <p role="status">Loading conversation messages…</p>}
     {cursorFailure && <FailedExchange request={cursorFailure} />}
     <div role="group" aria-label="Retained conversation items">
@@ -162,7 +163,7 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
     {output.length > 0 && <div role="list" aria-label="Live model output">
       {output.map(item => <div role="listitem" className="message" key={outputKey(item)}>
         <h3>{outputLabels[item.channel]}{item.committedHash ? '' : item.streaming && ready && active ? ' · streaming' : ' · incomplete'}</h3>
-        <pre className="history-content">{item.text}</pre>
+        <pre className={`history-content ${item.channel === 'tool_arguments' || item.channel === 'tool_input' ? 'history-code' : 'history-prose'}`}>{item.text}</pre>
         {item.overflow && <p role="status">Live preview is partial after its size or active-item limit. Completed content remains available in retained history.</p>}
       </div>)}
     </div>}
