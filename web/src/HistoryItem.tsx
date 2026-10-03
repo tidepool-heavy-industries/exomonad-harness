@@ -84,8 +84,8 @@ export default function HistoryItem({ entry }: { readonly entry: HistoryEntry })
   const [showRaw, setShowRaw] = useState(false)
   const rawVisible = showRaw || !view
   const raw = useMemo(() => rawVisible ? JSON.stringify(entry.item, null, 2) : undefined, [entry.item, rawVisible])
-  // Opaque reasoning items contain no readable summary and add no chat content.
-  if (object(entry.item) && entry.item.type === 'reasoning' && view?.texts.length === 0) return null
+  // Purely opaque reasoning has no readable or unknown blocks to inspect.
+  if (object(entry.item) && entry.item.type === 'reasoning' && view?.texts.length === 0 && !view.unknownBlocks) return null
   return <div role="listitem" className="message">
     {view ? <>
       <h3>{view.label}</h3>

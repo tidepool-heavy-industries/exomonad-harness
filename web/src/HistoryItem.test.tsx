@@ -10,6 +10,16 @@ describe('retained Item presentation', () => {
     const {container} = render(<HistoryItem entry={entry({type:'reasoning', summary:[], encrypted_content:'opaque'})} />)
     expect(container.textContent).toBe('')
   })
+  it('keeps unknown textless reasoning inspectable through Raw', () => {
+    const item = { type: 'reasoning', summary: [{ type: 'future_summary', value: 'opaque summary' }], encrypted_content: 'opaque' }
+    render(<HistoryItem entry={entry(item)} />)
+    expect(screen.getByRole('heading', { name: 'Reasoning' })).toBeInTheDocument()
+    expect(screen.getByText(/Unknown content is retained/)).toBeInTheDocument()
+    expect(screen.queryByText(/show readable text/i)).toBeNull()
+    fireEvent.click(screen.getByText('Message details'))
+    fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
+    expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
+  })
   it('shows a readable role and exact escaped string content without executing HTML', () => {
     const { container } = render(<HistoryItem entry={entry({ type: 'message', role: 'assistant', phase: 'commentary', content: exact })} />)
     expect(screen.getByRole('heading', { name: 'Assistant · commentary' })).toBeInTheDocument()
