@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """Build one Buck libtest target and require a nonempty, successful selection."""
 
+from __future__ import annotations
+
 import argparse
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+from typing import Sequence
 
 
 TEST_LINE = re.compile(r"^(.+): test$")
@@ -17,30 +23,59 @@ TEST_RESULT = re.compile(
 )
 
 
+def test_names(output: str) -> set[str]:
+    return {
+        match.group(1)
+        for line in output.splitlines()
+        if (match := TEST_LINE.fullmatch(line.strip())) is not None
+    }
+
+
 def buck2(root: Path) -> str:
-    if path := os.environ.get("BUCK2") or shutil.which("buck2"):
-        return path
+    """Honor an explicit override; otherwise use this checkout's pinned flake output."""
+    override = os.environ.get("BUCK2")
+    if override:
+        return override
     system = subprocess.check_output(
         ["nix", "eval", "--raw", "--impure", "--expr", "builtins.currentSystem"],
         cwd=root,
         text=True,
-    )
+    ).strip()
     output = subprocess.check_output(
         ["nix", "eval", "--raw", f".#packages.{system}.buck2.outPath"],
         cwd=root,
         text=True,
-    )
+    ).strip()
     return str(Path(output) / "bin/buck2")
 
 
-def main() -> int:
+def source_snapshot(directory: Path) -> tuple[str | None, str | None]:
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=directory,
+                          text=True, capture_output=True, check=False)
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=directory,
+                            text=True, capture_output=True, check=False)
+    return (head.stdout.strip() if head.returncode == 0 else None,
+            status.stdout if status.returncode == 0 else None)
+
+
+def save(evidence: Path, record: dict) -> None:
+    (evidence / "evidence.json").write_text(json.dumps(record, indent=2) + "\n")
+
+
+def exit_with(returncode: int) -> None:
+    if returncode < 0:
+        os.kill(os.getpid(), -returncode)
+    raise SystemExit(returncode)
+
+
+def run(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True, help="One native rust_test label")
     parser.add_argument("--filter", required=True, help="Libtest name substring")
     parser.add_argument("--expect", type=int, help="Exact runnable and executed count")
     parser.add_argument("--exact", action="store_true", help="Match the complete test name")
     parser.add_argument("--local-only", action="store_true", help="Build without remote actions")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if not args.target.startswith("//crates/") or ":" not in args.target:
         parser.error("--target must be a //crates/...:NAME label")
     if not args.filter.strip() or args.filter.startswith("-"):
@@ -52,53 +87,172 @@ def main() -> int:
     package = root / args.target[2:].split(":", 1)[0]
     if not package.is_dir():
         parser.error("target package does not exist")
-    command = [buck2(root), "build", args.target, "--show-full-simple-output", "-v", "0"]
+    (root / "target").mkdir(exist_ok=True)
+    evidence = Path(tempfile.mkdtemp(prefix="focused-buck-", dir=root / "target"))
+    source_before, status_before = source_snapshot(root)
+    record = {
+        "source_before": source_before,
+        "working_tree_status_before": status_before,
+        "target": args.target,
+        "filter": args.filter,
+        "expected": args.expect,
+        "exact": args.exact,
+        "phase": "buck2_resolution",
+        "buck2": None,
+        "buck2_resolution_source": "BUCK2" if os.environ.get("BUCK2") else "pinned_flake",
+        "executable": None,
+        "sha256": None,
+        "matched": [],
+        "runnable": [],
+        "selected_count": 0,
+        "executed_count": None,
+        "exit_code": None,
+    }
+    save(evidence, record)
+    print(f"focused test evidence: {evidence / 'evidence.json'}", file=sys.stderr)
+
+    def finish(code: int) -> int:
+        source_after, status_after = source_snapshot(root)
+        record.update(source_after=source_after, working_tree_status_after=status_after,
+                      exit_code=code)
+        save(evidence, record)
+        return code
+
+    try:
+        executable_name = buck2(root)
+    except (OSError, subprocess.CalledProcessError) as error:
+        diagnostic = str(error)
+        if isinstance(error, subprocess.CalledProcessError):
+            diagnostic += "\n" + (error.stderr or error.output or "")
+        (evidence / "buck2-resolution.log").write_text(diagnostic)
+        print(f"focused test could not resolve Buck2; see {evidence / 'buck2-resolution.log'}",
+              file=sys.stderr)
+        record["resolution_error"] = diagnostic
+        return finish(1)
+
+    record["buck2"] = executable_name
+    buck_path = Path(executable_name)
+    if not buck_path.is_absolute() and (os.sep in executable_name or
+                                        (os.altsep and os.altsep in executable_name)):
+        buck_path = (root / buck_path).resolve()
+        executable_name = str(buck_path)
+        record["buck2"] = executable_name
+    elif record["buck2_resolution_source"] == "BUCK2" and not buck_path.is_file():
+        located = shutil.which(executable_name)
+        if located:
+            executable_name = located
+            buck_path = Path(located)
+            record["buck2"] = executable_name
+    if not buck_path.is_file() or not os.access(buck_path, os.X_OK):
+        if record["buck2_resolution_source"] == "pinned_flake":
+            diagnostic = (
+                f"Pinned Buck2 output is not materialized as an executable at {buck_path}. "
+                "Run `nix build .#packages.<system>.buck2 --no-link` for this machine "
+                "to materialize the declared output, then rerun."
+            )
+        else:
+            diagnostic = f"BUCK2 override is not an executable file: {buck_path}"
+        (evidence / "buck2-resolution.log").write_text(diagnostic + "\n")
+        print(diagnostic, file=sys.stderr)
+        record["phase"] = "buck2_unavailable"
+        record["resolution_error"] = diagnostic
+        return finish(1)
+
+    build = [executable_name, "build", args.target, "--show-full-simple-output", "-v", "0"]
     if args.local_only:
-        command.extend(["--local-only", "-c", "remote.enabled=false"])
-    built = subprocess.run(command, cwd=root, text=True, capture_output=True, check=False)
+        build.extend(["--local-only", "-c", "remote.enabled=false"])
+    record.update(build_argv=build, phase="build")
+    save(evidence, record)
+    built = subprocess.run(build, cwd=root, text=True, capture_output=True, check=False)
+    (evidence / "build.log").write_text(built.stdout + built.stderr)
+    record["build_exit_code"] = built.returncode
+    save(evidence, record)
     sys.stderr.write(built.stderr)
     if built.returncode:
-        return built.returncode
+        return finish(built.returncode)
     outputs = [Path(line) for line in built.stdout.splitlines() if line.startswith("/")]
     if len(outputs) != 1 or not outputs[0].is_file():
         print("focused test rejected: expected one executable Buck output", file=sys.stderr)
-        return 1
+        record["phase"] = "artifact_rejected"
+        return finish(1)
 
-    executable = outputs[0]
+    original = outputs[0].resolve()
+    executable = evidence / original.name
+    shutil.copy2(original, executable)
+    digest = hashlib.sha256(executable.read_bytes()).hexdigest()
     env = os.environ.copy()
     env["CARGO_MANIFEST_DIR"] = str(package)
     selection = [str(executable), args.filter]
     if args.exact:
         selection.append("--exact")
-    listed = subprocess.run([*selection, "--list"], cwd=package, env=env,
-                            text=True, capture_output=True, check=False)
+    record.update(executable=str(executable), sha256=digest, selection_argv=selection,
+                  phase="listing")
+    save(evidence, record)
+
+    list_argv = [*selection, "--list"]
+    record["list_argv"] = list_argv
+    listed = subprocess.run(list_argv, cwd=package, env=env, text=True,
+                            capture_output=True, check=False)
+    (evidence / "list.log").write_text(listed.stdout + listed.stderr)
+    record["list_exit_code"] = listed.returncode
+    save(evidence, record)
     if listed.returncode:
         sys.stderr.write(listed.stdout + listed.stderr)
-        return listed.returncode
-    names = [match.group(1) for line in listed.stdout.splitlines()
-             if (match := TEST_LINE.fullmatch(line.strip()))]
-    print(f"selected {len(names)} runnable test(s) in {args.target}: {', '.join(names)}")
+        return finish(listed.returncode)
+    ignored_argv = [*selection, "--list", "--ignored"]
+    record["ignored_list_argv"] = ignored_argv
+    ignored_list = subprocess.run(ignored_argv, cwd=package, env=env, text=True,
+                                  capture_output=True, check=False)
+    (evidence / "ignored.log").write_text(ignored_list.stdout + ignored_list.stderr)
+    record["ignored_list_exit_code"] = ignored_list.returncode
+    save(evidence, record)
+    if ignored_list.returncode:
+        sys.stderr.write(ignored_list.stdout + ignored_list.stderr)
+        return finish(ignored_list.returncode)
+    matched = test_names(listed.stdout)
+    ignored = test_names(ignored_list.stdout)
+    names = matched - ignored
+    record.update(matched=sorted(matched), ignored=sorted(ignored & matched),
+                  runnable=sorted(names), selected_count=len(names), matched_count=len(matched),
+                  ignored_count=len(ignored & matched))
+    print(f"focused test selection: {len(matched)} matched, {len(names)} runnable, "
+          f"{len(ignored & matched)} ignored in {args.target}")
     if not names or (args.expect is not None and len(names) != args.expect):
         print("focused test rejected: runnable selection count mismatch", file=sys.stderr)
-        return 1
+        record["phase"] = "selection_rejected"
+        return finish(1)
 
-    run = subprocess.run([*selection, "--nocapture"], cwd=package, env=env,
-                         text=True, capture_output=True, check=False)
-    sys.stdout.write(run.stdout)
-    sys.stderr.write(run.stderr)
-    if run.returncode:
-        return run.returncode
-    summaries = [match for line in run.stdout.splitlines()
+    command = [*selection, "--nocapture"]
+    record.update(run_argv=command, phase="execution")
+    save(evidence, record)
+    completed = subprocess.run(command, cwd=package, env=env, text=True,
+                               capture_output=True, check=False)
+    (evidence / "run.log").write_text(completed.stdout + completed.stderr)
+    sys.stdout.write(completed.stdout)
+    sys.stderr.write(completed.stderr)
+    record["run_exit_code"] = completed.returncode
+    summaries = [match for line in completed.stdout.splitlines()
                  if (match := TEST_RESULT.fullmatch(line.strip()))]
+    record["summaries"] = [tuple(int(value) for value in summary.groups())
+                           for summary in summaries]
+    if summaries:
+        passed, failed, ignored, _, _ = map(int, summaries[0].groups())
+        record["executed_count"] = passed + failed
+        record["passed_count"] = passed
+        record["failed_count"] = failed
+        record["ignored_count"] = ignored
+    save(evidence, record)
+    if completed.returncode:
+        return finish(completed.returncode)
     if len(summaries) != 1:
-        print("focused test rejected: missing libtest summary", file=sys.stderr)
-        return 1
+        print("focused test rejected: missing or multiple libtest summaries", file=sys.stderr)
+        return finish(1)
     passed, failed, ignored, _, _ = map(int, summaries[0].groups())
     if passed != len(names) or failed or ignored:
         print("focused test rejected: executed count differs from runnable selection", file=sys.stderr)
-        return 1
-    return 0
+        return finish(1)
+    return finish(0)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    exit_with(run(sys.argv[1:]))

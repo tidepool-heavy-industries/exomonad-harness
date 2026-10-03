@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+stable_binary=${1:?stable release binary path required}
+
+cargo --locked build --release --package harness-demo --bin harness-demo
+target_dir="${CARGO_TARGET_DIR:-$PWD/target}"
+if [[ "$target_dir" != /* ]]; then
+  target_dir="$PWD/$target_dir"
+fi
+built_binary="$target_dir/release/harness-demo"
+if [[ ! -x "$built_binary" ]]; then
+  echo "release harness binary was not produced at $built_binary" >&2
+  exit 1
+fi
+
+mkdir -p "$(dirname "$stable_binary")"
+staged_binary="$(mktemp "$(dirname "$stable_binary")/.harness-demo.XXXXXX")"
+cleanup_staged() {
+  if [[ -n "$staged_binary" ]]; then
+    rm -f -- "$staged_binary"
+  fi
+}
+trap cleanup_staged EXIT
+install -m 755 "$built_binary" "$staged_binary"
+mv -f "$staged_binary" "$stable_binary"
+staged_binary=""
+
+# Exercise the staged release executable through the production launcher and
+# the existing deterministic browser journey. The test harness remains reusable.
+HARNESS_DEMO_TEST_BIN="$stable_binary" scripts/cargo-focused-test \
+  --package harness-demo --target test:standalone_browser \
+  --filter standalone_missing_assets_and_clean_and_process_loss_reopen --expect 1

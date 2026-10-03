@@ -36,14 +36,20 @@ the crate build to Cargo. The web `check`, `test`, and `dist` targets run pinned
 Node actions against a fixed-output offline npm cache. Cargo remains the
 publication and non-Linux development path. The [server acceptance record](docs/buck2-acceptance.md)
 lists exact checks, resource use, and pending gates.
+Run Buck from an admitted build environment with the checkout's provisioned
+`buck-out` bind mount. Stop if the `findmnt` check below fails. Keep remote
+execution disabled with `--local-only -c remote.enabled=false` until its
+project gates are recorded.
+For `scripts/buck-focused-test`, `--local-only` supplies both Buck options.
 
 ```sh
 nix build .#buck2 .#buck-rust .#buck-cc .#buck-binutils .#buck-node \
   .#buck-python .#buck-npm-cache --no-link
+findmnt --mountpoint "$PWD/buck-out"
 scripts/buck2-configure.sh
 BUCK2="$(nix eval --raw .#packages.x86_64-linux.buck2.outPath)/bin/buck2"
-"$BUCK2" build //crates/harness:harness --local-only
-"$BUCK2" build //web:check //web:test //web:dist --local-only
+"$BUCK2" build //crates/harness:harness --local-only -c remote.enabled=false
+"$BUCK2" build //web:check //web:test //web:dist --local-only -c remote.enabled=false
 scripts/buck-focused-test --target //crates/harness:unit_tests \
   --filter hooks::tests::send_plan_and_opaque_evidence_cross_serde_boundary \
   --exact --expect 1 --local-only

@@ -2,14 +2,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 stable_binary="$PWD/target/release/harness-demo"
-staged_binary=""
 prepared=false
 cleanup() {
   if [[ "$prepared" != true ]]; then
     rm -f "$stable_binary"
-  fi
-  if [[ -n "$staged_binary" ]]; then
-    rm -f "$staged_binary"
   fi
 }
 trap cleanup EXIT
@@ -21,28 +17,11 @@ if ! rm -f "$stable_binary"; then
   exit 1
 fi
 bash scripts/prepare-browser-check "$(git rev-parse HEAD)"
-cargo build --release --package harness-demo --bin harness-demo
-target_dir="${CARGO_TARGET_DIR:-$PWD/target}"
-if [[ "$target_dir" != /* ]]; then
-  target_dir="$PWD/$target_dir"
-fi
-built_binary="$target_dir/release/harness-demo"
-if [[ ! -x "$built_binary" ]]; then
-  echo "release harness binary was not produced at $built_binary" >&2
-  exit 1
-fi
-mkdir -p "$(dirname "$stable_binary")"
-if [[ ! "$built_binary" -ef "$stable_binary" ]]; then
-  staged_binary="$(mktemp "$(dirname "$stable_binary")/.harness-demo.XXXXXX")"
-  install -m 755 "$built_binary" "$staged_binary"
-  mv -f "$staged_binary" "$stable_binary"
-  staged_binary=""
-fi
-# Exercise the staged release executable through the production launcher and
-# the existing deterministic browser journey. The test harness remains reusable.
-HARNESS_DEMO_TEST_BIN="$stable_binary" scripts/cargo-focused-test \
-  --package harness-demo --target test:standalone_browser \
-  --filter standalone_missing_assets_and_clean_and_process_loss_reopen --expect 1
+shell_source="$(mktemp -d)"
+trap 'cleanup; rm -rf -- "$shell_source"' EXIT
+cp flake.nix flake.lock rust-toolchain.toml "$shell_source/"
+nix develop "path:$shell_source#browser" --command \
+  bash scripts/prepare-browser-release "$stable_binary"
 printf 'Prepared standalone browser harness: %s\n' "$stable_binary"
 sha256sum "$stable_binary"
 prepared=true
