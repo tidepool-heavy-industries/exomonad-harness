@@ -20,6 +20,43 @@ describe('retained Item presentation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
     expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
   })
+  it('labels model calls separately and keeps transport identifiers in closed metadata', () => {
+    const item = { type: 'function_call', id: 'fc-item-1', call_id: 'call-1', name: 'read_file', arguments: '{"path":"README","limit":3}' }
+    render(<HistoryItem entry={entry(item)} />)
+    const heading = screen.getByRole('heading', { name: 'Model tool call · read_file' })
+    expect(heading).not.toHaveTextContent('call-1')
+    expect(screen.getByLabelText('Arguments item 7').textContent).toBe('{\n  "path": "README",\n  "limit": 3\n}')
+    expect(screen.getByLabelText('Arguments item 7')).toHaveClass('history-code')
+    const details = screen.getByText('Message details').closest('details')!
+    expect(details).not.toHaveAttribute('open')
+    fireEvent.click(screen.getByText('Message details'))
+    expect(details).toHaveTextContent('Item ID: fc-item-1')
+    expect(details).toHaveTextContent('Call ID: call-1')
+    fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
+    expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
+  })
+
+  it('labels tool responses and collapses formatted JSON behind a concise preview', () => {
+    const response = {
+      ready_results: [{ call: 'call-CN', origin: { actor: '/root', incarnation: '1', kind: 'embedded', run: 'run-1' }, request: 'request-1' }],
+      reason: 'tool_result',
+    }
+    const compact = JSON.stringify(response)
+    const item = { type: 'function_call_output', id: 'fc-output-1', call_id: 'call-CN', output: compact }
+    render(<HistoryItem entry={entry(item)} />)
+    const heading = screen.getByRole('heading', { name: 'Tool response' })
+    expect(heading).not.toHaveTextContent('call-CN')
+    const disclosure = screen.getByText('JSON result · 2 fields · reason: tool_result')
+    expect(disclosure.tagName).toBe('SUMMARY')
+    expect(disclosure.closest('details')).not.toHaveAttribute('open')
+    fireEvent.click(disclosure)
+    expect(screen.getByLabelText('Result item 7').textContent).toBe(JSON.stringify(response, null, 2))
+    expect(screen.getByLabelText('Result item 7')).toHaveClass('history-code')
+    fireEvent.click(screen.getByText('Message details'))
+    expect(screen.getByText('Message details').closest('details')).toHaveTextContent('Call ID: call-CN')
+    fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
+    expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
+  })
   it('shows a readable role and exact escaped string content without executing HTML', () => {
     const { container } = render(<HistoryItem entry={entry({ type: 'message', role: 'assistant', phase: 'commentary', content: exact })} />)
     expect(screen.getByRole('heading', { name: 'Assistant · commentary' })).toBeInTheDocument()
@@ -62,10 +99,10 @@ describe('retained Item presentation', () => {
     [{type:'message',role:'assistant',content:[{type:'refusal',refusal:exact}]}, 'Text'],
     [{type:'reasoning',summary:[],content:[{type:'reasoning_text',text:exact}]}, 'Reasoning'],
     [{ type: 'reasoning', summary: [{ type: 'summary_text', text: exact }] }, 'Summary'],
-    [{ type: 'function_call', name: 'f', call_id: 'call λ', arguments: ' { "z":1, "a" : 2 }\n' }, 'Arguments'],
+    [{ type: 'function_call', name: 'f', call_id: 'call λ', arguments: 'arguments as exact text' }, 'Arguments'],
     [{ type: 'custom_tool_call', name: 'cell', call_id: 'call λ', input: exact }, 'Input'],
-    [{ type: 'function_call_output', call_id: 'call λ', output: ' { "z":1, "a" : 2 }\n' }, 'Output'],
-    [{ type: 'custom_tool_call_output', call_id: 'call λ', output: exact }, 'Output'],
+    [{ type: 'function_call_output', call_id: 'call λ', output: 'Tool failed: permission denied\n' }, 'Result'],
+    [{ type: 'custom_tool_call_output', call_id: 'call λ', output: exact }, 'Result'],
     [{ type: 'configuration_update', reasoning: { effort: 'high' } }, 'Reasoning effort'],
   ] as const)('retains the original text for %j', (item, label) => {
     render(<HistoryItem entry={entry(item)} />)
@@ -80,7 +117,18 @@ describe('retained Item presentation', () => {
     }
     expect(screen.getByLabelText(`${label} item 7`).textContent).toBe(source)
     if ('type' in item && item.type.includes('call')) expect(screen.getByLabelText(`${label} item 7`)).toHaveClass('history-code')
-    if ('type' in item && item.type.includes('call')) expect(screen.getByRole('heading').textContent).toContain(item.type)
+    if ('type' in item && (item.type === 'function_call' || item.type === 'custom_tool_call')) {
+      expect(screen.getByRole('heading')).toHaveTextContent('Model tool call')
+      expect(screen.getByRole('heading')).not.toHaveTextContent('call λ')
+    }
+    if ('type' in item && (item.type === 'function_call_output' || item.type === 'custom_tool_call_output')) {
+      expect(screen.getByRole('heading', { name: 'Tool response' })).toBeInTheDocument()
+      expect(screen.getByRole('heading')).not.toHaveTextContent('call λ')
+      expect(screen.getByLabelText(`${label} item 7`)).toBeVisible()
+      fireEvent.click(screen.getByText('Message details'))
+      fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
+      expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
+    }
   })
 
   it.each([null, false, 0, { type: 'future_item', extra: ['λ'] }, { type: 'custom_tool_call_output', call_id: 'c', output: false }, { type: 'custom_tool_call', call_id: 'c', name: 'f', input: { z: 1 } }])('shows genuine arbitrary or unfamiliar JSON %j', (item) => {
@@ -93,7 +141,8 @@ describe('retained Item presentation', () => {
     const argumentsObject = { z: 1, nested: { unicode: '  λ\n🐈  ', nullable: null }, choices: [false, 0] }
     const item = { type: 'function_call', call_id: 'call λ', name: 'structured', arguments: argumentsObject }
     render(<HistoryItem entry={entry(item)} />)
-    expect(screen.getByRole('heading', { name: 'function_call · structured · call call λ' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Model tool call · structured' })).toBeInTheDocument()
+    expect(screen.getByRole('heading')).not.toHaveTextContent('call λ')
     expect(screen.getByLabelText('Arguments JSON item 7').textContent).toBe(JSON.stringify(argumentsObject, null, 2))
     expect(screen.getByLabelText('Arguments JSON item 7')).toHaveClass('history-code')
     fireEvent.click(screen.getByText('Message details'))

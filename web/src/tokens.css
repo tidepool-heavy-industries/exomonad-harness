@@ -95,6 +95,8 @@ pre { margin-block: 8px; max-width: 100%; }
 .history-code { font-family: var(--mono); }
 .history-reasoning { margin-block: 8px; }
 .history-reasoning > summary { cursor: pointer; }
+.history-tool-response { margin-block: 8px; }
+.history-tool-response > summary { cursor: pointer; }
 .history-controls { margin-block: 12px; }
 .skip-link { position: absolute; inset-inline-start: 8px; top: -80px; padding: 8px; background: var(--panel); z-index: 20; }
 .skip-link:focus { top: 8px; }

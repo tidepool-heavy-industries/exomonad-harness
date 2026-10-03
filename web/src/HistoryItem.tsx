@@ -10,8 +10,40 @@ function object(value: unknown): value is Record<string, unknown> {
 interface ReadableItem {
   readonly label: string
   readonly texts: readonly { label: string; text: string; kind: 'prose' | 'code' }[]
+  readonly metadata?: readonly { label: string; value: string }[]
+  readonly responseSummary?: string
   readonly unknownBlocks?: boolean
   readonly reasoning?: boolean
+}
+
+function structuredJson(text: string): { text: string; summary?: string } | undefined {
+  try {
+    const value: unknown = JSON.parse(text)
+    if (!object(value) && !Array.isArray(value)) return undefined
+    const entries = Array.isArray(value) ? value.length : Object.keys(value).length
+    const scalarFields = object(value)
+      ? Object.entries(value).filter(([, field]) => field === null || ['string', 'number', 'boolean'].includes(typeof field))
+      : []
+    const preview = scalarFields.slice(0, 2).map(([key, field]) => {
+      const rendered = String(field)
+      return `${key}: ${rendered.length > 72 ? `${rendered.slice(0, 69)}…` : rendered}`
+    }).join(' · ')
+    return { text: JSON.stringify(value, null, 2), summary: !Array.isArray(value) && preview
+      ? `JSON result · ${entries} fields · ${preview}` : undefined }
+  } catch { /* Non-JSON tool text stays exact. */ }
+  return undefined
+}
+
+function presentJson(text: string): string {
+  return structuredJson(text)?.text ?? text
+}
+
+function toolMetadata(value: Record<string, unknown>, type: string, callId: string): { label: string; value: string }[] {
+  return [
+    { label: 'Item type', value: type },
+    ...(typeof value.id === 'string' ? [{ label: 'Item ID', value: value.id }] : []),
+    { label: 'Call ID', value: callId },
+  ]
 }
 
 function blocks(value: unknown, types: readonly string[]): { texts: string[]; unknownBlocks: boolean } {
@@ -51,13 +83,16 @@ function readable(value: unknown): ReadableItem | undefined {
     && typeof value.name === 'string' && typeof value.call_id === 'string') {
     const input = value.type === 'function_call' ? value.arguments : value.input
     if (typeof input !== 'string' && !(value.type === 'function_call' && object(input))) return undefined
-    return { label: `${value.type} · ${value.name} · call ${value.call_id}`,
+    return { label: `Model tool call · ${value.name}`,
+      metadata: toolMetadata(value, value.type, value.call_id),
       texts: [{ label: value.type === 'function_call' ? (typeof input === 'string' ? 'Arguments' : 'Arguments JSON') : 'Input',
-        text: typeof input === 'string' ? input : JSON.stringify(input, null, 2), kind: 'code' }] }
+        text: typeof input === 'string' ? presentJson(input) : JSON.stringify(input, null, 2), kind: 'code' }] }
   }
   if ((value.type === 'function_call_output' || value.type === 'custom_tool_call_output')
     && typeof value.call_id === 'string' && typeof value.output === 'string') {
-    return { label: `${value.type} · call ${value.call_id}`, texts: [{ label: 'Output', text: value.output, kind: 'code' }] }
+    const formatted = structuredJson(value.output)
+    return { label: 'Tool response', metadata: toolMetadata(value, value.type, value.call_id), responseSummary: formatted?.summary,
+      texts: [{ label: 'Result', text: formatted?.text ?? value.output, kind: 'code' }] }
   }
   if (value.type === 'configuration_update' && object(value.reasoning) && typeof value.reasoning.effort === 'string') {
     return { label: 'Configuration update', texts: [{ label: 'Reasoning effort', text: value.reasoning.effort, kind: 'code' }] }
@@ -92,9 +127,14 @@ export default function HistoryItem({ entry }: { readonly entry: HistoryEntry })
       {view.reasoning && view.texts.length > 0 ? <details className="history-reasoning">
         <summary>{view.label} · show readable text</summary>
         {view.texts.map((part, index) => <TextPreview key={index} text={part.text} kind={part.kind} label={`${part.label} item ${entry.position}${view.texts.length > 1 ? ` block ${index + 1}` : ''}`} />)}
+      </details> : view.responseSummary ? <details className="history-tool-response">
+        <summary>{view.responseSummary}</summary>
+        {view.texts.map((part, index) => <TextPreview key={index} text={part.text} kind={part.kind} label={`${part.label} item ${entry.position}${view.texts.length > 1 ? ` block ${index + 1}` : ''}`} />)}
       </details> : view.texts.map((part, index) => <TextPreview key={index} text={part.text} kind={part.kind} label={`${part.label} item ${entry.position}${view.texts.length > 1 ? ` block ${index + 1}` : ''}`} />)}
       {view.unknownBlocks && <p>Unknown content is retained. Open Raw to inspect all blocks.</p>}
-      <details className="history-controls"><summary>Message details</summary><p className="meta">Item {entry.position} · hash {entry.hash} · {entry.byteLen} bytes</p><button type="button" aria-expanded={showRaw} onClick={() => setShowRaw(!showRaw)}>{showRaw ? 'Hide' : 'Show'} Raw item {entry.position}</button></details>
+      <details className="history-controls"><summary>Message details</summary><p className="meta">Item {entry.position} · hash {entry.hash} · {entry.byteLen} bytes</p>
+        {view.metadata?.map(({ label, value }) => <p className="meta" key={label}>{label}: <span className="mono">{value}</span></p>)}
+        <button type="button" aria-expanded={showRaw} onClick={() => setShowRaw(!showRaw)}>{showRaw ? 'Hide' : 'Show'} Raw item {entry.position}</button></details>
     </> : <p>Unrecognized item · Raw data</p>}
     {rawVisible && <TextPreview key="raw" text={raw ?? 'Raw data could not be represented as JSON.'} kind="code" label={`Raw item ${entry.position}`} />}
   </div>
