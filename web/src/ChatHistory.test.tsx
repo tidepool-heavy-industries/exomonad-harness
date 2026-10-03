@@ -23,6 +23,11 @@ describe('bounded retained Chat slices', () => {
     await act(async () => rejectAncestor(new Error('ancestor unavailable')))
     expect(screen.getByText('newest slice 0')).toBeVisible()
     expect(screen.getByText('ancestor unavailable')).toBeVisible()
+    expect(screen.getByRole('status')).toHaveTextContent('Showing previously loaded messages. The requested messages could not be loaded.')
+    vi.mocked(readHistoryPage).mockImplementation(async id => page(id, 0))
+    fireEvent.click(screen.getByRole('button', { name: 'Retry messages' }))
+    await waitFor(() => expect(screen.queryByText('Showing previously loaded messages. The requested messages could not be loaded.')).toBeNull())
+    expect(screen.getByText('newest slice 0')).toBeVisible()
   })
   it('uses proven request lineage to refresh predecessor commits without restarting progressive loads', async () => {
     const oldOrigin = {kind:'embedded' as const, run:'run', actor:'/root', incarnation:'old'}
@@ -62,10 +67,19 @@ describe('bounded retained Chat slices', () => {
     fireEvent.click(screen.getByRole('button', { name: 'More items in this exchange' }))
     await screen.findByText('page unavailable')
     expect(screen.getByText('one slice 0')).toBeVisible()
+    expect(screen.getByText('Showing previously loaded messages. The requested messages could not be loaded.')).toBeVisible()
     fail = false
     fireEvent.click(screen.getByRole('button', { name: 'Retry messages' }))
     await screen.findByText('one slice 1')
+    expect(screen.queryByText('Showing previously loaded messages. The requested messages could not be loaded.')).toBeNull()
     expect(readHistoryPage).toHaveBeenLastCalledWith('one', 1, expect.any(AbortSignal))
+  })
+  it('does not claim retained messages when the initial read fails', async () => {
+    vi.mocked(readHistoryPage).mockRejectedValueOnce(new Error('first read unavailable'))
+    render(chat('one'))
+    await screen.findByText('first read unavailable')
+    expect(screen.queryByText('Showing previously loaded messages. The requested messages could not be loaded.')).toBeNull()
+    expect(screen.queryByRole('listitem')).toBeNull()
   })
   it('keeps the oversized item visible when its skip cursor fails and retries the skip cursor', async () => {
     let fail = true
@@ -80,6 +94,7 @@ describe('bounded retained Chat slices', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Skip large item' }))
     await screen.findByText('skip unavailable')
     expect(notice).toBeVisible()
+    expect(screen.queryByText('Showing previously loaded messages. The requested messages could not be loaded.')).toBeNull()
     fail = false
     fireEvent.click(screen.getByRole('button', { name: 'Retry messages' }))
     await screen.findByText('one slice 1')
@@ -113,6 +128,19 @@ describe('bounded retained Chat slices', () => {
     })
     render(chat('one'))
     expect(await screen.findByText(new RegExp(hash))).toBeVisible()
+  })
+  it('keeps live assistant prose proportional and live tool input monospace', async () => {
+    const origin = { kind: 'embedded' as const, run: 'run', actor: '/root', incarnation: 'one' }
+    const liveOutput = [
+      { origin, requestId: 'one', itemId: 'assistant', channel: 'assistant' as const, index: 0, text: 'Live answer', overflow: false, streaming: true, version: 1 },
+      { origin, requestId: 'one', itemId: 'tool-input', channel: 'tool_arguments' as const, index: 0, text: '{"path":"README"}', overflow: false, streaming: true, version: 1 },
+    ]
+    render(<ChatHistory cacheKey="one" requestId="one" requests={new Map()} refreshKey="stable" ready liveOutput={liveOutput} />)
+    await screen.findByText('one slice 0')
+    expect(screen.getByRole('heading', { name: 'Assistant · streaming' })).toBeVisible()
+    expect(screen.getByText('Live answer')).toHaveClass('history-content', 'history-prose')
+    expect(screen.getByRole('heading', { name: 'Tool arguments · streaming' })).toBeVisible()
+    expect(screen.getByText('{"path":"README"}')).toHaveClass('history-content', 'history-code')
   })
   it('evicts older worker slices after four retained conversations while keeping the recent slice readable offline', async () => {
     for (let index = 0; index < 5; index++) {
