@@ -39,8 +39,9 @@ test('history recovers from 503, bounds each page, renders text/raw and explicit
   await inspector(page).getByRole('button',{name:'Previous page',exact:true}).click()
   await expect(items(page)).toHaveCount(50)
   await expect(items(page).first()).toContainText('Item 0')
+  const pageZeroReadsBeforeRefresh=(await observations(request)).historyReads.filter((r:any)=>r.offset===0).length
   await page.getByRole('button',{name:'Refresh history',exact:true}).click()
-  await expect.poll(async()=> (await observations(request)).historyReads.filter((r:any)=>r.offset===0).length).toBe(3)
+  await expect.poll(async()=> (await observations(request)).historyReads.filter((r:any)=>r.offset===0).length).toBe(pageZeroReadsBeforeRefresh+1)
 })
 
 test('obsolete history HTTP response cannot replace the current request',async({page,request})=>{
