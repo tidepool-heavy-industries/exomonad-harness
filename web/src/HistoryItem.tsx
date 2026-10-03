@@ -25,8 +25,9 @@ function structuredJson(text: string): { text: string; summary?: string } | unde
       ? Object.entries(value).filter(([, field]) => field === null || ['string', 'number', 'boolean'].includes(typeof field))
       : []
     const preview = scalarFields.slice(0, 2).map(([key, field]) => {
+      const displayKey = key.length > 48 ? `${key.slice(0, 45)}…` : key
       const rendered = String(field)
-      return `${key}: ${rendered.length > 72 ? `${rendered.slice(0, 69)}…` : rendered}`
+      return `${displayKey}: ${rendered.length > 72 ? `${rendered.slice(0, 69)}…` : rendered}`
     }).join(' · ')
     const summary = Array.isArray(value)
       ? `JSON result · ${entries} item${entries === 1 ? '' : 's'}`

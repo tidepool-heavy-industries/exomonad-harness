@@ -61,7 +61,8 @@ describe('retained Item presentation', () => {
   it.each([
     ['nested JSON', JSON.stringify({ ready_results: [{ origin: { actor: '/root' } }] }), 'JSON result · 1 field'],
     ['array JSON', JSON.stringify([{ call: 'call-1', origin: { actor: '/root' } }]), 'JSON result · 1 item'],
-  ])('collapses %s without a scalar preview and keeps the formatted response available', (_name, output, summary) => {
+    ['long-key JSON', JSON.stringify({ [`${'a'.repeat(60)}`]: 'short' }), `JSON result · 1 field · ${'a'.repeat(45)}…: short`],
+  ])('collapses %s with a bounded preview and keeps the formatted response available', (_name, output, summary) => {
     render(<HistoryItem entry={entry({ type: 'function_call_output', call_id: 'call-1', output })} />)
     const disclosure = screen.getByText(summary)
     expect(disclosure.tagName).toBe('SUMMARY')
