@@ -45,7 +45,7 @@ export default function ActorOutput({ origin, revision, ready, active, onAuthExp
     } catch (error) { setIssue(error instanceof Error ? error.message : String(error)) }
     finally { setBusy(undefined) }
   }
-  return <section aria-label="Displayed values">
+  return <section className="actor-output" aria-label="Displayed values">
     <h3>Displayed values</h3>
     {issue && <p role="alert">{issue}</p>}
     {!rows.length && !issue && <p>No values have been displayed yet.</p>}

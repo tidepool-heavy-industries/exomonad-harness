@@ -15,5 +15,7 @@
 .actor-operations { margin-top: 20px; border-top: 1px solid var(--line); }
 .actor-operations .toolbar { margin-top: 12px; }
 .actor-operations .toolbar h2 { margin: 0; }
+.actor-output { max-height: 45vh; overflow: auto; margin-block: 12px; }
+.actor-output pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (min-width: 1000px) { .actor-details { grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr); } }
 @media (max-width: 700px) { .worker-chat { grid-template-columns: minmax(0, 1fr); } .worker-chat-list { max-height: 16rem; border-inline-end: 0; border-bottom: 1px solid var(--line); padding-inline-end: 0; } }
