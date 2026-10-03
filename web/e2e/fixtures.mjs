@@ -16,6 +16,6 @@ export function snapshot(workerCount = 2, requestsPerWorker = 2) {
   return { seq: 10, hostRun: target.run, actors, conversations, requests, jobs, envelopes, commandReceipts: [] };
 }
 export function history(requestId, offset = 0) {
-  const items = Array.from({ length: 50 }, (_, n) => ({ position: offset + n, hash: createHash('sha256').update(`fixture-item-${offset+n}`).digest('hex'), byteLen: 100, item: n === 0 ? { type: 'message', role: 'assistant', content: [{type:'output_text', text:`Retained fixture message ${requestId} page ${offset}\n  preserved whitespace 🐚`}] } : n === 1 ? { type: 'future_unknown_item', fixture: `unknown ${offset+n}` } : {type:'message',role:'user',content:[{type:'input_text',text:`History item ${offset+n}`}]} }));
+  const items = Array.from({ length: 50 }, (_, n) => ({ position: offset + n, hash: createHash('sha256').update(`fixture-item-${offset+n}`).digest('hex'), byteLen: 100, item: n === 0 ? { type: 'message', role: 'assistant', content: [{type:'output_text', text:`Retained fixture message ${requestId} page ${offset}\n  preserved whitespace 🐚`}] } : n === 1 ? { type: 'future_unknown_item', fixture: `unknown ${offset+n}` } : n === 2 ? {type:'function_call', name:'read_file', call_id:'fixture-call', arguments:'{"path":"README"}'} : {type:'message',role:'user',content:[{type:'input_text',text:`History item ${offset+n}`}]} }));
   return { requestId, parentId: null, branch: 'browser-fixture', items, nextOffset: offset < 100 ? offset + 50 : null, oversizedItem: null };
 }

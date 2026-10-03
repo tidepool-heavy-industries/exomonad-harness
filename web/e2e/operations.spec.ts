@@ -31,6 +31,7 @@ test('URL Back/reload preserves exact selection and per-tab draft; shortcuts res
   await expect(page.getByRole('heading',{name:'Timeline',exact:true})).toBeFocused()
   const inspect=page.getByRole('button',{name:'Inspect history',exact:true}).first()
   await inspect.click()
+  await expect(page.getByRole('heading',{name:/Request history/})).toBeFocused()
   await page.getByRole('button',{name:'Close history',exact:true}).click()
   await expect(inspect).toBeFocused()
   expect((await observations(request)).commands).toHaveLength(0)
@@ -67,6 +68,13 @@ test('transport reconnect is observational, preserves draft and gates sends on a
   await send(page).click()
   await expect.poll(async()=> (await observations(request)).commands.length).toBe(1)
   const first=(await observations(request)).commands[0]
+  const retained=page.locator(`[data-operation-id="${first.operation_id}"]`)
+  await expect(retained).toContainText(target.actor)
+  await expect(retained).toContainText(target.incarnation)
+  await expect(retained.getByText('Original command JSON')).toBeVisible()
+  await expect(retained.locator('details pre')).toHaveCount(0)
+  await retained.getByText('Original command JSON').click()
+  await expect(retained.locator('details pre')).toContainText(original)
   const draft='Unsubmitted reconnect draft'
   await composer(page).fill(draft)
   await control(request,'config',{holdSnapshot:true})
@@ -136,7 +144,7 @@ for(const outcome of ['admitted','refused','unconfirmed','control_requested'] as
     const command=(await observations(request)).commands[0]
     const row=page.locator(`[data-operation-id="${command.operation_id}"]`)
     await expect(row).toContainText(outcome==='admitted'?'input_admitted':outcome)
-    if(outcome==='unconfirmed') await expect(page.getByRole('region',{name:'Command handoff receipts'})).not.toContainText('Refused')
+    if(outcome==='unconfirmed') await expect(page.getByRole('region',{name:'Retained browser operations'})).not.toContainText('Refused')
     if(outcome==='admitted') {
       await control(request,'frame',{type:'event',event:{seq:12,event:{kind:'command.receipt',value:{commandId:command.operation_id,target:command.command.target,outcome:'unconfirmed',reason:'Weaker late fixture uncertainty'}}}})
       await expect(row).toContainText('input_admitted')
