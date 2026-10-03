@@ -115,6 +115,33 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(path.read_text())['buck2'], str(pinned))
 
+    def test_missing_pinned_output_records_materialization_prerequisite(self):
+        ambient_dir = self.root / 'ambient'
+        ambient_dir.mkdir()
+        self.program(ambient_dir / 'buck2', 'exit 99')
+        nix = self.bin_dir / 'nix'
+        self.program(nix, '''
+case "$*" in
+  *builtins.currentSystem*) printf '%s\\n' x86_64-linux ;;
+  *packages.x86_64-linux.buck2.outPath*) printf '%s\\n' "$PINNED_OUTPUT" ;;
+  *) exit 98 ;;
+esac
+''')
+        missing = self.root / 'unmaterialized-buck2'
+        result, path = self.invoke(BUCK2='',
+                                   PATH=str(ambient_dir) + ':' + str(self.bin_dir) + ':' + os.environ['PATH'],
+                                   PINNED_OUTPUT=str(missing))
+        self.assertEqual(result.returncode, 1)
+        self.assertIsNotNone(path)
+        evidence = json.loads(path.read_text())
+        self.assertEqual(evidence['phase'], 'buck2_unavailable')
+        self.assertEqual(evidence['buck2_resolution_source'], 'pinned_flake')
+        self.assertEqual(evidence['buck2'], str(missing / 'bin/buck2'))
+        self.assertIn('nix build .#packages.<system>.buck2 --no-link', evidence['resolution_error'])
+        self.assertEqual(evidence['exit_code'], 1)
+        self.assertIn('not materialized', (path.parent / 'buck2-resolution.log').read_text())
+        self.assertFalse((self.root / 'buck-argv').exists())
+
     def test_zero_selection_wrong_count_and_run_failure_are_rejected_with_logs(self):
         cases = [
             ({'LISTING': 'selected_case: test\n',

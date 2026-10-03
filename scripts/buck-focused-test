@@ -90,10 +90,6 @@ def run(argv: Sequence[str]) -> int:
     (root / "target").mkdir(exist_ok=True)
     evidence = Path(tempfile.mkdtemp(prefix="focused-buck-", dir=root / "target"))
     source_before, status_before = source_snapshot(root)
-    executable_name = buck2(root)
-    build = [executable_name, "build", args.target, "--show-full-simple-output", "-v", "0"]
-    if args.local_only:
-        build.extend(["--local-only", "-c", "remote.enabled=false"])
     record = {
         "source_before": source_before,
         "working_tree_status_before": status_before,
@@ -101,8 +97,9 @@ def run(argv: Sequence[str]) -> int:
         "filter": args.filter,
         "expected": args.expect,
         "exact": args.exact,
-        "build_argv": build,
-        "phase": "build",
+        "phase": "buck2_resolution",
+        "buck2": None,
+        "buck2_resolution_source": "BUCK2" if os.environ.get("BUCK2") else "pinned_flake",
         "executable": None,
         "sha256": None,
         "matched": [],
@@ -121,7 +118,51 @@ def run(argv: Sequence[str]) -> int:
         save(evidence, record)
         return code
 
+    try:
+        executable_name = buck2(root)
+    except (OSError, subprocess.CalledProcessError) as error:
+        diagnostic = str(error)
+        if isinstance(error, subprocess.CalledProcessError):
+            diagnostic += "\n" + (error.stderr or error.output or "")
+        (evidence / "buck2-resolution.log").write_text(diagnostic)
+        print(f"focused test could not resolve Buck2; see {evidence / 'buck2-resolution.log'}",
+              file=sys.stderr)
+        record["resolution_error"] = diagnostic
+        return finish(1)
+
     record["buck2"] = executable_name
+    buck_path = Path(executable_name)
+    if not buck_path.is_absolute() and (os.sep in executable_name or
+                                        (os.altsep and os.altsep in executable_name)):
+        buck_path = (root / buck_path).resolve()
+        executable_name = str(buck_path)
+        record["buck2"] = executable_name
+    elif record["buck2_resolution_source"] == "BUCK2" and not buck_path.is_file():
+        located = shutil.which(executable_name)
+        if located:
+            executable_name = located
+            buck_path = Path(located)
+            record["buck2"] = executable_name
+    if not buck_path.is_file() or not os.access(buck_path, os.X_OK):
+        if record["buck2_resolution_source"] == "pinned_flake":
+            diagnostic = (
+                f"Pinned Buck2 output is not materialized as an executable at {buck_path}. "
+                "Run `nix build .#packages.<system>.buck2 --no-link` for this machine "
+                "to materialize the declared output, then rerun."
+            )
+        else:
+            diagnostic = f"BUCK2 override is not an executable file: {buck_path}"
+        (evidence / "buck2-resolution.log").write_text(diagnostic + "\n")
+        print(diagnostic, file=sys.stderr)
+        record["phase"] = "buck2_unavailable"
+        record["resolution_error"] = diagnostic
+        return finish(1)
+
+    build = [executable_name, "build", args.target, "--show-full-simple-output", "-v", "0"]
+    if args.local_only:
+        build.extend(["--local-only", "-c", "remote.enabled=false"])
+    record.update(build_argv=build, phase="build")
+    save(evidence, record)
     built = subprocess.run(build, cwd=root, text=True, capture_output=True, check=False)
     (evidence / "build.log").write_text(built.stdout + built.stderr)
     record["build_exit_code"] = built.returncode
