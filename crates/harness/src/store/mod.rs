@@ -8,6 +8,7 @@ pub(crate) use compaction::ServerCompactionResponse;
 pub(crate) use embedded::{CommandInputAdmission, EmbeddedInputState};
 pub use embedded_commands::{EmbeddedCommandRecord, EmbeddedCommandState};
 pub use embedded_round::{EmbeddedRoundFrontier, EmbeddedRoundOutcome};
+pub mod actor_output;
 pub mod history;
 mod replay;
 pub mod schema;
@@ -39,6 +40,14 @@ pub const SQL: &str = schema::SQL;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("actor output exceeds its bounds or has invalid identity/keys")]
+    InvalidActorOutput,
+    #[error("host refused actor output admission")]
+    ActorOutputRefused,
+    #[error("actor output admission failed: {0}")]
+    ActorOutputAuthority(String),
+    #[error("actor output identity already has different content")]
+    ConflictingActorOutput,
     #[error(transparent)]
     Context(#[from] crate::context::ContextError),
     #[error("settled operation {operation:?} has no typed replay outcome; preserve its bytes")]
