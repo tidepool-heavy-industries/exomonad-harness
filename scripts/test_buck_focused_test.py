@@ -105,8 +105,8 @@ fi
         nix = self.bin_dir / 'nix'
         self.program(nix, '''
 case "$*" in
-  *builtins.currentSystem*) printf '%s\\n' x86_64-linux ;;
-  *packages.x86_64-linux.buck2.outPath*) printf '%s\\n' "$PINNED_OUTPUT" ;;
+  *builtins.currentSystem*) echo 'warning: dirty flake source' >&2; printf '%s\\n' x86_64-linux ;;
+  *packages.x86_64-linux.buck2.outPath*) echo 'warning: dirty flake source' >&2; printf '%s\\n' "$PINNED_OUTPUT" ;;
   *) exit 98 ;;
 esac
 ''')

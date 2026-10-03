@@ -40,13 +40,13 @@ def buck2(root: Path) -> str:
         ["nix", "eval", "--raw", "--impure", "--expr", "builtins.currentSystem"],
         cwd=root,
         text=True,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.PIPE,
     ).strip()
     output = subprocess.check_output(
         ["nix", "eval", "--raw", f".#packages.{system}.buck2.outPath"],
         cwd=root,
         text=True,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.PIPE,
     ).strip()
     return str(Path(output) / "bin/buck2")
 
