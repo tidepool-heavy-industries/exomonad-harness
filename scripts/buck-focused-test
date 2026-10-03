@@ -40,11 +40,13 @@ def buck2(root: Path) -> str:
         ["nix", "eval", "--raw", "--impure", "--expr", "builtins.currentSystem"],
         cwd=root,
         text=True,
+        stderr=subprocess.STDOUT,
     ).strip()
     output = subprocess.check_output(
         ["nix", "eval", "--raw", f".#packages.{system}.buck2.outPath"],
         cwd=root,
         text=True,
+        stderr=subprocess.STDOUT,
     ).strip()
     return str(Path(output) / "bin/buck2")
 
@@ -128,6 +130,7 @@ def run(argv: Sequence[str]) -> int:
         print(f"focused test could not resolve Buck2; see {evidence / 'buck2-resolution.log'}",
               file=sys.stderr)
         record["resolution_error"] = diagnostic
+        record["phase"] = "buck2_resolution_failed"
         return finish(1)
 
     record["buck2"] = executable_name

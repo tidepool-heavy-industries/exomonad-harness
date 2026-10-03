@@ -171,6 +171,22 @@ esac
         self.assertEqual(evidence['exit_code'], 6)
         self.assertIn('build-failed', (path.parent / 'build.log').read_text())
 
+    def test_pinned_resolution_failure_retains_nix_diagnostic(self):
+        ambient_dir = self.root / 'ambient'
+        ambient_dir.mkdir()
+        ambient = ambient_dir / 'buck2'
+        self.program(ambient, 'exit 99')
+        nix = self.bin_dir / 'nix'
+        self.program(nix, 'echo "nix resolution diagnostic" >&2\nexit 23')
+        result, path = self.invoke(BUCK2='', PATH=str(ambient_dir) + ':' +
+                                   str(self.bin_dir) + ':' + os.environ['PATH'])
+        self.assertEqual(result.returncode, 1, result.stderr)
+        evidence = json.loads(path.read_text())
+        self.assertEqual(evidence['phase'], 'buck2_resolution_failed')
+        self.assertIn('nix resolution diagnostic', evidence['resolution_error'])
+        self.assertIn('nix resolution diagnostic',
+                      (path.parent / 'buck2-resolution.log').read_text())
+
 
 if __name__ == '__main__':
     unittest.main()
