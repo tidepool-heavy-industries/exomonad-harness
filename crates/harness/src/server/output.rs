@@ -159,6 +159,30 @@ impl ModelOutputObserver for ServerControl {
     }
 }
 
+impl ServerControl {
+    /// Project a committed journal row through the existing ordered browser stream.
+    /// The bounded snapshot retains references; full bodies remain in Store history.
+    pub fn publish_actor_output(&self, output: &crate::store::actor_output::StoredActorOutput) {
+        let reference = output.reference();
+        let mut next = self.next_sequence.lock().expect("sequence lock poisoned");
+        let mut snapshot = self.snapshot.write().expect("snapshot lock poisoned");
+        if snapshot.actor_output_revisions.contains(reference) { return; }
+        snapshot.actor_output_revisions.push(reference.clone());
+        while snapshot.actor_output_revisions.len() > OUTPUT_ITEMS
+            || serde_json::to_vec(&snapshot.actor_output_revisions).expect("output references serialize").len() > OUTPUT_BYTES
+        {
+            snapshot.actor_output_revisions.remove(0);
+        }
+        let sequence = *next;
+        *next += 1;
+        snapshot.seq = sequence;
+        let _ = self.events.send(ServerEvent {
+            sequence, event: "actor.output.committed".into(),
+            payload: serde_json::to_value(output).expect("committed output serializes"),
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

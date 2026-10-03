@@ -40,6 +40,8 @@ pub const SQL: &str = schema::SQL;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("actor outputs require typed host admission")]
+    ActorOutputNeedsAuthority,
     #[error("actor output exceeds its bounds or has invalid identity/keys")]
     InvalidActorOutput,
     #[error("host refused actor output admission")]
@@ -1535,6 +1537,7 @@ impl Store {
         kind: &str,
         payload: &serde_json::Value,
     ) -> Result<i64> {
+        if kind == actor_output::EVENT_KIND { return Err(StoreError::ActorOutputNeedsAuthority); }
         let text = serde_json::to_string(payload)?;
         let c = self.lock();
         c.execute(

@@ -7,6 +7,8 @@ use crate::model::ConversationIdentity;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+pub(super) const EVENT_KIND: &str = "actor_output";
+
 pub const MAX_ACTOR_TEXT_BYTES: usize = 32 * 1024;
 pub const MAX_ACTOR_METADATA_BYTES: usize = 8 * 1024;
 const MAX_EMISSION_BYTES: usize = MAX_HISTORY_BYTES - 32 * 1024;
@@ -121,7 +123,15 @@ pub struct ActorOutputHistoryPage {
     pub next_after: Option<i64>,
 }
 
+fn validate_origin(origin: &ActorOutputOrigin) -> Result<()> {
+    if origin.run.is_empty() || origin.run.len() > 1024
+        || origin.native_actor > i64::MAX as u64 || origin.incarnation > i64::MAX as u64
+    { return Err(StoreError::InvalidActorOutput); }
+    Ok(())
+}
+
 fn validate(emission: &ActorOutputEmission) -> Result<()> {
+    validate_origin(&emission.origin)?;
     let page = &emission.page;
     let mut keys = std::collections::HashSet::new();
     let valid_execution = match &emission.execution {
@@ -249,6 +259,7 @@ impl Store {
         after: i64,
         limit: usize,
     ) -> Result<ActorOutputHistoryPage> {
+        validate_origin(origin)?;
         if after < 0 || limit == 0 || limit > MAX_HISTORY_ITEMS {
             return Err(StoreError::InvalidHistoryOffset);
         }
@@ -306,6 +317,18 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct TestDirectory(std::path::PathBuf);
+    impl TestDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("harness-actor-output-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+        fn path(&self) -> &std::path::Path { &self.0 }
+    }
+    impl Drop for TestDirectory {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
     struct Authority(bool);
     impl ActorOutputAuthority for Authority {
         fn validate_output(&self, _: &ActorOutputEmission) -> std::result::Result<bool, String> {
@@ -334,7 +357,7 @@ mod tests {
     }
     #[test]
     fn actor_output_survives_without_conversation_and_replays_once() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = TestDirectory::new();
         let path = directory.path().join("store.sqlite");
         let first = emission(0);
         let reference = {
@@ -385,6 +408,10 @@ mod tests {
     #[test]
     fn actor_output_bounds_encoded_metadata_and_history_bytes() {
         let store = Store::memory().unwrap();
+        assert!(matches!(store.record_event(None, EVENT_KIND, &serde_json::to_value(emission(0)).unwrap()), Err(StoreError::ActorOutputNeedsAuthority)));
+        let mut invalid_origin = emission(0).origin;
+        invalid_origin.run = "x".repeat(MAX_HISTORY_BYTES + 1);
+        assert!(matches!(store.actor_output_page(&invalid_origin, 0, 100), Err(StoreError::InvalidActorOutput)));
         let mut invalid = emission(0);
         invalid.page.expansions[0].1 = "\0".repeat(1400);
         assert!(matches!(
@@ -418,7 +445,7 @@ mod tests {
     }
     #[test]
     fn schema_eleven_actor_output_migration_preserves_existing_journal() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = TestDirectory::new();
         let path = directory.path().join("store.sqlite");
         {
             let store = Store::open(&path).unwrap();

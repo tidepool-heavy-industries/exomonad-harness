@@ -557,6 +557,7 @@ impl ServerControl {
         snapshot.command_receipts = receipts;
         snapshot.live_output = std::mem::take(&mut current.live_output);
         snapshot.history_revisions = std::mem::take(&mut current.history_revisions);
+        snapshot.actor_output_revisions = std::mem::take(&mut current.actor_output_revisions);
         *current = snapshot;
     }
 
@@ -719,6 +720,7 @@ pub fn server_with_config(
         .route("/commands/{operation_id}", get(command_status))
         .route("/events", get(event_stream))
         .route("/history/{request_id}", get(history::request_history))
+        .route("/actor-output", get(history::actor_output_history))
         .route("/ws", get(websocket))
         .route_layer(middleware::from_fn_with_state(auth, authorize))
         .with_state(state.clone());
