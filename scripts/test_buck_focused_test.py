@@ -86,6 +86,8 @@ fi
         self.assertEqual(evidence['executed_count'], 1)
         self.assertEqual(evidence['exit_code'], 0)
         self.assertEqual(len(evidence['sha256']), 64)
+        self.assertEqual(evidence['buck2_resolution_source'], 'BUCK2')
+        self.assertEqual(evidence['buck2_resolution_argv'], [])
         self.assertEqual(evidence['build_argv'][0], str(self.buck))
         self.assertEqual(evidence['list_argv'][-1], '--list')
         self.assertEqual(evidence['run_argv'][-1], '--nocapture')
@@ -113,7 +115,13 @@ esac
         result, path = self.invoke(BUCK2='', PATH=str(ambient_dir) + ':' + str(self.bin_dir) + ':' + os.environ['PATH'],
                                    PINNED_OUTPUT=str(pinned.parents[1]))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(path.read_text())['buck2'], str(pinned))
+        evidence = json.loads(path.read_text())
+        self.assertEqual(evidence['buck2'], str(pinned))
+        self.assertEqual(evidence['buck2_resolution_source'], 'pinned_flake')
+        self.assertEqual(evidence['buck2_resolution_argv'], [
+            ['nix', 'eval', '--raw', '--impure', '--expr', 'builtins.currentSystem'],
+            ['nix', 'eval', '--raw', '.#packages.x86_64-linux.buck2.outPath'],
+        ])
 
     def test_missing_pinned_output_records_materialization_prerequisite(self):
         ambient_dir = self.root / 'ambient'
@@ -183,6 +191,10 @@ esac
         self.assertEqual(result.returncode, 1, result.stderr)
         evidence = json.loads(path.read_text())
         self.assertEqual(evidence['phase'], 'buck2_resolution_failed')
+        self.assertEqual(evidence['buck2_resolution_source'], 'pinned_flake')
+        self.assertEqual(evidence['buck2_resolution_argv'], [
+            ['nix', 'eval', '--raw', '--impure', '--expr', 'builtins.currentSystem'],
+        ])
         self.assertIn('nix resolution diagnostic', evidence['resolution_error'])
         self.assertIn('nix resolution diagnostic',
                       (path.parent / 'buck2-resolution.log').read_text())

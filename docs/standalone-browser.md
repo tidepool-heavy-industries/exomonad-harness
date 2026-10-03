@@ -6,7 +6,7 @@ inference or shell tools.
 
 ## Prepare
 
-From a checkout with Rust installed, run:
+From a checkout with Nix available, run:
 
 ```sh
 scripts/prepare-browser-harness
@@ -15,17 +15,18 @@ scripts/prepare-browser-harness
 This snapshots the pinned flake inputs to prepare `web/dist`, builds and stages
 `target/release/harness-demo`, then runs the existing standalone browser journey
 against that exact release executable through `scripts/launch-browser-harness`.
+Preparation enters the pinned Nix `browser` shell, which provides the Rust
+toolchain from `rust-toolchain.toml` and pinned Node; host Rust and Node
+installations are not required.
 The check uses a temporary database and unrelated working directory, tests
 reconnect and process-loss reopen, and stops only its own process. A failed
 preparation or release check invalidates the staged binary. The successful
-output includes its SHA256 and focused evidence location.
-Missing Nix, Node/npm or Rust are
-preparation failures, not browser assertion failures. Preserve the built
+output includes its SHA256 and focused evidence location. Missing Nix or
+failure to materialize its pinned inputs is a preparation failure, not a
+browser assertion failure. Preserve the built
 `web/dist` assets with the binary; neither location should be treated as the
 database home. Copy the prepared binary and assets to stable absolute host
-paths if the checkout is disposable. If your host is not a Nix host, supply
-the equivalent locked Node/npm and Rust toolchains before running the script;
-this alternative has not been verified for this wave.
+paths if the checkout is disposable.
 
 ## Launch from an ordinary host shell
 

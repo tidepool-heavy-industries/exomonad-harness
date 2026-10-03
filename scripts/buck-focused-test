@@ -31,19 +31,23 @@ def test_names(output: str) -> set[str]:
     }
 
 
-def buck2(root: Path) -> str:
+def buck2(root: Path, resolution_argv: list[list[str]]) -> str:
     """Honor an explicit override; otherwise use this checkout's pinned flake output."""
     override = os.environ.get("BUCK2")
     if override:
         return override
+    system_argv = ["nix", "eval", "--raw", "--impure", "--expr", "builtins.currentSystem"]
+    resolution_argv.append(system_argv)
     system = subprocess.check_output(
-        ["nix", "eval", "--raw", "--impure", "--expr", "builtins.currentSystem"],
+        system_argv,
         cwd=root,
         text=True,
         stderr=subprocess.PIPE,
     ).strip()
+    output_argv = ["nix", "eval", "--raw", f".#packages.{system}.buck2.outPath"]
+    resolution_argv.append(output_argv)
     output = subprocess.check_output(
-        ["nix", "eval", "--raw", f".#packages.{system}.buck2.outPath"],
+        output_argv,
         cwd=root,
         text=True,
         stderr=subprocess.PIPE,
@@ -92,6 +96,7 @@ def run(argv: Sequence[str]) -> int:
     (root / "target").mkdir(exist_ok=True)
     evidence = Path(tempfile.mkdtemp(prefix="focused-buck-", dir=root / "target"))
     source_before, status_before = source_snapshot(root)
+    resolution_argv: list[list[str]] = []
     record = {
         "source_before": source_before,
         "working_tree_status_before": status_before,
@@ -102,6 +107,7 @@ def run(argv: Sequence[str]) -> int:
         "phase": "buck2_resolution",
         "buck2": None,
         "buck2_resolution_source": "BUCK2" if os.environ.get("BUCK2") else "pinned_flake",
+        "buck2_resolution_argv": resolution_argv,
         "executable": None,
         "sha256": None,
         "matched": [],
@@ -121,7 +127,7 @@ def run(argv: Sequence[str]) -> int:
         return code
 
     try:
-        executable_name = buck2(root)
+        executable_name = buck2(root, resolution_argv)
     except (OSError, subprocess.CalledProcessError) as error:
         diagnostic = str(error)
         if isinstance(error, subprocess.CalledProcessError):
