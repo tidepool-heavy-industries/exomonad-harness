@@ -876,6 +876,32 @@ impl JobScheduler {
         Ok(())
     }
 
+    /// Fence every exact operation before waiting on any cancellation owner.
+    /// Queued work cannot enter its provider when another job releases capacity.
+    /// Reconciliation retains each job's existing grace and terminal arbitration;
+    /// results are returned in the supplied operation order.
+    pub(crate) async fn cancel_batch(
+        &self,
+        operations: &[OperationId],
+    ) -> Vec<Result<(), JobError>> {
+        {
+            let jobs = self.jobs.lock().await;
+            for operation in operations {
+                if let Some(job) = jobs.get(operation) {
+                    if job.output.is_none() {
+                        job.cancel.cancel();
+                    }
+                }
+            }
+        }
+        futures_util::future::join_all(
+            operations
+                .iter()
+                .map(|operation| async move { self.cancel(operation).await.map(|_| ()) }),
+        )
+        .await
+    }
+
     /// Cancel an in-flight job. Cancellation is a typed terminal output; it
     /// is retained and delivered through the same claim mechanism.
     pub async fn cancel<K: JobKey>(&self, call_id: &K) -> Result<Option<JobSettlement>, JobError> {
@@ -1435,6 +1461,238 @@ mod tests {
         }
         fn tools(&self) -> Vec<Value> {
             vec![]
+        }
+    }
+
+    struct CompletingBatchOwner {
+        scheduler: std::sync::Weak<JobScheduler>,
+        tokens: std::sync::Mutex<Vec<tokio_util::sync::CancellationToken>>,
+        release: tokio::sync::Notify,
+        cancellations: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl crate::provider::CancellationOwner for CompletingBatchOwner {
+        async fn cancel(
+            &self,
+            operation: &OperationId,
+            _: &JobHandle,
+        ) -> crate::provider::CancellationAcknowledgment {
+            self.cancellations
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert!(
+                self.tokens
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|token| token.is_cancelled()),
+                "all batch tokens must be signalled before entering the first owner"
+            );
+            self.release.notify_one();
+            assert_eq!(
+                self.scheduler
+                    .upgrade()
+                    .unwrap()
+                    .wait(operation)
+                    .await
+                    .unwrap(),
+                JobOutput::Completed(Ok(json!("finished during cancellation")))
+            );
+            crate::provider::CancellationAcknowledgment::Stopped
+        }
+    }
+
+    struct CompletingBatchProvider {
+        owner: Arc<CompletingBatchOwner>,
+        started: tokio::sync::Notify,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Provider for CompletingBatchProvider {
+        fn cancellation_owner(&self) -> Option<Arc<dyn crate::provider::CancellationOwner>> {
+            Some(self.owner.clone())
+        }
+
+        async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.started.notify_one();
+            self.owner.release.notified().await;
+            Ok(json!("finished during cancellation"))
+        }
+
+        fn tools(&self) -> Vec<Value> {
+            vec![]
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_signals_queued_jobs_before_first_owner_releases_capacity() {
+        let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+        let owner = Arc::new(CompletingBatchOwner {
+            scheduler: Arc::downgrade(&scheduler),
+            tokens: std::sync::Mutex::new(Vec::new()),
+            release: tokio::sync::Notify::new(),
+            cancellations: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let provider = Arc::new(CompletingBatchProvider {
+            owner: owner.clone(),
+            started: tokio::sync::Notify::new(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let operations = ["active", "queued-first", "queued-second"]
+            .map(|call| scheduler.detached_operation(&CallId(call.into())));
+        for (index, operation) in operations.iter().enumerate() {
+            scheduler
+                .start_operation(
+                    provider.clone(),
+                    operation.clone(),
+                    AgentPath("/root".into()),
+                    None,
+                    "run".into(),
+                    json!({}),
+                )
+                .await
+                .unwrap();
+            if index == 0 {
+                provider.started.notified().await;
+            }
+        }
+        let tokens = {
+            let jobs = scheduler.jobs.lock().await;
+            operations
+                .iter()
+                .map(|operation| jobs[operation].cancel.clone())
+                .collect()
+        };
+        *owner.tokens.lock().unwrap() = tokens;
+
+        assert!(
+            scheduler
+                .cancel_batch(&operations)
+                .await
+                .iter()
+                .all(Result::is_ok)
+        );
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            owner
+                .cancellations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            scheduler.wait(&operations[0]).await.unwrap(),
+            JobOutput::Completed(Ok(json!("finished during cancellation"))),
+            "completion during the first owner's acknowledgment keeps its terminal"
+        );
+        for operation in &operations[1..] {
+            assert_eq!(
+                scheduler.wait(operation).await.unwrap(),
+                JobOutput::Cancelled
+            );
+        }
+    }
+
+    struct RendezvousBatchOwner {
+        tokens: std::sync::Mutex<Vec<tokio_util::sync::CancellationToken>>,
+        rendezvous: tokio::sync::Barrier,
+        started: tokio::sync::mpsc::UnboundedSender<()>,
+    }
+
+    #[async_trait]
+    impl crate::provider::CancellationOwner for RendezvousBatchOwner {
+        async fn cancel(
+            &self,
+            operation: &OperationId,
+            _: &JobHandle,
+        ) -> crate::provider::CancellationAcknowledgment {
+            assert!(
+                self.tokens
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|token| token.is_cancelled())
+            );
+            self.rendezvous.wait().await;
+            crate::provider::CancellationAcknowledgment::StoppedWithReceipt(Ok(json!({
+                "origin": operation.origin
+            })))
+        }
+    }
+
+    struct RendezvousBatchProvider(Arc<RendezvousBatchOwner>);
+
+    #[async_trait]
+    impl Provider for RendezvousBatchProvider {
+        fn cancellation_owner(&self) -> Option<Arc<dyn crate::provider::CancellationOwner>> {
+            Some(self.0.clone())
+        }
+
+        async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+            self.0.started.send(()).unwrap();
+            std::future::pending().await
+        }
+
+        fn tools(&self) -> Vec<Value> {
+            vec![]
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_joins_exact_owners_concurrently_and_returns_results_in_order() {
+        let scheduler = JobScheduler::new(2).unwrap();
+        let (started, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let owner = Arc::new(RendezvousBatchOwner {
+            tokens: std::sync::Mutex::new(Vec::new()),
+            rendezvous: tokio::sync::Barrier::new(2),
+            started,
+        });
+        let provider = Arc::new(RendezvousBatchProvider(owner.clone()));
+        let operations = ["first-store", "second-store"].map(|store| OperationId {
+            origin: ConversationIdentity::Standalone {
+                store: store.into(),
+                actor: AgentPath("/root".into()),
+            },
+            request: RequestId("same-request".into()),
+            call: CallId("same-call".into()),
+        });
+        for operation in &operations {
+            scheduler
+                .start_operation(
+                    provider.clone(),
+                    operation.clone(),
+                    operation.origin.actor().clone(),
+                    Some(operation.request.clone()),
+                    "run".into(),
+                    json!({}),
+                )
+                .await
+                .unwrap();
+            started_rx.recv().await.unwrap();
+        }
+        let tokens = {
+            let jobs = scheduler.jobs.lock().await;
+            operations
+                .iter()
+                .map(|operation| jobs[operation].cancel.clone())
+                .collect()
+        };
+        *owner.tokens.lock().unwrap() = tokens;
+        let unknown = scheduler.detached_operation(&CallId("missing".into()));
+        let results = scheduler
+            .cancel_batch(&[operations[1].clone(), unknown, operations[0].clone()])
+            .await;
+        assert_eq!(results.len(), 3);
+        assert!(results[0].is_ok());
+        assert!(matches!(results[1], Err(JobError::UnknownCall)));
+        assert!(results[2].is_ok());
+        for operation in &operations {
+            assert_eq!(
+                scheduler.wait(operation).await.unwrap(),
+                JobOutput::CancelledWithReceipt(Ok(json!({"origin": operation.origin}))),
+                "both owners must meet before either acknowledgment grace expires"
+            );
         }
     }
 

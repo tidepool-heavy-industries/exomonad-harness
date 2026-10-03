@@ -2358,10 +2358,19 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
 
     async fn cancel_pending(&self, pending: &[PendingCall]) -> Result<(), EngineError> {
         let mut first_error = None;
+        let operations = pending
+            .iter()
+            .filter(|call| call.cancel_job_on_cleanup && call.wait.is_none())
+            .map(|call| call.operation.clone())
+            .collect::<Vec<_>>();
+        let mut cancellations = self.scheduler.cancel_batch(&operations).await.into_iter();
         for call in pending {
             let mut persisted_terminal = false;
             if call.cancel_job_on_cleanup && call.wait.is_none() {
-                if let Err(error) = self.scheduler.cancel(&call.operation).await {
+                if let Err(error) = cancellations
+                    .next()
+                    .expect("one result per owned operation")
+                {
                     if !matches!(error, JobError::UnknownCall) {
                         first_error.get_or_insert_with(|| EngineError::Job(error));
                     }
@@ -3720,6 +3729,118 @@ mod tests {
         assert_eq!(child_claims[0].call_id, call_id);
         assert_eq!(child_claims[0].request, snapshot);
         (store, source_head, snapshot, call_id)
+    }
+
+    #[tokio::test]
+    async fn cancel_pending_settles_owned_jobs_and_preserves_inherited_and_wait_jobs() {
+        let (store, source, snapshot, inherited_call) = inherited_claim_fixture().await;
+        let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+        let inherited = store
+            .operation_for_request(&source, &inherited_call)
+            .unwrap();
+        let mut pending = Vec::new();
+        for (call_id, cancel_job_on_cleanup, wait) in [
+            (inherited_call, false, None),
+            (CallId("owned-call".into()), true, None),
+            (CallId("watch-call".into()), true, Some(WaitKind::Agent)),
+        ] {
+            let operation = if cancel_job_on_cleanup {
+                store
+                    .append_items(
+                        &snapshot,
+                        &[Item(json!({
+                            "type":"function_call", "call_id":call_id.0,
+                            "name":"slow", "arguments":"{}"
+                        }))],
+                    )
+                    .unwrap();
+                store.claim(&call_id, &snapshot).unwrap();
+                store.operation_for_request(&snapshot, &call_id).unwrap()
+            } else {
+                inherited.clone()
+            };
+            scheduler
+                .queue_operation(
+                    Arc::new(Echo),
+                    operation.clone(),
+                    operation.origin.actor().clone(),
+                    Some(operation.request.clone()),
+                    "slow".into(),
+                    json!({}),
+                )
+                .await
+                .unwrap();
+            pending.push(PendingCall {
+                operation,
+                call_id,
+                claim_request: snapshot.clone(),
+                wait,
+                tool_kind: ToolKind::Function,
+                execution: ToolExecution::Asynchronous,
+                persist_here_invocation_output: false,
+                cancel_job_on_cleanup,
+                scheduling: ToolScheduling::Async,
+                queued: true,
+                completion: PendingCompletion::BlocksCompletion,
+            });
+        }
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            Replay {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                turns: Mutex::new(Default::default()),
+            },
+            store.clone(),
+            scheduler.clone(),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "cancel-pending".into(),
+                agent: AgentPath("/root/child".into()),
+            },
+        );
+
+        engine.cancel_pending(&pending).await.unwrap();
+        assert_eq!(
+            scheduler
+                .unpublished_output(&pending[1].operation)
+                .await
+                .unwrap(),
+            Some(crate::turn::JobOutput::Cancelled)
+        );
+        for call in [&pending[0], &pending[2]] {
+            assert_eq!(
+                scheduler.unpublished_output(&call.operation).await.unwrap(),
+                None
+            );
+        }
+        let claims = store.claims_on(&snapshot).unwrap();
+        for (index, call) in pending.iter().enumerate() {
+            let claim = claims
+                .iter()
+                .find(|claim| claim.operation == call.operation)
+                .unwrap();
+            if index == 1 {
+                assert_eq!(claim.state, crate::store::ClaimState::Settled);
+                assert_eq!(
+                    store.get_item(claim.output.as_ref().unwrap()).unwrap(),
+                    Some(Item::tool_output(
+                        &call.call_id,
+                        ToolKind::Function,
+                        &crate::turn::JobOutput::Cancelled
+                    ))
+                );
+            } else {
+                assert_eq!(claim.state, crate::store::ClaimState::Interrupted);
+                assert!(claim.output.is_none());
+            }
+        }
+        assert_eq!(
+            store.claims_on(&source).unwrap()[0].state,
+            crate::store::ClaimState::Pending
+        );
     }
 
     #[tokio::test]
