@@ -28,8 +28,10 @@ function structuredJson(text: string): { text: string; summary?: string } | unde
       const rendered = String(field)
       return `${key}: ${rendered.length > 72 ? `${rendered.slice(0, 69)}…` : rendered}`
     }).join(' · ')
-    return { text: JSON.stringify(value, null, 2), summary: !Array.isArray(value) && preview
-      ? `JSON result · ${entries} fields · ${preview}` : undefined }
+    const summary = Array.isArray(value)
+      ? `JSON result · ${entries} item${entries === 1 ? '' : 's'}`
+      : `JSON result · ${entries} field${entries === 1 ? '' : 's'}${preview ? ` · ${preview}` : ''}`
+    return { text: JSON.stringify(value, null, 2), summary }
   } catch { /* Non-JSON tool text stays exact. */ }
   return undefined
 }

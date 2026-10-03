@@ -57,6 +57,18 @@ describe('retained Item presentation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
     expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
   })
+
+  it.each([
+    ['nested JSON', JSON.stringify({ ready_results: [{ origin: { actor: '/root' } }] }), 'JSON result · 1 field'],
+    ['array JSON', JSON.stringify([{ call: 'call-1', origin: { actor: '/root' } }]), 'JSON result · 1 item'],
+  ])('collapses %s without a scalar preview and keeps the formatted response available', (_name, output, summary) => {
+    render(<HistoryItem entry={entry({ type: 'function_call_output', call_id: 'call-1', output })} />)
+    const disclosure = screen.getByText(summary)
+    expect(disclosure.tagName).toBe('SUMMARY')
+    expect(disclosure.closest('details')).not.toHaveAttribute('open')
+    fireEvent.click(disclosure)
+    expect(screen.getByLabelText('Result item 7').textContent).toBe(JSON.stringify(JSON.parse(output), null, 2))
+  })
   it('shows a readable role and exact escaped string content without executing HTML', () => {
     const { container } = render(<HistoryItem entry={entry({ type: 'message', role: 'assistant', phase: 'commentary', content: exact })} />)
     expect(screen.getByRole('heading', { name: 'Assistant · commentary' })).toBeInTheDocument()
