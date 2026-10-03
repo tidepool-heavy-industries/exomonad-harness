@@ -136,7 +136,11 @@ pub struct Snapshot {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub history_revisions: Vec<super::HistoryRevision>,
-    #[serde(default, rename = "actorOutputRevisions", skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        rename = "actorOutputRevisions",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub actor_output_revisions: Vec<crate::store::actor_output::ActorOutputReference>,
     /// Present only when this snapshot is projected from an embedded host run.
     /// An empty actor list does not imply standalone mode.

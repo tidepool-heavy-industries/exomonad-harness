@@ -124,9 +124,13 @@ pub struct ActorOutputHistoryPage {
 }
 
 fn validate_origin(origin: &ActorOutputOrigin) -> Result<()> {
-    if origin.run.is_empty() || origin.run.len() > 1024
-        || origin.native_actor > i64::MAX as u64 || origin.incarnation > i64::MAX as u64
-    { return Err(StoreError::InvalidActorOutput); }
+    if origin.run.is_empty()
+        || origin.run.len() > 1024
+        || origin.native_actor > i64::MAX as u64
+        || origin.incarnation > i64::MAX as u64
+    {
+        return Err(StoreError::InvalidActorOutput);
+    }
     Ok(())
 }
 
@@ -320,14 +324,19 @@ mod tests {
     struct TestDirectory(std::path::PathBuf);
     impl TestDirectory {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!("harness-actor-output-{}", uuid::Uuid::new_v4()));
+            let path =
+                std::env::temp_dir().join(format!("harness-actor-output-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir(&path).unwrap();
             Self(path)
         }
-        fn path(&self) -> &std::path::Path { &self.0 }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
     }
     impl Drop for TestDirectory {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
     struct Authority(bool);
     impl ActorOutputAuthority for Authority {
@@ -408,10 +417,20 @@ mod tests {
     #[test]
     fn actor_output_bounds_encoded_metadata_and_history_bytes() {
         let store = Store::memory().unwrap();
-        assert!(matches!(store.record_event(None, EVENT_KIND, &serde_json::to_value(emission(0)).unwrap()), Err(StoreError::ActorOutputNeedsAuthority)));
+        assert!(matches!(
+            store.record_event(
+                None,
+                EVENT_KIND,
+                &serde_json::to_value(emission(0)).unwrap()
+            ),
+            Err(StoreError::ActorOutputNeedsAuthority)
+        ));
         let mut invalid_origin = emission(0).origin;
         invalid_origin.run = "x".repeat(MAX_HISTORY_BYTES + 1);
-        assert!(matches!(store.actor_output_page(&invalid_origin, 0, 100), Err(StoreError::InvalidActorOutput)));
+        assert!(matches!(
+            store.actor_output_page(&invalid_origin, 0, 100),
+            Err(StoreError::InvalidActorOutput)
+        ));
         let mut invalid = emission(0);
         invalid.page.expansions[0].1 = "\0".repeat(1400);
         assert!(matches!(

@@ -1537,7 +1537,9 @@ impl Store {
         kind: &str,
         payload: &serde_json::Value,
     ) -> Result<i64> {
-        if kind == actor_output::EVENT_KIND { return Err(StoreError::ActorOutputNeedsAuthority); }
+        if kind == actor_output::EVENT_KIND {
+            return Err(StoreError::ActorOutputNeedsAuthority);
+        }
         let text = serde_json::to_string(payload)?;
         let c = self.lock();
         c.execute(
