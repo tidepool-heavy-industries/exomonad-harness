@@ -140,7 +140,7 @@ async fn yield_actual_embedded_manifest_accepts_call_and_timeout_zero() {
         .unwrap();
     assert_eq!(
         status(&result),
-        json!({"reason":"timeout","ready_results":[]})
+        json!({"reason":"timeout","ready_results":[],"pending_results":[]})
     );
     let requests = requests.lock().unwrap();
     let tools = &requests[0].tools;
@@ -306,13 +306,20 @@ async fn yield_ready_result_wins_zero_deadline() {
 #[tokio::test]
 async fn yield_indefinite_wakes_durable_user_and_worker_input() {
     for sender in ["operator", "worker"] {
-        let (engine, _, _) = engine(
+        let mut work = call("work-call", "work", json!({}));
+        work.0["async"] = json!(true);
+        let (engine, requests, release) = engine(
             vec![
-                turn(vec![call("yield-call", "yield", json!({"until":null}))]),
+                turn(vec![
+                    work,
+                    call("yield-call", "yield", json!({"until":null})),
+                ]),
+                turn(vec![call("yield-result", "yield", json!({"until":null}))]),
                 final_turn(),
             ],
             false,
         );
+        let origin = serde_json::to_value(&engine.origin).unwrap();
         let store = engine.store.clone();
         let (_cancel, cancel) = watch::channel(false);
         let (mail_tx, mail) = tokio::sync::mpsc::unbounded_channel::<DurableMailboxWake>();
@@ -340,13 +347,35 @@ async fn yield_indefinite_wakes_durable_user_and_worker_input() {
         mail_tx
             .send(DurableMailboxWake { envelope_id: id })
             .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if requests.lock().unwrap().len() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!run.is_finished());
+        release.notify_one();
         let result = tokio::time::timeout(Duration::from_secs(1), run)
             .await
             .unwrap()
             .unwrap()
             .unwrap();
+        let yielded = status(&result);
+        assert_eq!(yielded["ready_results"], json!([]));
+        assert_eq!(yielded["pending_results"].as_array().unwrap().len(), 1);
+        assert_eq!(yielded["pending_results"][0]["origin"], origin);
+        assert_eq!(yielded["pending_results"][0]["call"], "work-call");
+        let claims = store.claims(&CallId("work-call".into())).unwrap();
         assert_eq!(
-            status(&result)["reason"],
+            yielded["pending_results"][0]["request"],
+            json!(claims[0].operation.request)
+        );
+        assert_eq!(
+            yielded["reason"],
             if sender == "operator" {
                 "user_input"
             } else {
@@ -388,6 +417,30 @@ async fn yield_engine_timeout_then_result_preserves_output_order() {
         ],
         false,
     );
+    let origin = serde_json::to_value(&engine.origin).unwrap();
+    let unrelated = OperationId {
+        origin: ConversationIdentity::Embedded {
+            run: "another-run".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "two".into(),
+        },
+        request: RequestId("another-request".into()),
+        call: CallId("work-call".into()),
+    };
+    engine
+        .scheduler
+        .start_operation(
+            engine.provider.clone(),
+            unrelated.clone(),
+            unrelated.origin.actor().clone(),
+            Some(unrelated.request.clone()),
+            "work".into(),
+            json!({}),
+        )
+        .await
+        .unwrap();
+    release.notify_one();
+    engine.scheduler.wait(&unrelated).await.unwrap();
     let (_cancel, cancel) = watch::channel(false);
     let (_mail, mail) = tokio::sync::mpsc::unbounded_channel::<DurableMailboxWake>();
     let run = tokio::spawn(async move { engine.run_embedded(None, vec![], cancel, mail).await });
@@ -408,7 +461,13 @@ async fn yield_engine_timeout_then_result_preserves_output_order() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(status(&result)["reason"], "timeout");
+    let timed_out = status(&result);
+    assert_eq!(timed_out["reason"], "timeout");
+    assert_eq!(timed_out["pending_results"].as_array().unwrap().len(), 1);
+    assert_eq!(timed_out["pending_results"][0]["call"], "work-call");
+    assert_eq!(timed_out["pending_results"][0]["origin"], origin);
+    assert_ne!(timed_out["pending_results"][0], json!(unrelated));
+    assert!(timed_out["pending_results"][0].get("output").is_none());
     let outputs: Vec<_> = result
         .transcript
         .iter()
@@ -427,6 +486,67 @@ async fn yield_engine_timeout_then_result_preserves_output_order() {
     assert_eq!(resumed["ready_results"].as_array().unwrap().len(), 1);
     assert_eq!(resumed["ready_results"][0]["call"], "work-call");
     assert!(resumed["ready_results"][0].get("output").is_none());
+    assert_eq!(resumed["ready_results"][0], timed_out["pending_results"][0]);
+    assert_eq!(resumed["pending_results"], json!([]));
+}
+
+#[tokio::test]
+async fn yield_pending_identity_snapshot_is_bounded_and_excludes_own_call() {
+    let work: Vec<_> = (0..65)
+        .map(|index| {
+            let mut item = call(&format!("work-{index}"), "work", json!({}));
+            item.0["async"] = json!(true);
+            item
+        })
+        .chain([call("yield-call", "yield", json!({"until":0}))])
+        .collect();
+    let (engine, requests, _) = engine(
+        vec![
+            turn(work),
+            turn(vec![call("yield-result", "yield", json!({"until":null}))]),
+        ],
+        false,
+    );
+    let store = engine.store.clone();
+    let (cancel_tx, cancel) = watch::channel(false);
+    let (_mail, mail) = tokio::sync::mpsc::unbounded_channel::<DurableMailboxWake>();
+    let run = tokio::spawn(async move { engine.run_embedded(None, vec![], cancel, mail).await });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if requests.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let claims = store.claims(&CallId("yield-call".into())).unwrap();
+    let item = store
+        .get_item(claims[0].output.as_ref().unwrap())
+        .unwrap()
+        .unwrap();
+    let status: serde_json::Value =
+        serde_json::from_str(item.0["output"].as_str().unwrap()).unwrap();
+    assert_eq!(status["reason"], "timeout");
+    assert_eq!(status["ready_results"], json!([]));
+    assert_eq!(status["pending_results_omitted"], 1);
+    let listed = status["pending_results"].as_array().unwrap();
+    assert_eq!(listed.len(), 64);
+    for (index, operation) in listed.iter().enumerate() {
+        let claims = store.claims(&CallId(format!("work-{index}"))).unwrap();
+        assert_eq!(*operation, json!(claims[0].operation));
+    }
+    // This host ignores cancellation; sequential cleanup can spend the
+    // scheduler's 250 ms abort grace on each of the 65 pending calls.
+    cancel_tx.send(true).unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(EngineError::Cancelled { .. })
+    ));
 }
 
 #[tokio::test]

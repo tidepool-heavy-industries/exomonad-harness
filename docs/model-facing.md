@@ -122,8 +122,11 @@ scheduler and event wait, with one timer and no polling or Haskell compilation.
 Ready tool outputs are appended once in operation order, before the yield
 status. The status has `reason` (`tool_result`, `user_input`, `worker_input`,
 `timeout`, or `cancelled`) and `ready_results`, an array of exact operation IDs
-whose outputs are available in that transcript. Cancellation records this status
-and ends the cancelled engine invocation. Host tool declarations and configured
-tools must not use the reserved `yield` name. After process loss, an unfinished
+whose outputs are available in that transcript. `pending_results` names up to 64
+remaining operations in admission order, each with its exact origin, request and
+call IDs; it excludes this yield. If more remain, `pending_results_omitted` counts
+them. These identities do not replay result bodies or change their original calls.
+Cancellation records this status and ends the cancelled engine invocation. Host
+tool declarations and configured tools must not use the reserved `yield` name. After process loss, an unfinished
 yield is subject to the existing fail-closed wait recovery policy; its timer does
 not authorize replaying pending asynchronous work.

@@ -3105,7 +3105,26 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
         };
         let output = if yield_wait {
-            json!({"reason": yield_reason, "ready_results": operations})
+            // Omitted identities still complete under their original calls.
+            const MAX_PENDING_RESULTS: usize = 64;
+            let mut pending_results = Vec::with_capacity(pending.len().min(MAX_PENDING_RESULTS));
+            let mut omitted = 0usize;
+            for call in pending
+                .iter()
+                .filter(|call| Some(&call.operation) != wait_call)
+            {
+                if pending_results.len() < MAX_PENDING_RESULTS {
+                    pending_results.push(&call.operation);
+                } else {
+                    omitted += 1;
+                }
+            }
+            let mut status = json!({"reason": yield_reason, "ready_results": operations,
+                "pending_results": pending_results});
+            if omitted > 0 {
+                status["pending_results_omitted"] = json!(omitted);
+            }
+            status
         } else {
             output
         };
@@ -3533,7 +3552,7 @@ fn is_final(turn: &ResponsesTurn, finalized: bool) -> bool {
 /// requires the nullable field on the wire; direct calls may omit it.
 fn yield_tool_schema() -> serde_json::Value {
     json!({"type":"function","name":"yield","strict":true,
-        "description":"Park until an owned tool result, user or worker input, cancellation, or optional maximum duration. until is seconds; null waits for the first event. Timeout leaves pending jobs running.",
+        "description":"Park until an owned tool result, user or worker input, cancellation, or optional maximum duration. until is seconds; null waits for the first event. Returns ready and pending operation identities; results arrive under their original call IDs. Timeout leaves pending jobs running.",
         "parameters":{"type":"object","properties":{"until":{"anyOf":[{"type":"number","minimum":0},{"type":"null"}]}},"required":["until"],"additionalProperties":false}})
 }
 
