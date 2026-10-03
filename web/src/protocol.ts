@@ -5,12 +5,14 @@ import { appendOutput, commitOutput, setRevision, outputKey, revisionKey, isLive
  * server API, not Rust structs; wire adapters may evolve independently.
  */
 export type EntityId = string;
+import { actorOutputKey, isActorOutputOrigin, isActorOutputReference, isStoredActorOutput, retainActorOutput, type ActorOutputOrigin, type ActorOutputReference, type StoredActorOutput } from './actor-output';
 const commandReceiptLimit = 128;
 
 export interface Snapshot {
   readonly seq: number;
   readonly liveOutput?: readonly LiveOutput[];
   readonly historyRevisions?: readonly HistoryRevision[];
+  readonly actorOutputRevisions?: readonly ActorOutputReference[];
   /** Exact embedded host run; absent means this is the standalone demo UI. */
   readonly hostRun?: string;
   /** Absent in standalone snapshots written before host actor projection. */
@@ -45,6 +47,7 @@ export type HostCommand =
 
 export interface HostActorProjection {
   readonly identity: HostActorIdentity;
+  readonly outputOrigin?: ActorOutputOrigin;
   readonly parent: HostActorIdentity | null;
   readonly kind: "model" | "workflow";
   readonly lifecycle: "running" | "waiting" | "retiring" | "retired" | "lost";
@@ -152,6 +155,7 @@ export interface Envelope {
 }
 
 export type StateEvent =
+  | { readonly kind: "actor.output.committed"; readonly value: StoredActorOutput }
   | { readonly kind: "model.output.stopped"; readonly value: OutputScope }
   | { readonly kind: "model.output.started"; readonly value: OutputScope }
   | { readonly kind: "model.output.delta"; readonly value: OutputUpdate }
@@ -179,6 +183,7 @@ export interface DeltaEvent {
 }
 
 export interface NormalizedState {
+  readonly actorOutputRevisions?: ReadonlyMap<string, ActorOutputReference>;
   readonly liveOutput?: ReadonlyMap<string, LiveOutput>;
   readonly historyRevisions?: ReadonlyMap<string, HistoryRevision>;
   readonly seq: number;
@@ -198,6 +203,7 @@ export type ApplyResult =
 export function normalizeSnapshot(snapshot: Snapshot): NormalizedState {
   return {
     seq: snapshot.seq,
+    actorOutputRevisions: new Map((snapshot.actorOutputRevisions ?? []).map(item => [actorOutputKey(item.origin), item])),
     liveOutput: new Map((snapshot.liveOutput ?? []).map(item => [outputKey(item), item])),
     historyRevisions: new Map((snapshot.historyRevisions ?? []).map(item => [revisionKey(item), item])),
     hostRun: snapshot.hostRun,
@@ -221,6 +227,8 @@ export function applyStateEvent(state: NormalizedState, message: SequencedEvent)
   }
   const next = { ...state, seq: message.seq };
   switch (message.event.kind) {
+    case "actor.output.committed": return { kind: 'applied', state: { ...next,
+      actorOutputRevisions: retainActorOutput(next.actorOutputRevisions, message.event.value.reference) } };
     case "model.output.stopped": {
       const outputs = new Map(next.liveOutput);
       for (const [key, item] of outputs) if (revisionKey(item) === revisionKey(message.event.value)) outputs.set(key, {...item, streaming:false});
@@ -433,13 +441,14 @@ function validRequestFailure(value: unknown): boolean {
 }
 
 function validProjection(kind: string, value: unknown): boolean {
-  const projected = ['model.output.stopped', 'model.output.started', 'model.output.delta', 'model.output.committed', 'model.output.remove', 'host_run.upsert', 'command.receipt', 'actor.upsert', 'conversation.upsert',
+  const projected = ['actor.output.committed', 'model.output.stopped', 'model.output.started', 'model.output.delta', 'model.output.committed', 'model.output.remove', 'host_run.upsert', 'command.receipt', 'actor.upsert', 'conversation.upsert',
     'request.upsert', 'job.upsert', 'envelope.upsert', 'entity.remove'];
   if (!projected.includes(kind)) return true; // Auxiliary events only occupy sequence numbers.
   if (!isObject(value)) return false;
   const id = () => text(value.id) && value.id.length > 0;
   const version = () => optional(value, 'version', count);
   switch (kind) {
+    case 'actor.output.committed': return isStoredActorOutput(value);
     case 'model.output.stopped': return isOutputScope(value);
     case 'model.output.started': return isOutputScope(value);
     case 'model.output.delta': return isOutputUpdate(value);
@@ -451,7 +460,7 @@ function validProjection(kind: string, value: unknown): boolean {
       && ['model', 'workflow'].includes(value.kind as string)
       && ['running', 'waiting', 'retiring', 'retired', 'lost'].includes(value.lifecycle as string)
       && nullableId(value.modelConversation) && optional(value, 'modelHeadRequest', nullableId)
-      && optional(value, 'activeRound', isOperationId);
+      && optional(value, 'activeRound', isOperationId) && optional(value, 'outputOrigin', isActorOutputOrigin);
     case 'conversation.upsert': return id() && text(value.path) && version()
       && ['idle', 'requesting', 'paused', 'cancelled'].includes(value.state as string)
       && optional(value, 'parentId', nullableId) && optional(value, 'forkSourceRequestId', nullableId);
@@ -485,6 +494,7 @@ export function isSnapshot(value: unknown): value is Snapshot {
     if (!Array.isArray(rows) || !rows.every((row) => validProjection(kind, row))) return false;
   }
   return (value.liveOutput === undefined || (Array.isArray(value.liveOutput) && value.liveOutput.length <= 128 && value.liveOutput.every(isLiveOutput)))
+    && (value.actorOutputRevisions === undefined || (Array.isArray(value.actorOutputRevisions) && value.actorOutputRevisions.length <= 128 && value.actorOutputRevisions.every(isActorOutputReference)))
     && (value.historyRevisions === undefined || (Array.isArray(value.historyRevisions) && value.historyRevisions.length <= 128 && value.historyRevisions.every(isHistoryRevision)))
     && (value.actors === undefined || (Array.isArray(value.actors) && value.actors.every((row) => validProjection('actor.upsert', row))))
     && (value.commandReceipts === undefined || (Array.isArray(value.commandReceipts) && value.commandReceipts.every(isCommandReceipt)));

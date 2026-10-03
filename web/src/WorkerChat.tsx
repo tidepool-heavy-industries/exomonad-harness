@@ -1,6 +1,8 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { belongsTo } from './live-output'
 import ChatHistory, { clearChatHistoryRetention } from './ChatHistory'
+import ActorOutput from './ActorOutput'
+import { actorOutputKey } from './actor-output'
 import type { RouteState, TransportPhase } from './client-contract'
 import { routeUrl } from './navigation'
 import { actorIdentityKey, type HostActorIdentity } from './protocol'
@@ -125,6 +127,9 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
             <p role="status">This actor is {resolved.actor.lifecycle}. Its Chat is read-only; retained history remains available.</p>}
           {resolved.missing && <p role="status">This exact actor is unavailable. Retained history remains read-only; choose a different worker explicitly.</p>}
           {ambiguousConversation && !exactHead && <p role="status">The host associates this conversation with multiple exact actors. Its current history head is unavailable; only previously retained exact history can be shown.</p>}
+          {resolved.actor?.outputOrigin && <ActorOutput key={actorOutputKey(resolved.actor.outputOrigin)} origin={resolved.actor.outputOrigin}
+            revision={(data.actorOutputRevisions ?? []).find(reference => actorOutputKey(reference.origin) === actorOutputKey(resolved.actor!.outputOrigin!))?.sequence}
+            ready={transportPhase === 'ready'} active={['running', 'waiting'].includes(resolved.actor.lifecycle)} onAuthExpired={onAuthExpired} />}
           {resolved.actor?.kind === 'workflow' ? <WorkflowMessages key={context} data={data} identity={identity} /> : (conversationId || exactHead) && head ? <ChatHistory key={JSON.stringify([context, conversationId])}
             cacheKey={JSON.stringify([context, conversationId])} requestId={head.id}
             requests={new Map(data.timeline.filter(item => item.kind === 'request').map(item => [item.id, item]))}

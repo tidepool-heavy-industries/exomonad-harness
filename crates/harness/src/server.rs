@@ -3,7 +3,9 @@
 //! The scheduler owns the command receiver and publishes events through the
 //! returned control handle. The module intentionally does not depend on a
 //! scheduler/store implementation so the crate owner can wire it independently.
+mod actor_output;
 mod assets;
+pub use actor_output::{ActorDisplayExpander, ActorDisplayExpansion};
 pub mod history;
 mod output;
 mod ws_protocol;
@@ -368,6 +370,7 @@ impl ServerConfig {
 
 #[derive(Clone)]
 struct AppState {
+    actor_display_expander: Arc<std::sync::OnceLock<actor_output::ActorDisplayExpander>>,
     commands: mpsc::Sender<QueuedCommand>,
     events: broadcast::Sender<ServerEvent>,
     asset_root: Arc<PathBuf>,
@@ -412,6 +415,7 @@ pub struct QueuedCommand {
 /// Producer-side API given to the scheduler.
 #[derive(Clone)]
 pub struct ServerControl {
+    actor_display_expander: Arc<std::sync::OnceLock<actor_output::ActorDisplayExpander>>,
     events: broadcast::Sender<ServerEvent>,
     next_sequence: Arc<std::sync::Mutex<u64>>,
     snapshot: Arc<std::sync::RwLock<Snapshot>>,
@@ -692,6 +696,7 @@ pub fn server_with_config(
     let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (events, _) = broadcast::channel(EVENT_CAPACITY);
     let state = AppState {
+        actor_display_expander: Arc::new(std::sync::OnceLock::new()),
         commands,
         events: events.clone(),
         asset_root: Arc::new(asset_root),
@@ -706,6 +711,7 @@ pub fn server_with_config(
     };
     let snapshot = state.snapshot.clone();
     let control = ServerControl {
+        actor_display_expander: Arc::clone(&state.actor_display_expander),
         events,
         next_sequence: Arc::new(std::sync::Mutex::new(1)),
         snapshot,
@@ -721,6 +727,7 @@ pub fn server_with_config(
         .route("/events", get(event_stream))
         .route("/history/{request_id}", get(history::request_history))
         .route("/actor-output", get(history::actor_output_history))
+        .route("/actor-output/expand", post(actor_output::expand))
         .route("/ws", get(websocket))
         .route_layer(middleware::from_fn_with_state(auth, authorize))
         .with_state(state.clone());
@@ -769,8 +776,8 @@ async fn authorize(State(auth): State<ApiAuth>, request: Request, next: Next) ->
     }
     let ambient = matches!(auth.policy.browser_auth, BrowserAuthentication::Peer(_))
         || valid_session_from_headers(request.headers(), &auth.policy).is_some();
-    let submitting =
-        request.method() == axum::http::Method::POST && request.uri().path() == "/commands";
+    let submitting = request.method() == axum::http::Method::POST
+        && matches!(request.uri().path(), "/commands" | "/actor-output/expand");
     let command_lookup_with_origin = request.method() == axum::http::Method::GET
         && request.uri().path().starts_with("/commands/")
         && request.headers().contains_key(header::ORIGIN);
@@ -1611,6 +1618,7 @@ mod tests {
 
     fn projected_actor(run: &str, actor: &str, incarnation: &str) -> HostActorProjection {
         HostActorProjection {
+            output_origin: None,
             identity: HostActorIdentity {
                 run: run.into(),
                 actor: crate::model::AgentPath(actor.into()),

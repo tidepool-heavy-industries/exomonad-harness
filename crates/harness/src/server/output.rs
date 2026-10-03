@@ -226,6 +226,7 @@ mod tests {
         control.update_host_projection(
             "run".into(),
             vec![HostActorProjection {
+                output_origin: None,
                 identity: HostActorIdentity {
                     run: "run".into(),
                     actor: AgentPath("/root".into()),
