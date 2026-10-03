@@ -1735,6 +1735,7 @@ mod tests {
             seq: 7,
             live_output: Vec::new(),
             history_revisions: Vec::new(),
+            actor_output_revisions: Vec::new(),
             host_run: Some("run-old".into()),
             command_receipts: vec![],
             actors: vec![old_actor.clone()],
