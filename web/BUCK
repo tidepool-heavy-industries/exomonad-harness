@@ -12,7 +12,7 @@ WEB_SRCS = glob(["src/**/*"]) + [
 
 # An independent source-only leaf: no schema, npm installation or compilation
 # output enters this identity, so the contract producer remains acyclic.
-BROWSER_IDENTITY_SRCS = glob(["src/**/*"], exclude = ["src/generated/**", "src/**/*.test.*", "src/**/tests/**", "src/fixture.ts"]) + [
+BROWSER_IDENTITY_SRCS = glob(["src/**/*"], exclude = ["src/generated/**", "src/**/*.test.*", "src/**/tests/**", "src/fixture.ts", "src/test-setup.ts"]) + [
     "BUCK",
     "web_rules.bzl",
     "scripts/generate-browser-contract.mjs",

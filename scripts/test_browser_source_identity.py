@@ -22,7 +22,7 @@ class BrowserSourceIdentityTests(unittest.TestCase):
             native_source = b"native DTOs and event projection remain unchanged"
             (runtime / "server.rs").write_bytes(native_source)
             schema = b'{"type":"object"}'
-            (runtime / "schemas.json").write_bytes(schema)
+            (root / "schemas.json").write_bytes(schema)
             leaf = runtime / "browser-source-identity.json"
             composed = root / "composed.json"
 
@@ -37,7 +37,7 @@ class BrowserSourceIdentityTests(unittest.TestCase):
             changed = issue()
             self.assertNotEqual(changed, original)
             self.assertEqual((runtime / "server.rs").read_bytes(), native_source)
-            self.assertEqual((runtime / "schemas.json").read_bytes(), schema)
+            self.assertEqual((root / "schemas.json").read_bytes(), schema)
 
 
 if __name__ == "__main__":
