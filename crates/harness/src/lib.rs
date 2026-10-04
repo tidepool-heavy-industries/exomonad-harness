@@ -25,3 +25,9 @@ pub mod store;
 pub mod transport;
 pub mod tree_driver;
 pub mod turn;
+
+#[cfg(test)]
+extern crate self as harness;
+#[cfg(test)]
+#[path = "../tests/support/replay.rs"]
+mod test_support;

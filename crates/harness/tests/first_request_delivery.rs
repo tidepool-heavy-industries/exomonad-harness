@@ -1,5 +1,9 @@
 //! Offline first-request follow-up delivery integration gate.
 
+#[path = "support/replay.rs"]
+mod replay_support;
+use replay_support::ReplayTransport;
+
 use async_trait::async_trait;
 use harness::{
     agent_runtime::StoreAgentToolService,
@@ -8,7 +12,6 @@ use harness::{
     item::Item,
     model::{AgentPath, Effort},
     provider::{Provider, ProviderError},
-    replay::ReplayTransport,
     store::Store,
     transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, sse::StreamEvent},
     turn::JobScheduler,

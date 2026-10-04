@@ -3,6 +3,10 @@
 //! This exercises the production Engine/Store path with only deterministic
 //! replay and a controllable resident cell; it never makes a live model call.
 
+#[path = "support/replay.rs"]
+mod replay_support;
+use replay_support::{FakeResidentCell, ReplayCellState, ReplaySessionKey, ReplayTransport};
+
 use async_trait::async_trait;
 use harness::{
     cell_job::{CellInput, CellJob, CellJobProvider, CellOutput},
@@ -11,7 +15,6 @@ use harness::{
     mailbox::{DeliveryClass, Envelope, EnvelopeType},
     model::{AgentPath, CallId, Effort},
     provider::{CallContext, ProviderError},
-    replay::{FakeResidentCell, ReplayCellState, ReplaySessionKey, ReplayTransport},
     store::Store,
     transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, sse::StreamEvent},
     turn::{JobOutput, JobScheduler},

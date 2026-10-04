@@ -1,4 +1,5 @@
-use super::{ReplayProvider, ReplayTransport};
+use super::ReplayProvider;
+use crate::test_support::ReplayTransport;
 use crate::{
     context::{ContextBlock, ContextCommit, ContextDraft, ContextRole},
     engine::{Engine, EngineConfig},

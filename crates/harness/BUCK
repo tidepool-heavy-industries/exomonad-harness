@@ -43,7 +43,7 @@ rust_test(
     crate = "harness",
     crate_root = "src/lib.rs",
     edition = "2024",
-    srcs = HARNESS_SRCS,
+    srcs = HARNESS_SRCS + ["tests/support/replay.rs"],
     deps = HARNESS_DEPS,
 )
 
@@ -66,11 +66,11 @@ genrule(
 
 # Integration tests are independent libtest binaries, as in Cargo. Keeping
 # them separate makes one suite selectable without rebuilding every test root.
-integration_test(name = "adapter_readiness", deps = [":harness"] + HARNESS_DEPS)
+integration_test(name = "adapter_readiness", deps = [":harness"] + HARNESS_DEPS, extra_srcs = ["tests/support/replay.rs"])
 integration_test(name = "correction_wave", deps = [":harness"] + HARNESS_DEPS)
 integration_test(name = "custom_cell", deps = [":harness"] + HARNESS_DEPS)
 integration_test(name = "external_cancellation", deps = [":harness"] + HARNESS_DEPS)
-integration_test(name = "first_request_delivery", deps = [":harness"] + HARNESS_DEPS)
+integration_test(name = "first_request_delivery", deps = [":harness"] + HARNESS_DEPS, extra_srcs = ["tests/support/replay.rs"])
 integration_test(name = "job_operations", deps = [":harness"] + HARNESS_DEPS)
 integration_test(name = "plain_text_compaction", deps = [":harness"] + HARNESS_DEPS)
 integration_test(name = "process_recovery", deps = [":harness"] + HARNESS_DEPS)
