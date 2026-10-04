@@ -2,8 +2,7 @@
 set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
-mode=${1:-prepare}
-case "$mode" in prepare|--assets-ready) ;; *) echo "usage: $0 [--assets-ready]" >&2; exit 2 ;; esac
+[[ $# == 0 ]] || { echo "usage: $0" >&2; exit 2; }
 if [[ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]]; then
   echo "enter the pinned nix develop .#web shell and materialize .#web-chromium" >&2
   exit 2
@@ -16,20 +15,24 @@ if [[ "$(node -p 'process.execPath')" != "$declared_node" || "$PLAYWRIGHT_BROWSE
   exit 2
 fi
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-if [[ "$mode" == prepare ]]; then
-  cache_source="${HARNESS_NPM_CACHE:-$(nix eval --raw ".#packages.$web_system.buck-npm-cache.outPath")}"
-  if [[ ! -d "$cache_source/_cacache" ]]; then
-    echo "materialize nix build .#buck-npm-cache --no-link before frontend verification" >&2
-    exit 2
-  fi
-  task_cache=$(mktemp -d)
-  trap 'rm -rf -- "$task_cache"' EXIT
-  cp -R "$cache_source/." "$task_cache/"
-  chmod -R u+w "$task_cache"
-  (cd web && npm ci --offline --ignore-scripts --cache "$task_cache" --no-audit --no-fund)
-  (cd web && npm run check && npm test && npm run build)
+[[ -f .buckconfig.local ]] || { echo "run scripts/buck2-configure.sh after materializing the declared closures" >&2; exit 2; }
+buck="${HARNESS_BUCK2:-$(nix eval --raw ".#packages.$web_system.buck2.outPath")/bin/buck2}"
+"$buck" build --local-only -c remote.enabled=false //web:check //web:test
+export HARNESS_BROWSER_ASSETS
+HARNESS_BROWSER_ASSETS="$("$buck" build --local-only -c remote.enabled=false //web:dist --show-full-simple-output -v 0)"
+[[ "$HARNESS_BROWSER_ASSETS" = /* && "$HARNESS_BROWSER_ASSETS" != *$'\n'* && -s "$HARNESS_BROWSER_ASSETS/browser-bundle.json" ]] || {
+  echo "declared browser bundle was not produced" >&2; exit 2;
+}
+cache_source="${HARNESS_NPM_CACHE:-$(nix eval --raw ".#packages.$web_system.buck-npm-cache.outPath")}"
+if [[ ! -d "$cache_source/_cacache" ]]; then
+  echo "materialize nix build .#buck-npm-cache --no-link before frontend verification" >&2
+  exit 2
 fi
-test -s web/dist/index.html || { echo "production assets are missing" >&2; exit 2; }
+task_cache=$(mktemp -d)
+trap 'rm -rf -- "$task_cache"' EXIT
+cp -R "$cache_source/." "$task_cache/"
+chmod -R u+w "$task_cache"
+(cd web && npm ci --offline --ignore-scripts --cache "$task_cache" --no-audit --no-fund)
 (cd web && npm run check:browser && npm run test:tooling)
 export HARNESS_BROWSER_RUN_ID="$(date -u +%Y%m%dT%H%M%S)-$$"
 export HARNESS_BROWSER_EVIDENCE_DIR="$repo_root/target/gui-browser/runs/$HARNESS_BROWSER_RUN_ID"

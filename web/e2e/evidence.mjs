@@ -11,8 +11,10 @@ let report, reportError;
 try { report = JSON.parse(await readFile(`${evidenceDir}/results.json`,'utf8')); }
 catch (error) { reportError = `Browser reporter did not produce readable results: ${error.message}`; }
 const validation = validateReport(report, process.env.HARNESS_BROWSER_RUN_ID);
+const assetRoot = process.env.HARNESS_BROWSER_ASSETS ?? 'web/dist';
+const bundle = JSON.parse(await readFile(`${assetRoot}/browser-bundle.json`, 'utf8'));
 const assets = {};
-for(const name of await readdir('web/dist/assets')) assets[name] = await digest(`web/dist/assets/${name}`);
+for(const name of await readdir(`${assetRoot}/assets`)) assets[name] = await digest(`${assetRoot}/assets/${name}`);
 const inputs = {};
 for (const name of await readdir('web/e2e', {recursive:true})) {
   const path = `web/e2e/${name}`;
@@ -30,6 +32,7 @@ const evidence = {
   lockSha256: await digest('web/package-lock.json'),
   fixtureSha256: await digest('web/e2e/fixtures.mjs'),
   inputs,
+  bundle,
   assets,
   testExitStatus,
   exitStatus,

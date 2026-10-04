@@ -37,6 +37,7 @@ test('evidence recorder rejects missing, zero and stale reports and preserves a 
     await writeFile(browserExecutable, '#!/bin/sh\n[ "$1" = "--version" ] || exit 2\nprintf "Synthetic Chromium provenance fixture\\n"\n', { mode: 0o755 });
     for (const directory of ['web/dist/assets','web/e2e','scripts','target/gui-browser']) await mkdir(join(scratch,directory),{recursive:true});
     for (const path of ['web/dist/assets/fixture.js','web/e2e/fixtures.mjs','web/package-lock.json','web/playwright.config.ts','web/tsconfig.browser.json','scripts/verify-frontend-browser','flake.nix','flake.lock']) await writeFile(join(scratch,path),'Synthetic evidence-consumer test input\n');
+    await writeFile(join(scratch,'web/dist/browser-bundle.json'),JSON.stringify({version:1,identity:{runtimeSourceSha256:'a'.repeat(64),schemaSha256:'b'.repeat(64)},assets:{'assets/fixture.js':'c'.repeat(64)}}));
     execFileSync('git',['init','--quiet',scratch]);
     execFileSync('git',['-C',scratch,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','--quiet','--allow-empty','-m','Evidence consumer fixture']);
     const empty=report();empty.suites=[];empty.stats.expected=0;
