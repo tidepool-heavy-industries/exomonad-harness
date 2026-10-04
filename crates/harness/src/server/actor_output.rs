@@ -134,7 +134,7 @@ mod tests {
         let event = events.recv().await.unwrap();
         assert_eq!(event.event.kind(), "actor.output.committed");
         assert_eq!(
-            super::event_value(&event)["reference"]["sequence"],
+            crate::server::event_value(&event)["reference"]["sequence"],
             committed.output().reference().sequence.to_string()
         );
         assert!(events.try_recv().is_err());
@@ -179,18 +179,18 @@ mod tests {
             "no-store"
         );
         let page: serde_json::Value = page.json().await.unwrap();
-        assert_eq!(page["outputs"][0], super::event_value(&event));
+        assert_eq!(page["outputs"][0], crate::server::event_value(&event));
         assert!(page["outputs"][0].get("execution").is_none());
         assert!(page["outputs"][0].get("createdAtMs").is_none());
         assert_eq!(
             page["outputs"][0]["reference"],
-            serde_json::to_value(super::browser_contract::ActorOutputReference::from(
+            serde_json::to_value(crate::server::browser_contract::ActorOutputReference::from(
                 committed.output().reference()
             ))
             .unwrap()
         );
         let expand = format!("http://{address}/api/actor-output/expand");
-        let body = serde_json::to_value(super::browser_contract::ActorDisplayExpansion {
+        let body = serde_json::to_value(crate::server::browser_contract::ActorDisplayExpansion {
             origin: (&origin).into(),
             display_slot: emission.id.display_slot.into(),
             key: emission.page.expansions[0].0.into(),
@@ -241,7 +241,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tail.status(), StatusCode::OK);
-        let tail: super::browser_contract::ActorOutputHistoryPage = tail.json().await.unwrap();
+        let tail: crate::server::browser_contract::ActorOutputHistoryPage =
+            tail.json().await.unwrap();
         assert_eq!(tail.origin.native_actor.get(), origin.native_actor);
         assert!(tail.outputs.is_empty());
         let expanded = client

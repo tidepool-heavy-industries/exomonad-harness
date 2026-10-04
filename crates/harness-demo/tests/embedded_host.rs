@@ -1009,7 +1009,7 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
         history
             .items
             .iter()
-            .any(|item| item.item.to_string().contains("done"))
+            .any(|item| item.item.0.to_string().contains("done"))
     );
     assert!(matches!(
         conversation.input_observation(receipt.envelope_id).unwrap(),

@@ -14,6 +14,33 @@ use crate::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Provider and tool JSON passes through this carrier without interpretation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct JsonValue(pub serde_json::Value);
+impl From<serde_json::Value> for JsonValue {
+    fn from(value: serde_json::Value) -> Self {
+        Self(value)
+    }
+}
+impl JsonSchema for JsonValue {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "JsonValue".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // An explicit true branch accepts every JSON form even when a field's
+        // description is attached; schema consumers must not infer an object.
+        schemars::json_schema!({"anyOf": [true]})
+    }
+}
+impl JsonValue {
+    fn deserialize_present<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Self>, D::Error> {
+        Self::deserialize(deserializer).map(Some)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ActorOutputOrigin {
@@ -148,7 +175,7 @@ pub struct HistoryItem {
     pub hash: String,
     pub byte_len: WireU64,
     /// Opaque provider item body inside a typed retained-history observation.
-    pub item: serde_json::Value,
+    pub item: JsonValue,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -183,7 +210,7 @@ impl From<&crate::store::history::HistoryPage> for HistoryPage {
                     position: item.position.into(),
                     hash: item.hash.clone(),
                     byte_len: (item.byte_len as u64).into(),
-                    item: item.item.0.clone(),
+                    item: item.item.0.clone().into(),
                 })
                 .collect(),
             next_offset: page.next_offset.map(Into::into),
@@ -300,7 +327,8 @@ pub struct JobProjection {
     pub delivered: Option<bool>,
     /// The tool's own result is opaque inside this typed observation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<serde_json::Value>,
+    #[serde(deserialize_with = "JsonValue::deserialize_present")]
+    pub output: Option<JsonValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<WireU64>,
 }
@@ -591,7 +619,9 @@ pub fn wire_samples() -> serde_json::Value {
         tool_name: Some("inspect".into()),
         tool_kind: Some(ToolKind::Custom),
         delivered: Some(true),
-        output: Some(serde_json::json!({"providerOwned": [null, "opaque", {"status": "ready"}]})),
+        output: Some(
+            serde_json::json!({"providerOwned": [null, "opaque", {"status": "ready"}]}).into(),
+        ),
         version: Some(9_007_199_254_740_993u64.into()),
     };
     let origin = ActorOutputOrigin {
@@ -732,6 +762,39 @@ pub fn wire_samples() -> serde_json::Value {
             id: job.id.clone(),
         }),
     ];
+    let opaque_values = [
+        serde_json::json!({"provider": [null, "nested"]}),
+        serde_json::json!([null, true, "retained"]),
+        serde_json::json!("text"),
+        serde_json::json!(23.5),
+        serde_json::json!(false),
+        serde_json::Value::Null,
+    ];
+    let opaque_history = opaque_values
+        .iter()
+        .map(|value| HistoryPage {
+            request_id: "request/root".into(),
+            parent_id: None,
+            branch: "/root".into(),
+            items: vec![HistoryItem {
+                position: 9_007_199_254_740_993u64.into(),
+                hash: "a".repeat(64),
+                byte_len: (serde_json::to_vec(value).unwrap().len() as u64).into(),
+                item: value.clone().into(),
+            }],
+            next_offset: Some(9_007_199_254_740_994u64.into()),
+            oversized_item: None,
+        })
+        .collect::<Vec<_>>();
+    let opaque_job_events = opaque_values
+        .into_iter()
+        .map(|value| {
+            StateEvent::JobUpsert(JobProjection {
+                output: Some(value.into()),
+                ..job.clone()
+            })
+        })
+        .collect::<Vec<_>>();
     let mut frames = vec![ServerFrame::Snapshot {
         snapshot: Snapshot {
             seq: 9_007_199_254_740_993u64.into(),
@@ -755,6 +818,7 @@ pub fn wire_samples() -> serde_json::Value {
     frames.extend(
         events
             .into_iter()
+            .chain(opaque_job_events)
             .enumerate()
             .map(|(index, event)| ServerFrame::Event {
                 event: SequencedEvent {
@@ -778,11 +842,7 @@ pub fn wire_samples() -> serde_json::Value {
         "actorOutputHistory": [ActorOutputHistoryPage { origin: origin.clone(), outputs: vec![output.clone()], next_after: Some(i64::MAX.into()) }],
         "actorDisplayExpansion": [ActorDisplayExpansion { origin, display_slot: output.emission.id.display_slot, key: output.emission.page.expansions[0].0 }],
         "embeddedCommand": [EmbeddedCommandRecord { operation_id: ClientOperationId(uuid::Uuid::nil()), command: HostCommand::Input { target: HostActorIdentity { run: "run".into(), actor: crate::model::AgentPath("/root".into()), incarnation: "incarnation".into() }, text: "start".into() }, state: crate::store::EmbeddedCommandState::InputAdmitted, envelope_id: Some(i64::MAX.into()), receipt: Some(receipt) }, EmbeddedCommandRecord { operation_id: ClientOperationId(uuid::Uuid::nil()), command: HostCommand::Input { target: HostActorIdentity { run: "run".into(), actor: crate::model::AgentPath("/root".into()), incarnation: "incarnation".into() }, text: "start".into() }, state: crate::store::EmbeddedCommandState::Queued, envelope_id: None, receipt: None }],
-        "history": [HistoryPage {
-            request_id: "request/root".into(), parent_id: None, branch: "/root".into(),
-            items: vec![HistoryItem { position: 9_007_199_254_740_993u64.into(), hash: "a".repeat(64), byte_len: 31u64.into(), item: serde_json::json!({"type":"future_provider_item","body":{"providerOwned":true}}) }],
-            next_offset: Some(9_007_199_254_740_994u64.into()), oversized_item: None,
-        }],
+        "history": opaque_history,
     })
 }
 

@@ -131,7 +131,7 @@ impl From<&ToolJobRecord> for contract::JobProjection {
             delivered: Some(record.delivered),
             started_at_ms: record.started_at_ms.map(Into::into),
             ended_at_ms: record.ended_at_ms.map(Into::into),
-            output: record.output.clone(),
+            output: record.output.clone().map(Into::into),
             version: None,
         }
     }
