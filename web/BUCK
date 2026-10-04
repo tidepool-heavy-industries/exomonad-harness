@@ -1,4 +1,4 @@
-load(":web_rules.bzl", "npm_dependencies", "web_action")
+load(":web_rules.bzl", "browser_contract", "npm_dependencies", "web_action")
 
 WEB_SRCS = glob(["src/**/*"]) + [
     "index.html",
@@ -9,6 +9,7 @@ WEB_SRCS = glob(["src/**/*"]) + [
 ]
 
 npm_dependencies()
+browser_contract()
 
 web_action(name = "check", script = "check", output = "check.txt", srcs = WEB_SRCS)
 web_action(name = "test", script = "test", output = "test.log", srcs = WEB_SRCS)

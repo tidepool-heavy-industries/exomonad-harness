@@ -22,17 +22,38 @@ cp -a node_modules "$OUTPUT"
         visibility = ["PUBLIC"],
     )
 
+def browser_contract():
+    genrule(
+        name = "browser_contract",
+        srcs = ["scripts/generate-browser-contract.mjs"],
+        out = "generated",
+        bash = """set -euo pipefail
+NODE='$(exe toolchains//:node)'
+NPM_DEPS="$PWD/$(location :npm_dependencies)"
+RUST_CONTRACT="$PWD/$(location //crates/harness:browser_contract)"
+OUTPUT="$PWD/$OUT"
+mkdir -p "$TMP/generator/scripts"
+cp -rL "$SRCDIR/." "$TMP/generator/"
+cp -a "$NPM_DEPS/." "$TMP/generator/node_modules/"
+"$NODE" "$TMP/generator/scripts/generate-browser-contract.mjs" "$RUST_CONTRACT" "$OUTPUT"
+""",
+        visibility = ["PUBLIC"],
+    )
+
 def web_action(name, script, output, srcs, is_directory = False):
     command = """set -euo pipefail
 NODE='$(exe toolchains//:node)'
 NPM='$(exe toolchains//:npm)'
 NPM_DEPS="$PWD/$(location :npm_dependencies)"
+CONTRACT="$PWD/$(location :browser_contract)"
 OUTPUT="$PWD/$OUT"
 export PATH="${NODE%/*}:$PATH"
 export CI=1 TZ=UTC npm_config_update_notifier=false npm_config_logs_dir="$TMP/npm-logs"
 mkdir -p "$TMP/web"
 cp -rL "$SRCDIR/." "$TMP/web/"
 cp -a "$NPM_DEPS/." "$TMP/web/node_modules/"
+mkdir -p "$TMP/web/src/generated"
+cp -rL "$CONTRACT/." "$TMP/web/src/generated/"
 cd "$TMP/web"
 """
     if script == "test":
