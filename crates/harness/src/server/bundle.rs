@@ -207,6 +207,18 @@ mod tests {
         };
         write_manifest(&manifest);
         let bundle = verify_browser_bundle(&root, &expected).unwrap();
+        // A different declared web source changes the composition identity even
+        // when the compiled runtime DTOs and schema are unchanged.
+        let revised_source = BrowserBundleIdentity::from_declared_source(
+            &serde_json::to_vec(&serde_json::json!({"runtimeSourceSha256": "b".repeat(64)}))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(revised_source.schema_sha256, expected.schema_sha256);
+        assert!(matches!(
+            verify_browser_bundle(&root, &revised_source),
+            Err(BrowserBundleError::IdentityMismatch)
+        ));
         manifest.identity.runtime_source_sha256 = "b".repeat(64);
         write_manifest(&manifest);
         assert!(matches!(
