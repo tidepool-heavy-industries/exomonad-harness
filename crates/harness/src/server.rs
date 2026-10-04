@@ -1645,7 +1645,7 @@ mod tests {
             snapshot
                 .requests
                 .iter()
-                .all(|row| row.get("input").is_none())
+                .all(|row| serde_json::to_value(row).unwrap().get("input").is_none())
         );
     }
     use super::*;
