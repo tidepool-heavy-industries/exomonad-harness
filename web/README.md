@@ -33,10 +33,10 @@ nix develop .#web -c scripts/verify-frontend-browser
 ```
 
 This frontend-only check copies the fixed-output npm cache to disposable scratch,
-installs locked dependencies offline, runs TypeScript and Vitest, builds production
-assets, typechecks the browser tests, checks the evidence reader, then executes
-Playwright. It requires no
-Cargo or Rust build. Node 24 and Chromium come from the existing flake pin;
+installs locked dependencies offline, selects the declared Buck TypeScript,
+Vitest and sealed production asset outputs, typechecks the browser tests, checks
+the evidence reader, then executes Playwright. Browser types and validators are
+generated from the native Rust DTO exporter through those Buck dependencies. Node 24 and Chromium come from the existing flake pin;
 Playwright and axe are development dependencies. Browser installation scripts and
 ambient browsers are not used.
 
@@ -69,8 +69,9 @@ systemd-run --user --wait --pipe --collect --unit=harness-frontend-browser \
   "$(command -v nix)" develop .#web --command scripts/verify-frontend-browser
 ```
 
-For ordinary frontend work, enter `nix develop .#web`, then run `npm ci`,
-`npm run check`, `npm test`, and `npm run build` in `web`. The Vite dev server
+For ordinary frontend checks, build `//web:check`, `//web:test` or `//web:dist`
+through the admitted pinned Buck environment. These targets provide the Rust
+schema artifact, generated declarations and standalone validators. The Vite dev server
 needs the protected API/WebSocket routes on its origin; static Vite alone does
 not authenticate or supply the operator state.
 
@@ -90,3 +91,19 @@ frontend gate. Follow the repository/server build admission rules, configure the
 checkout after pin changes, and use `--local-only -c remote.enabled=false` until
 remote-execution acceptance is recorded. A new worktree needs its own provisioned
 `buck-out` bind mount before Buck is used.
+
+
+## Generated wire contracts
+
+Rust owns the browser DTOs and their Serde schemas; see
+[the contract and bundle boundary](../docs/browser-contract.md). Native integer
+IDs, counters and cursors cross JSON as canonical decimal strings. Browser code
+compares them with `bigint`, preserving values beyond JavaScript's exact number
+range. The generated declarations and standalone validators are build outputs
+under `src/generated`, supplied by `//web:browser_contract` to each web action.
+They are not checked-in snapshots.
+
+A production dist contains `browser-bundle.json`, with declared Harness source,
+actual DTO schema and asset hashes. The composition root supplies the expected
+source identity from its matched build inputs, and verifies the bundle before
+listening. A manifest from an unrelated source or stale schema is refused.
