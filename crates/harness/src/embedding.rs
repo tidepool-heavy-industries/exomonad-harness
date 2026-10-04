@@ -21,6 +21,40 @@ pub struct ClientOperationId(pub uuid::Uuid);
 #[serde(transparent)]
 pub struct EmbeddedRoundId(pub uuid::Uuid);
 
+// Match UUID's human-readable Serde parser, while outbound values always use
+// the canonical lowercase hyphenated spelling.
+fn browser_uuid_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let digits = if generator.contract().is_serialize() {
+        "[0-9a-f]"
+    } else {
+        "[0-9a-fA-F]"
+    };
+    let hyphenated =
+        format!("{digits}{{8}}-{digits}{{4}}-{digits}{{4}}-{digits}{{4}}-{digits}{{12}}");
+    let pattern = if generator.contract().is_serialize() {
+        format!("^{hyphenated}$")
+    } else {
+        format!("^(?:{digits}{{32}}|{hyphenated}|\\{{{hyphenated}\\}}|urn:uuid:{hyphenated})$")
+    };
+    schemars::json_schema!({"type": "string", "pattern": pattern})
+}
+impl schemars::JsonSchema for ClientOperationId {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ClientOperationId".into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        browser_uuid_schema(generator)
+    }
+}
+impl schemars::JsonSchema for EmbeddedRoundId {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "EmbeddedRoundId".into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        browser_uuid_schema(generator)
+    }
+}
+
 impl std::fmt::Display for ClientOperationId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
@@ -32,7 +66,7 @@ impl std::fmt::Display for EmbeddedRoundId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostIdentity {
     pub run: String,
     pub actor: AgentPath,

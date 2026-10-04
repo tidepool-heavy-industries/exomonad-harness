@@ -1,4 +1,4 @@
-load("@prelude//:rules.bzl", "rust_library", "rust_test")
+load("@prelude//:rules.bzl", "genrule", "rust_binary", "rust_library", "rust_test")
 load("//:rust_tests.bzl", "integration_test")
 
 # These are the direct dependencies in crates/harness/Cargo.toml. Reindeer
@@ -45,6 +45,23 @@ rust_test(
     edition = "2024",
     srcs = HARNESS_SRCS,
     deps = HARNESS_DEPS,
+)
+
+rust_binary(
+    name = "browser_contract_export",
+    crate = "browser_contract_export",
+    crate_root = "src/bin/browser_contract_export.rs",
+    edition = "2024",
+    srcs = ["src/bin/browser_contract_export.rs"],
+    deps = [":harness", "//third-party/rust:serde_json"],
+    visibility = ["PUBLIC"],
+)
+
+genrule(
+    name = "browser_contract",
+    out = "browser-contract",
+    bash = "$(exe :browser_contract_export) \"$OUT\"",
+    visibility = ["PUBLIC"],
 )
 
 # Integration tests are independent libtest binaries, as in Cargo. Keeping

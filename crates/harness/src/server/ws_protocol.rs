@@ -2,6 +2,10 @@
 use crate::item::ToolKind;
 use serde::{Deserialize, Serialize};
 
+pub mod contract;
+mod decimal;
+pub use decimal::{WireI64, WireU64};
+
 /// Browser projection of an Engine-owned call, not a second job registry.
 /// `delivered` means the output was persisted in the conversation's input
 /// history, not merely that the provider future settled.
@@ -27,7 +31,7 @@ pub struct ToolJobRecord {
     pub output: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolJobState {
     Running,
@@ -46,14 +50,14 @@ impl HostActorIdentity {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HostActorKind {
     Model,
     Workflow,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HostActorLifecycle {
     Running,
@@ -81,7 +85,7 @@ pub struct HostActorProjection {
     pub active_round: Option<crate::embedding::EmbeddedRoundId>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandControl {
     Interrupt,
@@ -98,7 +102,9 @@ pub struct CommandReceipt {
     pub outcome: CommandReceiptOutcome,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema, schemars::JsonSchema,
+)]
 #[serde(
     tag = "outcome",
     rename_all = "snake_case",

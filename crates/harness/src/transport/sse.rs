@@ -11,7 +11,7 @@ pub struct ResponseAssembly {
     completed: Option<(String, Usage)>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputChannel {
     Assistant,

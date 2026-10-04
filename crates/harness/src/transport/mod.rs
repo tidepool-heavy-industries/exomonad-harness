@@ -174,7 +174,7 @@ pub enum StreamInterruption {
 
 /// Allowlisted, bounded provider error fields. The transport removes credentials
 /// before constructing this value; it never retains the provider's raw body.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct HttpDiagnostic {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,

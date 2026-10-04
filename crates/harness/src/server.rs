@@ -16,6 +16,7 @@ pub use ws_protocol::{
     HostActorLifecycle, HostActorProjection, Snapshot, ToolJobRecord, ToolJobState, WsClientFrame,
     WsEvent, WsEventPayload, WsServerFrame,
 };
+pub use ws_protocol::{WireI64, WireU64, contract as browser_contract};
 
 pub use crate::embedding::{ClientOperationId, EmbeddedRoundId};
 use crate::store::Store;
@@ -88,7 +89,7 @@ pub enum ClientCommand {
 
 /// Exact host address supplied by the authenticated operator. The host still
 /// validates live ownership and admission; this envelope grants no authority.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum HostCommand {
     Input {
@@ -114,7 +115,7 @@ impl HostCommand {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandRefusal {
     InvalidCommand,
