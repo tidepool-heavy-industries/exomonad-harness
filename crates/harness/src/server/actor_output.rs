@@ -104,20 +104,20 @@ mod tests {
         let store = Arc::new(Store::memory().unwrap());
         let origin = ActorOutputOrigin {
             run: "run".into(),
-            native_actor: 4,
-            incarnation: 2,
+            native_actor: 9_007_199_254_740_993,
+            incarnation: 9_007_199_254_740_995,
         };
         let emission = ActorOutputEmission {
             origin: origin.clone(),
             id: ActorOutputId {
-                display_slot: 1,
+                display_slot: 9_007_199_254_740_997,
                 page_ordinal: 1,
             },
             execution: ActorOutputExecution::ActorProgram,
             conversation: None,
             page: ActorDisplayPage {
                 text: "preview".into(),
-                expansions: vec![(1, "field".into())],
+                expansions: vec![(9_007_199_254_740_999, "field".into())],
                 unavailable: false,
             },
         };
@@ -159,7 +159,10 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let client = reqwest::Client::new();
-        let history = format!("http://{address}/api/actor-output?run=run&actor=4&incarnation=2");
+        let history = format!(
+            "http://{address}/api/actor-output?run=run&actor={}&incarnation={}",
+            origin.native_actor, origin.incarnation
+        );
         assert_eq!(
             client.get(&history).send().await.unwrap().status(),
             StatusCode::UNAUTHORIZED
@@ -176,6 +179,9 @@ mod tests {
             "no-store"
         );
         let page: serde_json::Value = page.json().await.unwrap();
+        assert_eq!(page["outputs"][0], super::event_value(&event));
+        assert!(page["outputs"][0].get("execution").is_none());
+        assert!(page["outputs"][0].get("createdAtMs").is_none());
         assert_eq!(
             page["outputs"][0]["reference"],
             serde_json::to_value(super::browser_contract::ActorOutputReference::from(
@@ -184,7 +190,12 @@ mod tests {
             .unwrap()
         );
         let expand = format!("http://{address}/api/actor-output/expand");
-        let body = json!({"origin":super::browser_contract::ActorOutputOrigin::from(&origin),"displaySlot":"1","key":"1"});
+        let body = serde_json::to_value(super::browser_contract::ActorDisplayExpansion {
+            origin: (&origin).into(),
+            display_slot: emission.id.display_slot.into(),
+            key: emission.page.expansions[0].0.into(),
+        })
+        .unwrap();
         assert_eq!(
             client
                 .post(&expand)
@@ -195,7 +206,8 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
-        let invalid = json!({"origin":super::browser_contract::ActorOutputOrigin::from(&origin),"displaySlot":"1","key":"0"});
+        let mut invalid = body.clone();
+        invalid["key"] = json!("0");
         assert_eq!(
             client
                 .post(&expand)
@@ -208,6 +220,30 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let mut lossy = body.clone();
+        lossy["displaySlot"] = json!(emission.id.display_slot);
+        assert_eq!(
+            client
+                .post(&expand)
+                .bearer_auth(secret)
+                .json(&lossy)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let tail = client
+            .get(format!("{history}&after={}", i64::MAX))
+            .bearer_auth(secret)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(tail.status(), StatusCode::OK);
+        let tail: super::browser_contract::ActorOutputHistoryPage = tail.json().await.unwrap();
+        assert_eq!(tail.origin.native_actor.get(), origin.native_actor);
+        assert!(tail.outputs.is_empty());
         let expanded = client
             .post(&expand)
             .bearer_auth(secret)
