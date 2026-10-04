@@ -308,7 +308,7 @@ pub struct OutputDelta {
 pub struct OutputCommit {
     pub origin: ConversationIdentity,
     pub request_id: String,
-    pub item_id: String,
+    pub item_id: Option<String>,
     pub hash: String,
     pub version: WireU64,
 }

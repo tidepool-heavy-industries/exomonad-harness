@@ -8,9 +8,14 @@ use serde::{Deserialize, Serialize};
 pub enum RequestFailure {
     Authentication,
     Http {
+        #[schemars(schema_with = "http_status_schema")]
         status: u16,
         diagnostic: Option<HttpDiagnostic>,
     },
+}
+
+fn http_status_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type": "integer", "minimum": u16::MIN, "maximum": u16::MAX})
 }
 
 impl TransportError {
