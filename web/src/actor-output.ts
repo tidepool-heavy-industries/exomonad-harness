@@ -6,15 +6,17 @@ export type ActorOutputReference = StoredActorOutput['reference']
 const bytes = (value: unknown) => new TextEncoder().encode(typeof value === 'string' ? value : JSON.stringify(value)).length
 export const actorOutputKey = (origin: ActorOutputOrigin) => JSON.stringify([origin.run, origin.nativeActor, origin.incarnation])
 
+export function validActorOutputReference(reference: ActorOutputReference): boolean {
+  return reference.origin.run.length > 0 && bytes(reference.origin.run) <= 1024 && BigInt(reference.sequence) > 0n
+}
 /** Generated shapes precede cross-field association and retained display bounds. */
 export function isStoredActorOutput(value: unknown): value is StoredActorOutput {
   const frame = { type: 'event', event: { seq: '0', event: { kind: 'actor.output.committed', value } } }
   if (!isServerFrame(frame) || frame.type !== 'event' || frame.event.event.kind !== 'actor.output.committed') return false
   const { reference, emission } = frame.event.event.value
   const page = emission.page
-  return BigInt(reference.sequence) > 0n && BigInt(emission.id.displaySlot) > 0n
+  return validActorOutputReference(reference) && BigInt(emission.id.displaySlot) > 0n
     && actorOutputKey(emission.origin) === actorOutputKey(reference.origin)
-    && emission.origin.run.length > 0 && bytes(emission.origin.run) <= 1024
     && bytes(page.text) <= 32768
     && page.expansions.every(([key]) => BigInt(key) > 0n)
     && new Set(page.expansions.map(([key]) => key)).size === page.expansions.length

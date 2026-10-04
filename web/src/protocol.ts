@@ -1,6 +1,6 @@
 import { appendOutput, commitOutput, setRevision, outputKey, revisionKey,
   type LiveOutput, type HistoryRevision } from './live-output';
-import { actorOutputKey, retainActorOutput, isStoredActorOutput, type ActorOutputReference } from './actor-output';
+import { actorOutputKey, retainActorOutput, isStoredActorOutput, validActorOutputReference, type ActorOutputReference } from './actor-output';
 import { isServerFrame, isClientFrame, isEmbeddedCommandRecord as isCommandRecordShape } from './generated/validators.mjs';
 import type { ServerFrame } from './generated/server';
 import type { ClientFrame } from './generated/client';
@@ -213,7 +213,10 @@ export function isCommandState(value: unknown): value is EmbeddedCommandRecord['
     state: value, envelopeId: null, receipt: null });
 }
 export function isCommandReceipt(value: unknown): value is CommandReceipt {
-  return isServerFrame({ type: 'event', event: { seq: '0', event: { kind: 'command.receipt', value } } });
+  const frame = { type: 'event', event: { seq: '0', event: { kind: 'command.receipt', value } } };
+  if (!isServerFrame(frame) || frame.type !== 'event' || frame.event.event.kind !== 'command.receipt') return false;
+  const receipt = frame.event.event.value;
+  return receipt.commandId.length > 0 && (receipt.target === undefined || isHostIdentity(receipt.target));
 }
 export function isCommandRefusal(value: unknown): value is HostCommandRefusal {
   return isObject(value) && isServerFrame({ ...value, type: 'command.refused' });
@@ -242,6 +245,8 @@ export function isSnapshot(value: unknown): value is Snapshot {
   return (snapshot.liveOutput?.length ?? 0) <= 128
     && (snapshot.historyRevisions?.length ?? 0) <= 128
     && (snapshot.actorOutputRevisions?.length ?? 0) <= 128
+    && new TextEncoder().encode(JSON.stringify(snapshot.actorOutputRevisions ?? [])).length <= 65536
+    && (snapshot.actorOutputRevisions ?? []).every(validActorOutputReference)
     && (snapshot.actors ?? []).every(value => validStateEvent({ kind: 'actor.upsert', value }))
     && snapshot.conversations.every(value => validStateEvent({ kind: 'conversation.upsert', value }))
     && snapshot.requests.every(value => validStateEvent({ kind: 'request.upsert', value }))
