@@ -17,10 +17,15 @@ use harness::engine::{Engine, EngineCompletion, EngineConfig, EngineError};
 use harness::item::Item;
 use harness::model::{AgentPath, Effort};
 use harness::provider::{CallContext, Provider, ProviderError};
+use harness::server::browser_contract::{
+    ConversationProjection, ConversationState, EnvelopeKind, EnvelopeProjection, JobProjection,
+    RequestOutcome, RequestProjection, RequestState, StateEvent,
+};
 use harness::server::{
     self, ClientCommand, CommandReceipt, CommandReceiptOutcome, QueuedCommand, ServerConfig,
     SessionSecret, Snapshot,
 };
+use harness::server::{ToolJobState, WireI64, WireU64};
 use harness::store::Store;
 use harness::transport::{
     Auth, ResponsesClient, ResponsesRequest, ResponsesTurn, TransportError, Usage,
@@ -426,72 +431,107 @@ async fn flush_trace_result<T>(
 const ROOT_CONVERSATION_ID: &str = "conversation/root";
 const ROOT_PATH: &str = "/root";
 
-fn conversation_record(state: &str) -> Value {
-    json!({"id":ROOT_CONVERSATION_ID,"path":ROOT_PATH,"state":state})
+fn conversation_record(state: ConversationState) -> ConversationProjection {
+    ConversationProjection {
+        id: ROOT_CONVERSATION_ID.into(),
+        path: ROOT_PATH.into(),
+        state,
+        parent_id: None,
+        fork_source_request_id: None,
+        version: None,
+    }
 }
 
-fn request_record(id: &str, state: &str) -> Value {
-    json!({"id":id,"conversationId":ROOT_CONVERSATION_ID,"state":state})
+fn request_record(id: &str, state: RequestState) -> RequestProjection {
+    RequestProjection {
+        id: id.into(),
+        conversation_id: ROOT_CONVERSATION_ID.into(),
+        state,
+        parent_id: None,
+        created_at_ms: None,
+        ended_at_ms: None,
+        command_id: None,
+        command: None,
+        outcome: None,
+        detail: None,
+        failure: None,
+        version: None,
+    }
 }
 
 fn command_request_record(
     id: &str,
-    state: &str,
+    state: RequestState,
     command_id: &str,
     command: &str,
-    outcome: &str,
+    outcome: RequestOutcome,
     detail: Option<&str>,
-) -> Value {
-    let mut record = request_record(id, state);
-    record["commandId"] = json!(command_id);
-    record["command"] = json!(command);
-    record["outcome"] = json!(outcome);
-    if let Some(detail) = detail {
-        record["detail"] = json!(detail);
+) -> RequestProjection {
+    RequestProjection {
+        command_id: Some(command_id.into()),
+        command: Some(command.into()),
+        outcome: Some(outcome),
+        detail: detail.map(str::to_owned),
+        ..request_record(id, state)
     }
-    record
 }
 
-fn next_envelope_ordinal(envelopes: &[Value]) -> u64 {
+fn next_envelope_ordinal(envelopes: &[EnvelopeProjection]) -> Result<u64, String> {
     envelopes
         .iter()
-        .filter_map(|envelope| envelope["ordinal"].as_u64())
+        .filter_map(|envelope| envelope.ordinal.map(WireU64::get))
         .max()
         .unwrap_or(0)
-        + 1
+        .checked_add(1)
+        .ok_or_else(|| "demo envelope ordinal space is exhausted".into())
 }
 
-fn active_wait_request(requests: &[Value], history: &[Item]) -> Option<String> {
+fn active_wait_request(requests: &[RequestProjection], history: &[Item]) -> Option<String> {
     requests.iter().find_map(|request| {
-        if request["state"] != "running" || request["outcome"] == "accepted" {
+        if request.state != RequestState::Running
+            || request.outcome == Some(RequestOutcome::Accepted)
+        {
             return None;
         }
-        let request_id = request["id"].as_str()?;
-        if request["command"] == "wait" {
-            return Some(request_id.to_owned());
+        if request.command.as_deref() == Some("wait")
+            || history
+                .iter()
+                .any(|item| item.0["request_id"] == request.id && item.0["command"] == "wait")
+        {
+            Some(request.id.clone())
+        } else {
+            None
         }
-        history
-            .iter()
-            .any(|item| item.0["request_id"] == request_id && item.0["command"] == "wait")
-            .then(|| request_id.to_owned())
     })
 }
 
-fn active_async_request(requests: &[Value]) -> Option<String> {
+fn active_async_request(requests: &[RequestProjection]) -> Option<String> {
     requests.iter().find_map(|request| {
-        (request["state"] == "running"
-            && (request["command"] == "async start"
-                || request["command"].as_str().is_some_and(|command| {
-                    command.starts_with("custom ")
-                        && !matches!(command, "custom release" | "custom cancel")
-                })))
-        .then(|| request["id"].as_str().map(str::to_owned))
-        .flatten()
+        (request.state == RequestState::Running
+            && request.command.as_deref().is_some_and(|command| {
+                command == "async start"
+                    || (command.starts_with("custom ")
+                        && !matches!(command, "custom release" | "custom cancel"))
+            }))
+        .then(|| request.id.clone())
     })
 }
 
-fn job_record(id: &str, state: &str) -> Value {
-    json!({"id":id,"conversationId":ROOT_CONVERSATION_ID,"state":state})
+fn job_record(id: &str, state: ToolJobState) -> JobProjection {
+    JobProjection {
+        id: id.into(),
+        conversation_id: ROOT_CONVERSATION_ID.into(),
+        state,
+        started_at_ms: None,
+        ended_at_ms: None,
+        request_id: None,
+        call_id: None,
+        tool_name: None,
+        tool_kind: None,
+        delivered: None,
+        output: None,
+        version: None,
+    }
 }
 
 fn persisted_epoch_ms() -> Option<i64> {
@@ -501,32 +541,25 @@ fn persisted_epoch_ms() -> Option<i64> {
         .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
 }
 
-fn stamp_start(record: &mut Value, field: &str) {
-    if let Some(epoch_ms) = persisted_epoch_ms() {
-        record[field] = json!(epoch_ms);
-    } else {
-        record[field] = Value::Null;
-    }
-}
-
-fn conversation_rows(root: &Value, envelopes: &[Value]) -> Vec<Value> {
+fn conversation_rows(
+    root: &ConversationProjection,
+    envelopes: &[EnvelopeProjection],
+) -> Vec<ConversationProjection> {
     let mut rows = vec![root.clone()];
-    let mut paths = std::collections::BTreeSet::new();
-    for envelope in envelopes {
-        for key in ["sender", "recipient"] {
-            if let Some(path) = envelope[key]
-                .as_str()
-                .filter(|path| path.starts_with("/root/"))
-            {
-                paths.insert(path.to_owned());
-            }
-        }
-    }
-    rows.extend(
-        paths
-            .into_iter()
-            .map(|path| json!({"id":format!("conversation/{path}"),"path":path,"state":"idle"})),
-    );
+    let paths: std::collections::BTreeSet<_> = envelopes
+        .iter()
+        .flat_map(|envelope| [&envelope.sender, &envelope.recipient])
+        .filter(|path| path.starts_with("/root/"))
+        .cloned()
+        .collect();
+    rows.extend(paths.into_iter().map(|path| ConversationProjection {
+        id: format!("conversation/{path}"),
+        path,
+        state: ConversationState::Idle,
+        parent_id: None,
+        fork_source_request_id: None,
+        version: None,
+    }));
     rows
 }
 
@@ -542,9 +575,16 @@ impl Drop for AbortTasksOnDrop {
 }
 
 #[cfg(test)]
-fn final_envelope(id: &str, payload: &str) -> Value {
-    json!({"id":id,"conversationId":ROOT_CONVERSATION_ID,"recipient":ROOT_PATH,
-        "sender":ROOT_PATH,"type":"FINAL_ANSWER","payload":payload})
+fn final_envelope(id: &str, payload: &str) -> EnvelopeProjection {
+    EnvelopeProjection {
+        id: id.into(),
+        recipient: ROOT_PATH.into(),
+        sender: ROOT_PATH.into(),
+        kind: EnvelopeKind::FinalAnswer,
+        payload: payload.into(),
+        ordinal: None,
+        version: None,
+    }
 }
 
 fn command_input(history: &[Item], prompt: &str) -> Vec<Item> {
@@ -558,14 +598,18 @@ fn command_input(history: &[Item], prompt: &str) -> Vec<Item> {
 fn deterministic_command(
     command: &str,
     waiting: bool,
-) -> (&'static str, &'static str, Option<String>) {
+) -> (ToolJobState, RequestOutcome, Option<String>) {
     if command == "custom release" {
-        return ("settled", "completed", Some("Custom tool released.".into()));
+        return (
+            ToolJobState::Settled,
+            RequestOutcome::Completed,
+            Some("Custom tool released.".into()),
+        );
     }
     if command == "custom cancel" {
         return (
-            "settled",
-            "completed",
+            ToolJobState::Settled,
+            RequestOutcome::Completed,
             Some("Custom tool cancelled.".into()),
         );
     }
@@ -574,71 +618,79 @@ fn deterministic_command(
             .strip_prefix("custom ")
             .is_some_and(|raw| !raw.is_empty())
         {
-            ("running", "pending", None)
+            (ToolJobState::Running, RequestOutcome::Pending, None)
         } else {
             (
-                "failed",
-                "failed",
+                ToolJobState::Settled,
+                RequestOutcome::Failed,
                 Some("Custom input must not be empty.".into()),
             )
         };
     }
     if command == "async start" {
-        return ("running", "pending", None);
+        return (ToolJobState::Running, RequestOutcome::Pending, None);
     }
     if command == "async release" {
         return (
-            "settled",
-            "completed",
+            ToolJobState::Settled,
+            RequestOutcome::Completed,
             Some("Async tool A released.".into()),
         );
     }
     if command == "async cancel" {
         return (
-            "settled",
-            "completed",
+            ToolJobState::Settled,
+            RequestOutcome::Completed,
             Some("Async tool A cancelled.".into()),
         );
     }
     if command == "async recovery" {
         return (
-            "settled",
-            "completed",
+            ToolJobState::Settled,
+            RequestOutcome::Completed,
             Some("Recovered interrupted async jobs.".into()),
         );
     }
     if command == "wait" {
         return if waiting {
             (
-                "failed",
-                "already pending",
+                ToolJobState::Settled,
+                RequestOutcome::Failed,
                 Some("A wait is already pending.".into()),
             )
         } else {
-            ("running", "pending", None)
+            (ToolJobState::Running, RequestOutcome::Pending, None)
         };
     }
     if command == "cancel" && waiting {
         return (
-            "settled",
-            "completed",
+            ToolJobState::Settled,
+            RequestOutcome::Completed,
             Some("Pending wait cancelled.".into()),
         );
     }
     if let Some(text) = command.strip_prefix("echo ") {
-        return ("settled", "completed", Some(text.into()));
+        return (
+            ToolJobState::Settled,
+            RequestOutcome::Completed,
+            Some(text.into()),
+        );
     }
     if command == "test" {
         return (
-            "settled",
-            "completed",
+            ToolJobState::Settled,
+            RequestOutcome::Completed,
             Some("Deterministic check passed.".into()),
         );
     }
     if let Some(text) = command.strip_prefix("message ") {
         return (
-            "settled",
-            if waiting { "queued" } else { "no pending wait" },
+            ToolJobState::Settled,
+            if waiting {
+                RequestOutcome::Queued
+            } else {
+                RequestOutcome::Completed
+            },
             Some(if waiting {
                 format!("Message queued: {text}")
             } else {
@@ -648,8 +700,8 @@ fn deterministic_command(
     }
     if let Some(text) = command.strip_prefix("child ") {
         return (
-            "settled",
-            "completed",
+            ToolJobState::Settled,
+            RequestOutcome::Completed,
             Some(format!(
                 "Child /root/demo-child received and replied: {text}"
             )),
@@ -658,21 +710,21 @@ fn deterministic_command(
     if command == "child-reply" || command.starts_with("child-reply ") {
         let text = command.strip_prefix("child-reply ").unwrap_or_default();
         return (
-            "settled",
-            "completed",
+            ToolJobState::Settled,
+            RequestOutcome::Completed,
             Some(format!("Child received and replied: {text}")),
         );
     }
     if command == "fail" {
         return (
-            "failed",
-            "failed",
+            ToolJobState::Settled,
+            RequestOutcome::Failed,
             Some("Controlled deterministic failure.".into()),
         );
     }
     (
-        "failed",
-        "failed",
+        ToolJobState::Settled,
+        RequestOutcome::Failed,
         Some("Unknown deterministic command.".into()),
     )
 }
@@ -741,11 +793,11 @@ impl harness::engine::ResponsesTransport for DeterministicServerTransport {
                 usage: Usage::default(),
             });
         }
-        let (state, _outcome, answer) = deterministic_command(&self.command, self.waiting);
-        if self.command == "wait" && state == "running" {
+        let (state, outcome, answer) = deterministic_command(&self.command, self.waiting);
+        if self.command == "wait" && state == ToolJobState::Running {
             return std::future::pending().await;
         }
-        if state == "failed" {
+        if outcome == RequestOutcome::Failed {
             return Err(TransportError::Stream(
                 "controlled deterministic server failure".into(),
             ));
@@ -1305,7 +1357,7 @@ async fn run_deterministic_child_message(
     scheduler: Arc<JobScheduler>,
     command_id: &str,
     message: &str,
-) -> Result<(AgentPath, String, Value), String> {
+) -> Result<(AgentPath, String, EnvelopeProjection), String> {
     let root = AgentPath(ROOT_PATH.into());
     let root_exists = store
         .agent(&root)
@@ -1388,14 +1440,15 @@ async fn run_deterministic_child_message(
         .map(|(_, payload)| payload)
         .ok_or_else(|| "committed child message has no payload".to_owned())?
         .to_owned();
-    let envelope = json!({
-        "id":format!("envelope/{}", stored.id),
-        "conversationId":ROOT_CONVERSATION_ID,
-        "recipient":stored.recipient,
-        "sender":stored.sender,
-        "type":"MESSAGE",
-        "payload":reply
-    });
+    let envelope = EnvelopeProjection {
+        id: format!("envelope/{}", stored.id),
+        recipient: stored.recipient,
+        sender: stored.sender,
+        kind: EnvelopeKind::Message,
+        payload: reply.clone(),
+        ordinal: None,
+        version: None,
+    };
     Ok((child, reply, envelope))
 }
 
@@ -1403,10 +1456,10 @@ fn persist_browser_envelope(
     store: &Store,
     sender: &str,
     recipient: &str,
-    kind: &str,
+    kind: EnvelopeKind,
     payload: &str,
     ordinal: u64,
-) -> Result<Value, String> {
+) -> Result<EnvelopeProjection, String> {
     let role = if sender == "/operator" {
         "user"
     } else {
@@ -1420,36 +1473,36 @@ fn persist_browser_envelope(
     let id = store
         .add_envelope(sender, recipient, "AtBoundary", &item, None)
         .map_err(|_| "could not persist browser message envelope")?;
-    Ok(json!({
-        "id":format!("envelope/{id}"),
-        "conversationId":if recipient.starts_with("/root/") { format!("conversation/{recipient}") } else { ROOT_CONVERSATION_ID.to_owned() },
-        "recipient":recipient,
-        "sender":sender,
-        "type":kind,
-        "payload":payload,
-        "ordinal":ordinal
-    }))
+    Ok(EnvelopeProjection {
+        id: format!("envelope/{id}"),
+        recipient: recipient.into(),
+        sender: sender.into(),
+        kind,
+        payload: payload.into(),
+        ordinal: Some(ordinal.into()),
+        version: None,
+    })
 }
 
 fn persist_engine_final_envelope(
     store: &Store,
     item: &Item,
     ordinal: u64,
-) -> Result<Value, String> {
+) -> Result<EnvelopeProjection, String> {
     let answer = final_text(std::slice::from_ref(item))
         .ok_or_else(|| "Engine final item is not a final answer".to_owned())?;
     let id = store
         .add_envelope(ROOT_PATH, "/operator", "AtBoundary", item, None)
         .map_err(|_| "could not persist Engine final answer envelope")?;
-    Ok(json!({
-        "id":format!("envelope/{id}"),
-        "conversationId":ROOT_CONVERSATION_ID,
-        "recipient":"/operator",
-        "sender":ROOT_PATH,
-        "type":"FINAL_ANSWER",
-        "payload":answer,
-        "ordinal":ordinal
-    }))
+    Ok(EnvelopeProjection {
+        id: format!("envelope/{id}"),
+        recipient: "/operator".into(),
+        sender: ROOT_PATH.into(),
+        kind: EnvelopeKind::FinalAnswer,
+        payload: answer,
+        ordinal: Some(ordinal.into()),
+        version: None,
+    })
 }
 
 fn save_server_tool_jobs(
@@ -1494,14 +1547,17 @@ fn save_server_tool_jobs(
 #[derive(Debug)]
 struct PersistedServerState {
     history: Vec<Item>,
-    jobs: Vec<Value>,
-    requests: Vec<Value>,
-    envelopes: Vec<Value>,
-    conversation: Value,
+    jobs: Vec<JobProjection>,
+    requests: Vec<RequestProjection>,
+    envelopes: Vec<EnvelopeProjection>,
+    conversation: ConversationProjection,
     engine_head: Option<harness::model::RequestId>,
     tool_jobs: Vec<harness::server::ToolJobRecord>,
 }
 
+/// Previous demo sessions stored sparse projections and native JSON numbers.
+/// This read boundary admits that historical spelling, then validates each
+/// complete row with the canonical browser DTO. Live producers use DTOs only.
 fn restore_server_state(raw: &str) -> Result<PersistedServerState, String> {
     let value: Value = serde_json::from_str(raw)
         .map_err(|_| "persisted demo server state is malformed JSON".to_owned())?;
@@ -1522,98 +1578,97 @@ fn restore_server_state(raw: &str) -> Result<PersistedServerState, String> {
                 .ok_or_else(|| "persisted demo server Engine head is malformed".to_owned())
         })
         .transpose()?;
-    let tool_jobs = value.get("toolJobs").cloned().unwrap_or_else(|| json!([]));
-    let tool_jobs = serde_json::from_value::<Vec<harness::server::ToolJobRecord>>(tool_jobs)
-        .map_err(|_| "persisted demo server tool jobs are malformed".to_owned())?;
+    let tool_jobs = serde_json::from_value::<Vec<harness::server::ToolJobRecord>>(
+        value.get("toolJobs").cloned().unwrap_or_else(|| json!([])),
+    )
+    .map_err(|_| "persisted demo server tool jobs are malformed".to_owned())?;
     let records = |field: &str| -> Result<Vec<Value>, String> {
         required(field)?
             .as_array()
             .cloned()
             .ok_or_else(|| format!("persisted demo server {field} is malformed"))
     };
-    let mut conversation = required("conversation")?
-        .as_object()
-        .cloned()
-        .map(Value::Object)
-        .ok_or_else(|| "persisted demo server conversation is malformed".to_owned())?;
-    if conversation["id"] != ROOT_CONVERSATION_ID || conversation["path"] != ROOT_PATH {
+    let mut conversation = required("conversation")?.clone();
+    historical_nullable_fields(&mut conversation, &["parentId", "forkSourceRequestId"])?;
+    historical_decimal_fields(&mut conversation, &["version"])?;
+    let mut conversation: ConversationProjection = serde_json::from_value(conversation)
+        .map_err(|error| format!("persisted demo server conversation is malformed: {error}"))?;
+    if conversation.id != ROOT_CONVERSATION_ID || conversation.path != ROOT_PATH {
         return Err("persisted demo server conversation does not identify /root".into());
     }
-    if !matches!(
-        conversation["state"].as_str(),
-        Some("idle" | "requesting" | "paused" | "cancelled")
-    ) {
-        return Err("persisted demo server conversation state is malformed".into());
-    }
-    let mut jobs = records("jobs")?;
-    for job in &mut jobs {
-        if job.get("id").and_then(Value::as_str).is_none()
-            || job.get("conversationId").and_then(Value::as_str) != Some(ROOT_CONVERSATION_ID)
-        {
+    let mut jobs = Vec::new();
+    for mut row in records("jobs")? {
+        historical_nullable_fields(&mut row, &["startedAtMs", "endedAtMs"])?;
+        historical_decimal_fields(&mut row, &["startedAtMs", "endedAtMs", "version"])?;
+        // Old restart annotations were display metadata, not job state.
+        let object = row.as_object_mut().expect("validated projection object");
+        object.remove("status");
+        object.remove("interrupted");
+        let mut job: JobProjection = serde_json::from_value(row)
+            .map_err(|error| format!("persisted demo server job is malformed: {error}"))?;
+        if job.conversation_id != ROOT_CONVERSATION_ID {
             return Err("persisted demo server job is malformed".into());
         }
-        if !matches!(
-            job.get("state").and_then(Value::as_str),
-            Some("running" | "settled" | "cancelled")
-        ) {
-            return Err("persisted demo server job state is malformed".into());
+        if job.state == ToolJobState::Running {
+            job.state = ToolJobState::Cancelled;
+            job.ended_at_ms = None;
         }
-        if job.get("state").and_then(Value::as_str) == Some("running") {
-            job["state"] = json!("cancelled");
-            job["status"] = json!("Interrupted");
-            job["interrupted"] = json!(true);
-            job["endedAtMs"] = Value::Null;
-        }
+        jobs.push(job);
     }
-    let mut requests = records("requests")?;
-    for request in &mut requests {
-        if request.get("id").and_then(Value::as_str).is_none()
-            || request.get("conversationId").and_then(Value::as_str) != Some(ROOT_CONVERSATION_ID)
-            || !matches!(
-                request.get("state").and_then(Value::as_str),
-                Some("running" | "completed" | "failed")
-            )
-        {
+    let mut requests = Vec::new();
+    for mut row in records("requests")? {
+        historical_nullable_fields(
+            &mut row,
+            &["parentId", "createdAtMs", "endedAtMs", "failure"],
+        )?;
+        historical_decimal_fields(&mut row, &["createdAtMs", "endedAtMs", "version"])?;
+        // These historical labels carried command detail in the outcome field.
+        // Preserve the detail and express the outcome with the closed contract.
+        match row.get("outcome").and_then(Value::as_str) {
+            Some("already pending") => row["outcome"] = json!(RequestOutcome::Failed),
+            Some("no pending wait") => row["outcome"] = json!(RequestOutcome::Completed),
+            _ => {}
+        }
+        let mut request: RequestProjection = serde_json::from_value(row)
+            .map_err(|error| format!("persisted demo server request is malformed: {error}"))?;
+        if request.conversation_id != ROOT_CONVERSATION_ID {
             return Err("persisted demo server request is malformed".into());
         }
-        if request.get("state").and_then(Value::as_str) == Some("running") {
-            request["state"] = json!("failed");
-            request["endedAtMs"] = Value::Null;
-            if request.get("commandId").is_some() {
-                request["outcome"] = json!("failed");
-                request["detail"] = json!("Process restarted before this request settled.");
+        if request.state == RequestState::Running {
+            request.state = RequestState::Failed;
+            request.ended_at_ms = None;
+            if request.command_id.is_some() {
+                request.outcome = Some(RequestOutcome::Failed);
+                request.detail = Some("Process restarted before this request settled.".into());
             }
         }
+        requests.push(request);
     }
-    let envelopes = records("envelopes")?;
+    let mut envelopes = Vec::new();
     let mut last_ordinal = 0;
-    for envelope in &envelopes {
-        if envelope.get("id").and_then(Value::as_str).is_none()
-            || !envelope
-                .get("conversationId")
-                .and_then(Value::as_str)
-                .is_some_and(|id| {
-                    id == ROOT_CONVERSATION_ID || id.starts_with("conversation//root/")
-                })
-            || envelope.get("sender").and_then(Value::as_str).is_none()
-            || envelope.get("recipient").and_then(Value::as_str).is_none()
-            || envelope.get("payload").and_then(Value::as_str).is_none()
-            || !matches!(
-                envelope.get("type").and_then(Value::as_str),
-                Some("PROGRESS" | "MESSAGE" | "FINAL_ANSWER")
-            )
-        {
-            return Err("persisted demo server envelope is malformed".into());
+    for mut row in records("envelopes")? {
+        historical_nullable_fields(&mut row, &[])?;
+        let object = row.as_object_mut().expect("validated projection object");
+        if let Some(conversation) = object.remove("conversationId") {
+            if !conversation.as_str().is_some_and(|id| {
+                id == ROOT_CONVERSATION_ID || id.starts_with("conversation//root/")
+            }) {
+                return Err("persisted demo server envelope is malformed".into());
+            }
         }
-        if let Some(ordinal) = envelope["ordinal"].as_u64() {
+        historical_decimal_fields(&mut row, &["ordinal", "version"])?;
+        let envelope: EnvelopeProjection = serde_json::from_value(row)
+            .map_err(|error| format!("persisted demo server envelope is malformed: {error}"))?;
+        if let Some(ordinal) = envelope.ordinal.map(WireU64::get) {
             if ordinal <= last_ordinal {
                 return Err("persisted demo server envelope ordinals are not monotone".into());
             }
             last_ordinal = ordinal;
         }
+        envelopes.push(envelope);
     }
-    if conversation["state"] == "requesting" {
-        conversation["state"] = json!("idle");
+    if conversation.state == ConversationState::Requesting {
+        conversation.state = ConversationState::Idle;
     }
     Ok(PersistedServerState {
         history,
@@ -1624,6 +1679,30 @@ fn restore_server_state(raw: &str) -> Result<PersistedServerState, String> {
         engine_head,
         tool_jobs,
     })
+}
+
+fn historical_nullable_fields(row: &mut Value, fields: &[&str]) -> Result<(), String> {
+    let object = row
+        .as_object_mut()
+        .ok_or("persisted demo projection is not an object")?;
+    for field in fields {
+        object.entry(*field).or_insert(Value::Null);
+    }
+    Ok(())
+}
+
+fn historical_decimal_fields(row: &mut Value, fields: &[&str]) -> Result<(), String> {
+    for field in fields {
+        if let Some(Value::Number(number)) = row.get(*field) {
+            if !number.is_i64() && !number.is_u64() {
+                return Err(format!(
+                    "persisted demo projection {field} is not an integer"
+                ));
+            }
+            row[*field] = Value::String(number.to_string());
+        }
+    }
+    Ok(())
 }
 
 async fn serve(
@@ -1665,7 +1744,7 @@ async fn serve(
     let mut jobs = Vec::new();
     let mut requests = Vec::new();
     let mut envelopes = Vec::new();
-    let mut conversation = conversation_record("idle");
+    let mut conversation = conversation_record(ConversationState::Idle);
     let mut engine_head: Option<harness::model::RequestId> = None;
     let mut tool_jobs = async_demo::ToolJobs::default();
     if let Some(saved) = status_store
@@ -1696,15 +1775,13 @@ async fn serve(
             save_server_tool_jobs(&tool_job_store, records.clone())?;
             let snapshot = {
                 let mut snapshot = tool_job_snapshot.lock().unwrap_or_else(|e| e.into_inner());
-                snapshot
-                    .jobs
-                    .retain(|job| !job["id"].as_str().is_some_and(|id| id.starts_with("tool/")));
+                snapshot.jobs.retain(|job| !job.id.starts_with("tool/"));
                 snapshot.jobs.extend(records.iter().map(projected_tool_job));
                 snapshot.clone()
             };
             tool_job_control.set_snapshot(snapshot);
             for record in records {
-                tool_job_control.publish("job.upsert", projected_tool_job(&record));
+                tool_job_control.publish(StateEvent::JobUpsert(projected_tool_job(&record)));
             }
             Ok(())
         });
@@ -1818,17 +1895,17 @@ async fn serve(
                 let completion = match async_result {
                     Ok(Ok((answer, item, head))) => {
                         engine_head = Some(head);
-                        ("completed", "completed", Some(answer), Some(item))
+                        (RequestState::Completed, RequestOutcome::Completed, Some(answer), Some(item))
                     }
                     Ok(Err(error)) => (
-                        "failed",
-                        "failed",
+                        RequestState::Failed,
+                        RequestOutcome::Failed,
                         Some(format!("Async Engine scenario failed: {error}")),
                         None,
                     ),
                     Err(join_error) => (
-                        "failed",
-                        "failed",
+                        RequestState::Failed,
+                        RequestOutcome::Failed,
                         Some(format!("Async Engine task join failed: {join_error}")),
                         None,
                     ),
@@ -1838,10 +1915,10 @@ async fn serve(
                         let envelope = persist_engine_final_envelope(
                             &status_store,
                             item,
-                            next_envelope_ordinal(&envelopes),
+                            next_envelope_ordinal(&envelopes)?,
                         )?;
                         envelopes.push(envelope.clone());
-                        control.publish("envelope.upsert", envelope);
+                        control.publish(StateEvent::EnvelopeUpsert(envelope));
                     }
                     if let Some(history_item) = history.iter_mut().find(|item| {
                         item.0["request_id"] == request_id && item.0["command"] == original_command
@@ -1857,14 +1934,14 @@ async fn serve(
                         completion.1,
                         completion.2.as_deref(),
                     );
-                    let job = job_record(&command_id, "settled");
+                    let job = job_record(&command_id, ToolJobState::Settled);
                     let request = replace_by_id(&mut requests, request);
                     let job = replace_by_id(&mut jobs, job);
                     let next_conversation =
                         if active_wait_request(&requests, &history).is_some() {
-                            conversation_record("requesting")
+                            conversation_record(ConversationState::Requesting)
                         } else {
-                            conversation_record("idle")
+                            conversation_record(ConversationState::Idle)
                         };
                     let conversation_changed = conversation != next_conversation;
                     conversation = next_conversation;
@@ -1885,10 +1962,10 @@ async fn serve(
                             ..Snapshot::default()
                         },
                     );
-                    control.publish("request.upsert", request);
-                    control.publish("job.upsert", job);
+                    control.publish(StateEvent::RequestUpsert(request));
+                    control.publish(StateEvent::JobUpsert(job));
                     if conversation_changed {
-                        control.publish("conversation.upsert", conversation.clone());
+                        control.publish(StateEvent::ConversationUpsert(conversation.clone()));
                     }
                 }
             }
@@ -1906,18 +1983,18 @@ async fn serve(
                         });
                     }
                     ClientCommand::Submit { command } => {
-                        let conversation_was_requesting = conversation["state"] == "requesting";
+                        let conversation_was_requesting = conversation.state == ConversationState::Requesting;
                         let request_id = format!("request/{command_id}");
                         let job_id = command_id.clone();
-                        let mut queued_job = job_record(&job_id, "running");
-                        stamp_start(&mut queued_job, "startedAtMs");
+                        let mut queued_job = job_record(&job_id, ToolJobState::Running);
+                        queued_job.started_at_ms = persisted_epoch_ms().map(Into::into);
                         let mut queued_request = command_request_record(
-                            &request_id, "running", &command_id, &command, "accepted", None,
+                            &request_id, RequestState::Running, &command_id, &command, RequestOutcome::Accepted, None,
                         );
-                        stamp_start(&mut queued_request, "createdAtMs");
+                        queued_request.created_at_ms = persisted_epoch_ms().map(Into::into);
                         jobs.push(queued_job);
                         requests.push(queued_request);
-                        conversation = conversation_record("requesting");
+                        conversation = conversation_record(ConversationState::Requesting);
                         status_store
                             .save_session_state(
                                 "harness-demo-server:/root",
@@ -1926,20 +2003,20 @@ async fn serve(
                             .map_err(|_| "could not persist accepted server command".to_owned())?;
                         set_live_server_snapshot(&control, &live_snapshot, Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: projected_server_jobs(&jobs, &tool_jobs), envelopes: envelopes.clone(), ..Snapshot::default() });
                         if !conversation_was_requesting {
-                            control.publish("conversation.upsert", conversation.clone());
+                            control.publish(StateEvent::ConversationUpsert(conversation.clone()));
                         }
-                        control.publish("request.upsert", requests.last().unwrap().clone());
-                        control.publish("job.upsert", jobs.last().unwrap().clone());
+                        control.publish(StateEvent::RequestUpsert(requests.last().unwrap().clone()));
+                        control.publish(StateEvent::JobUpsert(jobs.last().unwrap().clone()));
                         let waiting = active_wait_request(&requests, &history).is_some();
                         let (initial_state, initial_outcome, fallback_answer) =
                             deterministic_command(&command, waiting);
-                        if command == "wait" && initial_state == "running" {
+                        if command == "wait" && initial_state == ToolJobState::Running {
                             let pending_record = command_request_record(
                                 &request_id,
-                                "running",
+                                RequestState::Running,
                                 &command_id,
                                 &command,
-                                "pending",
+                                RequestOutcome::Pending,
                                 Some("Waiting for a cancel command."),
                             );
                             let pending_record = replace_by_id(&mut requests, pending_record);
@@ -1950,7 +2027,7 @@ async fn serve(
                                 )
                                 .map_err(|_| "could not persist pending wait")?;
                             set_live_server_snapshot(&control, &live_snapshot, Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: projected_server_jobs(&jobs, &tool_jobs), envelopes: envelopes.clone(), ..Snapshot::default() });
-                            control.publish("request.upsert", pending_record);
+                            control.publish(StateEvent::RequestUpsert(pending_record));
                         }
                         if command.starts_with("message ") && waiting {
                             let text = command.strip_prefix("message ").unwrap_or_default();
@@ -1958,9 +2035,9 @@ async fn serve(
                                 &status_store,
                                 "/operator",
                                 ROOT_PATH,
-                                "MESSAGE",
+                                EnvelopeKind::Message,
                                 text,
-                                next_envelope_ordinal(&envelopes),
+                                next_envelope_ordinal(&envelopes)?,
                             )?;
                             envelopes.push(message.clone());
                             status_store
@@ -1970,15 +2047,15 @@ async fn serve(
                                 )
                                 .map_err(|_| "could not persist queued browser message")?;
                             set_live_server_snapshot(&control, &live_snapshot, Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: projected_server_jobs(&jobs, &tool_jobs), envelopes: envelopes.clone(), ..Snapshot::default() });
-                            control.publish("envelope.upsert", message);
+                            control.publish(StateEvent::EnvelopeUpsert(message));
                         }
                         let progress = persist_browser_envelope(
                             &status_store,
                             "/harness",
                             ROOT_PATH,
-                            "PROGRESS",
+                            EnvelopeKind::Progress,
                             &format!("Request {command_id} accepted; deterministic Engine is processing it."),
-                            next_envelope_ordinal(&envelopes),
+                            next_envelope_ordinal(&envelopes)?,
                         )?;
                         envelopes.push(progress.clone());
                         status_store
@@ -1988,7 +2065,7 @@ async fn serve(
                             )
                             .map_err(|_| "could not persist server progress")?;
                         set_live_server_snapshot(&control, &live_snapshot, Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: projected_server_jobs(&jobs, &tool_jobs), envelopes: envelopes.clone(), ..Snapshot::default() });
-                        control.publish("envelope.upsert", progress);
+                        control.publish(StateEvent::EnvelopeUpsert(progress));
                         let mut child_envelopes = Vec::new();
                         let child_result = if let Some(text) = command.strip_prefix("child ") {
                             Some(
@@ -2008,14 +2085,14 @@ async fn serve(
                                 &status_store,
                                 ROOT_PATH,
                                 &child.0,
-                                "MESSAGE",
+                                EnvelopeKind::Message,
                                 command.strip_prefix("child ").unwrap_or_default(),
-                                next_envelope_ordinal(&envelopes),
+                                next_envelope_ordinal(&envelopes)?,
                             )?;
                             envelopes.push(parent_message.clone());
                             child_envelopes.push(parent_message);
                             let mut reply = child_envelope.clone();
-                            reply["ordinal"] = json!(next_envelope_ordinal(&envelopes));
+                            reply.ordinal = Some(next_envelope_ordinal(&envelopes)?.into());
                             envelopes.push(reply.clone());
                             child_envelopes.push(reply);
                         }
@@ -2078,7 +2155,7 @@ async fn serve(
                             ))
                         } else if async_echo_check {
                             None
-                        } else if initial_state == "running" {
+                        } else if initial_state == ToolJobState::Running {
                             let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
                             let engine_command_id = command_id.clone();
                             let engine_command = command.clone();
@@ -2142,9 +2219,9 @@ async fn serve(
                                             &status_store,
                                             "/harness",
                                             ROOT_PATH,
-                                            "PROGRESS",
+                                            EnvelopeKind::Progress,
                                             &start_event.to_string(),
-                                            next_envelope_ordinal(&envelopes),
+                                            next_envelope_ordinal(&envelopes)?,
                                         )?;
                                         envelopes.push(progress.clone());
                                         status_store
@@ -2160,7 +2237,7 @@ async fn serve(
                                             envelopes: envelopes.clone(),
                                             ..Snapshot::default()
                                         });
-                                        control.publish("envelope.upsert", progress);
+                                        control.publish(StateEvent::EnvelopeUpsert(progress));
                                     }
                                     tokio::time::timeout(
                                         Duration::from_secs(2),
@@ -2247,7 +2324,7 @@ async fn serve(
                                 if let Some(head) = engine_head.take() {
                                     engine_head = Some(durable_recovery_head(&status_store, head, ROOT_PATH)?);
                                 }
-                                ("failed", "failed", Some(error), None)
+                                (ToolJobState::Settled, RequestOutcome::Failed, Some(error), None)
                             },
                         };
                         history.push(Item(json!({"type":"demo_command","command_id":command_id,
@@ -2266,9 +2343,9 @@ async fn serve(
                         let mut changed_requests = Vec::new();
                         let mut changed_jobs = Vec::new();
                         let mut changed_envelopes = child_envelopes;
-                        if state != "running" {
-                            let own_request_state = if state == "failed" { "failed" } else { "completed" };
-                            let own_job_state = if state == "failed" { "settled" } else if outcome == "cancelled" { "cancelled" } else { "settled" };
+                        if state != ToolJobState::Running {
+                            let own_request_state = if outcome == RequestOutcome::Failed { RequestState::Failed } else { RequestState::Completed };
+                            let own_job_state = if outcome == RequestOutcome::Cancelled { ToolJobState::Cancelled } else { ToolJobState::Settled };
                             let done_request = command_request_record(
                                 &request_id,
                                 own_request_state,
@@ -2287,10 +2364,10 @@ async fn serve(
                                     let wait_item = history.iter().find(|item| item.0["request_id"] == pending_id && item.0["command"] == "wait");
                                     let wait_command_id = wait_item.and_then(|item| item.0["command_id"].as_str()).unwrap_or_default();
                                     let cancelled_request = command_request_record(
-                                        &pending_id, "failed", wait_command_id, "wait",
-                                        "cancelled", Some("Request cancelled."),
+                                        &pending_id, RequestState::Failed, wait_command_id, "wait",
+                                        RequestOutcome::Cancelled, Some("Request cancelled."),
                                     );
-                                    let cancelled_job = job_record(pending_id.strip_prefix("request/").unwrap_or(&pending_id), "cancelled");
+                                    let cancelled_job = job_record(pending_id.strip_prefix("request/").unwrap_or(&pending_id), ToolJobState::Cancelled);
                                     let cancelled_request =
                                         replace_by_id(&mut requests, cancelled_request);
                                     let cancelled_job = replace_by_id(&mut jobs, cancelled_job);
@@ -2298,11 +2375,11 @@ async fn serve(
                                     changed_jobs.push(cancelled_job);
                                 }
                             }
-                            if own_request_state == "completed" {
+                            if own_request_state == RequestState::Completed {
                                 if let Some(Ok((_, _, child_envelope))) = &child_result {
                                     let _ = child_envelope;
                                 } else if let Some(item) = final_item.as_ref() {
-                                    let envelope = persist_engine_final_envelope(&status_store, item, next_envelope_ordinal(&envelopes))?;
+                                    let envelope = persist_engine_final_envelope(&status_store, item, next_envelope_ordinal(&envelopes)?)?;
                                     envelopes.push(envelope.clone());
                                     changed_envelopes.push(envelope);
                                 } else if skip_engine_for_queued_message {
@@ -2310,9 +2387,9 @@ async fn serve(
                                         &status_store,
                                         ROOT_PATH,
                                         "/operator",
-                                        "MESSAGE",
+                                        EnvelopeKind::Message,
                                         answer.as_deref().unwrap_or("Message queued."),
-                                        next_envelope_ordinal(&envelopes),
+                                        next_envelope_ordinal(&envelopes)?,
                                     )?;
                                     envelopes.push(queued.clone());
                                     changed_envelopes.push(queued);
@@ -2321,9 +2398,9 @@ async fn serve(
                                         &status_store,
                                         ROOT_PATH,
                                         "/operator",
-                                        "MESSAGE",
+                                        EnvelopeKind::Message,
                                         answer.as_deref().unwrap_or(""),
-                                        next_envelope_ordinal(&envelopes),
+                                        next_envelope_ordinal(&envelopes)?,
                                     )?;
                                     envelopes.push(responsive.clone());
                                     changed_envelopes.push(responsive);
@@ -2333,9 +2410,9 @@ async fn serve(
                                     &status_store,
                                     ROOT_PATH,
                                     "/operator",
-                                    "MESSAGE",
+                                    EnvelopeKind::Message,
                                     answer,
-                                    next_envelope_ordinal(&envelopes),
+                                    next_envelope_ordinal(&envelopes)?,
                                 )?;
                                 envelopes.push(failure.clone());
                                 changed_envelopes.push(failure);
@@ -2347,9 +2424,9 @@ async fn serve(
                         let next_conversation = if active_wait_request(&requests, &history).is_some()
                             || active_async_request(&requests).is_some()
                         {
-                            conversation_record("requesting")
+                            conversation_record(ConversationState::Requesting)
                         } else {
-                            conversation_record("idle")
+                            conversation_record(ConversationState::Idle)
                         };
                         let conversation_changed = conversation != next_conversation;
                         conversation = next_conversation;
@@ -2361,16 +2438,16 @@ async fn serve(
                             .map_err(|_| "could not persist server job status".to_owned())?;
                         set_live_server_snapshot(&control, &live_snapshot, Snapshot { conversations: conversation_rows(&conversation, &envelopes), requests: requests.clone(), jobs: projected_server_jobs(&jobs, &tool_jobs), envelopes: envelopes.clone(), ..Snapshot::default() });
                         for request in changed_requests {
-                            control.publish("request.upsert", request);
+                            control.publish(StateEvent::RequestUpsert(request));
                         }
                         for job in changed_jobs {
-                            control.publish("job.upsert", job);
+                            control.publish(StateEvent::JobUpsert(job));
                         }
                         for envelope in changed_envelopes {
-                            control.publish("envelope.upsert", envelope);
+                            control.publish(StateEvent::EnvelopeUpsert(envelope));
                         }
                         if conversation_changed {
-                            control.publish("conversation.upsert", conversation.clone());
+                            control.publish(StateEvent::ConversationUpsert(conversation.clone()));
                         }
                     }
                 }
@@ -2386,43 +2463,80 @@ async fn serve(
     Ok(())
 }
 
-fn replace_by_id(records: &mut Vec<Value>, mut replacement: Value) -> Value {
-    let id = replacement.get("id").cloned();
+/// The two demo observations share timing replacement, while their state types
+/// and timestamps remain explicit at the producer boundary.
+trait TimedProjection: Clone {
+    fn id(&self) -> &str;
+    fn running(&self) -> bool;
+    fn start(&self) -> Option<WireI64>;
+    fn end(&self) -> Option<WireI64>;
+    fn set_times(&mut self, start: Option<WireI64>, end: Option<WireI64>);
+}
+impl TimedProjection for RequestProjection {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn running(&self) -> bool {
+        self.state == RequestState::Running
+    }
+    fn start(&self) -> Option<WireI64> {
+        self.created_at_ms
+    }
+    fn end(&self) -> Option<WireI64> {
+        self.ended_at_ms
+    }
+    fn set_times(&mut self, start: Option<WireI64>, end: Option<WireI64>) {
+        self.created_at_ms = start;
+        self.ended_at_ms = end;
+    }
+}
+impl TimedProjection for JobProjection {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn running(&self) -> bool {
+        self.state == ToolJobState::Running
+    }
+    fn start(&self) -> Option<WireI64> {
+        self.started_at_ms
+    }
+    fn end(&self) -> Option<WireI64> {
+        self.ended_at_ms
+    }
+    fn set_times(&mut self, start: Option<WireI64>, end: Option<WireI64>) {
+        self.started_at_ms = start;
+        self.ended_at_ms = end;
+    }
+}
+fn replace_by_id<T: TimedProjection>(records: &mut Vec<T>, mut replacement: T) -> T {
     if let Some(previous) = records
         .iter()
-        .find(|record| record.get("id") == id.as_ref())
+        .find(|record| record.id() == replacement.id())
     {
-        let (start_field, end_field) = if replacement.get("commandId").is_some() {
-            ("createdAtMs", "endedAtMs")
-        } else {
-            ("startedAtMs", "endedAtMs")
-        };
-        if let Some(start) = previous.get(start_field) {
-            replacement[start_field] = start.clone();
-        }
-        if let Some(end) = previous.get(end_field) {
-            replacement[end_field] = end.clone();
-        } else if previous["state"] == "running" && replacement["state"] != "running" {
-            replacement[end_field] = persisted_epoch_ms().map_or(Value::Null, |ms| json!(ms));
-        }
+        let end = previous.end().or_else(|| {
+            (previous.running() && !replacement.running())
+                .then(persisted_epoch_ms)
+                .flatten()
+                .map(Into::into)
+        });
+        replacement.set_times(previous.start(), end);
     }
-    records.retain(|record| record.get("id") != id.as_ref());
+    records.retain(|record| record.id() != replacement.id());
     records.push(replacement.clone());
     replacement
 }
 
-fn projected_server_jobs(command_jobs: &[Value], tool_jobs: &async_demo::ToolJobs) -> Vec<Value> {
+fn projected_server_jobs(
+    command_jobs: &[JobProjection],
+    tool_jobs: &async_demo::ToolJobs,
+) -> Vec<JobProjection> {
     let mut projected = command_jobs.to_vec();
     projected.extend(tool_jobs.records().iter().map(projected_tool_job));
     projected
 }
 
-fn projected_tool_job(record: &harness::server::ToolJobRecord) -> Value {
-    let mut value = serde_json::to_value(record).expect("tool job record serializes");
-    if record.state == harness::server::ToolJobState::Interrupted && record.ended_at_ms.is_none() {
-        value["endedAtMs"] = Value::Null;
-    }
-    value
+fn projected_tool_job(record: &harness::server::ToolJobRecord) -> JobProjection {
+    JobProjection::from(record)
 }
 
 fn set_live_server_snapshot(
@@ -2800,7 +2914,7 @@ mod tests {
     use super::*;
     use harness::engine::ResponsesTransport;
     use harness::model::{AgentPath, CallId, Effort};
-    use harness::server::{WsEvent, WsEventPayload, WsServerFrame};
+    use harness::server::{WsEvent, WsServerFrame};
     use harness::store::Store;
     use harness::transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, Usage};
     use harness::turn::JobScheduler;
@@ -2841,61 +2955,74 @@ mod tests {
     fn command_timing_replacement_preserves_persisted_start_and_single_terminal_end() {
         let mut pending = command_request_record(
             "request/c1",
-            "running",
+            RequestState::Running,
             "c1",
             "async start",
-            "pending",
+            RequestOutcome::Pending,
             None,
         );
-        pending["createdAtMs"] = json!(1_700_000_000_000_i64);
+        pending.created_at_ms = Some(1_700_000_000_000_i64.into());
         let mut records = vec![pending];
         let still_pending = replace_by_id(
             &mut records,
             command_request_record(
                 "request/c1",
-                "running",
+                RequestState::Running,
                 "c1",
                 "async start",
-                "pending",
+                RequestOutcome::Pending,
                 None,
             ),
         );
-        assert_eq!(still_pending["createdAtMs"], json!(1_700_000_000_000_i64));
-        assert!(still_pending.get("endedAtMs").is_none());
+        assert_eq!(
+            still_pending.created_at_ms.map(WireI64::get),
+            Some(1_700_000_000_000_i64)
+        );
+        assert!(still_pending.ended_at_ms.is_none());
         let completed = replace_by_id(
             &mut records,
             command_request_record(
                 "request/c1",
-                "completed",
+                RequestState::Completed,
                 "c1",
                 "async start",
-                "completed",
+                RequestOutcome::Completed,
                 None,
             ),
         );
-        let end = completed["endedAtMs"]
-            .as_i64()
+        let end = completed
+            .ended_at_ms
+            .map(WireI64::get)
             .expect("observed terminal time");
         assert!(end >= 1_700_000_000_000_i64);
         let replayed = replace_by_id(
             &mut records,
             command_request_record(
                 "request/c1",
-                "completed",
+                RequestState::Completed,
                 "c1",
                 "async start",
-                "completed",
+                RequestOutcome::Completed,
                 None,
             ),
         );
-        assert_eq!(replayed["createdAtMs"], json!(1_700_000_000_000_i64));
-        assert_eq!(replayed["endedAtMs"], json!(end));
+        assert_eq!(
+            replayed.created_at_ms.map(WireI64::get),
+            Some(1_700_000_000_000_i64)
+        );
+        assert_eq!(replayed.ended_at_ms.map(WireI64::get), Some(end));
 
-        let mut running_job = job_record("c1", "running");
-        running_job["startedAtMs"] = json!(1_700_000_000_001_i64);
-        let interrupted_job = replace_by_id(&mut vec![running_job], job_record("c1", "cancelled"));
-        assert_eq!(interrupted_job["startedAtMs"], json!(1_700_000_000_001_i64));
-        assert!(interrupted_job["endedAtMs"].as_i64().is_some());
+        let mut running_job = job_record("c1", ToolJobState::Running);
+        running_job.started_at_ms = Some(1_700_000_000_001_i64.into());
+        let interrupted_job = replace_by_id(
+            &mut vec![running_job],
+            job_record("c1", ToolJobState::Cancelled),
+        );
+        assert_eq!(
+            interrupted_job.started_at_ms.map(WireI64::get),
+            Some(1_700_000_000_001_i64)
+        );
+        assert!(interrupted_job.ended_at_ms.is_some());
 
         let projected = projected_tool_job(&harness::server::ToolJobRecord {
             id: "tool/conversation/root/call-a".into(),
@@ -2910,8 +3037,12 @@ mod tests {
             ended_at_ms: None,
             output: None,
         });
-        assert_eq!(projected["startedAtMs"], json!(1_700_000_000_002_i64));
-        assert!(projected.get("endedAtMs").is_some_and(Value::is_null));
+        assert_eq!(
+            projected.started_at_ms.map(WireI64::get),
+            Some(1_700_000_000_002_i64)
+        );
+        assert!(projected.ended_at_ms.is_none());
+        assert_eq!(projected.state, ToolJobState::Interrupted);
     }
 
     #[tokio::test]
@@ -3904,92 +4035,73 @@ mod tests {
 
     #[test]
     fn server_state_matches_web_contract_and_event_kinds() {
-        let conversation = conversation_record("idle");
-        let request = request_record("r1", "completed");
-        let job = job_record("j1", "settled");
+        let conversation = conversation_record(ConversationState::Idle);
+        let request = request_record("r1", RequestState::Completed);
+        let job = job_record("j1", ToolJobState::Settled);
         let envelope = final_envelope("e1", "final answer");
-        assert_eq!(
-            conversation,
-            json!({"id":"conversation/root","path":"/root","state":"idle"})
-        );
-        assert_eq!(
-            request,
-            json!({"id":"r1","conversationId":"conversation/root","state":"completed"})
-        );
-        assert_eq!(
-            job,
-            json!({"id":"j1","conversationId":"conversation/root","state":"settled"})
-        );
-        assert_eq!(
-            envelope,
-            json!({"id":"e1","conversationId":"conversation/root","recipient":"/root","sender":"/root","type":"FINAL_ANSWER","payload":"final answer"})
-        );
         let frame = WsServerFrame::Event {
             event: WsEvent {
-                seq: 1,
-                event: WsEventPayload {
-                    kind: "job.upsert".into(),
-                    value: job,
-                },
+                seq: u64::MAX.into(),
+                event: StateEvent::JobUpsert(job.clone()),
             },
         };
+        let wire = serde_json::to_value(&frame).unwrap();
         assert_eq!(
-            serde_json::to_value(frame).unwrap(),
-            json!({"type":"event","event":{"seq":1,"event":{"kind":"job.upsert","value":{
-                "id":"j1","conversationId":"conversation/root","state":"settled"
-            }}}})
+            wire,
+            json!({"type":"event","event":{
+                "seq":"18446744073709551615", "event":{"kind":"job.upsert","value":{
+                    "id":"j1", "conversationId":"conversation/root", "state":"settled",
+                    "startedAtMs":null, "endedAtMs":null
+                }}
+            }})
         );
-        assert_eq!(envelope["type"], "FINAL_ANSWER");
         assert_eq!(
-            serde_json::to_value(Snapshot {
-                host_run: None,
-                live_output: vec![],
-                history_revisions: vec![],
-                seq: 5,
-                actors: vec![],
-                command_receipts: vec![],
-                conversations: vec![conversation],
-                requests: vec![request],
-                jobs: vec![job_record("j1", "settled")],
-                envelopes: vec![envelope],
-            })
-            .unwrap(),
-            json!({
-                "seq":5,
-                "conversations":[{"id":"conversation/root","path":"/root","state":"idle"}],
-                "requests":[{"id":"r1","conversationId":"conversation/root","state":"completed"}],
-                "jobs":[{"id":"j1","conversationId":"conversation/root","state":"settled"}],
-                "envelopes":[{"id":"e1","conversationId":"conversation/root","recipient":"/root","sender":"/root","type":"FINAL_ANSWER","payload":"final answer"}]
-            })
+            serde_json::from_value::<WsServerFrame>(wire).unwrap(),
+            frame
         );
+        assert_eq!(envelope.kind, EnvelopeKind::FinalAnswer);
+        let snapshot = Snapshot {
+            seq: 5_u64.into(),
+            conversations: vec![conversation],
+            requests: vec![request],
+            jobs: vec![job],
+            envelopes: vec![envelope],
+            ..Snapshot::default()
+        };
+        let wire = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(wire["seq"], "5");
+        assert!(wire["requests"][0]["parentId"].is_null());
+        assert!(wire["requests"][0]["failure"].is_null());
+        assert!(wire["envelopes"][0].get("conversationId").is_none());
+        assert_eq!(serde_json::from_value::<Snapshot>(wire).unwrap(), snapshot);
     }
 
     #[test]
     fn deterministic_server_commands_keep_wait_pending_without_blocking_followups() {
         assert_eq!(
             deterministic_command("wait", false),
-            ("running", "pending", None)
+            (ToolJobState::Running, RequestOutcome::Pending, None)
         );
         assert_eq!(
             deterministic_command("message queued text", true),
             (
-                "settled",
-                "queued",
+                ToolJobState::Settled,
+                RequestOutcome::Queued,
                 Some("Message queued: queued text".into())
             )
         );
         assert_eq!(
             deterministic_command("cancel", true),
             (
-                "settled",
-                "completed",
+                ToolJobState::Settled,
+                RequestOutcome::Completed,
                 Some("Pending wait cancelled.".into())
             )
         );
         let request_id = "request/client-command-1";
         assert_eq!(
             active_wait_request(
-                &[request_record(request_id, "running")],
+                &[request_record(request_id, RequestState::Running)],
                 &[Item(json!({
                     "type":"demo_command",
                     "command_id":"client-command-1",
@@ -4007,10 +4119,10 @@ mod tests {
     fn custom_pending_request_keeps_conversation_requesting() {
         let pending = command_request_record(
             "request/custom",
-            "running",
+            RequestState::Running,
             "command/custom",
             "custom hold-for-cancel",
-            "pending",
+            RequestOutcome::Pending,
             None,
         );
         assert_eq!(
@@ -4019,7 +4131,7 @@ mod tests {
         );
         assert_eq!(
             deterministic_command("custom hold-for-cancel", false),
-            ("running", "pending", None)
+            (ToolJobState::Running, RequestOutcome::Pending, None)
         );
     }
 
@@ -4028,14 +4140,18 @@ mod tests {
         assert_eq!(
             deterministic_command("fail", false),
             (
-                "failed",
-                "failed",
+                ToolJobState::Settled,
+                RequestOutcome::Failed,
                 Some("Controlled deterministic failure.".into())
             )
         );
         assert_eq!(
             deterministic_command("echo recovered", false),
-            ("settled", "completed", Some("recovered".into()))
+            (
+                ToolJobState::Settled,
+                RequestOutcome::Completed,
+                Some("recovered".into())
+            )
         );
     }
 
@@ -4055,7 +4171,7 @@ mod tests {
             .rev()
             .find(|entry| entry.sender == child.0)
             .unwrap();
-        assert_eq!(snapshot["id"], format!("envelope/{}", committed.id));
+        assert_eq!(snapshot.id, format!("envelope/{}", committed.id));
         let item = store.get_item(&committed.item_hash).unwrap().unwrap();
         let stored_text = item.0["content"][0]["text"].as_str().unwrap();
         assert!(stored_text.ends_with(&reply));
@@ -4285,6 +4401,61 @@ mod tests {
         assert_eq!(next_input.last().unwrap().0["content"], "follow-up");
     }
 
+    #[test]
+    fn persisted_projection_migration_preserves_timing_and_exact_ordinals() {
+        let legacy = json!({
+            "history":[],
+            "jobs":[{"id":"job/1","conversationId":"conversation/root","state":"settled",
+                "startedAtMs":1_700_000_000_001_i64,"endedAtMs":1_700_000_000_002_i64}],
+            "requests":[{"id":"request/1","conversationId":"conversation/root","state":"completed",
+                "createdAtMs":1_700_000_000_001_i64,"endedAtMs":1_700_000_000_002_i64,
+                "outcome":"no pending wait","detail":"No pending wait; message not queued."}],
+            "envelopes":[{"id":"envelope/1","conversationId":"conversation/root",
+                "sender":"/root","recipient":"/operator","type":"MESSAGE","payload":"retained",
+                "ordinal":u64::MAX}],
+            "conversation":{"id":"conversation/root","path":"/root","state":"idle"}
+        });
+        let restored = restore_server_state(&legacy.to_string()).unwrap();
+        assert_eq!(
+            restored.jobs[0].started_at_ms.map(WireI64::get),
+            Some(1_700_000_000_001)
+        );
+        assert_eq!(
+            restored.requests[0].ended_at_ms.map(WireI64::get),
+            Some(1_700_000_000_002)
+        );
+        assert_eq!(
+            restored.requests[0].outcome,
+            Some(RequestOutcome::Completed)
+        );
+        assert_eq!(
+            restored.requests[0].detail.as_deref(),
+            Some("No pending wait; message not queued.")
+        );
+        assert_eq!(
+            restored.envelopes[0].ordinal.map(WireU64::get),
+            Some(u64::MAX)
+        );
+        assert!(next_envelope_ordinal(&restored.envelopes).is_err());
+        let current = json!({
+            "history":restored.history,"jobs":restored.jobs,"requests":restored.requests,
+            "envelopes":restored.envelopes,"conversation":restored.conversation
+        });
+        assert_eq!(current["jobs"][0]["startedAtMs"], "1700000000001");
+        assert_eq!(current["envelopes"][0]["ordinal"], "18446744073709551615");
+        let reopened = restore_server_state(&current.to_string()).unwrap();
+        assert_eq!(reopened.jobs, restored.jobs);
+        assert_eq!(reopened.requests, restored.requests);
+        assert_eq!(reopened.envelopes, restored.envelopes);
+        assert_eq!(reopened.conversation, restored.conversation);
+        let mut malformed = legacy;
+        malformed["jobs"][0]["state"] = json!("unrecognized");
+        assert!(restore_server_state(&malformed.to_string()).is_err());
+        malformed["jobs"][0]["state"] = json!("settled");
+        malformed["jobs"][0]["startedAtMs"] = json!(1.25);
+        assert!(restore_server_state(&malformed.to_string()).is_err());
+    }
+
     #[tokio::test]
     async fn malformed_persisted_state_fails_and_running_records_are_interrupted() {
         assert!(restore_server_state("{").is_err());
@@ -4297,11 +4468,10 @@ mod tests {
             r#"{"history":[],"jobs":[{"id":"j1","conversationId":"conversation/root","state":"running"}],"requests":[{"id":"r1","conversationId":"conversation/root","state":"running"}],"envelopes":[],"engineHead":"actual-head-1","toolJobs":[{"id":"tool/conversation/root/call-A","conversationId":"conversation/root","requestId":"emitting-head-2","callId":"call-A","toolName":"sleep","state":"running","delivered":false},{"id":"tool/conversation/root/call-B","conversationId":"conversation/root","requestId":"emitting-head-1","callId":"call-B","toolName":"sleep","state":"settled","delivered":true,"output":{"ok":true}}],"conversation":{"id":"conversation/root","path":"/root","state":"requesting"}}"#,
         )
         .unwrap();
-        assert_eq!(restored.jobs[0]["state"], "cancelled");
-        assert_eq!(restored.jobs[0]["status"], "Interrupted");
-        assert_eq!(restored.jobs[0]["interrupted"], true);
-        assert_eq!(restored.requests[0]["state"], "failed");
-        assert_eq!(restored.conversation["state"], "idle");
+        assert_eq!(restored.jobs[0].state, ToolJobState::Cancelled);
+        assert!(restored.jobs[0].ended_at_ms.is_none());
+        assert_eq!(restored.requests[0].state, RequestState::Failed);
+        assert_eq!(restored.conversation.state, ConversationState::Idle);
         assert_eq!(
             restored.engine_head.as_ref().map(|head| head.0.as_str()),
             Some("actual-head-1")
