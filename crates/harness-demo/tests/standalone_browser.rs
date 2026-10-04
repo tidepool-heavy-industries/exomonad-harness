@@ -6,6 +6,10 @@ use std::{
 };
 
 use futures_util::{SinkExt, StreamExt};
+use harness::server::browser_contract::{
+    EnvelopeKind, JobProjection, RequestOutcome, RequestState, ServerFrame, Snapshot,
+};
+use harness::server::{ClientCommand, ToolJobState};
 use harness::{
     model::RequestId,
     store::{RecordedReplayTurn, Store},
@@ -292,7 +296,7 @@ async fn login(base: &str, client: &reqwest::Client) -> String {
         .to_owned()
 }
 
-async fn snapshot(base: &str, cookie: &str) -> Value {
+async fn snapshot(base: &str, cookie: &str) -> Snapshot {
     let mut request = (base.replacen("http://", "ws://", 1) + "/api/ws")
         .into_client_request()
         .unwrap();
@@ -303,14 +307,16 @@ async fn snapshot(base: &str, cookie: &str) -> Value {
         .headers_mut()
         .insert("cookie", cookie.parse().unwrap());
     let (mut socket, _) = connect_async(request).await.unwrap();
-    let value = timeout(Duration::from_secs(5), read_json(&mut socket))
+    let value = timeout(Duration::from_secs(5), read_frame(&mut socket))
         .await
         .unwrap();
-    assert_eq!(value["type"], "snapshot");
-    value
+    match value {
+        ServerFrame::Snapshot { snapshot } => snapshot,
+        other => panic!("expected snapshot frame: {other:?}"),
+    }
 }
 
-async fn read_json(socket: &mut Socket) -> Value {
+async fn read_frame(socket: &mut Socket) -> ServerFrame {
     while let Some(message) = socket.next().await {
         match message.expect("read websocket frame") {
             Message::Text(text) => {
@@ -333,7 +339,9 @@ async fn submit(base: &str, cookie: &str, client: &reqwest::Client, command: &st
         .post(format!("{base}/api/commands"))
         .header("origin", base)
         .header("cookie", cookie)
-        .json(&json!({"type":"submit","command":command}))
+        .json(&ClientCommand::Submit {
+            command: command.into(),
+        })
         .send()
         .await
         .unwrap();
@@ -344,16 +352,13 @@ async fn submit(base: &str, cookie: &str, client: &reqwest::Client, command: &st
         .to_owned()
 }
 
-async fn await_request(base: &str, cookie: &str, id: &str) -> Value {
+async fn await_request(base: &str, cookie: &str, id: &str) -> Snapshot {
     timeout(Duration::from_secs(10), async {
         loop {
             let shot = snapshot(base, cookie).await;
-            if shot["snapshot"]["requests"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|r| r["commandId"] == id && r["state"] != "running")
-            {
+            if shot.requests.iter().any(|request| {
+                request.command_id.as_deref() == Some(id) && request.state != RequestState::Running
+            }) {
                 return shot;
             }
             tokio::time::sleep(Duration::from_millis(40)).await;
@@ -368,80 +373,53 @@ async fn await_gate_pair(
     cookie: &str,
     command_id: &str,
     db: &Path,
-) -> (Value, Vec<Value>) {
+) -> (Snapshot, Vec<JobProjection>) {
     timeout(Duration::from_secs(10), async {
         loop {
             let shot = snapshot(base, cookie).await;
-            let tool_jobs: Vec<Value> = shot["snapshot"]["jobs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|job| {
-                    job["callId"].as_str().is_some_and(|id| !id.is_empty())
-                        && job["requestId"].as_str().is_some_and(|id| !id.is_empty())
-                        && job["toolName"].as_str().is_some_and(|name| !name.is_empty())
-                        && job["delivered"].is_boolean()
-                })
-                .cloned()
-                .collect();
+            let tool_jobs: Vec<JobProjection> = shot.jobs.iter().filter(|job| {
+                job.call_id.as_deref().is_some_and(|id| !id.is_empty())
+                    && job.request_id.as_deref().is_some_and(|id| !id.is_empty())
+                    && job.tool_name.as_deref().is_some_and(|name| !name.is_empty())
+                    && job.delivered.is_some()
+            }).cloned().collect();
             let request_sequence = before_request_decisions(db);
-            let pair_observed = tool_jobs
-                .iter()
-                .filter(|job| {
-                    job["toolName"] == "gate"
-                        && job["state"] == "running"
-                        && job["delivered"] == false
+            let pair_observed = tool_jobs.iter().filter(|job| {
+                job.tool_name.as_deref() == Some("gate") && job.state == ToolJobState::Running
+                    && job.delivered == Some(false)
+            }).any(|a| {
+                let Some(a_sequence) = request_sequence.iter().position(|row| row["request"] == a.request_id.as_deref().unwrap()) else { return false; };
+                tool_jobs.iter().any(|b| {
+                    if b.delivered != Some(true) || b.call_id == a.call_id || b.request_id == a.request_id { return false; }
+                    request_sequence.iter().position(|row| row["request"] == b.request_id.as_deref().unwrap())
+                        .is_some_and(|b_sequence| b_sequence > a_sequence)
                 })
-                .any(|a| {
-                    let Some(a_sequence) = request_sequence
-                        .iter()
-                        .position(|row| row["request"] == a["requestId"])
-                    else {
-                        return false;
-                    };
-                    tool_jobs.iter().any(|b| {
-                        if b["delivered"] != true
-                            || b["callId"] == a["callId"]
-                            || b["requestId"] == a["requestId"]
-                        {
-                            return false;
-                        }
-                        request_sequence
-                            .iter()
-                            .position(|row| row["request"] == b["requestId"])
-                            .is_some_and(|b_sequence| b_sequence > a_sequence)
-                    })
-                });
-            if pair_observed {
-                return (shot, tool_jobs);
-            }
-
-            // A terminal command without the paired gate jobs is direct
-            // expected-red evidence for a missing async producer.
-            let command_finished = shot["snapshot"]["requests"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|request| request["commandId"] == command_id && request["state"] != "running");
-            if command_finished {
-                return (shot, tool_jobs);
-            }
+            });
+            if pair_observed { return (shot, tool_jobs); }
+            // A terminal command without the gate pair retains evidence of a
+            // missing async producer rather than waiting for a nonexistent pair.
+            let command_finished = shot.requests.iter().any(|request| {
+                request.command_id.as_deref() == Some(command_id) && request.state != RequestState::Running
+            });
+            if command_finished { return (shot, tool_jobs); }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-    })
-    .await
-    .expect("async start exposed neither the pending/delivered ToolJobRecord pair nor a terminal command")
+    }).await.expect("async start exposed neither the pending/delivered ToolJobRecord pair nor a terminal command")
 }
 
-async fn await_job_state(base: &str, cookie: &str, call_id: &str, state: &str) -> Value {
+async fn await_job_state(
+    base: &str,
+    cookie: &str,
+    call_id: &str,
+    state: ToolJobState,
+) -> JobProjection {
     timeout(Duration::from_secs(10), async {
         loop {
             let shot = snapshot(base, cookie).await;
-            if let Some(job) = shot["snapshot"]["jobs"]
-                .as_array()
-                .unwrap()
+            if let Some(job) = shot
+                .jobs
                 .iter()
-                .find(|job| job["callId"] == call_id && job["state"] == state)
+                .find(|job| job.call_id.as_deref() == Some(call_id) && job.state == state)
             {
                 return job.clone();
             }
@@ -666,33 +644,30 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     let cookie = login(&base, &client).await;
     let first_id = submit(&base, &cookie, &client, "echo standalone").await;
     let echo = await_request(&base, &cookie, &first_id).await;
-    let echo_record = echo["snapshot"]["requests"]
-        .as_array()
-        .unwrap()
+    let echo_record = echo
+        .requests
         .iter()
-        .find(|r| r["commandId"] == first_id)
+        .find(|r| r.command_id.as_deref() == Some(first_id.as_str()))
         .expect("echo request must be visible");
-    assert_eq!(echo_record["state"], "completed");
-    assert_eq!(echo_record["outcome"], "completed");
-    assert_eq!(echo_record["detail"], "standalone");
+    assert_eq!(echo_record.state, RequestState::Completed);
+    assert_eq!(echo_record.outcome, Some(RequestOutcome::Completed));
+    assert_eq!(echo_record.detail.as_deref(), Some("standalone"));
     let inject_id = submit(&base, &cookie, &client, "echo inject-context").await;
     let injected = await_request(&base, &cookie, &inject_id).await;
-    let inject_record = injected["snapshot"]["requests"]
-        .as_array()
-        .unwrap()
+    let inject_record = injected
+        .requests
         .iter()
-        .find(|r| r["commandId"] == inject_id)
+        .find(|r| r.command_id.as_deref() == Some(inject_id.as_str()))
         .expect("inject-context request must be visible");
-    assert_eq!(inject_record["state"], "completed");
-    assert_eq!(inject_record["outcome"], "completed");
+    assert_eq!(inject_record.state, RequestState::Completed);
+    assert_eq!(inject_record.outcome, Some(RequestOutcome::Completed));
     let child_id = submit(&base, &cookie, &client, "child standalone-child").await;
     let first_shot = await_request(&base, &cookie, &child_id).await;
     assert!(
-        first_shot["snapshot"]["envelopes"]
-            .as_array()
-            .unwrap()
+        first_shot
+            .envelopes
             .iter()
-            .any(|e| e["type"] == "MESSAGE"),
+            .any(|e| e.kind == EnvelopeKind::Message),
         "child message absent before reopen"
     );
     let early_decisions = before_request_decisions(&db);
@@ -833,31 +808,33 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     let (async_start_snapshot, tool_jobs) =
         await_gate_pair(&base, &cookie, &async_start_id, &db).await;
 
-    let pending_a: Vec<&Value> = tool_jobs
+    let pending_a: Vec<&JobProjection> = tool_jobs
         .iter()
         .filter(|job| {
-            job["toolName"] == "gate" && job["state"] == "running" && job["delivered"] == false
+            job.tool_name.as_deref() == Some("gate")
+                && job.state == ToolJobState::Running
+                && job.delivered == Some(false)
         })
         .collect();
     let a_request_sequence = before_request_decisions(&db);
     let a_sequence = pending_a
         .first()
-        .and_then(|job| job["requestId"].as_str())
+        .and_then(|job| job.request_id.as_deref())
         .and_then(|request_id| {
             a_request_sequence
                 .iter()
                 .position(|row| row["request"] == request_id)
         });
-    let delivered_b_candidates: Vec<(&Value, usize)> = tool_jobs
+    let delivered_b_candidates: Vec<(&JobProjection, usize)> = tool_jobs
         .iter()
         .filter(|job| {
-            if job["delivered"] != true {
+            if job.delivered != Some(true) {
                 return false;
             }
             let Some(a) = pending_a.first() else {
                 return false;
             };
-            if job["callId"] == a["callId"] || job["requestId"] == a["requestId"] {
+            if job.call_id == a.call_id || job.request_id == a.request_id {
                 return false;
             }
             let Some(a_sequence) = a_sequence else {
@@ -865,13 +842,13 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
             };
             a_request_sequence
                 .iter()
-                .position(|row| row["request"] == job["requestId"])
+                .position(|row| row["request"] == job.request_id.as_deref().unwrap())
                 .is_some_and(|b_sequence| b_sequence > a_sequence)
         })
         .filter_map(|job| {
             a_request_sequence
                 .iter()
-                .position(|row| row["request"] == job["requestId"])
+                .position(|row| row["request"] == job.request_id.as_deref().unwrap())
                 .map(|sequence| (job, sequence))
         })
         .collect();
@@ -880,8 +857,8 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
         1,
         "expected exactly one A running and undelivered after accepted async start; command={} requests={:#?} jobs={:#?}",
         async_start_id,
-        async_start_snapshot["snapshot"]["requests"],
-        async_start_snapshot["snapshot"]["jobs"]
+        async_start_snapshot.requests,
+        async_start_snapshot.jobs
     );
     let delivered_b = delivered_b_candidates
         .iter()
@@ -890,17 +867,21 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
         .expect("expected a distinct delivered B from a later actual Engine request while A remains pending");
     let gate_a = pending_a[0];
     let gate_b = delivered_b;
-    let gate_call_id = gate_a["callId"]
-        .as_str()
+    let gate_call_id = gate_a
+        .call_id
+        .as_deref()
         .expect("A ToolJobRecord must expose its original callId");
-    let gate_request_id = gate_a["requestId"]
-        .as_str()
+    let gate_request_id = gate_a
+        .request_id
+        .as_deref()
         .expect("A ToolJobRecord must expose its emitting Engine requestId");
-    let b_call_id = gate_b["callId"]
-        .as_str()
+    let b_call_id = gate_b
+        .call_id
+        .as_deref()
         .expect("B ToolJobRecord must expose its original callId");
-    let b_request_id = gate_b["requestId"]
-        .as_str()
+    let b_request_id = gate_b
+        .request_id
+        .as_deref()
         .expect("B ToolJobRecord must expose its emitting Engine requestId");
     assert_ne!(gate_call_id, b_call_id, "A and B must be distinct calls");
     assert_ne!(
@@ -918,15 +899,14 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
 
     let echo_id = submit(&base, &cookie, &client, "echo hello").await;
     let echo_while_pending = await_request(&base, &cookie, &echo_id).await;
-    let echo_record = echo_while_pending["snapshot"]["requests"]
-        .as_array()
-        .unwrap()
+    let echo_record = echo_while_pending
+        .requests
         .iter()
-        .find(|request| request["commandId"] == echo_id)
+        .find(|request| request.command_id.as_deref() == Some(echo_id.as_str()))
         .expect("echo hello request must remain visible while async work is pending");
-    assert_eq!(echo_record["state"], "completed");
-    assert_eq!(echo_record["outcome"], "completed");
-    assert_eq!(echo_record["detail"], "hello");
+    assert_eq!(echo_record.state, RequestState::Completed);
+    assert_eq!(echo_record.outcome, Some(RequestOutcome::Completed));
+    assert_eq!(echo_record.detail.as_deref(), Some("hello"));
 
     let engine_store = Store::open(&db).expect("open Store for async Engine evidence");
     let gate_request = RequestId(gate_request_id.to_owned());
@@ -954,7 +934,7 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
         b_emitting_items.iter().any(|item| {
             item["type"] == "function_call"
                 && item["call_id"] == b_call_id
-                && item["name"] == gate_b["toolName"]
+                && item["name"] == gate_b.tool_name.as_deref().unwrap()
                 && item["async"] == true
         }),
         "B's observed call must retain native async metadata in its actual Engine request: {b_emitting_items:#?}"
@@ -1030,24 +1010,27 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     );
     let pending_snapshot = snapshot(&base, &cookie).await;
     assert!(
-        pending_snapshot["snapshot"]["jobs"]
-            .as_array()
-            .unwrap()
+        pending_snapshot
+            .jobs
             .iter()
-            .any(|job| job["callId"] == gate_call_id
-                && job["state"] == "running"
-                && job["delivered"] == false),
+            .any(|job| job.call_id.as_deref() == Some(gate_call_id)
+                && job.state == ToolJobState::Running
+                && job.delivered == Some(false)),
         "A must remain unanswered as B is consumed"
     );
 
     let release_id = submit(&base, &cookie, &client, "async release").await;
     let _ = await_request(&base, &cookie, &release_id).await;
     let _ = await_request(&base, &cookie, &async_start_id).await;
-    let released_a = await_job_state(&base, &cookie, gate_call_id, "settled").await;
-    assert_eq!(released_a["requestId"], gate_request_id);
-    assert_eq!(released_a["output"], "A released");
+    let released_a = await_job_state(&base, &cookie, gate_call_id, ToolJobState::Settled).await;
+    assert_eq!(released_a.request_id.as_deref(), Some(gate_request_id));
     assert_eq!(
-        released_a["delivered"], true,
+        released_a.output.as_ref().and_then(Value::as_str),
+        Some("A released")
+    );
+    assert_eq!(
+        released_a.delivered,
+        Some(true),
         "released A output must be consumed"
     );
     let a_history = before_request_decisions(&db);
@@ -1065,30 +1048,36 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     let cancel_a = cancel_jobs
         .iter()
         .find(|job| {
-            job["toolName"] == "gate" && job["state"] == "running" && job["delivered"] == false
+            job.tool_name.as_deref() == Some("gate")
+                && job.state == ToolJobState::Running
+                && job.delivered == Some(false)
         })
         .expect("fresh scenario A");
-    let cancel_call = cancel_a["callId"].as_str().unwrap().to_owned();
-    let cancel_request = cancel_a["requestId"].as_str().unwrap().to_owned();
+    let cancel_call = cancel_a.call_id.as_deref().unwrap().to_owned();
+    let cancel_request = cancel_a.request_id.as_deref().unwrap().to_owned();
     let cancel_id = submit(&base, &cookie, &client, "async cancel").await;
     let _ = await_request(&base, &cookie, &cancel_id).await;
-    let cancelled_a = await_job_state(&base, &cookie, &cancel_call, "cancelled").await;
-    assert_eq!(cancelled_a["requestId"], cancel_request);
+    let cancelled_a = await_job_state(&base, &cookie, &cancel_call, ToolJobState::Cancelled).await;
+    assert_eq!(
+        cancelled_a.request_id.as_deref(),
+        Some(cancel_request.as_str())
+    );
     let _ = await_request(&base, &cookie, &cancel_start_id).await;
     let late_release_id = submit(&base, &cookie, &client, "async release").await;
     let _ = await_request(&base, &cookie, &late_release_id).await;
     let post_release = snapshot(&base, &cookie).await;
-    let final_cancelled = post_release["snapshot"]["jobs"]
-        .as_array()
-        .unwrap()
+    let final_cancelled = post_release
+        .jobs
         .iter()
-        .find(|job| job["callId"] == cancel_call)
+        .find(|job| job.call_id.as_deref() == Some(cancel_call.as_str()))
         .expect("cancelled A remains recorded");
-    assert_eq!(final_cancelled["state"], "cancelled");
-    assert_eq!(final_cancelled["requestId"], cancel_request);
+    assert_eq!(final_cancelled.state, ToolJobState::Cancelled);
     assert_eq!(
-        final_cancelled["output"],
-        Value::Null,
+        final_cancelled.request_id.as_deref(),
+        Some(cancel_request.as_str())
+    );
+    assert_eq!(
+        final_cancelled.output, None,
         "late release must not resurrect A"
     );
     let cancel_history = before_request_decisions(&db);
@@ -1129,25 +1118,22 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     let cookie = login(&base, &client).await;
     let clean = snapshot(&base, &cookie).await;
     assert!(
-        clean["snapshot"]["requests"]
-            .as_array()
-            .unwrap()
+        clean
+            .requests
             .iter()
-            .any(|r| r["commandId"] == first_id)
+            .any(|r| r.command_id.as_deref() == Some(first_id.as_str()))
     );
     assert!(
-        clean["snapshot"]["requests"]
-            .as_array()
-            .unwrap()
+        clean
+            .requests
             .iter()
-            .any(|r| r["commandId"] == inject_id)
+            .any(|r| r.command_id.as_deref() == Some(inject_id.as_str()))
     );
     assert!(
-        clean["snapshot"]["requests"]
-            .as_array()
-            .unwrap()
+        clean
+            .requests
             .iter()
-            .any(|r| r["commandId"] == child_id)
+            .any(|r| r.command_id.as_deref() == Some(child_id.as_str()))
     );
     assert_eq!(
         before_request_decisions(&db),
@@ -1164,11 +1150,13 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     let recovery_a = recovery_jobs
         .iter()
         .find(|job| {
-            job["toolName"] == "gate" && job["state"] == "running" && job["delivered"] == false
+            job.tool_name.as_deref() == Some("gate")
+                && job.state == ToolJobState::Running
+                && job.delivered == Some(false)
         })
         .expect("in-flight A before process loss");
-    let recovery_call = recovery_a["callId"].as_str().unwrap().to_owned();
-    let recovery_request = recovery_a["requestId"].as_str().unwrap().to_owned();
+    let recovery_call = recovery_a.call_id.as_deref().unwrap().to_owned();
+    let recovery_request = recovery_a.request_id.as_deref().unwrap().to_owned();
     second.kill().await.unwrap();
     assert!(
         !second.wait().await.unwrap().success(),
@@ -1196,14 +1184,16 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     .await;
     let cookie = login(&base, &client).await;
     let lost = snapshot(&base, &cookie).await;
-    let interrupted_a = lost["snapshot"]["jobs"]
-        .as_array()
-        .unwrap()
+    let interrupted_a = lost
+        .jobs
         .iter()
-        .find(|job| job["callId"] == recovery_call)
+        .find(|job| job.call_id.as_deref() == Some(recovery_call.as_str()))
         .expect("reopened A ToolJobRecord");
-    assert_eq!(interrupted_a["state"], "interrupted");
-    assert_eq!(interrupted_a["requestId"], recovery_request);
+    assert_eq!(interrupted_a.state, ToolJobState::Interrupted);
+    assert_eq!(
+        interrupted_a.request_id.as_deref(),
+        Some(recovery_request.as_str())
+    );
     let recovery_store = Store::open(&db).expect("open recovered Store");
     let recovered_claim = recovery_store
         .claims(&harness::model::CallId(recovery_call.clone()))
@@ -1228,25 +1218,19 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     let recovery_items = stored_items(&db, recovery_outputs[0]["request"].as_str().unwrap());
     assert_eq!(output_count(&recovery_items, &recovery_call), 1);
     assert!(
-        lost["snapshot"]["requests"]
-            .as_array()
-            .unwrap()
+        lost.requests
             .iter()
-            .any(|r| r["commandId"] == first_id)
+            .any(|r| r.command_id.as_deref() == Some(first_id.as_str()))
     );
     assert!(
-        lost["snapshot"]["requests"]
-            .as_array()
-            .unwrap()
+        lost.requests
             .iter()
-            .any(|r| r["commandId"] == inject_id)
+            .any(|r| r.command_id.as_deref() == Some(inject_id.as_str()))
     );
     assert!(
-        lost["snapshot"]["envelopes"]
-            .as_array()
-            .unwrap()
+        lost.envelopes
             .iter()
-            .any(|e| e["type"] == "MESSAGE")
+            .any(|e| e.kind == EnvelopeKind::Message)
     );
     stop_sigint(&mut third).await;
     let _ = std::fs::remove_dir_all(root);

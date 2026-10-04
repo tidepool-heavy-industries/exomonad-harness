@@ -1,5 +1,11 @@
 use std::{collections::HashSet, net::TcpListener, process::Stdio, time::Duration};
 
+use harness::item::ToolKind;
+use harness::server::browser_contract::{
+    ClientFrame, ConversationState, EnvelopeKind, EnvelopeProjection, RequestOutcome,
+    RequestProjection, RequestState, ServerFrame, Snapshot, StateEvent,
+};
+use harness::server::{ClientCommand, ToolJobState, WireU64};
 use harness::{model::RequestId, store::Store};
 use serde_json::{Value, json};
 use tokio::{
@@ -146,7 +152,10 @@ impl Demo {
         let tokio_tungstenite::MaybeTlsStream::Plain(stream) = socket.get_mut() else {
             panic!("loopback WebSocket unexpectedly negotiated TLS");
         };
-        let text = json!({"type":"command","command":command}).to_string();
+        let text = serde_json::to_string(&ClientFrame::Command {
+            command: command.into(),
+        })
+        .unwrap();
         let bytes = text.as_bytes();
         assert!(bytes.len() < 126, "test WebSocket command too large");
         let mask = [0x35, 0xa1, 0x6c, 0x09];
@@ -156,8 +165,8 @@ impl Demo {
         stream.write_all(&frame).await.unwrap();
         loop {
             let frame = next_frame(socket).await;
-            if frame["type"] == "command.accepted" {
-                return frame["command_id"].as_str().unwrap().to_owned();
+            if let ServerFrame::CommandAccepted { command_id } = frame {
+                return command_id;
             }
         }
     }
@@ -176,7 +185,7 @@ impl Demo {
         let tokio_tungstenite::MaybeTlsStream::Plain(stream) = socket.get_mut() else {
             panic!("loopback WebSocket unexpectedly negotiated TLS");
         };
-        let text = json!({"type":"snapshot.request"}).to_string();
+        let text = serde_json::to_string(&ClientFrame::SnapshotRequest).unwrap();
         let bytes = text.as_bytes();
         let mask = [0x35, 0xa1, 0x6c, 0x09];
         let mut frame = vec![0x81, 0x80 | bytes.len() as u8];
@@ -191,7 +200,9 @@ impl Demo {
             .post(format!("{}/api/commands", self.base))
             .header("origin", &self.base)
             .header("cookie", &self.cookie)
-            .json(&json!({"type":"submit","command":command}))
+            .json(&ClientCommand::Submit {
+                command: command.into(),
+            })
             .send()
             .await
             .unwrap();
@@ -221,7 +232,7 @@ fn uuid_suffix() -> String {
     )
 }
 
-async fn next_frame(socket: &mut BrowserSocket) -> Value {
+async fn next_frame(socket: &mut BrowserSocket) -> ServerFrame {
     loop {
         let tokio_tungstenite::MaybeTlsStream::Plain(stream) = socket.get_mut() else {
             panic!("loopback WebSocket unexpectedly negotiated TLS");
@@ -261,55 +272,59 @@ async fn next_frame(socket: &mut BrowserSocket) -> Value {
     }
 }
 
-fn command_record<'a>(snapshot: &'a Value, command_id: &str) -> Option<&'a Value> {
-    snapshot["snapshot"]["requests"]
-        .as_array()?
+fn command_record<'a>(snapshot: &'a Snapshot, command_id: &str) -> Option<&'a RequestProjection> {
+    snapshot
+        .requests
         .iter()
-        .find(|request| request["commandId"] == command_id)
+        .find(|request| request.command_id.as_deref() == Some(command_id))
 }
 
 async fn wait_for_outcome(
     socket: &mut BrowserSocket,
     command_id: &str,
-    outcomes: &[&str],
-) -> Value {
+    outcomes: &[RequestOutcome],
+) -> RequestProjection {
     Demo::request_snapshot(socket).await;
-    let mut last = Value::Null;
+    let mut last = None;
     timeout(Duration::from_secs(10), async {
         loop {
             let frame = next_frame(socket).await;
-            last = frame.clone();
-            if frame["type"] == "snapshot" {
-                if let Some(request) = command_record(&frame, command_id) {
-                    if outcomes.contains(&request["outcome"].as_str().unwrap_or_default()) {
-                        return frame;
-                    }
+            last = Some(frame.clone());
+            let request = match frame {
+                ServerFrame::Snapshot { snapshot } => {
+                    command_record(&snapshot, command_id).cloned()
                 }
-            } else if frame["type"] == "event"
-                && frame["event"]["event"]["kind"] == "request.upsert"
-            {
-                let request = &frame["event"]["event"]["value"];
-                assert!(
-                    request["commandId"].is_string() && request["outcome"].is_string(),
-                    "request.upsert omitted the contract's commandId/outcome fields"
-                );
-                if request["commandId"] == command_id
-                    && outcomes.contains(&request["outcome"].as_str().unwrap_or_default())
+                ServerFrame::Event { event } => match event.event {
+                    StateEvent::RequestUpsert(request) => {
+                        assert!(
+                            request.command_id.is_some() && request.outcome.is_some(),
+                            "request.upsert omitted the contract's commandId/outcome fields"
+                        );
+                        (request.command_id.as_deref() == Some(command_id)).then_some(request)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(request) = request {
+                if request
+                    .outcome
+                    .is_some_and(|outcome| outcomes.contains(&outcome))
                 {
-                    return json!({"snapshot":{"requests":[request.clone()]}});
+                    return request;
                 }
             }
         }
     })
     .await
-    .unwrap_or_else(|e| panic!("command {command_id} expected {outcomes:?}: {e}; last={last}"))
+    .unwrap_or_else(|e| panic!("command {command_id} expected {outcomes:?}: {e}; last={last:?}"))
 }
 
-fn custom_started_call_id(row: &Value, expected_input_len: usize) -> Option<String> {
-    if row["type"] != "PROGRESS" {
+fn custom_started_call_id(row: &EnvelopeProjection, expected_input_len: usize) -> Option<String> {
+    if row.kind != EnvelopeKind::Progress {
         return None;
     }
-    let payload = serde_json::from_str::<Value>(row["payload"].as_str()?).ok()?;
+    let payload = serde_json::from_str::<Value>(&row.payload).ok()?;
     if payload["event"] == "custom_started" && payload["inputLength"] == json!(expected_input_len) {
         payload["callId"].as_str().map(ToOwned::to_owned)
     } else {
@@ -363,22 +378,21 @@ async fn wait_for_custom_start(socket: &mut BrowserSocket, expected_input_len: u
     Demo::request_snapshot(socket).await;
     timeout(Duration::from_secs(10), async {
         loop {
-            let frame = next_frame(socket).await;
-            if frame["type"] == "snapshot" {
-                if let Some(call_id) = frame["snapshot"]["envelopes"].as_array().and_then(|rows| {
-                    rows.iter()
-                        .find_map(|row| custom_started_call_id(row, expected_input_len))
-                }) {
-                    return call_id;
-                }
-            } else if frame["type"] == "event"
-                && frame["event"]["event"]["kind"] == "envelope.upsert"
-            {
-                if let Some(call_id) =
-                    custom_started_call_id(&frame["event"]["event"]["value"], expected_input_len)
-                {
-                    return call_id;
-                }
+            let call_id = match next_frame(socket).await {
+                ServerFrame::Snapshot { snapshot } => snapshot
+                    .envelopes
+                    .iter()
+                    .find_map(|row| custom_started_call_id(row, expected_input_len)),
+                ServerFrame::Event { event } => match event.event {
+                    StateEvent::EnvelopeUpsert(envelope) => {
+                        custom_started_call_id(&envelope, expected_input_len)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(call_id) = call_id {
+                return call_id;
             }
         }
     })
@@ -386,13 +400,19 @@ async fn wait_for_custom_start(socket: &mut BrowserSocket, expected_input_len: u
     .expect("custom evaluator did not publish its call-scoped start barrier")
 }
 
-async fn fresh_snapshot(socket: &mut BrowserSocket) -> Value {
+fn snapshot_frame(frame: ServerFrame) -> Snapshot {
+    match frame {
+        ServerFrame::Snapshot { snapshot } => snapshot,
+        other => panic!("expected snapshot frame, received {other:?}"),
+    }
+}
+
+async fn fresh_snapshot(socket: &mut BrowserSocket) -> Snapshot {
     Demo::request_snapshot(socket).await;
     timeout(Duration::from_secs(5), async {
         loop {
-            let frame = next_frame(socket).await;
-            if frame["type"] == "snapshot" {
-                return frame;
+            if let ServerFrame::Snapshot { snapshot } = next_frame(socket).await {
+                return snapshot;
             }
         }
     })
@@ -430,21 +450,27 @@ async fn browser_journey_auth_pending_cancel_child_failure_and_reconnect() {
     let initial = timeout(Duration::from_secs(5), next_frame(&mut ws))
         .await
         .expect("initial WebSocket snapshot timeout");
-    assert_eq!(initial["type"], "snapshot");
+    let _initial = snapshot_frame(initial);
 
     // A pending root command must not occupy the receiver: an independent
     // cancel command has to be accepted and produce a durable terminal state.
     let wait_id = Demo::submit_ws(&mut ws, "wait").await;
-    let pending = wait_for_outcome(&mut ws, &wait_id, &["pending"]).await;
-    assert_eq!(
-        command_record(&pending, &wait_id).unwrap()["command"],
-        "wait"
-    );
+    let pending = wait_for_outcome(&mut ws, &wait_id, &[RequestOutcome::Pending]).await;
+    assert_eq!(pending.command.as_deref(), Some("wait"));
     let message_id = demo.submit("message while-wait-is-pending").await;
-    let message = wait_for_outcome(&mut ws, &message_id, &["queued", "presented", "acted"]).await;
+    let message = wait_for_outcome(
+        &mut ws,
+        &message_id,
+        &[
+            RequestOutcome::Queued,
+            RequestOutcome::Presented,
+            RequestOutcome::Acted,
+        ],
+    )
+    .await;
     assert_eq!(
-        command_record(&message, &message_id).unwrap()["command"],
-        "message while-wait-is-pending"
+        message.command.as_deref(),
+        Some("message while-wait-is-pending")
     );
     // Cancellation is a server command, not a connection-lifetime side effect.
     // Drop the submitting socket while wait is pending, then cancel over HTTP.
@@ -456,7 +482,7 @@ async fn browser_journey_auth_pending_cancel_child_failure_and_reconnect() {
     let after_cancel_disconnect = timeout(Duration::from_secs(5), next_frame(&mut ws))
         .await
         .expect("post-cancel reconnect snapshot timeout");
-    assert_eq!(after_cancel_disconnect["type"], "snapshot");
+    let _after_cancel_disconnect = snapshot_frame(after_cancel_disconnect);
 
     // Exercise a child identity and its parent-message/reply path.
     let child_id = demo.submit("child browser-child-proof").await;
@@ -471,18 +497,15 @@ async fn browser_journey_auth_pending_cancel_child_failure_and_reconnect() {
     // Observe server-published request transitions, with a bounded frame
     // timeout. The snapshot request is an explicit resync, not a sleep-based
     // assumption that queued work has completed.
-    let _ = wait_for_outcome(&mut ws, &wait_id, &["cancelled"]).await;
-    let _ = wait_for_outcome(&mut ws, &cancel_id, &["completed"]).await;
-    let _ = wait_for_outcome(&mut ws, &child_id, &["completed"]).await;
-    let failed = wait_for_outcome(&mut ws, &failed_id, &["failed"]).await;
+    let _ = wait_for_outcome(&mut ws, &wait_id, &[RequestOutcome::Cancelled]).await;
+    let _ = wait_for_outcome(&mut ws, &cancel_id, &[RequestOutcome::Completed]).await;
+    let _ = wait_for_outcome(&mut ws, &child_id, &[RequestOutcome::Completed]).await;
+    let failed = wait_for_outcome(&mut ws, &failed_id, &[RequestOutcome::Failed]).await;
+    assert_eq!(failed.command.as_deref(), Some("fail"));
+    let success = wait_for_outcome(&mut ws, &success_id, &[RequestOutcome::Completed]).await;
     assert_eq!(
-        command_record(&failed, &failed_id).unwrap()["command"],
-        "fail"
-    );
-    let success = wait_for_outcome(&mut ws, &success_id, &["completed"]).await;
-    assert_eq!(
-        command_record(&success, &success_id).unwrap()["command"],
-        "echo browser-recovery-proof"
+        success.command.as_deref(),
+        Some("echo browser-recovery-proof")
     );
 
     // Reconnect is a snapshot resynchronization, not command replay.
@@ -491,103 +514,82 @@ async fn browser_journey_auth_pending_cancel_child_failure_and_reconnect() {
     let restored = timeout(Duration::from_secs(5), next_frame(&mut reconnected))
         .await
         .expect("reconnect WebSocket snapshot timeout");
-    assert_eq!(restored["type"], "snapshot");
-    let requests = restored["snapshot"]["requests"].as_array().unwrap();
-    let by_id = |id: &str| requests.iter().find(|r| r["commandId"] == id).unwrap();
-    assert_eq!(by_id(&wait_id)["outcome"], "cancelled");
-    assert_eq!(by_id(&wait_id)["state"], "failed");
-    let jobs = restored["snapshot"]["jobs"].as_array().unwrap();
+    let restored = snapshot_frame(restored);
+    let requests = restored.requests;
+    let by_id = |id: &str| {
+        requests
+            .iter()
+            .find(|r| r.command_id.as_deref() == Some(id))
+            .unwrap()
+    };
+    assert_eq!(by_id(&wait_id).outcome, Some(RequestOutcome::Cancelled));
+    assert_eq!(by_id(&wait_id).state, RequestState::Failed);
+    let jobs = restored.jobs;
     let wait_job = jobs
         .iter()
-        .find(|job| job["id"] == wait_id)
+        .find(|job| job.id == wait_id)
         .expect("cancelled wait has no associated durable job");
-    assert_eq!(wait_job["state"], "cancelled");
+    assert_eq!(wait_job.state, ToolJobState::Cancelled);
     assert!(
-        ["queued", "presented", "acted"].contains(&by_id(&message_id)["outcome"].as_str().unwrap())
+        [
+            RequestOutcome::Queued,
+            RequestOutcome::Presented,
+            RequestOutcome::Acted
+        ]
+        .contains(&by_id(&message_id).outcome.unwrap())
     );
-    assert_eq!(by_id(&cancel_id)["outcome"], "completed");
-    assert_eq!(by_id(&child_id)["outcome"], "completed");
-    assert_eq!(by_id(&failed_id)["outcome"], "failed");
-    assert_eq!(by_id(&success_id)["outcome"], "completed");
-    assert_eq!(by_id(&failed_id)["command"], "fail");
-    assert_ne!(
-        by_id(&failed_id)["commandId"],
-        by_id(&success_id)["commandId"]
-    );
+    assert_eq!(by_id(&cancel_id).outcome, Some(RequestOutcome::Completed));
+    assert_eq!(by_id(&child_id).outcome, Some(RequestOutcome::Completed));
+    assert_eq!(by_id(&failed_id).outcome, Some(RequestOutcome::Failed));
+    assert_eq!(by_id(&success_id).outcome, Some(RequestOutcome::Completed));
+    assert_eq!(by_id(&failed_id).command.as_deref(), Some("fail"));
+    assert_ne!(by_id(&failed_id).command_id, by_id(&success_id).command_id);
 
-    let conversations = restored["snapshot"]["conversations"].as_array().unwrap();
+    let conversations = restored.conversations;
     let child_conversation = conversations
         .iter()
-        .find(|row| {
-            row["id"] != "conversation/root"
-                && row["path"]
-                    .as_str()
-                    .is_some_and(|path| path.starts_with("/root/"))
-        })
+        .find(|row| row.id != "conversation/root" && row.path.starts_with("/root/"))
         .expect("child command did not create a distinct child conversation");
-    let envelopes = restored["snapshot"]["envelopes"].as_array().unwrap();
+    let envelopes = restored.envelopes;
     assert!(
-        envelopes
-            .iter()
-            .any(|row| { row["type"] == "PROGRESS" && row["ordinal"].as_u64().is_some() }),
+        envelopes.iter().any(|row| {
+            row.kind == EnvelopeKind::Progress && row.ordinal.map(WireU64::get).is_some()
+        }),
         "echo did not persist ordered progress"
     );
     assert!(
         envelopes.iter().any(|row| {
-            row["type"] == "FINAL_ANSWER"
-                && row["payload"]
-                    .as_str()
-                    .is_some_and(|text| text.contains("browser-recovery-proof"))
+            row.kind == EnvelopeKind::FinalAnswer && row.payload.contains("browser-recovery-proof")
         }),
         "echo final answer did not include its submitted text"
     );
     let ordinals: Vec<u64> = envelopes
         .iter()
-        .filter_map(|row| row["ordinal"].as_u64())
+        .filter_map(|row| row.ordinal.map(WireU64::get))
         .collect();
     assert!(ordinals.windows(2).all(|pair| pair[0] < pair[1]));
-    let child_path = child_conversation["path"].as_str().unwrap();
+    let child_path = child_conversation.path.as_str();
     let parent_message = envelopes
         .iter()
-        .find(|row| row["type"] == "MESSAGE" && row["recipient"] == child_path)
+        .find(|row| row.kind == EnvelopeKind::Message && row.recipient == child_path)
         .expect("child is missing the delivered parent message");
     let child_reply = envelopes
         .iter()
         .find(|row| {
-            (row["type"] == "MESSAGE" || row["type"] == "FINAL_ANSWER")
-                && row["sender"] == child_path
+            (row.kind == EnvelopeKind::Message || row.kind == EnvelopeKind::FinalAnswer)
+                && row.sender == child_path
         })
         .expect("child is missing its sent reply");
-    assert!(
-        !parent_message["sender"]
-            .as_str()
-            .unwrap_or_default()
-            .is_empty()
-    );
+    assert!(!parent_message.sender.is_empty());
     assert_eq!(
-        parent_message["sender"], child_reply["recipient"],
+        parent_message.sender, child_reply.recipient,
         "child reply is not addressed to the actual parent sender"
     );
+    assert!(!parent_message.recipient.is_empty());
+    assert!(!child_reply.sender.is_empty());
+    assert!(!child_reply.recipient.is_empty());
     assert!(
-        !parent_message["recipient"]
-            .as_str()
-            .unwrap_or_default()
-            .is_empty()
-    );
-    assert!(
-        !child_reply["sender"]
-            .as_str()
-            .unwrap_or_default()
-            .is_empty()
-    );
-    assert!(
-        !child_reply["recipient"]
-            .as_str()
-            .unwrap_or_default()
-            .is_empty()
-    );
-    assert!(
-        parent_message["ordinal"].as_u64() < child_reply["ordinal"].as_u64(),
+        parent_message.ordinal.map(WireU64::get) < child_reply.ordinal.map(WireU64::get),
         "child reply appeared before its parent message"
     );
 }
@@ -599,17 +601,17 @@ async fn browser_journey_custom_call_is_retained_in_server_snapshot_and_store() 
     let initial = timeout(Duration::from_secs(5), next_frame(&mut ws))
         .await
         .expect("initial WebSocket snapshot timeout");
-    assert_eq!(initial["type"], "snapshot");
+    let _initial = snapshot_frame(initial);
 
     // The deterministic server fixture emits one raw custom `run` call for
     // this command. Submit through the authenticated production HTTP route,
     // then observe the existing WebSocket projection rather than a test-only
     // endpoint or direct Engine invocation.
     let command_id = demo.submit("custom browser-journey-proof").await;
-    let completed = wait_for_outcome(&mut ws, &command_id, &["completed"]).await;
+    let completed = wait_for_outcome(&mut ws, &command_id, &[RequestOutcome::Completed]).await;
     assert_eq!(
-        command_record(&completed, &command_id).unwrap()["command"],
-        "custom browser-journey-proof"
+        completed.command.as_deref(),
+        Some("custom browser-journey-proof")
     );
 
     // A reconnect is a read/resync only. The settled job and the original
@@ -621,40 +623,40 @@ async fn browser_journey_custom_call_is_retained_in_server_snapshot_and_store() 
     let restored = timeout(Duration::from_secs(5), next_frame(&mut reopened))
         .await
         .expect("reopened WebSocket snapshot timeout");
-    assert_eq!(restored["type"], "snapshot");
-    let jobs = restored["snapshot"]["jobs"].as_array().unwrap();
-    let custom_jobs: Vec<_> = jobs.iter().filter(|job| job["toolName"] == "run").collect();
+    let restored = snapshot_frame(restored);
+    let jobs = restored.jobs;
+    let custom_jobs: Vec<_> = jobs
+        .iter()
+        .filter(|job| job.tool_name.as_deref() == Some("run"))
+        .collect();
     assert_eq!(custom_jobs.len(), 1, "custom job was replayed or lost");
     let job = custom_jobs[0];
-    let call_id = job["callId"].as_str().expect("custom job callId");
-    assert_eq!(job["toolKind"], "custom");
-    assert_eq!(job["state"], "settled");
+    let call_id = job.call_id.as_deref().expect("custom job callId");
+    assert_eq!(job.tool_kind, Some(ToolKind::Custom));
+    assert_eq!(job.state, ToolJobState::Settled);
     assert!(
-        !job["output"].is_null(),
+        !job.output.as_ref().is_none_or(Value::is_null),
         "settled custom job has no retained output: {job:#?}"
     );
-    let progress = restored["snapshot"]["envelopes"]
-        .as_array()
-        .expect("server snapshot envelopes");
+    let progress = restored.envelopes;
     // The request acknowledgement proves serviceability, not evaluator progress.
     assert!(
         progress.iter().any(|row| {
-            row["type"] == "PROGRESS"
-                && row["ordinal"].as_u64().is_some()
-                && row["payload"]
-                    .as_str()
-                    .is_some_and(|text| text.contains(&format!("Request {command_id} accepted")))
+            row.kind == EnvelopeKind::Progress
+                && row.ordinal.map(WireU64::get).is_some()
+                && row
+                    .payload
+                    .contains(&format!("Request {command_id} accepted"))
         }),
         "custom command did not retain its request-scoped server acknowledgement"
     );
     assert!(
         progress.iter().any(|row| {
-            if row["type"] != "PROGRESS" {
+            if row.kind != EnvelopeKind::Progress {
                 return false;
             }
-            row["payload"]
-                .as_str()
-                .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            serde_json::from_str::<Value>(&row.payload)
+                .ok()
                 .is_some_and(|payload| {
                     payload["event"] == "custom_started"
                         && payload["callId"] == call_id
@@ -665,7 +667,7 @@ async fn browser_journey_custom_call_is_retained_in_server_snapshot_and_store() 
     );
 
     let store = Store::open(&demo.db).expect("reopen durable server Store");
-    let request_id = RequestId(job["requestId"].as_str().unwrap().to_owned());
+    let request_id = RequestId(job.request_id.as_deref().unwrap().to_owned());
     assert!(
         store.request(&request_id).unwrap().is_some(),
         "tool job request provenance must survive process-level Store reopen"
@@ -692,14 +694,12 @@ async fn browser_journey_custom_call_is_retained_in_server_snapshot_and_store() 
     let after_reopen = timeout(Duration::from_secs(5), next_frame(&mut reopened))
         .await
         .expect("WebSocket did not remain serviceable after resync");
-    assert_eq!(after_reopen["type"], "snapshot");
-    let after_resync_jobs = after_reopen["snapshot"]["jobs"]
-        .as_array()
-        .expect("resync jobs");
+    let after_reopen = snapshot_frame(after_reopen);
+    let after_resync_jobs = after_reopen.jobs;
     assert_eq!(
         after_resync_jobs
             .iter()
-            .filter(|row| row["callId"] == call_id)
+            .filter(|row| row.call_id.as_deref() == Some(call_id))
             .count(),
         1,
         "resync must not create a second custom job"
@@ -715,22 +715,21 @@ async fn browser_journey_custom_raw_input_survives_release_and_process_reopen() 
     let initial = timeout(Duration::from_secs(5), next_frame(&mut ws))
         .await
         .expect("initial custom raw WebSocket snapshot timeout");
-    assert_eq!(initial["type"], "snapshot");
+    let _initial = snapshot_frame(initial);
 
     let command_id = demo.submit(&format!("custom {RAW}")).await;
     let call_id = wait_for_custom_start(&mut ws, RAW.len()).await;
     let started = fresh_snapshot(&mut ws).await;
-    let start_event = started["snapshot"]["envelopes"]
-        .as_array()
-        .unwrap()
+    let start_event = started
+        .envelopes
         .iter()
         .find(|row| custom_started_call_id(row, RAW.len()).as_deref() == Some(call_id.as_str()))
         .expect("call-scoped custom start envelope missing before reopen");
-    let start_id = start_event["id"].clone();
-    let start_payload = start_event["payload"].clone();
-    assert!(start_id.is_string());
-    assert!(start_payload.is_string());
-    let _ = wait_for_outcome(&mut ws, &command_id, &["completed"]).await;
+    let start_id = start_event.id.clone();
+    let start_payload = start_event.payload.clone();
+    assert!(!start_id.is_empty());
+    assert!(!start_payload.is_empty());
+    let _ = wait_for_outcome(&mut ws, &command_id, &[RequestOutcome::Completed]).await;
 
     Demo::close_ws(&mut ws).await;
     drop(ws);
@@ -739,48 +738,55 @@ async fn browser_journey_custom_raw_input_survives_release_and_process_reopen() 
     let restored = timeout(Duration::from_secs(5), next_frame(&mut reopened))
         .await
         .expect("custom raw reopen snapshot timeout");
-    assert_eq!(restored["type"], "snapshot");
-    let retained_envelopes = restored["snapshot"]["envelopes"].as_array().unwrap();
+    let restored = snapshot_frame(restored);
+    let retained_envelopes = restored.envelopes;
     assert_eq!(
         retained_envelopes
             .iter()
-            .filter(|row| row["id"] == start_id)
+            .filter(|row| row.id == start_id)
             .count(),
         1,
         "reopen duplicated the custom progress envelope"
     );
     let retained_start = retained_envelopes
         .iter()
-        .find(|row| row["id"] == start_id)
+        .find(|row| row.id == start_id)
         .expect("original custom start envelope lost after process reopen");
-    assert_eq!(retained_start["payload"], start_payload);
+    assert_eq!(retained_start.payload, start_payload);
     assert_eq!(
         custom_started_call_id(retained_start, RAW.len()).as_deref(),
         Some(call_id.as_str())
     );
-    let jobs = restored["snapshot"]["jobs"].as_array().unwrap();
+    let jobs = restored.jobs;
     assert!(
         jobs.iter().any(|row| {
-            row["toolName"] == "echo" && row["state"] == "settled" && row["delivered"] == true
+            row.tool_name.as_deref() == Some("echo")
+                && row.state == ToolJobState::Settled
+                && row.delivered == Some(true)
         }),
         "function B was not delivered before the custom result settled"
     );
     assert_eq!(
-        jobs.iter().filter(|row| row["callId"] == call_id).count(),
+        jobs.iter()
+            .filter(|row| row.call_id.as_deref() == Some(call_id.as_str()))
+            .count(),
         1,
         "reopen duplicated the original custom job"
     );
     let job = jobs
         .iter()
-        .find(|row| row["callId"] == call_id)
+        .find(|row| row.call_id.as_deref() == Some(call_id.as_str()))
         .expect("original custom call missing after process reopen");
-    assert_eq!(job["toolKind"], "custom");
-    assert_eq!(job["toolName"], "run");
-    assert_eq!(job["state"], "settled");
-    assert_eq!(job["output"].as_str(), Some(expected_output.as_str()));
+    assert_eq!(job.tool_kind, Some(ToolKind::Custom));
+    assert_eq!(job.tool_name.as_deref(), Some("run"));
+    assert_eq!(job.state, ToolJobState::Settled);
+    assert_eq!(
+        job.output.as_ref().and_then(Value::as_str),
+        Some(expected_output.as_str())
+    );
 
     let store = Store::open(&demo.db).expect("reopen durable custom Store");
-    let request_id = RequestId(job["requestId"].as_str().unwrap().to_owned());
+    let request_id = RequestId(job.request_id.as_deref().unwrap().to_owned());
     let items = store.items(&request_id).expect("retained custom items");
     let calls: Vec<_> = items
         .iter()
@@ -812,7 +818,7 @@ async fn browser_journey_custom_cancel_is_retained_after_process_reopen() {
     let initial = timeout(Duration::from_secs(5), next_frame(&mut ws))
         .await
         .expect("initial custom cancel WebSocket snapshot timeout");
-    assert_eq!(initial["type"], "snapshot");
+    let _initial = snapshot_frame(initial);
 
     let command_id = demo.submit(&format!("custom {RAW}")).await;
     let started_call_id = wait_for_custom_start(&mut ws, RAW.len()).await;
@@ -820,41 +826,40 @@ async fn browser_journey_custom_cancel_is_retained_after_process_reopen() {
     // its native A-start and function-B-delivery barriers. It then gives us a
     // bounded, event-driven point to read the production running A row.
     let echo_id = demo.submit("echo browser-cancel-barrier").await;
-    let _ = wait_for_outcome(&mut ws, &echo_id, &["completed"]).await;
+    let _ = wait_for_outcome(&mut ws, &echo_id, &[RequestOutcome::Completed]).await;
     let started = fresh_snapshot(&mut ws).await;
-    let root = started["snapshot"]["conversations"]
-        .as_array()
-        .unwrap()
+    let root = started
+        .conversations
         .iter()
-        .find(|row| row["id"] == "conversation/root")
+        .find(|row| row.id == "conversation/root")
         .expect("root conversation missing while custom call is pending");
-    assert_eq!(root["state"], "requesting");
-    let running = started["snapshot"]["jobs"]
-        .as_array()
-        .unwrap()
+    assert_eq!(root.state, ConversationState::Requesting);
+    let running = started
+        .jobs
         .iter()
-        .find(|row| row["toolName"] == "run" && row["state"] == "running")
+        .find(|row| row.tool_name.as_deref() == Some("run") && row.state == ToolJobState::Running)
         .expect("custom call has no running production job");
-    let call_id = running["callId"]
-        .as_str()
+    let call_id = running
+        .call_id
+        .as_deref()
         .expect("running custom callId")
         .to_owned();
     assert_eq!(call_id, started_call_id);
-    assert_eq!(running["toolKind"], "custom");
-    assert_eq!(running["state"], "running");
-    let request_id = RequestId(running["requestId"].as_str().unwrap().to_owned());
+    assert_eq!(running.tool_kind, Some(ToolKind::Custom));
+    assert_eq!(running.state, ToolJobState::Running);
+    let request_id = RequestId(running.request_id.as_deref().unwrap().to_owned());
 
     let cancel_id = demo.submit("custom cancel").await;
-    let _ = wait_for_outcome(&mut ws, &cancel_id, &["completed"]).await;
+    let _ = wait_for_outcome(&mut ws, &cancel_id, &[RequestOutcome::Completed]).await;
     let cancelled = fresh_snapshot(&mut ws).await;
-    let jobs = cancelled["snapshot"]["jobs"].as_array().unwrap();
+    let jobs = cancelled.jobs;
     let cancelled_job = jobs
         .iter()
-        .find(|row| row["callId"] == call_id)
+        .find(|row| row.call_id.as_deref() == Some(call_id.as_str()))
         .expect("custom job disappeared after cancellation");
-    assert_eq!(cancelled_job["toolKind"], "custom");
-    assert_eq!(cancelled_job["state"], "cancelled");
-    assert!(cancelled_job["output"].is_null());
+    assert_eq!(cancelled_job.tool_kind, Some(ToolKind::Custom));
+    assert_eq!(cancelled_job.state, ToolJobState::Cancelled);
+    assert!(cancelled_job.output.as_ref().is_none_or(Value::is_null));
 
     Demo::close_ws(&mut ws).await;
     drop(ws);
@@ -863,20 +868,27 @@ async fn browser_journey_custom_cancel_is_retained_after_process_reopen() {
     let restored = timeout(Duration::from_secs(5), next_frame(&mut reopened))
         .await
         .expect("cancelled custom reopen snapshot timeout");
-    assert_eq!(restored["type"], "snapshot");
-    let jobs = restored["snapshot"]["jobs"].as_array().unwrap();
+    let restored = snapshot_frame(restored);
+    let jobs = restored.jobs;
     assert_eq!(
-        jobs.iter().filter(|row| row["callId"] == call_id).count(),
+        jobs.iter()
+            .filter(|row| row.call_id.as_deref() == Some(call_id.as_str()))
+            .count(),
         1,
         "reopen reexecuted or lost cancelled custom call"
     );
-    let retained = jobs.iter().find(|row| row["callId"] == call_id).unwrap();
-    assert_eq!(retained["toolKind"], "custom");
-    assert_eq!(retained["state"], "cancelled");
-    assert!(retained["output"].is_null());
-    let requests = restored["snapshot"]["requests"].as_array().unwrap();
+    let retained = jobs
+        .iter()
+        .find(|row| row.call_id.as_deref() == Some(call_id.as_str()))
+        .unwrap();
+    assert_eq!(retained.tool_kind, Some(ToolKind::Custom));
+    assert_eq!(retained.state, ToolJobState::Cancelled);
+    assert!(retained.output.as_ref().is_none_or(Value::is_null));
+    let requests = restored.requests;
     assert!(
-        requests.iter().any(|row| row["commandId"] == command_id),
+        requests
+            .iter()
+            .any(|row| row.command_id.as_deref() == Some(command_id.as_str())),
         "reopen lost original custom command"
     );
 

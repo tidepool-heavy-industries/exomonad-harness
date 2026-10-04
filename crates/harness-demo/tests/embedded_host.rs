@@ -789,6 +789,10 @@ async fn embedded_binding_rejects_foreign_context_kind_and_retired_input() {
 #[tokio::test]
 async fn embedded_browser_login_input_history_and_reconnect_use_external_owner() {
     use futures_util::StreamExt;
+    use harness::server::browser_contract::{
+        ConversationProjection, ConversationState, HistoryPage, RequestProjection, RequestState,
+        ServerFrame,
+    };
     use harness::server::{
         self, ClientCommand, HostActorIdentity, HostActorKind, HostActorLifecycle,
         HostActorProjection, ServerConfig, SessionSecret, Snapshot,
@@ -941,10 +945,28 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
                 active_round: None,
             },
         ],
-        conversations: vec![json!({"id":"/root","path":"/root","state":"idle"})],
-        requests: vec![
-            json!({"id":completion.head_request.0,"conversationId":"/root","state":"completed"}),
-        ],
+        conversations: vec![ConversationProjection {
+            id: "/root".into(),
+            path: "/root".into(),
+            parent_id: None,
+            fork_source_request_id: None,
+            state: ConversationState::Idle,
+            version: None,
+        }],
+        requests: vec![RequestProjection {
+            id: completion.head_request.0.clone(),
+            conversation_id: "/root".into(),
+            parent_id: None,
+            created_at_ms: None,
+            ended_at_ms: None,
+            state: RequestState::Completed,
+            command_id: None,
+            command: None,
+            outcome: None,
+            detail: None,
+            failure: None,
+            version: None,
+        }],
         ..Snapshot::default()
     });
     for _ in 0..2 {
@@ -958,10 +980,13 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
             .headers_mut()
             .insert("Cookie", cookie.parse().unwrap());
         let (mut socket, _) = connect_async(request).await.unwrap();
-        let snapshot: Value =
+        let frame: ServerFrame =
             serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
-        assert_eq!(snapshot["snapshot"]["actors"].as_array().unwrap().len(), 2);
-        assert_eq!(snapshot["snapshot"]["actors"][1]["kind"], "workflow");
+        let ServerFrame::Snapshot { snapshot } = frame else {
+            panic!("expected server snapshot");
+        };
+        assert_eq!(snapshot.actors.len(), 2);
+        assert_eq!(snapshot.actors[1].kind, HostActorKind::Workflow);
         socket.close(None).await.unwrap();
     }
     assert_eq!(
@@ -979,8 +1004,13 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
         .await
         .unwrap();
     assert_eq!(history.status(), 200);
-    let history: Value = history.json().await.unwrap();
-    assert!(history.to_string().contains("done"));
+    let history: HistoryPage = history.json().await.unwrap();
+    assert!(
+        history
+            .items
+            .iter()
+            .any(|item| item.item.to_string().contains("done"))
+    );
     assert!(matches!(
         conversation.input_observation(receipt.envelope_id).unwrap(),
         InputObservation::Included(_)
