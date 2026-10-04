@@ -32,9 +32,11 @@ fn browser_uuid_schema(generator: &mut schemars::SchemaGenerator) -> schemars::S
     let hyphenated =
         format!("{digits}{{8}}-{digits}{{4}}-{digits}{{4}}-{digits}{{4}}-{digits}{{12}}");
     let pattern = if generator.contract().is_serialize() {
-        format!("^{hyphenated}$")
+        format!(r"^{hyphenated}$(?![\s\S])")
     } else {
-        format!("^(?:{digits}{{32}}|{hyphenated}|\\{{{hyphenated}\\}}|urn:uuid:{hyphenated})$")
+        format!(
+            "^(?:{digits}{{32}}|{hyphenated}|\\{{{hyphenated}\\}}|urn:uuid:{hyphenated})$(?![\\s\\S])"
+        )
     };
     schemars::json_schema!({"type": "string", "pattern": pattern})
 }

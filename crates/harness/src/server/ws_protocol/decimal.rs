@@ -76,13 +76,16 @@ macro_rules! decimal {
 decimal!(
     WireU64,
     u64,
-    format!("^(?:0|{})$", positive_range("18446744073709551615"))
+    format!(
+        r"^(?:0|{})$(?![\s\S])",
+        positive_range("18446744073709551615")
+    )
 );
 decimal!(
     WireI64,
     i64,
     format!(
-        "^(?:0|{}|-(?:{}))$",
+        r"^(?:0|{}|-(?:{}))$(?![\s\S])",
         positive_range("9223372036854775807"),
         positive_range("9223372036854775808")
     )
@@ -108,6 +111,10 @@ mod tests {
             assert_eq!(serde_json::from_value::<WireI64>(encoded).unwrap(), wire);
         }
         for spelling in [
+            "1\n",
+            "1\r",
+            "1 ",
+            " 1",
             "",
             "01",
             "+1",
@@ -124,6 +131,10 @@ mod tests {
             );
         }
         for spelling in [
+            "-1\n",
+            "1\r",
+            "1 ",
+            " 1",
             "01",
             "+1",
             "-0",

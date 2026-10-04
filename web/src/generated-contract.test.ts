@@ -21,7 +21,7 @@ describe('Rust-owned browser wire contracts', () => {
   it('refuses rounded counters, overflow, alternate decimal spellings and unknown events', () => {
     const frame = frames.find(frame => frame.type === 'snapshot');
     expect(frame).toBeDefined();
-    for (const seq of [9007199254740992, '18446744073709551616', '-1', '01', '+1', '1e3']) {
+    for (const seq of [9007199254740992, '18446744073709551616', '-1', '01', '+1', '1e3', '1\n', '1\r', '1 ', ' 1']) {
       expect(isServerFrame({ ...frame, snapshot: { ...frame!.snapshot, seq } })).toBe(false);
     }
     expect(isServerFrame({ type: 'event', event: { seq: '1', event: { kind: 'unknown', value: {} } } })).toBe(false);
