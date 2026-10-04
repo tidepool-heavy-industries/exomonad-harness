@@ -68,6 +68,8 @@ pub enum HostActorLifecycle {
 #[serde(rename_all = "camelCase")]
 pub struct HostActorProjection {
     pub identity: HostActorIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_origin: Option<crate::store::actor_output::ActorOutputOrigin>,
     pub parent: Option<HostActorIdentity>,
     pub kind: HostActorKind,
     pub lifecycle: HostActorLifecycle,
@@ -136,6 +138,12 @@ pub struct Snapshot {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub history_revisions: Vec<super::HistoryRevision>,
+    #[serde(
+        default,
+        rename = "actorOutputRevisions",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub actor_output_revisions: Vec<crate::store::actor_output::ActorOutputReference>,
     /// Present only when this snapshot is projected from an embedded host run.
     /// An empty actor list does not imply standalone mode.
     #[serde(default, rename = "hostRun", skip_serializing_if = "Option::is_none")]
@@ -318,6 +326,7 @@ mod tests {
     #[test]
     fn model_actor_projection_roundtrips_optional_exact_head() {
         let mut actor = HostActorProjection {
+            output_origin: None,
             identity: HostActorIdentity {
                 run: "run".into(),
                 actor: crate::model::AgentPath("/root/old".into()),
@@ -353,6 +362,7 @@ mod tests {
             incarnation: "first".into(),
         };
         let child = HostActorProjection {
+            output_origin: None,
             identity: HostActorIdentity {
                 run: "run-1".into(),
                 actor: crate::model::AgentPath("reviewer".into()),

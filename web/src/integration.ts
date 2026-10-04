@@ -41,7 +41,7 @@ export function createViewProjector(): (state: NormalizedState) => HarnessViewMo
   let parents = new Map<string, string | null | undefined>()
 
   return (state) => {
-    const outputChanged = previous?.liveOutput !== state.liveOutput || previous?.historyRevisions !== state.historyRevisions
+    const outputChanged = previous?.liveOutput !== state.liveOutput || previous?.historyRevisions !== state.historyRevisions || previous?.actorOutputRevisions !== state.actorOutputRevisions
     const actorsChanged = previous?.actors !== state.actors
     const conversationsChanged = previous?.conversations !== state.conversations
     const requestsChanged = previous?.requests !== state.requests
@@ -90,6 +90,7 @@ export function createViewProjector(): (state: NormalizedState) => HarnessViewMo
         const id = actorIdentityKey(actor.identity)
         return reuse(actorsCache, next, id, actor, '', () => ({
           id, name: actor.identity.actor, run: actor.identity.run, incarnation: actor.identity.incarnation,
+          outputOrigin: actor.outputOrigin,
           parentIdentity: actor.parent,
           parent: actor.parent ? `${actor.parent.actor} · incarnation ${actor.parent.incarnation} · run ${actor.parent.run}` : undefined,
           kind: actor.kind, lifecycle: actor.lifecycle,
@@ -145,6 +146,7 @@ export function createViewProjector(): (state: NormalizedState) => HarnessViewMo
       inboxCache = next
     }
     result = { liveOutput: outputChanged ? [...(state.liveOutput?.values() ?? [])] : result?.liveOutput,
+      actorOutputRevisions: outputChanged ? [...(state.actorOutputRevisions?.values() ?? [])] : result?.actorOutputRevisions,
       historyRevisions: outputChanged ? [...(state.historyRevisions?.values() ?? [])] : result?.historyRevisions,
       hostRun: state.hostRun, actors, nodes, timeline, inbox,
       commandReceipts: receiptsChanged ? [...state.commandReceipts.values()] : result?.commandReceipts ?? [] }

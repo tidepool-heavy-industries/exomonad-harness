@@ -7,12 +7,14 @@ import type { CommandReceipt, Envelope, HostActorIdentity, RequestFailure } from
 export type HarnessViewModel = {
   liveOutput?: readonly import('./live-output').LiveOutput[];
   historyRevisions?: readonly import('./live-output').HistoryRevision[];
+  actorOutputRevisions?: readonly import('./actor-output').ActorOutputReference[];
   hostRun?: string;
   actors?: Array<{
     id: string;
     name: string;
     run: string;
     incarnation: string;
+    outputOrigin?: import('./actor-output').ActorOutputOrigin;
     parent?: string;
     parentIdentity?: HostActorIdentity | null;
     kind: "model" | "workflow";

@@ -147,3 +147,45 @@ mod tests {
         server.abort();
     }
 }
+
+#[derive(Deserialize)]
+pub(super) struct ActorOutputQuery {
+    run: String,
+    actor: u64,
+    incarnation: u64,
+    #[serde(default)]
+    after: i64,
+    limit: Option<usize>,
+}
+
+pub(super) async fn actor_output_history(
+    State(state): State<AppState>,
+    Query(query): Query<ActorOutputQuery>,
+) -> Response {
+    let Some(store) = state.history_store else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "history Store is unavailable",
+        )
+            .into_response();
+    };
+    let limit = query.limit.unwrap_or(50);
+    if query.after < 0 || limit == 0 || limit > MAX_HISTORY_ITEMS || query.run.len() > 1024 {
+        return (StatusCode::BAD_REQUEST, "invalid history page bounds").into_response();
+    }
+    let origin = crate::store::actor_output::ActorOutputOrigin {
+        run: query.run,
+        native_actor: query.actor,
+        incarnation: query.incarnation,
+    };
+    let result =
+        tokio::task::spawn_blocking(move || store.actor_output_page(&origin, query.after, limit))
+            .await;
+    match result {
+        Ok(Ok(page)) => ([(header::CACHE_CONTROL, "no-store")], Json(page)).into_response(),
+        Ok(Err(StoreError::InvalidHistoryOffset | StoreError::InvalidActorOutput)) => {
+            StatusCode::BAD_REQUEST.into_response()
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}

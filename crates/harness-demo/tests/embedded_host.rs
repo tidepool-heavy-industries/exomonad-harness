@@ -917,6 +917,7 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
     control.set_snapshot(Snapshot {
         actors: vec![
             HostActorProjection {
+                output_origin: None,
                 identity: identity.clone(),
                 parent: None,
                 kind: HostActorKind::Model,
@@ -926,6 +927,7 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
                 active_round: None,
             },
             HostActorProjection {
+                output_origin: None,
                 identity: HostActorIdentity {
                     run: "run".into(),
                     actor: AgentPath("/root/workflow".into()),
