@@ -1,7 +1,8 @@
 import { actorIdentityKey, applyStateEvent, isEmbeddedCommandRecord, isSequencedEvent, isSnapshot, normalizeSnapshot, type Snapshot } from './protocol'
 import { fixtureSnapshot } from './fixture'
-import { nextCounter } from './decimal'
 import { describe, expect, it } from 'vitest'
+
+const nextCounter = (value: string) => (BigInt(value) + 1n).toString()
 
 describe('generated browser state projection', () => {
   it('applies exact consecutive counters above JavaScript safe integers without mutating prior state', () => {
@@ -78,6 +79,16 @@ describe('generated browser state projection', () => {
       expect(isSnapshot({ ...snapshot, requests: [value] })).toBe(false)
       expect(isSequencedEvent({ seq: '1', event: { kind: 'request.upsert', value } })).toBe(false)
     }
+  })
+
+  it('retains nonempty host and exact history scopes after a valid snapshot control', () => {
+    const origin = { kind: 'embedded' as const, run: 'run', actor: '/root', incarnation: 'one' }
+    const revision = { origin, requestId: 'request', version: '9007199254740993' }
+    const snapshot = { ...fixtureSnapshot, hostRun: 'run', historyRevisions: [revision] }
+    expect(isSnapshot(snapshot)).toBe(true)
+    expect(isSnapshot({ ...snapshot, hostRun: '' })).toBe(false)
+    expect(isSnapshot({ ...snapshot, historyRevisions: [{ ...revision, requestId: '' }] })).toBe(false)
+    expect(isSnapshot({ ...snapshot, historyRevisions: [{ ...revision, origin: { ...origin, incarnation: '' } }] })).toBe(false)
   })
 
   it('refuses undeclared auxiliary events at the generated boundary', () => {

@@ -1,5 +1,5 @@
 import { appendOutput, commitOutput, setRevision, outputKey, revisionKey,
-  type LiveOutput, type HistoryRevision } from './live-output';
+  type LiveOutput, type HistoryRevision, type OutputScope } from './live-output';
 import { actorOutputKey, retainActorOutput, isStoredActorOutput, validActorOutputReference, type ActorOutputReference } from './actor-output';
 import { isServerFrame, isClientFrame, isEmbeddedCommandRecord as isCommandRecordShape } from './generated/validators.mjs';
 import type { ServerFrame } from './generated/server';
@@ -248,6 +248,8 @@ export function isSnapshot(value: unknown): value is Snapshot {
   const snapshot = frame.snapshot;
   return (snapshot.liveOutput?.length ?? 0) <= 128
     && (snapshot.historyRevisions?.length ?? 0) <= 128
+    && (snapshot.historyRevisions ?? []).every(validOutputScope)
+    && (snapshot.hostRun === undefined || snapshot.hostRun.length > 0)
     && (snapshot.actorOutputRevisions?.length ?? 0) <= 128
     && new TextEncoder().encode(JSON.stringify(snapshot.actorOutputRevisions ?? [])).length <= 65536
     && (snapshot.actorOutputRevisions ?? []).every(validActorOutputReference)
@@ -270,9 +272,7 @@ function validStateEvent(event: StateEvent): boolean {
     case 'actor.output.committed': return isStoredActorOutput(event.value);
     case 'model.output.started': case 'model.output.stopped': case 'model.output.delta':
     case 'model.output.committed': case 'model.output.remove': {
-      const { origin, requestId } = event.value;
-      return requestId.length > 0 && origin.actor.length > 0
-        && (origin.kind === 'embedded' ? origin.run.length > 0 && origin.incarnation.length > 0 : origin.store.length > 0)
+      return validOutputScope(event.value)
         && (!('itemId' in event.value) || nullableIdentity(event.value.itemId));
     }
     case 'actor.upsert': return isHostIdentity(event.value.identity)
@@ -286,6 +286,11 @@ function validStateEvent(event: StateEvent): boolean {
     case 'host_run.upsert': return event.value.run.length > 0;
     case 'command.receipt': return event.value.commandId.length > 0;
   }
+}
+
+function validOutputScope({ origin, requestId }: OutputScope): boolean {
+  return requestId.length > 0 && origin.actor.length > 0
+    && (origin.kind === 'embedded' ? origin.run.length > 0 && origin.incarnation.length > 0 : origin.store.length > 0);
 }
 
 function withinDiagnosticBounds(failure: RequestFailure | null): boolean {

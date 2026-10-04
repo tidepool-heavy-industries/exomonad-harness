@@ -12,7 +12,3 @@ export function compareDecimal(left: string, right: string): number {
   const a = BigInt(left), b = BigInt(right);
   return a < b ? -1 : a > b ? 1 : 0;
 }
-export function nextCounter(value: string): string {
-  if (!unsignedDecimal(value) || value === '18446744073709551615') throw new Error('Counter cannot advance.');
-  return (BigInt(value) + 1n).toString();
-}
