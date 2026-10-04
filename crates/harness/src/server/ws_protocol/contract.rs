@@ -559,6 +559,7 @@ impl From<&crate::store::EmbeddedCommandRecord> for EmbeddedCommandRecord {
 pub fn schemas() -> serde_json::Value {
     use schemars::generate::SchemaSettings;
     serde_json::json!({
+        "serverEvent": SchemaSettings::draft07().for_serialize().into_generator().into_root_schema_for::<crate::server::ServerEvent>(),
         "server": SchemaSettings::draft07().for_serialize().into_generator().into_root_schema_for::<ServerFrame>(),
         "client": SchemaSettings::draft07().for_deserialize().into_generator().into_root_schema_for::<ClientFrame>(),
         "actorOutputHistory": SchemaSettings::draft07().for_serialize().into_generator().into_root_schema_for::<ActorOutputHistoryPage>(),
@@ -739,7 +740,7 @@ pub fn wire_samples() -> serde_json::Value {
             requests: vec![request],
             actors: vec![actor],
             envelopes: vec![envelope],
-            command_receipts: vec![receipt],
+            command_receipts: vec![receipt.clone()],
             live_output: vec![live_output],
             history_revisions: vec![HistoryRevision {
                 origin: scope.origin,
@@ -771,11 +772,12 @@ pub fn wire_samples() -> serde_json::Value {
         reason: "Owner has changed".into(),
     });
     serde_json::json!({
+        "serverEvent": frames.iter().filter_map(|frame| match frame { ServerFrame::Event { event } => Some(crate::server::ServerEvent { sequence: event.seq, event: event.event.clone() }), _ => None }).collect::<Vec<_>>(),
         "server": frames,
         "client": [ClientFrame::Command { command: "start".into() }, ClientFrame::SnapshotRequest, ClientFrame::HostCommand { operation_id: ClientOperationId(uuid::Uuid::nil()), command: HostCommand::Interrupt { target: identity, expected_round: EmbeddedRoundId(uuid::Uuid::nil()) } }],
         "actorOutputHistory": [ActorOutputHistoryPage { origin: origin.clone(), outputs: vec![output.clone()], next_after: Some(i64::MAX.into()) }],
         "actorDisplayExpansion": [ActorDisplayExpansion { origin, display_slot: output.emission.id.display_slot, key: output.emission.page.expansions[0].0 }],
-        "embeddedCommand": [EmbeddedCommandRecord { operation_id: ClientOperationId(uuid::Uuid::nil()), command: HostCommand::Input { target: HostActorIdentity { run: "run".into(), actor: crate::model::AgentPath("/root".into()), incarnation: "incarnation".into() }, text: "start".into() }, state: crate::store::EmbeddedCommandState::Queued, envelope_id: None, receipt: None }],
+        "embeddedCommand": [EmbeddedCommandRecord { operation_id: ClientOperationId(uuid::Uuid::nil()), command: HostCommand::Input { target: HostActorIdentity { run: "run".into(), actor: crate::model::AgentPath("/root".into()), incarnation: "incarnation".into() }, text: "start".into() }, state: crate::store::EmbeddedCommandState::InputAdmitted, envelope_id: Some(i64::MAX.into()), receipt: Some(receipt) }, EmbeddedCommandRecord { operation_id: ClientOperationId(uuid::Uuid::nil()), command: HostCommand::Input { target: HostActorIdentity { run: "run".into(), actor: crate::model::AgentPath("/root".into()), incarnation: "incarnation".into() }, text: "start".into() }, state: crate::store::EmbeddedCommandState::Queued, envelope_id: None, receipt: None }],
         "history": [HistoryPage {
             request_id: "request/root".into(), parent_id: None, branch: "/root".into(),
             items: vec![HistoryItem { position: 9_007_199_254_740_993u64.into(), hash: "a".repeat(64), byte_len: 31u64.into(), item: serde_json::json!({"type":"future_provider_item","body":{"providerOwned":true}}) }],
@@ -826,6 +828,22 @@ mod tests {
         for wire in samples["client"].as_array().unwrap() {
             let frame: ClientFrame = serde_json::from_value(wire.clone()).unwrap();
             assert_eq!(serde_json::to_value(frame).unwrap(), *wire);
+        }
+        for wire in samples["serverEvent"].as_array().unwrap() {
+            let event: crate::server::ServerEvent = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(event).unwrap(), *wire);
+        }
+        for wire in samples["history"].as_array().unwrap() {
+            let page: HistoryPage = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(page).unwrap(), *wire);
+        }
+        for wire in samples["embeddedCommand"].as_array().unwrap() {
+            let record: EmbeddedCommandRecord = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(record).unwrap(), *wire);
+        }
+        for wire in samples["actorDisplayExpansion"].as_array().unwrap() {
+            let input: ActorDisplayExpansion = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(input).unwrap(), *wire);
         }
         for wire in samples["actorOutputHistory"].as_array().unwrap() {
             let page: ActorOutputHistoryPage = serde_json::from_value(wire.clone()).unwrap();

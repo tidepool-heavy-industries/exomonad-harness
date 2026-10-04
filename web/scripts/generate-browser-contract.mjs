@@ -14,6 +14,7 @@ const schemas = JSON.parse(encodedSchemas);
 const samples = JSON.parse(await readFile(join(source, 'wire-samples.json'), 'utf8'));
 const roots = [
   ['server', 'server', 'ServerFrame', 'isServerFrame'],
+  ['serverEvent', 'server-event', 'ServerEvent', 'isServerEvent'],
   ['client', 'client', 'ClientFrame', 'isClientFrame'],
   ['actorOutputHistory', 'actor-output-history', 'ActorOutputHistoryPage', 'isActorOutputHistoryPage'],
   ['actorDisplayExpansion', 'actor-display-expansion', 'ActorDisplayExpansion', 'isActorDisplayExpansion'],

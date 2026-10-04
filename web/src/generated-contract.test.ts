@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   isServerFrame, isClientFrame, isActorOutputHistoryPage, isActorDisplayExpansion,
-  isHistoryPage, isEmbeddedCommandRecord,
+  isHistoryPage, isEmbeddedCommandRecord, isServerEvent,
 } from './generated/validators.mjs';
 import samples from './generated/wire-samples.json';
 const rawFrames: unknown[] = samples.server;
@@ -10,6 +10,7 @@ const frames = rawFrames.filter(isServerFrame);
 describe('Rust-owned browser wire contracts', () => {
   it('accepts every positive wire sample emitted by the Rust owner', () => {
     for (const frame of samples.server) expect(isServerFrame(frame)).toBe(true);
+    for (const event of samples.serverEvent) expect(isServerEvent(event)).toBe(true);
     for (const frame of samples.client) expect(isClientFrame(frame)).toBe(true);
     for (const page of samples.actorOutputHistory) expect(isActorOutputHistoryPage(page)).toBe(true);
     for (const input of samples.actorDisplayExpansion) expect(isActorDisplayExpansion(input)).toBe(true);

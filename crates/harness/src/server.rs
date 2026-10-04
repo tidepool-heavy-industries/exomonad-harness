@@ -209,7 +209,8 @@ pub struct CommandAccepted {
 }
 
 /// Stable event envelope sent as JSON on `GET /api/events` (SSE).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ServerEvent {
     pub sequence: WireU64,
     pub event: browser_contract::StateEvent,
