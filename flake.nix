@@ -43,7 +43,7 @@
         web-chromium = pkgs.playwright-driver.browsers-chromium;
         buck-npm-cache = pkgs.fetchNpmDeps {
           src = ./web;
-          hash = "sha256-R1WPUQzu8+knK7B5mSx7i6sneSBLgKmX7HDCSsWwekI=";
+          hash = "sha256-g4795mrsdHMivyNeXa32zEDxlP4Iz4iuaNVEfGLKStc=";
         };
         buck-rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         buck-cc = pkgs.stdenv.cc;
