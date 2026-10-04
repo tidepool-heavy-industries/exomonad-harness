@@ -183,14 +183,17 @@ fn parse_serve_address(value: &str) -> Result<SocketAddr, String> {
     Ok(address)
 }
 
-fn ensure_asset_root(path: &Path) -> Result<(), String> {
-    if !path.is_dir() {
-        return Err(format!(
-            "web assets are missing at {}; build web/dist before starting --serve",
+fn verify_browser_assets(path: &Path) -> Result<server::VerifiedBrowserBundle, String> {
+    let expected = server::BrowserBundleIdentity::from_declared_source(include_bytes!(env!(
+        "HARNESS_BROWSER_SOURCE_IDENTITY"
+    )))
+    .map_err(|error| error.to_string())?;
+    server::verify_browser_bundle(path, &expected).map_err(|error| {
+        format!(
+            "browser bundle at {} is unavailable or mismatched: {error}",
             path.display()
-        ));
-    }
-    Ok(())
+        )
+    })
 }
 
 pub struct CliProvider(DemoProvider);
@@ -1637,13 +1640,14 @@ async fn serve(
     let cwd = std::env::current_dir().map_err(|_| "could not determine current directory")?;
     let db = if db.is_absolute() { db } else { cwd.join(db) };
     let asset_root = assets.unwrap_or_else(|| cwd.join("web/dist"));
-    ensure_asset_root(&asset_root)?;
+    let browser_bundle = verify_browser_assets(&asset_root)?;
     let secret = std::env::var("HARNESS_DEMO_SESSION_SECRET")
         .map_err(|_| "HARNESS_DEMO_SESSION_SECRET is required".to_owned())?;
     let secret = SessionSecret::new(secret)?;
     let status_store =
         Arc::new(Store::open(&db).map_err(|_| "could not open server status store".to_owned())?);
     let config = ServerConfig::new(asset_root)
+        .with_browser_bundle(browser_bundle)
         .with_browser_session(secret, Duration::from_secs(8 * 60 * 60))?
         .with_history_store(status_store.clone());
     let (app, control, mut commands) = server::server_with_config(config);
@@ -3850,12 +3854,12 @@ mod tests {
     #[test]
     fn serving_requires_built_web_assets() {
         let root = temp();
-        assert!(ensure_asset_root(&root).is_ok());
+        assert!(verify_browser_assets(&root).is_err());
         let missing = root.join("not-built");
         assert!(
-            ensure_asset_root(&missing)
+            verify_browser_assets(&missing)
                 .unwrap_err()
-                .contains("build web/dist")
+                .contains("browser bundle")
         );
         let _ = std::fs::remove_dir_all(root);
     }

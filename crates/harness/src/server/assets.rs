@@ -19,14 +19,7 @@ use axum::{
 /// and index-file policy remain the caller's responsibility.
 pub async fn asset_response(root: impl AsRef<Path>, path: &str) -> Response<Body> {
     let relative = Path::new(path);
-    if path.is_empty()
-        || relative.is_absolute()
-        || relative
-            .components()
-            .any(|part| !matches!(part, Component::Normal(_)))
-        || path.contains('\\')
-        || path.contains('\0')
-    {
+    if !valid_asset_path(path) {
         return response(
             StatusCode::BAD_REQUEST,
             "invalid asset path",
@@ -74,7 +67,18 @@ pub async fn asset_response(root: impl AsRef<Path>, path: &str) -> Response<Body
     )
 }
 
-fn response(
+pub(super) fn valid_asset_path(path: &str) -> bool {
+    let relative = Path::new(path);
+    !path.is_empty()
+        && !relative.is_absolute()
+        && relative
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+        && !path.contains('\\')
+        && !path.contains('\0')
+}
+
+pub(super) fn response(
     status: StatusCode,
     text: &'static str,
     mime: Option<&'static str>,
@@ -98,7 +102,7 @@ fn response(
     response
 }
 
-fn mime_type(path: &Path) -> &'static str {
+pub(super) fn mime_type(path: &Path) -> &'static str {
     match path
         .extension()
         .and_then(|ext| ext.to_str())

@@ -5,8 +5,10 @@ import Ajv from 'ajv';
 import standaloneCode from 'ajv/dist/standalone/index.js';
 import { compile } from 'json-schema-to-typescript';
 
-const [source, output, extra] = process.argv.slice(2);
-if (!source || !output || extra) throw new Error('Expected Rust contract directory and output directory.');
+const [source, output, sourceIdentity, extra] = process.argv.slice(2);
+if (!source || !output || !sourceIdentity || extra) throw new Error('Expected Rust contract directory, output directory and declared source identity.');
+const runtimeIdentity = JSON.parse(await readFile(sourceIdentity, 'utf8'));
+if (!/^[0-9a-f]{64}$/.test(runtimeIdentity.runtimeSourceSha256)) throw new Error('Invalid declared source identity.');
 const encodedSchemas = await readFile(join(source, 'schemas.json'));
 const schemas = JSON.parse(encodedSchemas);
 const samples = JSON.parse(await readFile(join(source, 'wire-samples.json'), 'utf8'));
@@ -45,6 +47,7 @@ await writeFile(join(output, 'validators.d.mts'), declarations.join('\n') + '\n'
 await writeFile(join(output, 'wire-samples.json'), JSON.stringify(samples, null, 2) + '\n');
 await writeFile(join(output, 'contract-manifest.json'), JSON.stringify({
   version: 1,
+  runtimeSourceSha256: runtimeIdentity.runtimeSourceSha256,
   schemaSha256: createHash('sha256').update(encodedSchemas).digest('hex'),
   generators: { schemars: '1.2.2', jsonSchemaToTypescript: '16.0.0', ajv: '8.17.1' },
 }, null, 2) + '\n');

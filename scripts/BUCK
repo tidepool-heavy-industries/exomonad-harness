@@ -5,3 +5,9 @@ export_file(
     src = "launch-browser-harness",
     visibility = ["PUBLIC"],
 )
+
+export_file(
+    name = "browser_source_identity_issuer",
+    src = "browser-source-identity.py",
+    visibility = ["PUBLIC"],
+)

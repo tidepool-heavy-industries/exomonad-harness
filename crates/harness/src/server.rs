@@ -5,7 +5,12 @@
 //! scheduler/store implementation so the crate owner can wire it independently.
 mod actor_output;
 mod assets;
+mod bundle;
 pub use actor_output::{ActorDisplayExpander, ActorDisplayExpansion};
+pub use bundle::{
+    BrowserBundleError, BrowserBundleIdentity, BrowserBundleManifest, VerifiedBrowserBundle,
+    browser_schema_sha256, verify_browser_bundle,
+};
 pub mod history;
 mod output;
 mod ws_protocol;
@@ -264,6 +269,7 @@ impl SessionSecret {
 /// session, protected API routes fail closed.
 pub struct ServerConfig {
     pub asset_root: PathBuf,
+    browser_bundle: Option<Arc<VerifiedBrowserBundle>>,
     history_store: Option<Arc<Store>>,
     bearer_secret: Option<BearerSecret>,
     browser_auth: BrowserAuthentication,
@@ -275,12 +281,18 @@ impl ServerConfig {
     pub fn new(asset_root: PathBuf) -> Self {
         Self {
             asset_root,
+            browser_bundle: None,
             history_store: None,
             bearer_secret: None,
             browser_auth: BrowserAuthentication::Disabled,
             public_origin_scheme: "http".into(),
             public_origin_authority: None,
         }
+    }
+
+    pub fn with_browser_bundle(mut self, bundle: VerifiedBrowserBundle) -> Self {
+        self.browser_bundle = Some(Arc::new(bundle));
+        self
     }
 
     /// Attach the opened durable Store for protected, bounded history reads.
@@ -375,6 +387,7 @@ struct AppState {
     commands: mpsc::Sender<QueuedCommand>,
     events: broadcast::Sender<ServerEvent>,
     asset_root: Arc<PathBuf>,
+    browser_bundle: Option<Arc<VerifiedBrowserBundle>>,
     snapshot: Arc<std::sync::RwLock<Snapshot>>,
     history_store: Option<Arc<Store>>,
     public_origin_scheme: Arc<str>,
@@ -688,6 +701,7 @@ pub fn server_with_config(
 ) -> (Router, ServerControl, mpsc::Receiver<QueuedCommand>) {
     let ServerConfig {
         asset_root,
+        browser_bundle,
         history_store,
         bearer_secret,
         browser_auth,
@@ -701,6 +715,7 @@ pub fn server_with_config(
         commands,
         events: events.clone(),
         asset_root: Arc::new(asset_root),
+        browser_bundle,
         snapshot: Arc::new(std::sync::RwLock::new(Snapshot::default())),
         history_store,
         public_origin_scheme: Arc::from(public_origin_scheme),
@@ -1325,6 +1340,9 @@ async fn event_stream(
 }
 
 async fn index_asset(State(state): State<AppState>) -> Response<axum::body::Body> {
+    if let Some(bundle) = &state.browser_bundle {
+        return bundle.response("index.html");
+    }
     assets::asset_response(state.asset_root.as_path(), "index.html").await
 }
 
@@ -1335,6 +1353,9 @@ async fn static_asset(
 ) -> Response<axum::body::Body> {
     if is_frontend_page_path(uri.path()) {
         return index_asset(State(state)).await;
+    }
+    if let Some(bundle) = &state.browser_bundle {
+        return bundle.response(&path);
     }
     assets::asset_response(state.asset_root.as_path(), &path).await
 }

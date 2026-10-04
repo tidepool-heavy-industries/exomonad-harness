@@ -28,6 +28,21 @@ HARNESS_DEPS = [
 
 HARNESS_SRCS = glob(["src/**/*.rs"]) + ["src/store/schema.sql"]
 
+BROWSER_SOURCE_INPUTS = {source: source for source in HARNESS_SRCS}
+BROWSER_SOURCE_INPUTS.update({
+    "Cargo.toml": "Cargo.toml",
+    "workspace/Cargo.toml": "//:workspace_cargo_toml",
+    "workspace/Cargo.lock": "//:workspace_cargo_lock",
+})
+
+genrule(
+    name = "browser_source_identity",
+    srcs = BROWSER_SOURCE_INPUTS,
+    out = "browser-source-identity.json",
+    bash = "$(exe toolchains//:python) $(location //scripts:browser_source_identity_issuer) \"$SRCDIR\" \"$OUT\"",
+    visibility = ["PUBLIC"],
+)
+
 rust_library(
     name = "harness",
     crate = "harness",

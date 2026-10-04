@@ -25,6 +25,7 @@ rust_binary(
     edition = "2024",
     srcs = DEMO_SRCS,
     deps = DEMO_DEPS,
+    env = {"HARNESS_BROWSER_SOURCE_IDENTITY": "$(location //crates/harness:browser_source_identity)"},
     visibility = ["PUBLIC"],
 )
 
@@ -35,6 +36,7 @@ rust_test(
     edition = "2024",
     srcs = DEMO_SRCS,
     deps = DEMO_DEPS,
+    env = {"HARNESS_BROWSER_SOURCE_IDENTITY": "$(location //crates/harness:browser_source_identity)"},
 )
 
 integration_test(

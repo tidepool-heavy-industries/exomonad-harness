@@ -38,6 +38,7 @@ system_python_bootstrap_toolchain(
 nix_tool(name = "node", executable = read_root_config("nix", "node"), visibility = ["PUBLIC"])
 nix_tool(name = "npm", executable = read_root_config("nix", "npm"), visibility = ["PUBLIC"])
 nix_tool(name = "bash", executable = read_root_config("nix", "bash"), visibility = ["PUBLIC"])
+nix_tool(name = "python", executable = read_root_config("nix", "python"), visibility = ["PUBLIC"])
 nix_tool(name = "coreutils", executable = read_root_config("nix", "coreutils"), visibility = ["PUBLIC"])
 
 nix_directory(

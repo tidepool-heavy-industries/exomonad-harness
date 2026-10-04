@@ -1,6 +1,7 @@
 load(":web_rules.bzl", "browser_contract", "npm_dependencies", "web_action")
 
 WEB_SRCS = glob(["src/**/*"]) + [
+    "scripts/seal-browser-bundle.mjs",
     "index.html",
     "package.json",
     "package-lock.json",

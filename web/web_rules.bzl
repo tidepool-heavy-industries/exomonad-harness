@@ -31,11 +31,12 @@ def browser_contract():
 NODE='$(exe toolchains//:node)'
 NPM_DEPS="$PWD/$(location :npm_dependencies)"
 RUST_CONTRACT="$PWD/$(location //crates/harness:browser_contract)"
+SOURCE_IDENTITY="$PWD/$(location //crates/harness:browser_source_identity)"
 OUTPUT="$PWD/$OUT"
 mkdir -p "$TMP/generator/scripts"
 cp -rL "$SRCDIR/." "$TMP/generator/"
 cp -a "$NPM_DEPS/." "$TMP/generator/node_modules/"
-"$NODE" "$TMP/generator/scripts/generate-browser-contract.mjs" "$RUST_CONTRACT" "$OUTPUT"
+"$NODE" "$TMP/generator/scripts/generate-browser-contract.mjs" "$RUST_CONTRACT" "$OUTPUT" "$SOURCE_IDENTITY"
 """,
         visibility = ["PUBLIC"],
     )
@@ -61,6 +62,7 @@ cd "$TMP/web"
     else:
         command += "\"$NPM\" run " + script + "\n"
     if is_directory:
+        command += "\"$NODE\" scripts/seal-browser-bundle.mjs dist src/generated/contract-manifest.json\n"
         command += "cp -a dist \"$OUTPUT\"\n"
     elif script != "test":
         command += "printf 'passed\\n' > \"$OUTPUT\"\n"
