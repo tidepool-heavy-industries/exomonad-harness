@@ -1,3 +1,4 @@
+load("@prelude//:rules.bzl", "genrule")
 load(":web_rules.bzl", "browser_contract", "npm_dependencies", "web_action")
 
 WEB_SRCS = glob(["src/**/*"]) + [
@@ -8,6 +9,27 @@ WEB_SRCS = glob(["src/**/*"]) + [
     "tsconfig.json",
     "vite.config.ts",
 ]
+
+# An independent source-only leaf: no schema, npm installation or compilation
+# output enters this identity, so the contract producer remains acyclic.
+BROWSER_IDENTITY_SRCS = glob(["src/**/*"], exclude = ["src/generated/**", "src/**/*.test.*", "src/**/tests/**", "src/fixture.ts"]) + [
+    "BUCK",
+    "web_rules.bzl",
+    "scripts/generate-browser-contract.mjs",
+    "scripts/seal-browser-bundle.mjs",
+    "index.html",
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "vite.config.ts",
+]
+genrule(
+    name = "browser_source_identity",
+    srcs = BROWSER_IDENTITY_SRCS,
+    out = "browser-source-identity.json",
+    bash = "$(exe toolchains//:python) $(location //scripts:browser_source_identity_issuer) \"$SRCDIR\" \"$OUT\"",
+    visibility = ["PUBLIC"],
+)
 
 npm_dependencies()
 browser_contract()

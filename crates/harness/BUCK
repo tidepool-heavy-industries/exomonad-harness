@@ -28,11 +28,20 @@ HARNESS_DEPS = [
 
 HARNESS_SRCS = glob(["src/**/*.rs"]) + ["src/store/schema.sql"]
 
-BROWSER_SOURCE_INPUTS = {source: source for source in HARNESS_SRCS}
+# The bundle identity covers declared production inputs without forcing source
+# hashing or web actions into Rust library compilation.
+BROWSER_RUNTIME_SRCS = glob(["src/**/*.rs"], exclude = ["src/**/*tests.rs", "src/**/tests/**", "src/bin/**"]) + ["src/store/schema.sql", "src/bin/browser_contract_export.rs"]
+BROWSER_SOURCE_INPUTS = {source: source for source in BROWSER_RUNTIME_SRCS}
 BROWSER_SOURCE_INPUTS.update({
     "Cargo.toml": "Cargo.toml",
     "workspace/Cargo.toml": "//:workspace_cargo_toml",
     "workspace/Cargo.lock": "//:workspace_cargo_lock",
+    "workspace/flake.nix": "//:workspace_flake",
+    "workspace/flake.lock": "//:workspace_flake_lock",
+    "workspace/.buckconfig": "//:workspace_buckconfig",
+    "BUCK": "BUCK",
+    "browser-source-identity.json": "//web:browser_source_identity",
+    "browser-source-identity.py": "//scripts:browser_source_identity_issuer",
 })
 
 genrule(

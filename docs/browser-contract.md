@@ -23,7 +23,8 @@ Rust scenario before issuing an artifact. `//web:check`, `//web:test` and
 `//web:dist` depend on that artifact and the exact offline npm closure.
 
 The dist producer seals fresh assets with one manifest. Its source digest is
-issued from the declared Harness Rust, SQL and Cargo inputs; its schema digest
+issued from the declared production Rust, SQL, Cargo and toolchain/build inputs
+plus the independent web source identity leaf; its schema digest
 is computed from the actual Rust schema artifact. The composition root passes
 `BrowserBundleIdentity` from that same declared source to
 `verify_browser_bundle(root, expected_identity)` before listening. Verification
