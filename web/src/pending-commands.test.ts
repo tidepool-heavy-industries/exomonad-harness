@@ -181,3 +181,23 @@ it('quarantines persisted authoritative receipts that contradict immutable targe
     expect(readCommandLedger().quarantine).toHaveLength(1)
   }
 })
+
+it.each([
+  'ABCDEF01111141118111111111111111',
+  '{ABCDEF01-1111-4111-8111-111111111111}',
+  'urn:uuid:ABCDEF01-1111-4111-8111-111111111111',
+])('joins native UUID spelling %s with canonical operation receipts and interrupt rounds', spelling => {
+  const canonical = 'abcdef01-1111-4111-8111-111111111111'
+  const interrupt = { action: 'interrupt' as const, target: command.target, expected_round: spelling }
+  const submission = { operation_id: spelling, command: interrupt }
+  const retained = retainCommand([], 'run-1', submission)
+  const receipt = { commandId: canonical, target: command.target, outcome: 'control_requested' as const, control: 'interrupt' as const }
+  const joined = applyCommandReceipt(retained, receipt)
+  expect(joined[0]?.authority).toBe('receipt')
+  expect(joined[0]?.submission).toEqual(submission)
+  const status = { operationId: canonical, command: { ...interrupt, expected_round: canonical },
+    state: 'control_requested' as const, envelopeId: null, receipt }
+  expect(applyCommandStatus(joined, 'run-1', status)[0]?.submission).toEqual(submission)
+  writePendingCommands(joined)
+  expect(readPendingCommands()[0]?.submission).toEqual(submission)
+})

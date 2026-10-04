@@ -59,12 +59,25 @@ describe('generated browser state projection', () => {
   it('checks operation, target and receipt association after generated shape validation', () => {
     const target = { run: 'run', actor: '/worker', incarnation: 'one' }
     const operationId = 'ABCDEF01-1111-4111-8111-111111111111'
-    const valid = { operationId, command: { action: 'input', target, text: 'hello' }, state: 'input_admitted',
+    const valid = { operationId: operationId.toLowerCase(), command: { action: 'input', target, text: 'hello' }, state: 'input_admitted',
       envelopeId: '9223372036854775807', receipt: { commandId: operationId.toLowerCase(), target,
         outcome: 'admitted', envelopeId: '9223372036854775807' } }
     expect(isEmbeddedCommandRecord(valid)).toBe(true)
     expect(isEmbeddedCommandRecord({ ...valid, envelopeId: '9223372036854775806' })).toBe(false)
     expect(isEmbeddedCommandRecord({ ...valid, receipt: { ...valid.receipt, target: { ...target, incarnation: 'two' } } })).toBe(false)
+  })
+
+  it('keeps provider diagnostic rendering bounded after generated shape validation', () => {
+    const failure = { kind: 'http', status: 400, diagnostic: { code: '😀'.repeat(256), message: '😀'.repeat(2048) } }
+    const request = { ...fixtureSnapshot.requests[0]!, failure }
+    const snapshot = { ...fixtureSnapshot, requests: [request] }
+    expect(isSnapshot(snapshot)).toBe(true)
+    expect(isSequencedEvent({ seq: '1', event: { kind: 'request.upsert', value: request } })).toBe(true)
+    for (const diagnostic of [{ code: '😀'.repeat(257) }, { message: '😀'.repeat(2049) }]) {
+      const value = { ...request, failure: { ...failure, diagnostic } }
+      expect(isSnapshot({ ...snapshot, requests: [value] })).toBe(false)
+      expect(isSequencedEvent({ seq: '1', event: { kind: 'request.upsert', value } })).toBe(false)
+    }
   })
 
   it('refuses undeclared auxiliary events at the generated boundary', () => {

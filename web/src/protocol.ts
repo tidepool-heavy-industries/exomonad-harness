@@ -187,7 +187,11 @@ export function isOperationId(value: unknown): value is string {
 /** Only operation and round UUIDs have case-insensitive identity. */
 export function canonicalOperationId(value: string): string {
   if (!isOperationId(value)) throw new Error('The operation ID is invalid.');
-  return value.toLowerCase();
+  let digits = value.toLowerCase();
+  if (digits.startsWith('urn:uuid:')) digits = digits.slice(9);
+  else if (digits.startsWith('{')) digits = digits.slice(1, -1);
+  digits = digits.replaceAll('-', '');
+  return [digits.slice(0, 8), digits.slice(8, 12), digits.slice(12, 16), digits.slice(16, 20), digits.slice(20)].join('-');
 }
 export function isHostIdentity(value: unknown): value is HostActorIdentity {
   const frame = { type: 'host_command', operation_id: validationOperation, command: { action: 'retire', target: value } };
@@ -276,9 +280,18 @@ function validStateEvent(event: StateEvent): boolean {
       && nullableIdentity(event.value.modelConversation) && nullableIdentity(event.value.modelHeadRequest);
     case 'conversation.upsert': return event.value.id.length > 0
       && nullableIdentity(event.value.parentId) && nullableIdentity(event.value.forkSourceRequestId);
-    case 'request.upsert': return event.value.id.length > 0 && nullableIdentity(event.value.parentId);
+    case 'request.upsert': return event.value.id.length > 0 && nullableIdentity(event.value.parentId)
+      && withinDiagnosticBounds(event.value.failure);
     case 'job.upsert': case 'envelope.upsert': case 'entity.remove': return event.value.id.length > 0;
     case 'host_run.upsert': return event.value.run.length > 0;
     case 'command.receipt': return event.value.commandId.length > 0;
   }
+}
+
+function withinDiagnosticBounds(failure: RequestFailure | null): boolean {
+  if (failure?.kind !== 'http' || failure.diagnostic === null) return true;
+  const diagnostic = failure.diagnostic;
+  const within = (text: string | undefined, limit: number) => text === undefined || Array.from(text).length <= limit;
+  return within(diagnostic.code, 256) && within(diagnostic.error_type, 256)
+    && within(diagnostic.param, 256) && within(diagnostic.message, 2048);
 }
