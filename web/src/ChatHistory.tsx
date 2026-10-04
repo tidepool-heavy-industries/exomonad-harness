@@ -6,7 +6,7 @@ import type { HarnessViewModel } from './view-model'
 
 const MAX_REQUESTS = 8
 const MAX_ITEMS = 200
-interface Cursor { requestId: string; offset: number }
+interface Cursor { requestId: string; offset: string }
 interface Loaded { cursor: Cursor; page: HistoryPage }
 interface RetainedSlice { browsing?: Cursor; backStack: Cursor[]; pages: Loaded[]; failures: Map<string, RequestStatus> }
 const retainedSlices = new Map<string, RetainedSlice>()
@@ -50,7 +50,7 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
   const initial = useRef(cacheKey ? retainedSlices.get(cacheKey) : undefined)
   const [browsing, setBrowsing] = useState<Cursor | undefined>(initial.current?.browsing)
   const [backStack, setBackStack] = useState<Cursor[]>(initial.current?.backStack ?? [])
-  const cursor = browsing ?? { requestId, offset: 0 }
+  const cursor = browsing ?? { requestId, offset: '0' }
   const [pages, setPages] = useState<Loaded[]>(initial.current?.pages ?? [])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -69,7 +69,7 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
     let changed = false
     for (const revision of historyRevisions) {
       const old = observedRevisions.current.get(revision.requestId)
-      if (revision.version > (old ?? 0) && provenLineage.current.has(revision.requestId)) changed = true
+      if (BigInt(revision.version) > BigInt(old ?? '0') && provenLineage.current.has(revision.requestId)) changed = true
       observedRevisions.current.set(revision.requestId, revision.version)
     }
     while (observedRevisions.current.size > 128) observedRevisions.current.delete(observedRevisions.current.keys().next().value!)
@@ -84,23 +84,23 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
     void (async () => {
       const visited = new Set<string>()
       let next: Cursor | undefined = cursor
-      let bytes = 0
+      let bytes = 0n
       let count = 0
       while (next && loaded.length < MAX_REQUESTS) {
         if (visited.has(next.requestId)) throw new Error('Retained history has a cyclic parent link.')
         visited.add(next.requestId)
         const page = await readHistoryPage(next.requestId, next.offset, controller.signal)
         if (controller.signal.aborted) return
-        const pageBytes = page.items.reduce((total, entry) => total + entry.byteLen, 0)
-        if (loaded.length && (bytes + pageBytes > MAX_HISTORY_BYTES || count + page.items.length > MAX_ITEMS)) break
+        const pageBytes = page.items.reduce((total, entry) => total + BigInt(entry.byteLen), 0n)
+        if (loaded.length && (bytes + pageBytes > BigInt(MAX_HISTORY_BYTES) || count + page.items.length > MAX_ITEMS)) break
         loaded.push({ cursor: next, page })
         // Show the newest retained response before reading potentially slow ancestors.
         setPages([...loaded].reverse())
         bytes += pageBytes
         count += page.items.length
         // Offset paging stays within one request. Never silently omit a large item.
-        if (page.nextOffset !== null || next.offset !== 0) break
-        next = page.parentId === null ? undefined : { requestId: page.parentId, offset: 0 }
+        if (page.nextOffset !== null || next.offset !== '0') break
+        next = page.parentId === null ? undefined : { requestId: page.parentId, offset: '0' }
       }
       if (!controller.signal.aborted) setPages(loaded.reverse())
     })().catch((cause: unknown) => {
@@ -145,7 +145,7 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
       {backStack.length > 0 && <button disabled={!ready || loading} onClick={newer}>Newer messages</button>}
     </div></div>
     {oldest?.page.parentId && <div className="history-controls">
-      <button disabled={!ready || loading} onClick={() => go({ requestId: oldest.page.parentId!, offset: 0 })}>Earlier exchanges</button>
+      <button disabled={!ready || loading} onClick={() => go({ requestId: oldest.page.parentId!, offset: '0' })}>Earlier exchanges</button>
       <span className="meta">Showing a recent slice; earlier exchanges remain in retained history.</span>
     </div>}
     {!ready && <p role="status">Host unavailable; retained messages remain visible. Reconnect to refresh or reply.</p>}
@@ -155,7 +155,7 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
     {cursorFailure && <FailedExchange request={cursorFailure} />}
     <div role="group" aria-label="Retained conversation items">
       {pages.map(({ page, cursor: source }) => <div className="chat-exchange" key={`${page.requestId}:${source.offset}`}>
-        <details className="meta"><summary>Exchange details</summary>Exchange {page.requestId}{source.offset > 0 ? ` · offset ${source.offset}` : ''}</details>
+        <details className="meta"><summary>Exchange details</summary>Exchange {page.requestId}{source.offset !== '0' ? ` · offset ${source.offset}` : ''}</details>
         <div role="list" aria-label={`Messages in exchange ${page.requestId}`}>{page.items.map(entry => <HistoryItem key={`${page.requestId}:${entry.position}:${entry.hash}`} entry={entry} />)}</div>
         {retainedFailures.current.has(page.requestId) && <FailedExchange request={retainedFailures.current.get(page.requestId)!} />}
       </div>)}

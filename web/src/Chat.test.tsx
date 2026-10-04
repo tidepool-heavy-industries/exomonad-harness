@@ -13,7 +13,7 @@ vi.mock('./history-client', async importOriginal => ({ ...await importOriginal<t
 const target = { run: 'run', actor: '/root', incarnation: 'original' }
 const actor = { id: JSON.stringify(['run', '/root', 'original']), name: '/root', run: 'run', incarnation: 'original', kind: 'model' as const, parentIdentity: null, lifecycle: 'running', modelConversation: 'root-conv', activeRound: 'round' }
 const data: HarnessViewModel = { hostRun: 'run', actors: [actor], nodes: [{ id: 'root-conv', name: '/root', state: 'active' }], timeline: [{ id: 'first', nodeId: 'root-conv', parentId: null, label: 'Earlier request', kind: 'request', state: 'completed', historyRefreshKey: 'first:1' }, { id: 'latest', nodeId: 'root-conv', parentId: 'first', label: 'Latest request', kind: 'request', state: 'completed', historyRefreshKey: 'latest:1' }, { id: 'child', nodeId: 'child-conv', parentId: 'first', label: 'Unrelated child', kind: 'request', state: 'completed' }], inbox: [] }
-function page(id: string, parentId: string | null, items: unknown[], nextOffset: number | null = null): HistoryPage { return { requestId: id, parentId, branch: '/root', nextOffset, oversizedItem: null, items: items.map((item, position) => ({ position, hash: 'a'.repeat(64), byteLen: 100, item })) } }
+function page(id: string, parentId: string | null, items: unknown[], nextOffset: number | null = null): HistoryPage { return { requestId: id, parentId, branch: '/root', nextOffset: nextOffset === null ? null : String(nextOffset), oversizedItem: null, items: items.map((item, position) => ({ position: String(position), hash: 'a'.repeat(64), byteLen: '100', item })) } }
 const histories = {
   first: page('first', null, [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Original question' }] }, { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Earlier answer' }] }]),
   latest: page('latest', 'first', [{ type: 'function_call', name: 'read_file', call_id: 'call-1', arguments: '{"path":"README"}' }, { type: 'function_call_output', call_id: 'call-1', output: 'File contents' }, { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Latest answer' }] }]),
@@ -27,10 +27,10 @@ afterEach(() => { vi.clearAllMocks(); clearDrafts(); clearWorkerChatRetention() 
 describe('embedded actor chat', () => {
   it('renders the failed request wire diagnostic separately and admits a new reply without changing retained history', async () => {
     const failure = { kind: 'http' as const, status: 400, diagnostic: { code: 'invalid_parameter', error_type: 'invalid_request_error', param: 'tools[0]', message: '<b>Tool schema rejected</b>' } }
-    const snapshot: Snapshot = { seq: 1, hostRun: 'run', actors: [{ identity: target, parent: null, kind: 'model', lifecycle: 'running', modelConversation: 'root-conv' }], conversations: [{ id: 'root-conv', path: '/root', state: 'idle' }], requests: [
-      { id: 'first', conversationId: 'root-conv', parentId: null, state: 'completed', failure: null },
-      { id: 'latest', conversationId: 'root-conv', parentId: 'first', state: 'failed', failure },
-      { id: 'child', conversationId: 'child-conv', state: 'failed', failure: { kind: 'http', status: 500, diagnostic: { message: 'Unrelated child failure' } } },
+    const snapshot: Snapshot = { seq: '1', hostRun: 'run', actors: [{ identity: target, parent: null, kind: 'model', lifecycle: 'running', modelConversation: 'root-conv' }], conversations: [{ parentId: null, forkSourceRequestId: null, id: 'root-conv', path: '/root', state: 'idle' }], requests: [
+      { createdAtMs: null, endedAtMs: null, id: 'first', conversationId: 'root-conv', parentId: null, state: 'completed', failure: null },
+      { createdAtMs: null, endedAtMs: null, id: 'latest', conversationId: 'root-conv', parentId: 'first', state: 'failed', failure },
+      { parentId: null, createdAtMs: null, endedAtMs: null, id: 'child', conversationId: 'child-conv', state: 'failed', failure: { kind: 'http', status: 500, diagnostic: { message: 'Unrelated child failure' } } },
     ], jobs: [], envelopes: [] }
     expect(isSnapshot(snapshot)).toBe(true)
     const failedPage = page('latest', 'first', [])
@@ -59,7 +59,7 @@ describe('embedded actor chat', () => {
     expect(screen.queryByText('Try again with the corrected schema')).toBeNull()
     const nextPage = page('next', 'latest', [{ type: 'message', role: 'assistant', content: 'Recovered answer' }])
     vi.mocked(readHistoryPage).mockImplementation(async id => id === 'next' ? nextPage : id === 'latest' ? failedPage : histories[id as keyof typeof histories]!)
-    const nextSnapshot: Snapshot = { ...snapshot, seq: 2, requests: [...snapshot.requests, { id: 'next', conversationId: 'root-conv', parentId: 'latest', state: 'completed', failure: null }] }
+    const nextSnapshot: Snapshot = { ...snapshot, seq: '2', requests: [...snapshot.requests, { createdAtMs: null, endedAtMs: null, id: 'next', conversationId: 'root-conv', parentId: 'latest', state: 'completed', failure: null }] }
     mounted.rerender(<App data={toViewModel(normalizeSnapshot(nextSnapshot))} onHostCommand={submit} />)
     await screen.findByText('Recovered answer')
     expect(screen.getByRole('alert', { name: 'Failed exchange latest' })).toBeVisible()
@@ -162,7 +162,7 @@ describe('embedded actor chat', () => {
     vi.mocked(readHistoryPage).mockImplementationOnce(() => new Promise(resolve => { resolveNext = resolve }))
     const next = { ...data, timeline: [...data.timeline, { ...data.timeline[1]!, id: 'next', parentId: 'latest' }] }
     mounted.rerender(<App data={next} />)
-    await waitFor(() => expect(readHistoryPage).toHaveBeenLastCalledWith('next', 0, expect.any(AbortSignal)))
+    await waitFor(() => expect(readHistoryPage).toHaveBeenLastCalledWith('next', '0', expect.any(AbortSignal)))
     expect(screen.getByText('Latest answer')).toBeVisible()
     const pendingSignal = vi.mocked(readHistoryPage).mock.calls.at(-1)![2]
     mounted.rerender(<App data={next} transportPhase="disconnected" />)
@@ -188,7 +188,7 @@ describe('embedded actor chat', () => {
     expect(screen.getByText('Latest answer')).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: 'Retry messages' }))
     await waitFor(() => expect(screen.queryByText('Host history unavailable')).toBeNull())
-    expect(readHistoryPage).toHaveBeenLastCalledWith('first', 0, expect.any(AbortSignal))
+    expect(readHistoryPage).toHaveBeenLastCalledWith('first', '0', expect.any(AbortSignal))
   })
   it('resets history and actor drafts on an explicit identity switch and aborts stale reads', async () => {
     const replacement = { ...actor, id: JSON.stringify(['run', '/other', 'two']), name: '/other', incarnation: 'two', parentIdentity: target, modelConversation: 'other-conv' }
@@ -226,8 +226,8 @@ describe('embedded actor chat', () => {
   it('pages an exchange only on demand, exposes oversized-item skips and returns to latest messages', async () => {
     vi.mocked(readHistoryPage).mockImplementation(async (id, offset) => {
       if (id === 'first') return histories.first
-      if (offset === 0) return page('latest', 'first', [{ type: 'message', role: 'assistant', content: 'First slice' }], 1)
-      if (offset === 1) return { ...page('latest', 'first', [], 1), oversizedItem: { position: 1, hash: 'a'.repeat(64), byteLen: 300_000, skipOffset: 2 } }
+      if (offset === '0') return page('latest', 'first', [{ type: 'message', role: 'assistant', content: 'First slice' }], 1)
+      if (offset === '1') return { ...page('latest', 'first', [], 1), oversizedItem: { position: '1', hash: 'a'.repeat(64), byteLen: '300000', skipOffset: '2' } }
       return page('latest', 'first', [{ type: 'message', role: 'assistant', content: 'After oversized item' }])
     })
     render(<App data={data} />)
@@ -235,19 +235,19 @@ describe('embedded actor chat', () => {
     expect(readHistoryPage).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByRole('button', { name: 'More items in this exchange' }))
     await screen.findByText(/too large to display/)
-    expect(readHistoryPage).toHaveBeenLastCalledWith('latest', 1, expect.any(AbortSignal))
+    expect(readHistoryPage).toHaveBeenLastCalledWith('latest', '1', expect.any(AbortSignal))
     fireEvent.click(screen.getByRole('button', { name: 'Skip large item' }))
     await screen.findByText('After oversized item')
-    expect(readHistoryPage).toHaveBeenLastCalledWith('latest', 2, expect.any(AbortSignal))
+    expect(readHistoryPage).toHaveBeenLastCalledWith('latest', '2', expect.any(AbortSignal))
     fireEvent.click(screen.getByRole('button', { name: 'Earlier exchanges' }))
     await screen.findByText('Original question')
     fireEvent.click(screen.getByRole('button', { name: 'Latest messages' }))
     await screen.findByText('First slice')
-    expect(readHistoryPage).toHaveBeenLastCalledWith('latest', 0, expect.any(AbortSignal))
+    expect(readHistoryPage).toHaveBeenLastCalledWith('latest', '0', expect.any(AbortSignal))
   })
   it.each([
-    { budget: 'item', itemsPerPage: 50, byteLen: 100, reads: 5, visible: 200 },
-    { budget: 'byte', itemsPerPage: 1, byteLen: 200_000, reads: 2, visible: 1 },
+    { budget: 'item', itemsPerPage: 50, byteLen: '100', reads: 5, visible: 200 },
+    { budget: 'byte', itemsPerPage: 1, byteLen: '200000', reads: 2, visible: 1 },
   ])('bounds the fetched display by its $budget budget and keeps earlier history reachable', async ({ itemsPerPage, byteLen, reads, visible }) => {
     vi.mocked(readHistoryPage).mockImplementation(async id => {
       const result = page(id, `parent-${id}`, Array.from({ length: itemsPerPage }, (_, i) => ({ type: 'message', role: 'assistant', content: `${id} item ${i}` })))

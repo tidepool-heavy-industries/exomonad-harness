@@ -3,28 +3,12 @@ export const MAX_HISTORY_BYTES = 256 * 1024
 const READ_TIMEOUT_MS = 10_000
 const ITEM_BUDGET = MAX_HISTORY_BYTES - 16 * 1024
 
-export interface HistoryEntry {
-  readonly position: number
-  readonly hash: string
-  readonly byteLen: number
-  readonly item: unknown
-}
-
-export interface OversizedItem {
-  readonly position: number
-  readonly hash: string
-  readonly byteLen: number
-  readonly skipOffset: number
-}
-
-export interface HistoryPage {
-  readonly requestId: string
-  readonly parentId: string | null
-  readonly branch: string
-  readonly items: readonly HistoryEntry[]
-  readonly nextOffset: number | null
-  readonly oversizedItem: OversizedItem | null
-}
+import { isHistoryPage } from './generated/validators.mjs'
+import { unsignedDecimal } from './decimal'
+import type { HistoryPage } from './generated/history'
+export type { HistoryPage } from './generated/history'
+export type HistoryEntry = HistoryPage['items'][number]
+export type OversizedItem = NonNullable<HistoryPage['oversizedItem']>
 
 export class HistoryReadError extends Error {
   constructor(message: string, readonly kind: 'authentication' | 'unavailable' | 'invalid' = 'unavailable') {
@@ -33,51 +17,39 @@ export class HistoryReadError extends Error {
   }
 }
 
-function record(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function natural(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-}
-
-function metadata(value: unknown): value is Record<string, unknown> & { position: number; hash: string; byteLen: number } {
-  return record(value) && natural(value.position) && typeof value.hash === 'string'
-    && /^[0-9a-f]{64}$/.test(value.hash) && natural(value.byteLen) && value.byteLen > 0
-}
-
 function invalid(): never {
   throw new HistoryReadError('Request history returned an invalid page.', 'invalid')
 }
 
 /** Validates the Store envelope; Item itself remains transparent arbitrary JSON. */
-export function decodeHistoryPage(value: unknown, requestId: string, offset: number, status = 200): HistoryPage {
-  if (!natural(offset) || !record(value) || value.requestId !== requestId
-    || !(value.parentId === null || typeof value.parentId === 'string')
-    || typeof value.branch !== 'string' || !Array.isArray(value.items)
-    || value.items.length > HISTORY_PAGE_SIZE
-    || !(value.nextOffset === null || natural(value.nextOffset))) invalid()
-  let last = offset - 1
-  let bytes = 0
+export function decodeHistoryPage(value: unknown, requestId: string, offset: string, status = 200): HistoryPage {
+  if (!unsignedDecimal(offset) || !isHistoryPage(value) || value.requestId !== requestId
+    || value.items.length > HISTORY_PAGE_SIZE) invalid()
+  const first = BigInt(offset)
+  const budget = BigInt(ITEM_BUDGET)
+  let last = first - 1n
+  let bytes = 0n
   for (const entry of value.items) {
-    if (!metadata(entry) || !Object.hasOwn(entry, 'item') || entry.position < offset
-      || entry.position <= last || entry.byteLen > ITEM_BUDGET) invalid()
-    last = entry.position
-    bytes += entry.byteLen
-    if (bytes > ITEM_BUDGET) invalid()
+    const position = BigInt(entry.position)
+    const length = BigInt(entry.byteLen)
+    if (!/^[0-9a-f]{64}$/.test(entry.hash) || length <= 0n || position < first
+      || position <= last || length > budget) invalid()
+    last = position
+    bytes += length
+    if (bytes > budget) invalid()
   }
   const oversized = value.oversizedItem
   if (oversized !== null) {
-    if (!metadata(oversized) || oversized.position < offset || oversized.position <= last
-      || oversized.byteLen <= ITEM_BUDGET || !natural(oversized.skipOffset)
-      || oversized.skipOffset !== oversized.position + 1
+    const position = BigInt(oversized.position)
+    if (!/^[0-9a-f]{64}$/.test(oversized.hash) || position < first || position <= last
+      || BigInt(oversized.byteLen) <= budget || BigInt(oversized.skipOffset) !== position + 1n
       || value.nextOffset !== oversized.position) invalid()
   }
-  if (value.nextOffset !== null && (value.nextOffset < offset || value.nextOffset <= last
-    || (oversized === null && value.nextOffset <= offset))) invalid()
+  if (value.nextOffset !== null && (BigInt(value.nextOffset) < first || BigInt(value.nextOffset) <= last
+    || (oversized === null && BigInt(value.nextOffset) <= first))) invalid()
   if (value.items.length === 0 && value.nextOffset !== null && oversized === null) invalid()
   if ((status === 413) !== (value.items.length === 0 && oversized !== null)) invalid()
-  return value as unknown as HistoryPage
+  return value
 }
 
 async function boundedJson(response: Response, signal: AbortSignal): Promise<unknown> {
@@ -116,7 +88,7 @@ async function boundedJson(response: Response, signal: AbortSignal): Promise<unk
   }
 }
 
-async function requestPage(requestId: string, offset: number, signal: AbortSignal): Promise<HistoryPage> {
+async function requestPage(requestId: string, offset: string, signal: AbortSignal): Promise<HistoryPage> {
   signal.throwIfAborted()
   const response = await fetch(`/api/history/${encodeURIComponent(requestId)}?offset=${offset}&limit=${HISTORY_PAGE_SIZE}`, {
     credentials: 'same-origin', cache: 'no-store', signal,
@@ -134,8 +106,8 @@ async function requestPage(requestId: string, offset: number, signal: AbortSigna
 }
 
 /** One deadline covers response headers and body; parent cancellation stays silent. */
-export async function readHistoryPage(requestId: string, offset: number, signal: AbortSignal): Promise<HistoryPage> {
-  if (!natural(offset)) invalid()
+export async function readHistoryPage(requestId: string, offset: string, signal: AbortSignal): Promise<HistoryPage> {
+  if (!unsignedDecimal(offset)) invalid()
   signal.throwIfAborted()
   const controller = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined

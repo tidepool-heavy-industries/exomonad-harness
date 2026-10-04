@@ -35,7 +35,7 @@ it('rejects stale operation identity and malformed status payloads', async () =>
     { ...record, operationId: '22222222-2222-4222-8222-222222222222' },
     { ...record, state: 'not_a_state' },
     { ...record, command: { action: 'interrupt', target: record.command.target } },
-    { ...record, envelopeId: '7' },
+    { ...record, envelopeId: 7 },
   ]
   const fetcher = vi.fn()
   vi.stubGlobal('fetch', fetcher)

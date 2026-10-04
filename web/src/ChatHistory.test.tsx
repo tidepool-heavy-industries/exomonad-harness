@@ -3,9 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ChatHistory, { clearChatHistoryRetention } from './ChatHistory'
 import { readHistoryPage, type HistoryPage } from './history-client'
 vi.mock('./history-client', async original => ({ ...await original<typeof import('./history-client')>(), readHistoryPage: vi.fn() }))
-function page(id: string, offset: number): HistoryPage {
-  return { requestId: id, parentId: null, branch: 'untrusted path', nextOffset: offset === 0 ? 1 : null, oversizedItem: null,
-    items: [{ position: offset, hash: 'a'.repeat(64), byteLen: 100, item: { type: 'message', role: 'assistant', content: `${id} slice ${offset}` } }] }
+function page(id: string, offset: string | number): HistoryPage {
+  return { requestId: id, parentId: null, branch: 'untrusted path', nextOffset: String(offset) === '0' ? '1' : null, oversizedItem: null,
+    items: [{ position: String(offset), hash: 'a'.repeat(64), byteLen: '100', item: { type: 'message', role: 'assistant', content: `${id} slice ${offset}` } }] }
 }
 function chat(key: string, ready = true) {
   return <ChatHistory cacheKey={key} requestId={key} requests={new Map()} refreshKey="stable" ready={ready} />
@@ -33,10 +33,10 @@ describe('bounded retained Chat slices', () => {
     const oldOrigin = {kind:'embedded' as const, run:'run', actor:'/root', incarnation:'old'}
     vi.mocked(readHistoryPage).mockImplementation(async (id) => ({...page(id,0), parentId:id === 'newest' ? 'ancestor' : null, nextOffset:null}))
     const props = {requestId:'newest', requests:new Map(), refreshKey:'stable', ready:true}
-    const mounted = render(<ChatHistory {...props} historyRevisions={[{origin:oldOrigin, requestId:'ancestor', version:1}]} />)
+    const mounted = render(<ChatHistory {...props} historyRevisions={[{origin:oldOrigin, requestId:'ancestor', version: '1'}]} />)
     await screen.findByText('ancestor slice 0')
     await waitFor(() => expect(readHistoryPage).toHaveBeenCalledTimes(2))
-    mounted.rerender(<ChatHistory {...props} historyRevisions={[{origin:oldOrigin, requestId:'ancestor', version:2}]} />)
+    mounted.rerender(<ChatHistory {...props} historyRevisions={[{origin:oldOrigin, requestId:'ancestor', version: '2'}]} />)
     await waitFor(() => expect(readHistoryPage).toHaveBeenCalledTimes(4))
     expect(screen.getByText('ancestor slice 0')).toBeVisible()
   })
@@ -54,13 +54,13 @@ describe('bounded retained Chat slices', () => {
     expect(readHistoryPage).toHaveBeenCalledTimes(3)
     restored.rerender(chat('one'))
     await waitFor(() => expect(readHistoryPage).toHaveBeenCalledTimes(4))
-    expect(readHistoryPage).toHaveBeenLastCalledWith('one', 1, expect.any(AbortSignal))
+    expect(readHistoryPage).toHaveBeenLastCalledWith('one', '1', expect.any(AbortSignal))
   })
   it('keeps the readable slice on a failed cursor read and retries that requested cursor', async () => {
     let fail = true
     vi.mocked(readHistoryPage).mockImplementation(async (id, offset) => {
-      if (id === 'one' && offset === 1 && fail) throw new Error('page unavailable')
-      return {...page(id, offset), nextOffset: offset < 2 ? offset + 1 : null}
+      if (id === 'one' && offset === '1' && fail) throw new Error('page unavailable')
+      return {...page(id, offset), nextOffset: BigInt(offset) < 2n ? (BigInt(offset) + 1n).toString() : null}
     })
     render(chat('one'))
     await screen.findByText('one slice 0')
@@ -72,7 +72,7 @@ describe('bounded retained Chat slices', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry messages' }))
     await screen.findByText('one slice 1')
     expect(screen.queryByText('Showing previously loaded messages. The requested messages could not be loaded.')).toBeNull()
-    expect(readHistoryPage).toHaveBeenLastCalledWith('one', 1, expect.any(AbortSignal))
+    expect(readHistoryPage).toHaveBeenLastCalledWith('one', '1', expect.any(AbortSignal))
   })
   it('does not claim retained messages when the initial read fails', async () => {
     vi.mocked(readHistoryPage).mockRejectedValueOnce(new Error('first read unavailable'))
@@ -83,10 +83,10 @@ describe('bounded retained Chat slices', () => {
   })
   it('keeps the oversized item visible when its skip cursor fails and retries the skip cursor', async () => {
     let fail = true
-    const oversized = { position: 0, hash: 'c'.repeat(64), byteLen: 400_000, skipOffset: 1 }
+    const oversized = { position: '0', hash: 'c'.repeat(64), byteLen: '400000', skipOffset: '1' }
     vi.mocked(readHistoryPage).mockImplementation(async (id, offset) => {
-      if (id === 'one' && offset === 1 && fail) throw new Error('skip unavailable')
-      return offset === 0 ? { requestId: id, parentId: null, branch: 'main', items: [], nextOffset: 0, oversizedItem: oversized }
+      if (id === 'one' && offset === '1' && fail) throw new Error('skip unavailable')
+      return offset === '0' ? { requestId: id, parentId: null, branch: 'main', items: [], nextOffset: '0', oversizedItem: oversized }
         : page(id, offset)
     })
     render(chat('one'))
@@ -98,11 +98,11 @@ describe('bounded retained Chat slices', () => {
     fail = false
     fireEvent.click(screen.getByRole('button', { name: 'Retry messages' }))
     await screen.findByText('one slice 1')
-    expect(readHistoryPage).toHaveBeenLastCalledWith('one', 1, expect.any(AbortSignal))
+    expect(readHistoryPage).toHaveBeenLastCalledWith('one', '1', expect.any(AbortSignal))
   })
   it('keeps a bounded cursor trail for moving back to newer pages', async () => {
     vi.mocked(readHistoryPage).mockImplementation(async (id, offset) => ({
-      ...page(id, offset), nextOffset: offset < 39 ? offset + 1 : null,
+      ...page(id, offset), nextOffset: BigInt(offset) < 39n ? (BigInt(offset) + 1n).toString() : null,
     }))
     render(chat('one'))
     await screen.findByText('one slice 0')
@@ -123,8 +123,8 @@ describe('bounded retained Chat slices', () => {
   it('shows the store supplied hash for an oversized item', async () => {
     const hash = 'b'.repeat(64)
     vi.mocked(readHistoryPage).mockResolvedValue({
-      requestId: 'one', parentId: null, branch: 'main', items: [], nextOffset: 0,
-      oversizedItem: { position: 0, hash, byteLen: 400_000, skipOffset: 1 },
+      requestId: 'one', parentId: null, branch: 'main', items: [], nextOffset: '0',
+      oversizedItem: { position: '0', hash, byteLen: '400000', skipOffset: '1' },
     })
     render(chat('one'))
     expect(await screen.findByText(new RegExp(hash))).toBeVisible()
@@ -132,8 +132,8 @@ describe('bounded retained Chat slices', () => {
   it('keeps live assistant prose proportional and live tool input monospace', async () => {
     const origin = { kind: 'embedded' as const, run: 'run', actor: '/root', incarnation: 'one' }
     const liveOutput = [
-      { origin, requestId: 'one', itemId: 'assistant', channel: 'assistant' as const, index: 0, text: 'Live answer', overflow: false, streaming: true, version: 1 },
-      { origin, requestId: 'one', itemId: 'tool-input', channel: 'tool_arguments' as const, index: 0, text: '{"path":"README"}', overflow: false, streaming: true, version: 1 },
+      { origin, requestId: 'one', itemId: 'assistant', channel: 'assistant' as const, index: '0', text: 'Live answer', overflow: false, streaming: true, version: '1' },
+      { origin, requestId: 'one', itemId: 'tool-input', channel: 'tool_arguments' as const, index: '0', text: '{"path":"README"}', overflow: false, streaming: true, version: '1' },
     ]
     render(<ChatHistory cacheKey="one" requestId="one" requests={new Map()} refreshKey="stable" ready liveOutput={liveOutput} />)
     await screen.findByText('one slice 0')

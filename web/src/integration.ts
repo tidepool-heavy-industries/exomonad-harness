@@ -1,5 +1,6 @@
 import type { HarnessViewModel } from './view-model'
 import { actorIdentityKey, type Job, type NormalizedState } from './protocol'
+import { compareDecimal } from './decimal'
 import { resolveParentIds, formatActivityTime, sortActivity } from './selectors'
 
 type NodeRow = HarnessViewModel['nodes'][number]
@@ -17,11 +18,14 @@ function reuse<T>(previous: Map<string, CachedRow<T>>, next: Map<string, CachedR
   return entry.row
 }
 
-function timestamp(value: number | null | undefined): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+function timestamp(value: string | null | undefined): number | undefined {
+  if (value == null) return undefined
+  const integer = BigInt(value)
+  // The Date presentation range fits exactly inside JavaScript's safe integers.
+  return integer >= -8640000000000000n && integer <= 8640000000000000n ? Number(integer) : undefined
 }
 
-function timing(start: number | null | undefined, end: number | null | undefined) {
+function timing(start: string | null | undefined, end: string | null | undefined) {
   const times = { startedAtMs: timestamp(start), endedAtMs: timestamp(end) }
   const rendered = formatActivityTime(times)
   return { ...times, startedAt: rendered.start, duration: rendered.duration }
@@ -142,7 +146,7 @@ export function createViewProjector(): (state: NormalizedState) => HarnessViewMo
           id: envelope.id, sender: envelope.sender, recipient: envelope.recipient,
           message: envelope.payload, state: envelope.type, type: envelope.type, ordinal: envelope.ordinal,
         })))
-      if (inbox.every((row) => row.ordinal !== undefined)) inbox.sort((a, b) => a.ordinal! - b.ordinal!)
+      if (inbox.every((row) => row.ordinal !== undefined)) inbox.sort((a, b) => compareDecimal(a.ordinal!, b.ordinal!))
       inboxCache = next
     }
     result = { liveOutput: outputChanged ? [...(state.liveOutput?.values() ?? [])] : result?.liveOutput,

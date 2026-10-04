@@ -23,10 +23,10 @@ describe('WebSocket snapshot and operation boundary', () => {
     dispatch({ type: 'snapshot', snapshot: fixtureSnapshot })
     expect(connection.send('wait_agent')).toBe('sent')
     expect(socket.send).toHaveBeenLastCalledWith(JSON.stringify({ type: 'command', command: 'wait_agent' }))
-    dispatch({ type: 'event', event: { seq: fixtureSnapshot.seq + 1,
-      event: { kind: 'conversation.upsert', value: { id: 'new', path: '/root/new', state: 'idle' } } } })
+    dispatch({ type: 'event', event: { seq: (BigInt(fixtureSnapshot.seq) + 1n).toString(),
+      event: { kind: 'conversation.upsert', value: { parentId: null, forkSourceRequestId: null, id: 'new', path: '/root/new', state: 'idle' } } } })
     expect(callbacks.receive.mock.lastCall?.[0].conversations.has('new')).toBe(true)
-    for (const seq of [fixtureSnapshot.seq + 3, fixtureSnapshot.seq + 4])
+    for (const seq of [(BigInt(fixtureSnapshot.seq) + 3n).toString(), (BigInt(fixtureSnapshot.seq) + 4n).toString()])
       dispatch({ type: 'event', event: { seq, event: { kind: 'entity.remove', value: { entity: 'conversation', id: 'new' } } } })
     expect(socket.send).toHaveBeenCalledTimes(2)
     expect(callbacks.phase).toHaveBeenLastCalledWith('resync')
@@ -35,7 +35,7 @@ describe('WebSocket snapshot and operation boundary', () => {
     dispatch({ type: 'snapshot', snapshot: fixtureSnapshot })
     expect(callbacks.phase).toHaveBeenLastCalledWith('resync')
     expect(callbacks.receive).toHaveBeenCalledTimes(2)
-    dispatch({ type: 'snapshot', snapshot: { ...fixtureSnapshot, seq: fixtureSnapshot.seq + 4 } })
+    dispatch({ type: 'snapshot', snapshot: { ...fixtureSnapshot, seq: (BigInt(fixtureSnapshot.seq) + 4n).toString() } })
     expect(connection.send('wait_agent')).toBe('sent')
   })
 
@@ -62,9 +62,9 @@ describe('WebSocket snapshot and operation boundary', () => {
   it('rejects unknown receipts without fabricating terminal state or treating protocol failure as auth loss', () => {
     const { socket, callbacks, dispatch } = setup()
     dispatch({ type: 'snapshot', snapshot: fixtureSnapshot })
-    dispatch({ type: 'event', event: { seq: fixtureSnapshot.seq + 1, event: { kind: 'command.receipt',
+    dispatch({ type: 'event', event: { seq: (BigInt(fixtureSnapshot.seq) + 1n).toString(), event: { kind: 'command.receipt',
       value: { commandId: 'op', outcome: 'future_outcome' } } } })
-    expect(callbacks.error).toHaveBeenCalledWith('Invalid projected event from server.')
+    expect(callbacks.error).toHaveBeenCalledWith('Invalid server frame.')
     expect(callbacks.receive).toHaveBeenCalledTimes(1)
     expect(callbacks.disconnected).not.toHaveBeenCalled()
     expect(socket.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ type: 'snapshot.request' }))

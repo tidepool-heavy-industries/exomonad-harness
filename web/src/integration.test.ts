@@ -8,7 +8,7 @@ import App from './App'
 
 describe('web outcome integration', () => {
   it('projects an exact retired actor head without any activity rows', () => {
-    const snapshot: Snapshot = { seq: 1, hostRun: 'run', actors: [{
+    const snapshot: Snapshot = { seq: '1', hostRun: 'run', actors: [{
       identity: { run: 'run', actor: '/root/old', incarnation: '1' }, parent: null,
       kind: 'model', lifecycle: 'retired', modelConversation: '/root/old',
       modelHeadRequest: 'old-exact-head',
@@ -20,7 +20,7 @@ describe('web outcome integration', () => {
 
   it('shows Haskell-only host actors apart from model conversations', () => {
     const snapshot: Snapshot = {
-      seq: 1,
+      seq: '1',
       actors: [
         { identity: { run: 'run-1', actor: 'root', incarnation: 'first' }, parent: null,
           kind: 'model', lifecycle: 'running', modelConversation: 'root-conversation' },
@@ -28,7 +28,7 @@ describe('web outcome integration', () => {
           parent: { run: 'run-1', actor: 'root', incarnation: 'first' },
           kind: 'workflow', lifecycle: 'waiting', modelConversation: null },
       ],
-      conversations: [{ id: 'root-conversation', path: '/root', state: 'requesting' }],
+      conversations: [{ parentId: null, forkSourceRequestId: null, id: 'root-conversation', path: '/root', state: 'requesting' }],
       requests: [], jobs: [], envelopes: [],
     };
     const view = toViewModel(normalizeSnapshot(snapshot));
@@ -142,7 +142,7 @@ describe('web outcome integration', () => {
       state: 'PROGRESS',
       message: 'custom run started',
     }])
-    expect(afterLateCompletion!.seq).toBe(reopened!.seq + 1)
+    expect(afterLateCompletion!.seq).toBe((BigInt(reopened!.seq) + 1n).toString())
     const afterLateView = toViewModel(normalizeSnapshot(afterLateCompletion!))
     expect(afterLateView.timeline.find(({ id }) => id === 'job-custom')).toMatchObject({
       id: 'job-custom',
@@ -189,24 +189,24 @@ describe('web outcome integration', () => {
 
   it('renders additive outcomes, ordered progress/messages, and distinct child identities', () => {
     const snapshot: Snapshot = {
-      seq: 4,
+      seq: '4',
       conversations: [
-        { id: 'root', path: '/root', state: 'idle' },
-        { id: 'child', path: '/root/helper', state: 'idle' },
+        { parentId: null, forkSourceRequestId: null, id: 'root', path: '/root', state: 'idle' },
+        { parentId: 'root', forkSourceRequestId: null, id: 'child', path: '/root/helper', state: 'idle' },
       ],
-      requests: [{
+      requests: [{ parentId: null, createdAtMs: null, endedAtMs: null, failure: null,
         id: 'request-1', conversationId: 'root', state: 'completed',
         commandId: 'cmd-7', command: 'echo hello', outcome: 'completed', detail: 'echoed hello',
       }],
-      jobs: [{
+      jobs: [{ startedAtMs: null, endedAtMs: null,
         id: 'job-9', conversationId: 'root', state: 'settled',
         requestId: 'request-1', callId: 'call-3', toolName: 'slow_tool',
         delivered: false, output: 'result pending delivery',
       }],
       envelopes: [
-        { id: 'reply', recipient: '/root', sender: '/root/helper', type: 'FINAL_ANSWER', payload: 'done', ordinal: 3 },
-        { id: 'progress', recipient: '/root', sender: '/harness', type: 'PROGRESS', payload: 'working', ordinal: 1 },
-        { id: 'message', recipient: '/root/helper', sender: '/root', type: 'MESSAGE', payload: 'do it', ordinal: 2 },
+        { id: 'reply', recipient: '/root', sender: '/root/helper', type: 'FINAL_ANSWER', payload: 'done', ordinal: '3' },
+        { id: 'progress', recipient: '/root', sender: '/harness', type: 'PROGRESS', payload: 'working', ordinal: '1' },
+        { id: 'message', recipient: '/root/helper', sender: '/root', type: 'MESSAGE', payload: 'do it', ordinal: '2' },
       ],
     }
     const view = toViewModel(normalizeSnapshot(snapshot))
@@ -223,11 +223,11 @@ describe('web outcome integration', () => {
     expect(view.nodes.find(({ id }) => id === 'child')).toMatchObject({ parentId: 'root', name: '/root/helper' })
   })
 
-  it('keeps old snapshots valid and does not synthesize outcome or envelope ordering', () => {
+  it('does not synthesize absent optional outcomes or envelope ordering', () => {
     const old: Snapshot = {
-      seq: 1,
-      conversations: [{ id: 'root', path: '/root', state: 'idle' }],
-      requests: [{ id: 'legacy', conversationId: 'root', state: 'completed' }],
+      seq: '1',
+      conversations: [{ parentId: null, forkSourceRequestId: null, id: 'root', path: '/root', state: 'idle' }],
+      requests: [{ parentId: null, createdAtMs: null, endedAtMs: null, failure: null, id: 'legacy', conversationId: 'root', state: 'completed' }],
       jobs: [],
       envelopes: [{ id: 'legacy-message', recipient: '/root', sender: '/operator', type: 'MESSAGE', payload: 'hi' }],
     }
@@ -242,14 +242,14 @@ describe('web outcome integration', () => {
 describe('indexed retained projection', () => {
   it('preserves authoritative null/unrelated parents, source links, exact identity and null output', () => {
     const parent = { run: 'Opaque/Run', actor: 'same-label', incarnation: 'OLD' }
-    const state = normalizeSnapshot({ seq: 1, actors: [{
+    const state = normalizeSnapshot({ seq: '1', actors: [{
       identity: { ...parent, incarnation: 'NEW' }, parent, kind: 'workflow', lifecycle: 'waiting', modelConversation: null,
     }], conversations: [
-      { id: 'root', path: '/root', state: 'idle' },
+      { parentId: null, forkSourceRequestId: null, id: 'root', path: '/root', state: 'idle' },
       { id: 'child', path: '/unrelated', parentId: 'root', state: 'idle', forkSourceRequestId: 'source' },
-      { id: 'other-root', path: '/root/other', parentId: null, state: 'idle' },
-    ], requests: [{ id: 'same', conversationId: 'root', parentId: 'source', state: 'completed', createdAtMs: 3000, endedAtMs: 4000 }],
-    jobs: [{ id: 'same', conversationId: 'root', requestId: 'same', state: 'settled', startedAtMs: 1000, endedAtMs: 3000, output: null }], envelopes: [] })
+      { forkSourceRequestId: null, id: 'other-root', path: '/root/other', parentId: null, state: 'idle' },
+    ], requests: [{ failure: null, id: 'same', conversationId: 'root', parentId: 'source', state: 'completed', createdAtMs: '3000', endedAtMs: '4000' }],
+    jobs: [{ id: 'same', conversationId: 'root', requestId: 'same', state: 'settled', startedAtMs: '1000', endedAtMs: '3000', output: null }], envelopes: [] })
     const data = toViewModel(state)
     expect(data.actors?.[0]?.parentIdentity).toBe(parent)
     expect(data.nodes.find((node) => node.id === 'child')).toMatchObject({ parentId: 'root', forkSourceRequestId: 'source' })
@@ -262,16 +262,16 @@ describe('indexed retained projection', () => {
 
   it('refreshes history only for the exact durable request and its terminal/delivered jobs', () => {
     const project = createViewProjector()
-    let state = normalizeSnapshot({ seq: 1, conversations: [{ id: 'c', path: '/c', state: 'idle', version: 1 }],
-      requests: [{ id: 'r', conversationId: 'c', state: 'running', version: 1 }],
-      jobs: [{ id: 'j', conversationId: 'c', requestId: 'r', state: 'running', version: 1, delivered: false }], envelopes: [] })
+    let state = normalizeSnapshot({ seq: '1', conversations: [{ parentId: null, forkSourceRequestId: null, id: 'c', path: '/c', state: 'idle', version: '1' }],
+      requests: [{ parentId: null, createdAtMs: null, endedAtMs: null, failure: null, id: 'r', conversationId: 'c', state: 'running', version: '1' }],
+      jobs: [{ startedAtMs: null, endedAtMs: null, id: 'j', conversationId: 'c', requestId: 'r', state: 'running', version: '1', delivered: false }], envelopes: [] })
     const key = () => project(state).timeline.find((row) => row.kind === 'request')!.historyRefreshKey
     const first = key()
-    state = { ...state, seq: 9, conversations: new Map([['c', { ...state.conversations.get('c')!, version: 100 }]]) }
+    state = { ...state, seq: '9', conversations: new Map([['c', { ...state.conversations.get('c')!, version: '100' }]]) }
     expect(key()).toBe(first)
-    state = { ...state, jobs: new Map([['j', { ...state.jobs.get('j')!, version: 8, output: 'progress' }]]) }
+    state = { ...state, jobs: new Map([['j', { ...state.jobs.get('j')!, version: '8', output: 'progress' }]]) }
     expect(key()).toBe(first)
-    state = { ...state, jobs: new Map([...state.jobs, ['other', { id: 'other', conversationId: 'c', requestId: 'elsewhere', state: 'settled', delivered: true }]]) }
+    state = { ...state, jobs: new Map([...state.jobs, ['other', { startedAtMs: null, endedAtMs: null, id: 'other', conversationId: 'c', requestId: 'elsewhere', state: 'settled', delivered: true }]]) }
     expect(key()).toBe(first)
     state = { ...state, jobs: new Map([...state.jobs, ['j', { ...state.jobs.get('j')!, state: 'settled' }]]) }
     const terminal = key()
@@ -279,19 +279,19 @@ describe('indexed retained projection', () => {
     state = { ...state, jobs: new Map([...state.jobs, ['j', { ...state.jobs.get('j')!, delivered: true }]]) }
     const delivered = key()
     expect(delivered).not.toBe(terminal)
-    state = { ...state, jobs: new Map([...state.jobs, ['j', { ...state.jobs.get('j')!, version: 99, output: 'metadata update' }]]) }
+    state = { ...state, jobs: new Map([...state.jobs, ['j', { ...state.jobs.get('j')!, version: '99', output: 'metadata update' }]]) }
     expect(key()).toBe(delivered)
-    state = { ...state, requests: new Map([['r', { ...state.requests.get('r')!, version: 2 }]]) }
+    state = { ...state, requests: new Map([['r', { ...state.requests.get('r')!, version: '2' }]]) }
     expect(key()).not.toBe(delivered)
   })
 
   it('reuses unrelated tables and unchanged rows when relevant Maps change', () => {
     const project = createViewProjector()
-    const state = normalizeSnapshot({ seq: 1, conversations: [
-      { id: 'a', path: '/a', state: 'idle' }, { id: 'b', path: '/b', state: 'idle' }],
-      requests: [{ id: 'r', conversationId: 'a', state: 'running' }], jobs: [], envelopes: [] })
+    const state = normalizeSnapshot({ seq: '1', conversations: [
+      { parentId: null, forkSourceRequestId: null, id: 'a', path: '/a', state: 'idle' }, { parentId: null, forkSourceRequestId: null, id: 'b', path: '/b', state: 'idle' }],
+      requests: [{ parentId: null, createdAtMs: null, endedAtMs: null, failure: null, id: 'r', conversationId: 'a', state: 'running' }], jobs: [], envelopes: [] })
     const first = project(state)
-    expect(project({ ...state, seq: 2 })).toBe(first)
+    expect(project({ ...state, seq: '2' })).toBe(first)
     const message = project({ ...state, envelopes: new Map([['e', { id: 'e', sender: '/a', recipient: '/b', type: 'MESSAGE', payload: 'hi' }]]) })
     expect(message.nodes).toBe(first.nodes)
     expect(message.timeline).toBe(first.timeline)
@@ -306,10 +306,10 @@ describe('indexed retained projection', () => {
     class CountedRequests extends Map<string, RequestRecord> {
       override values() { scans++; return super.values() }
     }
-    const state = normalizeSnapshot({ seq: 1, conversations: Array.from({ length: count }, (_, n) => ({
+    const state = normalizeSnapshot({ seq: '1', conversations: Array.from({ length: count }, (_, n) => ({ forkSourceRequestId: null,
       id: `c${n}`, path: `/root/c${n}`, parentId: n === 0 ? null : 'c0', state: 'idle' as const,
     })), requests: [], jobs: [], envelopes: [] })
-    const requests = new CountedRequests(Array.from({ length: count }, (_, n) => [`r${n}`, {
+    const requests = new CountedRequests(Array.from({ length: count }, (_, n) => [`r${n}`, { parentId: null, createdAtMs: null, endedAtMs: null, failure: null,
       id: `r${n}`, conversationId: `c${n}`, state: 'running' as const,
     }]))
     const project = createViewProjector()
@@ -317,7 +317,7 @@ describe('indexed retained projection', () => {
     expect(view.nodes).toHaveLength(count)
     expect(view.nodes.every((row) => row.detail === 'request running')).toBe(true)
     expect(scans).toBe(2)
-    project({ ...state, requests, seq: 100 })
+    project({ ...state, requests, seq: '100' })
     expect(scans).toBe(2)
   })
 })

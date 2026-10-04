@@ -132,8 +132,8 @@ describe('optional browser session', () => {
       data: JSON.stringify({
         type: 'snapshot',
         snapshot: {
-          seq: 31,
-          conversations: [{ id: 'live-root', path: '/authoritative/live-root', state: 'requesting' }],
+          seq: '31',
+          conversations: [{ parentId: null, forkSourceRequestId: null, id: 'live-root', path: '/authoritative/live-root', state: 'requesting' }],
           requests: [],
           jobs: [],
           envelopes: [],
@@ -157,7 +157,7 @@ describe('optional browser session', () => {
       .mockResolvedValueOnce(response(200, { authenticated: true }))
       .mockResolvedValueOnce(response(200, {
         operationId: submission.operation_id, command: submission.command,
-        state: 'input_admitted', envelopeId: 42, receipt: null,
+        state: 'input_admitted', envelopeId: '42', receipt: null,
       }))
     render(<Operator />)
     const socket = await waitFor(() => {
@@ -169,7 +169,7 @@ describe('optional browser session', () => {
       data: JSON.stringify({
         type: 'snapshot',
         snapshot: {
-          seq: 1,
+          seq: '1',
           hostRun: 'run-1',
           actors: [{
             identity: { ...submission.command.target, incarnation: 'replacement' }, parent: null, kind: 'workflow', lifecycle: 'waiting',
@@ -204,7 +204,7 @@ describe('optional browser session', () => {
     socket.listeners.get('message')?.forEach((listener) => listener(new MessageEvent('message', {
       data: JSON.stringify({
         type: 'snapshot',
-        snapshot: { seq: 1, hostRun: 'run-1', conversations: [], requests: [], jobs: [], envelopes: [] },
+        snapshot: { seq: '1', hostRun: 'run-1', conversations: [], requests: [], jobs: [], envelopes: [] },
       }),
     })))
     expect(await screen.findByRole('link', { name: 'Chat' })).toBeInTheDocument()
@@ -221,7 +221,7 @@ it('expires authentication on status refusal while preserving the operation and 
   await waitFor(() => expect(sockets).toHaveLength(1))
   const socket = sockets[0]!
   socket.readyState = FakeSocket.OPEN
-  socket.listeners.get('message')?.forEach((listener) => listener(new MessageEvent('message', { data: JSON.stringify({ type: 'snapshot', snapshot: { seq: 1, hostRun: 'run-1', conversations: [], requests: [], jobs: [], envelopes: [] } }) })))
+  socket.listeners.get('message')?.forEach((listener) => listener(new MessageEvent('message', { data: JSON.stringify({ type: 'snapshot', snapshot: { seq: '1', hostRun: 'run-1', conversations: [], requests: [], jobs: [], envelopes: [] } }) })))
   expect(await screen.findByRole('heading', { name: 'Operator sign in' })).toBeInTheDocument()
   expect(readPendingCommands()[0]?.lookup?.reason).toContain('HTTP 401')
   expect(socket.send).not.toHaveBeenCalled()
@@ -248,7 +248,7 @@ it('ignores a stale status response after sign out without changing retained inp
   render(<Operator />)
   await waitFor(() => expect(sockets).toHaveLength(1))
   const socket = sockets[0]!
-  socket.listeners.get('message')?.forEach((listener) => listener(new MessageEvent('message', { data: JSON.stringify({ type: 'snapshot', snapshot: { seq: 1, hostRun: 'run-1', conversations: [], requests: [], jobs: [], envelopes: [] } }) })))
+  socket.listeners.get('message')?.forEach((listener) => listener(new MessageEvent('message', { data: JSON.stringify({ type: 'snapshot', snapshot: { seq: '1', hostRun: 'run-1', conversations: [], requests: [], jobs: [], envelopes: [] } }) })))
   await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
   fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
   expect(await screen.findByRole('heading', { name: 'Operator sign in' })).toBeInTheDocument()
@@ -265,7 +265,7 @@ it('retains before sending and leaves host effects untouched when tab storage fa
   await waitFor(() => expect(sockets).toHaveLength(1))
   const socket = sockets[0]!
   socket.readyState = FakeSocket.OPEN
-  socket.listeners.get('message')?.forEach((listener) => listener(new MessageEvent('message', { data: JSON.stringify({ type: 'snapshot', snapshot: { seq: 1, hostRun: 'run-1', actors: [{ identity: { run: 'run-1', actor: '/root', incarnation: 'one' }, parent: null, kind: 'model', lifecycle: 'waiting', modelConversation: '/root' }], conversations: [], requests: [], jobs: [], envelopes: [] } }) })))
+  socket.listeners.get('message')?.forEach((listener) => listener(new MessageEvent('message', { data: JSON.stringify({ type: 'snapshot', snapshot: { seq: '1', hostRun: 'run-1', actors: [{ identity: { run: 'run-1', actor: '/root', incarnation: 'one' }, parent: null, kind: 'model', lifecycle: 'waiting', modelConversation: '/root' }], conversations: [], requests: [], jobs: [], envelopes: [] } }) })))
   fireEvent.click(await screen.findByRole('link', { name: 'Chat' }))
   fireEvent.click(within(screen.getByRole('complementary', { name: 'Workers' })).getByRole('link', { name: '/root' }))
   fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: '  λ preserved  ' } })

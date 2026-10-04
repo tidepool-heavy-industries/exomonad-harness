@@ -1,14 +1,14 @@
 import type { Snapshot } from './protocol'
 
-/** Replaceable stable-JSON example; deliberately contains no Rust-owned type. */
+/** Synthetic examples conforming to the generated Rust browser projections. */
 export const fixtureSnapshot: Snapshot = {
-  seq: 12,
+  seq: '12',
   conversations: [
-    { id: 'root', path: '/root', state: 'requesting' },
-    { id: 'worker', path: '/root/web_ui/web_ui', state: 'paused' },
+    { parentId: null, forkSourceRequestId: null, id: 'root', path: '/root', state: 'requesting' },
+    { parentId: 'root', forkSourceRequestId: null, id: 'worker', path: '/root/web_ui/web_ui', state: 'paused' },
   ],
-  requests: [{ id: 'request-1', conversationId: 'root', state: 'running' }],
-  jobs: [{ id: 'job-1', conversationId: 'worker', state: 'running' }],
+  requests: [{ parentId: null, createdAtMs: null, endedAtMs: null, failure: null, id: 'request-1', conversationId: 'root', state: 'running' }],
+  jobs: [{ startedAtMs: null, endedAtMs: null, id: 'job-1', conversationId: 'worker', state: 'running' }],
   envelopes: [
     {
       id: 'envelope-1',
@@ -27,10 +27,10 @@ export const fixtureSnapshot: Snapshot = {
  */
 export const customJobJourney: readonly Snapshot[] = [
   {
-    seq: 20,
-    conversations: [{ id: 'root', path: '/root', state: 'requesting' }],
-    requests: [{ id: 'request-custom', conversationId: 'root', state: 'running' }],
-    jobs: [{
+    seq: '20',
+    conversations: [{ parentId: null, forkSourceRequestId: null, id: 'root', path: '/root', state: 'requesting' }],
+    requests: [{ parentId: null, createdAtMs: null, endedAtMs: null, failure: null, id: 'request-custom', conversationId: 'root', state: 'running' }],
+    jobs: [{ startedAtMs: null, endedAtMs: null,
       id: 'job-custom',
       conversationId: 'root',
       state: 'running',
@@ -45,19 +45,19 @@ export const customJobJourney: readonly Snapshot[] = [
       sender: '/root',
       type: 'PROGRESS',
       payload: 'custom run started',
-      ordinal: 1,
+      ordinal: '1',
     }],
   },
   {
-    seq: 21,
-    conversations: [{ id: 'root', path: '/root', state: 'cancelled' }],
-    requests: [{
+    seq: '21',
+    conversations: [{ parentId: null, forkSourceRequestId: null, id: 'root', path: '/root', state: 'cancelled' }],
+    requests: [{ parentId: null, createdAtMs: null, endedAtMs: null, failure: null,
       id: 'request-custom',
       conversationId: 'root',
       state: 'completed',
       outcome: 'cancelled',
     }],
-    jobs: [{
+    jobs: [{ startedAtMs: null, endedAtMs: null,
       id: 'job-custom',
       conversationId: 'root',
       state: 'cancelled',
@@ -74,20 +74,20 @@ export const customJobJourney: readonly Snapshot[] = [
       sender: '/root',
       type: 'PROGRESS',
       payload: 'custom run started',
-      ordinal: 1,
+      ordinal: '1',
     }],
   },
   {
     // Same durable IDs and terminal result, as returned after reopening.
-    seq: 21,
-    conversations: [{ id: 'root', path: '/root', state: 'cancelled' }],
-    requests: [{
+    seq: '21',
+    conversations: [{ parentId: null, forkSourceRequestId: null, id: 'root', path: '/root', state: 'cancelled' }],
+    requests: [{ parentId: null, createdAtMs: null, endedAtMs: null, failure: null,
       id: 'request-custom',
       conversationId: 'root',
       state: 'completed',
       outcome: 'cancelled',
     }],
-    jobs: [{
+    jobs: [{ startedAtMs: null, endedAtMs: null,
       id: 'job-custom',
       conversationId: 'root',
       state: 'cancelled',
@@ -104,22 +104,22 @@ export const customJobJourney: readonly Snapshot[] = [
       sender: '/root',
       type: 'PROGRESS',
       payload: 'custom run started',
-      ordinal: 1,
+      ordinal: '1',
     }],
   },
   {
     // Expected authoritative server snapshot after a late provider completion:
     // the late success is observed but cannot replace the terminal cancellation.
     // This is a fixture contract, not proof that Engine/server implements it.
-    seq: 22,
-    conversations: [{ id: 'root', path: '/root', state: 'cancelled' }],
-    requests: [{
+    seq: '22',
+    conversations: [{ parentId: null, forkSourceRequestId: null, id: 'root', path: '/root', state: 'cancelled' }],
+    requests: [{ parentId: null, createdAtMs: null, endedAtMs: null, failure: null,
       id: 'request-custom',
       conversationId: 'root',
       state: 'completed',
       outcome: 'cancelled',
     }],
-    jobs: [{
+    jobs: [{ startedAtMs: null, endedAtMs: null,
       id: 'job-custom',
       conversationId: 'root',
       state: 'cancelled',
@@ -136,14 +136,14 @@ export const customJobJourney: readonly Snapshot[] = [
       sender: '/root',
       type: 'PROGRESS',
       payload: 'custom run started',
-      ordinal: 1,
+      ordinal: '1',
     }, {
       id: 'late-completion',
       recipient: '/root',
       sender: '/harness',
       type: 'MESSAGE',
       payload: 'late provider success ignored; cancellation retained',
-      ordinal: 2,
+      ordinal: '2',
     }],
   },
 ]
@@ -151,10 +151,10 @@ export const customJobJourney: readonly Snapshot[] = [
 /** Expected server snapshots for a successful custom job and a read-only reopen. */
 export const customSuccessJourney: readonly Snapshot[] = [
   {
-    seq: 30,
-    conversations: [{ id: 'root', path: '/root', state: 'requesting' }],
-    requests: [{ id: 'request-success', conversationId: 'root', state: 'running' }],
-    jobs: [{
+    seq: '30',
+    conversations: [{ parentId: null, forkSourceRequestId: null, id: 'root', path: '/root', state: 'requesting' }],
+    requests: [{ parentId: null, createdAtMs: null, endedAtMs: null, failure: null, id: 'request-success', conversationId: 'root', state: 'running' }],
+    jobs: [{ startedAtMs: null, endedAtMs: null,
       id: 'job-success',
       conversationId: 'root',
       state: 'running',
@@ -170,14 +170,14 @@ export const customSuccessJourney: readonly Snapshot[] = [
       sender: '/root',
       type: 'PROGRESS',
       payload: 'custom run evaluating',
-      ordinal: 1,
+      ordinal: '1',
     }],
   },
   {
-    seq: 31,
-    conversations: [{ id: 'root', path: '/root', state: 'idle' }],
-    requests: [{ id: 'request-success', conversationId: 'root', state: 'completed', outcome: 'completed' }],
-    jobs: [{
+    seq: '31',
+    conversations: [{ parentId: null, forkSourceRequestId: null, id: 'root', path: '/root', state: 'idle' }],
+    requests: [{ parentId: null, createdAtMs: null, endedAtMs: null, failure: null, id: 'request-success', conversationId: 'root', state: 'completed', outcome: 'completed' }],
+    jobs: [{ startedAtMs: null, endedAtMs: null,
       id: 'job-success',
       conversationId: 'root',
       state: 'settled',
@@ -194,15 +194,15 @@ export const customSuccessJourney: readonly Snapshot[] = [
       sender: '/root',
       type: 'PROGRESS',
       payload: 'custom run evaluating',
-      ordinal: 1,
+      ordinal: '1',
     }],
   },
   {
     // Reopening projects the same durable identity, progress and settled output.
-    seq: 31,
-    conversations: [{ id: 'root', path: '/root', state: 'idle' }],
-    requests: [{ id: 'request-success', conversationId: 'root', state: 'completed', outcome: 'completed' }],
-    jobs: [{
+    seq: '31',
+    conversations: [{ parentId: null, forkSourceRequestId: null, id: 'root', path: '/root', state: 'idle' }],
+    requests: [{ parentId: null, createdAtMs: null, endedAtMs: null, failure: null, id: 'request-success', conversationId: 'root', state: 'completed', outcome: 'completed' }],
+    jobs: [{ startedAtMs: null, endedAtMs: null,
       id: 'job-success',
       conversationId: 'root',
       state: 'settled',
@@ -219,7 +219,7 @@ export const customSuccessJourney: readonly Snapshot[] = [
       sender: '/root',
       type: 'PROGRESS',
       payload: 'custom run evaluating',
-      ordinal: 1,
+      ordinal: '1',
     }],
   },
 ]

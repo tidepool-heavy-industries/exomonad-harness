@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import HistoryItem from './HistoryItem'
 
-const entry = (item: unknown) => ({ position: 7, hash: 'a'.repeat(64), byteLen: 123, item })
+const entry = (item: unknown) => ({ position: '7', hash: 'a'.repeat(64), byteLen: '123', item })
 const exact = '  λ 🐈\n"quoted" \\  <script>alert(1)</script>  '
 
 describe('retained Item presentation', () => {

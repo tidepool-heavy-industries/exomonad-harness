@@ -18,3 +18,8 @@ it('validates canonical decimal spellings and both signed native bounds using bi
   expect(signedDecimal('9223372036854775808')).toBe(false);
   expect(signedDecimal('-9223372036854775809')).toBe(false);
 });
+
+it.each(['1\n', '1\r', '1 ', ' 1', '+1', '01', '-0', '1e3', ''])('refuses noncanonical whitespace and decimal spelling %j', value => {
+  expect(unsignedDecimal(value)).toBe(false);
+  expect(signedDecimal(value)).toBe(false);
+});

@@ -103,14 +103,14 @@ test('a sequence gap coalesces snapshot requests and never submits the draft',as
   await chooseWorker(page)
   await composer(page).fill('Gap draft remains unsent')
   await control(request,'config',{holdSnapshot:true})
-  const frame=(seq:number)=>({type:'event',event:{seq,event:{kind:'envelope.upsert',value:{id:`gap-${seq}`,recipient:'/operator',sender:'/root',type:'MESSAGE',payload:'Gap fixture'}}}})
+  const frame=(seq:number)=>({type:'event',event:{seq:String(seq),event:{kind:'envelope.upsert',value:{id:`gap-${seq}`,recipient:'/operator',sender:'/root',type:'MESSAGE',payload:'Gap fixture'}}}})
   await control(request,'frame',frame(12))
   await control(request,'frame',frame(13))
   await expect(send(page)).toBeDisabled()
   await expect.poll(async()=> (await observations(request)).snapshotRequests).toBe(1)
   await expect(composer(page)).toHaveValue('Gap draft remains unsent')
   expect((await observations(request)).commands).toHaveLength(0)
-  await control(request,'snapshot',{...data,seq:13})
+  await control(request,'snapshot',{...data,seq:'13'})
   await expect(send(page)).toBeEnabled()
   expect((await observations(request)).commands).toHaveLength(0)
 })
@@ -122,7 +122,7 @@ test('actor replacement cannot retarget a selected incarnation or its draft',asy
   await composer(page).fill('Draft for the original incarnation')
   const replaced=structuredClone(data)
   replaced.actors[1].identity.incarnation='replacement-incarnation'
-  replaced.seq=11
+  replaced.seq='11'
   await control(request,'snapshot',replaced)
   await expect(send(page)).toBeDisabled()
   expect(new URL(page.url()).searchParams.get('incarnation')).toBe(target.incarnation)
@@ -147,7 +147,7 @@ for(const outcome of ['admitted','refused','unconfirmed','control_requested'] as
     await expect(row).toContainText(outcome==='admitted'?'input_admitted':outcome)
     if(outcome==='unconfirmed') await expect(page.getByRole('region',{name:'Retained browser operations'})).not.toContainText('Refused')
     if(outcome==='admitted') {
-      await control(request,'frame',{type:'event',event:{seq:12,event:{kind:'command.receipt',value:{commandId:command.operation_id,target:command.command.target,outcome:'unconfirmed',reason:'Weaker late fixture uncertainty'}}}})
+      await control(request,'frame',{type:'event',event:{seq:'12',event:{kind:'command.receipt',value:{commandId:command.operation_id,target:command.command.target,outcome:'unconfirmed',reason:'Weaker late fixture uncertainty'}}}})
       await expect(row).toContainText('input_admitted')
     }
   })
@@ -177,7 +177,7 @@ test('unsupported receipt outcome remains a protocol error and cannot settle or 
   const command=(await observations(request)).commands[0]
   await composer(page).fill('Preserve this later draft')
   await control(request,'config',{holdSnapshot:true})
-  await control(request,'frame',{type:'event',event:{seq:11,event:{kind:'command.receipt',value:{commandId:command.operation_id,target:command.command.target,outcome:'future_unrecognized_outcome',reason:'Unsupported fixture outcome'}}}})
+  await control(request,'frame',{type:'event',event:{seq:'11',event:{kind:'command.receipt',value:{commandId:command.operation_id,target:command.command.target,outcome:'future_unrecognized_outcome',reason:'Unsupported fixture outcome'}}}})
   await expect(send(page)).toBeDisabled()
   await expect.poll(async()=> (await observations(request)).snapshotRequests).toBe(1)
   const row=page.locator(`[data-operation-id="${command.operation_id}"]`)
@@ -186,7 +186,7 @@ test('unsupported receipt outcome remains a protocol error and cannot settle or 
   await expect(composer(page)).toHaveValue('Preserve this later draft')
   await expect(page.getByRole('heading',{name:'Operator sign in'})).toHaveCount(0)
   expect((await observations(request)).commands).toHaveLength(1)
-  await control(request,'snapshot',{...data,seq:11})
+  await control(request,'snapshot',{...data,seq:'11'})
   await expect(send(page)).toBeEnabled()
   expect((await observations(request)).commands).toHaveLength(1)
 })

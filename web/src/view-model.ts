@@ -28,7 +28,7 @@ export type HarnessViewModel = {
     id: string;
     parentId?: string | null;
     forkSourceRequestId?: string | null;
-    version?: number;
+    version?: string;
     name: string;
     model?: string;
     effort?: string;
@@ -49,7 +49,7 @@ export type HarnessViewModel = {
     duration?: string;
     startedAtMs?: number;
     endedAtMs?: number;
-    version?: number;
+    version?: string;
     historyRefreshKey?: string;
     detail?: string;
     commandId?: string;
@@ -71,6 +71,6 @@ export type HarnessViewModel = {
     state: string;
     type?: Envelope["type"];
     receivedAt?: string;
-    ordinal?: number;
+    ordinal?: string;
   }>;
 };

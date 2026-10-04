@@ -16,7 +16,7 @@ import { CommandStatusError, getCommandStatus, getSessionStatus, login, logout, 
 import { connectHarness, type HarnessConnection } from './ws-client'
 import type { DemoSubmissionResult, LocalSubmissionResult, TransportPhase } from './client-contract'
 
-const emptySnapshot: Snapshot = { seq: 0, conversations: [], requests: [], jobs: [], envelopes: [] }
+const emptySnapshot: Snapshot = { seq: '0', conversations: [], requests: [], jobs: [], envelopes: [] }
 const reconnectDelays = [1_000, 2_000, 5_000, 10_000, 30_000] as const
 
 export function Operator() {

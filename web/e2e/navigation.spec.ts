@@ -4,7 +4,7 @@ import { openFixture, view, observations } from './support'
 
 test('linked actor views filter one context; global activity and native message filters remain explicit',async({page,request})=>{
   const data=snapshot()
-  data.envelopes.push({id:'worker-progress',sender:target.actor,recipient:'/operator',type:'PROGRESS',payload:'Only selected worker progress',ordinal:9,version:1})
+  data.envelopes.push({id:'worker-progress',sender:target.actor,recipient:'/operator',type:'PROGRESS',payload:'Only selected worker progress',ordinal:'9',version:'1'})
   await openFixture(page,request,{snapshot:data})
   await page.getByRole('link',{name:`Open chat with ${target.actor}, waiting`,exact:true}).click()
   const actorURL=new URL(page.url())

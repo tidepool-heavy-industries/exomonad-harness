@@ -72,13 +72,13 @@ test('only selected-request durable changes refresh the current bounded history 
   await page.getByRole('button',{name:'Inspect history',exact:true}).first().click()
   await expect(items(page)).toHaveCount(50)
   const first=(await observations(request)).historyReads[0].id
-  await control(request,'frame',{type:'event',event:{seq:11,event:{kind:'envelope.upsert',value:{id:'unrelated',recipient:'/operator',sender:'/elsewhere',type:'MESSAGE',payload:'Unrelated update'}}}})
+  await control(request,'frame',{type:'event',event:{seq:'11',event:{kind:'envelope.upsert',value:{id:'unrelated',recipient:'/operator',sender:'/elsewhere',type:'MESSAGE',payload:'Unrelated update'}}}})
   await page.waitForTimeout(100)
   expect((await observations(request)).historyReads).toHaveLength(1)
   await inspector(page).getByRole('button',{name:'Next page',exact:true}).click()
   await expect(items(page).first()).toContainText('Item 50')
   const record=data.requests.find(r=>r.id===first)!
-  await control(request,'frame',{type:'event',event:{seq:12,event:{kind:'request.upsert',value:{...record,version:2}}}})
+  await control(request,'frame',{type:'event',event:{seq:'12',event:{kind:'request.upsert',value:{...record,version:'2'}}}})
   await expect.poll(async()=> (await observations(request)).historyReads.length).toBe(3)
   expect((await observations(request)).historyReads[2].offset).toBe(50)
   await expect(items(page)).toHaveCount(50)

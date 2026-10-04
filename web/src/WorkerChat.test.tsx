@@ -14,7 +14,7 @@ const data: HarnessViewModel = { hostRun: 'run', actors: [actor], nodes: [{ id: 
   timeline: [{ id: 'head', nodeId: 'conversation', kind: 'request', state: 'completed', label: 'Head', parentId: null, historyRefreshKey: 'head:1' }], inbox: [] }
 function history(id: string, text = `Messages for ${id}`): HistoryPage {
   return { requestId: id, parentId: null, branch: '/root/worker', nextOffset: null, oversizedItem: null,
-    items: [{ position: 0, hash: 'a'.repeat(64), byteLen: 100, item: { type: 'message', role: 'assistant', content: text } }] }
+    items: [{ position: '0', hash: 'a'.repeat(64), byteLen: '100', item: { type: 'message', role: 'assistant', content: text } }] }
 }
 const navigate = vi.fn()
 function chat(snapshot = data, selected = route, phase: 'ready' | 'disconnected' = 'ready') {
@@ -119,10 +119,10 @@ describe('exact worker Chat', () => {
       { ...actor, id: actorIdentityKey(replacementIdentity), incarnation: 'two', modelHeadRequest: 'replacement-head' }],
       timeline: Array.from({ length: 128 }, (_, index) => ({ ...data.timeline[0]!, id: index === 127 ? 'replacement-head' : `sibling-${index}` })) }
     const mounted = render(chat(shared))
-    await waitFor(() => expect(readHistoryPage).toHaveBeenCalledWith('retired-head', 0, expect.any(AbortSignal)))
+    await waitFor(() => expect(readHistoryPage).toHaveBeenCalledWith('retired-head', '0', expect.any(AbortSignal)))
     expect(vi.mocked(readHistoryPage).mock.calls.map(call => call[0])).toEqual(['retired-head'])
     mounted.rerender(chat(shared, { ...route, selection: { kind: 'actor', identity: replacementIdentity } }))
-    await waitFor(() => expect(readHistoryPage).toHaveBeenCalledWith('replacement-head', 0, expect.any(AbortSignal)))
+    await waitFor(() => expect(readHistoryPage).toHaveBeenCalledWith('replacement-head', '0', expect.any(AbortSignal)))
     expect(vi.mocked(readHistoryPage).mock.calls.map(call => call[0])).toEqual(['retired-head', 'replacement-head'])
   })
   it('loads only the selected conversation and uses ordinary exact worker anchors', async () => {
@@ -164,7 +164,7 @@ describe('exact worker Chat', () => {
     expect(screen.queryByText('Stale response')).toBeNull()
     mounted.rerender(chat(next))
     await screen.findByText('Messages for next')
-    expect(readHistoryPage).toHaveBeenLastCalledWith('next', 0, expect.any(AbortSignal))
+    expect(readHistoryPage).toHaveBeenLastCalledWith('next', '0', expect.any(AbortSignal))
   })
   it('keeps fetched retired history when refresh fails and retries protected history', async () => {
     const expired = vi.fn()

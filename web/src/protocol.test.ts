@@ -1,232 +1,73 @@
-import { actorIdentityKey, applyStateEvent, isSequencedEvent, isSnapshot, normalizeSnapshot, type SequencedEvent, type Snapshot } from "./protocol";
-import { describe, expect, it } from "vitest";
+import { actorIdentityKey, applyStateEvent, isEmbeddedCommandRecord, isSequencedEvent, isSnapshot, normalizeSnapshot, type Snapshot } from './protocol'
+import { fixtureSnapshot } from './fixture'
+import { nextCounter } from './decimal'
+import { describe, expect, it } from 'vitest'
 
-// Recorded-shaped fixture: consumers can replace this with captured server JSON
-// without bringing Rust types into the browser package.
-const fixture: Snapshot = {
-  seq: 41,
-  conversations: [{ id: "c/root", path: "/root", state: "requesting" }],
-  requests: [{ id: "r/7", conversationId: "c/root", state: "running" }],
-  jobs: [],
-  envelopes: [{ id: "e/2", recipient: "/root", sender: "/operator", type: "MESSAGE", payload: "continue" }],
-};
-
-describe('actor history head wire validation', () => {
-  const actor = { identity: { run: 'run', actor: '/root/old', incarnation: '1' },
-    parent: null, kind: 'model', lifecycle: 'retired', modelConversation: '/root/old' }
-  it.each([undefined, null, 'exact-old-head'])('accepts an optional exact head: %j', modelHeadRequest => {
-    const value = { ...actor, ...(modelHeadRequest === undefined ? {} : { modelHeadRequest }) }
-    expect(isSnapshot({ ...fixture, actors: [value] })).toBe(true)
-    expect(isSequencedEvent({ seq: 42, event: { kind: 'actor.upsert', value } })).toBe(true)
+describe('generated browser state projection', () => {
+  it('applies exact consecutive counters above JavaScript safe integers without mutating prior state', () => {
+    const snapshot: Snapshot = { ...fixtureSnapshot, seq: '9007199254740992' }
+    expect(isSnapshot(snapshot)).toBe(true)
+    const initial = normalizeSnapshot(snapshot)
+    const message = { seq: '9007199254740993', event: { kind: 'job.upsert' as const,
+      value: { id: 'job-next', conversationId: 'root', state: 'running' as const, startedAtMs: null, endedAtMs: null } } }
+    expect(isSequencedEvent(message)).toBe(true)
+    const applied = applyStateEvent(initial, message)
+    if (applied.kind !== 'applied') throw new Error('valid consecutive event failed')
+    expect(applied.state.seq).toBe('9007199254740993')
+    expect(applied.state.jobs.has('job-next')).toBe(true)
+    expect(initial.seq).toBe(snapshot.seq)
+    expect(initial.jobs.has('job-next')).toBe(false)
+    expect(applyStateEvent(initial, { ...message, seq: '9007199254740994' }))
+      .toEqual({ kind: 'resync', expected: '9007199254740993', received: '9007199254740994' })
   })
-  it.each([12, {}, [], ''])('rejects malformed head entrypoints: %j', modelHeadRequest => {
-    const value = { ...actor, modelHeadRequest }
-    expect(isSnapshot({ ...fixture, actors: [value] })).toBe(false)
-    expect(isSequencedEvent({ seq: 42, event: { kind: 'actor.upsert', value } })).toBe(false)
+
+  it('projects exact actor incarnations and their authoritative history heads across reconnect', () => {
+    const identity = { run: 'run', actor: 'worker', incarnation: 'second' }
+    const actor = { identity, parent: null, kind: 'model' as const, lifecycle: 'waiting' as const,
+      modelConversation: 'root', modelHeadRequest: 'exact-head' }
+    const state = normalizeSnapshot({ ...fixtureSnapshot, actors: [actor] })
+    const message = { seq: nextCounter(state.seq), event: { kind: 'actor.upsert' as const,
+      value: { ...actor, lifecycle: 'retired' as const } } }
+    const result = applyStateEvent(state, message)
+    if (result.kind !== 'applied') throw new Error('valid actor event failed')
+    const key = actorIdentityKey(identity)
+    expect(result.state.actors.get(key)?.modelHeadRequest).toBe('exact-head')
+    expect(result.state.actors.get(key)?.lifecycle).toBe('retired')
+    expect(normalizeSnapshot({ ...fixtureSnapshot, seq: message.seq, actors: [message.event.value] }).actors.get(key))
+      .toEqual(result.state.actors.get(key))
+    expect(state.actors.get(key)?.lifecycle).toBe('waiting')
   })
-})
 
-describe('request failure wire validation', () => {
-  it.each([
-    null,
-    { kind: 'authentication' },
-    { kind: 'http', status: 400, diagnostic: null },
-    { kind: 'http', status: 429, diagnostic: { code: 'rate_limit', error_type: 'quota', param: 'model', message: 'Try later' } },
-    { kind: 'http', status: 400, diagnostic: { code: '😀'.repeat(256), message: '😀'.repeat(2048) } },
-  ])('preserves a valid failure in snapshots and request updates: %j', failure => {
-    const request = { ...fixture.requests[0]!, state: 'failed', failure };
-    const snapshot = { ...fixture, requests: [request] };
-    const event = { seq: 42, event: { kind: 'request.upsert', value: request } };
-    expect(isSnapshot(snapshot)).toBe(true);
-    expect(isSequencedEvent(event)).toBe(true);
-    if (isSnapshot(snapshot)) expect(normalizeSnapshot(snapshot).requests.get(request.id)?.failure).toEqual(failure);
-    if (isSequencedEvent(event)) {
-      const result = applyStateEvent(normalizeSnapshot(fixture), event);
-      expect(result.kind).toBe('applied');
-      if (result.kind === 'applied') expect(result.state.requests.get(request.id)?.failure).toEqual(failure);
+  it('bounds handoff receipts and moves a replacement to the newest position', () => {
+    let state = normalizeSnapshot(fixtureSnapshot)
+    for (let index = 0; index < 129; index++) {
+      const result = applyStateEvent(state, { seq: nextCounter(state.seq), event: { kind: 'command.receipt',
+        value: { commandId: `cmd-${index}`, outcome: 'refused', reason: 'not admitted' } } })
+      if (result.kind !== 'applied') throw new Error('receipt event failed')
+      state = result.state
     }
-  });
-  it.each([
-    'failed', {}, { kind: 'future' },
-    { kind: 'http', status: -1, diagnostic: null },
-    { kind: 'http', status: 65536, diagnostic: null },
-    { kind: 'http', status: 400.5, diagnostic: null },
-    { kind: 'http', status: '400', diagnostic: null },
-    { kind: 'http', status: 400 },
-    { kind: 'http', status: 400, diagnostic: [] },
-    { kind: 'http', status: 400, diagnostic: { error_type: null } },
-    { kind: 'http', status: 400, diagnostic: { code: 123 } },
-    { kind: 'http', status: 400, diagnostic: { param: 'x'.repeat(257) } },
-    { kind: 'http', status: 400, diagnostic: { message: 'x'.repeat(2049) } },
-  ])('rejects malformed failures in snapshots and request updates: %j', failure => {
-    const request = { ...fixture.requests[0]!, state: 'failed', failure };
-    expect(isSnapshot({ ...fixture, requests: [request] })).toBe(false);
-    expect(isSequencedEvent({ seq: 42, event: { kind: 'request.upsert', value: request } })).toBe(false);
-  });
-});
+    expect(state.commandReceipts.size).toBe(128)
+    expect([...state.commandReceipts.keys()][0]).toBe('cmd-1')
+    const replacement = applyStateEvent(state, { seq: nextCounter(state.seq), event: { kind: 'command.receipt',
+      value: { commandId: 'cmd-1', outcome: 'admitted', envelopeId: '9223372036854775807' } } })
+    if (replacement.kind !== 'applied') throw new Error('replacement failed')
+    expect(replacement.state.commandReceipts.size).toBe(128)
+    expect([...replacement.state.commandReceipts.keys()].at(-1)).toBe('cmd-1')
+    expect(replacement.state.commandReceipts.get('cmd-1')).toMatchObject({ envelopeId: '9223372036854775807' })
+  })
 
-describe("stable JSON state adapter", () => {
-  it("normalizes snapshots and applies contiguous events immutably", () => {
-    const initial = normalizeSnapshot(fixture);
-    expect(initial.seq).toBe(41);
-    expect(initial.requests.has("r/7")).toBe(true);
-    const applied = applyStateEvent(initial, {
-      seq: 42,
-      event: { kind: "job.upsert", value: { id: "j/1", conversationId: "c/root", state: "running" } },
-    });
-    expect(applied.kind).toBe("applied");
-    if (applied.kind === "applied") {
-      expect(applied.state.jobs.has("j/1")).toBe(true);
-      expect(applied.state.seq).toBe(42);
-    }
-    expect(initial.seq).toBe(41);
-    expect(initial.jobs.has("j/1")).toBe(false);
-  });
+  it('checks operation, target and receipt association after generated shape validation', () => {
+    const target = { run: 'run', actor: '/worker', incarnation: 'one' }
+    const operationId = 'ABCDEF01-1111-4111-8111-111111111111'
+    const valid = { operationId, command: { action: 'input', target, text: 'hello' }, state: 'input_admitted',
+      envelopeId: '9223372036854775807', receipt: { commandId: operationId.toLowerCase(), target,
+        outcome: 'admitted', envelopeId: '9223372036854775807' } }
+    expect(isEmbeddedCommandRecord(valid)).toBe(true)
+    expect(isEmbeddedCommandRecord({ ...valid, envelopeId: '9223372036854775806' })).toBe(false)
+    expect(isEmbeddedCommandRecord({ ...valid, receipt: { ...valid.receipt, target: { ...target, incarnation: 'two' } } })).toBe(false)
+  })
 
-  it("rejects sequence gaps without applying the event", () => {
-    const initial = normalizeSnapshot(fixture);
-    const gap = applyStateEvent(initial, {
-      seq: 43,
-      event: { kind: "conversation.upsert", value: { id: "c/other", path: "/other", state: "idle" } },
-    });
-    expect(gap).toEqual({ kind: "resync", expected: 42, received: 43 });
-    expect(initial.conversations.has("c/other")).toBe(false);
-  });
-
-  it("projects host workflow incarnations separately from conversations across reconnect", () => {
-    const identity = { run: "run-1", actor: "worker", incarnation: "second" };
-    const actor = {
-      identity, parent: { run: "run-1", actor: "root", incarnation: "first" },
-      kind: "workflow" as const, lifecycle: "waiting" as const, modelConversation: null,
-    };
-    const initial = normalizeSnapshot({ ...fixture, actors: [actor] });
-    const key = actorIdentityKey(identity);
-    expect(initial.actors.get(key)).toEqual(actor);
-    expect(initial.conversations.size).toBe(1);
-    const result = applyStateEvent(initial, {
-      seq: 42, event: { kind: "actor.upsert", value: { ...actor, lifecycle: "retired" } },
-    });
-    expect(result.kind).toBe("applied");
-    if (result.kind === "applied") {
-      expect(result.state.actors.get(key)?.lifecycle).toBe("retired");
-      expect(normalizeSnapshot({ ...fixture, seq: 42, actors: [{ ...actor, lifecycle: "retired" }] }).actors.get(key))
-        .toEqual(result.state.actors.get(key));
-    }
-    expect(initial.actors.get(key)?.lifecycle).toBe("waiting");
-  });
-
-  it("updates explicit host mode from a host-run event even with no actor rows", () => {
-    const initial = normalizeSnapshot({ ...fixture, hostRun: undefined, actors: [] });
-    const result = applyStateEvent(initial, {
-      seq: 42,
-      event: { kind: "host_run.upsert", value: { run: "run-empty" } },
-    });
-    expect(result.kind).toBe("applied");
-    if (result.kind === "applied") {
-      expect(result.state.hostRun).toBe("run-empty");
-      expect(result.state.actors.size).toBe(0);
-    }
-  });
-
-  it("applies bounded command receipts as sequenced observable handoffs", () => {
-    const receipt = {
-      commandId: "cmd-4",
-      target: { run: "run-1", actor: "/root/worker", incarnation: "inc-2" },
-      outcome: "control_requested" as const,
-      control: "interrupt" as const,
-    };
-    const initial = normalizeSnapshot(fixture);
-    const applied = applyStateEvent(initial, {
-      seq: fixture.seq + 1,
-      event: { kind: "command.receipt", value: receipt },
-    });
-    expect(applied.kind).toBe("applied");
-    if (applied.kind === "applied") {
-      expect(applied.state.commandReceipts.get("cmd-4")).toEqual(receipt);
-      expect(applied.state.seq).toBe(fixture.seq + 1);
-    }
-  });
-
-  it("advances over a valid auxiliary event without requesting a false resync", () => {
-    const initial = normalizeSnapshot(fixture);
-    const result = applyStateEvent(initial, {
-      seq: fixture.seq + 1,
-      event: { kind: "control.requested", value: { commandId: "cmd-5" } },
-    } as unknown as SequencedEvent);
-    expect(result.kind).toBe("applied");
-    if (result.kind === "applied") expect(result.state.seq).toBe(fixture.seq + 1);
-  });
-
-  it("bounds live receipts and moves a replacement to the newest position", () => {
-    let state = normalizeSnapshot(fixture);
-    for (let index = 0; index < 129; index += 1) {
-      const result = applyStateEvent(state, {
-        seq: state.seq + 1,
-        event: {
-          kind: "command.receipt",
-          value: { commandId: `cmd-${index}`, outcome: "refused", reason: "not admitted" },
-        },
-      });
-      expect(result.kind).toBe("applied");
-      if (result.kind === "applied") state = result.state;
-    }
-    expect(state.commandReceipts.size).toBe(128);
-    expect([...state.commandReceipts.keys()][0]).toBe("cmd-1");
-    expect([...state.commandReceipts.keys()].at(-1)).toBe("cmd-128");
-
-    const replacement = applyStateEvent(state, {
-      seq: state.seq + 1,
-      event: {
-        kind: "command.receipt",
-        value: { commandId: "cmd-1", outcome: "admitted", envelopeId: "env-refreshed" },
-      },
-    });
-    expect(replacement.kind).toBe("applied");
-    if (replacement.kind === "applied") {
-      expect(replacement.state.commandReceipts.size).toBe(128);
-      expect([...replacement.state.commandReceipts.keys()][0]).toBe("cmd-2");
-      expect([...replacement.state.commandReceipts.keys()].at(-1)).toBe("cmd-1");
-      expect(replacement.state.commandReceipts.get("cmd-1")).toMatchObject({
-        outcome: "admitted", envelopeId: "env-refreshed",
-      });
-    }
-  });
-});
-
-it('validates every receipt outcome and rejects unsupported or incomplete handoff evidence', async () => {
-  const { isCommandReceipt, isEmbeddedCommandRecord } = await import('./protocol')
-  const target = { run: 'Run', actor: '/ROOT', incarnation: 'Inc' }
-  const commandId = '11111111-1111-4111-8111-111111111111'
-  for (const receipt of [
-    { commandId, target, outcome: 'admitted', envelopeId: '42', wakeError: 'wake failed' },
-    { commandId, target, outcome: 'control_requested', control: 'interrupt' },
-    { commandId, target, outcome: 'refused', reason: 'denied' },
-    { commandId, target, outcome: 'unconfirmed', reason: 'ack lost' },
-  ]) expect(isCommandReceipt(receipt)).toBe(true)
-  for (const receipt of [
-    { commandId, target, outcome: 'future_success' },
-    { commandId, outcome: 'unconfirmed', reason: 'unknown' },
-    { commandId, target, outcome: 'admitted', envelopeId: 42 },
-    { commandId, target, outcome: 'control_requested', control: 'kill' },
-  ]) {
-    expect(isCommandReceipt(receipt)).toBe(false)
-    expect(isEmbeddedCommandRecord({ operationId: commandId, command: { action: 'retire', target }, state: 'queued', envelopeId: null, receipt })).toBe(false)
-  }
-})
-
-it('validates known optional fields while preserving absent parent and explicit null provenance', async () => {
-  const { isSnapshot, isSequencedEvent } = await import('./protocol')
-  const legacy = { seq: 0, conversations: [{ id: 'c', path: '/c', state: 'idle' }], requests: [], jobs: [], envelopes: [] }
-  expect(isSnapshot(legacy)).toBe(true)
-  expect(Object.hasOwn(legacy.conversations[0]!, 'parentId')).toBe(false)
-  expect(isSnapshot({ ...legacy, conversations: [{ ...legacy.conversations[0], parentId: null }] })).toBe(true)
-  const malformed = [
-    { kind: 'conversation.upsert', value: { ...legacy.conversations[0], parentId: 123 } },
-    { kind: 'job.upsert', value: { id: 'j', conversationId: 'c', state: 'running', delivered: 'false' } },
-    { kind: 'job.upsert', value: { id: 'j', conversationId: 'c', state: 'running', toolKind: {} } },
-    { kind: 'request.upsert', value: { id: 'r', conversationId: 'c', state: 'running', createdAtMs: Infinity } },
-    { kind: 'envelope.upsert', value: { id: 'e', sender: 's', recipient: 'r', type: 'MESSAGE', payload: '', ordinal: -1 } },
-  ]
-  for (const event of malformed) expect(isSequencedEvent({ seq: 1, event })).toBe(false)
-  expect(isSequencedEvent({ seq: 1, event: { kind: 'tokens.observed', value: null } })).toBe(true)
+  it('refuses undeclared auxiliary events at the generated boundary', () => {
+    expect(isSequencedEvent({ seq: '1', event: { kind: 'tokens.observed', value: null } })).toBe(false)
+  })
 })

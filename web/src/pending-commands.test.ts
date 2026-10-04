@@ -23,10 +23,10 @@ describe('retained embedded browser operations', () => {
       operationId: submission.operation_id,
       command,
       state: 'input_admitted',
-      envelopeId: 42,
+      envelopeId: '42',
       receipt: null,
     })
-    expect(next).toMatchObject([{ ...retained[0]!, authority: 'status', state: 'input_admitted', envelopeId: 42 }])
+    expect(next).toMatchObject([{ ...retained[0]!, authority: 'status', state: 'input_admitted', envelopeId: '42' }])
     expect(next[0]?.submission).toEqual(submission)
   })
 })
@@ -61,7 +61,7 @@ it('does not apply status for another incarnation or changed payload', () => {
     { ...command, target: { ...command.target, incarnation: 'replacement' } },
     { action: 'retire' as const, target: command.target },
   ]) {
-    expect(() => applyCommandStatus(records, 'run-1', { operationId, command: altered, state: 'input_admitted', envelopeId: 7, receipt: null })).toThrow(/exact target and contents/)
+    expect(() => applyCommandStatus(records, 'run-1', { operationId, command: altered, state: 'input_admitted', envelopeId: '7', receipt: null })).toThrow(/exact target and contents/)
   }
   expect(records[0]?.state).toBe('queued')
 })
@@ -172,7 +172,7 @@ it('quarantines persisted authoritative receipts that contradict immutable targe
     { state: 'control_requested', receipt: { ...admittedReceipt, outcome: 'control_requested', control: 'retire' } },
     { receipt: { ...admittedReceipt, commandId: '00000000-0000-4000-8000-000000000000' } },
     { receipt: { ...admittedReceipt, target: { ...command.target, incarnation: 'OTHER' } } },
-    { envelopeId: 43 },
+    { envelopeId: '43' },
   ]) {
     sessionStorage.setItem('harness.embeddedCommands.v2', JSON.stringify({ version: 2, records: [
       { ...local, authority: 'receipt', state: 'input_admitted', receipt: admittedReceipt, ...changes },

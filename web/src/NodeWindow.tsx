@@ -5,17 +5,17 @@ import { HistoryReadError, readHistoryPage, type HistoryPage } from './history-c
 
 interface LoadedPage {
   readonly page: HistoryPage
-  readonly offset: number
+  readonly offset: string
   readonly previous?: PageOffset
 }
 
 interface PageOffset {
-  readonly offset: number
+  readonly offset: string
   readonly previous?: PageOffset
 }
 
 interface ReadIntent {
-  readonly offset: number
+  readonly offset: string
   readonly previous?: PageOffset
   readonly attempt: number
 }
@@ -31,7 +31,7 @@ export default function NodeWindow({ requestId, conversationId, hostRun, refresh
   const [loaded, setLoaded] = useState<LoadedPage>()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>()
-  const [intent, setIntent] = useState<ReadIntent>({ offset: 0, attempt: 0 })
+  const [intent, setIntent] = useState<ReadIntent>({ offset: '0', attempt: 0 })
   const currentContext = useRef(context)
   currentContext.current = context
   const generation = useRef(0)
@@ -47,7 +47,7 @@ export default function NodeWindow({ requestId, conversationId, hostRun, refresh
     setStateContext(context)
     setLoaded(undefined)
     setError(undefined)
-    setIntent({ offset: 0, attempt: 0 })
+    setIntent({ offset: '0', attempt: 0 })
     setStateRefreshKey(refreshKey)
   } else if (stateRefreshKey !== refreshKey) {
     setStateRefreshKey(refreshKey)
@@ -80,7 +80,7 @@ export default function NodeWindow({ requestId, conversationId, hostRun, refresh
     setIntent((current) => visiblePageIntent(current, loaded))
   }
 
-  function next(offset: number) {
+  function next(offset: string) {
     if (!loaded) return
     setIntent({ offset, previous: { offset: loaded.offset, previous: loaded.previous }, attempt: 0 })
   }

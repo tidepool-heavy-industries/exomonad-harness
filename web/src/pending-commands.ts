@@ -4,6 +4,8 @@ import {
   type CommandReceipt, type EmbeddedCommandRecord, type HostCommandRefusal, type HostCommandSubmission,
 } from './protocol'
 
+import { signedDecimal } from './decimal'
+
 const storageKey = 'harness.embeddedCommands.v2'
 const legacyStorageKey = 'harness.embeddedCommands.v1'
 
@@ -14,7 +16,7 @@ export interface BrowserCommandRecord {
   readonly authority: 'local' | 'legacy' | 'status' | 'receipt'
   readonly state: EmbeddedCommandRecord['state']
   readonly receipt?: CommandReceipt | null
-  readonly envelopeId?: number | null
+  readonly envelopeId?: string | null
   readonly accepted?: boolean
   readonly send?: 'sent' | 'not_sent' | 'unknown'
   readonly lookup?: { readonly kind: 'unavailable' | 'error'; readonly reason: string }
@@ -71,7 +73,7 @@ function decodeRecord(value: unknown, legacy: boolean): BrowserCommandRecord | u
   if (!legacy && !['local', 'legacy', 'status', 'receipt'].includes(value.authority as string)) return
   if (value.receipt !== undefined && value.receipt !== null && !isCommandReceipt(value.receipt)) return
   if (value.envelopeId !== undefined && value.envelopeId !== null
-    && (!Number.isSafeInteger(value.envelopeId) || (value.envelopeId as number) < 0)) return
+    && !signedDecimal(value.envelopeId)) return
   if (value.accepted !== undefined && typeof value.accepted !== 'boolean') return
   if (value.send !== undefined && !['sent', 'not_sent', 'unknown'].includes(value.send as string)) return
   if (value.lookup !== undefined && (!isObject(value.lookup) || !['unavailable', 'error'].includes(value.lookup.kind as string)
@@ -86,7 +88,7 @@ function decodeRecord(value: unknown, legacy: boolean): BrowserCommandRecord | u
     if (record.authority === 'receipt' && (!record.receipt || !record.receipt.target)) return
     if (record.receipt && (!receiptMatches(record, record.receipt) || receiptState(record.receipt) !== record.state)) return
     if (record.receipt?.outcome === 'admitted' && record.envelopeId != null
-      && String(record.envelopeId) !== record.receipt.envelopeId) return
+      && record.envelopeId !== record.receipt.envelopeId) return
   }
   return record
 }
@@ -188,7 +190,7 @@ function receiptMatches(record: BrowserCommandRecord, receipt: CommandReceipt): 
 }
 
 function mergeEvidence(record: BrowserCommandRecord, state: EmbeddedCommandRecord['state'], authority: 'status' | 'receipt',
-  receipt?: CommandReceipt | null, envelopeId?: number | null): BrowserCommandRecord {
+  receipt?: CommandReceipt | null, envelopeId?: string | null): BrowserCommandRecord {
   if ((state === 'input_admitted' && record.submission.command.action !== 'input')
     || (state === 'control_requested' && record.submission.command.action === 'input'))
     return issue(record, 'Observed handoff state contradicts this operation’s action.')

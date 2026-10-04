@@ -1,7 +1,9 @@
 import {
-  applyStateEvent, isCommandRefusal, isHostCommand, isObject, isOperationId, isSequencedEvent,
+  applyStateEvent, isCommandRefusal, isHostCommand, isOperationId, isSequencedEvent,
   isSnapshot, normalizeSnapshot, type HostCommandRefusal, type HostCommandSubmission, type NormalizedState,
 } from './protocol'
+import { isServerFrame } from './generated/validators.mjs'
+import { compareDecimal } from './decimal'
 import type { TransportPhase } from './client-contract'
 
 export type SendObservation = 'sent' | 'not_sent' | 'unknown'
@@ -57,11 +59,11 @@ export function connectHarness(socket: WebSocket, callbacks: {
     if (disposed || lost) return
     try {
       const frame: unknown = JSON.parse(message.data)
-      if (!isObject(frame)) throw new Error('Invalid server frame.')
+      if (!isServerFrame(frame)) throw new Error('Invalid server frame.')
       switch (frame.type) {
         case 'snapshot':
           if (!isSnapshot(frame.snapshot)) throw new Error('Invalid authoritative snapshot from server.')
-          if (current && frame.snapshot.hostRun === current.hostRun && frame.snapshot.seq < current.seq) break
+          if (current && frame.snapshot.hostRun === current.hostRun && compareDecimal(frame.snapshot.seq, current.seq) < 0) break
           current = normalizeSnapshot(frame.snapshot)
           requestedSnapshot = false
           if (resyncTimer !== undefined) { clearTimeout(resyncTimer); resyncTimer = undefined }

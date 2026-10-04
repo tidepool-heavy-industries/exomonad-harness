@@ -9,15 +9,15 @@ import type { Selection } from './client-contract'
 const identity = { run: 'RUN/opaque', actor: '/worker', incarnation: 'Inc-A' }
 const selection: Selection = { kind: 'actor', identity }
 function fixture() {
-  return toViewModel(normalizeSnapshot({ seq: 1, actors: [
+  return toViewModel(normalizeSnapshot({ seq: '1', actors: [
     { identity, parent: null, kind: 'model', lifecycle: 'running', modelConversation: 'CONV' },
     { identity: { ...identity, actor: 'workflow' }, parent: identity,
       kind: 'workflow', lifecycle: 'waiting', modelConversation: null },
   ], conversations: [
-    { id: 'CONV', path: '/source/path', state: 'idle', parentId: null },
-    { id: 'free', path: '/unattached', state: 'idle' },
-  ], requests: [{ id: 'r', conversationId: 'CONV', state: 'running' },
-    { id: 'other', conversationId: 'free', state: 'running' }], jobs: [], envelopes: [
+    { forkSourceRequestId: null, id: 'CONV', path: '/source/path', state: 'idle', parentId: null },
+    { parentId: null, forkSourceRequestId: null, id: 'free', path: '/unattached', state: 'idle' },
+  ], requests: [{ parentId: null, createdAtMs: null, endedAtMs: null, failure: null, id: 'r', conversationId: 'CONV', state: 'running' },
+    { parentId: null, createdAtMs: null, endedAtMs: null, failure: null, id: 'other', conversationId: 'free', state: 'running' }], jobs: [], envelopes: [
     { id: 'operator', sender: '/operator', recipient: '/source/path', type: 'MESSAGE', payload: 'hi' },
     { id: 'answer', sender: '/source/path', recipient: '/operator', type: 'FINAL_ANSWER', payload: 'done' },
     { id: 'progress', sender: '/source/path', recipient: '/peer', type: 'PROGRESS', payload: 'working' },

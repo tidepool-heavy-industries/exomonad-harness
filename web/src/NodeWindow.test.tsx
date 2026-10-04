@@ -5,9 +5,9 @@ import NodeWindow from './NodeWindow'
 const hash = 'a'.repeat(64)
 const page = (requestId = 'request-1', offset = 0, count = 1, nextOffset: number | null = null, text = 'text') => ({
   requestId, parentId: 'parent-1', branch: '/root',
-  items: Array.from({ length: count }, (_, index) => ({ position: offset + index, hash, byteLen: 91,
+  items: Array.from({ length: count }, (_, index) => ({ position: String(offset + index), hash, byteLen: '91',
     item: { type: 'message', role: 'assistant', content: `${text} ${offset + index}` } })),
-  nextOffset, oversizedItem: null,
+  nextOffset: nextOffset === null ? null : String(nextOffset), oversizedItem: null,
 })
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status })
 function deferred() {
@@ -58,8 +58,8 @@ describe('retained request inspection', () => {
   })
 
   it('requires explicit oversized skip even for a 413 empty page and preserves return offsets', async () => {
-    const blocked = { ...page('request-1', 50, 0), nextOffset: 50,
-      oversizedItem: { position: 50, hash, byteLen: 270_000, skipOffset: 51 } }
+    const blocked = { ...page('request-1', 50, 0), nextOffset: '50',
+      oversizedItem: { position: '50', hash, byteLen: '270000', skipOffset: '51' } }
     const fetchMock = vi.fn().mockResolvedValueOnce(response(page('request-1', 0, 50, 50)))
       .mockResolvedValueOnce(response(blocked, 413)).mockResolvedValueOnce(response(page('request-1', 51)))
       .mockResolvedValueOnce(response(blocked, 413))
@@ -82,8 +82,8 @@ describe('retained request inspection', () => {
   })
 
   it('keeps the complete mixed-page return path after a failed next-page read', async () => {
-    const blocked = { ...page('request-1', 50, 0), nextOffset: 50,
-      oversizedItem: { position: 50, hash, byteLen: 270_000, skipOffset: 51 } }
+    const blocked = { ...page('request-1', 50, 0), nextOffset: '50',
+      oversizedItem: { position: '50', hash, byteLen: '270000', skipOffset: '51' } }
     const fetchMock = vi.fn().mockResolvedValueOnce(response(page('request-1', 0, 50, 50)))
       .mockResolvedValueOnce(response(blocked, 413))
       .mockResolvedValueOnce(response(page('request-1', 51, 50, 101)))
