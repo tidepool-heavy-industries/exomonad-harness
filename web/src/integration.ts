@@ -94,12 +94,12 @@ export function createViewProjector(): (state: NormalizedState) => HarnessViewMo
         const id = actorIdentityKey(actor.identity)
         return reuse(actorsCache, next, id, actor, '', () => ({
           id, name: actor.identity.actor, run: actor.identity.run, incarnation: actor.identity.incarnation,
-          outputOrigin: actor.outputOrigin,
+          outputOrigin: actor.outputOrigin ?? undefined,
           parentIdentity: actor.parent,
           parent: actor.parent ? `${actor.parent.actor} · incarnation ${actor.parent.incarnation} · run ${actor.parent.run}` : undefined,
           kind: actor.kind, lifecycle: actor.lifecycle,
           modelConversation: actor.modelConversation ?? undefined,
-          modelHeadRequest: actor.modelHeadRequest ?? undefined, activeRound: actor.activeRound,
+          modelHeadRequest: actor.modelHeadRequest ?? undefined, activeRound: actor.activeRound ?? undefined,
         }))
       })
       actorsCache = next
@@ -112,7 +112,7 @@ export function createViewProjector(): (state: NormalizedState) => HarnessViewMo
         const detail = requestDetails.get(conversation.id) ?? ''
         return reuse(nodesCache, next, conversation.id, conversation, JSON.stringify([parentId, detail]), () => ({
           id: conversation.id, parentId, name: conversation.path, state: conversation.state,
-          forkSourceRequestId: conversation.forkSourceRequestId, version: conversation.version, detail,
+          forkSourceRequestId: conversation.forkSourceRequestId, version: conversation.version ?? undefined, detail,
         }))
       })
       nodesCache = next
@@ -128,9 +128,9 @@ export function createViewProjector(): (state: NormalizedState) => HarnessViewMo
         rows.push(reuse(requestsCache, nextRequests, request.id, request, historyRefreshKey, () => ({
           id: request.id, key: JSON.stringify(['request', request.id]), nodeId: request.conversationId,
           label: request.command ?? 'Response request', kind: 'request', state: request.state,
-          ...timing(request.createdAtMs, request.endedAtMs), version: request.version,
+          ...timing(request.createdAtMs, request.endedAtMs), version: request.version ?? undefined,
           historyRefreshKey, parentId: request.parentId,
-          commandId: request.commandId, command: request.command, outcome: request.outcome, detail: request.detail, failure: request.failure,
+          commandId: request.commandId ?? undefined, command: request.command ?? undefined, outcome: request.outcome ?? undefined, detail: request.detail ?? undefined, failure: request.failure,
         })))
       }
       for (const job of state.jobs.values()) rows.push(reuse(jobsCache, nextJobs, job.id, job, '', () => jobRow(job)))
@@ -143,8 +143,8 @@ export function createViewProjector(): (state: NormalizedState) => HarnessViewMo
       const next = new Map<string, CachedRow<InboxRow>>()
       inbox = [...state.envelopes.values()].map((envelope) => reuse(inboxCache, next,
         envelope.id, envelope, '', () => ({
-          id: envelope.id, sender: envelope.sender, recipient: envelope.recipient,
-          message: envelope.payload, state: envelope.type, type: envelope.type, ordinal: envelope.ordinal,
+          id: envelope.id, sender: envelope.sender, recipient: envelope.recipient ?? undefined,
+          message: envelope.payload, state: envelope.type, type: envelope.type, ordinal: envelope.ordinal ?? undefined,
         })))
       if (inbox.every((row) => row.ordinal !== undefined)) inbox.sort((a, b) => compareDecimal(a.ordinal!, b.ordinal!))
       inboxCache = next
@@ -162,8 +162,8 @@ export function createViewProjector(): (state: NormalizedState) => HarnessViewMo
 function jobRow(job: Job): ActivityRow {
   return { id: job.id, key: JSON.stringify(['job', job.id]), nodeId: job.conversationId,
     label: 'Async job', kind: 'job', state: job.state, ...timing(job.startedAtMs, job.endedAtMs),
-    version: job.version, requestId: job.requestId, callId: job.callId, toolKind: job.toolKind,
-    toolName: job.toolName, delivered: job.delivered, output: job.output }
+    version: job.version ?? undefined, requestId: job.requestId ?? undefined, callId: job.callId ?? undefined, toolKind: job.toolKind ?? undefined,
+    toolName: job.toolName ?? undefined, delivered: job.delivered ?? undefined, output: job.output }
 }
 
 /** Pure one-shot projection for fixtures and consumers without retained state. */

@@ -260,6 +260,29 @@ describe('indexed retained projection', () => {
     expect(data.timeline[0]?.key).not.toBe(data.timeline[1]?.key)
   })
 
+  it('maps absent projection metadata to UI absence while retaining opaque null output', () => {
+    const snapshot: Snapshot = { seq: '1', hostRun: null,
+      actors: [{ identity: { run: 'run', actor: '/root', incarnation: 'one' }, parent: null,
+        kind: 'model', lifecycle: 'waiting', outputOrigin: null, activeRound: null }],
+      conversations: [{ id: 'c', path: '/root', parentId: null, forkSourceRequestId: null, state: 'idle', version: null }],
+      requests: [{ id: 'r', conversationId: 'c', state: 'completed', parentId: null,
+        createdAtMs: null, endedAtMs: null, failure: null, version: null, commandId: null,
+        command: null, outcome: null, detail: null }],
+      jobs: [{ id: 'j', conversationId: 'c', state: 'settled', startedAtMs: null, endedAtMs: null,
+        version: null, requestId: null, callId: null, toolKind: null, toolName: null, delivered: null, output: null }],
+      envelopes: [{ id: 'e', sender: '/root', recipient: null, type: 'MESSAGE', payload: 'hello', ordinal: null }],
+    }
+    const view = toViewModel(normalizeSnapshot(snapshot))
+    expect(view.hostRun).toBeUndefined()
+    expect(view.actors?.[0]).toMatchObject({ outputOrigin: undefined, activeRound: undefined, parentIdentity: null })
+    expect(view.nodes[0]).toMatchObject({ version: undefined, parentId: null })
+    expect(view.timeline.find(row => row.kind === 'request')).toMatchObject({ commandId: undefined, command: undefined,
+      outcome: undefined, detail: undefined, version: undefined })
+    expect(view.timeline.find(row => row.kind === 'job')).toMatchObject({ requestId: undefined, callId: undefined,
+      toolKind: undefined, toolName: undefined, delivered: undefined, output: null })
+    expect(view.inbox[0]).toMatchObject({ recipient: undefined, ordinal: undefined })
+  })
+
   it('refreshes history only for the exact durable request and its terminal/delivered jobs', () => {
     const project = createViewProjector()
     let state = normalizeSnapshot({ seq: '1', conversations: [{ parentId: null, forkSourceRequestId: null, id: 'c', path: '/c', state: 'idle', version: '1' }],

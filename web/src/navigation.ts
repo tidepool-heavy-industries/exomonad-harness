@@ -125,7 +125,10 @@ export function routeUrl(route: RouteState, base: URL): URL {
     if (!route.selection.identity.actor.startsWith('/')) url.searchParams.set('actor', route.selection.identity.actor);
   } else if (route.selection.kind === 'actor') {
     url.pathname = route.screen === 'chat' ? '/chat' : screenPaths[route.screen];
-    Object.entries(route.selection.identity).forEach(([key, value]) => url.searchParams.set(key, value));
+    const { run, actor, incarnation } = route.selection.identity;
+    url.searchParams.set('run', run);
+    url.searchParams.set('actor', actor);
+    url.searchParams.set('incarnation', incarnation);
   } else {
     url.pathname = route.screen === 'chat' ? '/chat' : screenPaths[route.screen];
     if (route.selection.kind === 'conversation') url.searchParams.set('conversation', route.selection.conversationId);

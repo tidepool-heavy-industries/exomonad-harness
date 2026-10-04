@@ -1,4 +1,4 @@
-import { actorIdentityKey, applyStateEvent, isEmbeddedCommandRecord, isSequencedEvent, isSnapshot, normalizeSnapshot, type Snapshot } from './protocol'
+import { actorIdentityKey, applyStateEvent, isCommandReceipt, isEmbeddedCommandRecord, isSequencedEvent, isSnapshot, normalizeSnapshot, type Snapshot } from './protocol'
 import { fixtureSnapshot } from './fixture'
 import { describe, expect, it } from 'vitest'
 
@@ -64,6 +64,8 @@ describe('generated browser state projection', () => {
       envelopeId: '9223372036854775807', receipt: { commandId: operationId.toLowerCase(), target,
         outcome: 'admitted', envelopeId: '9223372036854775807' } }
     expect(isEmbeddedCommandRecord(valid)).toBe(true)
+    expect(isEmbeddedCommandRecord({ ...valid, receipt: { ...valid.receipt, target: null } })).toBe(true)
+    expect(isCommandReceipt({ ...valid.receipt, target: null })).toBe(true)
     expect(isEmbeddedCommandRecord({ ...valid, envelopeId: '9223372036854775806' })).toBe(false)
     expect(isEmbeddedCommandRecord({ ...valid, receipt: { ...valid.receipt, target: { ...target, incarnation: 'two' } } })).toBe(false)
   })
@@ -86,6 +88,9 @@ describe('generated browser state projection', () => {
     const revision = { origin, requestId: 'request', version: '9007199254740993' }
     const snapshot = { ...fixtureSnapshot, hostRun: 'run', historyRevisions: [revision] }
     expect(isSnapshot(snapshot)).toBe(true)
+    const withoutHost = { ...snapshot, hostRun: null }
+    expect(isSnapshot(withoutHost)).toBe(true)
+    expect(normalizeSnapshot(withoutHost).hostRun).toBeUndefined()
     expect(isSnapshot({ ...snapshot, hostRun: '' })).toBe(false)
     expect(isSnapshot({ ...snapshot, historyRevisions: [{ ...revision, requestId: '' }] })).toBe(false)
     expect(isSnapshot({ ...snapshot, historyRevisions: [{ ...revision, origin: { ...origin, incarnation: '' } }] })).toBe(false)

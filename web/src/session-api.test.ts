@@ -47,7 +47,7 @@ it('rejects stale operation identity and malformed status payloads', async () =>
 
 it('matches UUID case canonically while preserving the exact returned target and round', async () => {
   const operationId = 'ABCDEF01-1111-4111-8111-111111111111'
-  const command = { action: 'interrupt', target: { run: 'RUN', actor: '/Root', incarnation: 'Inc' }, expected_round: 'ABCDEF02-1111-4111-8111-111111111111' }
+  const command = { action: 'interrupt', target: { run: 'RUN', actor: '/Root', incarnation: 'Inc' }, expected_round: 'abcdef02-1111-4111-8111-111111111111' }
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200,
     json: async () => ({ ...record, operationId: operationId.toLowerCase(), command }) }))
   expect((await getCommandStatus(operationId))?.command).toEqual(command)

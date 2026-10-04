@@ -181,7 +181,7 @@ function receiptState(receipt: CommandReceipt): EmbeddedCommandRecord['state'] {
 function receiptMatches(record: BrowserCommandRecord, receipt: CommandReceipt): boolean {
   if (!isOperationId(receipt.commandId)
     || canonicalOperationId(receipt.commandId) !== canonicalOperationId(record.submission.operation_id)) return false
-  if (receipt.target !== undefined && !sameHostIdentity(receipt.target, record.submission.command.target)) return false
+  if (receipt.target != null && !sameHostIdentity(receipt.target, record.submission.command.target)) return false
   switch (receipt.outcome) {
     case 'admitted': return record.submission.command.action === 'input'
     case 'control_requested': return record.submission.command.action === receipt.control

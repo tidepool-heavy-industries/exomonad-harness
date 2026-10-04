@@ -59,7 +59,7 @@ export function normalizeSnapshot(snapshot: Snapshot): NormalizedState {
     actorOutputRevisions: new Map((snapshot.actorOutputRevisions ?? []).map(item => [actorOutputKey(item.origin), item])),
     liveOutput: new Map((snapshot.liveOutput ?? []).map(item => [outputKey(item), item])),
     historyRevisions: new Map((snapshot.historyRevisions ?? []).map(item => [revisionKey(item), item])),
-    hostRun: snapshot.hostRun,
+    hostRun: snapshot.hostRun ?? undefined,
     actors: new Map((snapshot.actors ?? []).map((actor) => [actorIdentityKey(actor.identity), actor])),
     commandReceipts: (snapshot.commandReceipts ?? []).reduce<ReadonlyMap<EntityId, CommandReceipt>>(
       (receipts, receipt) => setCommandReceipt(receipts, receipt),
@@ -196,7 +196,7 @@ export function canonicalOperationId(value: string): string {
 export function isHostIdentity(value: unknown): value is HostActorIdentity {
   const frame = { type: 'host_command', operation_id: validationOperation, command: { action: 'retire', target: value } };
   return isClientFrame(frame) && frame.type === 'host_command'
-    && Object.values(frame.command.target).every(part => part.length > 0);
+    && [frame.command.target.run, frame.command.target.actor, frame.command.target.incarnation].every(part => part.length > 0);
 }
 export function sameHostIdentity(left: HostActorIdentity, right: HostActorIdentity): boolean {
   return left.run === right.run && left.actor === right.actor && left.incarnation === right.incarnation;
@@ -220,7 +220,7 @@ export function isCommandReceipt(value: unknown): value is CommandReceipt {
   const frame = { type: 'event', event: { seq: '0', event: { kind: 'command.receipt', value } } };
   if (!isServerFrame(frame) || frame.type !== 'event' || frame.event.event.kind !== 'command.receipt') return false;
   const receipt = frame.event.event.value;
-  return receipt.commandId.length > 0 && (receipt.target === undefined || isHostIdentity(receipt.target));
+  return receipt.commandId.length > 0 && (receipt.target == null || isHostIdentity(receipt.target));
 }
 export function isCommandRefusal(value: unknown): value is HostCommandRefusal {
   return isObject(value) && isServerFrame({ ...value, type: 'command.refused' });
@@ -233,7 +233,7 @@ export function isEmbeddedCommandRecord(value: unknown): value is EmbeddedComman
   const receipt = value.receipt;
   if (receipt === null) return true;
   if (!isOperationId(receipt.commandId) || canonicalOperationId(receipt.commandId) !== canonicalOperationId(value.operationId)
-    || (receipt.target !== undefined && !sameHostIdentity(receipt.target, value.command.target))) return false;
+    || (receipt.target != null && !sameHostIdentity(receipt.target, value.command.target))) return false;
   switch (receipt.outcome) {
     case 'admitted': return value.state === 'input_admitted' && value.command.action === 'input'
       && (value.envelopeId === null || value.envelopeId === receipt.envelopeId);
@@ -249,7 +249,7 @@ export function isSnapshot(value: unknown): value is Snapshot {
   return (snapshot.liveOutput?.length ?? 0) <= 128
     && (snapshot.historyRevisions?.length ?? 0) <= 128
     && (snapshot.historyRevisions ?? []).every(validOutputScope)
-    && (snapshot.hostRun === undefined || snapshot.hostRun.length > 0)
+    && (snapshot.hostRun == null || snapshot.hostRun.length > 0)
     && (snapshot.actorOutputRevisions?.length ?? 0) <= 128
     && new TextEncoder().encode(JSON.stringify(snapshot.actorOutputRevisions ?? [])).length <= 65536
     && (snapshot.actorOutputRevisions ?? []).every(validActorOutputReference)
@@ -296,7 +296,7 @@ function validOutputScope({ origin, requestId }: OutputScope): boolean {
 function withinDiagnosticBounds(failure: RequestFailure | null): boolean {
   if (failure?.kind !== 'http' || failure.diagnostic === null) return true;
   const diagnostic = failure.diagnostic;
-  const within = (text: string | undefined, limit: number) => text === undefined || Array.from(text).length <= limit;
+  const within = (text: string | null | undefined, limit: number) => text == null || Array.from(text).length <= limit;
   return within(diagnostic.code, 256) && within(diagnostic.error_type, 256)
     && within(diagnostic.param, 256) && within(diagnostic.message, 2048);
 }

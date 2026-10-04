@@ -52,7 +52,7 @@ describe('WebSocket snapshot and operation boundary', () => {
     dispatch({ type: 'command.accepted', command_id: submission.operation_id.toLowerCase() })
     expect(callbacks.accepted).toHaveBeenCalledWith(submission.operation_id.toLowerCase())
     for (const code of ['invalid_command', 'conflict', 'unavailable', 'wrong_run']) {
-      const refusal = { operation_id: submission.operation_id, code, reason: 'not admitted on channel' }
+      const refusal = { operation_id: submission.operation_id.toLowerCase(), code, reason: 'not admitted on channel' }
       dispatch({ type: 'command.refused', ...refusal })
       expect(callbacks.refused).toHaveBeenLastCalledWith({ type: 'command.refused', ...refusal })
     }
