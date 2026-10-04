@@ -11,16 +11,23 @@ use serde::Deserialize;
 use std::{future::Future, pin::Pin, sync::Arc};
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(from = "super::browser_contract::ActorDisplayExpansion")]
 pub struct ActorDisplayExpansion {
     pub origin: ActorOutputOrigin,
     pub display_slot: u64,
     pub key: u64,
 }
+impl From<super::browser_contract::ActorDisplayExpansion> for ActorDisplayExpansion {
+    fn from(wire: super::browser_contract::ActorDisplayExpansion) -> Self {
+        Self {
+            origin: wire.origin.into(),
+            display_slot: wire.display_slot.get(),
+            key: wire.key.get(),
+        }
+    }
+}
 pub type ActorDisplayExpander = Arc<
-    dyn Fn(
-            ActorDisplayExpansion,
-        ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send>>
+    dyn Fn(ActorDisplayExpansion) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
         + Send
         + Sync,
 >;
@@ -63,9 +70,9 @@ pub(super) async fn expand(
             .into_response();
     };
     match expand(input).await {
-        Ok(response) => (
+        Ok(()) => (
+            StatusCode::NO_CONTENT,
             [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(response),
         )
             .into_response(),
         Err(error) => (StatusCode::CONFLICT, error).into_response(),
@@ -125,10 +132,10 @@ mod tests {
         control.publish_actor_output(committed.output());
         control.publish_actor_output(committed.output());
         let event = events.recv().await.unwrap();
-        assert_eq!(event.event, "actor.output.committed");
+        assert_eq!(event.event.kind(), "actor.output.committed");
         assert_eq!(
-            event.payload["reference"]["sequence"],
-            committed.output().reference().sequence
+            super::event_value(&event)["reference"]["sequence"],
+            committed.output().reference().sequence.to_string()
         );
         assert!(events.try_recv().is_err());
         assert_eq!(
@@ -143,9 +150,9 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let called = calls.clone();
         control
-            .install_actor_display_expander(Arc::new(move |input| {
+            .install_actor_display_expander(Arc::new(move |_input| {
                 called.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async move { Ok(json!({"key":input.key})) })
+                Box::pin(async move { Ok(()) })
             }))
             .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -171,10 +178,13 @@ mod tests {
         let page: serde_json::Value = page.json().await.unwrap();
         assert_eq!(
             page["outputs"][0]["reference"],
-            serde_json::to_value(committed.output().reference()).unwrap()
+            serde_json::to_value(super::browser_contract::ActorOutputReference::from(
+                committed.output().reference()
+            ))
+            .unwrap()
         );
         let expand = format!("http://{address}/api/actor-output/expand");
-        let body = json!({"origin":origin,"displaySlot":1,"key":1});
+        let body = json!({"origin":super::browser_contract::ActorOutputOrigin::from(&origin),"displaySlot":"1","key":"1"});
         assert_eq!(
             client
                 .post(&expand)
@@ -185,7 +195,7 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
-        let invalid = json!({"origin":origin,"displaySlot":1,"key":0});
+        let invalid = json!({"origin":super::browser_contract::ActorOutputOrigin::from(&origin),"displaySlot":"1","key":"0"});
         assert_eq!(
             client
                 .post(&expand)
@@ -205,7 +215,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(expanded.status(), StatusCode::OK);
+        assert_eq!(expanded.status(), StatusCode::NO_CONTENT);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             store

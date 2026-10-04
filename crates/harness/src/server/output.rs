@@ -1,50 +1,31 @@
 //! Bounded reconnect state for live output on the existing ordered event stream.
-use super::{ServerControl, ServerEvent};
-use crate::transport::sse::OutputChannel;
+use super::{ServerControl, ServerEvent, browser_contract};
 use crate::{
     engine::{ModelOutput, ModelOutputObserver, ModelOutputUpdate},
-    model::{ConversationIdentity, RequestId},
+    model::ConversationIdentity,
 };
-use serde::{Deserialize, Serialize};
+pub use browser_contract::{HistoryRevision, LiveOutput};
+use browser_contract::{OutputCommit, OutputDelta, OutputItem, OutputScope, StateEvent};
 
 pub const OUTPUT_ITEMS: usize = 128;
 pub const OUTPUT_BYTES: usize = 64 * 1024;
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LiveOutput {
-    pub origin: ConversationIdentity,
-    pub request_id: RequestId,
-    pub item_id: String,
-    pub channel: OutputChannel,
-    pub index: u64,
-    pub text: String,
-    pub version: u64,
-    pub overflow: bool,
-    pub streaming: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub committed_hash: Option<String>,
-}
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HistoryRevision {
-    pub origin: ConversationIdentity,
-    pub request_id: RequestId,
-    pub version: u64,
-}
 impl ModelOutputObserver for ServerControl {
     fn observe(&self, output: ModelOutput) {
         let mut next = self.next_sequence.lock().expect("sequence lock poisoned");
         let mut snapshot = self.snapshot.write().expect("snapshot lock poisoned");
         let mut removals = Vec::new();
-        let mut payload = serde_json::to_value(&output).expect("model output serializes");
-        let kind = match &output.update {
+        let scope = OutputScope {
+            origin: output.origin.clone(),
+            request_id: output.request_id.0.clone(),
+        };
+        let event = match &output.update {
             ModelOutputUpdate::Stopped => {
                 for item in &mut snapshot.live_output {
-                    if item.origin == output.origin && item.request_id == output.request_id {
+                    if item.origin == output.origin && item.request_id == output.request_id.0 {
                         item.streaming = false;
                     }
                 }
-                "model.output.stopped"
+                StateEvent::ModelOutputStopped(scope)
             }
             ModelOutputUpdate::Started => {
                 if let ConversationIdentity::Embedded {
@@ -61,7 +42,7 @@ impl ModelOutputObserver for ServerControl {
                         projected.model_head_request = Some(output.request_id.0.clone());
                     }
                 }
-                "model.output.started"
+                StateEvent::ModelOutputStarted(scope)
             }
             ModelOutputUpdate::Delta {
                 item_id,
@@ -71,10 +52,10 @@ impl ModelOutputObserver for ServerControl {
             } => {
                 let existing = snapshot.live_output.iter().position(|item| {
                     item.origin == output.origin
-                        && item.request_id == output.request_id
+                        && item.request_id == output.request_id.0
                         && item.item_id == *item_id
                         && item.channel == *channel
-                        && item.index == *index
+                        && item.index.get() == *index
                 });
                 let item = if let Some(index) = existing {
                     &mut snapshot.live_output[index]
@@ -82,19 +63,22 @@ impl ModelOutputObserver for ServerControl {
                     let capacity_overflow = snapshot.live_output.len() == OUTPUT_ITEMS;
                     if capacity_overflow {
                         let old = snapshot.live_output.remove(0);
-                        removals.push(
-                            serde_json::json!({"origin":old.origin,"requestId":old.request_id,
-                            "itemId":old.item_id,"channel":old.channel,"index":old.index}),
-                        );
+                        removals.push(StateEvent::ModelOutputRemove(OutputItem {
+                            origin: old.origin,
+                            request_id: old.request_id,
+                            item_id: old.item_id,
+                            channel: old.channel,
+                            index: old.index,
+                        }));
                     }
                     snapshot.live_output.push(LiveOutput {
                         origin: output.origin.clone(),
-                        request_id: output.request_id.clone(),
+                        request_id: output.request_id.0.clone(),
                         item_id: item_id.clone(),
-                        channel: channel.clone(),
-                        index: *index,
+                        channel: *channel,
+                        index: (*index).into(),
                         text: String::new(),
-                        version: *next,
+                        version: (*next).into(),
                         overflow: capacity_overflow,
                         streaming: true,
                         committed_hash: None,
@@ -106,16 +90,23 @@ impl ModelOutputObserver for ServerControl {
                     end -= 1;
                 }
                 item.text.push_str(&text[..end]);
-                item.version = *next + removals.len() as u64;
+                item.version = (*next + removals.len() as u64).into();
                 item.overflow |= end != text.len();
-                payload["overflow"] = serde_json::json!(item.overflow);
-                payload["version"] = serde_json::json!(item.version);
-                "model.output.delta"
+                StateEvent::ModelOutputDelta(OutputDelta {
+                    origin: output.origin.clone(),
+                    request_id: output.request_id.0.clone(),
+                    item_id: item_id.clone(),
+                    channel: *channel,
+                    index: (*index).into(),
+                    text: text.clone(),
+                    version: item.version,
+                    overflow: item.overflow,
+                })
             }
             ModelOutputUpdate::Committed { item_id, hash } => {
                 for item in &mut snapshot.live_output {
                     if item.origin == output.origin
-                        && item.request_id == output.request_id
+                        && item.request_id == output.request_id.0
                         && Some(&item.item_id) == item_id.as_ref()
                     {
                         item.committed_hash = Some(hash.0.clone());
@@ -124,46 +115,48 @@ impl ModelOutputObserver for ServerControl {
                 }
                 snapshot
                     .history_revisions
-                    .retain(|r| r.origin != output.origin || r.request_id != output.request_id);
+                    .retain(|r| r.origin != output.origin || r.request_id != output.request_id.0);
                 if snapshot.history_revisions.len() == OUTPUT_ITEMS {
                     snapshot.history_revisions.remove(0);
                 }
-                // The revision is the event's sequence, including preceding removals.
-                let version = *next + removals.len() as u64;
+                let version = (*next + removals.len() as u64).into();
                 snapshot.history_revisions.push(HistoryRevision {
                     origin: output.origin.clone(),
-                    request_id: output.request_id.clone(),
+                    request_id: output.request_id.0.clone(),
                     version,
                 });
-                payload["version"] = serde_json::json!(version);
-                "model.output.committed"
+                StateEvent::ModelOutputCommitted(OutputCommit {
+                    origin: output.origin.clone(),
+                    request_id: output.request_id.0.clone(),
+                    item_id: item_id.clone(),
+                    hash: hash.0.clone(),
+                    version,
+                })
             }
         };
-        for removal in removals {
+        for event in removals {
             let sequence = *next;
             *next += 1;
             let _ = self.events.send(ServerEvent {
-                sequence,
-                event: "model.output.remove".into(),
-                payload: removal,
+                sequence: sequence.into(),
+                event,
             });
         }
         let sequence = *next;
         *next += 1;
-        snapshot.seq = sequence;
+        snapshot.seq = sequence.into();
         let _ = self.events.send(ServerEvent {
-            sequence,
-            event: kind.into(),
-            payload,
+            sequence: sequence.into(),
+            event,
         });
     }
 }
 
 impl ServerControl {
-    /// Project a committed journal row through the existing ordered browser stream.
-    /// The bounded snapshot retains references; full bodies remain in Store history.
+    /// The exact committed projection is shared with protected history reads.
     pub fn publish_actor_output(&self, output: &crate::store::actor_output::StoredActorOutput) {
-        let reference = output.reference();
+        let output = browser_contract::ActorOutputProjection::from(output);
+        let reference = &output.reference;
         let mut next = self.next_sequence.lock().expect("sequence lock poisoned");
         let mut snapshot = self.snapshot.write().expect("snapshot lock poisoned");
         if snapshot.actor_output_revisions.contains(reference) {
@@ -180,11 +173,10 @@ impl ServerControl {
         }
         let sequence = *next;
         *next += 1;
-        snapshot.seq = sequence;
+        snapshot.seq = sequence.into();
         let _ = self.events.send(ServerEvent {
-            sequence,
-            event: "actor.output.committed".into(),
-            payload: serde_json::to_value(output).expect("committed output serializes"),
+            sequence: sequence.into(),
+            event: StateEvent::ActorOutputCommitted(output),
         });
     }
 }
@@ -195,10 +187,12 @@ mod tests {
     use crate::{
         item::ItemHash,
         model::AgentPath,
+        model::RequestId,
         server::{
             HostActorIdentity, HostActorKind, HostActorLifecycle, HostActorProjection,
-            ServerConfig, Snapshot, server_with_config,
+            ServerConfig, Snapshot, WireU64, server_with_config,
         },
+        transport::sse::OutputChannel,
     };
     use std::path::PathBuf;
     fn origin(incarnation: &str) -> ConversationIdentity {
@@ -348,9 +342,9 @@ mod tests {
                 .all(|item| item.item_id != "large")
         );
         let mut saw_remove = false;
-        let mut last = 0;
+        let mut last = WireU64::default();
         while let Ok(event) = events.try_recv() {
-            saw_remove |= event.event == "model.output.remove";
+            saw_remove |= matches!(event.event, StateEvent::ModelOutputRemove(_));
             assert!(event.sequence > last);
             last = event.sequence;
         }

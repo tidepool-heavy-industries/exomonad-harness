@@ -141,6 +141,65 @@ pub struct ActorDisplayExpansion {
     pub key: WireU64,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistoryItem {
+    pub position: WireU64,
+    pub hash: String,
+    pub byte_len: WireU64,
+    /// Opaque provider item body inside a typed retained-history observation.
+    pub item: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OversizedHistoryItem {
+    pub position: WireU64,
+    pub hash: String,
+    pub byte_len: WireU64,
+    pub skip_offset: WireU64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistoryPage {
+    pub request_id: String,
+    pub parent_id: Option<String>,
+    pub branch: String,
+    pub items: Vec<HistoryItem>,
+    pub next_offset: Option<WireU64>,
+    pub oversized_item: Option<OversizedHistoryItem>,
+}
+impl From<&crate::store::history::HistoryPage> for HistoryPage {
+    fn from(page: &crate::store::history::HistoryPage) -> Self {
+        Self {
+            request_id: page.request_id.clone(),
+            parent_id: page.parent_id.clone(),
+            branch: page.branch.clone(),
+            items: page
+                .items
+                .iter()
+                .map(|item| HistoryItem {
+                    position: item.position.into(),
+                    hash: item.hash.clone(),
+                    byte_len: (item.byte_len as u64).into(),
+                    item: item.item.0.clone(),
+                })
+                .collect(),
+            next_offset: page.next_offset.map(Into::into),
+            oversized_item: page
+                .oversized_item
+                .as_ref()
+                .map(|item| OversizedHistoryItem {
+                    position: item.position.into(),
+                    hash: item.hash.clone(),
+                    byte_len: (item.byte_len as u64).into(),
+                    skip_offset: item.skip_offset.into(),
+                }),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HostActorProjection {
@@ -393,6 +452,27 @@ pub enum StateEvent {
     EntityRemove(EntityRemoval),
 }
 
+impl StateEvent {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::ActorOutputCommitted(_) => "actor.output.committed",
+            Self::ModelOutputStarted(_) => "model.output.started",
+            Self::ModelOutputStopped(_) => "model.output.stopped",
+            Self::ModelOutputDelta(_) => "model.output.delta",
+            Self::ModelOutputCommitted(_) => "model.output.committed",
+            Self::ModelOutputRemove(_) => "model.output.remove",
+            Self::HostRunUpsert(_) => "host_run.upsert",
+            Self::CommandReceipt(_) => "command.receipt",
+            Self::ActorUpsert(_) => "actor.upsert",
+            Self::ConversationUpsert(_) => "conversation.upsert",
+            Self::RequestUpsert(_) => "request.upsert",
+            Self::JobUpsert(_) => "job.upsert",
+            Self::EnvelopeUpsert(_) => "envelope.upsert",
+            Self::EntityRemove(_) => "entity.remove",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SequencedEvent {
@@ -453,6 +533,27 @@ pub enum ClientFrame {
     SnapshotRequest,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EmbeddedCommandRecord {
+    pub operation_id: ClientOperationId,
+    pub command: HostCommand,
+    pub state: crate::store::EmbeddedCommandState,
+    pub envelope_id: Option<WireI64>,
+    pub receipt: Option<CommandReceipt>,
+}
+impl From<&crate::store::EmbeddedCommandRecord> for EmbeddedCommandRecord {
+    fn from(record: &crate::store::EmbeddedCommandRecord) -> Self {
+        Self {
+            operation_id: record.operation_id,
+            command: record.command.clone(),
+            state: record.state,
+            envelope_id: record.envelope_id.map(Into::into),
+            receipt: record.receipt.clone(),
+        }
+    }
+}
+
 /// Schemas are generated separately for outbound serialization and inbound
 /// deserialization: omitted optional fields and nullability follow Serde.
 pub fn schemas() -> serde_json::Value {
@@ -462,6 +563,8 @@ pub fn schemas() -> serde_json::Value {
         "client": SchemaSettings::draft07().for_deserialize().into_generator().into_root_schema_for::<ClientFrame>(),
         "actorOutputHistory": SchemaSettings::draft07().for_serialize().into_generator().into_root_schema_for::<ActorOutputHistoryPage>(),
         "actorDisplayExpansion": SchemaSettings::draft07().for_deserialize().into_generator().into_root_schema_for::<ActorDisplayExpansion>(),
+        "embeddedCommand": SchemaSettings::draft07().for_serialize().into_generator().into_root_schema_for::<EmbeddedCommandRecord>(),
+        "history": SchemaSettings::draft07().for_serialize().into_generator().into_root_schema_for::<HistoryPage>(),
     })
 }
 
@@ -513,10 +616,116 @@ pub fn wire_samples() -> serde_json::Value {
             },
         },
     };
+    let identity = HostActorIdentity {
+        run: "run".into(),
+        actor: crate::model::AgentPath("/root".into()),
+        incarnation: "incarnation".into(),
+    };
+    let actor = HostActorProjection {
+        identity: identity.clone(),
+        output_origin: Some(origin.clone()),
+        parent: None,
+        kind: HostActorKind::Model,
+        lifecycle: HostActorLifecycle::Waiting,
+        model_conversation: Some(conversation.id.clone()),
+        model_head_request: Some("request/root".into()),
+        active_round: Some(EmbeddedRoundId(uuid::Uuid::nil())),
+    };
+    let request = RequestProjection {
+        id: "request/root".into(),
+        conversation_id: conversation.id.clone(),
+        parent_id: None,
+        created_at_ms: Some(i64::MIN.into()),
+        ended_at_ms: Some(i64::MAX.into()),
+        state: RequestState::Failed,
+        command_id: None,
+        command: None,
+        outcome: Some(RequestOutcome::Failed),
+        detail: Some("Provider refused the request".into()),
+        failure: Some(RequestFailure::Http {
+            status: 400,
+            diagnostic: Some(crate::transport::HttpDiagnostic {
+                code: Some("invalid_request".into()),
+                ..Default::default()
+            }),
+        }),
+        version: Some(u64::MAX.into()),
+    };
+    let receipt = CommandReceipt {
+        command_id: uuid::Uuid::nil().to_string(),
+        outcome: super::CommandReceiptOutcome::Admitted {
+            target: Some(identity.clone()),
+            envelope_id: i64::MAX.into(),
+            wake_error: None,
+        },
+    };
+    let scope = OutputScope {
+        origin: ConversationIdentity::Embedded {
+            run: identity.run.clone(),
+            actor: identity.actor.clone(),
+            incarnation: identity.incarnation.clone(),
+        },
+        request_id: request.id.clone(),
+    };
+    let item = OutputItem {
+        origin: scope.origin.clone(),
+        request_id: scope.request_id.clone(),
+        item_id: "assistant".into(),
+        channel: OutputChannel::Assistant,
+        index: u64::MAX.into(),
+    };
+    let live_output = LiveOutput {
+        origin: item.origin.clone(),
+        request_id: item.request_id.clone(),
+        item_id: item.item_id.clone(),
+        channel: item.channel,
+        index: item.index,
+        text: "Hello".into(),
+        version: u64::MAX.into(),
+        overflow: false,
+        streaming: false,
+        committed_hash: Some("a".repeat(64)),
+    };
+    let envelope = EnvelopeProjection {
+        id: format!("envelope/{}", i64::MAX),
+        recipient: "/root".into(),
+        sender: "operator".into(),
+        kind: EnvelopeKind::Message,
+        payload: "Continue".into(),
+        ordinal: Some(u64::MAX.into()),
+        version: None,
+    };
     let events = [
         StateEvent::ConversationUpsert(conversation.clone()),
+        StateEvent::RequestUpsert(request.clone()),
         StateEvent::JobUpsert(job.clone()),
+        StateEvent::EnvelopeUpsert(envelope.clone()),
+        StateEvent::ActorUpsert(actor.clone()),
         StateEvent::ActorOutputCommitted(output.clone()),
+        StateEvent::ModelOutputStarted(scope.clone()),
+        StateEvent::ModelOutputStopped(scope.clone()),
+        StateEvent::ModelOutputDelta(OutputDelta {
+            origin: item.origin.clone(),
+            request_id: item.request_id.clone(),
+            item_id: item.item_id.clone(),
+            channel: item.channel,
+            index: item.index,
+            text: "Hello".into(),
+            version: u64::MAX.into(),
+            overflow: false,
+        }),
+        StateEvent::ModelOutputCommitted(OutputCommit {
+            origin: scope.origin.clone(),
+            request_id: scope.request_id.clone(),
+            item_id: None,
+            hash: "a".repeat(64),
+            version: u64::MAX.into(),
+        }),
+        StateEvent::ModelOutputRemove(item),
+        StateEvent::HostRunUpsert(HostRun {
+            run: identity.run.clone(),
+        }),
+        StateEvent::CommandReceipt(receipt.clone()),
         StateEvent::EntityRemove(EntityRemoval {
             entity: EntityKind::Job,
             id: job.id.clone(),
@@ -527,6 +736,17 @@ pub fn wire_samples() -> serde_json::Value {
             seq: 9_007_199_254_740_993u64.into(),
             conversations: vec![conversation],
             jobs: vec![job],
+            requests: vec![request],
+            actors: vec![actor],
+            envelopes: vec![envelope],
+            command_receipts: vec![receipt],
+            live_output: vec![live_output],
+            history_revisions: vec![HistoryRevision {
+                origin: scope.origin,
+                request_id: scope.request_id,
+                version: u64::MAX.into(),
+            }],
+            host_run: Some(identity.run.clone()),
             actor_output_revisions: vec![output.reference.clone()],
             ..Snapshot::default()
         },
@@ -552,9 +772,15 @@ pub fn wire_samples() -> serde_json::Value {
     });
     serde_json::json!({
         "server": frames,
-        "client": [ClientFrame::Command { command: "start".into() }, ClientFrame::SnapshotRequest],
+        "client": [ClientFrame::Command { command: "start".into() }, ClientFrame::SnapshotRequest, ClientFrame::HostCommand { operation_id: ClientOperationId(uuid::Uuid::nil()), command: HostCommand::Interrupt { target: identity, expected_round: EmbeddedRoundId(uuid::Uuid::nil()) } }],
         "actorOutputHistory": [ActorOutputHistoryPage { origin: origin.clone(), outputs: vec![output.clone()], next_after: Some(i64::MAX.into()) }],
         "actorDisplayExpansion": [ActorDisplayExpansion { origin, display_slot: output.emission.id.display_slot, key: output.emission.page.expansions[0].0 }],
+        "embeddedCommand": [EmbeddedCommandRecord { operation_id: ClientOperationId(uuid::Uuid::nil()), command: HostCommand::Input { target: HostActorIdentity { run: "run".into(), actor: crate::model::AgentPath("/root".into()), incarnation: "incarnation".into() }, text: "start".into() }, state: crate::store::EmbeddedCommandState::Queued, envelope_id: None, receipt: None }],
+        "history": [HistoryPage {
+            request_id: "request/root".into(), parent_id: None, branch: "/root".into(),
+            items: vec![HistoryItem { position: 9_007_199_254_740_993u64.into(), hash: "a".repeat(64), byte_len: 31u64.into(), item: serde_json::json!({"type":"future_provider_item","body":{"providerOwned":true}}) }],
+            next_offset: Some(9_007_199_254_740_994u64.into()), oversized_item: None,
+        }],
     })
 }
 

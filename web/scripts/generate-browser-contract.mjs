@@ -17,6 +17,8 @@ const roots = [
   ['client', 'client', 'ClientFrame', 'isClientFrame'],
   ['actorOutputHistory', 'actor-output-history', 'ActorOutputHistoryPage', 'isActorOutputHistoryPage'],
   ['actorDisplayExpansion', 'actor-display-expansion', 'ActorDisplayExpansion', 'isActorDisplayExpansion'],
+  ['history', 'history', 'HistoryPage', 'isHistoryPage'],
+  ['embeddedCommand', 'embedded-command', 'EmbeddedCommandRecord', 'isEmbeddedCommandRecord'],
 ];
 const ajv = new Ajv({ strict: true, allErrors: true, code: { source: true, esm: true } });
 const exports = {};

@@ -462,9 +462,7 @@ impl Conversation {
             crate::store::CommandInputAdmission::Retained(receipt) => return Ok(receipt),
         };
         let envelope = match &receipt.outcome {
-            crate::server::CommandReceiptOutcome::Admitted { envelope_id, .. } => envelope_id
-                .parse::<i64>()
-                .map_err(|_| StoreError::InvalidCommandState)?,
+            crate::server::CommandReceiptOutcome::Admitted { envelope_id, .. } => envelope_id.get(),
             _ => return Err(StoreError::InvalidCommandState.into()),
         };
         // Wake is a best-effort hint after the durable atomic commit. The host's

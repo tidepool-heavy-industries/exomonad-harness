@@ -67,24 +67,6 @@ pub enum HostActorLifecycle {
     Lost,
 }
 
-/// A host-supplied browser row, including Haskell-only workflow actors.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HostActorProjection {
-    pub identity: HostActorIdentity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_origin: Option<crate::store::actor_output::ActorOutputOrigin>,
-    pub parent: Option<HostActorIdentity>,
-    pub kind: HostActorKind,
-    pub lifecycle: HostActorLifecycle,
-    pub model_conversation: Option<String>,
-    /// Exact actor-owned history entrypoint, independent of the activity rows.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_head_request: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_round: Option<crate::embedding::EmbeddedRoundId>,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandControl {
@@ -94,7 +76,7 @@ pub enum CommandControl {
 
 /// Bounded observation of a command handoff. It records admission or routing
 /// receipts only; durable input and completion remain owned elsewhere.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandReceipt {
     pub command_id: String,
@@ -102,9 +84,7 @@ pub struct CommandReceipt {
     pub outcome: CommandReceiptOutcome,
 }
 
-#[derive(
-    Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema, schemars::JsonSchema,
-)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(
     tag = "outcome",
     rename_all = "snake_case",
@@ -114,7 +94,7 @@ pub enum CommandReceiptOutcome {
     Admitted {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<HostActorIdentity>,
-        envelope_id: String,
+        envelope_id: WireI64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wake_error: Option<String>,
     },
@@ -133,86 +113,28 @@ pub enum CommandReceiptOutcome {
     },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Snapshot {
-    pub seq: u64,
-    #[serde(default, rename = "liveOutput", skip_serializing_if = "Vec::is_empty")]
-    pub live_output: Vec<super::LiveOutput>,
-    #[serde(
-        default,
-        rename = "historyRevisions",
-        skip_serializing_if = "Vec::is_empty"
-    )]
-    pub history_revisions: Vec<super::HistoryRevision>,
-    #[serde(
-        default,
-        rename = "actorOutputRevisions",
-        skip_serializing_if = "Vec::is_empty"
-    )]
-    pub actor_output_revisions: Vec<crate::store::actor_output::ActorOutputReference>,
-    /// Present only when this snapshot is projected from an embedded host run.
-    /// An empty actor list does not imply standalone mode.
-    #[serde(default, rename = "hostRun", skip_serializing_if = "Option::is_none")]
-    pub host_run: Option<String>,
-    #[serde(
-        default,
-        rename = "commandReceipts",
-        skip_serializing_if = "Vec::is_empty"
-    )]
-    pub command_receipts: Vec<CommandReceipt>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub actors: Vec<HostActorProjection>,
-    pub conversations: Vec<serde_json::Value>,
-    pub requests: Vec<serde_json::Value>,
-    pub jobs: Vec<serde_json::Value>,
-    pub envelopes: Vec<serde_json::Value>,
-}
+pub use contract::{
+    ClientFrame as WsClientFrame, HostActorProjection, SequencedEvent as WsEvent,
+    ServerFrame as WsServerFrame, Snapshot, StateEvent as WsEventPayload,
+};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct WsEvent {
-    pub seq: u64,
-    pub event: WsEventPayload,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct WsEventPayload {
-    pub kind: String,
-    pub value: serde_json::Value,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum WsServerFrame {
-    #[serde(rename = "command.refused")]
-    CommandRefused {
-        operation_id: Option<crate::embedding::ClientOperationId>,
-        code: super::CommandRefusal,
-        reason: String,
-    },
-    Snapshot {
-        snapshot: Snapshot,
-    },
-    Event {
-        event: WsEvent,
-    },
-    #[serde(rename = "command.accepted")]
-    CommandAccepted {
-        command_id: String,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum WsClientFrame {
-    Command {
-        command: String,
-    },
-    HostCommand {
-        operation_id: crate::embedding::ClientOperationId,
-        command: super::HostCommand,
-    },
-    #[serde(rename = "snapshot.request")]
-    SnapshotRequest,
+impl From<&ToolJobRecord> for contract::JobProjection {
+    fn from(record: &ToolJobRecord) -> Self {
+        Self {
+            id: record.id.clone(),
+            conversation_id: record.conversation_id.clone(),
+            request_id: Some(record.request_id.clone()),
+            call_id: Some(record.call_id.clone()),
+            tool_name: Some(record.tool_name.clone()),
+            tool_kind: record.tool_kind,
+            state: record.state,
+            delivered: Some(record.delivered),
+            started_at_ms: record.started_at_ms.map(Into::into),
+            ended_at_ms: record.ended_at_ms.map(Into::into),
+            output: record.output.clone(),
+            version: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -236,17 +158,16 @@ mod tests {
             output: None,
         };
         let mut snapshot = Snapshot::default();
-        snapshot.jobs.push(serde_json::to_value(&pending).unwrap());
+        snapshot.jobs.push((&pending).into());
         let encoded = serde_json::to_string(&WsServerFrame::Snapshot { snapshot }).unwrap();
         let decoded: WsServerFrame = serde_json::from_str(&encoded).unwrap();
         let WsServerFrame::Snapshot { snapshot } = decoded else {
             panic!("expected snapshot");
         };
-        let actual: ToolJobRecord = serde_json::from_value(snapshot.jobs[0].clone()).unwrap();
-        assert_eq!(actual, pending);
-        assert_eq!(snapshot.jobs[0]["callId"], "command-7/a");
-        assert_eq!(snapshot.jobs[0]["toolKind"], "function");
-        assert!(snapshot.jobs[0].get("output").is_none());
+        assert_eq!(snapshot.jobs[0], contract::JobProjection::from(&pending));
+        assert_eq!(snapshot.jobs[0].call_id.as_deref(), Some("command-7/a"));
+        assert_eq!(snapshot.jobs[0].tool_kind, Some(ToolKind::Function));
+        assert!(snapshot.jobs[0].output.is_none());
         let cancelled = ToolJobRecord {
             state: ToolJobState::Cancelled,
             delivered: true,
@@ -284,8 +205,8 @@ mod tests {
     #[test]
     fn serializes_snapshot_and_event_frames_to_web_wire_shapes() {
         let snapshot = Snapshot {
-            seq: 11,
-            conversations: vec![json!({"id":"root"})],
+            seq: 11u64.into(),
+            conversations: vec![crate::server::fixture_conversation("root", "/root")],
             ..Snapshot::default()
         };
         assert_eq!(
@@ -294,22 +215,19 @@ mod tests {
             })
             .unwrap(),
             json!({"type":"snapshot","snapshot":{
-                "seq":11,"conversations":[{"id":"root"}],"requests":[],"jobs":[],"envelopes":[]
+                "seq":"11","conversations":[crate::server::fixture_conversation("root", "/root")],"requests":[],"jobs":[],"envelopes":[]
             }})
         );
         let event = WsServerFrame::Event {
             event: WsEvent {
-                seq: 12,
-                event: WsEventPayload {
-                    kind: "job.started".into(),
-                    value: json!({"id":"job-1"}),
-                },
+                seq: 12u64.into(),
+                event: WsEventPayload::JobUpsert(crate::server::fixture_job("job-1")),
             },
         };
         assert_eq!(
             serde_json::to_value(event).unwrap(),
             json!({"type":"event","event":{
-                "seq":12,"event":{"kind":"job.started","value":{"id":"job-1"}}
+                "seq":"12","event":{"kind":"job.upsert","value":crate::server::fixture_job("job-1")}
             }})
         );
     }
@@ -422,7 +340,7 @@ mod tests {
             command_id: "cmd-1".into(),
             outcome: CommandReceiptOutcome::Admitted {
                 target: Some(identity.clone()),
-                envelope_id: "envelope-9".into(),
+                envelope_id: 9i64.into(),
                 wake_error: None,
             },
         };
@@ -432,7 +350,7 @@ mod tests {
                 "commandId":"cmd-1",
                 "target":{"run":"run-1","actor":"/root/worker","incarnation":"inc-2"},
                 "outcome":"admitted",
-                "envelopeId":"envelope-9"
+                "envelopeId":"9"
             })
         );
         assert_eq!(

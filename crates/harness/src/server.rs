@@ -211,10 +211,8 @@ pub struct CommandAccepted {
 /// Stable event envelope sent as JSON on `GET /api/events` (SSE).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ServerEvent {
-    pub sequence: u64,
-    pub event: String,
-    #[serde(default)]
-    pub payload: serde_json::Value,
+    pub sequence: WireU64,
+    pub event: browser_contract::StateEvent,
 }
 
 /// A bearer credential, intentionally redacted from Debug output.
@@ -438,18 +436,17 @@ pub struct ServerControl {
 impl ServerControl {
     /// Publish an event to current SSE subscribers. Events are deliberately live
     /// only; the durable store remains the source of truth for replay/query APIs.
-    pub fn publish(&self, event: impl Into<String>, payload: serde_json::Value) -> ServerEvent {
+    pub fn publish(&self, event: browser_contract::StateEvent) -> ServerEvent {
         // Keep sequence allocation and broadcast ordered together when several
         // scheduler tasks publish concurrently.
         let mut next_sequence = self.next_sequence.lock().expect("sequence lock poisoned");
         let sequence = *next_sequence;
         *next_sequence += 1;
         let event = ServerEvent {
-            sequence,
-            event: event.into(),
-            payload,
+            sequence: sequence.into(),
+            event,
         };
-        self.snapshot.write().expect("snapshot lock poisoned").seq = sequence;
+        self.snapshot.write().expect("snapshot lock poisoned").seq = sequence.into();
         let _ = self.events.send(event.clone());
         drop(next_sequence);
         event
@@ -460,7 +457,6 @@ impl ServerControl {
     /// Receipts describe admission or control routing, never command
     /// completion. Durable input records remain in the owning store.
     pub fn publish_command_receipt(&self, receipt: CommandReceipt) -> ServerEvent {
-        let payload = serde_json::to_value(&receipt).expect("command receipt serializes to JSON");
         let mut next_sequence = self.next_sequence.lock().expect("sequence lock poisoned");
         let mut snapshot = self.snapshot.write().expect("snapshot lock poisoned");
         if let Some(existing) = snapshot
@@ -470,7 +466,7 @@ impl ServerControl {
         {
             snapshot.command_receipts.remove(existing);
         }
-        snapshot.command_receipts.push(receipt);
+        snapshot.command_receipts.push(receipt.clone());
         if snapshot.command_receipts.len() > COMMAND_RECEIPT_CAPACITY {
             let excess = snapshot.command_receipts.len() - COMMAND_RECEIPT_CAPACITY;
             snapshot.command_receipts.drain(..excess);
@@ -478,11 +474,10 @@ impl ServerControl {
 
         let sequence = *next_sequence;
         *next_sequence += 1;
-        snapshot.seq = sequence;
+        snapshot.seq = sequence.into();
         let event = ServerEvent {
-            sequence,
-            event: "command.receipt".into(),
-            payload,
+            sequence: sequence.into(),
+            event: browser_contract::StateEvent::CommandReceipt(receipt),
         };
         let _ = self.events.send(event.clone());
         event
@@ -499,49 +494,51 @@ impl ServerControl {
         let mut next_sequence = self.next_sequence.lock().expect("sequence lock poisoned");
         let requests = store.model_request_outcomes(128)?;
         let mut snapshot = self.snapshot.write().expect("snapshot lock poisoned");
-        let rows = requests
-            .into_iter()
-            .map(|settled| {
-                let request = settled.request;
-                let mut row = serde_json::json!({
-                    "id": request.id.0,
-                    "parentId": request.parent.map(|parent| parent.0),
-                    "conversationId": request.branch,
-                    "state": if settled.failure.is_some() || settled.interruption.is_some() { "failed" } else { "completed" },
-                    "failure": settled.failure,
-                });
-                if let Some(cause) = settled.interruption {
-                    row["detail"] = serde_json::json!(format!(
-                        "Provider stream interrupted: {cause}. Send a new message to continue from retained history."
-                    ));
-                }
-                row
-            })
-            .collect::<Vec<_>>();
-        let previous = conversation_rows_by_id(&snapshot.requests);
-        let current = conversation_rows_by_id(&rows);
+        use browser_contract::{
+            EntityKind, EntityRemoval, RequestProjection, RequestState, StateEvent,
+        };
+        let rows = requests.into_iter().map(|settled| {
+            let request = settled.request;
+            RequestProjection {
+                id: request.id.0, parent_id: request.parent.map(|parent| parent.0),
+                conversation_id: request.branch,
+                state: if settled.failure.is_some() || settled.interruption.is_some() { RequestState::Failed } else { RequestState::Completed },
+                created_at_ms: None, ended_at_ms: None, command_id: None, command: None,
+                outcome: None, version: None, failure: settled.failure,
+                detail: settled.interruption.map(|cause| format!(
+                    "Provider stream interrupted: {cause}. Send a new message to continue from retained history."
+                )),
+            }
+        }).collect::<Vec<_>>();
+        let previous: BTreeMap<_, _> = snapshot
+            .requests
+            .iter()
+            .map(|row| (row.id.clone(), row.clone()))
+            .collect();
+        let current: BTreeMap<_, _> = rows
+            .iter()
+            .map(|row| (row.id.clone(), row.clone()))
+            .collect();
         let mut changes = Vec::new();
         for id in previous.keys().filter(|id| !current.contains_key(*id)) {
-            changes.push((
-                "entity.remove",
-                serde_json::json!({"entity":"request", "id":id}),
-            ));
+            changes.push(StateEvent::EntityRemove(EntityRemoval {
+                entity: EntityKind::Request,
+                id: id.clone(),
+            }));
         }
         for row in &rows {
-            let id = row["id"].as_str().expect("request identity is a string");
-            if previous.get(id) != Some(row) {
-                changes.push(("request.upsert", row.clone()));
+            if previous.get(&row.id) != Some(row) {
+                changes.push(StateEvent::RequestUpsert(row.clone()));
             }
         }
         snapshot.requests = rows;
-        for (kind, payload) in changes {
+        for event in changes {
             let sequence = *next_sequence;
             *next_sequence += 1;
-            snapshot.seq = sequence;
+            snapshot.seq = sequence.into();
             let _ = self.events.send(ServerEvent {
-                sequence,
-                event: kind.into(),
-                payload,
+                sequence: sequence.into(),
+                event,
             });
         }
         Ok(())
@@ -555,8 +552,8 @@ impl ServerControl {
     pub fn set_snapshot(&self, mut snapshot: Snapshot) {
         let mut next_sequence = self.next_sequence.lock().expect("sequence lock poisoned");
         let current_sequence = next_sequence.saturating_sub(1);
-        snapshot.seq = snapshot.seq.max(current_sequence);
-        *next_sequence = (*next_sequence).max(snapshot.seq.saturating_add(1));
+        snapshot.seq = snapshot.seq.max(current_sequence.into());
+        *next_sequence = (*next_sequence).max(snapshot.seq.get().saturating_add(1));
         let mut current = self.snapshot.write().expect("snapshot lock poisoned");
         let mut receipts = std::mem::take(&mut current.command_receipts);
         for receipt in snapshot.command_receipts.drain(..) {
@@ -590,7 +587,7 @@ impl ServerControl {
         &self,
         run: String,
         actors: Vec<HostActorProjection>,
-        conversations: Vec<serde_json::Value>,
+        conversations: Vec<browser_contract::ConversationProjection>,
     ) {
         debug_assert!(actors.iter().all(|actor| actor.identity.run == run));
 
@@ -606,84 +603,68 @@ impl ServerControl {
             .iter()
             .map(|actor| (actor.identity.wire_key(), actor.clone()))
             .collect();
-        let previous_conversations = conversation_rows_by_id(&snapshot.conversations);
-        let next_conversations = conversation_rows_by_id(&conversations);
-        let mut changes = Vec::<(String, serde_json::Value)>::new();
-
-        if snapshot.host_run.as_deref() != Some(run.as_str()) {
-            changes.push(("host_run.upsert".into(), serde_json::json!({"run":run})));
-        }
-
-        for (id, _) in previous_actors
+        use browser_contract::{EntityKind, EntityRemoval, HostRun, StateEvent};
+        let previous_conversations: BTreeMap<_, _> = snapshot
+            .conversations
             .iter()
-            .filter(|(id, _)| !next_actors.contains_key(*id))
+            .map(|row| (row.id.clone(), row.clone()))
+            .collect();
+        let next_conversations: BTreeMap<_, _> = conversations
+            .iter()
+            .map(|row| (row.id.clone(), row.clone()))
+            .collect();
+        let mut changes = Vec::new();
+        if snapshot.host_run.as_deref() != Some(run.as_str()) {
+            changes.push(StateEvent::HostRunUpsert(HostRun { run: run.clone() }));
+        }
+        for id in previous_actors
+            .keys()
+            .filter(|id| !next_actors.contains_key(*id))
         {
-            changes.push((
-                "entity.remove".into(),
-                serde_json::json!({"entity":"actor", "id":id}),
-            ));
+            changes.push(StateEvent::EntityRemove(EntityRemoval {
+                entity: EntityKind::Actor,
+                id: id.clone(),
+            }));
         }
         for (id, actor) in &next_actors {
-            if previous_actors.get(id).is_some_and(|old| old == actor) {
-                continue;
+            if previous_actors.get(id) != Some(actor) {
+                changes.push(StateEvent::ActorUpsert(actor.clone()));
             }
-            changes.push((
-                "actor.upsert".into(),
-                serde_json::to_value(actor).expect("host actor projection serializes"),
-            ));
         }
-        for (id, _) in previous_conversations
-            .iter()
-            .filter(|(id, _)| !next_conversations.contains_key(*id))
+        for id in previous_conversations
+            .keys()
+            .filter(|id| !next_conversations.contains_key(*id))
         {
-            changes.push((
-                "entity.remove".into(),
-                serde_json::json!({"entity":"conversation", "id":id}),
-            ));
+            changes.push(StateEvent::EntityRemove(EntityRemoval {
+                entity: EntityKind::Conversation,
+                id: id.clone(),
+            }));
         }
         for (id, conversation) in &next_conversations {
-            if previous_conversations
-                .get(id)
-                .is_some_and(|old| old == conversation)
-            {
-                continue;
+            if previous_conversations.get(id) != Some(conversation) {
+                changes.push(StateEvent::ConversationUpsert(conversation.clone()));
             }
-            changes.push(("conversation.upsert".into(), conversation.clone()));
         }
-
         let mut events = Vec::with_capacity(changes.len());
         let mut watermark = next_sequence.saturating_sub(1);
-        for (kind, payload) in changes {
+        for event in changes {
             let sequence = *next_sequence;
             *next_sequence += 1;
             watermark = sequence;
             events.push(ServerEvent {
-                sequence,
-                event: kind,
-                payload,
+                sequence: sequence.into(),
+                event,
             });
         }
 
         snapshot.host_run = Some(run);
         snapshot.actors = actors;
         snapshot.conversations = conversations;
-        snapshot.seq = snapshot.seq.max(watermark);
+        snapshot.seq = snapshot.seq.max(watermark.into());
         for event in events {
             let _ = self.events.send(event);
         }
     }
-}
-
-fn conversation_rows_by_id(rows: &[serde_json::Value]) -> BTreeMap<String, serde_json::Value> {
-    rows.iter()
-        .map(|row| {
-            let id = row
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .expect("host conversation projection has a string id");
-            (id.to_owned(), row.clone())
-        })
-        .collect()
 }
 
 /// Build a fail-closed server: public static assets work, but protected `/api/*`
@@ -1008,17 +989,17 @@ async fn websocket_session(
             }
             received = receiver.recv() => {
                 match received {
-                    Ok(event) if event.sequence > last_sent => {
+                    Ok(event) if event.sequence.get() > last_sent => {
                         let frame = WsServerFrame::Event {
                             event: WsEvent {
                                 seq: event.sequence,
-                                event: WsEventPayload { kind: event.event, value: event.payload },
+                                event: event.event,
                             },
                         };
                         if send_ws_frame(&mut socket, &frame).await.is_err() {
                             break;
                         }
-                        last_sent = event.sequence;
+                        last_sent = event.sequence.get();
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -1038,7 +1019,7 @@ async fn websocket_session(
 
 async fn send_snapshot(socket: &mut WebSocket, state: &AppState) -> Result<u64, ()> {
     let snapshot = state.snapshot.read().map_err(|_| ())?.clone();
-    let seq = snapshot.seq;
+    let seq = snapshot.seq.get();
     send_ws_frame(socket, &WsServerFrame::Snapshot { snapshot }).await?;
     Ok(seq)
 }
@@ -1128,7 +1109,9 @@ async fn command_status(
         return refusal(CommandRefusal::Unavailable, "embedded run unavailable");
     };
     match store.embedded_command(&run, operation) {
-        Ok(Some(record)) => Json(record).into_response(),
+        Ok(Some(record)) => {
+            Json(browser_contract::EmbeddedCommandRecord::from(&record)).into_response()
+        }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => refusal(CommandRefusal::Unavailable, "command Store read failed"),
     }
@@ -1326,7 +1309,7 @@ async fn event_stream(
                         match received {
                             Ok(event) => {
                                 let data = serde_json::to_string(&event).expect("ServerEvent serializes");
-                                return Some((Ok(SseEvent::default().event(event.event).data(data)), (receiver, revalidation, auth, headers, peer)));
+                                return Some((Ok(SseEvent::default().event(event.event.kind()).data(data)), (receiver, revalidation, auth, headers, peer)));
                             }
                             Err(broadcast::error::RecvError::Lagged(_)) => continue,
                             Err(broadcast::error::RecvError::Closed) => return None,
@@ -1377,6 +1360,68 @@ fn is_frontend_page_path(path: &str) -> bool {
                 .split('/')
                 .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
     })
+}
+
+#[cfg(test)]
+fn event_value(event: &ServerEvent) -> serde_json::Value {
+    serde_json::to_value(&event.event).unwrap()["value"].clone()
+}
+#[cfg(test)]
+fn fixture_conversation(id: &str, path: &str) -> browser_contract::ConversationProjection {
+    browser_contract::ConversationProjection {
+        id: id.into(),
+        path: path.into(),
+        parent_id: None,
+        fork_source_request_id: None,
+        state: browser_contract::ConversationState::Idle,
+        version: None,
+    }
+}
+#[cfg(test)]
+fn fixture_request(id: &str) -> browser_contract::RequestProjection {
+    browser_contract::RequestProjection {
+        id: id.into(),
+        conversation_id: "root".into(),
+        parent_id: None,
+        created_at_ms: None,
+        ended_at_ms: None,
+        state: browser_contract::RequestState::Running,
+        command_id: None,
+        command: None,
+        outcome: None,
+        detail: None,
+        failure: None,
+        version: None,
+    }
+}
+#[cfg(test)]
+fn fixture_job(id: &str) -> browser_contract::JobProjection {
+    browser_contract::JobProjection {
+        id: id.into(),
+        conversation_id: "root".into(),
+        state: ToolJobState::Running,
+        started_at_ms: None,
+        ended_at_ms: None,
+        request_id: None,
+        call_id: None,
+        tool_name: None,
+        tool_kind: None,
+        delivered: None,
+        output: None,
+        version: None,
+    }
+}
+#[cfg(test)]
+fn fixture_envelope(id: &str) -> browser_contract::EnvelopeProjection {
+    browser_contract::EnvelopeProjection {
+        id: id.into(),
+        recipient: "root".into(),
+        sender: "operator".into(),
+        kind: browser_contract::EnvelopeKind::Message,
+        payload: "message".into(),
+        ordinal: None,
+        version: None,
+    }
 }
 
 #[cfg(test)]
@@ -1434,10 +1479,7 @@ mod tests {
         );
         let (_, control, _) = server(PathBuf::from("."));
         control.refresh_completed_model_requests(&store).unwrap();
-        assert_eq!(
-            control.snapshot.read().unwrap().requests[0]["id"],
-            "retained"
-        );
+        assert_eq!(control.snapshot.read().unwrap().requests[0].id, "retained");
         let conn = store.lock();
         let mut query = conn.prepare(
             "EXPLAIN QUERY PLAN SELECT id,request_id FROM events WHERE kind='model_turn' ORDER BY id DESC LIMIT 128",
@@ -1499,7 +1541,7 @@ mod tests {
             fresh_snapshot
                 .requests
                 .iter()
-                .all(|request| request["id"] != head.0)
+                .all(|request| request.id != head.0)
         );
         assert_eq!(fresh_snapshot.actors, vec![actor]);
         let wire = serde_json::to_value(WsServerFrame::Snapshot {
@@ -1554,14 +1596,17 @@ mod tests {
         control.refresh_completed_model_requests(&store).unwrap();
         let first = events.try_recv().unwrap();
         let last = events.try_recv().unwrap();
-        assert_eq!(first.event, "request.upsert");
-        assert_eq!(first.payload["id"], "z-first");
-        assert_eq!(last.payload["id"], "a-last");
+        assert_eq!(first.event.kind(), "request.upsert");
+        assert_eq!(event_value(&first)["id"], "z-first");
+        assert_eq!(event_value(&last)["id"], "a-last");
         let snapshot = control.snapshot.read().unwrap().clone();
         assert_eq!(snapshot.seq, last.sequence);
         assert_eq!(snapshot.requests.len(), 2);
-        assert_eq!(snapshot.requests[1]["conversationId"], "/root/child");
-        assert_eq!(snapshot.requests[1]["state"], "completed");
+        assert_eq!(snapshot.requests[1].conversation_id, "/root/child");
+        assert_eq!(
+            snapshot.requests[1].state,
+            browser_contract::RequestState::Completed
+        );
         control.refresh_completed_model_requests(&store).unwrap();
         assert!(
             events.try_recv().is_err(),
@@ -1593,8 +1638,8 @@ mod tests {
         control.refresh_completed_model_requests(&store).unwrap();
         let snapshot = control.snapshot.read().unwrap();
         assert_eq!(snapshot.requests.len(), 128);
-        assert_eq!(snapshot.requests[0]["id"], "bounded-002");
-        assert_eq!(snapshot.requests[127]["id"], "bounded-129");
+        assert_eq!(snapshot.requests[0].id, "bounded-002");
+        assert_eq!(snapshot.requests[127].id, "bounded-129");
         assert!(
             snapshot
                 .requests
@@ -1747,9 +1792,8 @@ mod tests {
             json!({"type":"submit","command":"start"})
         );
         let event = ServerEvent {
-            sequence: 7,
-            event: "job_started".into(),
-            payload: json!({"handle":"job-1"}),
+            sequence: 7u64.into(),
+            event: browser_contract::StateEvent::JobUpsert(fixture_job("job-1")),
         };
         assert_eq!(
             serde_json::from_str::<ServerEvent>(&serde_json::to_string(&event).unwrap()).unwrap(),
@@ -1762,22 +1806,22 @@ mod tests {
         let (_, control, _) = authorized_server(PathBuf::from("."));
         let old_actor = projected_actor("run-old", "/root/worker", "inc-1");
         control.set_snapshot(Snapshot {
-            seq: 7,
+            seq: 7u64.into(),
             live_output: Vec::new(),
             history_revisions: Vec::new(),
             actor_output_revisions: Vec::new(),
             host_run: Some("run-old".into()),
             command_receipts: vec![],
             actors: vec![old_actor.clone()],
-            conversations: vec![json!({"id":"conversation-old","path":"/root/worker"})],
-            requests: vec![json!({"id":"request-1"})],
-            jobs: vec![json!({"id":"job-1"})],
-            envelopes: vec![json!({"id":"envelope-1"})],
+            conversations: vec![fixture_conversation("conversation-old", "/root/worker")],
+            requests: vec![fixture_request("request-1")],
+            jobs: vec![fixture_job("job-1")],
+            envelopes: vec![fixture_envelope("envelope-1")],
         });
         let mut events = control.events.subscribe();
 
         let new_actor = projected_actor("run-new", "/root/worker", "inc-2");
-        let new_conversation = json!({"id":"conversation-new", "path":"/root/worker"});
+        let new_conversation = fixture_conversation("conversation-new", "/root/worker");
         control.update_host_projection(
             "run-new".into(),
             vec![new_actor.clone()],
@@ -1785,19 +1829,19 @@ mod tests {
         );
 
         let snapshot = control.snapshot.read().unwrap().clone();
-        assert_eq!(snapshot.seq, 12);
+        assert_eq!(snapshot.seq.get(), 12);
         assert_eq!(snapshot.host_run.as_deref(), Some("run-new"));
         assert_eq!(snapshot.actors, vec![new_actor.clone()]);
         assert_eq!(snapshot.conversations, vec![new_conversation]);
-        assert_eq!(snapshot.requests, vec![json!({"id":"request-1"})]);
-        assert_eq!(snapshot.jobs, vec![json!({"id":"job-1"})]);
-        assert_eq!(snapshot.envelopes, vec![json!({"id":"envelope-1"})]);
+        assert_eq!(snapshot.requests, vec![fixture_request("request-1")]);
+        assert_eq!(snapshot.jobs, vec![fixture_job("job-1")]);
+        assert_eq!(snapshot.envelopes, vec![fixture_envelope("envelope-1")]);
 
         let observed: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
         assert_eq!(
             observed
                 .iter()
-                .map(|event| (event.sequence, event.event.as_str()))
+                .map(|event| (event.sequence.get(), event.event.kind()))
                 .collect::<Vec<_>>(),
             vec![
                 (8, "host_run.upsert"),
@@ -1807,17 +1851,20 @@ mod tests {
                 (12, "conversation.upsert"),
             ]
         );
-        assert_eq!(observed[0].payload, json!({"run":"run-new"}));
+        assert_eq!(event_value(&observed[0]), json!({"run":"run-new"}));
         assert_eq!(
-            observed[1].payload,
+            event_value(&observed[1]),
             json!({"entity":"actor", "id":old_actor.identity.wire_key()})
         );
-        assert_eq!(observed[2].payload["identity"]["incarnation"], "inc-2");
         assert_eq!(
-            observed[3].payload,
+            event_value(&observed[2])["identity"]["incarnation"],
+            "inc-2"
+        );
+        assert_eq!(
+            event_value(&observed[3]),
             json!({"entity":"conversation", "id":"conversation-old"})
         );
-        assert_eq!(observed[4].payload["id"], "conversation-new");
+        assert_eq!(event_value(&observed[4])["id"], "conversation-new");
         assert_eq!(snapshot.seq, observed.last().unwrap().sequence);
     }
 
@@ -1834,25 +1881,25 @@ mod tests {
             command_id: "cmd-1".into(),
             outcome: CommandReceiptOutcome::Admitted {
                 target: Some(target.clone()),
-                envelope_id: "envelope-4".into(),
+                envelope_id: 4i64.into(),
                 wake_error: None,
             },
         };
         let event = control.publish_command_receipt(receipt.clone());
         let snapshot = control.snapshot.read().unwrap().clone();
-        assert_eq!(event.event, "command.receipt");
+        assert_eq!(event.event.kind(), "command.receipt");
         assert_eq!(event.sequence, snapshot.seq);
         assert_eq!(snapshot.command_receipts, vec![receipt]);
-        assert_eq!(event.payload["outcome"], "admitted");
-        assert_eq!(event.payload["envelopeId"], "envelope-4");
+        assert_eq!(event_value(&event)["outcome"], "admitted");
+        assert_eq!(event_value(&event)["envelopeId"], "4");
 
         control.set_snapshot(Snapshot {
-            jobs: vec![json!({"id":"job-after-command"})],
+            jobs: vec![fixture_job("job-after-command")],
             ..Snapshot::default()
         });
         let snapshot = control.snapshot.read().unwrap().clone();
         assert_eq!(snapshot.command_receipts.len(), 1);
-        assert_eq!(snapshot.jobs, vec![json!({"id":"job-after-command"})]);
+        assert_eq!(snapshot.jobs, vec![fixture_job("job-after-command")]);
         let wire = serde_json::to_value(WsServerFrame::Snapshot { snapshot }).unwrap();
         assert_eq!(wire["snapshot"]["commandReceipts"][0]["commandId"], "cmd-1");
 
@@ -1867,9 +1914,9 @@ mod tests {
         let snapshot = control.snapshot.read().unwrap();
         assert_eq!(snapshot.seq, event.sequence);
         assert_eq!(snapshot.command_receipts.last(), Some(&requested));
-        assert_eq!(event.payload["outcome"], "control_requested");
-        assert_eq!(event.payload["control"], "interrupt");
-        assert_ne!(event.payload["outcome"], "completed");
+        assert_eq!(event_value(&event)["outcome"], "control_requested");
+        assert_eq!(event_value(&event)["control"], "interrupt");
+        assert_ne!(event_value(&event)["outcome"], "completed");
         drop(snapshot);
 
         for index in 0..=COMMAND_RECEIPT_CAPACITY {
@@ -1913,8 +1960,15 @@ mod tests {
                 let run = if cycle % 2 == 0 { "run-a" } else { "run-b" };
                 writer_control.update_host_projection(
                     run.into(),
-                    vec![projected_actor(run, "/root/worker", &format!("inc-{cycle}"))],
-                    vec![json!({"id":format!("conversation-{run}"), "projectionRun":run, "cycle":cycle})],
+                    vec![projected_actor(
+                        run,
+                        "/root/worker",
+                        &format!("inc-{cycle}"),
+                    )],
+                    vec![fixture_conversation(
+                        &format!("conversation-{run}-{cycle}"),
+                        run,
+                    )],
                 );
                 std::thread::yield_now();
             }
@@ -1926,7 +1980,7 @@ mod tests {
                 assert_eq!(snapshot.actors.len(), 1);
                 assert_eq!(snapshot.actors[0].identity.run, run);
                 assert_eq!(snapshot.conversations.len(), 1);
-                assert_eq!(snapshot.conversations[0]["projectionRun"], run);
+                assert_eq!(snapshot.conversations[0].path, run);
             }
             std::thread::yield_now();
         }
@@ -1939,7 +1993,7 @@ mod tests {
         assert_eq!(snapshot.seq, last_event.sequence);
         assert_eq!(snapshot.actors[0].identity.run, snapshot.host_run.unwrap());
         assert_eq!(
-            snapshot.conversations[0]["projectionRun"],
+            snapshot.conversations[0].path,
             snapshot.actors[0].identity.run
         );
     }
@@ -2489,7 +2543,9 @@ mod tests {
             let mut interval = tokio::time::interval(Duration::from_millis(10));
             loop {
                 interval.tick().await;
-                control.publish("token", json!({"text":"live output"}));
+                control.publish(browser_contract::StateEvent::HostRunUpsert(
+                    browser_contract::HostRun { run: "run".into() },
+                ));
             }
         });
         let mut chunks = 0;
@@ -2792,7 +2848,9 @@ mod tests {
             .await
             .unwrap()
             .bytes_stream();
-        control.publish("job_started", json!({"handle":"job-1"}));
+        control.publish(browser_contract::StateEvent::JobUpsert(fixture_job(
+            "job-1",
+        )));
         use futures_util::StreamExt;
         let frame = tokio::time::timeout(Duration::from_secs(2), events.next())
             .await
@@ -2801,7 +2859,7 @@ mod tests {
             .unwrap();
         let text = String::from_utf8_lossy(&frame);
         assert!(text.contains("event:"));
-        assert!(text.contains("\"event\":\"job_started\""));
+        assert!(text.contains("\"kind\":\"job.upsert\""));
         server_task.abort();
     }
 
@@ -2879,8 +2937,8 @@ mod tests {
                 .with_bearer_secret(BearerSecret::new(TEST_SECRET).unwrap()),
         );
         control.set_snapshot(Snapshot {
-            seq: 4,
-            conversations: vec![json!({"id":"root"})],
+            seq: 4u64.into(),
+            conversations: vec![fixture_conversation("root", "/root")],
             ..Snapshot::default()
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2896,7 +2954,7 @@ mod tests {
         assert_eq!(
             read_ws_text(&mut socket),
             json!({"type":"snapshot","snapshot":{
-                "seq":4,"conversations":[{"id":"root"}],"requests":[],"jobs":[],"envelopes":[]
+                "seq":"4","conversations":[fixture_conversation("root", "/root")],"requests":[],"jobs":[],"envelopes":[]
             }})
         );
         let (originless_socket, originless_handshake) = websocket(address, None, Some(TEST_SECRET));
@@ -2907,15 +2965,15 @@ mod tests {
         drop(originless_socket);
 
         control.set_snapshot(Snapshot {
-            seq: 8,
-            jobs: vec![json!({"id":"job-1"})],
+            seq: 8u64.into(),
+            jobs: vec![fixture_job("job-1")],
             ..Snapshot::default()
         });
         write_ws_text(&mut socket, r#"{"type":"snapshot.request"}"#);
         assert_eq!(
             read_ws_text(&mut socket),
             json!({"type":"snapshot","snapshot":{
-                "seq":8,"conversations":[],"requests":[],"jobs":[{"id":"job-1"}],"envelopes":[]
+                "seq":"8","conversations":[],"requests":[],"jobs":[fixture_job("job-1")],"envelopes":[]
             }})
         );
 
@@ -2964,11 +3022,13 @@ mod tests {
         assert_eq!(accepted["command_id"], queued.command_id);
         assert!(matches!(queued.command, ClientCommand::Host { command, .. } if command == input));
 
-        control.publish("job.started", json!({"id":"job-1"}));
+        control.publish(browser_contract::StateEvent::JobUpsert(fixture_job(
+            "job-1",
+        )));
         assert_eq!(
             read_ws_text(&mut socket),
             json!({"type":"event","event":{
-                "seq":9,"event":{"kind":"job.started","value":{"id":"job-1"}}
+                "seq":"9","event":{"kind":"job.upsert","value":fixture_job("job-1")}
             }})
         );
         drop(socket);
@@ -3147,7 +3207,7 @@ mod durable_command_tests {
                 .status(),
             StatusCode::ACCEPTED
         );
-        let record: crate::store::EmbeddedCommandRecord = client
+        let record: browser_contract::EmbeddedCommandRecord = client
             .get(&lookup)
             .bearer_auth(secret)
             .send()
@@ -3214,7 +3274,7 @@ mod durable_command_tests {
                 .iter()
                 .any(|r| r.command_id == operation.to_string())
         );
-        let record: crate::store::EmbeddedCommandRecord = client
+        let record: browser_contract::EmbeddedCommandRecord = client
             .get(&lookup)
             .bearer_auth(secret)
             .send()
@@ -3245,11 +3305,14 @@ mod rejection_projection_tests {
         let mut events = control.events.subscribe();
         control.refresh_completed_model_requests(&store).unwrap();
         let event = events.try_recv().unwrap();
-        assert_eq!(event.event, "request.upsert");
-        assert_eq!(event.payload["id"], request.0);
-        assert_eq!(event.payload["state"], "failed");
-        assert_eq!(event.payload["failure"], failure);
-        assert_eq!(control.snapshot.read().unwrap().requests[0], event.payload);
+        assert_eq!(event.event.kind(), "request.upsert");
+        assert_eq!(event_value(&event)["id"], request.0);
+        assert_eq!(event_value(&event)["state"], "failed");
+        assert_eq!(event_value(&event)["failure"], failure);
+        assert_eq!(
+            serde_json::to_value(&control.snapshot.read().unwrap().requests[0]).unwrap(),
+            event_value(&event)
+        );
         control.refresh_completed_model_requests(&store).unwrap();
         assert!(
             events.try_recv().is_err(),
@@ -3287,11 +3350,11 @@ mod interruption_projection_tests {
         control.refresh_completed_model_requests(&store).unwrap();
         let snapshot = control.snapshot.read().unwrap();
         let row = &snapshot.requests[0];
-        assert_eq!(row["state"], "failed");
-        assert!(row["failure"].is_null());
+        assert_eq!(row.state, browser_contract::RequestState::Failed);
+        assert!(row.failure.is_none());
         assert!(
-            row["detail"]
-                .as_str()
+            row.detail
+                .as_deref()
                 .unwrap()
                 .contains("Send a new message")
         );

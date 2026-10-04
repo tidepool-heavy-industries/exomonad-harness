@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   isServerFrame, isClientFrame, isActorOutputHistoryPage, isActorDisplayExpansion,
+  isHistoryPage, isEmbeddedCommandRecord,
 } from './generated/validators.mjs';
 import samples from './generated/wire-samples.json';
 const rawFrames: unknown[] = samples.server;
@@ -12,6 +13,8 @@ describe('Rust-owned browser wire contracts', () => {
     for (const frame of samples.client) expect(isClientFrame(frame)).toBe(true);
     for (const page of samples.actorOutputHistory) expect(isActorOutputHistoryPage(page)).toBe(true);
     for (const input of samples.actorDisplayExpansion) expect(isActorDisplayExpansion(input)).toBe(true);
+    for (const page of samples.history) expect(isHistoryPage(page)).toBe(true);
+    for (const record of samples.embeddedCommand) expect(isEmbeddedCommandRecord(record)).toBe(true);
   });
 
   it('refuses rounded counters, overflow, alternate decimal spellings and unknown events', () => {

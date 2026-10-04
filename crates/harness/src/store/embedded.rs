@@ -352,7 +352,7 @@ impl Store {
             command_id: operation.to_string(),
             outcome: CommandReceiptOutcome::Admitted {
                 target: Some(identity.clone()),
-                envelope_id: envelope.to_string(),
+                envelope_id: envelope.into(),
                 wake_error: None,
             },
         };

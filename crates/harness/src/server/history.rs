@@ -2,7 +2,7 @@
 //! Oversized Items retain their Store hash; full large-detail retrieval is
 //! deferred until an artifact route exists.
 
-use super::AppState;
+use super::{AppState, WireI64, WireU64, browser_contract};
 use crate::{
     model::RequestId,
     store::{StoreError, history::MAX_HISTORY_ITEMS},
@@ -18,7 +18,7 @@ use serde::Deserialize;
 #[derive(Default, Deserialize)]
 pub(super) struct HistoryQuery {
     #[serde(default)]
-    offset: u64,
+    offset: WireU64,
     limit: Option<usize>,
 }
 
@@ -35,11 +35,11 @@ pub(super) async fn request_history(
             .into_response();
     };
     let limit = query.limit.unwrap_or(50);
-    if limit == 0 || limit > MAX_HISTORY_ITEMS || i64::try_from(query.offset).is_err() {
+    if limit == 0 || limit > MAX_HISTORY_ITEMS || i64::try_from(query.offset.get()).is_err() {
         return (StatusCode::BAD_REQUEST, "invalid history page bounds").into_response();
     }
     let page = tokio::task::spawn_blocking(move || {
-        store.history_page(&RequestId(request_id), query.offset, limit)
+        store.history_page(&RequestId(request_id), query.offset.get(), limit)
     })
     .await;
     let page = match page {
@@ -55,7 +55,12 @@ pub(super) async fn request_history(
     } else {
         StatusCode::OK
     };
-    (status, [(header::CACHE_CONTROL, "no-store")], Json(page)).into_response()
+    (
+        status,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(browser_contract::HistoryPage::from(&page)),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -98,8 +103,8 @@ mod tests {
         let page: serde_json::Value = page.json().await.unwrap();
         assert_eq!(page["requestId"], "history-route");
         assert_eq!(page["items"][0]["item"], first.0);
-        assert_eq!(page["nextOffset"], 1);
-        assert_eq!(page["oversizedItem"]["skipOffset"], 2);
+        assert_eq!(page["nextOffset"], "1");
+        assert_eq!(page["oversizedItem"]["skipOffset"], "2");
         assert_eq!(page["oversizedItem"]["hash"].as_str().unwrap().len(), 64);
 
         let oversized = client
@@ -151,10 +156,10 @@ mod tests {
 #[derive(Deserialize)]
 pub(super) struct ActorOutputQuery {
     run: String,
-    actor: u64,
-    incarnation: u64,
+    actor: WireU64,
+    incarnation: WireU64,
     #[serde(default)]
-    after: i64,
+    after: WireI64,
     limit: Option<usize>,
 }
 
@@ -170,19 +175,24 @@ pub(super) async fn actor_output_history(
             .into_response();
     };
     let limit = query.limit.unwrap_or(50);
-    if query.after < 0 || limit == 0 || limit > MAX_HISTORY_ITEMS || query.run.len() > 1024 {
+    if query.after.get() < 0 || limit == 0 || limit > MAX_HISTORY_ITEMS || query.run.len() > 1024 {
         return (StatusCode::BAD_REQUEST, "invalid history page bounds").into_response();
     }
     let origin = crate::store::actor_output::ActorOutputOrigin {
         run: query.run,
-        native_actor: query.actor,
-        incarnation: query.incarnation,
+        native_actor: query.actor.get(),
+        incarnation: query.incarnation.get(),
     };
-    let result =
-        tokio::task::spawn_blocking(move || store.actor_output_page(&origin, query.after, limit))
-            .await;
+    let result = tokio::task::spawn_blocking(move || {
+        store.actor_output_page(&origin, query.after.get(), limit)
+    })
+    .await;
     match result {
-        Ok(Ok(page)) => ([(header::CACHE_CONTROL, "no-store")], Json(page)).into_response(),
+        Ok(Ok(page)) => (
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(browser_contract::ActorOutputHistoryPage::from(&page)),
+        )
+            .into_response(),
         Ok(Err(StoreError::InvalidHistoryOffset | StoreError::InvalidActorOutput)) => {
             StatusCode::BAD_REQUEST.into_response()
         }
