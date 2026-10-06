@@ -66,11 +66,14 @@
             url = "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20260926-200119/buck2-x86_64-unknown-linux-gnu.zst";
             hash = "sha256-hCos2M7wxjrYKXaQdCouhaWvoK6XM5urBtKJTm2tkfQ=";
           };
-          nativeBuildInputs = [ pkgs.zstd ];
+          # The GNU release needs the pinned loader and runtime library paths.
+          nativeBuildInputs = [ pkgs.zstd pkgs.autoPatchelfHook ];
+          buildInputs = [ pkgs.stdenv.cc.libc pkgs.stdenv.cc.cc.lib ];
         } ''
           mkdir -p "$out/bin"
           zstd --decompress --stdout "$src" > "$out/bin/buck2"
           chmod +x "$out/bin/buck2"
+          autoPatchelf "$out"
         '';
       });
     };
