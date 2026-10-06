@@ -415,12 +415,14 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
             super::http_error::read(response, &token, account.as_deref().unwrap_or("")).await;
         return Err(TransportError::Http { status, diagnostic });
     }
-    read_response(response, sink).await
+    read_response(response, sink, &token, account.as_deref().unwrap_or("")).await
 }
 
 async fn read_response(
     response: reqwest::Response,
     sink: Option<tokio::sync::mpsc::Sender<StreamEvent>>,
+    token: &str,
+    account: &str,
 ) -> Result<ResponsesTurn, TransportError> {
     let mut stream = response.bytes_stream();
     let mut framer = SseFramer::new();
@@ -445,7 +447,7 @@ async fn read_response(
             }
         };
         for data in framer.push(&chunk)? {
-            if let Some(event) = assembly.accept(&data)? {
+            if let Some(event) = assembly.accept_with_credentials(&data, token, account)? {
                 if let Some(sender) = &sink {
                     // Bounded backpressure preserves every provider delta and completed item.
                     // A closed consumer has stopped; the final turn remains authoritative.
@@ -630,6 +632,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_stream_error_retains_redacted_fields_through_http_body_reader() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let token = "mock-active-token";
+        let account = "mock-active-account";
+        let packet = json!({"type":"error", "code":"invalid_tools", "param":"tools[0].parameters",
+            "message":format!("schema refused {token} {account}"), "echoed_request":{"token":token}});
+        let body = format!("data: {packet}\n\n");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len(),
+            ).as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let response = http_client()
+            .unwrap()
+            .get(format!("http://{address}/responses"))
+            .send()
+            .await
+            .unwrap();
+        let failure = read_response(response, None, token, account)
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(matches!(&failure, TransportError::ProviderStreamFailure {
+            event: super::super::ProviderStreamFailureEvent::Error,
+            diagnostic: Some(diagnostic),
+        } if diagnostic.code.as_deref() == Some("invalid_tools")
+            && diagnostic.param.as_deref() == Some("tools[0].parameters")
+            && diagnostic.message.as_deref() == Some("schema refused [redacted] [redacted]")));
+        assert!(failure.request_failure().is_none());
+        let rendered = failure.to_string();
+        for private in [token, account, "echoed_request"] {
+            assert!(!rendered.contains(private));
+        }
+    }
+
+    #[tokio::test]
     async fn body_truncation_preserves_terminal_proof_and_distinguishes_clean_eof() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         for (completed, truncated) in [(false, false), (false, true), (true, true)] {
@@ -656,7 +700,7 @@ mod tests {
                 .send()
                 .await
                 .unwrap();
-            let result = read_response(response, None).await;
+            let result = read_response(response, None, "", "").await;
             server.await.unwrap();
             match (completed, truncated, result) {
                 (true, _, Ok(turn)) => assert_eq!(turn.response_id, "terminal-proof"),

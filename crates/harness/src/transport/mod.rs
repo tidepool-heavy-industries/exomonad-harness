@@ -153,12 +153,28 @@ pub enum TransportError {
         status: u16,
         diagnostic: Option<HttpDiagnostic>,
     },
+    #[error("provider stream failed ({event}){suffix}", suffix = diagnostic_suffix(.diagnostic.as_ref()))]
+    ProviderStreamFailure {
+        event: ProviderStreamFailureEvent,
+        diagnostic: Option<HttpDiagnostic>,
+    },
     #[error("stream failed: {0}")]
     Stream(String),
     #[error("stream failed: {0}")]
     IncompleteResponse(StreamInterruption),
     #[error("replay request {request:?} already has a recorded owner")]
     ReplayRequestReuse { request: crate::model::RequestId },
+}
+
+/// An explicit provider failure event, distinct from local framing or schema
+/// errors. It gives no proof that escaped tool work did not execute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderStreamFailureEvent {
+    #[error("response.failed")]
+    ResponseFailed,
+    #[error("error")]
+    Error,
 }
 
 /// The response ended without completion proof. This does not establish whether
