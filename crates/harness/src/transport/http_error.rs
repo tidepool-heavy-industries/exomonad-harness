@@ -49,24 +49,34 @@ fn parse(body: &[u8], token: &str, account: &str) -> Option<HttpDiagnostic> {
     let error = document.get("error").and_then(Value::as_object);
     // The Codex backend also reports account/model refusals as a top-level
     // detail string. Both known envelopes use the same bounded redaction path.
+    let field = |name: &str| error?.get(name)?.as_str();
+    diagnostic(
+        field("code"),
+        field("type"),
+        field("param"),
+        field("message").or_else(|| document.get("detail")?.as_str()),
+        token,
+        account,
+    )
+}
+
+/// Bound and redact only explicitly selected provider diagnostic fields. SSE
+/// events and HTTP bodies share this policy; neither retains its raw envelope.
+pub(super) fn diagnostic(
+    code: Option<&str>,
+    error_type: Option<&str>,
+    param: Option<&str>,
+    message: Option<&str>,
+    token: &str,
+    account: &str,
+) -> Option<HttpDiagnostic> {
+    // Redact before truncation so a field cutoff cannot retain a secret prefix.
     let bounded = |text: &str, limit| redact(text, token, account).chars().take(limit).collect();
-    let field = |name: &str, limit| {
-        error?.get(name)?.as_str().map(|text| {
-            // Redact before truncation, so a cutoff cannot leave a credential
-            // prefix visible. Unrecognized fields never enter the diagnostic.
-            bounded(text, limit)
-        })
-    };
     let diagnostic = HttpDiagnostic {
-        code: field("code", FIELD_LIMIT),
-        error_type: field("type", FIELD_LIMIT),
-        param: field("param", FIELD_LIMIT),
-        message: field("message", MESSAGE_LIMIT).or_else(|| {
-            document
-                .get("detail")?
-                .as_str()
-                .map(|text| bounded(text, MESSAGE_LIMIT))
-        }),
+        code: code.map(|text| bounded(text, FIELD_LIMIT)),
+        error_type: error_type.map(|text| bounded(text, FIELD_LIMIT)),
+        param: param.map(|text| bounded(text, FIELD_LIMIT)),
+        message: message.map(|text| bounded(text, MESSAGE_LIMIT)),
     };
     (diagnostic != HttpDiagnostic::default()).then_some(diagnostic)
 }

@@ -1,4 +1,4 @@
-use super::{ResponsesTurn, TransportError, Usage};
+use super::{ProviderStreamFailureEvent, ResponsesTurn, TransportError, Usage};
 use crate::item::Item;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -37,6 +37,15 @@ impl ResponseAssembly {
     /// Returns a live event for the loop, while retaining completed items for
     /// the final turn. The caller is responsible for SSE framing.
     pub fn accept(&mut self, data: &str) -> Result<Option<StreamEvent>, TransportError> {
+        self.accept_with_credentials(data, "", "")
+    }
+
+    pub(super) fn accept_with_credentials(
+        &mut self,
+        data: &str,
+        token: &str,
+        account: &str,
+    ) -> Result<Option<StreamEvent>, TransportError> {
         let event: Value = serde_json::from_str(data)
             .map_err(|_| TransportError::Stream("invalid SSE JSON".into()))?;
         match event.get("type").and_then(Value::as_str) {
@@ -147,9 +156,30 @@ impl ResponseAssembly {
                 ));
                 Ok(None)
             }
-            Some("response.failed" | "error") => Err(TransportError::Stream(
-                "server signaled response failure".into(),
-            )),
+            Some(kind @ ("response.failed" | "error")) => {
+                let (failure, error) = if kind == "response.failed" {
+                    (
+                        ProviderStreamFailureEvent::ResponseFailed,
+                        event
+                            .get("response")
+                            .and_then(|response| response.get("error")),
+                    )
+                } else {
+                    (ProviderStreamFailureEvent::Error, Some(&event))
+                };
+                let field = |name: &str| error?.get(name)?.as_str();
+                Err(TransportError::ProviderStreamFailure {
+                    event: failure,
+                    diagnostic: super::http_error::diagnostic(
+                        field("code"),
+                        None,
+                        field("param"),
+                        field("message"),
+                        token,
+                        account,
+                    ),
+                })
+            }
             _ => Ok(None),
         }
     }
@@ -228,6 +258,137 @@ mod tests {
                 .accept(r#"{"type":"response.output_text.delta","delta":"unscoped"}"#)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn provider_failures_preserve_allowlisted_fields_and_stay_non_rejections() {
+        for (packet, expected) in [
+            (
+                serde_json::json!({"type":"response.failed", "response":{
+                    "id":"response-unretained", "error":{"code":"invalid_tools", "message":"unsupported tool schema"},
+                    "input":[{"content":"private prompt must not be retained"}],
+                    "output":[{"content":"private output must not be retained"}],
+                }}),
+                ProviderStreamFailureEvent::ResponseFailed,
+            ),
+            (
+                serde_json::json!({"type":"error", "code":"invalid_tools", "message":"unsupported tool schema", "param":"tools[0].parameters",
+                    "request":{"input":"private prompt must not be retained"}, "unknown":"unretained metadata",
+                }),
+                ProviderStreamFailureEvent::Error,
+            ),
+        ] {
+            let mut assembly = ResponseAssembly::default();
+            let failure = assembly.accept(&packet.to_string()).unwrap_err();
+            let TransportError::ProviderStreamFailure { event, diagnostic } = &failure else {
+                panic!("provider failure was confused with a local stream error");
+            };
+            assert_eq!(*event, expected);
+            let diagnostic = diagnostic.as_ref().unwrap();
+            assert_eq!(diagnostic.code.as_deref(), Some("invalid_tools"));
+            assert_eq!(
+                diagnostic.message.as_deref(),
+                Some("unsupported tool schema")
+            );
+            assert_eq!(diagnostic.error_type, None);
+            if expected == ProviderStreamFailureEvent::Error {
+                assert_eq!(diagnostic.param.as_deref(), Some("tools[0].parameters"));
+            }
+            let encoded = serde_json::to_string(diagnostic).unwrap();
+            assert_eq!(
+                serde_json::from_str::<super::super::HttpDiagnostic>(&encoded).unwrap(),
+                *diagnostic
+            );
+            let rendered = failure.to_string();
+            assert!(rendered.contains("invalid_tools"));
+            assert!(rendered.contains("unsupported tool schema"));
+            for private in [
+                "private prompt",
+                "private output",
+                "response-unretained",
+                "unretained metadata",
+            ] {
+                assert!(!rendered.contains(private));
+            }
+            assert!(
+                failure.request_failure().is_none(),
+                "provider failure is not pre-response rejection proof"
+            );
+            assert!(matches!(
+                assembly.finish(),
+                Err(TransportError::IncompleteResponse(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn provider_failure_diagnostics_share_bounds_and_credential_redaction() {
+        let token = "active-request-secret";
+        let account = "active-account-secret";
+        let message = format!(
+            "{token} {account} Bearer other-secret sk-other acct_other {}{token}",
+            "λ".repeat(2048)
+        );
+        for packet in [
+            serde_json::json!({"type":"response.failed", "response":{"error":{
+                "code":format!("{}{}", "λ".repeat(255), token), "param":account, "message":message,
+            }, "echoed_request":{"credentials":token}}}),
+            serde_json::json!({"type":"error", "code":format!("{}{}", "λ".repeat(255), token), "param":account, "message":message, "authorization":token}),
+        ] {
+            let failure = ResponseAssembly::default()
+                .accept_with_credentials(&packet.to_string(), token, account)
+                .unwrap_err();
+            let TransportError::ProviderStreamFailure {
+                diagnostic: Some(ref diagnostic),
+                ..
+            } = failure
+            else {
+                panic!("missing provider diagnostic");
+            };
+            assert_eq!(diagnostic.code.as_ref().unwrap().chars().count(), 256);
+            assert_eq!(diagnostic.message.as_ref().unwrap().chars().count(), 2048);
+            assert_eq!(diagnostic.param.as_deref(), Some("[redacted]"));
+            let rendered = failure.to_string();
+            for private in [
+                token,
+                account,
+                "other-secret",
+                "sk-other",
+                "acct_other",
+                "echoed_request",
+                "authorization",
+            ] {
+                assert!(!rendered.contains(private), "private field was retained");
+            }
+            // Redaction precedes the code limit, so no active-secret prefix survives.
+            assert!(diagnostic.code.as_ref().unwrap().ends_with('['));
+        }
+    }
+
+    #[test]
+    fn absent_provider_fields_remain_unknown_and_local_schema_errors_stay_distinct() {
+        for packet in [
+            r#"{"type":"response.failed","response":{"error":null}}"#,
+            r#"{"type":"error","code":42,"message":{},"param":[]}"#,
+        ] {
+            assert!(matches!(
+                ResponseAssembly::default().accept(packet),
+                Err(TransportError::ProviderStreamFailure {
+                    diagnostic: None,
+                    ..
+                })
+            ));
+        }
+        for packet in [
+            "not JSON",
+            r#"{"type":"response.output_item.done"}"#,
+            r#"{"type":"response.completed","response":{}}"#,
+        ] {
+            assert!(matches!(
+                ResponseAssembly::default().accept(packet),
+                Err(TransportError::Stream(_))
+            ));
+        }
     }
 
     #[test]
