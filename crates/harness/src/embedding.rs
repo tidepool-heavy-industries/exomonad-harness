@@ -761,6 +761,11 @@ mod tests {
             let request = conversation.seed_context("spawn-op", prompt).unwrap();
             assert!(store.inbox("/root").unwrap().is_empty());
             assert!(store.events(None).unwrap().is_empty());
+            assert!(store.model_request_outcomes(128).unwrap().is_empty());
+            assert_eq!(
+                store.usage_subtree(&request).unwrap(),
+                crate::store::Usage::default()
+            );
             let frontier = store.embedded_round_frontier(host.identity()).unwrap();
             assert_eq!(frontier.settled_head, Some(request.clone()));
             assert_eq!(frontier.pending_head, None);
@@ -772,6 +777,11 @@ mod tests {
             assert_eq!(
                 conversation.seed_context("spawn-op", prompt).unwrap(),
                 request
+            );
+            assert!(store.model_request_outcomes(128).unwrap().is_empty());
+            assert_eq!(
+                store.usage_subtree(&request).unwrap(),
+                crate::store::Usage::default()
             );
             assert_eq!(
                 store.items(&request).unwrap(),
