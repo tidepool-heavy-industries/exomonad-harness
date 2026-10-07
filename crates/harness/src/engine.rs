@@ -2381,7 +2381,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             // even when the native owner returned without edits.
                             if call.scheduling == ToolScheduling::BeforeNextInference
                                 && matches!(output, crate::turn::JobOutput::Completed(_))
-                                && !self.store.has_completed_output(&call.operation)?
+                                && self
+                                    .store
+                                    .completed_finalization(&call.operation)?
+                                    .is_none()
                             {
                                 self.retain_context_requirement(&call.operation, true)
                                     .await?;

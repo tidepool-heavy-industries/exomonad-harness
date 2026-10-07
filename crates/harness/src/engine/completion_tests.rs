@@ -433,7 +433,12 @@ async fn completed_tool_is_acknowledged_while_successor_provider_response_is_sta
         .pop()
         .unwrap();
     assert_eq!(claim.state, crate::store::ClaimState::Settled);
-    assert!(store.has_completed_output(&claim.operation).unwrap());
+    assert!(
+        store
+            .completed_finalization(&claim.operation)
+            .unwrap()
+            .is_some()
+    );
     assert!(
         !transport.inputs.lock().await[1]
             .iter()

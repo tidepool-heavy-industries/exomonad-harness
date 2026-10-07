@@ -1790,7 +1790,7 @@ mod tests {
             recorded.item,
             Item::tool_output(&operation.call, ToolKind::Custom, &expected)
         );
-        assert!(!store.has_completed_output(&original).unwrap());
+        assert!(store.completed_finalization(&original).unwrap().is_none());
         let hash = store.claims_on(&root).unwrap()[0].output.clone().unwrap();
         let changed = Item::tool_output(&operation.call, ToolKind::Custom, &JobOutput::Cancelled);
         store

@@ -216,21 +216,6 @@ impl Store {
             }),
         )
     }
-
-    #[cfg(test)]
-    pub(crate) fn has_completed_output(&self, operation: &OperationId) -> Result<bool> {
-        let c = self.lock();
-        if exact_claim_state(&c, operation, &operation.request)? != Some(super::ClaimState::Settled)
-        {
-            return Ok(false);
-        }
-        Ok(exact_terminal(&c, operation)?.is_some_and(|(_, outcome)| {
-            matches!(
-                outcome,
-                TerminalOutcome::Success | TerminalOutcome::Failure(_)
-            )
-        }))
-    }
 }
 
 #[cfg(test)]
@@ -511,7 +496,7 @@ mod tests {
                 Item::tool_output(&operation.call, ToolKind::Function, output)
             );
             assert_eq!(
-                store.has_completed_output(operation).unwrap(),
+                store.completed_finalization(operation).unwrap().is_some(),
                 matches!(output, JobOutput::Completed(_))
             );
         }
@@ -586,7 +571,7 @@ mod tests {
                 }
             );
             assert_eq!(
-                store.has_completed_output(&operation).unwrap(),
+                store.completed_finalization(&operation).unwrap().is_some(),
                 !interrupt_original
             );
             assert!(
