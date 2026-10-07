@@ -24,9 +24,9 @@ export function isRichView(value: unknown, depth = 0): value is RichView {
     case 'text': case 'markdown': return bounded(value.text, 256 * 1024)
     case 'row': case 'column': return Array.isArray(value.children) && value.children.length <= 1024
       && value.children.every(child => isRichView(child, depth + 1))
-    case 'caption': return bounded(value.text, 8192) && isRichView(value.body, depth + 1)
+    case 'caption': return bounded(value.text, 128 * 1024) && isRichView(value.body, depth + 1)
     case 'svg': return bounded(value.source, 128 * 1024)
-    case 'image': return bounded(value.alt, 8192) && isImageSource(value.source)
+    case 'image': return bounded(value.alt, 128 * 1024) && isImageSource(value.source)
     case 'inspection': return bounded(value.text, 256 * 1024) && typeof value.has_more === 'boolean' && typeof value.unavailable === 'boolean'
     default: return false
   }

@@ -86,6 +86,7 @@ impl StoredActorForm {
             return Err(StoreError::InvalidForm);
         }
         self.opening.form.validate()?;
+        parse_errors(&serde_json::to_value(&self.errors)?)?;
         if let Some(draft) = &self.draft {
             self.opening.form.validate_draft(draft)?;
         }
@@ -863,6 +864,11 @@ mod notification_tests {
                 [],
             )
             .unwrap();
+        assert!(matches!(
+            store.actor_form(&o.origin, &o.mount_id),
+            Err(StoreError::InvalidForm)
+        ));
+        store.lock().execute("UPDATE actor_forms SET presentation=json_set(presentation,'$.state','open','$.errors',json(?1))", [serde_json::to_string(&json!([{"field":null,"message":"x".repeat(32768)}])).unwrap()]).unwrap();
         assert!(matches!(
             store.actor_form(&o.origin, &o.mount_id),
             Err(StoreError::InvalidForm)
