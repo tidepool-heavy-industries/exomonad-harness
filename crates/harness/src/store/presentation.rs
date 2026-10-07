@@ -292,7 +292,7 @@ impl FormSpec {
         }
         fn go(n: &FormNode, d: &FormDraft) -> bool {
             match n {
-   FormNode::Text{id,..}=>control(d,id).is_none_or(|v|matches!(v,ControlValue::Text(_))),FormNode::Int{id,..}=>control(d,id).is_none_or(|v|matches!(v,ControlValue::Integer(_))),FormNode::Number{id,..}=>control(d,id).is_none_or(|v|matches!(v,ControlValue::Integer(_)|ControlValue::Number(_))),FormNode::Bool{id,..}=>control(d,id).is_none_or(|v|matches!(v,ControlValue::Bool(_))),
+   FormNode::Text{id,..}=>control(d,id).is_none_or(|v|matches!(v,ControlValue::Text(_))),FormNode::Int{id,..}=>control(d,id).is_none_or(|v|matches!(v,ControlValue::Text(_))),FormNode::Number{id,..}=>control(d,id).is_none_or(|v|matches!(v,ControlValue::Integer(_)|ControlValue::Number(_))),FormNode::Bool{id,..}=>control(d,id).is_none_or(|v|matches!(v,ControlValue::Bool(_))),
    FormNode::Choice{id,options,..}=>control(d,id).is_none_or(|v|matches!(v,ControlValue::Text(s) if options.iter().any(|o|&o.id==s))),
    FormNode::Many{id,options,..}=>control(d,id).is_none_or(|v|matches!(v,ControlValue::Many(xs) if xs.iter().collect::<HashSet<_>>().len()==xs.len()&&xs.iter().all(|s|options.iter().any(|o|&o.id==s)))),
    FormNode::Alternatives{id,options,..}=>match control(d,id){None=>true,Some(ControlValue::Text(s))=>options.iter().find(|o|&o.id==s).is_some_and(|o|go(&o.form,d)),_=>false},
