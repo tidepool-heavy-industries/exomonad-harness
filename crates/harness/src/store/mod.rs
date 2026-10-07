@@ -9,7 +9,11 @@ pub(crate) use embedded::{CommandInputAdmission, EmbeddedInputState};
 pub use embedded_commands::{EmbeddedCommandRecord, EmbeddedCommandState};
 pub use embedded_round::{EmbeddedRoundFrontier, EmbeddedRoundOutcome};
 pub mod actor_output;
+pub mod chat;
+pub mod forms;
 pub mod history;
+pub mod media;
+pub mod presentation;
 mod replay;
 pub mod schema;
 mod schema_migration;
@@ -40,6 +44,16 @@ pub const SQL: &str = schema::SQL;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("invalid mounted form or submitted control values")]
+    InvalidForm,
+    #[error("form mount unavailable or already terminal")]
+    FormUnavailable,
+    #[error("form operation identity has conflicting content")]
+    ConflictingFormOperation,
+    #[error("invalid SVG document: {0}")]
+    InvalidSvg(String),
+    #[error("invalid or oversized retained media")]
+    InvalidMedia,
     #[error("actor outputs require typed host admission")]
     ActorOutputNeedsAuthority,
     #[error("actor output exceeds its bounds or has invalid identity/keys")]
@@ -886,6 +900,7 @@ impl Store {
         )?;
         let mut conn = conn;
         schema::initialize(&mut conn)?;
+        forms::interrupt_pending(&mut conn)?;
         let store_id: String = conn.query_row(
             "SELECT state FROM session_state WHERE session_id='harness:store-id'",
             [],
@@ -946,6 +961,7 @@ impl Store {
                 "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
                 params![request.0, position as i64, hash.0],
             )?;
+            chat::publish(&tx, request, position as i64, &hash, item)?;
         }
         tx.commit()?;
         Ok(Request {
@@ -1269,6 +1285,7 @@ impl Store {
                 "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
                 params![request.0, pos, h.0],
             )?;
+            chat::publish(&tx, request, pos, &h, item)?;
             pos += 1;
             hashes.push(h);
         }
@@ -1436,6 +1453,7 @@ impl Store {
                 "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
                 params![request.0, position, hash],
             )?;
+            chat::publish(&tx, request, position, &ItemHash(hash.clone()), &item)?;
             position += 1;
             items.push(item);
         }
@@ -1537,7 +1555,10 @@ impl Store {
         kind: &str,
         payload: &serde_json::Value,
     ) -> Result<i64> {
-        if kind == actor_output::EVENT_KIND {
+        if matches!(
+            kind,
+            actor_output::EVENT_KIND | "chat_message" | "actor_form_open" | "actor_form_update"
+        ) {
             return Err(StoreError::ActorOutputNeedsAuthority);
         }
         let text = serde_json::to_string(payload)?;

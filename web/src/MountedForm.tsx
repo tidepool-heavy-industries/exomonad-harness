@@ -13,7 +13,7 @@ export type FormNode =
 export interface FormSpec { readonly version: 1; readonly root: FormNode }
 export interface FormOrigin { readonly run: string; readonly nativeActor: number; readonly incarnation: number }
 export interface StoredActorForm {
-  readonly sequence: number
+  readonly sequence: number; readonly revisionSequence?: number
   readonly opening: { readonly origin: FormOrigin; readonly mountId: string; readonly execution: string; readonly conversation: string; readonly form: FormSpec }
   readonly state: 'open' | 'submitted' | 'answered' | 'dismissed' | 'cancelled' | 'interrupted'
   readonly attemptId: string | null
@@ -30,10 +30,10 @@ function option(value: unknown): value is FormOption {
   return obj(value) && text(value.id, 256) && value.id.length > 0 && text(value.label) && isRichView(value.presentation)
 }
 function formNode(value: unknown, depth = 0, ids = new Set<string>()): value is FormNode {
-  if (!obj(value) || depth > 20 || typeof value.kind !== 'string') return false
+  if (!obj(value) || depth > 32 || typeof value.kind !== 'string') return false
   switch (value.kind) {
     case 'pure': case 'empty': return true
-    case 'group': return Array.isArray(value.children) && value.children.length <= 128 && value.children.every(child => formNode(child, depth + 1, ids))
+    case 'group': return Array.isArray(value.children) && value.children.length <= 1024 && value.children.every(child => formNode(child, depth + 1, ids))
     case 'section': return text(value.title) && formNode(value.child, depth + 1, ids)
     case 'view': return isRichView(value.presentation)
     case 'text': case 'int': case 'number': case 'bool': {

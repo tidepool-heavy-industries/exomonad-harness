@@ -112,6 +112,7 @@ mod tests {
                 text: "preview".into(),
                 expansions: vec![(1, "field".into())],
                 unavailable: false,
+                view: None,
             },
         };
         let committed = store.append_actor_output(&Authorized, &emission).unwrap();

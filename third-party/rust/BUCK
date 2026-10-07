@@ -2546,6 +2546,35 @@ tidepool_buildscript_run(
 )
 
 alias(
+    name = "roxmltree",
+    actual = ":roxmltree-0.21",
+    visibility = ["PUBLIC"],
+)
+
+http_archive(
+    name = "roxmltree-0.21.1.crate",
+    sha256 = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb",
+    strip_prefix = "roxmltree-0.21.1",
+    urls = ["https://static.crates.io/crates/roxmltree/0.21.1/download"],
+    visibility = [],
+)
+
+rust_library(
+    name = "roxmltree-0.21",
+    srcs = [":roxmltree-0.21.1.crate"],
+    crate = "roxmltree",
+    crate_root = "roxmltree-0.21.1.crate/src/lib.rs",
+    edition = "2021",
+    features = [
+        "default",
+        "positions",
+        "std",
+    ],
+    visibility = [],
+    deps = [":memchr-2"],
+)
+
+alias(
     name = "rusqlite",
     actual = ":rusqlite-0.32",
     visibility = ["PUBLIC"],

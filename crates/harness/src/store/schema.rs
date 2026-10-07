@@ -1,4 +1,4 @@
-pub const VERSION: u32 = 13;
+pub const VERSION: u32 = 14;
 pub const SQL: &str = include_str!("schema.sql");
 const MODEL_REQUEST_INDEXES: &str = "
     CREATE INDEX IF NOT EXISTS events_model_turn_recent ON events(id DESC,request_id) WHERE kind='model_turn';
@@ -20,6 +20,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
         tx.execute_batch(super::validation::INDEXES)?;
         tx.execute("INSERT INTO schema_version(version) VALUES (?1)", [VERSION])?;
         super::schema_migration::ensure_store_id(&tx)?;
+        super::chat::initialize_cutover(&tx, false)?;
         tx.commit()?;
         return Ok(());
     }
@@ -43,6 +44,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
     }
     if version == VERSION {
         super::schema_migration::validate_checkpoint_metadata(conn)?;
+        conn.execute_batch(SQL)?;
         conn.execute_batch(MODEL_REQUEST_INDEXES)?;
         conn.execute_batch(super::actor_output::INDEXES)?;
         conn.execute_batch(super::validation::INDEXES)?;
@@ -157,6 +159,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
         tx.execute_batch("DROP TABLE legacy_claims")?;
     }
     super::schema_migration::migrate_checkpoint_metadata(&tx)?;
+    super::chat::initialize_cutover(&tx, true)?;
     tx.execute("UPDATE schema_version SET version=?1", [VERSION])?;
     Ok(tx.commit()?)
 }

@@ -61,6 +61,8 @@ pub struct ActorDisplayPage {
     pub text: String,
     pub expansions: Vec<(u64, String)>,
     pub unavailable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<super::presentation::View>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -123,7 +125,7 @@ pub struct ActorOutputHistoryPage {
     pub next_after: Option<i64>,
 }
 
-fn validate_origin(origin: &ActorOutputOrigin) -> Result<()> {
+pub(super) fn validate_origin(origin: &ActorOutputOrigin) -> Result<()> {
     if origin.run.is_empty()
         || origin.run.len() > 1024
         || origin.native_actor > i64::MAX as u64
@@ -136,6 +138,9 @@ fn validate_origin(origin: &ActorOutputOrigin) -> Result<()> {
 
 fn validate(emission: &ActorOutputEmission) -> Result<()> {
     validate_origin(&emission.origin)?;
+    if let Some(view) = &emission.page.view {
+        view.validate()?;
+    }
     let page = &emission.page;
     let mut keys = std::collections::HashSet::new();
     let valid_execution = match &emission.execution {
@@ -202,6 +207,11 @@ impl Store {
         emission: &ActorOutputEmission,
     ) -> Result<ActorOutputCommit> {
         validate(emission)?;
+        let mut retained = emission.clone();
+        if let Some(view) = &emission.page.view {
+            retained.page.view = Some(self.retain_view_media(view)?);
+        }
+        let emission = &retained;
         if let Some(ConversationIdentity::Standalone { store, .. }) = &emission.conversation {
             if store != &self.store_id {
                 return Err(StoreError::InvalidActorOutput);
@@ -361,6 +371,7 @@ mod tests {
                 text: "hello".into(),
                 expansions: vec![(1, "detail".into())],
                 unavailable: false,
+                view: None,
             },
         }
     }

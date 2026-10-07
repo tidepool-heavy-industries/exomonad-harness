@@ -94,3 +94,15 @@ CREATE TABLE IF NOT EXISTS embedded_commands (
  PRIMARY KEY(run_id, operation_id)
 );
 CREATE INDEX IF NOT EXISTS embedded_commands_queued ON embedded_commands(run_id,state,created_at);
+CREATE TABLE IF NOT EXISTS actor_forms (
+ identity TEXT PRIMARY KEY, opening_sequence INTEGER NOT NULL UNIQUE REFERENCES events(id), presentation TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS actor_form_operations (
+ identity TEXT NOT NULL REFERENCES actor_forms(identity), operation_id TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(identity,operation_id)
+);
+CREATE TABLE IF NOT EXISTS actor_media (
+ hash TEXT PRIMARY KEY, mime TEXT NOT NULL, bytes BLOB NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS events_chat_messages ON events(request_id,id) WHERE kind='chat_message';
+CREATE INDEX IF NOT EXISTS events_actor_form_history ON events(json_extract(payload,'$.origin.run'),json_extract(payload,'$.origin.nativeActor'),json_extract(payload,'$.origin.incarnation'),id) WHERE kind='actor_form_open';

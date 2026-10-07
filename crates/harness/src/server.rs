@@ -5,6 +5,7 @@
 //! scheduler/store implementation so the crate owner can wire it independently.
 mod actor_output;
 mod assets;
+mod chat;
 pub use actor_output::{ActorDisplayExpander, ActorDisplayExpansion};
 pub mod history;
 mod output;
@@ -726,6 +727,10 @@ pub fn server_with_config(
         .route("/commands/{operation_id}", get(command_status))
         .route("/events", get(event_stream))
         .route("/history/{request_id}", get(history::request_history))
+        .route("/chat", get(chat::chat))
+        .route("/actor-form/submit", post(chat::submit))
+        .route("/actor-form/dismiss", post(chat::dismiss))
+        .route("/actor-media/{hash}", get(chat::media))
         .route("/actor-output", get(history::actor_output_history))
         .route("/actor-output/expand", post(actor_output::expand))
         .route("/ws", get(websocket))
@@ -777,7 +782,10 @@ async fn authorize(State(auth): State<ApiAuth>, request: Request, next: Next) ->
     let ambient = matches!(auth.policy.browser_auth, BrowserAuthentication::Peer(_))
         || valid_session_from_headers(request.headers(), &auth.policy).is_some();
     let submitting = request.method() == axum::http::Method::POST
-        && matches!(request.uri().path(), "/commands" | "/actor-output/expand");
+        && matches!(
+            request.uri().path(),
+            "/commands" | "/actor-output/expand" | "/actor-form/submit" | "/actor-form/dismiss"
+        );
     let command_lookup_with_origin = request.method() == axum::http::Method::GET
         && request.uri().path().starts_with("/commands/")
         && request.headers().contains_key(header::ORIGIN);

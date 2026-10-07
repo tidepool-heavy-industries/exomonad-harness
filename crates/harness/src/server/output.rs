@@ -160,6 +160,35 @@ impl ModelOutputObserver for ServerControl {
 }
 
 impl ServerControl {
+    /// Wake projection readers from durable form revisions; mount position stays fixed.
+    pub fn publish_actor_form(&self, form: &crate::store::forms::StoredActorForm) {
+        let reference = crate::store::actor_output::ActorOutputReference {
+            origin: form.opening.origin.clone(),
+            sequence: form.revision_sequence,
+        };
+        let mut next = self.next_sequence.lock().expect("sequence lock poisoned");
+        let mut snapshot = self.snapshot.write().expect("snapshot lock poisoned");
+        if snapshot.actor_output_revisions.contains(&reference) {
+            return;
+        }
+        snapshot.actor_output_revisions.push(reference);
+        while snapshot.actor_output_revisions.len() > OUTPUT_ITEMS
+            || serde_json::to_vec(&snapshot.actor_output_revisions)
+                .expect("output references serialize")
+                .len()
+                > OUTPUT_BYTES
+        {
+            snapshot.actor_output_revisions.remove(0);
+        }
+        let sequence = *next;
+        *next += 1;
+        snapshot.seq = sequence;
+        let _ = self.events.send(ServerEvent {
+            sequence,
+            event: "actor.form.changed".into(),
+            payload: serde_json::to_value(form).expect("form serializes"),
+        });
+    }
     /// Project a committed journal row through the existing ordered browser stream.
     /// The bounded snapshot retains references; full bodies remain in Store history.
     pub fn publish_actor_output(&self, output: &crate::store::actor_output::StoredActorOutput) {

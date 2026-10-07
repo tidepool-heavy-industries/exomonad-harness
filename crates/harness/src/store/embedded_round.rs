@@ -210,6 +210,7 @@ impl Store {
                 "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
                 params![request.0, position as i64, hash.0],
             )?;
+            super::chat::publish(&tx, request, position as i64, &hash, item)?;
         }
         tx.commit()?;
         Ok(Request {

@@ -6,6 +6,7 @@ import { appendOutput, commitOutput, setRevision, outputKey, revisionKey, isLive
  */
 export type EntityId = string;
 import { actorOutputKey, isActorOutputOrigin, isActorOutputReference, isStoredActorOutput, retainActorOutput, type ActorOutputOrigin, type ActorOutputReference, type StoredActorOutput } from './actor-output';
+import { isStoredActorForm, type StoredActorForm } from './MountedForm';
 const commandReceiptLimit = 128;
 
 export interface Snapshot {
@@ -155,6 +156,7 @@ export interface Envelope {
 }
 
 export type StateEvent =
+  | { readonly kind: "actor.form.changed"; readonly value: StoredActorForm }
   | { readonly kind: "actor.output.committed"; readonly value: StoredActorOutput }
   | { readonly kind: "model.output.stopped"; readonly value: OutputScope }
   | { readonly kind: "model.output.started"; readonly value: OutputScope }
@@ -227,6 +229,7 @@ export function applyStateEvent(state: NormalizedState, message: SequencedEvent)
   }
   const next = { ...state, seq: message.seq };
   switch (message.event.kind) {
+    case "actor.form.changed": return { kind: 'applied', state: { ...next, actorOutputRevisions: retainActorOutput(next.actorOutputRevisions, {origin:message.event.value.opening.origin,sequence:message.event.value.revisionSequence ?? message.event.value.sequence}) } };
     case "actor.output.committed": return { kind: 'applied', state: { ...next,
       actorOutputRevisions: retainActorOutput(next.actorOutputRevisions, message.event.value.reference) } };
     case "model.output.stopped": {
@@ -441,13 +444,14 @@ function validRequestFailure(value: unknown): boolean {
 }
 
 function validProjection(kind: string, value: unknown): boolean {
-  const projected = ['actor.output.committed', 'model.output.stopped', 'model.output.started', 'model.output.delta', 'model.output.committed', 'model.output.remove', 'host_run.upsert', 'command.receipt', 'actor.upsert', 'conversation.upsert',
+  const projected = ['actor.form.changed', 'actor.output.committed', 'model.output.stopped', 'model.output.started', 'model.output.delta', 'model.output.committed', 'model.output.remove', 'host_run.upsert', 'command.receipt', 'actor.upsert', 'conversation.upsert',
     'request.upsert', 'job.upsert', 'envelope.upsert', 'entity.remove'];
   if (!projected.includes(kind)) return true; // Auxiliary events only occupy sequence numbers.
   if (!isObject(value)) return false;
   const id = () => text(value.id) && value.id.length > 0;
   const version = () => optional(value, 'version', count);
   switch (kind) {
+    case 'actor.form.changed': return isStoredActorForm(value) && Number.isSafeInteger(value.revisionSequence) && (value.revisionSequence as number)>=value.sequence;
     case 'actor.output.committed': return isStoredActorOutput(value);
     case 'model.output.stopped': return isOutputScope(value);
     case 'model.output.started': return isOutputScope(value);

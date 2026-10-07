@@ -15,6 +15,7 @@ HARNESS_DEPS = [
     "//third-party/rust:blake3",
     "//third-party/rust:futures-util",
     "//third-party/rust:reqwest",
+    "//third-party/rust:roxmltree",
     "//third-party/rust:rusqlite",
     "//third-party/rust:schemars",
     "//third-party/rust:serde",
