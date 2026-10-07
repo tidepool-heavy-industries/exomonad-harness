@@ -113,7 +113,7 @@ function keepDraft(key: string, draft: FormDraft) {
 function initialDraft(node: FormNode, into: FormDraft = {}): FormDraft {
   if (['text', 'int', 'number', 'bool', 'choice', 'many', 'alternatives'].includes(node.kind)) {
     const field = node as Extract<FormNode, { id: string }>
-    if (field.initial !== null && !Object.hasOwn(into, field.id)) into[field.id] = Array.isArray(field.initial) ? [...field.initial] : field.initial
+    if (field.initial !== null && !Object.hasOwn(into, field.id)) into[field.id] = field.kind === 'many' ? [...field.initial] : field.initial
     if (node.kind === 'many' && node.options.length === 0 && !Object.hasOwn(into, field.id)) into[field.id] = []
   }
   if (node.kind === 'group') node.children.forEach(child => initialDraft(child, into))
