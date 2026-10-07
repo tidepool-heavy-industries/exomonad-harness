@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import MountedForm, { clearMountedFormDrafts, isFormSpec, isStoredActorForm, type StoredActorForm } from './MountedForm'
 
 const origin = { run: 'run', nativeActor: 4, incarnation: 2 }
@@ -24,6 +24,13 @@ function integerForm(initial: string | null): StoredActorForm {
 function numberForm(): StoredActorForm {
   return { ...openForm, opening: { ...openForm.opening, mountId: 'number-mount', form: { version: 1, root: {
     kind: 'number', id: 'number', label: 'Number', initial: 1.25,
+  } } } }
+}
+function radioForm(mountId: string): StoredActorForm {
+  return { ...openForm, opening: { ...openForm.opening, mountId, form: { version: 1, root: {
+    kind: 'choice', id: 'f0', label: 'Pick', initial: null, options: [
+      { id: 'o0', label: 'Option 0', presentation: view }, { id: 'o1', label: 'Option 1', presentation: view },
+    ],
   } } } }
 }
 
@@ -122,16 +129,25 @@ describe('mounted actor forms', () => {
     expect(payload.draft.integer).toBe('1.5')
   })
 
-  it('keeps same-id radio groups independent across mounted forms', () => {
-    const second: StoredActorForm = { ...openForm, opening: { ...openForm.opening, mountId: 'mount-2' } }
-    render(<><MountedForm form={openForm} ready active /><MountedForm form={second} ready active /></>)
-    const choices = screen.getAllByLabelText('Same label') as HTMLInputElement[]
-    expect(choices).toHaveLength(4)
-    fireEvent.click(choices[0]!)
-    expect(choices[0]!.checked).toBe(true)
-    expect(choices[1]!.checked).toBe(false)
-    expect(choices[2]!.checked).toBe(false)
-    expect(choices[3]!.checked).toBe(false)
+  it('isolates radio DOM state and submitted drafts for identical fields in mounted forms', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('rejected', { status: 409 }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<><MountedForm form={radioForm('mount-a')} ready active /><MountedForm form={radioForm('mount-b')} ready active /></>)
+    const [formA, formB] = screen.getAllByRole('region', { name: 'Actor form' })
+    const cardA = within(formA!)
+    const cardB = within(formB!)
+    fireEvent.click(cardA.getByLabelText('Option 0'))
+    fireEvent.click(cardB.getByLabelText('Option 1'))
+    expect((cardA.getByLabelText('Option 0') as HTMLInputElement).checked).toBe(true)
+    expect((cardA.getByLabelText('Option 1') as HTMLInputElement).checked).toBe(false)
+    expect((cardB.getByLabelText('Option 0') as HTMLInputElement).checked).toBe(false)
+    expect((cardB.getByLabelText('Option 1') as HTMLInputElement).checked).toBe(true)
+    fireEvent.click(cardA.getByRole('button', { name: 'Submit' }))
+    fireEvent.click(cardB.getByRole('button', { name: 'Submit' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    const submitted = fetchMock.mock.calls.map(call => JSON.parse(String(call[1]?.body)) as { origin: unknown; mountId: string; draft: Record<string, unknown> })
+    expect(submitted.find(item => item.mountId === 'mount-a')?.draft).toEqual({ f0: 'o0' })
+    expect(submitted.find(item => item.mountId === 'mount-b')?.draft).toEqual({ f0: 'o1' })
   })
 
   it('submits an empty number input as null', async () => {
