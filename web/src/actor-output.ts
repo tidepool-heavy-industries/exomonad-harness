@@ -1,3 +1,5 @@
+import { isRichView, type RichView } from './rich-view'
+
 export interface ActorOutputOrigin { readonly run: string; readonly nativeActor: number; readonly incarnation: number }
 export interface ActorOutputReference { readonly origin: ActorOutputOrigin; readonly sequence: number }
 export interface StoredActorOutput {
@@ -5,7 +7,7 @@ export interface StoredActorOutput {
   readonly emission: {
     readonly origin: ActorOutputOrigin;
     readonly id: { readonly displaySlot: number; readonly pageOrdinal: number };
-    readonly page: { readonly text: string; readonly expansions: readonly (readonly [number, string])[]; readonly unavailable: boolean };
+    readonly page: { readonly text: string; readonly expansions: readonly (readonly [number, string])[]; readonly unavailable: boolean; readonly view?: RichView };
   };
 }
 const object = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -27,6 +29,7 @@ export function isStoredActorOutput(value: unknown): value is StoredActorOutput 
     || !counter(emission.id.pageOrdinal) || !object(emission.page)) return false;
   const page = emission.page;
   return typeof page.text === 'string' && bytes(page.text) <= 32768 && typeof page.unavailable === 'boolean'
+    && (page.view === undefined || isRichView(page.view))
     && Array.isArray(page.expansions) && page.expansions.every(key => Array.isArray(key) && key.length === 2
       && counter(key[0]) && key[0] > 0 && typeof key[1] === 'string')
     && new Set(page.expansions.map(key => key[0])).size === page.expansions.length

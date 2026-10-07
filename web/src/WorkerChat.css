@@ -25,6 +25,7 @@
 .rich-view-column, .form-group { display: grid; gap: 8px; }
 .rich-view-caption { margin: 0; }
 .rich-view-caption figcaption { color: var(--muted); font-size: .9em; }
+.rich-view-truncated { border-inline-start: 2px solid var(--pending); color: var(--pending); padding-inline-start: 6px; font-size: .9em; }
 .rich-view-image { display: block; max-width: 100%; max-height: 30rem; object-fit: contain; }
 .form-section, .mounted-form fieldset { border: 1px solid var(--line); margin-block: 8px; padding: 8px; min-width: 0; }
 .form-option, .form-field { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; margin-block: 6px; }

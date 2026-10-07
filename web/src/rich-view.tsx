@@ -1,11 +1,11 @@
 import type { ReactNode } from 'react'
 
 export type RichView =
-  | { readonly kind: 'text' | 'markdown'; readonly text: string }
+  | { readonly kind: 'text' | 'markdown'; readonly text: string; readonly truncated?: boolean }
   | { readonly kind: 'row' | 'column'; readonly children: readonly RichView[] }
-  | { readonly kind: 'caption'; readonly body: RichView; readonly text: string }
+  | { readonly kind: 'caption'; readonly body: RichView; readonly text: string; readonly truncated?: boolean }
   | { readonly kind: 'svg'; readonly source: string }
-  | { readonly kind: 'image'; readonly source: ImageSource; readonly alt: string }
+  | { readonly kind: 'image'; readonly source: ImageSource; readonly alt: string; readonly truncated?: boolean }
   | { readonly kind: 'inspection'; readonly text: string; readonly has_more: boolean; readonly unavailable: boolean }
 
 export type ImageSource =
@@ -18,6 +18,7 @@ const bounded = (value: unknown, max: number) => typeof value === 'string' && ne
 
 export function isRichView(value: unknown, depth = 0): value is RichView {
   if (!obj(value) || depth > 24 || typeof value.kind !== 'string') return false
+  if (Object.hasOwn(value, 'truncated') && typeof value.truncated !== 'boolean') return false
   switch (value.kind) {
     case 'text': case 'markdown': return bounded(value.text, 256 * 1024)
     case 'row': case 'column': return Array.isArray(value.children) && value.children.length <= 256
@@ -48,15 +49,15 @@ export function RichViewRenderer({ view, className }: { view: RichView; classNam
 
 function render(view: RichView): ReactNode {
   switch (view.kind) {
-    case 'text': return <pre className="rich-view-text">{view.text}</pre>
-    case 'markdown': return <pre className="rich-view-markdown">{view.text}</pre>
+    case 'text': return <><pre className="rich-view-text">{view.text}</pre>{view.truncated && <p className="rich-view-truncated" role="status">Value truncated.</p>}</>
+    case 'markdown': return <><pre className="rich-view-markdown">{view.text}</pre>{view.truncated && <p className="rich-view-truncated" role="status">Value truncated.</p>}</>
     case 'row': return <div className="rich-view-row">{view.children.map((child, i) => <RichViewRenderer key={i} view={child} />)}</div>
     case 'column': return <div className="rich-view-column">{view.children.map((child, i) => <RichViewRenderer key={i} view={child} />)}</div>
-    case 'caption': return <figure className="rich-view-caption"><RichViewRenderer view={view.body} /><figcaption>{view.text}</figcaption></figure>
+    case 'caption': return <figure className="rich-view-caption"><RichViewRenderer view={view.body} /><figcaption>{view.text}</figcaption>{view.truncated && <p className="rich-view-truncated" role="status">Value truncated.</p>}</figure>
     case 'svg': return <img className="rich-view-image" src={safeSvgData(view.source)} alt="SVG output" />
-    case 'image': return <img className="rich-view-image" src={view.source.kind === 'retained'
+    case 'image': return <><img className="rich-view-image" src={view.source.kind === 'retained'
       ? `/api/actor-media/${encodeURIComponent(view.source.hash)}`
-      : `data:${view.source.mime};base64,${view.source.base64}`} alt={view.alt} />
+      : `data:${view.source.mime};base64,${view.source.base64}`} alt={view.alt} />{view.truncated && <p className="rich-view-truncated" role="status">Value truncated.</p>}</>
     case 'inspection': return <section className="rich-view-inspection" aria-label="Inspection result"><pre>{view.text}</pre>
       {view.has_more && <p>More detail is available.</p>}{view.unavailable && <p>Some detail is unavailable.</p>}</section>
   }

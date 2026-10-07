@@ -1,9 +1,12 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { actorOutputKey, isActorOutputOrigin, isStoredActorOutput, type ActorOutputOrigin, type StoredActorOutput } from './actor-output'
 import { isStoredActorForm, type StoredActorForm } from './MountedForm'
 import HistoryItem from './HistoryItem'
 import type { HistoryEntry } from './history-client'
 import MountedForm from './MountedForm'
+import { visibleOutput, outputKey, outputLabels, type LiveOutput } from './live-output'
+import { RichViewRenderer } from './rich-view'
+import type { HarnessViewModel } from './view-model'
 
 export type UnifiedEntry =
   | { readonly sequence: number; readonly kind: 'message'; readonly requestId: string; readonly position: number; readonly hash: string; readonly item: unknown }
@@ -39,28 +42,47 @@ export function decodeUnifiedPage(value: unknown, origin: ActorOutputOrigin, aft
   return value as unknown as UnifiedPage
 }
 
-export default function UnifiedChat({ origin, requestId, revision, ready, active, onAuthExpired, legacy }: {
+async function readUnifiedPage(origin: ActorOutputOrigin, requestId: string | undefined, after: number, signal: AbortSignal, onAuthExpired?: () => void) {
+  const query = new URLSearchParams({ run: origin.run, actor: String(origin.nativeActor), incarnation: String(origin.incarnation), after: String(after), limit: '50' })
+  if (requestId) query.set('request', requestId)
+  const response = await fetch(`/api/chat?${query}`, { credentials: 'same-origin', cache: 'no-store', signal })
+  if (response.status === 401 || response.status === 403) onAuthExpired?.()
+  if (!response.ok) throw new Error(response.status === 404 ? 'Unified conversation history is unavailable.' : `Conversation history failed (${response.status}).`)
+  const raw = await response.text()
+  if (new TextEncoder().encode(raw).length > 256 * 1024) throw new Error('Unified conversation exceeded the page limit.')
+  return decodeUnifiedPage(JSON.parse(raw) as unknown, origin, after)
+}
+
+export default function UnifiedChat({ origin, requestId, revision, ready, active, onAuthExpired, legacy, liveOutput = [], requests }: {
   origin: ActorOutputOrigin; requestId?: string; revision?: number; ready: boolean; active: boolean; onAuthExpired?: () => void; legacy?: ReactNode
+  liveOutput?: readonly LiveOutput[]; requests?: ReadonlyMap<string, Pick<HarnessViewModel['timeline'][number], 'id' | 'state' | 'detail' | 'failure'>>
 }) {
   const [page, setPage] = useState<UnifiedPage>()
+  const pageRef = useRef<UnifiedPage>()
+  const [pageIndex, setPageIndex] = useState(0)
   const [issue, setIssue] = useState('')
   const [attempt, setAttempt] = useState(0)
+  const [loadingMore, setLoadingMore] = useState(false)
   const identity = actorOutputKey(origin)
   useEffect(() => {
     if (!ready) return
     const controller = new AbortController()
-    const query = new URLSearchParams({ run: origin.run, actor: String(origin.nativeActor), incarnation: String(origin.incarnation), after: '0', limit: '50' })
-    if (requestId) query.set('request', requestId)
     let timer: ReturnType<typeof setTimeout> | undefined
     const load = async () => {
       try {
-        const response = await fetch(`/api/chat?${query}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal })
-        if (response.status === 401 || response.status === 403) onAuthExpired?.()
-        if (!response.ok) throw new Error(response.status === 404 ? 'Unified conversation history is unavailable.' : `Conversation history failed (${response.status}).`)
-        const raw = await response.text()
-        if (new TextEncoder().encode(raw).length > 256 * 1024) throw new Error('Unified conversation exceeded the page limit.')
-        const next = decodeUnifiedPage(JSON.parse(raw) as unknown, origin, 0)
-        if (!controller.signal.aborted) { setPage(next); setIssue('') }
+        let next = await readUnifiedPage(origin, requestId, 0, controller.signal, onAuthExpired)
+        const entries = [...next.entries]
+        const knownCount = pageRef.current?.entries.length ?? 0
+        while (next.nextAfter !== null && entries.length < knownCount && entries.length < 500) {
+          next = await readUnifiedPage(origin, requestId, next.nextAfter, controller.signal, onAuthExpired)
+          entries.push(...next.entries)
+        }
+        next = { ...next, entries: entries.slice(0, 500) }
+        if (!controller.signal.aborted) {
+          pageRef.current = next
+          setPage(next)
+          setIssue('')
+        }
       } catch (error) {
         if (!controller.signal.aborted) setIssue(error instanceof Error ? error.message : String(error))
       } finally {
@@ -70,20 +92,86 @@ export default function UnifiedChat({ origin, requestId, revision, ready, active
     void load()
     return () => { controller.abort(); clearTimeout(timer) }
   }, [identity, requestId, revision, ready, active, attempt, onAuthExpired])
+  async function loadMore() {
+    if (!page?.nextAfter || loadingMore || !ready || page.entries.length >= 500) return
+    const cursor = page.nextAfter
+    const controller = new AbortController()
+    setLoadingMore(true); setIssue('')
+    try {
+      const next = await readUnifiedPage(origin, requestId, cursor, controller.signal, onAuthExpired)
+      setPage(current => {
+        if (!current || current.nextAfter !== cursor) return current
+        const entries = [...current.entries, ...next.entries].slice(0, 500)
+        const updated = { ...current, entries, nextAfter: entries.length >= 500 ? null : next.nextAfter }
+        pageRef.current = updated
+        return updated
+      })
+      setPageIndex(index => index + 1)
+    } catch (error) { setIssue(error instanceof Error ? error.message : String(error)) }
+    finally { setLoadingMore(false) }
+  }
+  const loadedHashes = new Map<string, ReadonlySet<string>>()
+  for (const entry of page?.entries ?? []) if (entry.kind === 'message') {
+    const hashes = new Set(loadedHashes.get(entry.requestId) ?? [])
+    hashes.add(entry.hash); loadedHashes.set(entry.requestId, hashes)
+  }
+  const provisional = visibleOutput(liveOutput, loadedHashes)
+  const visibleEntries = page?.entries.slice(pageIndex * 50, pageIndex * 50 + 50) ?? []
+  const failedRequests = [...(requests?.values() ?? [])].filter(item => item.state === 'failed'
+    && page?.entries.some(entry => entry.kind === 'message' && entry.requestId === item.id))
   return <section className="unified-chat" aria-label="Conversation" aria-busy={ready && !page}>
     <div className="toolbar"><h2>Conversation</h2><button type="button" disabled={!ready} onClick={() => setAttempt(value => value + 1)}>Refresh conversation</button></div>
     {!ready && <p role="status">Host unavailable; retained conversation entries remain visible.</p>}
     {issue && <div role="alert"><p>{issue}</p><button type="button" disabled={!ready} onClick={() => setAttempt(value => value + 1)}>Retry conversation</button></div>}
     {page?.legacyHistory && legacy}
-    {page && <div className="unified-entries" role="list" aria-label="Conversation entries">{page.entries.map(entry => <div role="listitem" className="message" key={entry.sequence} data-sequence={entry.sequence}>
+    {failedRequests.map(item => <div className="error" role="alert" key={item.id}><strong>Exchange failed</strong><p className="meta">Exchange {item.id}</p><p>{item.detail ?? 'The model request failed.'}</p></div>)}
+    {page && <div className="unified-entries" role="list" aria-label="Conversation entries">{visibleEntries.map(entry => <div role="listitem" className="message" key={entry.sequence} data-sequence={entry.sequence}>
       <div className="meta">Sequence {entry.sequence}</div>
       {entry.kind === 'message' ? <HistoryItem entry={{ position: entry.position, hash: entry.hash, byteLen: new TextEncoder().encode(JSON.stringify(entry.item)).length, item: entry.item } satisfies HistoryEntry} /> :
         entry.kind === 'oversized' ? <p role="status">Message {entry.position} is too large to display ({entry.byteLen} bytes).</p> :
-        entry.kind === 'output' ? <><h3>Displayed values</h3><pre>{entry.output.emission.page.text}</pre>{entry.output.emission.page.unavailable && <p>Some detail is unavailable from this renderer.</p>}</> :
+        entry.kind === 'output' ? <UnifiedOutput entry={entry} origin={origin} ready={ready} active={active} onAuthExpired={onAuthExpired} onExpanded={() => setAttempt(value => value + 1)} /> :
           <MountedFormEntry key={entry.form.opening.mountId} form={entry.form} ready={ready} active={active} onAuthExpired={onAuthExpired} />}
+    </div>)}</div>}
+    {page && <div className="history-controls">
+      <button type="button" disabled={pageIndex === 0} onClick={() => setPageIndex(index => Math.max(0, index - 1))}>Previous entries</button>
+      <button type="button" disabled={(pageIndex + 1) * 50 >= page.entries.length} onClick={() => setPageIndex(index => index + 1)}>Next entries</button>
+      {(pageIndex + 1) * 50 >= page.entries.length && page.nextAfter !== null && page.entries.length < 500 && <button type="button" disabled={!ready || loadingMore} onClick={() => void loadMore()}>
+        {loadingMore ? 'Loading entries…' : 'More conversation entries'}
+      </button>}
+    </div>}
+    {provisional.length > 0 && <div role="list" aria-label="Provisional live output">{provisional.map(item => <div role="listitem" className="message" key={outputKey(item)}>
+      <h3>{outputLabels[item.channel]}{item.committedHash ? '' : item.streaming && ready && active ? ' · streaming' : ' · incomplete'}</h3>
+      <pre className="history-content">{item.text}</pre>{item.overflow && <p role="status">Live preview is partial. Completed content remains available in retained history.</p>}
     </div>)}</div>}
     {page && !page.entries.length && !page.legacyHistory && !issue && <p>No conversation entries have been retained yet.</p>}
   </section>
+}
+
+function UnifiedOutput({ entry, origin, ready, active, onAuthExpired, onExpanded }: {
+  entry: Extract<UnifiedEntry, { kind: 'output' }>; origin: ActorOutputOrigin; ready: boolean; active: boolean
+  onAuthExpired?: () => void; onExpanded: () => void
+}) {
+  const [busyKey, setBusyKey] = useState<number>()
+  const [issue, setIssue] = useState('')
+  const output = entry.output.emission
+  async function expand(key: number) {
+    setBusyKey(key)
+    try {
+      const response = await fetch('/api/actor-output/expand', { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ origin, displaySlot: output.id.displaySlot, key }) })
+      if (response.status === 401 || response.status === 403) onAuthExpired?.()
+      if (!response.ok) throw new Error(response.status === 409 ? 'This detail is no longer available. Refresh the conversation.' : 'This detail could not be expanded.')
+      setIssue('')
+      onExpanded()
+    } catch (error) { setIssue(error instanceof Error ? error.message : String(error)) }
+    finally { setBusyKey(undefined) }
+  }
+  return <><h3>Displayed values</h3>{output.page.view ? <RichViewRenderer view={output.page.view} /> : <pre>{output.page.text}</pre>}
+    {issue && <p role="alert">{issue}</p>}
+    {output.page.unavailable && <p>Some detail is unavailable from this renderer.</p>}
+    {output.page.expansions.map(([key, label]) => <button key={key} disabled={!active || !ready || busyKey !== undefined}
+      onClick={() => void expand(key)}>{busyKey === key ? 'Loading…' : `Show ${label}`}</button>)}
+  </>
 }
 
 function MountedFormEntry({ form, ready, active, onAuthExpired }: { form: StoredActorForm; ready: boolean; active: boolean; onAuthExpired?: () => void }) {

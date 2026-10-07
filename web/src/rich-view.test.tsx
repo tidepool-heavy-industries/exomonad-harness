@@ -17,4 +17,14 @@ describe('rich actor views', () => {
     expect(isRichView({ kind: 'html', text: '<b>x</b>' })).toBe(false)
     expect(isRichView({ kind: 'image', alt: 'x', source: { kind: 'data', mime: 'image/svg+xml', base64: 'PHN2Zz4=' } })).toBe(false)
   })
+  it('marks bounded previews and unavailable inspection details', () => {
+    const view = { kind: 'column' as const, children: [
+      { kind: 'text' as const, text: 'preview', truncated: true },
+      { kind: 'inspection' as const, text: 'partial details', has_more: true, unavailable: true },
+    ] }
+    render(<RichViewRenderer view={view} />)
+    expect(screen.getByText('Value truncated.')).toBeTruthy()
+    expect(screen.getByText('More detail is available.')).toBeTruthy()
+    expect(screen.getByText('Some detail is unavailable.')).toBeTruthy()
+  })
 })

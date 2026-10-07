@@ -10,5 +10,7 @@ describe('unified conversation pages', () => {
     ], nextAfter: null }
     expect(decodeUnifiedPage(page, origin, 0).entries.map(entry => entry.sequence)).toEqual([4, 5])
     expect(() => decodeUnifiedPage({ ...page, entries: [...page.entries].reverse() }, origin, 0)).toThrow(/sequence/)
+    expect(decodeUnifiedPage({ ...page, nextAfter: 5 }, origin, 0).nextAfter).toBe(5)
+    expect(() => decodeUnifiedPage({ ...page, nextAfter: 6 }, origin, 0)).toThrow(/cursor/)
   })
 })

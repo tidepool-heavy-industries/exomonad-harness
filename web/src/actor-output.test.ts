@@ -20,6 +20,8 @@ describe('actor authored output', () => {
   })
   it('rejects mismatched authority and encoded metadata beyond its bound', () => {
     expect(isStoredActorOutput(output)).toBe(true)
+    expect(isStoredActorOutput({ ...output, emission: { ...output.emission, page: { ...output.emission.page, view: { kind: 'text', text: 'value', truncated: true } } } })).toBe(true)
+    expect(isStoredActorOutput({ ...output, emission: { ...output.emission, page: { ...output.emission.page, view: { kind: 'text', text: 'value', truncated: 'yes' } } } })).toBe(false)
     expect(isSequencedEvent({ seq: 1, event: { kind: 'actor.output.committed', value: { ...output, reference: { origin: { ...origin, incarnation: 4 }, sequence: 5 } } } })).toBe(false)
     expect(isStoredActorOutput({ ...output, emission: { ...output.emission, page: { ...output.emission.page, expansions: [[1, '\u0000'.repeat(1400)]] } } })).toBe(false)
   })
