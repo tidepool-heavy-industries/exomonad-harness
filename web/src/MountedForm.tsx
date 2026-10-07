@@ -56,7 +56,7 @@ function formNode(value: unknown, depth = 0, ids = new Set<string>()): value is 
     }
     case 'choice': case 'many': case 'alternatives': {
       if (!text(value.id, 128) || value.id.length === 0 || ids.has(value.id) || !text(value.label) || !Array.isArray(value.options)
-        || value.options.length === 0 || value.options.length > 256) return false
+        || value.options.length > 256 || value.kind !== 'many' && value.options.length === 0) return false
       ids.add(value.id)
       const optionIds = new Set<string>()
       if (!value.options.every(item => obj(item) && option(item) && !optionIds.has(item.id) && !!optionIds.add(item.id)
@@ -114,6 +114,7 @@ function initialDraft(node: FormNode, into: FormDraft = {}): FormDraft {
   if (['text', 'int', 'number', 'bool', 'choice', 'many', 'alternatives'].includes(node.kind)) {
     const field = node as Extract<FormNode, { id: string }>
     if (field.initial !== null && !Object.hasOwn(into, field.id)) into[field.id] = Array.isArray(field.initial) ? [...field.initial] : field.initial
+    if (node.kind === 'many' && node.options.length === 0 && !Object.hasOwn(into, field.id)) into[field.id] = []
   }
   if (node.kind === 'group') node.children.forEach(child => initialDraft(child, into))
   if (node.kind === 'section') initialDraft(node.child, into)

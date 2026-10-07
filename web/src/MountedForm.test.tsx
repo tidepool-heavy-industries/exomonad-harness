@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import MountedForm, { clearMountedFormDrafts, isStoredActorForm, type StoredActorForm } from './MountedForm'
+import MountedForm, { clearMountedFormDrafts, isFormSpec, isStoredActorForm, type StoredActorForm } from './MountedForm'
 
 const origin = { run: 'run', nativeActor: 4, incarnation: 2 }
 const view = { kind: 'text' as const, text: 'Option details' }
@@ -143,5 +143,22 @@ describe('mounted actor forms', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
     const payload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { draft: Record<string, unknown> }
     expect(payload.draft.number).toBeNull()
+  })
+
+  it('accepts empty many descriptors and submits their empty selection', async () => {
+    const emptyMany: StoredActorForm = { ...openForm, opening: { ...openForm.opening, form: { version: 1, root: {
+      kind: 'many', id: 'many', label: 'Choose any', options: [], initial: null,
+    } } } }
+    expect(isFormSpec(emptyMany.opening.form)).toBe(true)
+    expect(isStoredActorForm(emptyMany)).toBe(true)
+    expect(isFormSpec({ version: 1, root: { kind: 'choice', id: 'choice', label: 'Choose one', options: [], initial: null } })).toBe(false)
+    expect(isFormSpec({ version: 1, root: { kind: 'alternatives', id: 'mode', label: 'Mode', options: [], initial: null } })).toBe(false)
+    const fetchMock = vi.fn().mockResolvedValue(new Response('rejected', { status: 409 }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<MountedForm form={emptyMany} ready active />)
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    const payload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { draft: Record<string, unknown> }
+    expect(payload.draft.many).toEqual([])
   })
 })
