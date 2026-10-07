@@ -28,3 +28,11 @@ describe('rich actor views', () => {
     expect(screen.getByText('Some detail is unavailable.')).toBeTruthy()
   })
 })
+
+it('renders standard Markdown with raw HTML disabled', () => {
+  const { container } = render(<RichViewRenderer view={{ kind: 'markdown', text: '# Heading\n\n**strong** [link](https://example.com)\n\n<script>window.bad = true</script>' }} />)
+  expect(screen.getByRole('heading', { name: 'Heading' })).toBeVisible()
+  expect(container.querySelector('strong')).toHaveTextContent('strong')
+  expect(screen.getByRole('link', { name: 'link' })).toHaveAttribute('href', 'https://example.com')
+  expect(container.querySelector('script')).toBeNull()
+})

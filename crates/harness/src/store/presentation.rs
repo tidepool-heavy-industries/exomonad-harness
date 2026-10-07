@@ -177,31 +177,37 @@ pub struct FormError {
 }
 impl View {
     pub fn validate(&self) -> Result<()> {
-        if let View::Svg { source } = self {
-            validate_svg(source)?;
-        }
-        fn go(v: &View, depth: usize) -> bool {
+        fn go(view: &View, depth: usize) -> Result<()> {
             if depth > 32 {
-                return false;
+                return Err(StoreError::InvalidActorOutput);
             }
-            match v {
+            match view {
+                View::Svg { source } => validate_svg(source)?,
                 View::Row { children } | View::Column { children } => {
-                    children.len() <= 1024 && children.iter().all(|c| go(c, depth + 1))
+                    if children.len() > 1024 {
+                        return Err(StoreError::InvalidActorOutput);
+                    }
+                    for child in children {
+                        go(child, depth + 1)?;
+                    }
                 }
-                View::Caption { body, .. } => go(body, depth + 1),
+                View::Caption { body, .. } => go(body, depth + 1)?,
                 View::Image {
                     source: MediaSource::Retained { hash },
                     ..
-                } => hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
-                View::Svg { source } => validate_svg(source).is_ok(),
-                _ => true,
-            }
-        }
-        if go(self, 0) && serde_json::to_vec(self)?.len() <= MAX_PRESENTATION_BYTES {
+                } => {
+                    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        return Err(StoreError::InvalidActorOutput);
+                    }
+                }
+                _ => (),
+            };
             Ok(())
-        } else {
-            Err(StoreError::InvalidActorOutput)
         }
+        if serde_json::to_vec(self)?.len() > MAX_PRESENTATION_BYTES {
+            return Err(StoreError::InvalidActorOutput);
+        }
+        go(self, 0)
     }
 }
 impl FormSpec {
@@ -326,8 +332,7 @@ mod tests {
         )
         .unwrap();
         spec.validate_draft(&draft).unwrap();
-        let bad: FormDraft =
-            serde_json::from_value(json!({"f0":"o0","f1":123})).unwrap();
+        let bad: FormDraft = serde_json::from_value(json!({"f0":"o0","f1":123})).unwrap();
         assert!(matches!(
             spec.validate_draft(&bad),
             Err(StoreError::InvalidForm)
@@ -345,5 +350,26 @@ mod tests {
             Err(StoreError::InvalidSvg(_))
         ));
         assert!(validate_svg("<html/>").is_err());
+    }
+}
+#[cfg(test)]
+mod integer_wire_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn large_int_seeds_and_submissions_are_exact_lexemes() {
+        let spec:FormSpec=serde_json::from_value(json!({"version":1,"root":{"kind":"int","id":"f0","label":"Integer","initial":"9007199254740993"}})).unwrap();
+        spec.validate().unwrap();
+        assert_eq!(
+            serde_json::to_value(&spec).unwrap()["root"]["initial"],
+            "9007199254740993"
+        );
+        for raw in ["9007199254740993", "1.5", "-"] {
+            let draft: FormDraft = serde_json::from_value(json!({"f0":raw})).unwrap();
+            spec.validate_draft(&draft).unwrap();
+            assert_eq!(serde_json::to_value(draft).unwrap()["f0"], raw);
+        }
+        let numeric: FormDraft = serde_json::from_value(json!({"f0":123})).unwrap();
+        assert!(spec.validate_draft(&numeric).is_err());
     }
 }
