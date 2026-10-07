@@ -58,6 +58,11 @@ pub struct StoredActorForm {
     pub answer: Option<View>,
 }
 impl StoredActorForm {
+    pub(super) fn decode(raw: &str) -> Result<Self> {
+        let row: Self = serde_json::from_str(raw)?;
+        row.validate()?;
+        Ok(row)
+    }
     fn validate(&self) -> Result<()> {
         let submission = self.attempt_id.is_some() && self.draft.is_some();
         let no_submission = self.attempt_id.is_none() && self.draft.is_none();
@@ -120,8 +125,7 @@ fn load(tx: &Transaction<'_>, identity: &str) -> Result<StoredActorForm> {
             |r| r.get(0),
         )
         .optional()?;
-    let row: StoredActorForm = serde_json::from_str(&raw.ok_or(StoreError::FormUnavailable)?)?;
-    row.validate()?;
+    let row = StoredActorForm::decode(&raw.ok_or(StoreError::FormUnavailable)?)?;
     if key(&row.opening.origin, &row.opening.mount_id)? != identity {
         return Err(StoreError::InvalidForm);
     }
@@ -878,5 +882,257 @@ mod notification_tests {
             store.actor_form(&large.origin, &large.mount_id),
             Err(StoreError::FormUnavailable)
         ));
+    }
+}
+#[cfg(test)]
+mod history_model_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    #[derive(Clone, Copy, Debug)]
+    enum Op {
+        SubmitA,
+        SubmitB,
+        ConflictA,
+        RejectA,
+        RejectB,
+        CommitA,
+        CommitB,
+        Close,
+        Dismiss,
+        Restart,
+    }
+    #[derive(Clone, Debug)]
+    struct Model {
+        state: ActorFormState,
+        submission: Option<(String, String)>,
+        errors: bool,
+        answer: Option<String>,
+        operations: BTreeMap<String, Option<String>>,
+        changes: i64,
+    }
+    impl Model {
+        fn step(&mut self, op: Op) -> bool {
+            match op {
+                Op::SubmitA | Op::SubmitB | Op::ConflictA | Op::Dismiss => {
+                    let (id, value) = match op {
+                        Op::SubmitA => ("a", Some("first")),
+                        Op::SubmitB => ("b", Some("second")),
+                        Op::ConflictA => ("a", Some("conflict")),
+                        _ => ("dismiss", None),
+                    };
+                    if let Some(retained) = self.operations.get(id) {
+                        return retained.as_deref() == value;
+                    }
+                    let permitted = self.state == ActorFormState::Open
+                        || (value.is_none() && self.state == ActorFormState::Submitted);
+                    if !permitted {
+                        return false;
+                    }
+                    self.operations.insert(id.into(), value.map(str::to_owned));
+                    if let Some(value) = value {
+                        self.submission = Some((id.into(), value.into()));
+                        self.state = ActorFormState::Submitted
+                    } else {
+                        self.state = ActorFormState::Dismissed
+                    }
+                    self.errors = false;
+                    self.changes += 1;
+                    true
+                }
+                Op::RejectA | Op::RejectB | Op::CommitA | Op::CommitB => {
+                    let id = if matches!(op, Op::RejectA | Op::CommitA) {
+                        "a"
+                    } else {
+                        "b"
+                    };
+                    if self.submission.as_ref().map(|s| s.0.as_str()) != Some(id) {
+                        return false;
+                    }
+                    let commit = matches!(op, Op::CommitA | Op::CommitB);
+                    if (commit
+                        && self.state == ActorFormState::Answered
+                        && self.answer.as_deref() == Some(id))
+                        || (!commit && self.state == ActorFormState::Open && self.errors)
+                    {
+                        return true;
+                    }
+                    if self.state != ActorFormState::Submitted {
+                        return false;
+                    }
+                    if commit {
+                        self.state = ActorFormState::Answered;
+                        self.answer = Some(id.into());
+                        self.errors = false
+                    } else {
+                        self.state = ActorFormState::Open;
+                        self.errors = true
+                    }
+                    self.changes += 1;
+                    true
+                }
+                Op::Close | Op::Restart => {
+                    if !matches!(self.state, ActorFormState::Open | ActorFormState::Submitted) {
+                        return false;
+                    }
+                    self.state = if matches!(op, Op::Close) {
+                        ActorFormState::Cancelled
+                    } else {
+                        ActorFormState::Interrupted
+                    };
+                    self.changes += 1;
+                    true
+                }
+            }
+        }
+    }
+    struct Authority;
+    impl ActorFormAuthority for Authority {
+        fn validate_form(&self, _: &ActorFormOpen) -> std::result::Result<bool, String> {
+            Ok(true)
+        }
+    }
+    #[test]
+    fn bounded_histories_match_independent_model_and_publication_revisions() {
+        use Op::*;
+        let actions = [
+            SubmitA, SubmitB, ConflictA, RejectA, RejectB, CommitA, CommitB, Close, Dismiss,
+            Restart,
+        ];
+        let prefixes: Vec<Vec<Op>> = vec![
+            vec![],
+            vec![SubmitA],
+            vec![SubmitA, RejectA],
+            vec![SubmitA, CommitA],
+            vec![Close],
+            vec![Dismiss],
+            vec![Restart],
+            vec![SubmitA, RejectA, SubmitB],
+        ];
+        let mut histories = 0;
+        for prefix in prefixes {
+            for left in actions {
+                for right in actions {
+                    let store = Store::memory().unwrap();
+                    let opening = ActorFormOpen {
+                        origin: ActorOutputOrigin {
+                            run: "run".into(),
+                            native_actor: 7,
+                            incarnation: 1,
+                        },
+                        mount_id: "mount".into(),
+                        execution: ActorOutputExecution::ActorProgram,
+                        conversation: None,
+                        form: FormSpec {
+                            version: 1,
+                            root: FormNode::Text {
+                                id: "f0".into(),
+                                label: "Value".into(),
+                                initial: None,
+                            },
+                        },
+                    };
+                    let first = store.open_actor_form(&Authority, &opening).unwrap();
+                    let mut oracle = Model {
+                        state: ActorFormState::Open,
+                        submission: None,
+                        errors: false,
+                        answer: None,
+                        operations: BTreeMap::new(),
+                        changes: 0,
+                    };
+                    let history: Vec<Op> = prefix.iter().copied().chain([left, right]).collect();
+                    for op in &history {
+                        let expected = oracle.step(*op);
+                        let actual = match op {
+                            SubmitA => store
+                                .submit_actor_form(
+                                    &opening.origin,
+                                    "mount",
+                                    "a",
+                                    &json!({"f0":"first"}),
+                                )
+                                .is_ok(),
+                            SubmitB => store
+                                .submit_actor_form(
+                                    &opening.origin,
+                                    "mount",
+                                    "b",
+                                    &json!({"f0":"second"}),
+                                )
+                                .is_ok(),
+                            ConflictA => store
+                                .submit_actor_form(
+                                    &opening.origin,
+                                    "mount",
+                                    "a",
+                                    &json!({"f0":"conflict"}),
+                                )
+                                .is_ok(),
+                            RejectA | RejectB => store
+                                .reject_actor_form(
+                                    &opening.origin,
+                                    "mount",
+                                    if matches!(op, RejectA) { "a" } else { "b" },
+                                    &json!([{"field":"f0","message":"correct"}]),
+                                )
+                                .unwrap(),
+                            CommitA | CommitB => {
+                                let id = if matches!(op, CommitA) { "a" } else { "b" };
+                                store
+                                    .commit_actor_form(
+                                        &opening.origin,
+                                        "mount",
+                                        id,
+                                        &json!({"kind":"text","text":id}),
+                                    )
+                                    .unwrap()
+                            }
+                            Close => store.close_actor_form(&opening.origin, "mount").unwrap(),
+                            Dismiss => store
+                                .dismiss_actor_form(&opening.origin, "mount", "dismiss")
+                                .is_ok(),
+                            Restart => store.interrupt_actor_forms_for_restart().unwrap() > 0,
+                        };
+                        assert_eq!(actual, expected, "operation {op:?} in {history:?}");
+                        let row = store.actor_form(&opening.origin, "mount").unwrap();
+                        assert_eq!(row.state, oracle.state, "{history:?}");
+                        assert_eq!(row.sequence, first.sequence);
+                        assert_eq!(
+                            row.revision_sequence,
+                            first.sequence + oracle.changes,
+                            "{history:?}"
+                        );
+                        assert_eq!(
+                            store.events(None).unwrap().len() as i64,
+                            1 + oracle.changes,
+                            "{history:?}"
+                        );
+                        assert_eq!(
+                            row.attempt_id.as_deref(),
+                            oracle.submission.as_ref().map(|s| s.0.as_str())
+                        );
+                        assert_eq!(
+                            serde_json::to_value(&row.draft).unwrap(),
+                            oracle
+                                .submission
+                                .as_ref()
+                                .map(|s| json!({"f0":s.1}))
+                                .unwrap_or(Value::Null)
+                        );
+                        assert_eq!(!row.errors.is_empty(), oracle.errors);
+                        assert_eq!(
+                            serde_json::to_value(&row.answer).unwrap(),
+                            oracle
+                                .answer
+                                .as_ref()
+                                .map(|s| json!({"kind":"text","text":s}))
+                                .unwrap_or(Value::Null)
+                        );
+                    }
+                    histories += 1;
+                }
+            }
+        }
+        assert_eq!(histories, 800);
     }
 }

@@ -202,7 +202,7 @@ impl Store {
                     )?;
                     ChatEntry::Form {
                         sequence,
-                        form: serde_json::from_str(&raw)?,
+                        form: StoredActorForm::decode(&raw)?,
                     }
                 }
                 _ => unreachable!(),
