@@ -2,6 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import MountedForm, { clearMountedFormDrafts, isFormSpec, isStoredActorForm, type StoredActorForm } from './MountedForm'
 
+import preparedBoundaries from './fixtures/prepared-form-boundaries.json'
+
+function prepared(name: string) {
+  const entry = preparedBoundaries.cases.find(item => item.name === name)!
+  if (!isFormSpec(entry.descriptor)) throw new Error(`Invalid prepared descriptor: ${name}`)
+  return entry.descriptor
+}
+
 const origin = { run: 'run', nativeActor: 4, incarnation: 2 }
 const view = { kind: 'text' as const, text: 'Option details' }
 const openForm: StoredActorForm = {
@@ -22,16 +30,10 @@ function integerForm(initial: string | null): StoredActorForm {
   } } } }
 }
 function numberForm(): StoredActorForm {
-  return { ...openForm, opening: { ...openForm.opening, mountId: 'number-mount', form: { version: 1, root: {
-    kind: 'number', id: 'number', label: 'Number', initial: 1.25,
-  } } } }
+  return { ...openForm, opening: { ...openForm.opening, mountId: 'number-mount', form: prepared('blank-number-null') } }
 }
 function radioForm(mountId: string): StoredActorForm {
-  return { ...openForm, opening: { ...openForm.opening, mountId, form: { version: 1, root: {
-    kind: 'choice', id: 'f0', label: 'Pick', initial: null, options: [
-      { id: 'o0', label: 'Option 0', presentation: view }, { id: 'o1', label: 'Option 1', presentation: view },
-    ],
-  } } } }
+  return { ...openForm, opening: { ...openForm.opening, mountId, form: prepared('rich-choice') } }
 }
 
 beforeEach(() => { clearMountedFormDrafts(); vi.restoreAllMocks() })
@@ -136,12 +138,12 @@ describe('mounted actor forms', () => {
     const [formA, formB] = screen.getAllByRole('region', { name: 'Actor form' })
     const cardA = within(formA!)
     const cardB = within(formB!)
-    fireEvent.click(cardA.getByLabelText('Option 0'))
-    fireEvent.click(cardB.getByLabelText('Option 1'))
-    expect((cardA.getByLabelText('Option 0') as HTMLInputElement).checked).toBe(true)
-    expect((cardA.getByLabelText('Option 1') as HTMLInputElement).checked).toBe(false)
-    expect((cardB.getByLabelText('Option 0') as HTMLInputElement).checked).toBe(false)
-    expect((cardB.getByLabelText('Option 1') as HTMLInputElement).checked).toBe(true)
+    fireEvent.click(cardA.getByLabelText(/Quick/))
+    fireEvent.click(cardB.getByLabelText(/Careful/))
+    expect((cardA.getByLabelText(/Quick/) as HTMLInputElement).checked).toBe(true)
+    expect((cardA.getByLabelText(/Careful/) as HTMLInputElement).checked).toBe(false)
+    expect((cardB.getByLabelText(/Quick/) as HTMLInputElement).checked).toBe(false)
+    expect((cardB.getByLabelText(/Careful/) as HTMLInputElement).checked).toBe(true)
     fireEvent.click(cardA.getByRole('button', { name: 'Submit' }))
     fireEvent.click(cardB.getByRole('button', { name: 'Submit' }))
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
@@ -154,17 +156,16 @@ describe('mounted actor forms', () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('rejected', { status: 409 }))
     vi.stubGlobal('fetch', fetchMock)
     render(<MountedForm form={numberForm()} ready active />)
+    fireEvent.change(screen.getByLabelText('Number'), { target: { value: '1.25' } })
     fireEvent.change(screen.getByLabelText('Number'), { target: { value: '' } })
     fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
     await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
     const payload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { draft: Record<string, unknown> }
-    expect(payload.draft.number).toBeNull()
+    expect(payload.draft).toEqual(preparedBoundaries.cases.find(item => item.name === 'blank-number-null')!.values)
   })
 
   it('accepts empty many descriptors and submits their empty selection', async () => {
-    const emptyMany: StoredActorForm = { ...openForm, opening: { ...openForm.opening, form: { version: 1, root: {
-      kind: 'many', id: 'many', label: 'Choose any', options: [], initial: null,
-    } } } }
+    const emptyMany: StoredActorForm = { ...openForm, opening: { ...openForm.opening, form: prepared('empty-many') } }
     expect(isFormSpec(emptyMany.opening.form)).toBe(true)
     expect(isStoredActorForm(emptyMany)).toBe(true)
     expect(isFormSpec({ version: 1, root: { kind: 'choice', id: 'choice', label: 'Choose one', options: [], initial: null } })).toBe(false)
@@ -175,7 +176,7 @@ describe('mounted actor forms', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
     await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
     const payload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { draft: Record<string, unknown> }
-    expect(payload.draft.many).toEqual([])
+    expect(payload.draft).toEqual(preparedBoundaries.cases.find(item => item.name === 'empty-many')!.values)
   })
 
   it('accepts Rust-bounded option counts, labels, and form errors', () => {

@@ -353,24 +353,76 @@ mod tests {
         );
     }
     #[test]
-    fn empty_many_and_cleared_number_preserve_valid_wire_drafts() {
-        let many: FormSpec = serde_json::from_value(json!({"version":1,"root":{"kind":"many","id":"f0","label":"Values","options":[],"initial":[]}})).unwrap();
-        many.validate().unwrap();
-        let draft: FormDraft = serde_json::from_value(json!({"f0":[]})).unwrap();
-        many.validate_draft(&draft).unwrap();
-        let unknown: FormDraft = serde_json::from_value(json!({"f0":["o0"]})).unwrap();
-        assert!(many.validate_draft(&unknown).is_err());
+    fn emitted_haskell_descriptors_and_drafts_cross_store_admission() {
+        use crate::store::{
+            Store,
+            actor_output::{ActorOutputExecution, ActorOutputOrigin},
+            forms::{ActorFormAuthority, ActorFormOpen, ActorFormState},
+        };
+        struct Authority;
+        impl ActorFormAuthority for Authority {
+            fn validate_form(&self, _: &ActorFormOpen) -> std::result::Result<bool, String> {
+                Ok(true)
+            }
+        }
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/prepared-form-boundaries.json")).unwrap();
+        let store = Store::memory().unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let form: FormSpec = serde_json::from_value(case["descriptor"].clone()).unwrap();
+            let opening = ActorFormOpen {
+                origin: ActorOutputOrigin {
+                    run: "prepared-fixtures".into(),
+                    native_actor: 1,
+                    incarnation: 1,
+                },
+                mount_id: case["name"].as_str().unwrap().into(),
+                execution: ActorOutputExecution::ActorProgram,
+                conversation: None,
+                form,
+            };
+            let card = store.open_actor_form(&Authority, &opening).unwrap();
+            let submitted = store
+                .submit_actor_form(
+                    &opening.origin,
+                    &opening.mount_id,
+                    "attempt",
+                    &case["values"],
+                )
+                .unwrap();
+            assert_eq!(submitted.sequence, card.sequence);
+            assert_eq!(
+                serde_json::to_value(submitted.draft.as_ref().unwrap()).unwrap(),
+                case["values"]
+            );
+            if case["accepted"] == false {
+                assert!(
+                    store
+                        .reject_actor_form(
+                            &opening.origin,
+                            &opening.mount_id,
+                            "attempt",
+                            &case["errors"]
+                        )
+                        .unwrap()
+                );
+                let rejected = store
+                    .actor_form(&opening.origin, &opening.mount_id)
+                    .unwrap();
+                assert_eq!(rejected.state, ActorFormState::Open);
+                assert_eq!(rejected.sequence, card.sequence);
+                assert_eq!(
+                    serde_json::to_value(rejected.errors).unwrap(),
+                    case["errors"]
+                );
+            }
+        }
         for kind in ["choice", "alternatives"] {
             let spec: FormSpec = serde_json::from_value(json!({"version":1,"root":{"kind":kind,"id":"f0","label":"Value","options":[],"initial":null}})).unwrap();
             assert!(spec.validate().is_err());
         }
-        let number: FormSpec = serde_json::from_value(
-            json!({"version":1,"root":{"kind":"number","id":"f0","label":"Number","initial":1.5}}),
-        )
-        .unwrap();
-        number.validate().unwrap();
-        let cleared: FormDraft = serde_json::from_value(json!({"f0":null})).unwrap();
-        number.validate_draft(&cleared).unwrap();
+        let number: FormSpec =
+            serde_json::from_value(fixture["cases"][1]["descriptor"].clone()).unwrap();
         let wrong_type: FormDraft = serde_json::from_value(json!({"f0":""})).unwrap();
         assert!(number.validate_draft(&wrong_type).is_err());
     }

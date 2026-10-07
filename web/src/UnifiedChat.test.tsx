@@ -64,7 +64,7 @@ describe('unified conversation pages', () => {
     expect(screen.getByRole('region', { name: 'Actor form' })).toBe(card)
     expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('unsent edit')
     expect((screen.getByLabelText('Name') as HTMLInputElement).disabled).toBe(false)
-    expect(screen.getAllByRole('listitem').map(item => item.getAttribute('data-sequence'))).toEqual(['10', '20', '30'])
+    expect([...screen.getByRole('list', { name: 'Conversation entries' }).children].map(item => item.getAttribute('data-sequence'))).toEqual(['10', '20', '30'])
   })
 
 })

@@ -27,7 +27,7 @@ HARNESS_DEPS = [
     "//third-party/rust:uuid",
 ]
 
-HARNESS_SRCS = glob(["src/**/*.rs"]) + ["src/store/schema.sql"]
+HARNESS_SRCS = glob(["src/**/*.rs", "src/store/fixtures/*.json"]) + ["src/store/schema.sql"]
 
 rust_library(
     name = "harness",

@@ -1,0 +1,139 @@
+{
+  "cases": [
+    {
+      "accepted": true,
+      "descriptor": {
+        "root": {
+          "id": "f0",
+          "initial": [],
+          "kind": "many",
+          "label": "Actions",
+          "options": []
+        },
+        "version": 1
+      },
+      "errors": [],
+      "name": "empty-many",
+      "values": {
+        "f0": []
+      }
+    },
+    {
+      "accepted": false,
+      "descriptor": {
+        "root": {
+          "id": "f0",
+          "initial": null,
+          "kind": "number",
+          "label": "Number"
+        },
+        "version": 1
+      },
+      "errors": [
+        {
+          "field": "f0",
+          "message": "expected number, got null"
+        }
+      ],
+      "name": "blank-number-null",
+      "values": {
+        "f0": null
+      }
+    },
+    {
+      "accepted": false,
+      "descriptor": {
+        "root": {
+          "id": "f0",
+          "initial": null,
+          "kind": "number",
+          "label": "Number"
+        },
+        "version": 1
+      },
+      "errors": [
+        {
+          "field": "f0",
+          "message": "A value is required"
+        }
+      ],
+      "name": "blank-number-missing",
+      "values": {}
+    },
+    {
+      "accepted": true,
+      "descriptor": {
+        "root": {
+          "id": "f0",
+          "initial": "9007199254740993",
+          "kind": "int",
+          "label": "Integer"
+        },
+        "version": 1
+      },
+      "errors": [],
+      "name": "large-integer-seed",
+      "values": {
+        "f0": "9007199254740993"
+      }
+    },
+    {
+      "accepted": true,
+      "descriptor": {
+        "root": {
+          "id": "f0",
+          "initial": null,
+          "kind": "choice",
+          "label": "Route",
+          "options": [
+            {
+              "id": "o0",
+              "label": "Quick\n**Direct route**\n",
+              "presentation": {
+                "children": [
+                  {
+                    "kind": "text",
+                    "text": "Quick",
+                    "truncated": false
+                  },
+                  {
+                    "kind": "markdown",
+                    "text": "**Direct route**",
+                    "truncated": false
+                  }
+                ],
+                "kind": "column"
+              }
+            },
+            {
+              "id": "o1",
+              "label": "Careful\n**Review first**\n",
+              "presentation": {
+                "children": [
+                  {
+                    "kind": "text",
+                    "text": "Careful",
+                    "truncated": false
+                  },
+                  {
+                    "kind": "markdown",
+                    "text": "**Review first**",
+                    "truncated": false
+                  }
+                ],
+                "kind": "column"
+              }
+            }
+          ]
+        },
+        "version": 1
+      },
+      "errors": [],
+      "name": "rich-choice",
+      "values": {
+        "f0": "o1"
+      }
+    }
+  ],
+  "schema": 1
+}
