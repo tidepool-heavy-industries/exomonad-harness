@@ -2631,7 +2631,12 @@ mod tests {
             assert_eq!(s.unread("b").unwrap().len(), 1);
             s.record_event(Some(&id("root")), "created", &serde_json::json!({}))
                 .unwrap();
-            assert_eq!(s.events(Some(&id("root"))).unwrap().len(), 1);
+            let events = s.events(Some(&id("root"))).unwrap();
+            assert_eq!(events.iter().filter(|e| e.kind == "created").count(), 1);
+            assert_eq!(
+                events.iter().filter(|e| e.kind == "chat_message").count(),
+                2
+            );
         }
         {
             let s = Store::open(&path).unwrap();

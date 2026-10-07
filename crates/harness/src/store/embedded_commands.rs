@@ -542,7 +542,7 @@ mod tests {
             c.query_row("SELECT version FROM schema_version", [], |r| r
                 .get::<_, u32>(0))
                 .unwrap(),
-            7
+            schema::VERSION
         );
         assert_eq!(
             c.query_row("SELECT created_at FROM requests WHERE id='old'", [], |r| {

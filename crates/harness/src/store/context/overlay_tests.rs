@@ -736,7 +736,7 @@ fn v10_database_migration_preserves_original_bytes_and_defaults_to_identity() {
         c.query_row("SELECT version FROM schema_version", [], |row| row
             .get::<_, u32>(0))
             .unwrap(),
-        11
+        crate::store::schema::VERSION
     );
 }
 

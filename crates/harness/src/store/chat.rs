@@ -349,3 +349,112 @@ mod tests {
         assert!(serde_json::to_vec(&page).unwrap().len() < MAX_HISTORY_BYTES);
     }
 }
+#[cfg(test)]
+mod publication_boundary_tests {
+    use super::*;
+    use crate::{model::AgentPath, store::Usage};
+    #[test]
+    fn here_snapshot_reuses_proven_occurrences_and_publishes_only_new_delivered_task() {
+        let store = Store::memory().unwrap();
+        let root = AgentPath("/root".into());
+        let child = AgentPath("/root/child".into());
+        let source = RequestId("source".into());
+        let snapshot = RequestId("snapshot".into());
+        let original =
+            Item(json!({"type":"message","role":"user","content":"same at two positions"}));
+        store
+            .write_request(
+                &source,
+                None,
+                &root.0,
+                &[original.clone(), original],
+                Usage::default(),
+            )
+            .unwrap();
+        store
+            .admit_agent(&root, None, Some(&source), &json!({}), &json!({}))
+            .unwrap();
+        store
+            .admit_here_agent_with_snapshot(
+                &child,
+                &root,
+                &snapshot,
+                &json!({}),
+                &root.0,
+                &child.0,
+                "AtBoundary",
+                &Item(json!({"type":"message","role":"user","content":"new child task"})),
+            )
+            .unwrap();
+        let origin = ActorOutputOrigin {
+            run: "run".into(),
+            native_actor: 7,
+            incarnation: 1,
+        };
+        let page = store.chat_page(&origin, Some(&snapshot), 0, 100).unwrap();
+        assert_eq!(page.entries.len(), 2);
+        for (i, entry) in page.entries.iter().enumerate() {
+            assert!(
+                matches!(entry,ChatEntry::Message{request_id,position,..}if request_id=="source"&&*position==i as i64)
+            );
+        }
+        store.append_unread_envelopes(&child, &snapshot).unwrap();
+        let page = store.chat_page(&origin, Some(&snapshot), 0, 100).unwrap();
+        assert_eq!(page.entries.len(), 3);
+        assert!(
+            matches!(&page.entries[2],ChatEntry::Message{request_id,item,..}if request_id=="snapshot"&&item["content"]=="new child task")
+        );
+    }
+    #[test]
+    fn migrated_legacy_history_has_explicit_cutover_without_fabricated_order() {
+        let path = std::env::temp_dir().join(format!(
+            "harness-chat-cutover-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let head = RequestId("head".into());
+        let marker;
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .write_request(
+                    &head,
+                    None,
+                    "/root",
+                    &[Item(
+                        json!({"type":"message","role":"user","content":"old"}),
+                    )],
+                    Usage::default(),
+                )
+                .unwrap();
+            marker = store
+                .record_event(Some(&head), "legacy_marker", &json!({}))
+                .unwrap();
+            let c = store.lock();
+            c.execute_batch("DELETE FROM events WHERE kind='chat_message'; DELETE FROM session_state WHERE session_id='harness:chat-cutover'; UPDATE schema_version SET version=13;").unwrap();
+        }
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .append_items(
+                    &head,
+                    &[Item(
+                        json!({"type":"message","role":"assistant","content":"new"}),
+                    )],
+                )
+                .unwrap();
+            let origin = ActorOutputOrigin {
+                run: "run".into(),
+                native_actor: 7,
+                incarnation: 1,
+            };
+            let page = store.chat_page(&origin, Some(&head), 0, 100).unwrap();
+            assert_eq!(page.cutover_sequence, marker);
+            assert!(page.legacy_history);
+            assert_eq!(page.entries.len(), 1);
+            assert!(
+                matches!(&page.entries[0],ChatEntry::Message{item,sequence,..}if item["content"]=="new"&&*sequence>marker)
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+}
