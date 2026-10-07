@@ -57,6 +57,51 @@ pub struct StoredActorForm {
     pub errors: Vec<FormError>,
     pub answer: Option<View>,
 }
+impl StoredActorForm {
+    fn validate(&self) -> Result<()> {
+        let submission = self.attempt_id.is_some() && self.draft.is_some();
+        let no_submission = self.attempt_id.is_none() && self.draft.is_none();
+        let valid = match self.state {
+            ActorFormState::Open => self.answer.is_none() && (submission || no_submission),
+            ActorFormState::Submitted => {
+                submission && self.answer.is_none() && self.errors.is_empty()
+            }
+            ActorFormState::Answered => {
+                submission && self.answer.is_some() && self.errors.is_empty()
+            }
+            ActorFormState::Dismissed | ActorFormState::Cancelled | ActorFormState::Interrupted => {
+                self.answer.is_none() && (submission || no_submission)
+            }
+        };
+        if !valid
+            || self.sequence <= 0
+            || self.revision_sequence < self.sequence
+            || serde_json::to_vec(self)?.len() > super::history::MAX_HISTORY_BYTES - 8192
+        {
+            return Err(StoreError::InvalidForm);
+        }
+        self.opening.form.validate()?;
+        if let Some(draft) = &self.draft {
+            self.opening.form.validate_draft(draft)?;
+        }
+        if let Some(answer) = &self.answer {
+            answer.validate()?;
+        }
+        Ok(())
+    }
+}
+enum SettleForm<'a> {
+    Reject {
+        attempt: &'a str,
+        errors: &'a Vec<FormError>,
+    },
+    Commit {
+        attempt: &'a str,
+        answer: &'a View,
+    },
+    Close,
+}
+/// Validated under the Store transaction; this hook must not reenter Store.
 pub trait ActorFormAuthority: Send + Sync {
     fn validate_form(&self, opening: &ActorFormOpen) -> std::result::Result<bool, String>;
 }
@@ -67,20 +112,23 @@ fn key(origin: &ActorOutputOrigin, mount: &str) -> Result<String> {
     }
     Ok(serde_json::to_string(&(origin, mount))?)
 }
-fn load(tx: &Transaction<'_>, key: &str) -> Result<StoredActorForm> {
+fn load(tx: &Transaction<'_>, identity: &str) -> Result<StoredActorForm> {
     let raw: Option<String> = tx
         .query_row(
             "SELECT presentation FROM actor_forms WHERE identity=?1",
-            [key],
+            [identity],
             |r| r.get(0),
         )
         .optional()?;
-    serde_json::from_str(&raw.ok_or(StoreError::FormUnavailable)?).map_err(Into::into)
-}
-fn save(tx: &Transaction<'_>, key: &str, row: &mut StoredActorForm) -> Result<()> {
-    if serde_json::to_vec(row)?.len() > super::history::MAX_HISTORY_BYTES - 8192 {
+    let row: StoredActorForm = serde_json::from_str(&raw.ok_or(StoreError::FormUnavailable)?)?;
+    row.validate()?;
+    if key(&row.opening.origin, &row.opening.mount_id)? != identity {
         return Err(StoreError::InvalidForm);
     }
+    Ok(row)
+}
+fn save(tx: &Transaction<'_>, key: &str, row: &mut StoredActorForm) -> Result<()> {
+    row.validate()?;
     tx.execute("INSERT INTO events(request_id,kind,payload,created_at) VALUES(NULL,'actor_form_update',?1,?2)",params![serde_json::to_string(&json!({"origin":row.opening.origin,"mountId":row.opening.mount_id,"openingSequence":row.sequence}))?,super::utc_millis()])?;
     row.revision_sequence = tx.last_insert_rowid();
     tx.execute(
@@ -93,7 +141,20 @@ impl Store {
     /// Exclusive runtime startup calls this once before admitting continuation scopes.
     /// Opening a connection or serving retained history never performs recovery.
     pub fn interrupt_actor_forms_for_restart(&self) -> Result<usize> {
-        interrupt_pending(&mut self.lock())
+        let count = interrupt_pending(&mut self.lock())?;
+        if count > 0 {
+            self.signal_actor_form_change();
+        }
+        Ok(count)
+    }
+    /// Subscribe before reading a canonical attempt. Versions are readiness hints,
+    /// never publication order or durable form state.
+    pub fn subscribe_actor_form_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.actor_form_changes.subscribe()
+    }
+    fn signal_actor_form_change(&self) {
+        self.actor_form_changes
+            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
     }
     pub fn open_actor_form(
         &self,
@@ -150,11 +211,13 @@ impl Store {
             errors: vec![],
             answer: None,
         };
+        row.validate()?;
         tx.execute(
             "INSERT INTO actor_forms(identity,opening_sequence,presentation) VALUES(?1,?2,?3)",
             params![identity, row.sequence, serde_json::to_string(&row)?],
         )?;
         tx.commit()?;
+        self.signal_actor_form_change();
         Ok(row)
     }
     pub fn submit_actor_form(
@@ -212,8 +275,8 @@ impl Store {
         if let Some(draft) = draft {
             row.opening.form.validate_draft(draft)?;
         }
-        row.attempt_id = Some(operation.to_owned());
         if let Some(draft) = draft {
+            row.attempt_id = Some(operation.to_owned());
             row.draft = Some(draft.clone());
         }
         row.errors = vec![];
@@ -228,6 +291,7 @@ impl Store {
         )?;
         save(&tx, &identity, &mut row)?;
         tx.commit()?;
+        self.signal_actor_form_change();
         Ok(row)
     }
     pub fn actor_form_attempt(
@@ -263,7 +327,14 @@ impl Store {
         errors: &Value,
     ) -> Result<bool> {
         let errors = parse_errors(errors)?;
-        self.settle_actor_form(origin, mount, Some(attempt), None, Some(&errors))
+        self.settle_actor_form(
+            origin,
+            mount,
+            SettleForm::Reject {
+                attempt,
+                errors: &errors,
+            },
+        )
     }
     pub fn commit_actor_form(
         &self,
@@ -276,53 +347,66 @@ impl Store {
             serde_json::from_value(presentation.clone()).map_err(|_| StoreError::InvalidForm)?;
         presentation.validate()?;
         let retained = self.retain_view_media(&presentation)?;
-        self.settle_actor_form(origin, mount, Some(attempt), Some(&retained), None)
+        self.settle_actor_form(
+            origin,
+            mount,
+            SettleForm::Commit {
+                attempt,
+                answer: &retained,
+            },
+        )
     }
     pub fn close_actor_form(&self, origin: &ActorOutputOrigin, mount: &str) -> Result<bool> {
-        self.settle_actor_form(origin, mount, None, None, None)
+        self.settle_actor_form(origin, mount, SettleForm::Close)
     }
     fn settle_actor_form(
         &self,
         origin: &ActorOutputOrigin,
         mount: &str,
-        attempt: Option<&str>,
-        answer: Option<&View>,
-        errors: Option<&Vec<FormError>>,
+        settlement: SettleForm<'_>,
     ) -> Result<bool> {
         let identity = key(origin, mount)?;
         let mut c = self.lock();
         let tx = c.transaction()?;
         let mut row = load(&tx, &identity)?;
-        if let Some(attempt) = attempt {
-            if row.attempt_id.as_deref() == Some(attempt)
-                && ((row.state == ActorFormState::Answered
-                    && answer.is_some()
-                    && row.answer.as_ref() == answer)
-                    || (row.state == ActorFormState::Open
-                        && errors.is_some()
-                        && Some(&row.errors) == errors))
-            {
-                return Ok(true);
+        match settlement {
+            SettleForm::Commit { attempt, answer } => {
+                if row.attempt_id.as_deref() != Some(attempt) {
+                    return Ok(false);
+                }
+                if row.state == ActorFormState::Answered && row.answer.as_ref() == Some(answer) {
+                    return Ok(true);
+                }
+                if row.state != ActorFormState::Submitted {
+                    return Ok(false);
+                }
+                row.state = ActorFormState::Answered;
+                row.answer = Some(answer.clone());
+                row.errors = vec![];
             }
-            if row.state != ActorFormState::Submitted || row.attempt_id.as_deref() != Some(attempt)
-            {
-                return Ok(false);
+            SettleForm::Reject { attempt, errors } => {
+                if row.attempt_id.as_deref() != Some(attempt) {
+                    return Ok(false);
+                }
+                if row.state == ActorFormState::Open && &row.errors == errors {
+                    return Ok(true);
+                }
+                if row.state != ActorFormState::Submitted {
+                    return Ok(false);
+                }
+                row.state = ActorFormState::Open;
+                row.errors = errors.clone();
             }
-        } else if !matches!(row.state, ActorFormState::Open | ActorFormState::Submitted) {
-            return Ok(false);
-        }
-        if let Some(answer) = answer {
-            row.state = ActorFormState::Answered;
-            row.answer = Some(answer.clone());
-            row.errors = vec![]
-        } else if let Some(errors) = errors {
-            row.state = ActorFormState::Open;
-            row.errors = errors.clone()
-        } else {
-            row.state = ActorFormState::Cancelled
+            SettleForm::Close => {
+                if !matches!(row.state, ActorFormState::Open | ActorFormState::Submitted) {
+                    return Ok(false);
+                }
+                row.state = ActorFormState::Cancelled;
+            }
         }
         save(&tx, &identity, &mut row)?;
         tx.commit()?;
+        self.signal_actor_form_change();
         Ok(true)
     }
     fn retain_form_media(&self, form: &FormSpec) -> Result<FormSpec> {
@@ -544,6 +628,14 @@ mod tests {
         );
         let b = opening("b");
         store.open_actor_form(&Authority(true), &b).unwrap();
+        store
+            .submit_actor_form(
+                &b.origin,
+                "b",
+                "pending",
+                &json!({"f0":"retained when dismissed"}),
+            )
+            .unwrap();
         store.dismiss_actor_form(&b.origin, "b", "dismiss").unwrap();
         assert_eq!(
             store.actor_form_attempt(&b.origin, "b").unwrap(),
@@ -626,5 +718,165 @@ mod tests {
             );
         }
         std::fs::remove_file(path).unwrap();
+    }
+}
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+    struct Authority;
+    impl ActorFormAuthority for Authority {
+        fn validate_form(&self, _: &ActorFormOpen) -> std::result::Result<bool, String> {
+            Ok(true)
+        }
+    }
+    fn opening() -> ActorFormOpen {
+        ActorFormOpen{origin:ActorOutputOrigin{run:"run".into(),native_actor:7,incarnation:1},mount_id:"mount".into(),execution:ActorOutputExecution::ActorProgram,conversation:None,form:serde_json::from_value(json!({"version":1,"root":{"kind":"text","id":"f0","label":"Field","initial":null}})).unwrap()}
+    }
+    #[tokio::test]
+    async fn durable_mutations_wake_subscribed_waiters_and_failed_transactions_do_not() {
+        let store = Store::memory().unwrap();
+        let o = opening();
+        store.open_actor_form(&Authority, &o).unwrap();
+        let mut wake = store.subscribe_actor_form_changes();
+        assert!(
+            store
+                .actor_form_attempt(&o.origin, &o.mount_id)
+                .unwrap()
+                .is_none()
+        );
+        store
+            .submit_actor_form(&o.origin, &o.mount_id, "one", &json!({"f0":"draft"}))
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), wake.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            store.actor_form_attempt(&o.origin, &o.mount_id).unwrap(),
+            Some(ActorFormAttempt::Submitted { .. })
+        ));
+        store
+            .reject_actor_form(
+                &o.origin,
+                &o.mount_id,
+                "one",
+                &json!([{"field":"f0","message":"correct"}]),
+            )
+            .unwrap();
+        wake.changed().await.unwrap();
+        assert!(
+            store
+                .actor_form_attempt(&o.origin, &o.mount_id)
+                .unwrap()
+                .is_none()
+        );
+        store.lock().execute_batch("CREATE TRIGGER refuse_form BEFORE INSERT ON events WHEN NEW.kind='actor_form_update' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+        assert!(
+            store
+                .submit_actor_form(&o.origin, &o.mount_id, "two", &json!({"f0":"next"}))
+                .is_err()
+        );
+        assert!(!wake.has_changed().unwrap());
+        store
+            .lock()
+            .execute_batch("DROP TRIGGER refuse_form")
+            .unwrap();
+        store
+            .submit_actor_form(&o.origin, &o.mount_id, "two", &json!({"f0":"correct"}))
+            .unwrap();
+        wake.changed().await.unwrap();
+        store
+            .dismiss_actor_form(&o.origin, &o.mount_id, "dismiss")
+            .unwrap();
+        wake.changed().await.unwrap();
+        assert_eq!(
+            store.actor_form_attempt(&o.origin, &o.mount_id).unwrap(),
+            Some(ActorFormAttempt::Dismissed)
+        );
+        let mut other = o.clone();
+        other.mount_id = "other".into();
+        store.open_actor_form(&Authority, &other).unwrap();
+        wake.changed().await.unwrap();
+        store
+            .submit_actor_form(
+                &other.origin,
+                &other.mount_id,
+                "submit",
+                &json!({"f0":"answer"}),
+            )
+            .unwrap();
+        wake.changed().await.unwrap();
+        store
+            .commit_actor_form(
+                &other.origin,
+                &other.mount_id,
+                "submit",
+                &json!({"kind":"text","text":"accepted"}),
+            )
+            .unwrap();
+        wake.changed().await.unwrap();
+        assert!(
+            !store
+                .close_actor_form(&other.origin, &other.mount_id)
+                .unwrap()
+        );
+        assert!(!wake.has_changed().unwrap());
+        let mut cancelled = o.clone();
+        cancelled.mount_id = "cancelled".into();
+        store.open_actor_form(&Authority, &cancelled).unwrap();
+        wake.changed().await.unwrap();
+        store
+            .close_actor_form(&cancelled.origin, &cancelled.mount_id)
+            .unwrap();
+        wake.changed().await.unwrap();
+        let mut interrupted = o.clone();
+        interrupted.mount_id = "interrupted".into();
+        store.open_actor_form(&Authority, &interrupted).unwrap();
+        wake.changed().await.unwrap();
+        store.interrupt_actor_forms_for_restart().unwrap();
+        wake.changed().await.unwrap();
+        assert!(matches!(
+            store
+                .actor_form_attempt(&interrupted.origin, &interrupted.mount_id)
+                .unwrap(),
+            Some(ActorFormAttempt::Unavailable {
+                cause: ActorFormUnavailableCause::Interrupted
+            })
+        ));
+    }
+    #[test]
+    fn decoded_state_invariants_and_open_save_bounds_are_owned_centrally() {
+        let store = Store::memory().unwrap();
+        let o = opening();
+        store.open_actor_form(&Authority, &o).unwrap();
+        store
+            .submit_actor_form(&o.origin, &o.mount_id, "attempt", &json!({"f0":"draft"}))
+            .unwrap();
+        store
+            .lock()
+            .execute(
+                "UPDATE actor_forms SET presentation=json_set(presentation,'$.state','answered')",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.actor_form(&o.origin, &o.mount_id),
+            Err(StoreError::InvalidForm)
+        ));
+        let mut large = opening();
+        large.mount_id = "too-large".into();
+        large.execution = ActorOutputExecution::Notebook {
+            execution: "x".repeat(super::super::history::MAX_HISTORY_BYTES),
+            input_unit_index: 0,
+            effect_ordinal: 0,
+        };
+        assert!(matches!(
+            store.open_actor_form(&Authority, &large),
+            Err(StoreError::InvalidForm)
+        ));
+        assert!(matches!(
+            store.actor_form(&large.origin, &large.mount_id),
+            Err(StoreError::FormUnavailable)
+        ));
     }
 }

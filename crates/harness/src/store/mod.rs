@@ -316,6 +316,7 @@ pub struct Store {
     pub(crate) conn: Mutex<Connection>,
     pub(crate) process_identity: Arc<()>,
     store_id: String,
+    actor_form_changes: tokio::sync::watch::Sender<u64>,
 }
 impl Store {
     pub(crate) fn validate_agent_path(path: &str, parent: Option<&str>) -> Result<()> {
@@ -909,6 +910,7 @@ impl Store {
             conn: Mutex::new(conn),
             process_identity: Arc::new(()),
             store_id,
+            actor_form_changes: tokio::sync::watch::channel(0).0,
         })
     }
     pub fn standalone_identity(&self, actor: AgentPath) -> ConversationIdentity {
