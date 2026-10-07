@@ -769,6 +769,9 @@ async fn pinned_admission_refusal_skips_callback_but_dispatched_error_keeps_it_o
                 .requires_provider(),
             !close_before_launch
         );
+        let frontier = store.embedded_round_frontier(&host.identity).unwrap();
+        assert_eq!(frontier.settled_head, None);
+        assert_eq!(frontier.pending_head.as_ref(), Some(&head));
         drop(runtime);
         let recovered = conversation
             .engine::<TestAuth, _>(
@@ -781,7 +784,7 @@ async fn pinned_admission_refusal_skips_callback_but_dispatched_error_keeps_it_o
         let (_cancel, cancel) = watch::channel(false);
         let (_mail, mail) = tokio::sync::mpsc::unbounded_channel::<DurableMailboxWake>();
         recovered
-            .run_recovering_embedded(Some(head), vec![], cancel, mail)
+            .run_recovering_embedded(frontier.settled_head, vec![], cancel, mail)
             .await
             .unwrap();
         assert_eq!(

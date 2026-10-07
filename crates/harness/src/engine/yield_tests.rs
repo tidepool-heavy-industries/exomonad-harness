@@ -581,6 +581,9 @@ async fn yield_pinned_embedded_surface_allows_intrinsic_without_host_authority()
         .clone();
     let finalization = store.completed_finalization(&operation).unwrap().unwrap();
     assert!(!finalization.requires_provider());
+    let frontier = store.embedded_round_frontier(&host.identity).unwrap();
+    assert_eq!(frontier.settled_head, None);
+    assert_eq!(frontier.pending_head.as_ref(), Some(&result.head_request));
     drop(engine);
     drop(conversation);
     drop(snapshot);
@@ -608,7 +611,7 @@ async fn yield_pinned_embedded_surface_allows_intrinsic_without_host_authority()
     let (_cancel, cancel) = watch::channel(false);
     let (_mail, mail) = tokio::sync::mpsc::unbounded_channel::<DurableMailboxWake>();
     runtime
-        .run_recovering_embedded(Some(result.head_request), vec![], cancel, mail)
+        .run_recovering_embedded(frontier.settled_head, vec![], cancel, mail)
         .await
         .unwrap();
     assert_eq!(
