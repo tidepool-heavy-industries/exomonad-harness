@@ -161,4 +161,14 @@ describe('mounted actor forms', () => {
     const payload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { draft: Record<string, unknown> }
     expect(payload.draft.many).toEqual([])
   })
+
+  it('accepts Rust-bounded option counts, labels, and form errors', () => {
+    const options = Array.from({ length: 300 }, (_, index) => ({ id: `option-${index}`, label: index === 0 ? 'x'.repeat(9000) : `Option ${index}`, presentation: view }))
+    const form = { version: 1 as const, root: { kind: 'choice' as const, id: 'choice', label: 'Pick', options, initial: null } }
+    expect(isFormSpec(form)).toBe(true)
+    expect(isFormSpec({ version: 1, root: { kind: 'choice', id: 'choice', label: 'Pick', options: [{ id: 'i'.repeat(129), label: 'Option', presentation: view }], initial: null } })).toBe(false)
+    expect(isStoredActorForm({ ...openForm, errors: Array.from({ length: 1024 }, () => ({ field: null, message: 'x' })) })).toBe(true)
+    expect(isStoredActorForm({ ...openForm, errors: Array.from({ length: 1025 }, () => ({ field: null, message: 'x' })) })).toBe(false)
+    expect(isStoredActorForm({ ...openForm, errors: [{ field: null, message: 'x'.repeat(32 * 1024 + 1) }] })).toBe(false)
+  })
 })

@@ -34,10 +34,10 @@ export type DraftValue = string | number | boolean | string[] | null
 export type FormDraft = Record<string, DraftValue>
 type Obj = Record<string, unknown>
 const obj = (value: unknown): value is Obj => typeof value === 'object' && value !== null && !Array.isArray(value)
-const text = (value: unknown, max = 8192): value is string => typeof value === 'string' && new TextEncoder().encode(value).length <= max
+const text = (value: unknown, max = 128 * 1024): value is string => typeof value === 'string' && new TextEncoder().encode(value).length <= max
 
 function option(value: unknown): value is FormOption {
-  return obj(value) && text(value.id, 256) && value.id.length > 0 && text(value.label) && isRichView(value.presentation)
+  return obj(value) && text(value.id, 128) && value.id.length > 0 && text(value.label) && isRichView(value.presentation)
 }
 const decimalInteger = (value: unknown): value is string => typeof value === 'string' && /^-?\d+$/.test(value)
 function formNode(value: unknown, depth = 0, ids = new Set<string>()): value is FormNode {
@@ -56,7 +56,7 @@ function formNode(value: unknown, depth = 0, ids = new Set<string>()): value is 
     }
     case 'choice': case 'many': case 'alternatives': {
       if (!text(value.id, 128) || value.id.length === 0 || ids.has(value.id) || !text(value.label) || !Array.isArray(value.options)
-        || value.options.length > 256 || value.kind !== 'many' && value.options.length === 0) return false
+        || value.options.length > 1024 || value.kind !== 'many' && value.options.length === 0) return false
       ids.add(value.id)
       const optionIds = new Set<string>()
       if (!value.options.every(item => obj(item) && option(item) && !optionIds.has(item.id) && !!optionIds.add(item.id)
@@ -79,9 +79,18 @@ export function isStoredActorForm(value: unknown): value is StoredActorForm {
     || !(value.opening.conversation === null || isFormConversation(value.opening.conversation)) || !isFormSpec(value.opening.form)
     || !['open', 'submitted', 'answered', 'dismissed', 'cancelled', 'interrupted'].includes(String(value.state))
     || !(value.attemptId === null || text(value.attemptId, 256)) || !(value.draft === null || isFormDraft(value.draft))
-    || !Array.isArray(value.errors) || value.errors.length > 128 || !value.errors.every(error => obj(error)
-      && (error.field === null || text(error.field, 256)) && text(error.message, 8192))
+    || !isFormErrors(value.errors)
     || !(value.answer === null || isRichView(value.answer))) return false
+  return true
+}
+function isFormErrors(value: unknown): value is StoredActorForm['errors'] {
+  if (!Array.isArray(value) || value.length > 1024) return false
+  let bytes = 0
+  for (const error of value) {
+    if (!obj(error) || !(error.field === null || text(error.field, 256)) || !text(error.message)) return false
+    bytes += new TextEncoder().encode(error.field ?? '').length + new TextEncoder().encode(error.message).length
+    if (bytes > 32 * 1024) return false
+  }
   return true
 }
 function isFormDraft(value: unknown): value is FormDraft {
