@@ -17,5 +17,21 @@
 .actor-operations .toolbar h2 { margin: 0; }
 .actor-output { max-height: 45vh; overflow: auto; margin-block: 12px; }
 .actor-output pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.unified-chat, .mounted-form { margin-block: 12px; }
+.unified-chat { max-height: 65vh; overflow: auto; }
+.unified-entries > [role="listitem"] { border-bottom: 1px solid var(--line); padding-block: 8px; }
+.rich-view-text, .rich-view-markdown, .rich-view-inspection pre, .mounted-form pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.rich-view-row { display: flex; align-items: flex-start; gap: 8px; }
+.rich-view-column, .form-group { display: grid; gap: 8px; }
+.rich-view-caption { margin: 0; }
+.rich-view-caption figcaption { color: var(--muted); font-size: .9em; }
+.rich-view-image { display: block; max-width: 100%; max-height: 30rem; object-fit: contain; }
+.form-section, .mounted-form fieldset { border: 1px solid var(--line); margin-block: 8px; padding: 8px; min-width: 0; }
+.form-option, .form-field { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; margin-block: 6px; }
+.form-option .rich-view { grid-column: 2; }
+.form-field input { grid-column: 2; }
+.form-actions { display: flex; gap: 8px; margin-block: 8px; }
+.form-errors { color: var(--failed); }
+.form-answer { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
 @media (min-width: 1000px) { .actor-details { grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr); } }
 @media (max-width: 700px) { .worker-chat { grid-template-columns: minmax(0, 1fr); } .worker-chat-list { max-height: 16rem; border-inline-end: 0; border-bottom: 1px solid var(--line); padding-inline-end: 0; } }
