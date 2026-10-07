@@ -130,7 +130,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
             <p role="status">This actor is {resolved.actor.lifecycle}. Its Chat is read-only; retained history remains available.</p>}
           {resolved.missing && <p role="status">This exact actor is unavailable. Retained history remains read-only; choose a different worker explicitly.</p>}
           {ambiguousConversation && !exactHead && <p role="status">The host associates this conversation with multiple exact actors. Its current history head is unavailable; only previously retained exact history can be shown.</p>}
-          {outputOrigin && <UnifiedChat key={JSON.stringify([actorOutputKey(outputOrigin), head?.id ?? exactHead])}
+          {outputOrigin && <UnifiedChat key={actorOutputKey(outputOrigin)}
             origin={outputOrigin} requestId={head?.id ?? exactHead}
             revision={(data.actorOutputRevisions ?? []).find(reference => actorOutputKey(reference.origin) === actorOutputKey(outputOrigin))?.sequence}
             ready={transportPhase === 'ready'} active={!!resolved.actor && ['running', 'waiting'].includes(resolved.actor.lifecycle)} onAuthExpired={onAuthExpired}
@@ -139,7 +139,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
             cacheKey={JSON.stringify([context, conversationId])} requestId={head.id}
             requests={new Map(data.timeline.filter(item => item.kind === 'request').map(item => [item.id, item]))}
             historyRevisions={(data.historyRevisions ?? []).filter(revision => revision.origin.kind === 'embedded' && revision.origin.run === identity.run)} active={!!resolved.actor && ['running', 'waiting'].includes(resolved.actor.lifecycle)} refreshKey={refreshKey} ready={transportPhase === 'ready'} onAuthExpired={onAuthExpired} /> :
-            <p>{ambiguousConversation ? 'No exact history head is available for this actor.' : resolved.missing ? 'The host has no retained conversation association for this exact actor.' : 'No retained model exchange is available yet.'}</p>}
+            <p>{ambiguousConversation ? 'No exact history head is available for this actor.' : resolved.missing ? 'The host has no retained conversation association for this exact actor.' : 'No retained model exchange is available yet.'}</p>} />}
           {resolved.actor?.kind === 'workflow' ? <WorkflowMessages key={context} data={data} identity={identity} /> : !outputOrigin ?
             (conversationId || exactHead) && head ? <ChatHistory key={JSON.stringify([context, conversationId])}
               cacheKey={JSON.stringify([context, conversationId])} requestId={head.id}

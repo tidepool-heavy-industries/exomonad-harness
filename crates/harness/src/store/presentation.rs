@@ -216,6 +216,7 @@ impl FormSpec {
         fn options<'a>(
             xs: impl Iterator<Item = (&'a String, &'a View)>,
             initial: impl Iterator<Item = &'a String>,
+            nonempty: bool,
         ) -> bool {
             let mut ids = HashSet::new();
             let mut n = 0;
@@ -225,7 +226,7 @@ impl FormSpec {
                     return false;
                 }
             }
-            n > 0 && n <= 1024 && initial.into_iter().all(|id| ids.contains(id))
+            (!nonempty || n > 0) && n <= 1024 && initial.into_iter().all(|id| ids.contains(id))
         }
         fn go(n: &FormNode, depth: usize, ids: &mut HashSet<String>) -> bool {
             if depth > 32 {
@@ -262,7 +263,11 @@ impl FormSpec {
                     options: xs,
                     initial,
                     ..
-                } => options(xs.iter().map(|o| (&o.id, &o.presentation)), initial.iter()),
+                } => options(
+                    xs.iter().map(|o| (&o.id, &o.presentation)),
+                    initial.iter(),
+                    true,
+                ),
                 FormNode::Many {
                     options: xs,
                     initial,
@@ -270,14 +275,18 @@ impl FormSpec {
                 } => options(
                     xs.iter().map(|o| (&o.id, &o.presentation)),
                     initial.iter().flatten(),
+                    false,
                 ),
                 FormNode::Alternatives {
                     options: xs,
                     initial,
                     ..
                 } => {
-                    options(xs.iter().map(|o| (&o.id, &o.presentation)), initial.iter())
-                        && xs.iter().all(|o| go(&o.form, depth + 1, ids))
+                    options(
+                        xs.iter().map(|o| (&o.id, &o.presentation)),
+                        initial.iter(),
+                        true,
+                    ) && xs.iter().all(|o| go(&o.form, depth + 1, ids))
                 }
             }
         }
@@ -342,6 +351,28 @@ mod tests {
             serde_json::from_value::<FormSpec>(json!({"version":1,"root":{"kind":"invented"}}))
                 .is_err()
         );
+    }
+    #[test]
+    fn empty_many_and_cleared_number_preserve_valid_wire_drafts() {
+        let many: FormSpec = serde_json::from_value(json!({"version":1,"root":{"kind":"many","id":"f0","label":"Values","options":[],"initial":[]}})).unwrap();
+        many.validate().unwrap();
+        let draft: FormDraft = serde_json::from_value(json!({"f0":[]})).unwrap();
+        many.validate_draft(&draft).unwrap();
+        let unknown: FormDraft = serde_json::from_value(json!({"f0":["o0"]})).unwrap();
+        assert!(many.validate_draft(&unknown).is_err());
+        for kind in ["choice", "alternatives"] {
+            let spec: FormSpec = serde_json::from_value(json!({"version":1,"root":{"kind":kind,"id":"f0","label":"Value","options":[],"initial":null}})).unwrap();
+            assert!(spec.validate().is_err());
+        }
+        let number: FormSpec = serde_json::from_value(
+            json!({"version":1,"root":{"kind":"number","id":"f0","label":"Number","initial":1.5}}),
+        )
+        .unwrap();
+        number.validate().unwrap();
+        let cleared: FormDraft = serde_json::from_value(json!({"f0":null})).unwrap();
+        number.validate_draft(&cleared).unwrap();
+        let wrong_type: FormDraft = serde_json::from_value(json!({"f0":""})).unwrap();
+        assert!(number.validate_draft(&wrong_type).is_err());
     }
     #[test]
     fn standard_svg_parser_accepts_general_documents_and_reports_invalid_xml() {
