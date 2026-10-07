@@ -199,14 +199,18 @@ impl Store {
             }
             return Ok(row);
         }
-        if row.state != ActorFormState::Open {
+        if row.state != ActorFormState::Open
+            && !(draft.is_none() && row.state == ActorFormState::Submitted)
+        {
             return Err(StoreError::FormUnavailable);
         }
         if let Some(draft) = draft {
             row.opening.form.validate_draft(draft)?;
         }
         row.attempt_id = Some(operation.to_owned());
-        row.draft = draft.cloned();
+        if let Some(draft) = draft {
+            row.draft = Some(draft.clone());
+        }
         row.errors = vec![];
         row.state = if draft.is_some() {
             ActorFormState::Submitted
@@ -538,6 +542,17 @@ mod tests {
         assert_eq!(
             store.actor_form_attempt(&b.origin, "b").unwrap(),
             Some(ActorFormAttempt::Dismissed)
+        );
+        assert!(store.actor_form(&b.origin, "b").unwrap().draft.is_some());
+        assert!(
+            !store
+                .commit_actor_form(
+                    &b.origin,
+                    "b",
+                    "pending",
+                    &json!({"kind":"text","text":"stale"})
+                )
+                .unwrap()
         );
         assert!(
             store

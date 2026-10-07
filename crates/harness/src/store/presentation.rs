@@ -1,5 +1,6 @@
 //! Canonical serde presentation contract. Haskell lowers once at this boundary.
 use super::{Result, StoreError};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 pub fn validate_svg(source: &str) -> Result<()> {
@@ -19,7 +20,7 @@ pub fn validate_svg(source: &str) -> Result<()> {
     Ok(())
 }
 pub const MAX_PRESENTATION_BYTES: usize = 128 * 1024;
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum View {
     Text {
@@ -59,13 +60,13 @@ pub enum View {
         unavailable: bool,
     },
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MediaSource {
     Data { mime: ImageMime, base64: String },
     Retained { hash: String },
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ImageMime {
     #[serde(rename = "image/png")]
     Png,
@@ -83,13 +84,13 @@ impl ImageMime {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FormSpec {
     pub version: u32,
     pub root: FormNode,
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FormNode {
     Pure,
@@ -143,14 +144,14 @@ pub enum FormNode {
         initial: Option<String>,
     },
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FormOption {
     pub id: String,
     pub label: String,
     pub presentation: View,
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FormAlternative {
     pub id: String,
@@ -158,7 +159,7 @@ pub struct FormAlternative {
     pub presentation: View,
     pub form: FormNode,
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum ControlValue {
     Bool(bool),
@@ -169,7 +170,7 @@ pub enum ControlValue {
     Empty,
 }
 pub type FormDraft = BTreeMap<String, ControlValue>;
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FormError {
     pub field: Option<String>,
