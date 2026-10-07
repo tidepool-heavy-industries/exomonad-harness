@@ -112,7 +112,7 @@ pub enum FormNode {
     Int {
         id: String,
         label: String,
-        initial: Option<i64>,
+        initial: Option<String>,
     },
     Number {
         id: String,
@@ -327,7 +327,7 @@ mod tests {
         .unwrap();
         spec.validate_draft(&draft).unwrap();
         let bad: FormDraft =
-            serde_json::from_value(json!({"f0":"o0","f1":"invalid selected"})).unwrap();
+            serde_json::from_value(json!({"f0":"o0","f1":123})).unwrap();
         assert!(matches!(
             spec.validate_draft(&bad),
             Err(StoreError::InvalidForm)
