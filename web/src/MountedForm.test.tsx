@@ -21,6 +21,11 @@ function integerForm(initial: string | null): StoredActorForm {
     kind: 'int', id: 'integer', label: 'Integer', initial,
   } } } }
 }
+function numberForm(): StoredActorForm {
+  return { ...openForm, opening: { ...openForm.opening, mountId: 'number-mount', form: { version: 1, root: {
+    kind: 'number', id: 'number', label: 'Number', initial: 1.25,
+  } } } }
+}
 
 beforeEach(() => { clearMountedFormDrafts(); vi.restoreAllMocks() })
 
@@ -115,5 +120,28 @@ describe('mounted actor forms', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
     const payload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { draft: Record<string, unknown> }
     expect(payload.draft.integer).toBe('1.5')
+  })
+
+  it('keeps same-id radio groups independent across mounted forms', () => {
+    const second: StoredActorForm = { ...openForm, opening: { ...openForm.opening, mountId: 'mount-2' } }
+    render(<><MountedForm form={openForm} ready active /><MountedForm form={second} ready active /></>)
+    const choices = screen.getAllByLabelText('Same label') as HTMLInputElement[]
+    expect(choices).toHaveLength(4)
+    fireEvent.click(choices[0]!)
+    expect(choices[0]!.checked).toBe(true)
+    expect(choices[1]!.checked).toBe(false)
+    expect(choices[2]!.checked).toBe(false)
+    expect(choices[3]!.checked).toBe(false)
+  })
+
+  it('submits an empty number input as null', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('rejected', { status: 409 }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<MountedForm form={numberForm()} ready active />)
+    fireEvent.change(screen.getByLabelText('Number'), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    const payload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { draft: Record<string, unknown> }
+    expect(payload.draft.number).toBeNull()
   })
 })
