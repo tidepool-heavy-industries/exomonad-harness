@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { actorOutputKey, isActorOutputOrigin, isStoredActorOutput, type ActorOutputOrigin, type StoredActorOutput } from './actor-output'
 import { isStoredActorForm, type StoredActorForm } from './MountedForm'
 import HistoryItem from './HistoryItem'
@@ -17,6 +17,8 @@ export interface UnifiedPage {
   readonly origin: ActorOutputOrigin; readonly cutoverSequence: number; readonly legacyHistory: boolean
   readonly entries: readonly UnifiedEntry[]; readonly nextAfter: number | null
 }
+interface CachedPage { readonly after: number; readonly page: UnifiedPage }
+const MAX_CACHED_PAGES = 16
 const object = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 const nat = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0
 
@@ -57,30 +59,30 @@ export default function UnifiedChat({ origin, requestId, revision, ready, active
   origin: ActorOutputOrigin; requestId?: string; revision?: number; ready: boolean; active: boolean; onAuthExpired?: () => void; legacy?: ReactNode
   liveOutput?: readonly LiveOutput[]; requests?: ReadonlyMap<string, Pick<HarnessViewModel['timeline'][number], 'id' | 'state' | 'detail' | 'failure'>>
 }) {
-  const [page, setPage] = useState<UnifiedPage>()
-  const pageRef = useRef<UnifiedPage>()
+  const [pages, setPages] = useState<readonly CachedPage[]>([])
   const [pageIndex, setPageIndex] = useState(0)
   const [issue, setIssue] = useState('')
   const [attempt, setAttempt] = useState(0)
-  const [loadingMore, setLoadingMore] = useState(false)
+  const [loadingNext, setLoadingNext] = useState(false)
   const identity = actorOutputKey(origin)
+  const after = pages[pageIndex]?.after ?? 0
+  const page = pages[pageIndex]?.page
   useEffect(() => {
     if (!ready) return
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     const load = async () => {
       try {
-        let next = await readUnifiedPage(origin, requestId, 0, controller.signal, onAuthExpired)
-        const entries = [...next.entries]
-        const knownCount = pageRef.current?.entries.length ?? 0
-        while (next.nextAfter !== null && entries.length < knownCount && entries.length < 500) {
-          next = await readUnifiedPage(origin, requestId, next.nextAfter, controller.signal, onAuthExpired)
-          entries.push(...next.entries)
-        }
-        next = { ...next, entries: entries.slice(0, 500) }
+        const next = await readUnifiedPage(origin, requestId, after, controller.signal, onAuthExpired)
         if (!controller.signal.aborted) {
-          pageRef.current = next
-          setPage(next)
+          setPages(current => {
+            if (current[pageIndex]?.after === after) {
+              const updated = [...current]
+              updated[pageIndex] = { after, page: next }
+              return updated
+            }
+            return pageIndex === current.length ? [...current, { after, page: next }] : current
+          })
           setIssue('')
         }
       } catch (error) {
@@ -91,32 +93,31 @@ export default function UnifiedChat({ origin, requestId, revision, ready, active
     }
     void load()
     return () => { controller.abort(); clearTimeout(timer) }
-  }, [identity, requestId, revision, ready, active, attempt, onAuthExpired])
-  async function loadMore() {
-    if (!page?.nextAfter || loadingMore || !ready || page.entries.length >= 500) return
+  }, [identity, requestId, after, pageIndex, revision, ready, active, attempt, onAuthExpired])
+  async function loadNext() {
+    if (!page?.nextAfter || loadingNext || !ready) return
+    if (pageIndex + 1 < pages.length) { setPageIndex(index => index + 1); return }
     const cursor = page.nextAfter
     const controller = new AbortController()
-    setLoadingMore(true); setIssue('')
+    setLoadingNext(true); setIssue('')
     try {
       const next = await readUnifiedPage(origin, requestId, cursor, controller.signal, onAuthExpired)
-      setPage(current => {
-        if (!current || current.nextAfter !== cursor) return current
-        const entries = [...current.entries, ...next.entries].slice(0, 500)
-        const updated = { ...current, entries, nextAfter: entries.length >= 500 ? null : next.nextAfter }
-        pageRef.current = updated
-        return updated
+      setPages(current => {
+        if (current[pageIndex]?.page.nextAfter !== cursor) return current
+        const extended = [...current.slice(0, pageIndex + 1), { after: cursor, page: next }]
+        return extended.length > MAX_CACHED_PAGES ? extended.slice(1) : extended
       })
-      setPageIndex(index => index + 1)
+      setPageIndex(index => Math.min(MAX_CACHED_PAGES - 1, index + 1))
     } catch (error) { setIssue(error instanceof Error ? error.message : String(error)) }
-    finally { setLoadingMore(false) }
+    finally { setLoadingNext(false) }
   }
   const loadedHashes = new Map<string, ReadonlySet<string>>()
-  for (const entry of page?.entries ?? []) if (entry.kind === 'message') {
+  for (const cached of pages) for (const entry of cached.page.entries) if (entry.kind === 'message') {
     const hashes = new Set(loadedHashes.get(entry.requestId) ?? [])
     hashes.add(entry.hash); loadedHashes.set(entry.requestId, hashes)
   }
   const provisional = visibleOutput(liveOutput, loadedHashes)
-  const visibleEntries = page?.entries.slice(pageIndex * 50, pageIndex * 50 + 50) ?? []
+  const visibleEntries = page?.entries ?? []
   const failedRequests = [...(requests?.values() ?? [])].filter(item => item.state === 'failed'
     && page?.entries.some(entry => entry.kind === 'message' && entry.requestId === item.id))
   return <section className="unified-chat" aria-label="Conversation" aria-busy={ready && !page}>
@@ -134,10 +135,9 @@ export default function UnifiedChat({ origin, requestId, revision, ready, active
     </div>)}</div>}
     {page && <div className="history-controls">
       <button type="button" disabled={pageIndex === 0} onClick={() => setPageIndex(index => Math.max(0, index - 1))}>Previous entries</button>
-      <button type="button" disabled={(pageIndex + 1) * 50 >= page.entries.length} onClick={() => setPageIndex(index => index + 1)}>Next entries</button>
-      {(pageIndex + 1) * 50 >= page.entries.length && page.nextAfter !== null && page.entries.length < 500 && <button type="button" disabled={!ready || loadingMore} onClick={() => void loadMore()}>
-        {loadingMore ? 'Loading entries…' : 'More conversation entries'}
-      </button>}
+      <button type="button" disabled={pageIndex + 1 >= pages.length && page.nextAfter === null || !ready || loadingNext} onClick={() => void loadNext()}>
+        {loadingNext ? 'Loading entries…' : 'Next entries'}
+      </button>
     </div>}
     {provisional.length > 0 && <div role="list" aria-label="Provisional live output">{provisional.map(item => <div role="listitem" className="message" key={outputKey(item)}>
       <h3>{outputLabels[item.channel]}{item.committedHash ? '' : item.streaming && ready && active ? ' · streaming' : ' · incomplete'}</h3>

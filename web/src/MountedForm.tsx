@@ -3,27 +3,35 @@ import { RichViewRenderer, isRichView, type RichView } from './rich-view'
 
 export interface FormOption { readonly id: string; readonly label: string; readonly presentation: RichView }
 export type FormNode =
-  | { readonly kind: 'pure' | 'empty' }
+  | { readonly kind: 'pure' }
+  | { readonly kind: 'empty' }
   | { readonly kind: 'group'; readonly children: readonly FormNode[] }
   | { readonly kind: 'section'; readonly title: string; readonly child: FormNode }
   | { readonly kind: 'view'; readonly presentation: RichView }
-  | { readonly kind: 'text' | 'int'; readonly id: string; readonly label: string; readonly initial: string | null }
+  | { readonly kind: 'text'; readonly id: string; readonly label: string; readonly initial: string | null }
+  | { readonly kind: 'int'; readonly id: string; readonly label: string; readonly initial: string | null }
   | { readonly kind: 'number'; readonly id: string; readonly label: string; readonly initial: number | null }
   | { readonly kind: 'bool'; readonly id: string; readonly label: string; readonly initial: boolean | null }
-  | { readonly kind: 'choice' | 'many'; readonly id: string; readonly label: string; readonly options: readonly FormOption[]; readonly initial: string | readonly string[] | null }
+  | { readonly kind: 'choice'; readonly id: string; readonly label: string; readonly options: readonly FormOption[]; readonly initial: string | null }
+  | { readonly kind: 'many'; readonly id: string; readonly label: string; readonly options: readonly FormOption[]; readonly initial: readonly string[] | null }
   | { readonly kind: 'alternatives'; readonly id: string; readonly label: string; readonly options: readonly (FormOption & { readonly form: FormNode })[]; readonly initial: string | null }
 export interface FormSpec { readonly version: 1; readonly root: FormNode }
 export interface FormOrigin { readonly run: string; readonly nativeActor: number; readonly incarnation: number }
+export type FormExecution = { readonly kind: 'actor_program' }
+  | { readonly kind: 'notebook'; readonly execution: string; readonly inputUnitIndex: number; readonly effectOrdinal: number }
+export type FormConversation = { readonly kind: 'standalone'; readonly store: string; readonly actor: string }
+  | { readonly kind: 'embedded'; readonly run: string; readonly actor: string; readonly incarnation: string }
 export interface StoredActorForm {
-  readonly sequence: number; readonly revisionSequence?: number
-  readonly opening: { readonly origin: FormOrigin; readonly mountId: string; readonly execution: string; readonly conversation: string; readonly form: FormSpec }
+  readonly sequence: number; readonly revisionSequence: number
+  readonly opening: { readonly origin: FormOrigin; readonly mountId: string; readonly execution: FormExecution; readonly conversation: FormConversation | null; readonly form: FormSpec }
   readonly state: 'open' | 'submitted' | 'answered' | 'dismissed' | 'cancelled' | 'interrupted'
   readonly attemptId: string | null
-  readonly draft: Readonly<Record<string, unknown>> | null
+  readonly draft: Readonly<FormDraft> | null
   readonly errors: readonly { readonly field: string | null; readonly message: string }[]
   readonly answer: RichView | null
 }
-export type FormDraft = Record<string, string | number | boolean | string[]>
+export type DraftValue = string | number | boolean | string[] | null
+export type FormDraft = Record<string, DraftValue>
 type Obj = Record<string, unknown>
 const obj = (value: unknown): value is Obj => typeof value === 'object' && value !== null && !Array.isArray(value)
 const text = (value: unknown, max = 8192): value is string => typeof value === 'string' && new TextEncoder().encode(value).length <= max
@@ -31,7 +39,7 @@ const text = (value: unknown, max = 8192): value is string => typeof value === '
 function option(value: unknown): value is FormOption {
   return obj(value) && text(value.id, 256) && value.id.length > 0 && text(value.label) && isRichView(value.presentation)
 }
-const decimalInteger = (value: unknown): value is string => typeof value === 'string' && /^-?(?:0|[1-9]\d*)$/.test(value)
+const decimalInteger = (value: unknown): value is string => typeof value === 'string' && /^-?\d+$/.test(value)
 function formNode(value: unknown, depth = 0, ids = new Set<string>()): value is FormNode {
   if (!obj(value) || depth > 32 || typeof value.kind !== 'string') return false
   switch (value.kind) {
@@ -65,21 +73,38 @@ export function isFormSpec(value: unknown): value is FormSpec {
 }
 export function isStoredActorForm(value: unknown): value is StoredActorForm {
   if (!obj(value) || !Number.isSafeInteger(value.sequence) || (value.sequence as number) <= 0 || !obj(value.opening)
-    || !obj(value.opening.origin) || !text(value.opening.origin.run, 1024) || !Number.isSafeInteger(value.opening.origin.nativeActor)
-    || !Number.isSafeInteger(value.opening.origin.incarnation) || !text(value.opening.mountId, 256) || !text(value.opening.execution, 256)
-    || !text(value.opening.conversation, 256) || !isFormSpec(value.opening.form)
+    || !Number.isSafeInteger(value.revisionSequence) || (value.revisionSequence as number) < 0
+    || !obj(value.opening.origin) || !text(value.opening.origin.run, 1024) || !isCounter(value.opening.origin.nativeActor)
+    || !isCounter(value.opening.origin.incarnation) || !text(value.opening.mountId, 256) || !isFormExecution(value.opening.execution)
+    || !(value.opening.conversation === null || isFormConversation(value.opening.conversation)) || !isFormSpec(value.opening.form)
     || !['open', 'submitted', 'answered', 'dismissed', 'cancelled', 'interrupted'].includes(String(value.state))
-    || !(value.attemptId === null || text(value.attemptId, 256)) || !(value.draft === null || obj(value.draft))
+    || !(value.attemptId === null || text(value.attemptId, 256)) || !(value.draft === null || isFormDraft(value.draft))
     || !Array.isArray(value.errors) || value.errors.length > 128 || !value.errors.every(error => obj(error)
       && (error.field === null || text(error.field, 256)) && text(error.message, 8192))
     || !(value.answer === null || isRichView(value.answer))) return false
   return true
 }
+function isFormDraft(value: unknown): value is FormDraft {
+  return obj(value) && Object.entries(value).length <= 1024 && Object.entries(value).every(([key, item]) => key.length <= 128
+    && (item === null || typeof item === 'string' || typeof item === 'boolean'
+      || typeof item === 'number' && Number.isFinite(item)
+      || Array.isArray(item) && item.length <= 1024 && item.every(entry => typeof entry === 'string')))
+}
+function isCounter(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) >= 0 }
+function isFormExecution(value: unknown): value is FormExecution {
+  if (!obj(value)) return false
+  return value.kind === 'actor_program' || value.kind === 'notebook' && text(value.execution, 256)
+    && isCounter(value.inputUnitIndex) && isCounter(value.effectOrdinal)
+}
+function isFormConversation(value: unknown): value is FormConversation {
+  if (!obj(value)) return false
+  return value.kind === 'standalone' && text(value.store, 1024) && text(value.actor, 1024)
+    || value.kind === 'embedded' && text(value.run, 1024) && text(value.actor, 1024) && text(value.incarnation, 1024)
+}
 
 const retainedDrafts = new Map<string, FormDraft>()
 const MAX_DRAFTS = 32
 const keyOf = (form: StoredActorForm) => JSON.stringify([form.opening.origin.run, form.opening.origin.nativeActor, form.opening.origin.incarnation, form.opening.mountId])
-const stateRank = (state: StoredActorForm['state']) => state === 'open' ? 0 : state === 'submitted' ? 1 : state === 'answered' ? 2 : 1
 export function clearMountedFormDrafts() { retainedDrafts.clear() }
 function keepDraft(key: string, draft: FormDraft) {
   retainedDrafts.delete(key); retainedDrafts.set(key, draft)
@@ -88,15 +113,20 @@ function keepDraft(key: string, draft: FormDraft) {
 function initialDraft(node: FormNode, into: FormDraft = {}): FormDraft {
   if (['text', 'int', 'number', 'bool', 'choice', 'many', 'alternatives'].includes(node.kind)) {
     const field = node as Extract<FormNode, { id: string }>
-    if (field.initial !== null) into[field.id] = Array.isArray(field.initial) ? [...field.initial] : field.initial as string | number | boolean
+    if (field.initial !== null && !Object.hasOwn(into, field.id)) into[field.id] = Array.isArray(field.initial) ? [...field.initial] : field.initial
   }
   if (node.kind === 'group') node.children.forEach(child => initialDraft(child, into))
   if (node.kind === 'section') initialDraft(node.child, into)
   if (node.kind === 'alternatives') {
-    const branch = node.options.find(item => item.id === (into[node.id] ?? node.initial))
+    const selected = Object.hasOwn(into, node.id) ? into[node.id] : node.initial
+    const branch = typeof selected === 'string' ? node.options.find(item => item.id === selected) : undefined
     if (branch) initialDraft(branch.form, into)
   }
   return into
+}
+function hydratedDraft(form: StoredActorForm, cached?: FormDraft): FormDraft {
+  const draft = { ...initialDraft(form.opening.form.root), ...(form.draft ?? {}), ...(cached ?? {}) }
+  return initialDraft(form.opening.form.root, draft)
 }
 function activeDraft(node: FormNode, draft: FormDraft, into: FormDraft = {}): FormDraft {
   if (['text', 'int', 'number', 'bool', 'choice', 'many', 'alternatives'].includes(node.kind)) {
@@ -107,7 +137,8 @@ function activeDraft(node: FormNode, draft: FormDraft, into: FormDraft = {}): Fo
   if (node.kind === 'group') node.children.forEach(child => activeDraft(child, draft, into))
   if (node.kind === 'section') activeDraft(node.child, draft, into)
   if (node.kind === 'alternatives') {
-    const selected = typeof draft[node.id] === 'string' ? draft[node.id] : node.initial
+    const selectedValue = Object.hasOwn(draft, node.id) ? draft[node.id] : node.initial
+    const selected = typeof selectedValue === 'string' ? selectedValue : undefined
     const branch = node.options.find(item => item.id === selected)
     if (branch) activeDraft(branch.form, draft, into)
   }
@@ -116,17 +147,24 @@ function activeDraft(node: FormNode, draft: FormDraft, into: FormDraft = {}): Fo
 
 export default function MountedForm({ form, ready, active, onAuthExpired }: { form: StoredActorForm; ready: boolean; active: boolean; onAuthExpired?: () => void }) {
   const key = keyOf(form)
-  const [draft, setDraft] = useState<FormDraft>(() => ({ ...initialDraft(form.opening.form.root), ...(retainedDrafts.get(key) ?? {}) }))
+  const [draft, setDraft] = useState<FormDraft>(() => hydratedDraft(form, retainedDrafts.get(key)))
   const [busy, setBusy] = useState(false)
   const [issue, setIssue] = useState('')
   const [latest, setLatest] = useState(form)
   const editable = latest.state === 'open' && active && ready
-  useEffect(() => { setLatest(current => stateRank(form.state) >= stateRank(current.state) ? form : current) }, [form])
+  const dismissible = (latest.state === 'open' || latest.state === 'submitted') && active && ready
+  useEffect(() => {
+    const stale = form.revisionSequence < latest.revisionSequence
+      || (form.revisionSequence === latest.revisionSequence && latest.state !== 'open' && form.state === 'open')
+    if (stale) return
+    if (latest !== form) setLatest(form)
+    if (!retainedDrafts.has(key)) setDraft(hydratedDraft(form))
+  }, [form, key, latest])
   useEffect(() => {
     if (editable) keepDraft(key, draft)
   }, [key, draft, editable])
   async function submit(dismiss: boolean) {
-    if (!editable || busy) return
+    if ((dismiss ? !dismissible : !editable) || busy) return
     setBusy(true); setIssue('')
     try {
       const { origin, mountId } = latest.opening
@@ -138,7 +176,8 @@ export default function MountedForm({ form, ready, active, onAuthExpired }: { fo
       if (!response.ok) throw new Error(response.status === 409 ? 'This form is no longer open. Refresh the conversation.' : 'The form response was rejected. Your draft is still here.')
       const value: unknown = await response.json()
       if (!isStoredActorForm(value) || keyOf(value) !== key) throw new Error('The server returned an invalid form response. Your draft is still here.')
-      setLatest(value)
+      setLatest(current => value.revisionSequence < current.revisionSequence
+        || (value.revisionSequence === current.revisionSequence && current.state !== 'open' && value.state === 'open') ? current : value)
       if (value.state !== 'open') retainedDrafts.delete(key)
       else keepDraft(key, draft)
     } catch (error) { setIssue(error instanceof Error ? error.message : String(error)) }
@@ -150,34 +189,38 @@ export default function MountedForm({ form, ready, active, onAuthExpired }: { fo
     {issue && <p role="alert">{issue}</p>}
     {latest.answer && <div className="form-answer"><h4>Answer</h4><RichViewRenderer view={latest.answer} /></div>}
     {latest.state !== 'open' && latest.draft && <section className="submitted-form-values"><h4>Submitted values</h4><pre>{JSON.stringify(latest.draft, null, 2)}</pre></section>}
-    {latest.state === 'open' && <div className="form-actions"><button type="button" disabled={!editable || busy} onClick={() => void submit(false)}>{busy ? 'Sending…' : 'Submit'}</button>
-      <button type="button" disabled={!editable || busy} onClick={() => void submit(true)}>Dismiss</button></div>}
+    {(latest.state === 'open' || latest.state === 'submitted') && <div className="form-actions">
+      {latest.state === 'open' && <button type="button" disabled={!editable || busy} onClick={() => void submit(false)}>{busy ? 'Sending…' : 'Submit'}</button>}
+      <button type="button" disabled={!dismissible || busy} onClick={() => void submit(true)}>Dismiss</button>
+    </div>}
     {!active && latest.state === 'open' && <p role="status">This actor is inactive; the form is read-only.</p>}
   </section>
 }
 
 function FormNodeView({ node, draft, setDraft, editable }: { node: FormNode; draft: FormDraft; setDraft: (draft: FormDraft) => void; editable: boolean }) {
-  const change = (id: string, value: FormDraft[string]) => setDraft({ ...draft, [id]: value })
+  const change = (id: string, value: DraftValue, base = draft) => setDraft({ ...base, [id]: value })
   if (node.kind === 'pure' || node.kind === 'empty') return null
   if (node.kind === 'group') return <div className="form-group">{node.children.map((child, i) => <FormNodeView key={i} node={child} draft={draft} setDraft={setDraft} editable={editable} />)}</div>
   if (node.kind === 'section') return <fieldset className="form-section"><legend>{node.title}</legend><FormNodeView node={node.child} draft={draft} setDraft={setDraft} editable={editable} /></fieldset>
   if (node.kind === 'view') return <RichViewRenderer view={node.presentation} />
   if (node.kind === 'alternatives') {
-    const selected = typeof draft[node.id] === 'string' ? draft[node.id] as string : node.initial ?? ''
+    const selectedValue = Object.hasOwn(draft, node.id) ? draft[node.id] : node.initial
+    const selected = typeof selectedValue === 'string' ? selectedValue : ''
     const branch = node.options.find(item => item.id === selected)
     return <fieldset><legend>{node.label}</legend>{node.options.map(item => <label className="form-option" key={item.id}>
-      <input type="radio" name={node.id} value={item.id} checked={selected === item.id} disabled={!editable} onChange={() => change(node.id, item.id)} />
+      <input type="radio" aria-label={item.label} name={node.id} value={item.id} checked={selected === item.id} disabled={!editable} onChange={() => change(node.id, item.id, initialDraft(item.form, { ...draft }))} />
       <span>{item.label}</span><RichViewRenderer view={item.presentation} />
     </label>)}{branch && <FormNodeView node={branch.form} draft={draft} setDraft={setDraft} editable={editable} />}</fieldset>
   }
   if (node.kind === 'choice' || node.kind === 'many') return <fieldset><legend>{node.label}</legend>{node.options.map(item => {
-    const selected = node.kind === 'many' ? (Array.isArray(draft[node.id]) ? draft[node.id] as string[] : Array.isArray(node.initial) ? [...node.initial] : [])
-      : typeof draft[node.id] === 'string' ? [draft[node.id] as string] : node.initial ? [node.initial] : []
-    return <label className="form-option" key={item.id}><input type={node.kind === 'many' ? 'checkbox' : 'radio'} name={node.id} value={item.id} checked={selected.includes(item.id)} disabled={!editable}
+    const hasValue = Object.hasOwn(draft, node.id)
+    const selected = node.kind === 'many' ? (Array.isArray(draft[node.id]) ? draft[node.id] as string[] : !hasValue && Array.isArray(node.initial) ? [...node.initial] : [])
+      : typeof draft[node.id] === 'string' ? [draft[node.id] as string] : !hasValue && node.initial ? [node.initial] : []
+    return <label className="form-option" key={item.id}><input aria-label={item.label} type={node.kind === 'many' ? 'checkbox' : 'radio'} name={node.id} value={item.id} checked={selected.includes(item.id)} disabled={!editable}
       onChange={event => change(node.id, node.kind === 'many' ? event.target.checked ? [...selected, item.id] : selected.filter(id => id !== item.id) : item.id)} />
       <span>{item.label}</span><RichViewRenderer view={item.presentation} /></label>
   })}</fieldset>
-  const value = draft[node.id] ?? node.initial
+  const value = Object.hasOwn(draft, node.id) ? draft[node.id] : node.initial
   if (node.kind === 'bool') return <label className="form-field"><input type="checkbox" checked={value === true} disabled={!editable} onChange={event => change(node.id, event.target.checked)} />{node.label}</label>
   if (node.kind === 'int') return <label className="form-field">{node.label}<input type="text" inputMode="numeric" value={value === null ? '' : String(value)} disabled={!editable}
     onChange={event => change(node.id, event.target.value)} /></label>
