@@ -106,14 +106,18 @@ async fn embedded_seed_is_included_once_when_explicit_input_starts_inference() {
         .seed_embedded_context(&identity, "spawn", &prompt)
         .unwrap();
     assert!(store.model_request_outcomes(128).unwrap().is_empty());
-    assert_eq!(store.usage_subtree(&seed).unwrap(), Usage::default());
+    assert_eq!(
+        store.usage_subtree(&seed).unwrap(),
+        crate::store::Usage::default()
+    );
     let usage = Usage {
         input_tokens: 17,
         output_tokens: 5,
-        cost_micros: 23,
+        reported: true,
+        ..Usage::default()
     };
     let mut turn = final_turn();
-    turn.usage = usage;
+    turn.usage = usage.clone();
     let (engine, inputs) = engine(store.clone(), &identity, vec![Ok(turn)]);
     assert!(inputs.lock().unwrap().is_empty());
     let wake = Item(json!({"type":"message","role":"user","content":"start work"}));
@@ -129,7 +133,14 @@ async fn embedded_seed_is_included_once_when_explicit_input_starts_inference() {
     assert_eq!(outcomes[0].request.id, completion.head_request);
     assert!(outcomes[0].failure.is_none());
     assert!(outcomes[0].interruption.is_none());
-    assert_eq!(store.usage_subtree(&seed).unwrap(), usage);
+    assert_eq!(
+        store.usage_subtree(&seed).unwrap(),
+        crate::store::Usage {
+            input_tokens: 17,
+            output_tokens: 5,
+            cost_micros: 0,
+        }
+    );
     assert_eq!(
         requests[0]
             .input
