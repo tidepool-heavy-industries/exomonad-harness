@@ -124,7 +124,7 @@ export default function UnifiedChat({ origin, requestId, revision, ready, active
     <div className="toolbar"><h2>Conversation</h2><button type="button" disabled={!ready} onClick={() => setAttempt(value => value + 1)}>Refresh conversation</button></div>
     {!ready && <p role="status">Host unavailable; retained conversation entries remain visible.</p>}
     {issue && <div role="alert"><p>{issue}</p><button type="button" disabled={!ready} onClick={() => setAttempt(value => value + 1)}>Retry conversation</button></div>}
-    {page?.legacyHistory && legacy}
+    {page?.legacyHistory && <section aria-label="Legacy message history"><p className="meta">Older messages use retained request order. Their order relative to displays and forms is unavailable before sequence {page.cutoverSequence}.</p>{legacy}</section>}
     {failedRequests.map(item => <div className="error" role="alert" key={item.id}><strong>Exchange failed</strong><p className="meta">Exchange {item.id}</p><p>{item.detail ?? 'The model request failed.'}</p></div>)}
     {page && <div className="unified-entries" role="list" aria-label="Conversation entries">{visibleEntries.map(entry => <div role="listitem" className="message" key={entry.sequence} data-sequence={entry.sequence}>
       <div className="meta">Sequence {entry.sequence}</div>
