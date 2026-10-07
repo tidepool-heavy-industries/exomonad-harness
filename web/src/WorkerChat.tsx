@@ -3,6 +3,7 @@ import { belongsTo } from './live-output'
 import ChatHistory, { clearChatHistoryRetention } from './ChatHistory'
 import { actorOutputKey, type ActorOutputOrigin } from './actor-output'
 import UnifiedChat from './UnifiedChat'
+import { clearMountedFormDrafts } from './MountedForm'
 import type { RouteState, TransportPhase } from './client-contract'
 import { routeUrl } from './navigation'
 import { actorIdentityKey, type HostActorIdentity } from './protocol'
@@ -21,6 +22,7 @@ const MAX_RETAINED_CHATS = 8
 export function clearWorkerChatRetention() {
   retainedChats.clear()
   clearChatHistoryRetention()
+  clearMountedFormDrafts()
 }
 
 function identityOf(actor: Actor): HostActorIdentity {
