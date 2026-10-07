@@ -3,7 +3,7 @@ use super::{Result, Store, StoreError};
 use crate::{
     item::{Item, ItemHash},
     model::{OperationId, RequestId},
-    provider::ToolFailure,
+    provider::{FinalizationKind, FinalizationResponsibility, ToolFailure},
     turn::JobOutput,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -39,12 +39,42 @@ impl From<&JobOutput> for TerminalOutcome {
 pub struct RecordedToolOutput {
     pub item: Item,
     pub terminal: TerminalOutcome,
+    pub(crate) finalization: FinalizationResponsibility,
 }
 
-pub(super) fn exact_terminal(
+impl RecordedToolOutput {
+    pub fn finalization(&self) -> &FinalizationResponsibility {
+        &self.finalization
+    }
+}
+
+/// Versioned settlement is written in the existing claim transaction. Legacy
+/// outcome-only rows remain readable as claims/items, but cannot authorize replay.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TerminalSettlement {
+    version: u32,
+    pub(super) outcome: TerminalOutcome,
+    finalization: FinalizationKind,
+}
+
+impl TerminalSettlement {
+    pub(super) fn new(outcome: TerminalOutcome, finalization: &FinalizationResponsibility) -> Self {
+        Self {
+            version: 1,
+            outcome,
+            finalization: finalization.0.clone(),
+        }
+    }
+    fn responsibility(&self) -> FinalizationResponsibility {
+        FinalizationResponsibility(self.finalization.clone())
+    }
+}
+
+pub(super) fn exact_settlement(
     c: &Connection,
     operation: &OperationId,
-) -> Result<Option<(ItemHash, TerminalOutcome)>> {
+) -> Result<Option<(ItemHash, TerminalSettlement)>> {
     let origin = serde_json::to_string(&operation.origin)?;
     let mut query = c.prepare(
         "SELECT output_hash,terminal_json FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND state='settled' ORDER BY request_id",
@@ -66,10 +96,17 @@ pub(super) fn exact_terminal(
                 operation: operation.clone(),
             });
         };
-        let candidate = (
-            ItemHash(hash),
-            serde_json::from_str::<TerminalOutcome>(&terminal)?,
-        );
+        let settlement = serde_json::from_str::<TerminalSettlement>(&terminal).map_err(|_| {
+            StoreError::UnsupportedReplayOutcome {
+                operation: operation.clone(),
+            }
+        })?;
+        if settlement.version != 1 || !settlement.responsibility().validate(operation) {
+            return Err(StoreError::UnsupportedReplayOutcome {
+                operation: operation.clone(),
+            });
+        }
+        let candidate = (ItemHash(hash), settlement);
         if found
             .as_ref()
             .is_some_and(|previous| previous != &candidate)
@@ -81,6 +118,13 @@ pub(super) fn exact_terminal(
         found = Some(candidate);
     }
     Ok(found)
+}
+
+pub(super) fn exact_terminal(
+    c: &Connection,
+    operation: &OperationId,
+) -> Result<Option<(ItemHash, TerminalOutcome)>> {
+    Ok(exact_settlement(c, operation)?.map(|(hash, settlement)| (hash, settlement.outcome)))
 }
 
 fn exact_claim_state(
@@ -128,13 +172,14 @@ impl Store {
                 return Ok(Some(RecordedToolOutput {
                     item: Item::tool_output(&operation.call, kind, &JobOutput::Interrupted),
                     terminal: TerminalOutcome::Interrupted,
+                    finalization: FinalizationResponsibility::provider(),
                 }));
             }
             Some(super::ClaimState::Settled) => {}
             Some(super::ClaimState::Pending) | None => return Ok(None),
         }
-        let terminal = exact_terminal(&c, operation)?;
-        let Some((hash, terminal)) = terminal else {
+        let terminal = exact_settlement(&c, operation)?;
+        let Some((hash, settlement)) = terminal else {
             return Ok(None);
         };
         let raw: Option<String> = c
@@ -145,9 +190,34 @@ impl Store {
         let raw = raw.ok_or_else(|| StoreError::MissingReplayItem(hash.0))?;
         let item: Item = serde_json::from_str(&raw)?;
         super::validate_replay_output(&operation.call, kind, &item)?;
-        Ok(Some(RecordedToolOutput { item, terminal }))
+        Ok(Some(RecordedToolOutput {
+            item,
+            finalization: settlement.responsibility(),
+            terminal: settlement.outcome,
+        }))
     }
 
+    pub(crate) fn completed_finalization(
+        &self,
+        operation: &OperationId,
+    ) -> Result<Option<FinalizationResponsibility>> {
+        let c = self.lock();
+        if exact_claim_state(&c, operation, &operation.request)? != Some(super::ClaimState::Settled)
+        {
+            return Ok(None);
+        }
+        Ok(
+            exact_settlement(&c, operation)?.and_then(|(_, settlement)| {
+                matches!(
+                    settlement.outcome,
+                    TerminalOutcome::Success | TerminalOutcome::Failure(_)
+                )
+                .then(|| settlement.responsibility())
+            }),
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn has_completed_output(&self, operation: &OperationId) -> Result<bool> {
         let c = self.lock();
         if exact_claim_state(&c, operation, &operation.request)? != Some(super::ClaimState::Settled)
@@ -182,6 +252,212 @@ mod tests {
 
     fn path() -> std::path::PathBuf {
         std::env::temp_dir().join(format!("harness-terminal-{}.sqlite", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn finalization_responsibility_survives_reopen_and_is_bound_to_operation() {
+        let path = path();
+        let mut expected = vec![];
+        {
+            let store = Store::open(&path).unwrap();
+            for provider in [false, true] {
+                for successful in [false, true] {
+                    let operation = operation(&store, &format!("owner-{provider}-{successful}"));
+                    let output = JobOutput::Completed(if successful {
+                        Ok(json!("actual result"))
+                    } else {
+                        Err("actual failure".into())
+                    });
+                    let finalization = if provider {
+                        FinalizationResponsibility::provider()
+                    } else {
+                        FinalizationResponsibility::no_provider_dispatch(&operation)
+                    };
+                    assert_eq!(
+                        store
+                            .write_job_output_with_finalization(
+                                &operation,
+                                ToolKind::Function,
+                                &output,
+                                &finalization
+                            )
+                            .unwrap(),
+                        1
+                    );
+                    assert_eq!(
+                        store
+                            .write_job_output_with_finalization(
+                                &operation,
+                                ToolKind::Function,
+                                &output,
+                                &finalization
+                            )
+                            .unwrap(),
+                        0
+                    );
+                    expected.push((operation, output, finalization));
+                }
+            }
+        }
+        let store = Store::open(&path).unwrap();
+        for (operation, output, finalization) in &expected {
+            let recorded = store
+                .replay_tool_output_operation(operation)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                recorded.item,
+                Item::tool_output(&operation.call, ToolKind::Function, output)
+            );
+            assert_eq!(recorded.terminal, TerminalOutcome::from(output));
+            assert_eq!(recorded.finalization(), finalization);
+            assert_eq!(
+                store.completed_finalization(operation).unwrap().as_ref(),
+                Some(finalization)
+            );
+        }
+        let wrong_operation = operation(&store, "different-operation");
+        assert!(
+            matches!(store.write_job_output_with_finalization(&wrong_operation, ToolKind::Function, &expected[0].1, &expected[0].2), Err(StoreError::UnsupportedReplayOutcome { operation }) if operation == wrong_operation)
+        );
+        assert_eq!(
+            store.claims_for_operation(&wrong_operation).unwrap()[0].state,
+            super::super::ClaimState::Pending
+        );
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn identical_output_cannot_change_finalization_across_claimants() {
+        for first_provider in [false, true] {
+            for successful in [false, true] {
+                let store = Store::memory().unwrap();
+                let operation = operation(&store, "original-owner");
+                let output = JobOutput::Completed(if successful {
+                    Ok(json!(42))
+                } else {
+                    Err("provider error".into())
+                });
+                let first = if first_provider {
+                    FinalizationResponsibility::provider()
+                } else {
+                    FinalizationResponsibility::no_provider_dispatch(&operation)
+                };
+                let other = if first_provider {
+                    FinalizationResponsibility::no_provider_dispatch(&operation)
+                } else {
+                    FinalizationResponsibility::provider()
+                };
+                store
+                    .write_job_output_with_finalization(
+                        &operation,
+                        ToolKind::Function,
+                        &output,
+                        &first,
+                    )
+                    .unwrap();
+                let child = RequestId("new-claimant".into());
+                store
+                    .create_request(&child, Some(&operation.request), "/root/child")
+                    .unwrap();
+                store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) SELECT origin,origin_request_id,call_id,?1,'pending' FROM claims WHERE request_id=?2", params![child.0,operation.request.0]).unwrap();
+                assert!(
+                    matches!(store.write_job_output_with_finalization(&operation, ToolKind::Function, &output, &other), Err(StoreError::ConflictingReplayOutcome { operation: conflicting }) if conflicting == operation)
+                );
+                let pending = store.claims_on(&child).unwrap();
+                assert_eq!(pending[0].state, super::super::ClaimState::Pending);
+                assert!(pending[0].output.is_none());
+                assert_eq!(
+                    store
+                        .write_job_output_with_finalization(
+                            &operation,
+                            ToolKind::Function,
+                            &output,
+                            &first
+                        )
+                        .unwrap(),
+                    1
+                );
+                assert_eq!(
+                    store
+                        .replay_tool_output_claim(&operation, &child)
+                        .unwrap()
+                        .unwrap()
+                        .finalization(),
+                    &first
+                );
+                // A damaged inherited row with identical value/outcome also refuses.
+                store
+                    .lock()
+                    .execute(
+                        "UPDATE claims SET terminal_json=?1 WHERE request_id=?2",
+                        params![
+                            serde_json::to_string(&TerminalSettlement::new(
+                                TerminalOutcome::from(&output),
+                                &other
+                            ))
+                            .unwrap(),
+                            child.0
+                        ],
+                    )
+                    .unwrap();
+                assert!(
+                    matches!(store.replay_tool_output_operation(&operation), Err(StoreError::ConflictingReplayOutcome { operation: conflicting }) if conflicting == operation)
+                );
+                assert!(matches!(
+                    store.completed_finalization(&operation),
+                    Err(StoreError::ConflictingReplayOutcome { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_terminal_is_readable_but_cannot_authorize_finalization_or_replay() {
+        let store = Store::memory().unwrap();
+        let operation = operation(&store, "legacy-owner");
+        let output = JobOutput::Completed(Ok(json!(42)));
+        store
+            .write_job_output(&operation, ToolKind::Function, &output)
+            .unwrap();
+        let legacy = serde_json::to_string(&TerminalOutcome::Success).unwrap();
+        store
+            .lock()
+            .execute(
+                "UPDATE claims SET terminal_json=?1 WHERE request_id=?2",
+                params![legacy, operation.request.0],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.replay_tool_output_operation(&operation),
+            Err(StoreError::UnsupportedReplayOutcome { .. })
+        ));
+        assert!(matches!(
+            store.completed_finalization(&operation),
+            Err(StoreError::UnsupportedReplayOutcome { .. })
+        ));
+        assert_eq!(
+            store.replay_output_operation(&operation).unwrap(),
+            Some(Item::tool_output(
+                &operation.call,
+                ToolKind::Function,
+                &output
+            ))
+        );
+        assert_eq!(
+            store.claims_for_operation(&operation).unwrap()[0].state,
+            super::super::ClaimState::Settled
+        );
+        let after: String = store
+            .lock()
+            .query_row(
+                "SELECT terminal_json FROM claims WHERE request_id=?1",
+                [&operation.request.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, legacy);
     }
 
     #[test]
@@ -445,7 +721,11 @@ mod tests {
             .execute(
                 "UPDATE claims SET terminal_json=?1 WHERE request_id=?2",
                 params![
-                    serde_json::to_string(&TerminalOutcome::Success).unwrap(),
+                    serde_json::to_string(&TerminalSettlement::new(
+                        TerminalOutcome::Success,
+                        &FinalizationResponsibility::provider()
+                    ))
+                    .unwrap(),
                     child.0
                 ],
             )

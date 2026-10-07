@@ -2211,8 +2211,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     return Err(error);
                 }
             };
-            if let Some((output, continuation, barrier, commit)) = retained {
-                self.retain_output(&operation, tool_kind, &output, request)
+            if let Some((output, finalization, continuation, barrier, commit)) = retained {
+                self.retain_output_owned(&operation, tool_kind, &output, request, finalization)
                     .await?;
                 return Ok(DispatchResult::Settled {
                     operation,
@@ -2591,6 +2591,19 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .find(|call| call.operation == operation)
                 .expect("sync call retained");
             let completion = self.scheduler.invocation_completion(&operation).await?;
+            if completion.as_ref().is_some_and(|completion| {
+                !completion.finalization.validate(&operation)
+                    || (!completion.finalization.requires_provider()
+                        && !matches!(
+                            completion.context,
+                            crate::provider::ContextDisposition::Unedited
+                        ))
+            }) {
+                return Err(StoreError::UnsupportedReplayOutcome {
+                    operation: operation.clone(),
+                }
+                .into());
+            }
             self.retain_context_requirement(&operation, false).await?;
             let disposition = completion
                 .and_then(|completion| completion.full_success.then_some(completion.context))
@@ -2786,6 +2799,27 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         request: &RequestId,
         claim_request: &RequestId,
     ) -> Result<(), EngineError> {
+        let finalization = self.output_finalization(operation, output).await?;
+        self.persist_output_owned(
+            operation,
+            kind,
+            output,
+            request,
+            claim_request,
+            finalization,
+        )
+        .await
+    }
+
+    async fn persist_output_owned(
+        &self,
+        operation: &OperationId,
+        kind: ToolKind,
+        output: &crate::turn::JobOutput,
+        request: &RequestId,
+        claim_request: &RequestId,
+        finalization: crate::provider::FinalizationResponsibility,
+    ) -> Result<(), EngineError> {
         let call_id = &operation.call;
         let item = Item::tool_output(call_id, kind, output);
         let store = self.store.clone();
@@ -2794,7 +2828,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let claimed_at = claim_request.clone();
         let terminal_output = output.clone();
         let terminal = blocking(move || {
-            store.write_job_output(&call, kind, &terminal_output)?;
+            store.write_job_output_with_finalization(
+                &call,
+                kind,
+                &terminal_output,
+                &finalization,
+            )?;
             let claim = store
                 .claims_for_operation(&call)?
                 .into_iter()
@@ -2852,6 +2891,19 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         output: &crate::turn::JobOutput,
         claim_request: &RequestId,
     ) -> Result<(), EngineError> {
+        let finalization = self.output_finalization(operation, output).await?;
+        self.retain_output_owned(operation, kind, output, claim_request, finalization)
+            .await
+    }
+
+    async fn retain_output_owned(
+        &self,
+        operation: &OperationId,
+        kind: ToolKind,
+        output: &crate::turn::JobOutput,
+        claim_request: &RequestId,
+        finalization: crate::provider::FinalizationResponsibility,
+    ) -> Result<(), EngineError> {
         // Persist the refusal fence before the terminal: recovery must never
         // acknowledge a completed editing operation as an unedited success.
         self.retain_context_requirement(operation, false).await?;
@@ -2862,7 +2914,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let claimed_at = claim_request.clone();
         let terminal_output = output.clone();
         let terminal = blocking(move || {
-            store.write_job_output(&call, kind, &terminal_output)?;
+            store.write_job_output_with_finalization(
+                &call,
+                kind,
+                &terminal_output,
+                &finalization,
+            )?;
             let claim = store
                 .claims_for_operation(&call)?
                 .into_iter()
@@ -2889,6 +2946,40 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
         }
         Ok(())
+    }
+
+    async fn output_finalization(
+        &self,
+        operation: &OperationId,
+        output: &crate::turn::JobOutput,
+    ) -> Result<crate::provider::FinalizationResponsibility, EngineError> {
+        if let Ok(Some(completion)) = self.scheduler.invocation_completion(operation).await {
+            if !completion.finalization.validate(operation)
+                || (!completion.finalization.requires_provider()
+                    && !matches!(
+                        completion.context,
+                        crate::provider::ContextDisposition::Unedited
+                    ))
+            {
+                return Err(StoreError::UnsupportedReplayOutcome {
+                    operation: operation.clone(),
+                }
+                .into());
+            }
+            return Ok(completion.finalization);
+        }
+        if let Some(recorded) = self.store.replay_tool_output_operation(operation)? {
+            return Ok(recorded.finalization().clone());
+        }
+        // Cancellation without a provider completion never runs an output
+        // acknowledgment. Its interrupted owner obligations remain unchanged.
+        if !matches!(output, crate::turn::JobOutput::Completed(_)) {
+            return Ok(crate::provider::FinalizationResponsibility::provider());
+        }
+        Err(StoreError::UnsupportedReplayOutcome {
+            operation: operation.clone(),
+        }
+        .into())
     }
 
     async fn retain_context_requirement(
@@ -2936,7 +3027,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     async fn acknowledge_output(&self, operation: &OperationId) -> Result<(), EngineError> {
         // A fork replays its ancestor's result; only the issuing conversation
         // can acknowledge the owner's live execution boundary.
-        if operation.origin == self.origin && self.store.has_completed_output(operation)? {
+        if operation.origin == self.origin {
+            let Some(finalization) = self.store.completed_finalization(operation)? else {
+                return Ok(());
+            };
+            if !finalization.requires_provider() {
+                return Ok(());
+            }
             let required = self.retain_context_requirement(operation, false).await?;
             if required && self.store.context_receipt(operation)?.is_none() {
                 self.provider.output_aborted(operation).await?;
@@ -3110,12 +3207,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             output
         };
         if let Some(wait_call) = wait_call {
-            self.persist_output(
+            self.persist_output_owned(
                 wait_call,
                 ToolKind::Function,
                 &crate::turn::JobOutput::Completed(Ok(output)),
                 request,
                 request,
+                if yield_wait {
+                    crate::provider::FinalizationResponsibility::no_provider_dispatch(wait_call)
+                } else {
+                    crate::provider::FinalizationResponsibility::provider()
+                },
             )
             .await?;
             pending.retain(|call| call.operation != *wait_call);

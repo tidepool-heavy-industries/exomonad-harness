@@ -663,7 +663,15 @@ impl Provider for PinnedProvider {
         context: CallContext,
     ) -> crate::provider::ProviderCompletion {
         if let Err(error) = self.validate(name, &input, &context) {
-            return crate::provider::ProviderCompletion::unedited(Err(error.into_tool_failure()));
+            return match context.operation.as_ref() {
+                Some(operation) => crate::provider::ProviderCompletion::no_provider_dispatch(
+                    operation,
+                    Err(error.into_tool_failure()),
+                ),
+                None => {
+                    crate::provider::ProviderCompletion::unedited(Err(error.into_tool_failure()))
+                }
+            };
         }
         self.surface
             .dispatcher

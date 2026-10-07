@@ -497,17 +497,33 @@ impl JobScheduler {
                 .await;
             match retained {
                 Ok(Some(retained)) => {
-                    let output = match retained.into_parts(&task_operation) {
-                        Ok((output, None, barrier, None)) if barrier.is_empty() => output,
-                        Ok(_) => JobOutput::Completed(Err(
-                            "retained builtin continuation requires Engine dispatch".into(),
-                        )),
-                        Err(error) => JobOutput::Completed(Err(error.into_tool_failure())),
+                    let (output, finalization) = match retained.into_parts(&task_operation) {
+                        Ok((output, finalization, None, barrier, None)) if barrier.is_empty() => {
+                            (output, finalization)
+                        }
+                        Ok(_) => (
+                            JobOutput::Completed(Err(
+                                "retained builtin continuation requires Engine dispatch".into(),
+                            )),
+                            crate::provider::FinalizationResponsibility::provider(),
+                        ),
+                        Err(error) => (
+                            JobOutput::Completed(Err(error.into_tool_failure())),
+                            crate::provider::FinalizationResponsibility::provider(),
+                        ),
                     };
                     let completion = match &output {
                         JobOutput::Completed(result) => Some(result.clone()),
                         _ => None,
                     };
+                    if let Some(job) = jobs.lock().await.get_mut(&task_operation) {
+                        job.completion = Some(crate::provider::ProviderCompletion {
+                            output: output.clone(),
+                            full_success: matches!(&output, JobOutput::Completed(Ok(_))),
+                            context: crate::provider::ContextDisposition::Unedited,
+                            finalization,
+                        });
+                    }
                     settle(&jobs, task_operation.clone(), output, completion).await;
                     let _ = events.send(task_operation);
                     let _ = legacy_events.send(task_call_id);
@@ -515,6 +531,13 @@ impl JobScheduler {
                 }
                 Err(error) => {
                     let result = Err(error.into_tool_failure());
+                    if let Some(job) = jobs.lock().await.get_mut(&task_operation) {
+                        job.completion =
+                            Some(crate::provider::ProviderCompletion::no_provider_dispatch(
+                                &task_operation,
+                                result.clone(),
+                            ));
+                    }
                     settle(
                         &jobs,
                         task_operation.clone(),

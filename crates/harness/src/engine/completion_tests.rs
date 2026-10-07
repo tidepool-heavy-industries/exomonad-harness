@@ -599,3 +599,191 @@ async fn rejection_recovery_replays_settled_ancestor_output_once_without_reexecu
         );
     }
 }
+
+struct AdmissionHost {
+    identity: crate::embedding::HostIdentity,
+    open: AtomicBool,
+    acknowledgments: AtomicUsize,
+    surface: Arc<crate::embedding::ToolSurface>,
+}
+struct AdmissionLease;
+impl crate::embedding::AdmissionGuard for AdmissionLease {}
+#[async_trait]
+impl crate::embedding::HostActor for AdmissionHost {
+    fn identity(&self) -> &crate::embedding::HostIdentity {
+        &self.identity
+    }
+    fn admit(
+        &self,
+    ) -> Result<Box<dyn crate::embedding::AdmissionGuard>, crate::embedding::EmbeddedError> {
+        if self.open.load(Ordering::SeqCst) {
+            Ok(Box::new(AdmissionLease))
+        } else {
+            Err(crate::embedding::EmbeddedError::Host(
+                "admission closed".into(),
+            ))
+        }
+    }
+    fn tool_surface(
+        &self,
+    ) -> Result<Arc<crate::embedding::ToolSurface>, crate::embedding::EmbeddedError> {
+        Ok(self.surface.clone())
+    }
+    async fn wake(&self, _: i64) -> Result<(), String> {
+        Ok(())
+    }
+    async fn control(
+        &self,
+        _: crate::embedding::HostControl,
+    ) -> Result<Value, crate::embedding::HostControlError> {
+        panic!("test does not issue control")
+    }
+    async fn output_committed(&self, _: &OperationId) -> Result<(), String> {
+        self.acknowledgments.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    async fn output_aborted(&self, _: &OperationId) -> Result<(), String> {
+        panic!("unedited failure does not abort context")
+    }
+}
+struct FailingDispatcher {
+    calls: AtomicUsize,
+}
+#[async_trait]
+impl Provider for FailingDispatcher {
+    async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(ProviderError::Tool("postdispatch provider failure".into()))
+    }
+    fn tools(&self) -> Vec<Value> {
+        vec![]
+    }
+}
+
+#[tokio::test]
+async fn pinned_admission_refusal_skips_callback_but_dispatched_error_keeps_it_on_recovery() {
+    for close_before_launch in [false, true] {
+        let store = Arc::new(Store::memory().unwrap());
+        let dispatcher = Arc::new(FailingDispatcher {
+            calls: AtomicUsize::new(0),
+        });
+        let manifest = crate::embedding::EmbeddedToolManifest::with_scheduling(
+            vec![json!({"type":"function","name":"work","description":"Perform owned work","strict":true,"parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}})],
+            std::collections::HashMap::from([("work".into(), ToolScheduling::BeforeNextInference)]),
+        ).unwrap();
+        let surface = Arc::new(
+            crate::embedding::ToolSurface::from_manifest(
+                "owner-version".into(),
+                Arc::new(manifest),
+                dispatcher.clone(),
+            )
+            .unwrap(),
+        );
+        let host = Arc::new(AdmissionHost {
+            identity: crate::embedding::HostIdentity {
+                run: "owner-run".into(),
+                actor: AgentPath("/root".into()),
+                incarnation: "same-incarnation".into(),
+            },
+            open: AtomicBool::new(true),
+            acknowledgments: AtomicUsize::new(0),
+            surface,
+        });
+        let conversation =
+            crate::embedding::Conversation::attach(store.clone(), host.clone(), None).unwrap();
+        let config = EngineConfig {
+            instructions: "owned completion".into(),
+            tools: vec![],
+            model: "offline".into(),
+            effort: Effort::Low,
+            session_id: "responsibility".into(),
+            agent: host.identity.actor.clone(),
+        };
+        let runtime = conversation
+            .engine::<TestAuth, _>(
+                FinalTransport,
+                Arc::new(JobScheduler::new(1).unwrap()),
+                config.clone(),
+                std::num::NonZeroU64::new(10000).unwrap(),
+            )
+            .unwrap();
+        let pinned = conversation.provider().request_snapshot().unwrap().unwrap();
+        let head = RequestId("pinned-completion-head".into());
+        let item = Item(
+            json!({"type":"function_call","call_id":"owned-call","name":"work","arguments":"{}"}),
+        );
+        store
+            .write_embedded_request(
+                &host.identity,
+                &head,
+                None,
+                std::slice::from_ref(&item),
+                StoredUsage::default(),
+            )
+            .unwrap();
+        store.set_effort(&head, Effort::Low).unwrap();
+        store
+            .record_event(
+                Some(&head),
+                "tool_surface",
+                &json!({"version":"owner-version"}),
+            )
+            .unwrap();
+        let (_cancel, mut cancellation) = watch::channel(false);
+        let DispatchResult::Pending(call) = runtime
+            .dispatch_with_provider(item, &head, pinned, None, &mut cancellation)
+            .await
+            .unwrap()
+        else {
+            panic!("native request is queued before launch")
+        };
+        assert!(call.queued);
+        assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 0);
+        if close_before_launch {
+            host.open.store(false, Ordering::SeqCst);
+        }
+        runtime
+            .scheduler
+            .release_operation(&call.operation, None)
+            .await
+            .unwrap();
+        let output = runtime.scheduler.wait(&call.operation).await.unwrap();
+        assert!(matches!(output, crate::turn::JobOutput::Completed(Err(_))));
+        runtime
+            .persist_output(&call.operation, call.tool_kind, &output, &head, &head)
+            .await
+            .unwrap();
+        let expected = usize::from(!close_before_launch);
+        assert_eq!(dispatcher.calls.load(Ordering::SeqCst), expected);
+        assert_eq!(host.acknowledgments.load(Ordering::SeqCst), expected);
+        assert_eq!(
+            store
+                .completed_finalization(&call.operation)
+                .unwrap()
+                .unwrap()
+                .requires_provider(),
+            !close_before_launch
+        );
+        drop(runtime);
+        let recovered = conversation
+            .engine::<TestAuth, _>(
+                FinalTransport,
+                Arc::new(JobScheduler::new(1).unwrap()),
+                config,
+                std::num::NonZeroU64::new(10000).unwrap(),
+            )
+            .unwrap();
+        let (_cancel, cancel) = watch::channel(false);
+        let (_mail, mail) = tokio::sync::mpsc::unbounded_channel::<DurableMailboxWake>();
+        recovered
+            .run_recovering_embedded(Some(head), vec![], cancel, mail)
+            .await
+            .unwrap();
+        assert_eq!(
+            dispatcher.calls.load(Ordering::SeqCst),
+            expected,
+            "recovery never reexecutes"
+        );
+        assert_eq!(host.acknowledgments.load(Ordering::SeqCst), expected * 2);
+    }
+}

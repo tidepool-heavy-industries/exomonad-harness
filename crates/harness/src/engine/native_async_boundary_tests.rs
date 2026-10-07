@@ -69,6 +69,7 @@ impl Provider for NativeHost {
             sources: vec![],
         });
         ProviderCompletion {
+            finalization: crate::provider::FinalizationResponsibility::provider(),
             output: crate::turn::JobOutput::Completed(Ok(json!({"real_edit_result":true}))),
             full_success: true,
             context: ContextDisposition::Draft(ContextDraft {

@@ -449,8 +449,17 @@ impl ReplayProvider {
             }
             changed.await;
         }
+        let finalization = self
+            .store
+            .replay_tool_output_operation(&original)
+            .map_err(|error| {
+                ProviderError::Tool(format!("loading replay finalization: {error}").into())
+            })?
+            .ok_or_else(|| ProviderError::Tool("missing replay finalization".into()))?
+            .finalization()
+            .replayed(&original, local)?;
         if name != "wait_agent" {
-            return Ok(RetainedOutput::terminal(output));
+            return Ok(RetainedOutput::recorded_terminal(output, finalization));
         }
         let next = cut.and_then(|(index, _)| self.turns.get(index));
         let continuation = self
@@ -524,6 +533,7 @@ impl ReplayProvider {
         Ok(RetainedOutput::recorded_wait(
             local.clone(),
             output,
+            finalization,
             continuation,
             barrier,
             commit,
@@ -718,6 +728,7 @@ impl Provider for ReplayProvider {
                 ));
             };
             Ok(ProviderCompletion {
+                finalization: retained.finalization().clone(),
                 output: JobOutput::Completed(Ok(value.clone())),
                 full_success: true,
                 context: ContextDisposition::Replay(evidence),
@@ -2067,7 +2078,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            let (saved, continuation, barrier, commit) = retained.into_parts(&wait).unwrap();
+            let (saved, _, continuation, barrier, commit) = retained.into_parts(&wait).unwrap();
             assert_eq!(saved, wait_output);
             assert_eq!(barrier.before, vec![before.clone()]);
             assert_eq!(barrier.after, vec![after.clone()]);

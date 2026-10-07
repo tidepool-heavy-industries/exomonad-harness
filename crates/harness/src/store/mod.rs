@@ -52,7 +52,9 @@ pub enum StoreError {
     ConflictingActorOutput,
     #[error(transparent)]
     Context(#[from] crate::context::ContextError),
-    #[error("settled operation {operation:?} has no typed replay outcome; preserve its bytes")]
+    #[error(
+        "settled operation {operation:?} has no supported terminal/finalization evidence; preserve its bytes"
+    )]
     UnsupportedReplayOutcome { operation: OperationId },
     #[error("wait replay continuation does not match exact issued operation {operation:?}")]
     InvalidWaitContinuation { operation: OperationId },
@@ -1065,19 +1067,41 @@ impl Store {
         output: &Item,
         terminal: TerminalOutcome,
     ) -> Result<usize> {
-        self.settle_claims(operation, output, terminal)
+        self.settle_claims_with_finalization(
+            operation,
+            output,
+            terminal,
+            &crate::provider::FinalizationResponsibility::provider(),
+        )
     }
 
+    #[cfg(test)]
     pub(crate) fn write_job_output(
         &self,
         operation: &OperationId,
         kind: ToolKind,
         output: &crate::turn::JobOutput,
     ) -> Result<usize> {
-        self.settle_claims(
+        self.write_job_output_with_finalization(
+            operation,
+            kind,
+            output,
+            &crate::provider::FinalizationResponsibility::provider(),
+        )
+    }
+
+    pub(crate) fn write_job_output_with_finalization(
+        &self,
+        operation: &OperationId,
+        kind: ToolKind,
+        output: &crate::turn::JobOutput,
+        finalization: &crate::provider::FinalizationResponsibility,
+    ) -> Result<usize> {
+        self.settle_claims_with_finalization(
             operation,
             &Item::tool_output(&operation.call, kind, output),
             TerminalOutcome::from(output),
+            finalization,
         )
     }
     /// Crash recovery exposes all still-pending durable claims for the caller's resumption policy.
@@ -2011,6 +2035,26 @@ impl Store {
         output: &Item,
         terminal: TerminalOutcome,
     ) -> Result<usize> {
+        self.settle_claims_with_finalization(
+            operation,
+            output,
+            terminal,
+            &crate::provider::FinalizationResponsibility::provider(),
+        )
+    }
+    fn settle_claims_with_finalization(
+        &self,
+        operation: &OperationId,
+        output: &Item,
+        terminal: TerminalOutcome,
+        finalization: &crate::provider::FinalizationResponsibility,
+    ) -> Result<usize> {
+        if !finalization.validate(operation) {
+            return Err(StoreError::UnsupportedReplayOutcome {
+                operation: operation.clone(),
+            });
+        }
+        let settlement = terminal::TerminalSettlement::new(terminal, finalization);
         let kind = self
             .tool_invocation_kind(&operation.request, &operation.call)?
             .ok_or_else(|| StoreError::MissingCheckpointCall {
@@ -2021,9 +2065,10 @@ impl Store {
         let mut c = self.lock();
         let tx = c.transaction()?;
         let h = Self::put_item_tx(&tx, output)?;
-        if let Some((previous_hash, previous_terminal)) = terminal::exact_terminal(&tx, operation)?
+        if let Some((previous_hash, previous_terminal)) =
+            terminal::exact_settlement(&tx, operation)?
         {
-            if previous_hash != h || previous_terminal != terminal {
+            if previous_hash != h || previous_terminal != settlement {
                 return Err(StoreError::ConflictingReplayOutcome {
                     operation: operation.clone(),
                 });
@@ -2032,7 +2077,7 @@ impl Store {
         let origin = serde_json::to_string(&operation.origin)?;
         let n = tx.execute(
             "UPDATE claims SET state='settled',output_hash=?4,terminal_json=?5 WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND state='pending'",
-            params![origin,operation.request.0,operation.call.0,h.0,serde_json::to_string(&terminal)?],
+            params![origin,operation.request.0,operation.call.0,h.0,serde_json::to_string(&settlement)?],
         )?;
         tx.commit()?;
         Ok(n)

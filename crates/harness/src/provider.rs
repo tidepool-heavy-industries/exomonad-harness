@@ -227,6 +227,7 @@ impl WaitReplayBarrier {
 #[derive(Debug)]
 pub struct RetainedOutput {
     output: crate::turn::JobOutput,
+    finalization: FinalizationResponsibility,
     wait_operation: Option<OperationId>,
     continuation: Option<crate::store::RecordedWaitContinuation>,
     wait_barrier: WaitReplayBarrier,
@@ -237,11 +238,26 @@ impl RetainedOutput {
     pub fn terminal(output: crate::turn::JobOutput) -> Self {
         Self {
             output,
+            finalization: FinalizationResponsibility::provider(),
             wait_operation: None,
             continuation: None,
             wait_barrier: WaitReplayBarrier::default(),
             wait_commit: None,
         }
+    }
+
+    pub(crate) fn recorded_terminal(
+        output: crate::turn::JobOutput,
+        finalization: FinalizationResponsibility,
+    ) -> Self {
+        Self {
+            finalization,
+            ..Self::terminal(output)
+        }
+    }
+
+    pub(crate) fn finalization(&self) -> &FinalizationResponsibility {
+        &self.finalization
     }
 
     pub fn output(&self) -> &crate::turn::JobOutput {
@@ -251,12 +267,14 @@ impl RetainedOutput {
     pub(crate) fn recorded_wait(
         operation: OperationId,
         output: crate::turn::JobOutput,
+        finalization: FinalizationResponsibility,
         continuation: Option<crate::store::RecordedWaitContinuation>,
         wait_barrier: WaitReplayBarrier,
         wait_commit: crate::replay::ReplayWaitCommit,
     ) -> Self {
         Self {
             output,
+            finalization,
             wait_operation: Some(operation),
             continuation,
             wait_barrier,
@@ -270,12 +288,18 @@ impl RetainedOutput {
     ) -> Result<
         (
             crate::turn::JobOutput,
+            FinalizationResponsibility,
             Option<crate::store::RecordedWaitContinuation>,
             WaitReplayBarrier,
             Option<crate::replay::ReplayWaitCommit>,
         ),
         ProviderError,
     > {
+        if !self.finalization.validate(operation) {
+            return Err(ProviderError::Tool(
+                "retained finalization belongs to another operation".into(),
+            ));
+        }
         if self
             .wait_operation
             .as_ref()
@@ -287,6 +311,7 @@ impl RetainedOutput {
         }
         Ok((
             self.output,
+            self.finalization,
             self.continuation,
             self.wait_barrier,
             self.wait_commit,
@@ -327,6 +352,56 @@ pub enum ContextDisposition {
     Replay(crate::context::ContextCommitEvidence),
 }
 
+/// Finalization authority retained with one exact terminal. Providers cannot
+/// manufacture an exemption from their publication or cleanup obligation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinalizationResponsibility(pub(crate) FinalizationKind);
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "owner", content = "operation", rename_all = "snake_case")]
+pub(crate) enum FinalizationKind {
+    Provider,
+    NoProviderDispatch(OperationId),
+}
+
+impl FinalizationResponsibility {
+    pub(crate) fn provider() -> Self {
+        Self(FinalizationKind::Provider)
+    }
+
+    pub(crate) fn no_provider_dispatch(operation: &OperationId) -> Self {
+        Self(FinalizationKind::NoProviderDispatch(operation.clone()))
+    }
+
+    pub(crate) fn validate(&self, operation: &OperationId) -> bool {
+        match &self.0 {
+            FinalizationKind::Provider => true,
+            FinalizationKind::NoProviderDispatch(expected) => expected == operation,
+        }
+    }
+
+    pub(crate) fn requires_provider(&self) -> bool {
+        matches!(self.0, FinalizationKind::Provider)
+    }
+
+    pub(crate) fn replayed(
+        &self,
+        original: &OperationId,
+        local: &OperationId,
+    ) -> Result<Self, ProviderError> {
+        if !self.validate(original) {
+            return Err(ProviderError::Tool(
+                "retained finalization belongs to another operation".into(),
+            ));
+        }
+        Ok(if self.requires_provider() {
+            Self::provider()
+        } else {
+            Self::no_provider_dispatch(local)
+        })
+    }
+}
+
 /// Exact provider-future completion. Embedded runtimes derive `full_success`
 /// from their typed exit and confirmed cleanup, independently from value JSON.
 /// The owner supplies the terminal kind even when cancellation is observed
@@ -336,14 +411,41 @@ pub struct ProviderCompletion {
     pub output: crate::turn::JobOutput,
     pub full_success: bool,
     pub context: ContextDisposition,
+    pub(crate) finalization: FinalizationResponsibility,
 }
 
 impl ProviderCompletion {
+    pub fn provider(
+        output: crate::turn::JobOutput,
+        full_success: bool,
+        context: ContextDisposition,
+    ) -> Self {
+        Self {
+            output,
+            full_success,
+            context,
+            finalization: FinalizationResponsibility::provider(),
+        }
+    }
+
+    pub(crate) fn no_provider_dispatch(
+        operation: &OperationId,
+        result: Result<Value, ToolFailure>,
+    ) -> Self {
+        Self {
+            full_success: result.is_ok(),
+            output: crate::turn::JobOutput::Completed(result),
+            context: ContextDisposition::Unedited,
+            finalization: FinalizationResponsibility::no_provider_dispatch(operation),
+        }
+    }
+
     pub fn unedited(result: Result<Value, ToolFailure>) -> Self {
         Self {
             full_success: result.is_ok(),
             output: crate::turn::JobOutput::Completed(result),
             context: ContextDisposition::Unedited,
+            finalization: FinalizationResponsibility::provider(),
         }
     }
 }

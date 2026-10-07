@@ -1169,8 +1169,14 @@ impl Store {
             return Ok(None);
         };
         if !matches!(record.version, 2 | 3)
-            || terminal::exact_terminal(&c, operation)?
-                != Some((record.output.clone(), TerminalOutcome::Success))
+            || terminal::exact_settlement(&c, operation)?
+                != Some((
+                    record.output.clone(),
+                    terminal::TerminalSettlement::new(
+                        TerminalOutcome::Success,
+                        &crate::provider::FinalizationResponsibility::provider(),
+                    ),
+                ))
         {
             return Err(ContextError::UnsupportedState.into());
         }
@@ -1283,6 +1289,19 @@ impl Store {
             serde_json::to_string(draft)?
         };
         if let Some(record) = receipt(&tx, &snapshot.operation)? {
+            if terminal::exact_settlement(&tx, &snapshot.operation)?
+                != Some((
+                    record.output.clone(),
+                    terminal::TerminalSettlement::new(
+                        TerminalOutcome::Success,
+                        &crate::provider::FinalizationResponsibility::provider(),
+                    ),
+                ))
+            {
+                return Err(StoreError::ConflictingReplayOutcome {
+                    operation: snapshot.operation.clone(),
+                });
+            }
             let equivalent = record.candidate == candidate
                 || (record.version == 2
                     && legacy_candidate_matches(&record.candidate, replay, draft, snapshot)?);
@@ -1906,14 +1925,18 @@ fn freeze_committed_context(
 }
 
 fn settle_success(tx: &Transaction<'_>, operation: &OperationId, hash: &ItemHash) -> Result<()> {
-    if let Some((old, terminal)) = terminal::exact_terminal(tx, operation)?
-        && (old != *hash || terminal != TerminalOutcome::Success)
+    let settlement = terminal::TerminalSettlement::new(
+        TerminalOutcome::Success,
+        &crate::provider::FinalizationResponsibility::provider(),
+    );
+    if let Some((old, terminal)) = terminal::exact_settlement(tx, operation)?
+        && (old != *hash || terminal != settlement)
     {
         return Err(StoreError::ConflictingReplayOutcome {
             operation: operation.clone(),
         });
     }
-    let n=tx.execute("UPDATE claims SET state='settled',output_hash=?4,terminal_json=?5 WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND state='pending'",params![serde_json::to_string(&operation.origin)?,operation.request.0,operation.call.0,hash.0,serde_json::to_string(&TerminalOutcome::Success)?])?;
+    let n=tx.execute("UPDATE claims SET state='settled',output_hash=?4,terminal_json=?5 WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND state='pending'",params![serde_json::to_string(&operation.origin)?,operation.request.0,operation.call.0,hash.0,serde_json::to_string(&settlement)?])?;
     if n == 0 {
         return Err(ContextError::Conflict.into());
     }

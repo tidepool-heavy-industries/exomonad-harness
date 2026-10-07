@@ -184,12 +184,12 @@ impl Provider for TypedCancelledProvider {
     async fn complete_call(&self, _: &str, _: ToolInput, _: CallContext) -> ProviderCompletion {
         self.0.started.notify_one();
         self.0.release_reply.notified().await;
-        ProviderCompletion {
-            output: JobOutput::CancelledWithReceipt(self.0.receipt.clone()),
-            // Even a misreported success flag cannot make a cancellation eligible.
-            full_success: true,
-            context: ContextDisposition::Unedited,
-        }
+        // Even a misreported success flag cannot make a cancellation eligible.
+        ProviderCompletion::provider(
+            JobOutput::CancelledWithReceipt(self.0.receipt.clone()),
+            true,
+            ContextDisposition::Unedited,
+        )
     }
 
     fn tools(&self) -> Vec<Value> {

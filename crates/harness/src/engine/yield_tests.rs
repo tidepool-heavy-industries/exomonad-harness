@@ -495,6 +495,12 @@ impl crate::embedding::HostActor for Host {
     async fn wake(&self, _: i64) -> Result<(), String> {
         Ok(())
     }
+    async fn output_committed(&self, _: &OperationId) -> Result<(), String> {
+        panic!("intrinsic yield has no host finalization owner")
+    }
+    async fn output_aborted(&self, _: &OperationId) -> Result<(), String> {
+        panic!("intrinsic yield has no host abort owner")
+    }
     async fn control(
         &self,
         _: crate::embedding::HostControl,
@@ -511,19 +517,21 @@ async fn yield_pinned_embedded_surface_allows_intrinsic_without_host_authority()
     let surface = Arc::new(
         crate::embedding::ToolSurface::new("immutable-spec".into(), vec![], dispatcher).unwrap(),
     );
-    let conversation = crate::embedding::Conversation::attach(
-        Arc::new(Store::memory().unwrap()),
-        Arc::new(Host {
-            identity: HostIdentity {
-                run: "pinned-yield".into(),
-                actor: AgentPath("/root".into()),
-                incarnation: "one".into(),
-            },
-            surface,
-        }),
-        None,
-    )
-    .unwrap();
+    let path = std::env::temp_dir().join(format!(
+        "harness-yield-finalization-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = Arc::new(Store::open(&path).unwrap());
+    let host = Arc::new(Host {
+        identity: HostIdentity {
+            run: "pinned-yield".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "one".into(),
+        },
+        surface,
+    });
+    let conversation =
+        crate::embedding::Conversation::attach(store.clone(), host.clone(), None).unwrap();
     // PinnedProvider validates solely against the immutable host manifest.
     // The engine adds and interprets its intrinsic without granting host tools.
     let snapshot = conversation.provider().request_snapshot().unwrap().unwrap();
@@ -568,4 +576,47 @@ async fn yield_pinned_embedded_surface_allows_intrinsic_without_host_authority()
             .count(),
         1
     );
+    let operation = store.claims(&CallId("yield-call".into())).unwrap()[0]
+        .operation
+        .clone();
+    let finalization = store.completed_finalization(&operation).unwrap().unwrap();
+    assert!(!finalization.requires_provider());
+    drop(engine);
+    drop(conversation);
+    drop(snapshot);
+    drop(store);
+    let store = Arc::new(Store::open(&path).unwrap());
+    let recovered = crate::embedding::Conversation::attach(store.clone(), host, None).unwrap();
+    let runtime = recovered
+        .engine::<Offline, _>(
+            Script {
+                requests: requests.clone(),
+                turns: Mutex::new(vec![final_turn()].into()),
+            },
+            Arc::new(JobScheduler::new(1).unwrap()),
+            EngineConfig {
+                instructions: "native yield".into(),
+                tools: vec![],
+                model: "offline".into(),
+                effort: Effort::Low,
+                session_id: "pinned".into(),
+                agent: AgentPath("/root".into()),
+            },
+            NonZeroU64::new(10000).unwrap(),
+        )
+        .unwrap();
+    let (_cancel, cancel) = watch::channel(false);
+    let (_mail, mail) = tokio::sync::mpsc::unbounded_channel::<DurableMailboxWake>();
+    runtime
+        .run_recovering_embedded(Some(result.head_request), vec![], cancel, mail)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.completed_finalization(&operation).unwrap(),
+        Some(finalization)
+    );
+    drop(runtime);
+    drop(recovered);
+    drop(store);
+    std::fs::remove_file(path).unwrap();
 }

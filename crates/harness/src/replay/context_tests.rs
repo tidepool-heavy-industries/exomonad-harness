@@ -89,6 +89,7 @@ impl Provider for Editor {
             }
         }
         ProviderCompletion {
+            finalization: crate::provider::FinalizationResponsibility::provider(),
             output: JobOutput::Completed(Ok(
                 json!({"error":"a successful payload is still successful","changed":self.rewrite}),
             )),

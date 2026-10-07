@@ -49,8 +49,22 @@ acknowledgment and replay read this same authority; the former
 `operation_output` event is no longer written or used to decide completion.
 Inherited claimants must retain identical output and terminal evidence.
 
+Settlements now encode a version `1` envelope in the same `terminal_json` field:
+terminal outcome and opaque finalization responsibility are committed together.
+External provider completions and raw output writers retain provider responsibility,
+including unedited failures. Engine's intrinsic yield and a pinned provider's
+predispatch refusal issue `NoProviderDispatch`, bound to that exact operation.
+Retained-output replay carries this evidence into the mapped operation; context
+publication requires provider responsibility. Conflicting responsibility across
+claimants refuses even when the rendered output and terminal outcome are equal.
+Completed provider terminals still invoke the host's idempotent finalizer; an
+intrinsic or proven predispatch refusal does not. Cancellation receipts retain
+their existing explicit cleanup contract and do not invoke completed-output hooks.
+
 Older schemas open through an additive migration. Their settled rows have no
-terminal marker: typed replay returns `UnsupportedReplayOutcome`, preserving
+terminal marker. Outcome-only rows written before responsibility was retained
+also lack supported finalization evidence. Typed replay and acknowledgment return
+`UnsupportedReplayOutcome`, preserving
 their original Item bytes rather than interpreting an `error` key as failure
 or silently treating an unknown result as success. Ordinary diagnostic Item
 reads remain available. Successful tool payloads containing `error` or
