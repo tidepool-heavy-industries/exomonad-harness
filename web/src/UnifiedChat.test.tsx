@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import UnifiedChat, { decodeUnifiedPage } from './UnifiedChat'
+import { clearMountedFormDrafts } from './MountedForm'
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.unstubAllGlobals(); clearMountedFormDrafts() })
 
 describe('unified conversation pages', () => {
   const origin = { run: 'r', nativeActor: 3, incarnation: 1 }
@@ -36,4 +37,34 @@ describe('unified conversation pages', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Previous entries' }))
     await screen.findByText('First page')
   })
+  it('retains a mounted draft and publication rank through disconnection and a new head', async () => {
+    const form = { sequence: 10, revisionSequence: 10, opening: { origin, mountId: 'same-mount', execution: { kind: 'actor_program' }, conversation: null,
+      form: { version: 1, root: { kind: 'text', id: 'f0', label: 'Name', initial: null } } },
+      state: 'open', attemptId: null, draft: null, errors: [], answer: null }
+    const first = { origin, cutoverSequence: 0, legacyHistory: false, entries: [
+      { sequence: 10, kind: 'form', form },
+      { sequence: 20, kind: 'message', requestId: 'head-a', position: 0, hash: '1'.repeat(64), item: { type: 'message', role: 'assistant', content: 'Model answer' } },
+    ], nextAfter: null }
+    const second = { ...first, entries: [...first.entries,
+      { sequence: 30, kind: 'output', output: { reference: { origin, sequence: 30 }, emission: { origin, id: { displaySlot: 1, pageOrdinal: 0 }, execution: { kind: 'actor_program' }, conversation: null,
+        page: { text: 'Later display', expansions: [], unavailable: false } } } },
+    ] }
+    let snapshot: unknown = first
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(snapshot), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const mounted = render(<UnifiedChat origin={origin} requestId="head-a" revision={10} ready active />)
+    await screen.findByLabelText('Name')
+    const card = screen.getByRole('region', { name: 'Actor form' })
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'unsent edit' } })
+    mounted.rerender(<UnifiedChat origin={origin} requestId="head-a" revision={10} ready={false} active />)
+    expect((screen.getByLabelText('Name') as HTMLInputElement).disabled).toBe(true)
+    snapshot = second
+    mounted.rerender(<UnifiedChat origin={origin} requestId="head-b" revision={30} ready active />)
+    await screen.findByText('Later display')
+    expect(screen.getByRole('region', { name: 'Actor form' })).toBe(card)
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('unsent edit')
+    expect((screen.getByLabelText('Name') as HTMLInputElement).disabled).toBe(false)
+    expect(screen.getAllByRole('listitem').map(item => item.getAttribute('data-sequence'))).toEqual(['10', '20', '30'])
+  })
+
 })
