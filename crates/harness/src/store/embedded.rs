@@ -60,6 +60,78 @@ fn durable_binding_transaction<T>(
 }
 
 impl Store {
+    pub(crate) fn seed_embedded_context(
+        &self,
+        identity: &HostIdentity,
+        operation_id: &str,
+        item: &Item,
+    ) -> std::result::Result<RequestId, EmbeddedError> {
+        if operation_id.is_empty() {
+            return Err(EmbeddedError::Binding(
+                "empty context seed operation ID".into(),
+            ));
+        }
+        let mut connection = self.lock();
+        durable_binding_transaction(&mut connection, |tx| {
+            if !matches_binding(tx, identity)? {
+                return Err(EmbeddedError::Binding(
+                    "context seed target is not bound to this host".into(),
+                ));
+            }
+            let hash = Self::put_item_tx(tx, item)?;
+            let existing: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT request_id,item_hash FROM embedded_context_seeds \
+                 WHERE run_id=?1 AND agent_path=?2 AND incarnation=?3 AND operation_id=?4",
+                    params![
+                        identity.run,
+                        identity.actor.0,
+                        identity.incarnation,
+                        operation_id
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((request, previous_hash)) = existing {
+                if hash.0 != previous_hash {
+                    return Err(EmbeddedError::ConflictingSeed);
+                }
+                return Ok(RequestId(request));
+            }
+            let started: bool = tx.query_row(
+                "SELECT head_request IS NOT NULL \
+                    OR EXISTS(SELECT 1 FROM requests WHERE branch=?1) \
+                    OR EXISTS(SELECT 1 FROM envelopes WHERE recipient=?1) \
+                 FROM agents WHERE path=?1",
+                [&identity.actor.0],
+                |row| row.get(0),
+            )?;
+            if started {
+                return Err(EmbeddedError::SeedRequiresFreshConversation);
+            }
+            let request = RequestId(uuid::Uuid::new_v4().to_string());
+            // Synthetic settled history is not an admitted model round.
+            tx.execute(
+                "INSERT INTO requests(id,parent_id,branch,created_at) VALUES (?1,NULL,?2,?3)",
+                params![request.0, identity.actor.0, utc_millis()],
+            )?;
+            tx.execute(
+                "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,0,?2)",
+                params![request.0, hash.0],
+            )?;
+            tx.execute(
+                "UPDATE agents SET head_request=?2 WHERE path=?1 AND head_request IS NULL",
+                params![identity.actor.0, request.0],
+            )?;
+            tx.execute(
+                "INSERT INTO embedded_context_seeds(run_id,agent_path,incarnation,operation_id,request_id,item_hash) \
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                params![identity.run, identity.actor.0, identity.incarnation, operation_id, request.0, hash.0],
+            )?;
+            Ok(request)
+        })
+    }
+
     pub(crate) fn embedded_input_state(
         &self,
         identity: &HostIdentity,
@@ -383,6 +455,26 @@ mod tests {
             actor: AgentPath("/root".into()),
             incarnation: "1".into(),
         }
+    }
+
+    #[test]
+    fn schema_twelve_migration_retains_history_and_adds_empty_seed_receipts() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        super::super::schema::initialize(&mut connection).unwrap();
+        connection.execute_batch("DROP TABLE embedded_context_seeds; UPDATE schema_version SET version=12; INSERT INTO requests(id,branch) VALUES('kept','/root');").unwrap();
+        super::super::schema::initialize(&mut connection).unwrap();
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM embedded_context_seeds", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+        let branch: String = connection
+            .query_row("SELECT branch FROM requests WHERE id='kept'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(branch, "/root");
     }
 
     #[test]

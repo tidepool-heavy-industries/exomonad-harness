@@ -97,6 +97,63 @@ fn incoming() -> tokio::sync::mpsc::UnboundedReceiver<DurableMailboxWake> {
     tokio::sync::mpsc::unbounded_channel().1
 }
 #[tokio::test]
+async fn embedded_seed_is_included_once_when_explicit_input_starts_inference() {
+    let store = Arc::new(Store::memory().unwrap());
+    let identity = identity();
+    store.bind_embedded_actor(&identity, None).unwrap();
+    let prompt = Item(json!({"type":"message","role":"user","content":"  seed\nλ\n"}));
+    let seed = store
+        .seed_embedded_context(&identity, "spawn", &prompt)
+        .unwrap();
+    let (engine, inputs) = engine(store.clone(), &identity, vec![Ok(final_turn())]);
+    assert!(inputs.lock().unwrap().is_empty());
+    let wake = Item(json!({"type":"message","role":"user","content":"start work"}));
+    let (_cancel, cancel) = watch::channel(false);
+    let completion = engine
+        .run_embedded(Some(seed.clone()), vec![wake.clone()], cancel, incoming())
+        .await
+        .unwrap();
+    let requests = inputs.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .input
+            .iter()
+            .filter(|item| **item == prompt)
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests[0]
+            .input
+            .iter()
+            .filter(|item| **item == wake)
+            .count(),
+        1
+    );
+    assert!(
+        requests[0]
+            .input
+            .iter()
+            .position(|item| *item == prompt)
+            .unwrap()
+            < requests[0]
+                .input
+                .iter()
+                .position(|item| *item == wake)
+                .unwrap()
+    );
+    assert_eq!(
+        store
+            .request(&completion.head_request)
+            .unwrap()
+            .unwrap()
+            .parent,
+        Some(seed)
+    );
+}
+
+#[tokio::test]
 async fn embedded_restart_recovers_admission_and_delivery_cuts_without_duplicate_parent() {
     for has_head in [false, true] {
         for delivered in [false, true] {

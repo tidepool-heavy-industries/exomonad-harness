@@ -1,4 +1,4 @@
-pub const VERSION: u32 = 12;
+pub const VERSION: u32 = 13;
 pub const SQL: &str = include_str!("schema.sql");
 const MODEL_REQUEST_INDEXES: &str = "
     CREATE INDEX IF NOT EXISTS events_model_turn_recent ON events(id DESC,request_id) WHERE kind='model_turn';

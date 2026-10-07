@@ -76,6 +76,13 @@ CREATE TABLE IF NOT EXISTS embedded_inputs (
  item_hash TEXT NOT NULL REFERENCES items(hash),
  PRIMARY KEY(run_id, agent_path, incarnation, operation_id)
 );
+CREATE TABLE IF NOT EXISTS embedded_context_seeds (
+ run_id TEXT NOT NULL, agent_path TEXT NOT NULL REFERENCES embedded_bindings(agent_path),
+ incarnation TEXT NOT NULL, operation_id TEXT NOT NULL,
+ request_id TEXT NOT NULL UNIQUE REFERENCES requests(id),
+ item_hash TEXT NOT NULL REFERENCES items(hash),
+ PRIMARY KEY(run_id, agent_path, incarnation, operation_id)
+);
 
 CREATE TABLE IF NOT EXISTS embedded_commands (
  run_id TEXT NOT NULL, operation_id TEXT NOT NULL,

@@ -486,6 +486,6 @@ mod tests {
             .lock()
             .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, super::super::schema::VERSION);
     }
 }

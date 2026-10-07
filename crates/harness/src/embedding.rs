@@ -74,6 +74,10 @@ pub enum EmbeddedError {
     Surface(String),
     #[error("input operation was already admitted with different content")]
     ConflictingInput,
+    #[error("context seed operation was already committed with different content")]
+    ConflictingSeed,
+    #[error("context seed requires a fresh conversation without history or inputs")]
+    SeedRequiresFreshConversation,
 }
 impl From<rusqlite::Error> for EmbeddedError {
     fn from(value: rusqlite::Error) -> Self {
@@ -371,6 +375,20 @@ impl Conversation {
             host: self.host.clone(),
         })
     }
+    /// Persist the initial user prompt as settled history without admitting an
+    /// input envelope or waking the actor. Exact operation retries return the
+    /// original seed even after subsequent model history has advanced.
+    pub fn seed_context(
+        &self,
+        operation_id: &str,
+        prompt: &str,
+    ) -> Result<RequestId, EmbeddedError> {
+        let _admission = self.host.admit()?;
+        let item = Item(serde_json::json!({"type":"message","role":"user","content":prompt}));
+        self.store
+            .seed_embedded_context(self.identity(), operation_id, &item)
+    }
+
     pub async fn input(
         &self,
         operation_id: &str,
@@ -700,6 +718,148 @@ impl Provider for PinnedProvider {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    struct SeedHost(HostIdentity);
+    struct SeedGuard;
+    impl AdmissionGuard for SeedGuard {}
+    #[async_trait]
+    impl HostActor for SeedHost {
+        fn identity(&self) -> &HostIdentity {
+            &self.0
+        }
+        fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+            Ok(Box::new(SeedGuard))
+        }
+        fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+            panic!("seeding must not construct a model request")
+        }
+        async fn wake(&self, _: i64) -> Result<(), String> {
+            panic!("seeding must not wake the actor")
+        }
+        async fn control(&self, _: HostControl) -> Result<Value, HostControlError> {
+            panic!("seeding must not control the actor")
+        }
+    }
+    fn seed_host() -> Arc<SeedHost> {
+        Arc::new(SeedHost(HostIdentity {
+            run: "seed-run".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "seed-incarnation".into(),
+        }))
+    }
+
+    #[test]
+    fn context_seed_reopens_exact_prompt_without_input_or_pending_round() {
+        let directory = std::env::temp_dir().join(format!("harness-seed-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("store.sqlite");
+        let host = seed_host();
+        let prompt = "  Initial context\nλ\n\n";
+        let request = {
+            let store = Arc::new(Store::open(&path).unwrap());
+            let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+            let request = conversation.seed_context("spawn-op", prompt).unwrap();
+            assert!(store.inbox("/root").unwrap().is_empty());
+            assert!(store.events(None).unwrap().is_empty());
+            let frontier = store.embedded_round_frontier(host.identity()).unwrap();
+            assert_eq!(frontier.settled_head, Some(request.clone()));
+            assert_eq!(frontier.pending_head, None);
+            request
+        };
+        {
+            let store = Arc::new(Store::open(&path).unwrap());
+            let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+            assert_eq!(
+                conversation.seed_context("spawn-op", prompt).unwrap(),
+                request
+            );
+            assert_eq!(
+                store.items(&request).unwrap(),
+                vec![Item(json!({
+                    "type":"message", "role":"user", "content":prompt
+                }))]
+            );
+            let next = RequestId("next-model-history".into());
+            store
+                .create_request(&next, Some(&request), "/root")
+                .unwrap();
+            assert!(
+                store
+                    .advance_agent_head(&host.identity().actor, Some(&request), Some(&next))
+                    .unwrap()
+            );
+            assert_eq!(
+                conversation.seed_context("spawn-op", prompt).unwrap(),
+                request
+            );
+            assert_eq!(
+                store.embedded_agent_head(host.identity()).unwrap(),
+                Some(next)
+            );
+            assert!(matches!(
+                conversation.seed_context("spawn-op", "changed"),
+                Err(EmbeddedError::ConflictingSeed)
+            ));
+            assert!(matches!(
+                conversation.seed_context("other-op", prompt),
+                Err(EmbeddedError::SeedRequiresFreshConversation)
+            ));
+            assert!(store.inbox("/root").unwrap().is_empty());
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn context_seed_refuses_input_history_and_foreign_binding_without_partial_writes() {
+        for started_with_input in [false, true] {
+            let store = Arc::new(Store::memory().unwrap());
+            let host = seed_host();
+            let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+            if started_with_input {
+                store
+                    .admit_embedded_input(
+                        host.identity(),
+                        "input",
+                        "operator",
+                        &Item(json!({
+                            "type":"message", "role":"user", "content":"existing input"
+                        })),
+                    )
+                    .unwrap();
+            } else {
+                store
+                    .create_request(&RequestId("pending-history".into()), None, "/root")
+                    .unwrap();
+            }
+            assert!(matches!(
+                conversation.seed_context("seed", "prompt"),
+                Err(EmbeddedError::SeedRequiresFreshConversation)
+            ));
+            assert_eq!(store.embedded_agent_head(host.identity()).unwrap(), None);
+            let foreign = Conversation {
+                store: store.clone(),
+                host: Arc::new(SeedHost(HostIdentity {
+                    incarnation: "foreign".into(),
+                    ..host.identity().clone()
+                })),
+            };
+            assert!(matches!(
+                foreign.seed_context("seed", "prompt"),
+                Err(EmbeddedError::Binding(_))
+            ));
+            assert!(matches!(
+                conversation.seed_context("", "prompt"),
+                Err(EmbeddedError::Binding(_))
+            ));
+            let count: i64 = store
+                .lock()
+                .query_row("SELECT COUNT(*) FROM embedded_context_seeds", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+    }
 
     #[test]
     fn installed_manifest_pins_typed_scheduling_and_derives_wire_flag() {
