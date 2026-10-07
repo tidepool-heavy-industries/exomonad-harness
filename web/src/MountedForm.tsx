@@ -7,7 +7,9 @@ export type FormNode =
   | { readonly kind: 'group'; readonly children: readonly FormNode[] }
   | { readonly kind: 'section'; readonly title: string; readonly child: FormNode }
   | { readonly kind: 'view'; readonly presentation: RichView }
-  | { readonly kind: 'text' | 'int' | 'number' | 'bool'; readonly id: string; readonly label: string; readonly initial: string | number | boolean | null }
+  | { readonly kind: 'text' | 'int'; readonly id: string; readonly label: string; readonly initial: string | null }
+  | { readonly kind: 'number'; readonly id: string; readonly label: string; readonly initial: number | null }
+  | { readonly kind: 'bool'; readonly id: string; readonly label: string; readonly initial: boolean | null }
   | { readonly kind: 'choice' | 'many'; readonly id: string; readonly label: string; readonly options: readonly FormOption[]; readonly initial: string | readonly string[] | null }
   | { readonly kind: 'alternatives'; readonly id: string; readonly label: string; readonly options: readonly (FormOption & { readonly form: FormNode })[]; readonly initial: string | null }
 export interface FormSpec { readonly version: 1; readonly root: FormNode }
@@ -29,6 +31,7 @@ const text = (value: unknown, max = 8192): value is string => typeof value === '
 function option(value: unknown): value is FormOption {
   return obj(value) && text(value.id, 256) && value.id.length > 0 && text(value.label) && isRichView(value.presentation)
 }
+const decimalInteger = (value: unknown): value is string => typeof value === 'string' && /^-?(?:0|[1-9]\d*)$/.test(value)
 function formNode(value: unknown, depth = 0, ids = new Set<string>()): value is FormNode {
   if (!obj(value) || depth > 32 || typeof value.kind !== 'string') return false
   switch (value.kind) {
@@ -40,8 +43,8 @@ function formNode(value: unknown, depth = 0, ids = new Set<string>()): value is 
       if (!text(value.id, 128) || value.id.length === 0 || ids.has(value.id) || !text(value.label)) return false
       ids.add(value.id)
       if (value.initial === null) return true
-      return value.kind === 'text' ? typeof value.initial === 'string' : value.kind === 'bool' ? typeof value.initial === 'boolean'
-        : value.kind === 'int' ? Number.isSafeInteger(value.initial) : typeof value.initial === 'number' && Number.isFinite(value.initial)
+      return value.kind === 'text' ? typeof value.initial === 'string' : value.kind === 'int' ? decimalInteger(value.initial)
+        : value.kind === 'bool' ? typeof value.initial === 'boolean' : typeof value.initial === 'number' && Number.isFinite(value.initial)
     }
     case 'choice': case 'many': case 'alternatives': {
       if (!text(value.id, 128) || value.id.length === 0 || ids.has(value.id) || !text(value.label) || !Array.isArray(value.options)
@@ -176,6 +179,10 @@ function FormNodeView({ node, draft, setDraft, editable }: { node: FormNode; dra
   })}</fieldset>
   const value = draft[node.id] ?? node.initial
   if (node.kind === 'bool') return <label className="form-field"><input type="checkbox" checked={value === true} disabled={!editable} onChange={event => change(node.id, event.target.checked)} />{node.label}</label>
-  return <label className="form-field">{node.label}<input type={node.kind === 'text' ? 'text' : 'number'} value={value === null ? '' : String(value)} disabled={!editable}
-    step={node.kind === 'int' ? '1' : 'any'} onChange={event => { const raw = event.target.value; change(node.id, node.kind === 'text' ? raw : raw === '' ? '' : node.kind === 'int' ? Number.parseInt(raw, 10) : Number(raw)) }} /></label>
+  if (node.kind === 'int') return <label className="form-field">{node.label}<input type="text" inputMode="numeric" value={value === null ? '' : String(value)} disabled={!editable}
+    onChange={event => change(node.id, event.target.value)} /></label>
+  if (node.kind === 'text') return <label className="form-field">{node.label}<input type="text" value={value === null ? '' : String(value)} disabled={!editable}
+    onChange={event => change(node.id, event.target.value)} /></label>
+  return <label className="form-field">{node.label}<input type="number" step="any" value={value === null ? '' : String(value)} disabled={!editable}
+    onChange={event => { const raw = event.target.value; change(node.id, raw === '' ? '' : Number(raw)) }} /></label>
 }

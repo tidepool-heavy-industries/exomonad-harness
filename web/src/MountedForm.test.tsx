@@ -16,6 +16,11 @@ const openForm: StoredActorForm = {
     ] },
   ] } } }, state: 'open', attemptId: null, draft: null, errors: [], answer: null,
 }
+function integerForm(initial: string | null): StoredActorForm {
+  return { ...openForm, opening: { ...openForm.opening, mountId: 'int-mount', form: { version: 1, root: {
+    kind: 'int', id: 'integer', label: 'Integer', initial,
+  } } } }
+}
 
 beforeEach(() => { clearMountedFormDrafts(); vi.restoreAllMocks() })
 
@@ -47,5 +52,30 @@ describe('mounted actor forms', () => {
     expect(screen.getByText(/"name": "final"/)).toBeTruthy()
     expect(screen.getByText('**done**')).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Submit' })).toBeNull()
+  })
+
+  it('preserves integers beyond JavaScript safe range exactly through submission', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('rejected', { status: 409 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const exact = '9007199254740993'
+    render(<MountedForm form={integerForm(exact)} ready active />)
+    const input = screen.getByLabelText('Integer') as HTMLInputElement
+    expect(input.type).toBe('text')
+    expect(input.value).toBe(exact)
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    const payload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { draft: Record<string, unknown> }
+    expect(payload.draft.integer).toBe(exact)
+  })
+
+  it('forwards malformed partial integer lexemes unchanged for server validation', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('rejected', { status: 400 }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<MountedForm form={integerForm(null)} ready active />)
+    fireEvent.change(screen.getByLabelText('Integer'), { target: { value: '1.5' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    const payload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { draft: Record<string, unknown> }
+    expect(payload.draft.integer).toBe('1.5')
   })
 })
