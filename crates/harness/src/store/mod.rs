@@ -900,7 +900,6 @@ impl Store {
         )?;
         let mut conn = conn;
         schema::initialize(&mut conn)?;
-        forms::interrupt_pending(&mut conn)?;
         let store_id: String = conn.query_row(
             "SELECT state FROM session_state WHERE session_id='harness:store-id'",
             [],

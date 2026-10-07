@@ -90,6 +90,11 @@ fn save(tx: &Transaction<'_>, key: &str, row: &mut StoredActorForm) -> Result<()
     Ok(())
 }
 impl Store {
+    /// Exclusive runtime startup calls this once before admitting continuation scopes.
+    /// Opening a connection or serving retained history never performs recovery.
+    pub fn interrupt_actor_forms_for_restart(&self) -> Result<usize> {
+        interrupt_pending(&mut self.lock())
+    }
     pub fn open_actor_form(
         &self,
         authority: &dyn ActorFormAuthority,
@@ -358,13 +363,14 @@ impl Store {
         load(&tx, &identity)
     }
 }
-pub(super) fn interrupt_pending(c: &mut rusqlite::Connection) -> Result<()> {
+fn interrupt_pending(c: &mut rusqlite::Connection) -> Result<usize> {
     let tx = c.transaction()?;
     let rows = {
         let mut q = tx.prepare("SELECT identity,presentation FROM actor_forms WHERE json_extract(presentation,'$.state') IN ('open','submitted')")?;
         q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()?
     };
+    let count = rows.len();
     for (identity, raw) in rows {
         let mut row: StoredActorForm = serde_json::from_str(&raw)?;
         if matches!(row.state, ActorFormState::Open | ActorFormState::Submitted) {
@@ -373,7 +379,7 @@ pub(super) fn interrupt_pending(c: &mut rusqlite::Connection) -> Result<()> {
         }
     }
     tx.commit()?;
-    Ok(())
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -582,9 +588,20 @@ mod tests {
                     &json!({"kind":"markdown","text":"**accepted**"}),
                 )
                 .unwrap();
+            let reader = Store::open(&path).unwrap();
+            assert_eq!(
+                reader.actor_form(&pending.origin, "pending").unwrap().state,
+                ActorFormState::Submitted
+            );
+            assert_eq!(
+                store.actor_form(&pending.origin, "pending").unwrap().state,
+                ActorFormState::Submitted
+            );
         }
         {
             let store = Store::open(&path).unwrap();
+            assert_eq!(store.interrupt_actor_forms_for_restart().unwrap(), 1);
+            assert_eq!(store.interrupt_actor_forms_for_restart().unwrap(), 0);
             assert_eq!(
                 store.actor_form(&pending.origin, "pending").unwrap().state,
                 ActorFormState::Interrupted
