@@ -583,11 +583,9 @@ impl JobScheduler {
             tokio::pin!(call);
             let mut result = loop {
                 tokio::select! {
-                    event = progress_rx.recv() => {
-                        if let Some(event) = event {
-                            if let Some(job) = jobs.lock().await.get_mut(&task_operation) {
-                                retain_progress(&mut job.progress, event);
-                            }
+                    Some(event) = progress_rx.recv() => {
+                        if let Some(job) = jobs.lock().await.get_mut(&task_operation) {
+                            retain_progress(&mut job.progress, event);
                         }
                     }
                     result = &mut call => break result,
@@ -1669,6 +1667,91 @@ mod tests {
         assert_eq!(scheduler.settled_claimants(&id).await.unwrap().len(), 2);
         let replay = scheduler.claim(&id, a).await.unwrap();
         assert_eq!(replay, Some(JobOutput::Completed(Ok(json!({"ok": true})))));
+    }
+
+    #[tokio::test]
+    async fn closed_progress_does_not_repoll_pending_provider() {
+        use std::future::{Future, poll_fn};
+        use std::pin::Pin;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DroppedProgress {
+            polls: Arc<AtomicUsize>,
+            started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        }
+
+        #[async_trait]
+        impl Provider for DroppedProgress {
+            async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+                unreachable!("context-aware call expected")
+            }
+
+            async fn call_with_context(
+                &self,
+                _: &str,
+                _: Value,
+                context: CallContext,
+            ) -> Result<Value, ProviderError> {
+                context.progress.try_send(json!({"phase": "ready"})).unwrap();
+                drop(context);
+                let mut started = self.started.lock().unwrap().take();
+                let mut release = self.release.lock().unwrap().take().unwrap();
+                poll_fn(|cx| {
+                    self.polls.fetch_add(1, Ordering::SeqCst);
+                    if let Some(started) = started.take() {
+                        started.send(()).unwrap();
+                    }
+                    Pin::new(&mut release).poll(cx)
+                })
+                .await
+                .unwrap();
+                Ok(json!({"ok": true}))
+            }
+
+            fn tools(&self) -> Vec<Value> {
+                vec![]
+            }
+        }
+
+        let scheduler = JobScheduler::new(1).unwrap();
+        let call_id = CallId("closed-progress".into());
+        let polls = Arc::new(AtomicUsize::new(0));
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        scheduler
+            .start(
+                Arc::new(DroppedProgress {
+                    polls: polls.clone(),
+                    started: std::sync::Mutex::new(Some(started)),
+                    release: std::sync::Mutex::new(Some(release_rx)),
+                }),
+                call_id.clone(),
+                "pending".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        started_rx.await.unwrap();
+        // Drain the receiver-close wake before observing the dormant call.
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+        let dormant_polls = polls.load(Ordering::SeqCst);
+        assert_eq!(scheduler.output(&call_id).await.unwrap(), None);
+        assert_eq!(
+            scheduler.progress(&call_id).await.unwrap(),
+            vec![json!({"phase": "ready"})]
+        );
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(polls.load(Ordering::SeqCst), dormant_polls);
+        release.send(()).unwrap();
+        assert_eq!(
+            scheduler.wait(&call_id).await.unwrap(),
+            JobOutput::Completed(Ok(json!({"ok": true})))
+        );
     }
 
     #[tokio::test]
