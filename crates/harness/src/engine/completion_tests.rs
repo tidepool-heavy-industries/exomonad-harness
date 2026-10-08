@@ -904,7 +904,7 @@ impl ResponsesTransport for RequestBoundaryTransport {
         assert_eq!(self.calls.fetch_add(1, Ordering::SeqCst), 0);
         let mut items = vec![];
         if self.pending {
-            items.push(Item(json!({"type":"function_call","call_id":"pending-work","name":"linger","arguments":"{}"})));
+            items.push(Item(json!({"type":"function_call","call_id":"pending-work","name":"linger","async":true,"arguments":"{}"})));
         }
         items.push(Item(json!({"type":"function_call","call_id":"completed-work","name":"work","arguments":"{}"})));
         Ok(ResponsesTurn {
@@ -977,7 +977,15 @@ async fn closed_next_request_preserves_settlement_and_cleanup_without_transport_
             runtime.run_embedded(None, vec![], cancellation.clone(), mail),
         )
         .await
-        .unwrap()
+        .unwrap_or_else(|_| {
+            panic!(
+                "request boundary timed out: typed={typed}, pending={pending}, transport={}, work={}, pending_calls={}, acknowledgments={}",
+                transport_calls.load(Ordering::SeqCst),
+                dispatcher.work_calls.load(Ordering::SeqCst),
+                dispatcher.pending_calls.load(Ordering::SeqCst),
+                host.acknowledgments.load(Ordering::SeqCst)
+            )
+        })
         .unwrap_err();
         assert!(
             !*cancellation.borrow(),
@@ -1041,6 +1049,14 @@ async fn closed_next_request_preserves_settlement_and_cleanup_without_transport_
                     .unwrap()
                     .remove(0);
                 assert_eq!(pending_claim.state, crate::store::ClaimState::Settled);
+                assert_eq!(
+                    store
+                        .invocation_item(&pending_claim.operation.request, &pending_claim.call_id)
+                        .unwrap()
+                        .unwrap()
+                        .execution,
+                    ToolExecution::Asynchronous
+                );
                 assert!(matches!(
                     runtime
                         .scheduler
