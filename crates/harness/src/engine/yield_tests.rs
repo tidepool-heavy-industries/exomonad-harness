@@ -199,14 +199,23 @@ async fn engine_owned_yield_recovery_never_acknowledges_a_provider_operation() {
 async fn completed_output_without_original_invocation_refuses_provider_acknowledgment() {
     let (engine, _, _) = engine(vec![], false);
     let request = RequestId("missing-invocation".into());
+    let invocation = call("work-call", "work", json!({}));
     engine
         .store
-        .create_request(&request, None, "/root")
+        .write_embedded_request(
+            &engine.embedded_identity().unwrap(),
+            &request,
+            None,
+            std::slice::from_ref(&invocation),
+            StoredUsage::default(),
+        )
         .unwrap();
+    assert_eq!(engine.store.items(&request).unwrap(), vec![invocation]);
     let operation = engine
         .store
         .claim(&CallId("work-call".into()), &request)
         .unwrap();
+    assert_eq!(operation.origin, engine.origin);
     let output = JobOutput::Completed(Ok(json!({"done":true})));
     assert_eq!(
         engine
@@ -214,6 +223,41 @@ async fn completed_output_without_original_invocation_refuses_provider_acknowled
             .write_job_output(&operation, ToolKind::Function, &output)
             .unwrap(),
         1
+    );
+    assert!(engine.store.has_completed_output(&operation).unwrap());
+    let output_hash = engine.store.claims_for_operation(&operation).unwrap()[0]
+        .output
+        .clone()
+        .unwrap();
+    let retained_output = Item::tool_output(&operation.call, ToolKind::Function, &output);
+    assert_eq!(
+        engine.store.get_item(&output_hash).unwrap(),
+        Some(retained_output.clone())
+    );
+    // Simulate inconsistent persisted issuance evidence by removing only the
+    // invocation's request link. The completed claim and its output stay intact.
+    assert_eq!(
+        engine
+            .store
+            .lock()
+            .execute(
+                "DELETE FROM request_items WHERE request_id=?1 AND position=0",
+                [&request.0],
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine
+            .store
+            .lock()
+            .query_row(
+                "SELECT count(*) FROM pragma_foreign_key_check()",
+                [],
+                |row| { row.get::<_, i64>(0) }
+            )
+            .unwrap(),
+        0
     );
     assert!(engine.store.has_completed_output(&operation).unwrap());
     assert!(
@@ -229,6 +273,10 @@ async fn completed_output_without_original_invocation_refuses_provider_acknowled
     ));
     assert!(engine.provider.acknowledgments.lock().unwrap().is_empty());
     assert!(engine.store.has_completed_output(&operation).unwrap());
+    assert_eq!(
+        engine.store.get_item(&output_hash).unwrap(),
+        Some(retained_output)
+    );
 }
 #[tokio::test]
 async fn yield_reserved_name_collision_refused_before_transport() {
