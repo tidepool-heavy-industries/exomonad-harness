@@ -156,6 +156,8 @@ impl CallContext {
 pub enum ProviderError {
     Tool(ToolFailure),
     NonValueTerminal(NonValueTerminal),
+    /// The owning host permanently closed admission for the next request.
+    RequestAdmissionClosed,
 }
 
 /// A value-only direct call cannot faithfully return these recorded terminals.
@@ -171,6 +173,7 @@ impl std::fmt::Display for ProviderError {
     fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Tool(failure) => failure.fmt_provider(output),
+            Self::RequestAdmissionClosed => write!(output, "host request admission closed"),
             Self::NonValueTerminal(NonValueTerminal::Cancelled) => {
                 write!(
                     output,
@@ -205,7 +208,9 @@ impl ProviderError {
     pub fn into_tool_failure(self) -> ToolFailure {
         match self {
             Self::Tool(failure) => failure.with_tool_prefix(),
-            error @ Self::NonValueTerminal(_) => error.to_string().into(),
+            error @ (Self::NonValueTerminal(_) | Self::RequestAdmissionClosed) => {
+                error.to_string().into()
+            }
         }
     }
 }
