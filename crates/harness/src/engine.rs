@@ -159,6 +159,10 @@ mod yield_tests;
 mod ownership_history_tests;
 
 #[cfg(test)]
+#[path = "engine/reused_call_recovery_tests.rs"]
+mod reused_call_recovery_tests;
+
+#[cfg(test)]
 #[path = "engine/tool_execution_tests.rs"]
 mod tool_execution_tests;
 
