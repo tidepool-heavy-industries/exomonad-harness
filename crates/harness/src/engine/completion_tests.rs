@@ -795,3 +795,262 @@ async fn pinned_admission_refusal_skips_callback_but_dispatched_error_keeps_it_o
         assert_eq!(host.acknowledgments.load(Ordering::SeqCst), expected * 2);
     }
 }
+
+struct ClosingRequestHost {
+    identity: crate::embedding::HostIdentity,
+    surface: Arc<crate::embedding::ToolSurface>,
+    closed: AtomicBool,
+    typed: bool,
+    acknowledgments: AtomicUsize,
+}
+
+#[async_trait]
+impl crate::embedding::HostActor for ClosingRequestHost {
+    fn identity(&self) -> &crate::embedding::HostIdentity {
+        &self.identity
+    }
+    fn admit(
+        &self,
+    ) -> Result<Box<dyn crate::embedding::AdmissionGuard>, crate::embedding::EmbeddedError> {
+        if self.closed.load(Ordering::SeqCst) {
+            Err(crate::embedding::EmbeddedError::AdmissionClosed)
+        } else {
+            Ok(Box::new(AdmissionLease))
+        }
+    }
+    fn tool_surface(
+        &self,
+    ) -> Result<Arc<crate::embedding::ToolSurface>, crate::embedding::EmbeddedError> {
+        if self.closed.load(Ordering::SeqCst) {
+            Err(if self.typed {
+                crate::embedding::EmbeddedError::AdmissionClosed
+            } else {
+                crate::embedding::EmbeddedError::Host("host request admission closed".into())
+            })
+        } else {
+            Ok(self.surface.clone())
+        }
+    }
+    async fn wake(&self, _: i64) -> Result<(), String> {
+        Ok(())
+    }
+    async fn control(
+        &self,
+        _: crate::embedding::HostControl,
+    ) -> Result<Value, crate::embedding::HostControlError> {
+        panic!("no host control requested")
+    }
+    async fn output_committed(&self, operation: &OperationId) -> Result<(), String> {
+        assert_eq!(operation.call, CallId("completed-work".into()));
+        self.acknowledgments.fetch_add(1, Ordering::SeqCst);
+        self.closed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+struct UnconfirmedRequestOwner;
+#[async_trait]
+impl CancellationOwner for UnconfirmedRequestOwner {
+    async fn cancel(
+        &self,
+        operation: &OperationId,
+        _: &crate::provider::JobHandle,
+    ) -> CancellationAcknowledgment {
+        assert_eq!(operation.call, CallId("pending-work".into()));
+        CancellationAcknowledgment::Unconfirmed("pending owner still running".into())
+    }
+}
+
+struct RequestBoundaryDispatcher {
+    work_calls: AtomicUsize,
+    pending_calls: AtomicUsize,
+    pending_entered: Notify,
+    pending: bool,
+}
+#[async_trait]
+impl Provider for RequestBoundaryDispatcher {
+    fn tools(&self) -> Vec<Value> {
+        vec![]
+    }
+    fn cancellation_owner(&self) -> Option<Arc<dyn CancellationOwner>> {
+        Some(Arc::new(UnconfirmedRequestOwner))
+    }
+    async fn call(&self, name: &str, _: Value) -> Result<Value, ProviderError> {
+        match name {
+            "work" => {
+                if self.pending {
+                    self.pending_entered.notified().await;
+                }
+                self.work_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(json!("settled before admission closure"))
+            }
+            "linger" => {
+                self.pending_calls.fetch_add(1, Ordering::SeqCst);
+                self.pending_entered.notify_one();
+                std::future::pending().await
+            }
+            _ => panic!("unexpected provider call"),
+        }
+    }
+}
+
+struct RequestBoundaryTransport {
+    calls: Arc<AtomicUsize>,
+    pending: bool,
+}
+#[async_trait]
+impl ResponsesTransport for RequestBoundaryTransport {
+    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        assert_eq!(self.calls.fetch_add(1, Ordering::SeqCst), 0);
+        let mut items = vec![];
+        if self.pending {
+            items.push(Item(json!({"type":"function_call","call_id":"pending-work","name":"linger","arguments":"{}"})));
+        }
+        items.push(Item(json!({"type":"function_call","call_id":"completed-work","name":"work","arguments":"{}"})));
+        Ok(ResponsesTurn {
+            response_id: "first-only".into(),
+            items,
+            usage: Usage::default(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn closed_next_request_preserves_settlement_and_cleanup_without_transport_or_cancel_signal() {
+    for (typed, pending) in [(true, false), (false, false), (true, true)] {
+        let store = Arc::new(Store::memory().unwrap());
+        let dispatcher = Arc::new(RequestBoundaryDispatcher {
+            work_calls: AtomicUsize::new(0),
+            pending_calls: AtomicUsize::new(0),
+            pending_entered: Notify::new(),
+            pending,
+        });
+        let tools = ["work", "linger"].into_iter().map(|name| json!({"type":"function","name":name,"description":"Owned boundary work","strict":true,"parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}})).collect();
+        let manifest = crate::embedding::EmbeddedToolManifest::with_scheduling(
+            tools,
+            std::collections::HashMap::from([("work".into(), ToolScheduling::BeforeNextInference)]),
+        )
+        .unwrap();
+        let host = Arc::new(ClosingRequestHost {
+            identity: crate::embedding::HostIdentity {
+                run: "closing-next-request".into(),
+                actor: AgentPath("/root".into()),
+                incarnation: "one".into(),
+            },
+            surface: Arc::new(
+                crate::embedding::ToolSurface::from_manifest(
+                    "closing-version".into(),
+                    Arc::new(manifest),
+                    dispatcher.clone(),
+                )
+                .unwrap(),
+            ),
+            closed: AtomicBool::new(false),
+            typed,
+            acknowledgments: AtomicUsize::new(0),
+        });
+        let conversation =
+            crate::embedding::Conversation::attach(store.clone(), host.clone(), None).unwrap();
+        let transport_calls = Arc::new(AtomicUsize::new(0));
+        let runtime = conversation
+            .engine::<TestAuth, _>(
+                RequestBoundaryTransport {
+                    calls: transport_calls.clone(),
+                    pending,
+                },
+                Arc::new(JobScheduler::new(2).unwrap()),
+                EngineConfig {
+                    instructions: "closing boundary".into(),
+                    tools: vec![],
+                    model: "offline".into(),
+                    effort: Effort::Low,
+                    session_id: "closure".into(),
+                    agent: host.identity.actor.clone(),
+                },
+                std::num::NonZeroU64::new(10000).unwrap(),
+            )
+            .unwrap();
+        let (_cancel, cancellation) = watch::channel(false);
+        let (_mail, mail) = tokio::sync::mpsc::unbounded_channel::<DurableMailboxWake>();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            runtime.run_embedded(None, vec![], cancellation.clone(), mail),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(
+            !*cancellation.borrow(),
+            "host closure is independent of the cancellation signal"
+        );
+        assert_eq!(
+            transport_calls.load(Ordering::SeqCst),
+            1,
+            "no successor model request"
+        );
+        assert_eq!(dispatcher.work_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            dispatcher.pending_calls.load(Ordering::SeqCst),
+            usize::from(pending)
+        );
+        assert_eq!(host.acknowledgments.load(Ordering::SeqCst), 1);
+        let claim = store
+            .claims(&CallId("completed-work".into()))
+            .unwrap()
+            .remove(0);
+        assert_eq!(claim.state, crate::store::ClaimState::Settled);
+        let output = store
+            .get_item(claim.output.as_ref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            output,
+            Item::tool_output(
+                &claim.call_id,
+                ToolKind::Function,
+                &crate::turn::JobOutput::Completed(Ok(json!("settled before admission closure")))
+            )
+        );
+        assert!(
+            store
+                .completed_finalization(&claim.operation)
+                .unwrap()
+                .unwrap()
+                .requires_provider()
+        );
+        let frontier = store.embedded_round_frontier(&host.identity).unwrap();
+        assert_eq!(frontier.settled_head, None);
+        let head = frontier.pending_head.unwrap();
+        assert_eq!(
+            store.request(&head).unwrap().unwrap().parent.as_ref(),
+            Some(&claim.request)
+        );
+        assert_ne!(head, claim.request);
+        match (typed, pending, error) {
+            (true, false, EngineError::Cancelled { head_request }) => {
+                assert_eq!(head_request, Some(head))
+            }
+            (false, false, EngineError::ProviderCall(ProviderError::Tool(_))) => {}
+            (true, true, EngineError::Cleanup { primary, cleanup }) => {
+                assert!(
+                    matches!(*primary, EngineError::Cancelled { head_request: Some(ref actual) } if *actual == head)
+                );
+                assert!(!cleanup.is_empty());
+                let pending_claim = store
+                    .claims(&CallId("pending-work".into()))
+                    .unwrap()
+                    .remove(0);
+                assert_eq!(pending_claim.state, crate::store::ClaimState::Settled);
+                assert!(matches!(
+                    runtime
+                        .scheduler
+                        .output(&pending_claim.operation)
+                        .await
+                        .unwrap(),
+                    crate::turn::JobOutput::CancellationUnconfirmed(_)
+                ));
+            }
+            (_, _, error) => panic!("incorrect request-boundary disposition: {error:?}"),
+        }
+    }
+}

@@ -68,6 +68,8 @@ pub enum EmbeddedError {
     Store(#[from] StoreError),
     #[error("host refused: {0}")]
     Host(String),
+    #[error("host request admission closed")]
+    AdmissionClosed,
     #[error("invalid embedded binding: {0}")]
     Binding(String),
     #[error("invalid tool surface: {0}")]
@@ -583,10 +585,10 @@ impl Provider for BoundProvider {
     }
 
     fn request_snapshot(&self) -> Result<Option<Arc<dyn Provider>>, ProviderError> {
-        let surface = self
-            .host
-            .tool_surface()
-            .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
+        let surface = self.host.tool_surface().map_err(|error| match error {
+            EmbeddedError::AdmissionClosed => ProviderError::RequestAdmissionClosed,
+            error => ProviderError::Tool(error.to_string().into()),
+        })?;
         Ok(Some(Arc::new(PinnedProvider {
             store: self.store.clone(),
             host: self.host.clone(),
