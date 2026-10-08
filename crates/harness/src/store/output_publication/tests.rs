@@ -262,6 +262,20 @@ fn historical_unbound_outputs_refuse_without_rewriting_and_inconsistent_pairs_re
         Err(StoreError::InconsistentOutputPublication { position: 0, .. })
     ));
     assert_eq!(store.items(&operation.request).unwrap(), before);
+    // A structurally valid output cannot borrow an ordinary occurrence's source.
+    store
+        .lock()
+        .execute(
+            "UPDATE request_items SET output_operation=NULL WHERE request_id=?1 AND position=0",
+            [&operation.request.0],
+        )
+        .unwrap();
+    store.lock().execute("UPDATE request_items SET output_operation=?2,source_request=?1,source_position=0 WHERE request_id=?1 AND position=1", params![operation.request.0,serde_json::to_string(&operation).unwrap()]).unwrap();
+    assert!(matches!(
+        store.context_request_state(&operation.request, &operation.origin),
+        Err(StoreError::InconsistentOutputPublication { position: 1, .. })
+    ));
+    assert_eq!(store.items(&operation.request).unwrap(), before);
 }
 
 #[test]

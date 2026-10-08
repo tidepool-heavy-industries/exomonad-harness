@@ -1073,6 +1073,7 @@ impl Store {
                     .entered();
             history(&tx, head, true)?
         };
+        validate_canonical_history(&tx, &canonical)?;
         let projected = {
             let _projection = tracing::debug_span!(target: "harness::runtime_cost", "portable_history_projection", input_items = canonical.len()).entered();
             portable_request(&tx, &canonical, current.model.as_deref(), None)?
