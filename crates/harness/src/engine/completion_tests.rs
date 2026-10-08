@@ -711,9 +711,26 @@ impl ResponsesTransport for RequestBoundaryTransport {
         assert_eq!(self.calls.fetch_add(1, Ordering::SeqCst), 0);
         let mut items = vec![];
         if self.pending {
-            items.push(Item(json!({"type":"function_call","call_id":"pending-work","name":"linger","arguments":"{}"})));
+            let pending = Item(json!({
+                "type": "function_call", "call_id": "pending-work", "name": "linger",
+                "arguments": "{}", "async": true
+            }));
+            assert_eq!(
+                pending.tool_call().unwrap().unwrap().execution,
+                ToolExecution::Asynchronous,
+                "never-completing work must permit the next request admission boundary"
+            );
+            items.push(pending);
         }
-        items.push(Item(json!({"type":"function_call","call_id":"completed-work","name":"work","arguments":"{}"})));
+        let completed = Item(json!({
+            "type": "function_call", "call_id": "completed-work", "name": "work",
+            "arguments": "{}", "async": false
+        }));
+        assert_eq!(
+            completed.tool_call().unwrap().unwrap().execution,
+            ToolExecution::Synchronous
+        );
+        items.push(completed);
         Ok(ResponsesTurn {
             response_id: "first-only".into(),
             items,
