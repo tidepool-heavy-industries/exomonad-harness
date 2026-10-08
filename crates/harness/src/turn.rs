@@ -1334,6 +1334,7 @@ pub async fn wait_agent_and_drain(
 /// Wait for the first asynchronous event without consuming its payload from
 /// model history. After it returns, callers append `outputs_in_call_order`
 /// results first and then render the returned resume status/envelope.
+/// A closed mailbox leaves independent jobs and cancellation observable.
 pub async fn wait_agent(
     envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<Envelope>,
     jobs: &JobScheduler,
@@ -1353,10 +1354,8 @@ pub async fn wait_agent(
     }
     loop {
         tokio::select! {
-            envelope = envelopes.recv() => {
-                if let Some(envelope) = envelope {
-                    return WaitResume::Envelope(envelope);
-                }
+            Some(envelope) = envelopes.recv() => {
+                return WaitResume::Envelope(envelope);
             }
             event = settlements.recv() => match event {
                 Ok(call_id) if outstanding_calls_in_order.contains(&call_id)
@@ -1978,10 +1977,88 @@ mod tests {
             1,
         );
         tx.send(expected.clone()).unwrap();
+        drop(tx);
         assert_eq!(
             wait_agent(&mut rx, &scheduler, &mut cancel_rx, &[]).await,
             WaitResume::Envelope(expected)
         );
+    }
+
+    #[tokio::test]
+    async fn closed_mailbox_waits_without_self_waking_and_preserves_job_and_cancellation() {
+        use std::future::Future;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Poll, Wake, Waker};
+
+        #[derive(Default)]
+        struct CountWake(AtomicUsize);
+
+        impl Wake for CountWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        struct Gated(std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>);
+
+        #[async_trait]
+        impl Provider for Gated {
+            async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+                let release = self.0.lock().unwrap().take().unwrap();
+                release.await.unwrap();
+                Ok(json!({"ok": true}))
+            }
+
+            fn tools(&self) -> Vec<Value> {
+                vec![]
+            }
+        }
+
+        let scheduler = JobScheduler::new(1).unwrap();
+        let call_id = CallId("closed-mailbox-pending".into());
+        let (release, released) = tokio::sync::oneshot::channel();
+        scheduler
+            .start(
+                Arc::new(Gated(std::sync::Mutex::new(Some(released)))),
+                call_id.clone(),
+                "pending".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        let (incoming, mut envelopes) = tokio::sync::mpsc::unbounded_channel();
+        drop(incoming);
+        let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
+        let wakes = Arc::new(CountWake::default());
+        let waker = Waker::from(wakes.clone());
+        let mut cx = Context::from_waker(&waker);
+        let outstanding = [call_id.clone()];
+        let result = {
+            let waiting =
+                wait_agent_and_drain(&mut envelopes, &scheduler, &mut cancelled, &outstanding);
+            tokio::pin!(waiting);
+            assert!(matches!(waiting.as_mut().poll(&mut cx), Poll::Pending));
+            assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+            release.send(()).unwrap();
+            waiting.await.unwrap()
+        };
+        assert_eq!(result.resumed_by, WaitResume::Job(call_id.clone()));
+        assert_eq!(
+            result.call_outputs,
+            vec![(call_id, JobOutput::Completed(Ok(json!({"ok": true}))))]
+        );
+
+        wakes.0.store(0, Ordering::SeqCst);
+        let waiting = wait_agent(&mut envelopes, &scheduler, &mut cancelled, &[]);
+        tokio::pin!(waiting);
+        assert!(matches!(waiting.as_mut().poll(&mut cx), Poll::Pending));
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+        cancel.send(true).unwrap();
+        assert_eq!(waiting.await, WaitResume::Cancelled);
     }
 
     #[tokio::test]
