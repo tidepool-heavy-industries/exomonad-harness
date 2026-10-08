@@ -1693,7 +1693,10 @@ mod tests {
                 _: Value,
                 context: CallContext,
             ) -> Result<Value, ProviderError> {
-                context.progress.try_send(json!({"phase": "ready"})).unwrap();
+                context
+                    .progress
+                    .try_send(json!({"phase": "ready"}))
+                    .unwrap();
                 drop(context);
                 let mut started = self.started.lock().unwrap().take();
                 let mut release = self.release.lock().unwrap().take().unwrap();
