@@ -75,6 +75,13 @@ checkpoints and context rewrites copy the canonical occurrence metadata. Claim
 copies preserve the nearest exact claimant's current state atomically, including
 settlement that finishes before the copy transaction.
 
+The invocation's storage request identifies issuance, while the consuming
+branch determines the nearest claimant. A context rewrite uses its current
+head for claim selection. Validated restored native references can fall back
+to their historical source when that branch has no claimant. Compaction carries
+claims for every retained invocation, including completed exchanges, so a
+replacement cut retains terminal state as well as output ownership.
+
 Server compaction returns raw Items. Its Store boundary reconciles tool Items
 against the occurrence sidecar captured for the actual issued context. Internal
 retained users and pending calls carry explicit source selections. An ambiguous

@@ -28,6 +28,11 @@ fn boundary(
     store
         .write_request(&source, None, "/root", source_items, Usage::default())
         .unwrap();
+    for item in source_items {
+        if let Some(call) = item.tool_call().unwrap() {
+            store.claim(&call.call_id, &source).unwrap();
+        }
+    }
     store
         .write_compaction_request_with_evidence(
             &target,

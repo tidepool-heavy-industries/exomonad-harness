@@ -228,7 +228,6 @@ mod tests {
             embedding::HostIdentity,
             model::{AgentPath, ConversationIdentity},
         };
-        use std::collections::{HashMap, HashSet};
         let store = Store::memory().unwrap();
         let identity = HostIdentity {
             run: "old-run".into(),

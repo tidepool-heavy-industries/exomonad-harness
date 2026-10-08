@@ -1070,6 +1070,21 @@ impl Store {
                 }
             }
         }
+        let retained_occurrences = reconciled
+            .iter()
+            .filter_map(|item| match item {
+                context::CompactionItem::Retained(occurrence) => Some(occurrence.clone()),
+                context::CompactionItem::Authored(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let carried = context::carry_native_claims(
+            &tx,
+            &retained_occurrences,
+            parent,
+            request,
+            &self.store_id,
+            context::NativeClaimTransfer::Current,
+        )?;
         let mut seen = HashSet::new();
         let invocations =
             validation::invocations_for_operations(&tx, &pending.iter().cloned().collect())?;
@@ -1090,7 +1105,9 @@ impl Store {
                     call_id: operation.call.0.clone(),
                 });
             }
-            context::carry_operation_claim(&tx, operation, parent, request)?;
+            if !carried.contains(operation) {
+                return Err(crate::context::ContextError::ProtectedGroup.into());
+            }
         }
         let key = format!("harness:compaction:{}", request.0);
         tx.execute(

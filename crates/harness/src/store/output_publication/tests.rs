@@ -160,13 +160,44 @@ fn exact_output_histories_preserve_equal_hashes_order_and_here_copy() {
                     assert_eq!(retained[0].output_operation, source.output_operation);
                     assert_eq!(retained[0].hash, source.hash);
                 }
+                let compacted = RequestId("compacted-here".into());
+                let compact_items = copied
+                    .iter()
+                    .map(|occurrence| occurrence.item.clone())
+                    .collect::<Vec<_>>();
+                let selections = copied
+                    .iter()
+                    .enumerate()
+                    .map(|(position, occurrence)| (position, occurrence.clone()))
+                    .collect::<Vec<_>>();
+                store
+                    .write_compaction_request_with_evidence(
+                        &compacted,
+                        &copy,
+                        &child.0,
+                        &compact_items,
+                        &selections,
+                        &copied.iter().cloned().map(Some).collect::<Vec<_>>(),
+                        &[],
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                assert_owners(&store, &compacted, &expected);
+                let claims = store.claims_on(&compacted).unwrap();
+                assert_eq!(claims.len(), 2);
+                assert!(
+                    claims
+                        .iter()
+                        .all(|claim| claim.state == super::super::ClaimState::Settled)
+                );
                 histories += 1;
             }
         }
     }
     assert_eq!(histories, 12);
     eprintln!(
-        "exact_output_histories: histories=12 placements=3 payload_partitions=2 tool_name_partitions=2 publication_retries=24 Here_copies=12"
+        "exact_output_histories: histories=12 placements=3 payload_partitions=2 tool_name_partitions=2 publication_retries=24 Here_copies=12 terminal_compaction_copies=12"
     );
 }
 
@@ -559,7 +590,24 @@ fn compaction_preserves_exact_pending_occurrence_and_other_equal_wire_id() {
     assert_eq!(copied[1].output_operation.as_ref(), Some(&first));
     assert_eq!(copied[2].origin, pending.origin);
     assert_owners(&store, &target, std::slice::from_ref(&first));
-    assert_eq!(store.claims_on(&target).unwrap()[0].operation, second);
+    let claims = store.claims_on(&target).unwrap();
+    assert_eq!(claims.len(), 2);
+    assert_eq!(
+        claims
+            .iter()
+            .find(|claim| claim.operation == first)
+            .unwrap()
+            .state,
+        super::super::ClaimState::Settled
+    );
+    assert_eq!(
+        claims
+            .iter()
+            .find(|claim| claim.operation == second)
+            .unwrap()
+            .state,
+        super::super::ClaimState::Pending
+    );
 
     // Settlement can race with the external request. The transaction copies
     // the actual terminal state, rather than reissuing a pending claim.
@@ -754,7 +802,7 @@ fn here_copy_carries_nearest_exact_terminal_claim_without_reviving_it() {
         assert_eq!(claims[0].operation, operation);
         assert_eq!(claims[0].state, expected);
         let canonical = store
-            .replay_claim(&operation, &grandchild_head)
+            .replay_tool_output_claim(&operation, &grandchild_head)
             .unwrap()
             .unwrap();
         store

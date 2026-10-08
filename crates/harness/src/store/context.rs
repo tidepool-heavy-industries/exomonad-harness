@@ -1797,7 +1797,14 @@ impl Store {
             )?;
             // Saved native groups can come from ancestry hidden by a prior cut.
             // Carry authority from every retained invocation's immutable origin.
-            let carried = carry_native_claims(&tx, &rewritten, &head, &self.store_id)?;
+            let carried = carry_native_claims(
+                &tx,
+                &rewritten,
+                &snapshot.head,
+                &head,
+                &self.store_id,
+                NativeClaimTransfer::RestoreReferences,
+            )?;
             for operation in pending.iter().chain(std::iter::once(&snapshot.operation)) {
                 if !carried.contains(operation) {
                     return Err(ContextError::ProtectedGroup.into());
@@ -1982,7 +1989,14 @@ fn freeze_committed_context(
     for (position, occurrence) in all.iter().enumerate() {
         insert_occurrence(tx, &snapshot, position as i64, occurrence)?;
     }
-    carry_native_claims(tx, &all, &snapshot, store_id)?;
+    carry_native_claims(
+        tx,
+        &all,
+        head,
+        &snapshot,
+        store_id,
+        NativeClaimTransfer::Current,
+    )?;
     Ok(snapshot)
 }
 
@@ -2001,13 +2015,21 @@ fn settle_success(tx: &Transaction<'_>, operation: &OperationId, hash: &ItemHash
     Ok(())
 }
 
-/// A copied occurrence retains its original claimant, independent of today's
-/// conversation binding and of other invocations sharing a provider call ID.
-fn carry_native_claims(
+/// Issuance and current claim state are distinct. Copies resolve the exact
+/// operation on the consuming lineage before using a retained historical source.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum NativeClaimTransfer {
+    Current,
+    RestoreReferences,
+}
+
+pub(super) fn carry_native_claims(
     tx: &Transaction<'_>,
     occurrences: &[Occurrence],
+    consumer: &RequestId,
     head: &RequestId,
     store_id: &str,
+    transfer: NativeClaimTransfer,
 ) -> Result<HashSet<OperationId>> {
     let mut carried = HashSet::new();
     for occurrence in occurrences {
@@ -2068,31 +2090,84 @@ fn carry_native_claims(
             return Err(StoreError::OperationOriginMismatch);
         }
         if carried.insert(operation.clone()) {
-            carry_claim(tx, &operation, &occurrence.request, head, occurrences)?;
+            let publications = occurrences
+                .iter()
+                .filter(|output| output.output_operation.as_ref() == Some(&operation))
+                .collect::<Vec<_>>();
+            let source = match publications.as_slice() {
+                [publication] => ClaimSource::Restored {
+                    consumer,
+                    historical: &publication.origin.request,
+                },
+                [] => match transfer {
+                    NativeClaimTransfer::Current => ClaimSource::Consumer(consumer),
+                    NativeClaimTransfer::RestoreReferences => ClaimSource::Restored {
+                        consumer,
+                        historical: &occurrence.request,
+                    },
+                },
+                _ => return Err(ContextError::ProtectedGroup.into()),
+            };
+            carry_claim(tx, &operation, source, head, occurrences)?;
         }
     }
     Ok(carried)
 }
 
-pub(super) fn carry_operation_claim(
+enum ClaimSource<'a> {
+    Consumer(&'a RequestId),
+    Restored {
+        consumer: &'a RequestId,
+        historical: &'a RequestId,
+    },
+}
+
+fn carry_operation_claim(
     tx: &Transaction<'_>,
     operation: &OperationId,
-    source: &RequestId,
+    source: ClaimSource<'_>,
     target: &RequestId,
 ) -> Result<()> {
-    // Copy the nearest claimant's terminal state inside the publication transaction.
-    // Settlement before a copy must not create a fresh pending claimant.
-    let n = tx.execute("WITH RECURSIVE lineage(id,depth) AS (SELECT ?4,0 UNION ALL SELECT r.parent_id,l.depth+1 FROM requests r JOIN lineage l ON r.id=l.id WHERE r.parent_id IS NOT NULL), candidates AS (SELECT c.*,l.depth FROM claims c JOIN lineage l ON c.request_id=l.id WHERE c.origin=?1 AND c.origin_request_id=?2 AND c.call_id=?3 UNION ALL SELECT c.*,9223372036854775807 FROM claims c WHERE c.origin=?1 AND c.origin_request_id=?2 AND c.call_id=?3 AND c.request_id=c.origin_request_id) INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash,terminal_json) SELECT origin,origin_request_id,call_id,?5,state,output_hash,terminal_json FROM candidates ORDER BY depth LIMIT 1", params![serde_json::to_string(&operation.origin)?,operation.request.0,operation.call.0,source.0,target.0])?;
-    if n != 1 {
-        return Err(ContextError::ProtectedGroup.into());
+    let (consumer, historical) = match source {
+        ClaimSource::Consumer(consumer) => (consumer, None),
+        ClaimSource::Restored {
+            consumer,
+            historical,
+        } => (consumer, Some(historical)),
+    };
+    // Claim state belongs to the consuming lineage. A retained invocation's
+    // storage request identifies issuance, not the current claimant.
+    if copy_nearest_claim(tx, operation, consumer, target)? {
+        return Ok(());
     }
-    Ok(())
+    if let Some(historical) = historical {
+        // Saved native references can restore groups outside today's lineage.
+        // This fallback is available only after exact source validation.
+        if copy_nearest_claim(tx, operation, historical, target)? {
+            return Ok(());
+        }
+        let n = tx.execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash,terminal_json) SELECT origin,origin_request_id,call_id,?4,state,output_hash,terminal_json FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=origin_request_id", params![serde_json::to_string(&operation.origin)?,operation.request.0,operation.call.0,target.0])?;
+        if n == 1 {
+            return Ok(());
+        }
+    }
+    Err(ContextError::ProtectedGroup.into())
+}
+
+fn copy_nearest_claim(
+    tx: &Transaction<'_>,
+    operation: &OperationId,
+    consumer: &RequestId,
+    target: &RequestId,
+) -> Result<bool> {
+    let n = tx.execute("WITH RECURSIVE lineage(id,parent_id,branch,depth) AS (SELECT id,parent_id,branch,0 FROM requests WHERE id=?4 UNION ALL SELECT p.id,p.parent_id,p.branch,l.depth+1 FROM requests p JOIN lineage l ON p.id=l.parent_id WHERE p.branch=l.branch AND NOT EXISTS(SELECT 1 FROM session_state s WHERE s.session_id='harness:compaction:' || l.id)) INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash,terminal_json) SELECT c.origin,c.origin_request_id, c.call_id,?5,c.state,c.output_hash,c.terminal_json FROM claims c JOIN lineage l ON c.request_id=l.id WHERE c.origin=?1 AND c.origin_request_id=?2 AND c.call_id=?3 ORDER BY l.depth LIMIT 1", params![serde_json::to_string(&operation.origin)?,operation.request.0,operation.call.0,consumer.0,target.0])?;
+    Ok(n == 1)
 }
 
 fn carry_claim(
     tx: &Transaction<'_>,
     operation: &OperationId,
-    source: &RequestId,
+    source: ClaimSource<'_>,
     head: &RequestId,
     occurrences: &[Occurrence],
 ) -> Result<()> {
