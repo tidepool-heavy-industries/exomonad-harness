@@ -412,9 +412,11 @@ async fn engine_cohort(depth: usize, payload_bytes: usize, workers: usize) {
 async fn measure_grid(depths: &[usize], payload_sizes: &[usize], conversations: &[usize]) {
     let source = std::env::var("HARNESS_PERF_SOURCE")
         .expect("record exact built source via HARNESS_PERF_SOURCE");
+    let runtime_cost_trace_enabled =
+        tracing::enabled!(target: "harness::runtime_cost", tracing::Level::DEBUG);
     println!(
         "HARNESS_HISTORY_PERF {}",
-        json!({"schema":2,"source_revision_label":source,"pid":std::process::id(),"debug_assertions":cfg!(debug_assertions),"lineage_depths":depths,"payload_sizes":payload_sizes,"conversations":conversations,"expected_measurement_rows":depths.len()*payload_sizes.len()*conversations.len()*7,"expected_store_attempts":depths.len()*payload_sizes.len()*conversations.iter().sum::<usize>()*REPETITIONS*6,"expected_engine_rounds":depths.len()*payload_sizes.len()*conversations.iter().sum::<usize>()*REPETITIONS,"fixture":"ordinary editable messages; WAL/NORMAL durable Store; seeded histories warmed once; successful and refused attempts separate; no retry or timing acceptance threshold"})
+        json!({"schema":2,"source_revision_label":source,"pid":std::process::id(),"debug_assertions":cfg!(debug_assertions),"runtime_cost_trace_enabled":runtime_cost_trace_enabled,"lineage_depths":depths,"payload_sizes":payload_sizes,"conversations":conversations,"expected_measurement_rows":depths.len()*payload_sizes.len()*conversations.len()*7,"expected_store_attempts":depths.len()*payload_sizes.len()*conversations.iter().sum::<usize>()*REPETITIONS*6,"expected_engine_rounds":depths.len()*payload_sizes.len()*conversations.iter().sum::<usize>()*REPETITIONS,"fixture":"ordinary editable messages; WAL/NORMAL durable Store; seeded histories warmed once; successful and refused attempts separate; no retry or timing acceptance threshold"})
     );
     for &depth in depths {
         for &payload_bytes in payload_sizes {
