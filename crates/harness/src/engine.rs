@@ -3004,7 +3004,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
 
     async fn acknowledge_output(&self, operation: &OperationId) -> Result<(), EngineError> {
         let span = tracing::debug_span!(target: "harness::runtime_cost", "acknowledge_output",
-            origin_request_id = %operation.request.0, call_id = %operation.call.0);
+            origin_request_id = %operation.request.0, call_id = %operation.call.0,
+            provider_callback = "none", callback_completed = false);
         async {
             // A fork replays its ancestor's result; only the issuing conversation
             // can acknowledge the owner's live execution boundary.
@@ -3022,10 +3023,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
                 let required = self.retain_context_requirement(operation, false).await?;
                 if required && self.store.context_receipt(operation)?.is_none() {
+                    tracing::Span::current().record("provider_callback", "aborted");
                     self.provider.output_aborted(operation).await?;
                 } else {
+                    tracing::Span::current().record("provider_callback", "committed");
                     self.provider.output_committed(operation).await?;
                 }
+                tracing::Span::current().record("callback_completed", true);
             }
             Ok(())
         }

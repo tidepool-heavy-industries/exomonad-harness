@@ -2045,20 +2045,24 @@ impl Store {
     }
     /// Admit the original claimant under the request's exact conversation binding.
     pub fn claim_operation(&self, operation: &OperationId, request: &RequestId) -> Result<()> {
-        let _claim = tracing::debug_span!(target: "harness::runtime_cost", "claim_operation",
+        let claim_span = tracing::debug_span!(target: "harness::runtime_cost", "claim_operation",
             request_id = %request.0, origin_request_id = %operation.request.0,
-            call_id = %operation.call.0)
-        .entered();
+            call_id = %operation.call.0, admitted = false);
+        let _claim = claim_span.enter();
         if request != &operation.request
             || *operation != self.operation_for_request(request, &operation.call)?
         {
             return Err(StoreError::OperationOriginMismatch);
         }
         let origin = serde_json::to_string(&operation.origin)?;
-        self.lock().execute(
+        let result = self.lock().execute(
             "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES (?1,?2,?3,?4,'pending')",
             params![origin,operation.request.0,operation.call.0,request.0],
-        ).map(|_|()).map_err(|e| if matches!(e,rusqlite::Error::SqliteFailure(ref x,_) if x.extended_code==rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY) { StoreError::DuplicateClaim } else { e.into() })
+        ).map(|_|()).map_err(|e| if matches!(e,rusqlite::Error::SqliteFailure(ref x,_) if x.extended_code==rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY) { StoreError::DuplicateClaim } else { e.into() });
+        if result.is_ok() {
+            claim_span.record("admitted", true);
+        }
+        result
     }
     pub fn claims_for_operation(&self, operation: &OperationId) -> Result<Vec<Claim>> {
         let c = self.lock();
