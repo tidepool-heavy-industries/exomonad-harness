@@ -144,6 +144,7 @@ fn sealing_refuses_misalignment_forgery_foreign_lineage_and_rewritten_identity()
     let exact = request(vec![output.item.clone()]);
     let foreign = RequestId("foreign".into());
     store.create_request(&foreign, None, "/foreign").unwrap();
+    let events_before = store.events(Some(&operation.request)).unwrap();
     for variant in 0..7 {
         let mut req = exact.clone();
         let mut occurrences = vec![Some(output.clone())];
@@ -177,8 +178,12 @@ fn sealing_refuses_misalignment_forgery_foreign_lineage_and_rewritten_identity()
                 .is_err(),
             "variant {variant}"
         );
+        assert_eq!(
+            store.events(Some(&operation.request)).unwrap(),
+            events_before,
+            "variant {variant} changed replay events"
+        );
     }
-    assert!(store.events(Some(&operation.request)).unwrap().is_empty());
 }
 
 #[test]
@@ -187,7 +192,7 @@ fn issued_ownership_reopens_and_atomic_failure_leaves_no_completion() {
         "harness-issued-owners-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
-    let (operation, input) = {
+    let (operation, input, replay_event) = {
         let store = Store::open(&path).unwrap();
         let operation = issue(&store, "a", None, ToolKind::Function);
         let occurrences = store
@@ -211,25 +216,42 @@ fn issued_ownership_reopens_and_atomic_failure_leaves_no_completion() {
             items: vec![Item(json!({"new":"response"}))],
             ..response()
         };
+        let events_before = store.events(Some(&operation.request)).unwrap();
         assert!(
             store
                 .record_issued_replay_turn(&operation.request, issued.clone(), &failed_response)
                 .is_err()
         );
-        assert!(store.events(Some(&operation.request)).unwrap().is_empty());
+        assert_eq!(
+            store.events(Some(&operation.request)).unwrap(),
+            events_before
+        );
         let hash = Store::put_item_tx_hash(&failed_response.items[0]).unwrap();
         assert!(store.get_item(&hash).unwrap().is_none());
         store
             .lock()
             .execute_batch("DROP TRIGGER reject_owned_replay")
             .unwrap();
-        store
+        let replay_event = store
             .record_issued_replay_turn(&operation.request, issued, &response())
             .unwrap();
-        (operation, input)
+        let events_after = store.events(Some(&operation.request)).unwrap();
+        assert_eq!(
+            &events_after[..events_before.len()],
+            events_before.as_slice()
+        );
+        assert_eq!(events_after.len(), events_before.len() + 1);
+        assert_eq!(events_after.last().unwrap().id, replay_event);
+        assert_eq!(events_after.last().unwrap().kind, "model_turn");
+        (operation, input, replay_event)
     };
     let store = Store::open(&path).unwrap();
-    let turn = store.replay_turns(&operation.request).unwrap().remove(0);
+    let turn = store
+        .replay_turns(&operation.request)
+        .unwrap()
+        .into_iter()
+        .find(|turn| turn.replay_event == Some(replay_event))
+        .unwrap();
     assert_eq!(turn.model_request.input, input.input);
     assert_eq!(
         turn.issued_outputs.unwrap()[1].as_ref().unwrap().operation,
