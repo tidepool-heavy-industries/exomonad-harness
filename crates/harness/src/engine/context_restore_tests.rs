@@ -288,6 +288,7 @@ async fn checkpoint_child_context_rewrite_preserves_consuming_claim_through_reco
                     reference: None,
                     role: ContextRole::Assistant,
                     text: "rewritten child context".into(),
+                    sources: vec![],
                 },
             );
             let receipt = store
