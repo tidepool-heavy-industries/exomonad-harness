@@ -383,7 +383,8 @@ pub trait Provider: Send + Sync {
         None
     }
 
-    /// Acknowledge an exact operation after its real terminal output is durable.
+    /// Acknowledge a provider-issued operation after its real terminal output is durable.
+    /// Engine-owned waits settle without a provider completion notification.
     /// Recovery can repeat this notification; implementations must be idempotent.
     /// Failure leaves the retained output intact and never re-executes the call.
     async fn output_committed(&self, _operation: &OperationId) -> Result<(), ProviderError> {

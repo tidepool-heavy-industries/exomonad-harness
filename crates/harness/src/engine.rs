@@ -13,7 +13,7 @@ use crate::{
         TypedTurnFuture,
     },
     finalize::{FINALIZE_TOOL_NAME, FinalizeError, FinalizeParser},
-    item::{Item, ItemHash, ToolExecution, ToolInput, ToolKind},
+    item::{Item, ItemHash, ToolCall, ToolExecution, ToolInput, ToolKind},
     mailbox::{DurableMailboxWake, Envelope, MailboxSignal, MessageChannel},
     model::{AgentPath, CallId, ConversationIdentity, Effort, OperationId, RequestId},
     provider::{Provider, ToolScheduling},
@@ -74,6 +74,21 @@ enum WaitKind {
     Yield {
         deadline: Option<tokio::time::Instant>,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolSettlementOwner {
+    EngineYield,
+    Provider,
+}
+
+impl ToolSettlementOwner {
+    fn for_invocation(call: &ToolCall) -> Self {
+        match call.name.as_str() {
+            "yield" => Self::EngineYield,
+            _ => Self::Provider,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -2160,6 +2175,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .tool_call()
             .map_err(|_| EngineError::InvalidFunctionCall)?
             .ok_or(EngineError::InvalidFunctionCall)?;
+        let settlement_owner = ToolSettlementOwner::for_invocation(&call);
         let call_id = call.call_id;
         let operation = OperationId {
             origin: self.origin.clone(),
@@ -2170,7 +2186,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let input = call.input;
         let tool_kind = input.kind();
         let execution = call.execution;
-        let is_yield = name == "yield";
+        let is_yield = settlement_owner == ToolSettlementOwner::EngineYield;
         let wait = if is_yield {
             if self.embedded_identity().is_none() || tool_kind != ToolKind::Function {
                 return Err(EngineError::InvalidFunctionCall);
@@ -2947,6 +2963,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         // A fork replays its ancestor's result; only the issuing conversation
         // can acknowledge the owner's live execution boundary.
         if operation.origin == self.origin && self.store.has_completed_output(operation)? {
+            let invocation = self
+                .store
+                .invocation_item(&operation.request, &operation.call)?
+                .ok_or_else(|| EngineError::MissingInheritedOutput(operation.call.0.clone()))?;
+            // The reserved Engine wait has no provider-issued operation. Read
+            // its original invocation so recovery uses the same settlement owner.
+            if ToolSettlementOwner::for_invocation(&invocation) == ToolSettlementOwner::EngineYield
+            {
+                return Ok(());
+            }
             let required = self.retain_context_requirement(operation, false).await?;
             if required && self.store.context_receipt(operation)?.is_none() {
                 self.provider.output_aborted(operation).await?;

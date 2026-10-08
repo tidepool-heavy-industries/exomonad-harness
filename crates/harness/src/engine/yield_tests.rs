@@ -11,6 +11,8 @@ impl Auth for Offline {
 struct StrictHost {
     collision: bool,
     release: Arc<tokio::sync::Notify>,
+    entered: tokio::sync::Notify,
+    acknowledgments: Mutex<Vec<OperationId>>,
 }
 #[async_trait::async_trait]
 impl Provider for StrictHost {
@@ -36,8 +38,18 @@ impl Provider for StrictHost {
         _: &str,
         _: serde_json::Value,
     ) -> Result<serde_json::Value, ProviderError> {
+        self.entered.notify_one();
         self.release.notified().await;
         Ok(json!({"done":true}))
+    }
+    async fn output_committed(&self, operation: &OperationId) -> Result<(), ProviderError> {
+        if operation.call != CallId("work-call".into()) {
+            return Err(ProviderError::Tool(
+                "operation was not issued by this provider".into(),
+            ));
+        }
+        self.acknowledgments.lock().unwrap().push(operation.clone());
+        Ok(())
     }
 }
 struct Script {
@@ -98,6 +110,8 @@ fn engine(
         Arc::new(StrictHost {
             collision,
             release: release.clone(),
+            entered: tokio::sync::Notify::new(),
+            acknowledgments: Mutex::new(vec![]),
         }),
         EngineConfig {
             instructions: "yield fixture".into(),
@@ -153,6 +167,32 @@ async fn yield_actual_embedded_manifest_accepts_call_and_timeout_zero() {
         tools.iter().find(|tool| tool["name"] == "yield").unwrap()["parameters"]["required"],
         json!(["until"])
     );
+}
+
+#[tokio::test]
+async fn engine_owned_yield_recovery_never_acknowledges_a_provider_operation() {
+    let (engine, requests, _) = engine(
+        vec![
+            turn(vec![call("yield-call", "yield", json!({"until":0}))]),
+            final_turn(),
+        ],
+        false,
+    );
+    let (_cancel, cancel) = watch::channel(false);
+    let (_mail, mail) = tokio::sync::mpsc::unbounded_channel::<DurableMailboxWake>();
+    let completed = engine
+        .run_embedded(None, vec![], cancel.clone(), mail)
+        .await
+        .unwrap();
+    let (_mail, mail) = tokio::sync::mpsc::unbounded_channel::<DurableMailboxWake>();
+    let recovered = engine
+        .run_recovering_embedded(None, vec![], cancel, mail)
+        .await
+        .unwrap();
+    assert_eq!(recovered.head_request, completed.head_request);
+    assert_eq!(status(&recovered), status(&completed));
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    assert!(engine.provider.acknowledgments.lock().unwrap().is_empty());
 }
 #[tokio::test]
 async fn yield_reserved_name_collision_refused_before_transport() {
@@ -388,6 +428,8 @@ async fn yield_engine_timeout_then_result_preserves_output_order() {
         ],
         false,
     );
+    let provider = engine.provider.clone();
+    let store = engine.store.clone();
     let (_cancel, cancel) = watch::channel(false);
     let (_mail, mail) = tokio::sync::mpsc::unbounded_channel::<DurableMailboxWake>();
     let run = tokio::spawn(async move { engine.run_embedded(None, vec![], cancel, mail).await });
@@ -402,6 +444,13 @@ async fn yield_engine_timeout_then_result_preserves_output_order() {
     .await
     .unwrap();
     assert!(!run.is_finished());
+    tokio::time::timeout(Duration::from_secs(2), provider.entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.claims(&CallId("work-call".into())).unwrap()[0].state,
+        crate::store::ClaimState::Pending
+    );
     release.notify_one();
     let result = tokio::time::timeout(Duration::from_secs(2), run)
         .await
@@ -426,6 +475,29 @@ async fn yield_engine_timeout_then_result_preserves_output_order() {
     assert_eq!(resumed["reason"], "tool_result");
     assert_eq!(resumed["ready_results"].as_array().unwrap().len(), 1);
     assert_eq!(resumed["ready_results"][0]["call"], "work-call");
+    let operation = store
+        .claims(&CallId("work-call".into()))
+        .unwrap()
+        .remove(0)
+        .operation;
+    assert_eq!(*provider.acknowledgments.lock().unwrap(), vec![operation]);
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        !requests[1].input.iter().any(
+            |item| item.0["type"] == "function_call_output" && item.0["call_id"] == "work-call"
+        )
+    );
+    assert_eq!(
+        requests[2]
+            .input
+            .iter()
+            .filter(
+                |item| item.0["type"] == "function_call_output" && item.0["call_id"] == "work-call"
+            )
+            .count(),
+        1
+    );
     assert!(resumed["ready_results"][0].get("output").is_none());
 }
 
@@ -501,12 +573,20 @@ impl crate::embedding::HostActor for Host {
     ) -> Result<serde_json::Value, crate::embedding::HostControlError> {
         panic!("yield must not call host control")
     }
+    async fn output_committed(&self, _: &OperationId) -> Result<(), String> {
+        Err("Engine yield has no native host operation".into())
+    }
+    async fn output_aborted(&self, _: &OperationId) -> Result<(), String> {
+        Err("Engine yield has no native host operation".into())
+    }
 }
 #[tokio::test]
 async fn yield_pinned_embedded_surface_allows_intrinsic_without_host_authority() {
     let dispatcher = Arc::new(StrictHost {
         collision: false,
         release: Arc::new(tokio::sync::Notify::new()),
+        entered: tokio::sync::Notify::new(),
+        acknowledgments: Mutex::new(vec![]),
     });
     let surface = Arc::new(
         crate::embedding::ToolSurface::new("immutable-spec".into(), vec![], dispatcher).unwrap(),
