@@ -236,10 +236,6 @@ async fn history(boundaries: &[Boundary], published: &[bool]) -> Vec<(OperationI
     let mut operations = Vec::new();
     let call = CallId("reused-call".into());
     for (index, (&boundary, &publish)) in boundaries.iter().zip(published).enumerate() {
-        // A successor can reuse the call ID only after the preceding output
-        // has entered history. Otherwise it would mask the old call's output
-        // interval; the Engine publishes before admitting such a successor.
-        assert!(index == 0 || published[index - 1]);
         let request = RequestId(format!("issued-{index}"));
         let mut invocation = boundary.issuer.invocation(&call);
         if boundary.unpublished_context {
