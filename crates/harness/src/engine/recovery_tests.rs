@@ -562,7 +562,9 @@ async fn engine_recovering_reconciles_same_branch_ancestor_after_descendant_barr
             crate::store::TerminalOutcome::Success,
         )
         .unwrap();
-    store.append_items(&prior, &[prior_output]).unwrap();
+    store
+        .append_operation_output(&prior_op, &prior, &prior)
+        .unwrap();
     store
         .write_request(
             &origin,

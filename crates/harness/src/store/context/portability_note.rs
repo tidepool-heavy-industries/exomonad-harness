@@ -281,6 +281,7 @@ mod tests {
             position,
             hash: hash.clone(),
             item,
+            output_operation: None,
             origin: Origin {
                 request: RequestId("request-1".into()),
                 position,

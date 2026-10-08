@@ -205,6 +205,7 @@ impl Store {
             .filter(|item| !item.is_configuration_update())
             .enumerate()
         {
+            super::output_publication::require_ordinary(item, request, position as i64)?;
             let hash = Self::put_item_tx(&tx, item)?;
             tx.execute(
                 "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",

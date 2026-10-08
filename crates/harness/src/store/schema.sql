@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS request_items (
  source_request TEXT, source_position INTEGER, context_sources TEXT,
  context_note INTEGER NOT NULL DEFAULT 0,
  context_overlays TEXT,
+ output_operation TEXT,
  PRIMARY KEY(request_id, position)
 );
 CREATE TABLE IF NOT EXISTS events (

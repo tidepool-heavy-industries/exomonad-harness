@@ -35,6 +35,13 @@ fn boundary(
             "/root",
             &window(installed),
             &[],
+            &store
+                .history_occurrences(&source)
+                .unwrap()
+                .into_iter()
+                .map(Some)
+                .collect::<Vec<_>>(),
+            &[],
             None,
             Some(&ServerCompactionResponse {
                 model: "actual-model".into(),
@@ -237,6 +244,13 @@ fn evidence_failure_rolls_back_the_boundary_and_raw_items() {
                 &source,
                 "/root",
                 &window(vec![opaque.clone()]),
+                &[],
+                &store
+                    .history_occurrences(&source)
+                    .unwrap()
+                    .into_iter()
+                    .map(Some)
+                    .collect::<Vec<_>>(),
                 &[],
                 None,
                 Some(&ServerCompactionResponse {

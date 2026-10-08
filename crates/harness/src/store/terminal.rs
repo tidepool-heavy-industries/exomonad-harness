@@ -119,33 +119,7 @@ impl Store {
         operation: &OperationId,
         claimant: &RequestId,
     ) -> Result<Option<RecordedToolOutput>> {
-        let c = self.lock();
-        let Some(kind) = super::invocation_kind(&c, &operation.request, &operation.call)? else {
-            return Ok(None);
-        };
-        match exact_claim_state(&c, operation, claimant)? {
-            Some(super::ClaimState::Interrupted) => {
-                return Ok(Some(RecordedToolOutput {
-                    item: Item::tool_output(&operation.call, kind, &JobOutput::Interrupted),
-                    terminal: TerminalOutcome::Interrupted,
-                }));
-            }
-            Some(super::ClaimState::Settled) => {}
-            Some(super::ClaimState::Pending) | None => return Ok(None),
-        }
-        let terminal = exact_terminal(&c, operation)?;
-        let Some((hash, terminal)) = terminal else {
-            return Ok(None);
-        };
-        let raw: Option<String> = c
-            .query_row("SELECT json FROM items WHERE hash=?1", [&hash.0], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        let raw = raw.ok_or_else(|| StoreError::MissingReplayItem(hash.0))?;
-        let item: Item = serde_json::from_str(&raw)?;
-        super::validate_replay_output(&operation.call, kind, &item)?;
-        Ok(Some(RecordedToolOutput { item, terminal }))
+        replay_claim(&self.lock(), operation, claimant)
     }
 
     pub(crate) fn has_completed_output(&self, operation: &OperationId) -> Result<bool> {
@@ -161,6 +135,39 @@ impl Store {
             )
         }))
     }
+}
+
+pub(super) fn replay_claim(
+    c: &Connection,
+    operation: &OperationId,
+    claimant: &RequestId,
+) -> Result<Option<RecordedToolOutput>> {
+    let Some(kind) = super::invocation_kind(c, &operation.request, &operation.call)? else {
+        return Ok(None);
+    };
+    match exact_claim_state(c, operation, claimant)? {
+        Some(super::ClaimState::Interrupted) => {
+            return Ok(Some(RecordedToolOutput {
+                item: Item::tool_output(&operation.call, kind, &JobOutput::Interrupted),
+                terminal: TerminalOutcome::Interrupted,
+            }));
+        }
+        Some(super::ClaimState::Settled) => {}
+        Some(super::ClaimState::Pending) | None => return Ok(None),
+    }
+    let terminal = exact_terminal(c, operation)?;
+    let Some((hash, terminal)) = terminal else {
+        return Ok(None);
+    };
+    let raw: Option<String> = c
+        .query_row("SELECT json FROM items WHERE hash=?1", [&hash.0], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    let raw = raw.ok_or_else(|| StoreError::MissingReplayItem(hash.0))?;
+    let item: Item = serde_json::from_str(&raw)?;
+    super::validate_replay_output(&operation.call, kind, &item)?;
+    Ok(Some(RecordedToolOutput { item, terminal }))
 }
 
 #[cfg(test)]

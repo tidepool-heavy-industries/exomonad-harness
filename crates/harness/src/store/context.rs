@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
+mod compaction_reconciliation;
 mod portability_note;
+pub(super) use compaction_reconciliation::{CompactionItem, reconcile as reconcile_compaction};
 
 #[derive(Default, Serialize, Deserialize)]
 struct InferenceState {
@@ -118,7 +120,7 @@ fn validate_identity(
     Ok(())
 }
 
-pub(super) fn history(
+pub(crate) fn history(
     c: &Connection,
     head: &RequestId,
     boundaries: bool,
@@ -127,13 +129,42 @@ pub(super) fn history(
         SELECT id,parent_id,0 FROM requests WHERE id=?1
         UNION ALL SELECT r.id,r.parent_id,l.depth+1 FROM requests r JOIN lineage l ON r.id=l.parent_id
         WHERE ?2=0 OR NOT EXISTS(SELECT 1 FROM session_state s WHERE s.session_id='harness:compaction:'||l.id)
-    ) SELECT l.id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note,ri.context_overlays
+    ) SELECT l.id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note,ri.context_overlays,ri.output_operation
     FROM lineage l JOIN request_items ri ON ri.request_id=l.id JOIN items i ON i.hash=ri.item_hash ORDER BY l.depth DESC,ri.position", params![head.0, boundaries])
 }
 
 pub(super) fn request_occurrences(c: &Connection, request: &RequestId) -> Result<Vec<Occurrence>> {
-    query_occurrences(c, "SELECT ri.request_id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note,ri.context_overlays
+    query_occurrences(c, "SELECT ri.request_id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note,ri.context_overlays,ri.output_operation
         FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 ORDER BY ri.position", [&request.0])
+}
+
+pub(crate) fn validate_canonical_history(c: &Connection, history: &[Occurrence]) -> Result<()> {
+    super::output_publication::validate_history(c, history).map(drop)
+}
+
+pub(super) fn occurrences_for_requests(
+    c: &Connection,
+    requests: &HashSet<RequestId>,
+) -> Result<Vec<Occurrence>> {
+    let requests = requests
+        .iter()
+        .map(|request| request.0.as_str())
+        .collect::<Vec<_>>();
+    let mut occurrences = Vec::new();
+    for batch in requests.chunks(250) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT ri.request_id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note,ri.context_overlays,ri.output_operation FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id IN ({placeholders}) ORDER BY ri.request_id,ri.position"
+        );
+        occurrences.extend(query_occurrences(
+            c,
+            &sql,
+            rusqlite::params_from_iter(batch.iter()),
+        )?);
+    }
+    Ok(occurrences)
 }
 
 fn query_occurrences(
@@ -153,6 +184,7 @@ fn query_occurrences(
             r.get::<_, Option<String>>(6)?,
             r.get::<_, bool>(7)?,
             r.get::<_, Option<String>>(8)?,
+            r.get::<_, Option<String>>(9)?,
         ))
     })?;
     rows.map(|row| {
@@ -166,12 +198,16 @@ fn query_occurrences(
             sources,
             note,
             overlays,
+            output_operation,
         ) = row?;
-        Ok(Occurrence {
+        let occurrence = Occurrence {
             request: RequestId(request),
             position,
             hash: ItemHash(hash.clone()),
             item: serde_json::from_str(&raw)?,
+            output_operation: output_operation
+                .map(|raw| serde_json::from_str(&raw))
+                .transpose()?,
             origin: Origin {
                 request: RequestId(origin_request),
                 position: origin_position,
@@ -186,14 +222,16 @@ fn query_occurrences(
                 .map(|raw| serde_json::from_str(&raw))
                 .transpose()?
                 .unwrap_or_default(),
-        })
+        };
+        super::output_publication::validate_occurrence(&occurrence)?;
+        Ok(occurrence)
     })
     .collect()
 }
 
 /// Attribution is a request projection; canonical retained bytes and origin
 /// references remain unchanged in the Store.
-fn project_context_note(occurrence: &Occurrence) -> Result<Item> {
+pub(super) fn project_context_note(occurrence: &Occurrence) -> Result<Item> {
     let mut item = project_bodies(occurrence)?;
     if !occurrence.note {
         return Ok(item);
@@ -529,29 +567,40 @@ fn response_evidence(
 }
 
 fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBlock>> {
-    // Index the immutable history once for the grouping pass. Calls still pair
-    // with the first matching output after their own position, including when
-    // duplicate call IDs appear in the same history.
-    let mut outputs = HashMap::<String, Vec<usize>>::new();
-    let mut last_calls = HashMap::<&str, &Occurrence>::new();
+    let publication_ledger = super::output_publication::validate_history(c, all)?;
+    // Group by the issuing occurrence. Wire call IDs can repeat, and an older
+    // operation's output can arrive after a newer invocation.
+    let mut outputs = HashMap::<Origin, Vec<usize>>::new();
+    let calls = all
+        .iter()
+        .filter(|occurrence| {
+            matches!(
+                occurrence.item.0["type"].as_str(),
+                Some("function_call" | "custom_tool_call")
+            )
+        })
+        .map(|occurrence| (occurrence.origin.clone(), occurrence))
+        .collect::<HashMap<_, _>>();
     let mut output_owners = HashMap::<Origin, &Occurrence>::new();
     for (index, occurrence) in all.iter().enumerate() {
         if matches!(
             occurrence.item.0["type"].as_str(),
-            Some("function_call" | "custom_tool_call")
-        ) && let Some(id) = occurrence.item.0["call_id"].as_str()
-        {
-            last_calls.insert(id, occurrence);
-        }
-        if matches!(
-            occurrence.item.0["type"].as_str(),
             Some("function_call_output" | "custom_tool_call_output")
-        ) && let Some(call_id) = occurrence.item.0["call_id"].as_str()
-        {
-            outputs.entry(call_id.into()).or_default().push(index);
-            if let Some(call) = last_calls.get(call_id) {
-                output_owners.insert(occurrence.origin.clone(), call);
+        ) {
+            let operation = occurrence.output_operation.as_ref().ok_or_else(|| {
+                StoreError::UnboundOutputPublication {
+                    request: occurrence.request.clone(),
+                    position: occurrence.position,
+                }
+            })?;
+            let owner = publication_ledger
+                .issuing_call(operation)
+                .ok_or(ContextError::InvalidReference)?
+                .clone();
+            if let Some(call) = calls.get(&owner) {
+                output_owners.insert(occurrence.origin.clone(), *call);
             }
+            outputs.entry(owner).or_default().push(index);
         }
     }
 
@@ -610,7 +659,7 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
     }
 
     let mut ranges = Vec::<(usize, usize, bool, bool)>::new();
-    let mut prior_calls = HashSet::<String>::new();
+    let mut prior_calls = HashSet::<Origin>::new();
     for (index, occurrence) in all.iter().enumerate().take(cut) {
         let item = &occurrence.item;
         if item.is_configuration_update()
@@ -623,9 +672,9 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
         let call = item
             .tool_call()
             .map_err(|_| ContextError::InvalidReference)?;
-        if let Some(call) = &call {
+        if call.is_some() {
             let completion = super::replay::is_validated_completion(c, &occurrence.origin)?;
-            let result = outputs.get(&call.call_id.0).and_then(|positions| {
+            let result = outputs.get(&occurrence.origin).and_then(|positions| {
                 let next = positions.partition_point(|position| *position <= index);
                 positions.get(next).copied()
             });
@@ -640,13 +689,16 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
             let orphan = matches!(
                 item.0["type"].as_str(),
                 Some("function_call_output" | "custom_tool_call_output")
-            ) && !item.0["call_id"]
-                .as_str()
-                .is_some_and(|call_id| prior_calls.contains(call_id));
+            ) && !occurrence
+                .output_operation
+                .as_ref()
+                .map(|operation| original_call(c, operation))
+                .transpose()?
+                .is_some_and(|origin| prior_calls.contains(&origin));
             ranges.push((index, index + 1, opaque_items[index], orphan));
         }
-        if let Some(call) = call {
-            prior_calls.insert(call.call_id.0);
+        if call.is_some() {
+            prior_calls.insert(occurrence.origin.clone());
         }
         if opaque_items[index] {
             if let Some((start, end, complete)) = opaque_bounds.get(&occurrence.origin) {
@@ -727,25 +779,38 @@ fn portable_request(
     all: &[Occurrence],
     model: Option<&str>,
     completing: Option<&OperationId>,
-) -> Result<Vec<(RequestId, Option<ItemHash>, Item)>> {
+) -> Result<Vec<(RequestId, Option<ItemHash>, Item, Option<Occurrence>)>> {
     let evidence = response_evidence(c, all)?;
     let positions = occurrence_positions(all);
-    let mut outputs = HashMap::<String, Vec<usize>>::new();
-    let mut calls = HashMap::<String, Vec<usize>>::new();
-    for (index, occurrence) in all.iter().enumerate() {
-        match occurrence.item.0["type"].as_str() {
-            Some("function_call_output" | "custom_tool_call_output") => {
-                if let Some(id) = occurrence.item.0["call_id"].as_str() {
-                    outputs.entry(id.into()).or_default().push(index);
-                }
+    let operations = all
+        .iter()
+        .filter_map(|occurrence| occurrence.output_operation.clone())
+        .collect::<HashSet<_>>();
+    let invocations = super::validation::invocations_for_operations(c, &operations)?;
+    let mut outputs = HashMap::<Origin, Vec<usize>>::new();
+    for (index, occurrence) in all
+        .iter()
+        .enumerate()
+        .filter(|(_, occurrence)| super::output_publication::is_tool_output(&occurrence.item))
+    {
+        let operation = occurrence.output_operation.as_ref().ok_or_else(|| {
+            StoreError::UnboundOutputPublication {
+                request: occurrence.request.clone(),
+                position: occurrence.position,
             }
-            Some("function_call" | "custom_tool_call") => {
-                if let Some(id) = occurrence.item.0["call_id"].as_str() {
-                    calls.entry(id.into()).or_default().push(index);
-                }
-            }
-            _ => {}
-        }
+        })?;
+        let invocation = invocations
+            .get(operation)
+            .ok_or(ContextError::OpaqueModel)?;
+        super::validate_replay_output(
+            &operation.call,
+            invocation.call.input.kind(),
+            &occurrence.item,
+        )?;
+        outputs
+            .entry(invocation.occurrence.clone())
+            .or_default()
+            .push(index);
     }
     let mut seen = HashSet::new();
     let mut removed = HashSet::new();
@@ -806,17 +871,11 @@ fn portable_request(
                 crate::item::ToolKind::Function => "function_call_output",
                 crate::item::ToolKind::Custom => "custom_tool_call_output",
             };
-            let later_calls = calls
-                .get(&call.call_id.0)
-                .ok_or(ContextError::OpaqueModel)?;
-            let next = later_calls.partition_point(|position| *position <= index);
-            let end = later_calls.get(next).copied().unwrap_or(all.len());
             let results = outputs
-                .get(&call.call_id.0)
+                .get(&occurrence.origin)
                 .ok_or(ContextError::OpaqueModel)?;
             let first = results.partition_point(|position| *position <= index);
-            let last = results.partition_point(|position| *position < end);
-            let [output_index] = &results[first..last] else {
+            let [output_index] = &results[first..] else {
                 return Err(ContextError::OpaqueModel.into());
             };
             let output = &all[*output_index];
@@ -850,13 +909,14 @@ fn portable_request(
     let mut projected = Vec::with_capacity(all.len());
     for (index, occurrence) in all.iter().enumerate() {
         if let Some(note) = notes.remove(&index) {
-            projected.push((occurrence.request.clone(), None, note));
+            projected.push((occurrence.request.clone(), None, note, None));
         } else if !removed.contains(&index) {
             projected.push((
                 occurrence.request.clone(),
                 (!occurrence.note && occurrence.overlays.is_empty())
                     .then(|| occurrence.hash.clone()),
                 project_context_note(occurrence)?,
+                Some(occurrence.clone()),
             ));
         }
     }
@@ -873,26 +933,21 @@ fn validate_portable_output(
     call: &crate::model::CallId,
     completing: Option<&OperationId>,
 ) -> Result<()> {
-    let mut query = c.prepare(
-        "SELECT origin FROM claims WHERE request_id=?1 AND origin_request_id=?1 AND call_id=?2",
-    )?;
-    let owners = query
-        .query_map(params![occurrence.origin.request.0, call.0], |row| {
-            row.get::<_, String>(0)
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let [owner] = owners.as_slice() else {
+    let operation =
+        output
+            .output_operation
+            .as_ref()
+            .ok_or_else(|| StoreError::UnboundOutputPublication {
+                request: output.request.clone(),
+                position: output.position,
+            })?;
+    if operation.call != *call {
         return Err(ContextError::OpaqueModel.into());
-    };
-    let operation = OperationId {
-        origin: serde_json::from_str(owner)?,
-        request: occurrence.origin.request.clone(),
-        call: call.clone(),
-    };
+    }
     if original_call(c, &operation)? != occurrence.origin {
         return Err(ContextError::OpaqueModel.into());
     }
-    if Some(&operation) != completing
+    if Some(operation) != completing
         && terminal::exact_terminal(c, &operation)?.is_none_or(|(hash, _)| hash != output.hash)
     {
         return Err(ContextError::OpaqueModel.into());
@@ -900,17 +955,26 @@ fn validate_portable_output(
     Ok(())
 }
 
-pub(super) fn insert_occurrence(
+pub(crate) fn insert_occurrence(
     tx: &Transaction<'_>,
     request: &RequestId,
     position: i64,
     occurrence: &Occurrence,
 ) -> Result<()> {
-    tx.execute("INSERT INTO request_items(request_id,position,item_hash,source_request,source_position,context_sources,context_note,context_overlays) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![request.0,position,occurrence.hash.0,occurrence.origin.request.0,occurrence.origin.position,serde_json::to_string(&occurrence.sources)?,occurrence.note,serde_json::to_string(&occurrence.overlays)?])?;
+    super::output_publication::validate_occurrence(occurrence)?;
+    if super::output_publication::is_tool_output(&occurrence.item)
+        && occurrence.output_operation.is_none()
+    {
+        return Err(StoreError::UnboundOutputPublication {
+            request: occurrence.request.clone(),
+            position: occurrence.position,
+        });
+    }
+    tx.execute("INSERT INTO request_items(request_id,position,item_hash,source_request,source_position,context_sources,context_note,context_overlays,output_operation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![request.0,position,occurrence.hash.0,occurrence.origin.request.0,occurrence.origin.position,serde_json::to_string(&occurrence.sources)?,occurrence.note,serde_json::to_string(&occurrence.overlays)?,occurrence.output_operation.as_ref().map(serde_json::to_string).transpose()?])?;
     Ok(())
 }
 
-fn original_call(c: &Connection, operation: &OperationId) -> Result<Origin> {
+pub(super) fn original_call(c: &Connection, operation: &OperationId) -> Result<Origin> {
     super::validation::invocation_item(c, &operation.request, &operation.call)?
         .ok_or(ContextError::MissingCall)?;
     let(position,hash):(i64,String)=c.query_row("SELECT ri.position,ri.item_hash FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 AND json_extract(i.json,'$.call_id')=?2 AND json_extract(i.json,'$.type') IN ('function_call','custom_tool_call')",params![operation.request.0,operation.call.0],|r|Ok((r.get(0)?,r.get(1)?)))?;
@@ -955,14 +1019,6 @@ impl Store {
         Ok(receipt(tx, operation)?.map(|r| r.deferred_head))
     }
 
-    pub(crate) fn preserve_context_origins_tx(
-        tx: &Transaction<'_>,
-        source: &RequestId,
-        target: &RequestId,
-    ) -> Result<()> {
-        preserve_origins(tx, source, target, CopyRepresentation::Canonical)
-    }
-
     pub fn initialize_context_model(
         &self,
         identity: &ConversationIdentity,
@@ -1001,27 +1057,33 @@ impl Store {
             return Err(StoreError::OperationOriginMismatch);
         }
         let current = state(&tx, identity)?;
-        let history = portable_request(
+        let projected = portable_request(
             &tx,
             &history(&tx, head, true)?,
             current.model.as_deref(),
             None,
-        )?
-        .into_iter()
-        .map(|(request, hash, item)| {
+        )?;
+        let mut history = Vec::with_capacity(projected.len());
+        let mut occurrences = Vec::with_capacity(projected.len());
+        for (request, hash, item, occurrence) in projected {
             let hash = match hash {
                 Some(hash) => hash,
                 None => Self::put_item_tx(&tx, &item)?,
             };
-            Ok((request, hash, item))
-        })
-        .collect::<Result<Vec<_>>>()?;
+            history.push((request, hash, item));
+            occurrences.push(occurrence);
+        }
         tx.commit()?;
         Ok(ContextRequestState {
             history,
+            occurrences,
             model: current.model,
             generation: current.generation,
         })
+    }
+
+    pub(crate) fn history_occurrences(&self, head: &RequestId) -> Result<Vec<Occurrence>> {
+        history(&self.lock(), head, true)
     }
 
     pub fn context_history(&self, head: &RequestId) -> Result<Vec<(RequestId, ItemHash, Item)>> {
@@ -1512,6 +1574,7 @@ impl Store {
                         position: 0,
                         hash: hash.clone(),
                         item: item.clone(),
+                        output_operation: None,
                         sources: sources.clone(),
                         note: *note,
                         overlays: overlays.clone(),
@@ -1629,6 +1692,7 @@ impl Store {
                             },
                             hash,
                             item,
+                            output_operation: None,
                             sources: sources.clone(),
                             note: true,
                             overlays: Vec::new(),
@@ -1657,6 +1721,7 @@ impl Store {
             position: i64::MAX,
             hash: output_hash.clone(),
             item: output_item,
+            output_operation: Some(snapshot.operation.clone()),
             origin: Origin {
                 request: snapshot.head.clone(),
                 position: i64::MAX,
@@ -1732,14 +1797,11 @@ impl Store {
         }
         save_state(&tx, &snapshot.operation.origin, &current)?;
         settle_success(&tx, &snapshot.operation, &output_hash)?;
-        let position: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(position)+1,0) FROM request_items WHERE request_id=?1",
-            [&head.0],
-            |r| r.get(0),
-        )?;
-        tx.execute(
-            "INSERT INTO request_items(request_id,position,item_hash) VALUES(?1,?2,?3)",
-            params![head.0, position, output_hash.0],
+        super::output_publication::append_tx(
+            &tx,
+            &snapshot.operation,
+            &snapshot.operation.request,
+            &head,
         )?;
         if let Some(effort) = draft.next_effort {
             // The successful output separates this update from every earlier
@@ -1898,6 +1960,7 @@ fn freeze_committed_context(
         ],
     )?;
     let all = history(tx, head, true)?;
+    validate_canonical_history(tx, &all)?;
     for (position, occurrence) in all.iter().enumerate() {
         insert_occurrence(tx, &snapshot, position as i64, occurrence)?;
     }
@@ -1987,95 +2050,44 @@ fn carry_native_claims(
             return Err(StoreError::OperationOriginMismatch);
         }
         if carried.insert(operation.clone()) {
-            carry_claim(tx, &operation, head)?;
+            carry_claim(tx, &operation, &occurrence.request, head, occurrences)?;
         }
     }
     Ok(carried)
 }
 
-fn carry_claim(tx: &Transaction<'_>, operation: &OperationId, head: &RequestId) -> Result<()> {
-    let origin = serde_json::to_string(&operation.origin)?;
-    let matching:i64=tx.query_row("SELECT COUNT(*) FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 AND json_extract(i.json,'$.call_id')=?2 AND json_extract(i.json,'$.type') IN ('function_call','custom_tool_call')",params![head.0,operation.call.0],|r|r.get(0))?;
-    if matching != 1 {
-        return Err(ContextError::ProtectedGroup.into());
-    }
-    let n=tx.execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash,terminal_json) SELECT origin,origin_request_id,call_id,?4,state,output_hash,terminal_json FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 ORDER BY CASE WHEN request_id=origin_request_id THEN 0 ELSE 1 END LIMIT 1",params![origin,operation.request.0,operation.call.0,head.0])?;
+pub(super) fn carry_operation_claim(
+    tx: &Transaction<'_>,
+    operation: &OperationId,
+    source: &RequestId,
+    target: &RequestId,
+) -> Result<()> {
+    // Copy the nearest claimant's terminal state inside the publication transaction.
+    // Settlement before a copy must not create a fresh pending claimant.
+    let n = tx.execute("WITH RECURSIVE lineage(id,depth) AS (SELECT ?4,0 UNION ALL SELECT r.parent_id,l.depth+1 FROM requests r JOIN lineage l ON r.id=l.id WHERE r.parent_id IS NOT NULL), candidates AS (SELECT c.*,l.depth FROM claims c JOIN lineage l ON c.request_id=l.id WHERE c.origin=?1 AND c.origin_request_id=?2 AND c.call_id=?3 UNION ALL SELECT c.*,9223372036854775807 FROM claims c WHERE c.origin=?1 AND c.origin_request_id=?2 AND c.call_id=?3 AND c.request_id=c.origin_request_id) INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash,terminal_json) SELECT origin,origin_request_id,call_id,?5,state,output_hash,terminal_json FROM candidates ORDER BY depth LIMIT 1", params![serde_json::to_string(&operation.origin)?,operation.request.0,operation.call.0,source.0,target.0])?;
     if n != 1 {
         return Err(ContextError::ProtectedGroup.into());
     }
     Ok(())
 }
 
-/// Replacements preserve occurrence identity whenever an exact input item is reused.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum CopyRepresentation {
-    Canonical,
-    Projected,
-}
-
-pub(super) fn preserve_origins(
+fn carry_claim(
     tx: &Transaction<'_>,
+    operation: &OperationId,
     source: &RequestId,
-    target: &RequestId,
-    representation: CopyRepresentation,
+    head: &RequestId,
+    occurrences: &[Occurrence],
 ) -> Result<()> {
-    let old = history(tx, source, true)?;
-    let target_items = history(tx, target, false)?
-        .into_iter()
-        .filter(|i| i.request == *target)
-        .collect::<Vec<_>>();
-    let mut candidates = HashMap::<String, Vec<&Occurrence>>::new();
-    for item in &old {
-        candidates
-            .entry(item.hash.0.clone())
-            .or_default()
-            .push(item);
+    let issuing_call = original_call(tx, operation)?;
+    if occurrences
+        .iter()
+        .filter(|occurrence| occurrence.origin == issuing_call)
+        .count()
+        != 1
+    {
+        return Err(ContextError::ProtectedGroup.into());
     }
-    let mut projections = HashMap::<String, Vec<&Occurrence>>::new();
-    for item in &old {
-        if representation == CopyRepresentation::Projected && !item.overlays.is_empty() {
-            let projected = project_context_note(item)?;
-            let hash = Store::put_item_tx(tx, &projected)?;
-            projections.entry(hash.0).or_default().push(item);
-        }
-    }
-    let mut used_origins = HashSet::new();
-    for item in target_items {
-        let canonical = candidates.get(&item.hash.0).and_then(|items| {
-            items
-                .iter()
-                .copied()
-                .find(|candidate| !used_origins.contains(&candidate.origin))
-        });
-        let projected = projections
-            .get(&item.hash.0)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let source = if projected.is_empty() {
-            canonical
-        } else {
-            // A projected body cannot acquire another equal-byte occurrence's
-            // authority. Ambiguous compaction copies are refused atomically.
-            let [projected] = projected else {
-                return Err(ContextError::InvalidReference.into());
-            };
-            if candidates.get(&item.hash.0).is_some_and(|canonical| {
-                canonical
-                    .iter()
-                    .any(|canonical| canonical.origin != projected.origin)
-            }) {
-                return Err(ContextError::InvalidReference.into());
-            }
-            Some(*projected)
-        };
-        if let Some(source) = source {
-            if !used_origins.insert(source.origin.clone()) {
-                return Err(ContextError::InvalidReference.into());
-            }
-            tx.execute("UPDATE request_items SET source_request=?3,source_position=?4,context_sources=?5,context_note=?6,context_overlays=?7,item_hash=?8 WHERE request_id=?1 AND position=?2",params![target.0,item.position,source.origin.request.0,source.origin.position,serde_json::to_string(&source.sources)?,source.note,serde_json::to_string(&source.overlays)?,source.hash.0])?;
-        }
-    }
-    Ok(())
+    carry_operation_claim(tx, operation, source, head)
 }
 
 pub(super) fn compaction_generation(
@@ -2085,7 +2097,6 @@ pub(super) fn compaction_generation(
     target: &RequestId,
     branch: &str,
 ) -> Result<()> {
-    preserve_origins(tx, source, target, CopyRepresentation::Projected)?;
     let before = history(tx, source, true)?
         .into_iter()
         .map(|i| i.hash)

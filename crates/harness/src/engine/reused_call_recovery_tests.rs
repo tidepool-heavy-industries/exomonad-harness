@@ -26,6 +26,7 @@ struct Host {
     store: Arc<Store>,
     signals: Arc<Signals>,
     issued: Mutex<Vec<OperationId>>,
+    shared_output: bool,
 }
 
 #[async_trait::async_trait]
@@ -56,7 +57,11 @@ impl Provider for Host {
         } else {
             assert_eq!(index, 1, "recovery must not redispatch either operation");
         }
-        Ok(serde_json::to_value(operation).unwrap())
+        Ok(if self.shared_output {
+            json!("same result")
+        } else {
+            serde_json::to_value(operation).unwrap()
+        })
     }
     async fn output_committed(&self, operation: &OperationId) -> Result<(), ProviderError> {
         assert!(self.store.has_completed_output(operation).unwrap());
@@ -83,11 +88,12 @@ impl Provider for Host {
 struct Script {
     turns: AtomicUsize,
     signals: Arc<Signals>,
+    names: [&'static str; 2],
 }
 
-fn invocation() -> Item {
+fn invocation(name: &str) -> Item {
     Item(
-        json!({"type":"function_call", "call_id":"reused", "name":"work", "async":true, "arguments":"{}"}),
+        json!({"type":"function_call", "call_id":"reused", "name":name, "async":true, "arguments":"{}"}),
     )
 }
 
@@ -96,11 +102,11 @@ impl ResponsesTransport for Script {
     async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         let index = self.turns.fetch_add(1, Ordering::SeqCst);
         let items = match index {
-            0 => vec![invocation()],
+            0 => vec![invocation(self.names[0])],
             1 => {
                 self.signals.successor_held.notify_one();
                 self.signals.first_retained.notified().await;
-                vec![invocation()]
+                vec![invocation(self.names[1])]
             }
             index => {
                 if index == 2 {
@@ -123,11 +129,13 @@ fn engine(
     store: Arc<Store>,
     host: Arc<Host>,
     signals: Arc<Signals>,
+    names: [&'static str; 2],
 ) -> Engine<Offline, Host, Script> {
     Engine::with_transport(
         Script {
             turns: AtomicUsize::new(0),
             signals,
+            names,
         },
         store,
         Arc::new(JobScheduler::new(2).unwrap()),
@@ -157,16 +165,16 @@ impl ResponsesTransport for Finish {
     }
 }
 
-#[tokio::test]
-async fn async_settlement_after_successor_reuses_call_id_recovers_each_operation_once() {
+async fn run_reused_history(shared_output: bool, names: [&'static str; 2], here_copy: bool) {
     let store = Arc::new(Store::memory().unwrap());
     let signals = Arc::new(Signals::default());
     let host = Arc::new(Host {
         store: store.clone(),
         signals: signals.clone(),
         issued: Mutex::new(vec![]),
+        shared_output,
     });
-    let runtime = Arc::new(engine(store.clone(), host.clone(), signals.clone()));
+    let runtime = Arc::new(engine(store.clone(), host.clone(), signals.clone(), names));
     let (_cancel, cancellation) = watch::channel(false);
     let running = runtime.clone();
     let first_cancellation = cancellation.clone();
@@ -205,12 +213,13 @@ async fn async_settlement_after_successor_reuses_call_id_recovers_each_operation
     assert_ne!(issued[0].request, issued[1].request);
     let outputs = issued
         .iter()
-        .map(|operation| {
+        .zip(names)
+        .map(|(operation, name)| {
             assert_eq!(
                 store
                     .invocation_item(&operation.request, &operation.call)
                     .unwrap(),
-                invocation().tool_call().unwrap()
+                invocation(name).tool_call().unwrap()
             );
             store
                 .replay_tool_output_operation(operation)
@@ -219,7 +228,7 @@ async fn async_settlement_after_successor_reuses_call_id_recovers_each_operation
                 .item
         })
         .collect::<Vec<_>>();
-    assert_ne!(outputs[0], outputs[1]);
+    assert_eq!(outputs[0] == outputs[1], shared_output);
     for output in &outputs {
         assert_eq!(
             completed
@@ -227,33 +236,67 @@ async fn async_settlement_after_successor_reuses_call_id_recovers_each_operation
                 .iter()
                 .filter(|item| *item == output)
                 .count(),
-            1
+            if shared_output { 2 } else { 1 }
         );
     }
-    let call_positions = completed
-        .transcript
+    let records = store.recovery_history(&completed.head_request).unwrap();
+    let call_positions = records
         .iter()
         .enumerate()
-        .filter_map(|(position, item)| (item == &invocation()).then_some(position))
+        .filter_map(|(position, record)| {
+            record
+                .item
+                .tool_call()
+                .unwrap()
+                .is_some_and(|call| call.call_id.0 == "reused")
+                .then_some(position)
+        })
         .collect::<Vec<_>>();
     assert_eq!(call_positions.len(), 2);
-    let older_output_position = completed
-        .transcript
+    let older_output_position = records
         .iter()
-        .position(|item| item == &outputs[0])
+        .position(|record| {
+            record
+                .output
+                .as_ref()
+                .is_some_and(|output| output.operation == issued[0])
+        })
         .unwrap();
     assert!(
         older_output_position > call_positions[1],
         "older result must arrive after the reused call"
     );
     let mut head = completed.head_request;
+    let mut config = runtime.config.clone();
+    if here_copy {
+        let parent = config.agent.clone();
+        let child = AgentPath("/root/child".into());
+        store
+            .admit_agent(&parent, None, Some(&head), &json!({}), &json!({}))
+            .unwrap();
+        let copy = RequestId("copied".into());
+        store
+            .admit_here_agent_with_snapshot(
+                &child,
+                &parent,
+                &copy,
+                &json!({}),
+                "/root",
+                "/root/child",
+                "AtBoundary",
+                &Item(json!({"type":"message","role":"user","content":"continue"})),
+            )
+            .unwrap();
+        config.agent = child;
+        head = copy;
+    }
     for _ in 0..2 {
         let recovered = Engine::<Offline, _, _>::with_transport(
             Finish,
             store.clone(),
             Arc::new(JobScheduler::new(2).unwrap()),
             host.clone(),
-            runtime.config.clone(),
+            config.clone(),
         )
         .run_recovering(
             Some(head),
@@ -263,7 +306,15 @@ async fn async_settlement_after_successor_reuses_call_id_recovers_each_operation
         )
         .await
         .unwrap();
+        let retained = store.recovery_history(&recovered.head_request).unwrap();
         for (operation, output) in issued.iter().zip(&outputs) {
+            let owned = retained
+                .iter()
+                .filter_map(|record| record.output.as_ref())
+                .filter(|publication| &publication.operation == operation)
+                .collect::<Vec<_>>();
+            assert_eq!(owned.len(), 1);
+            assert_eq!(owned[0].item, *output);
             assert_eq!(
                 store
                     .replay_tool_output_operation(operation)
@@ -278,10 +329,28 @@ async fn async_settlement_after_successor_reuses_call_id_recovers_each_operation
                     .iter()
                     .filter(|item| *item == output)
                     .count(),
-                1
+                if shared_output { 2 } else { 1 }
             );
         }
         assert_eq!(*host.issued.lock().unwrap(), issued);
         head = recovered.head_request;
     }
+}
+
+#[tokio::test]
+async fn async_settlement_after_successor_reuses_call_id_recovers_each_operation_once() {
+    for here_copy in [false, true] {
+        run_reused_history(false, ["work", "work"], here_copy).await;
+    }
+    eprintln!("distinct-output async recovery: histories=2 Here_partitions=2 fresh_recoveries=4");
+}
+
+#[tokio::test]
+async fn equal_async_outputs_recover_exact_operations_through_here_copy() {
+    for names in [["work", "work"], ["work", "other_work"]] {
+        run_reused_history(true, names, true).await;
+    }
+    eprintln!(
+        "equal-output async recovery: histories=2 tool_name_partitions=2 Here_copies=2 fresh_recoveries=4"
+    );
 }

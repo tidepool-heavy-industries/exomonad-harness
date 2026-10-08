@@ -44,6 +44,7 @@ mod items;
 struct HistoryWindow {
     items: Vec<Item>,
     provenance: Vec<(RequestId, ItemHash)>,
+    occurrences: Vec<Option<crate::context::Occurrence>>,
     model: Option<String>,
 }
 
@@ -693,13 +694,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         }
         self.await_here_invocation_output(&head, &mut cancellation)
             .await?;
-        let inherited_pairs = match &head {
-            Some(head) => self.read_history_pairs(head).await?,
+        let inherited_records = match &head {
+            Some(head) => self.read_recovery_history(head).await?,
             None => Vec::new(),
         };
-        let inherited_history = inherited_pairs
+        let inherited_history = inherited_records
             .iter()
-            .map(|(_, item)| item.clone())
+            .map(|record| record.item.clone())
             .collect::<Vec<_>>();
         let inherited_claims = match &head {
             Some(head) => {
@@ -724,8 +725,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             None => Vec::new(),
         };
         if resuming {
-            for (request, item) in &inherited_pairs {
-                let Some(call) = item
+            for record in &inherited_records {
+                let request = &record.source_request;
+                let Some(call) = record
+                    .item
                     .tool_call()
                     .map_err(|_| EngineError::InvalidFunctionCall)?
                 else {
@@ -739,8 +742,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     continue;
                 }
                 if !inherited_claims.iter().any(|claim| {
-                    claim.call_id == call.call_id
-                        && (&claim.request == request || &claim.operation.request == request)
+                    claim.call_id == call.call_id && &claim.operation.request == request
                 }) {
                     return Err(EngineError::UnclaimedInheritedCall {
                         request: request.clone(),
@@ -750,7 +752,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
         }
         let mut pending = Vec::<PendingCall>::new();
-        let mut replay_items = Vec::<Item>::new();
+        let mut replay_items = Vec::<(OperationId, RequestId)>::new();
         let mut replay_outputs =
             Vec::<(OperationId, crate::turn::JobOutput, ToolKind, RequestId)>::new();
         let mut attachable = Vec::new();
@@ -758,7 +760,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let invocation = self
                 .store
                 .invocation_item(&claim.operation.request, &claim.call_id)?
-                .ok_or_else(|| EngineError::MissingInheritedOutput(claim.call_id.0.clone()))?;
+                .ok_or_else(|| EngineError::MissingOperationInvocation(claim.operation.clone()))?;
             let tool_kind = invocation.input.kind();
             let execution = invocation.execution;
             let same_call = |item: &Item| {
@@ -767,41 +769,28 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     .flatten()
                     .is_some_and(|call| call.call_id == claim.call_id)
             };
-            let claimant_call_count = inherited_pairs
+            let invocation_count = inherited_records
                 .iter()
-                .filter(|(request, item)| request == &claim.request && same_call(item))
+                .filter(|record| {
+                    record.source_request == claim.operation.request && same_call(&record.item)
+                })
                 .count();
-            if claimant_call_count > 1 && claim.state != crate::store::ClaimState::Pending {
+            if invocation_count == 0 {
+                return Err(EngineError::MissingInheritedOutput(claim.call_id.0.clone()));
+            }
+            if invocation_count > 1 && claim.state != crate::store::ClaimState::Pending {
                 return Err(EngineError::MismatchedToolOutput(claim.call_id.0.clone()));
             }
-            let call_position = inherited_pairs
+            // An older async result can arrive after a newer invocation reuses
+            // its wire call ID. Only the Store-issued occurrence selects its owner.
+            let already_output = inherited_records
                 .iter()
-                .enumerate()
-                .find(|(_, (request, item))| request == &claim.request && same_call(item))
-                .map(|(position, _)| position)
-                .or_else(|| {
-                    inherited_pairs
-                        .iter()
-                        .enumerate()
-                        .find(|(_, (request, item))| {
-                            request == &claim.operation.request && same_call(item)
-                        })
-                        .map(|(position, _)| position)
-                })
-                .or_else(|| inherited_history.iter().rposition(&same_call))
-                .ok_or_else(|| EngineError::MissingInheritedOutput(claim.call_id.0.clone()))?;
-            let next_call = inherited_history[call_position + 1..]
-                .iter()
-                .position(&same_call)
-                .map_or(inherited_history.len(), |relative| {
-                    call_position + 1 + relative
-                });
-            let already_output = inherited_history[call_position + 1..next_call]
-                .iter()
-                .filter(|item| {
-                    (item.0["type"] == "function_call_output"
-                        || item.0["type"] == "custom_tool_call_output")
-                        && item.0["call_id"].as_str() == Some(&claim.call_id.0)
+                .filter_map(|record| {
+                    record
+                        .output
+                        .as_ref()
+                        .filter(|output| output.operation == claim.operation)
+                        .map(|output| &output.item)
                 })
                 .collect::<Vec<_>>();
             for item in &already_output {
@@ -834,29 +823,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 continue;
             }
             if claim.state == crate::store::ClaimState::Settled {
-                let item = self
-                    .read_settled_output(&claim.operation, &claim.request)
+                self.read_settled_output(&claim.operation, &claim.request)
                     .await?;
                 self.acknowledge_output(&claim.operation).await?;
-                replay_items.push(item);
+                replay_items.push((claim.operation, claim.request));
                 continue;
             }
             if claim.state == crate::store::ClaimState::Interrupted {
-                replay_items.push(Item::tool_output(
-                    &claim.call_id,
-                    tool_kind,
-                    &crate::turn::JobOutput::Interrupted,
-                ));
+                replay_items.push((claim.operation, claim.request));
                 continue;
             }
-            if inherited_history[call_position..next_call]
-                .iter()
-                .any(|item| {
-                    items::function_call(item).is_some_and(|(call, name, _)| {
-                        call == claim.call_id && matches!(name.as_str(), "wait_agent" | "yield")
-                    })
-                })
-            {
+            if matches!(invocation.name.as_str(), "wait_agent" | "yield") {
                 return Err(EngineError::UnresumableForkedWaitAgent);
             }
             // Validate every pending job before claiming any of them. The
@@ -869,7 +846,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 // Persist an interruption before appending its synthetic output;
                 // if settlement won the race, recover that durable output instead.
                 Err(JobError::UnknownCall) => {
-                    replay_items.push(self.recover_missing_job(&claim).await?);
+                    self.recover_missing_job(&claim).await?;
+                    replay_items.push((claim.operation, claim.request));
                     continue;
                 }
                 Err(error) => return Err(EngineError::Job(error)),
@@ -965,8 +943,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             self.persist_output(&operation, kind, &output, &id, &claim_request)
                 .await?;
         }
-        if !replay_items.is_empty() {
-            self.append(&id, replay_items).await?;
+        for (operation, claimant) in replay_items {
+            self.publish_operation_output(&id, &operation, &claimant)
+                .await?;
         }
         if admit_inbox {
             let store = self.store.clone();
@@ -1040,7 +1019,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 let compact_model = history.model.as_deref().unwrap_or(&self.config.model);
                 let compact = self.compact_window(
                     &parent,
-                    &history.items,
+                    &history,
                     &pending,
                     &previous_usage,
                     compact_model,
@@ -1988,6 +1967,40 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         self.append_retaining_items(id, items).await.map(drop)
     }
 
+    async fn publish_operation_output(
+        &self,
+        id: &RequestId,
+        operation: &OperationId,
+        claimant: &RequestId,
+    ) -> Result<(), EngineError> {
+        let store = self.store.clone();
+        let request = id.clone();
+        let operation = operation.clone();
+        let claimant = claimant.clone();
+        let observing = self.output_observer.is_some();
+        let (output, origin) = blocking(move || {
+            let output = store.append_operation_output(&operation, &claimant, &request)?;
+            let origin = if observing && output.appended {
+                Some(store.request_output_origin(&request)?)
+            } else {
+                None
+            };
+            Ok((output, origin))
+        })
+        .await?;
+        if let (Some(observer), Some(origin)) = (&self.output_observer, origin) {
+            observer.observe(ModelOutput {
+                origin,
+                request_id: id.clone(),
+                update: ModelOutputUpdate::Committed {
+                    item_id: output.item.0["id"].as_str().map(str::to_owned),
+                    hash: output.hash,
+                },
+            });
+        }
+        Ok(())
+    }
+
     async fn append_retaining_items(
         &self,
         id: &RequestId,
@@ -2853,7 +2866,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         {
             return Err(EngineError::ClaimRecoveryConflict(call_id.0.clone()));
         }
-        self.append(&request, vec![item]).await?;
+        self.publish_operation_output(&request, operation, claim_request)
+            .await?;
         if operation.origin == self.origin {
             match self.scheduler.mark_output_committed(operation).await {
                 Ok(()) | Err(JobError::UnknownCall) => {}
@@ -3202,6 +3216,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             Ok(HistoryWindow {
                 items,
                 provenance,
+                occurrences: state.occurrences,
                 model: state.model,
             })
         })
@@ -3212,11 +3227,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         load_history(self.store.clone(), id.clone()).await
     }
 
-    async fn read_history_pairs(
+    async fn read_recovery_history(
         &self,
         id: &RequestId,
-    ) -> Result<Vec<(RequestId, Item)>, EngineError> {
-        load_history_pairs(self.store.clone(), id.clone()).await
+    ) -> Result<Vec<crate::store::RecoveryItem>, EngineError> {
+        let store = self.store.clone();
+        let head = id.clone();
+        blocking(move || store.recovery_history(&head)).await
     }
 
     /// A model-facing Here child is admitted before its spawn tool returns.
@@ -3271,31 +3288,32 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     async fn compact_window(
         &self,
         source: &RequestId,
-        history: &[Item],
+        window: &HistoryWindow,
         pending: &[PendingCall],
         usage: &Usage,
         model: &str,
     ) -> Result<Option<RequestId>, EngineError> {
-        let pending_items: Vec<Item> = pending
+        let issued_occurrences = window.occurrences.clone();
+        let history = &window.items;
+        let pending_operations = pending
             .iter()
-            .map(|call| {
-                self.store
-                    .items(&call.operation.request)
-                    .map_err(|e| CompactError::Failed(e.to_string()))?
-                    .iter()
-                    .find(|item| {
-                        item.0["call_id"].as_str() == Some(call.call_id.0.as_str())
-                            && matches!(
-                                item.0["type"].as_str(),
-                                Some("function_call" | "custom_tool_call")
-                            )
-                    })
-                    .cloned()
-                    .ok_or_else(|| {
-                        CompactError::Failed(format!("missing pending call {}", call.call_id.0))
-                    })
-            })
-            .collect::<Result<_, _>>()?;
+            .map(|call| call.operation.clone())
+            .collect::<Vec<_>>();
+        let selected = self
+            .store
+            .select_operation_occurrences(&window.occurrences, &pending_operations)?;
+        let pending_positions = selected
+            .iter()
+            .map(|(position, _)| *position)
+            .collect::<Vec<_>>();
+        let pending_occurrences = selected
+            .into_iter()
+            .map(|(_, occurrence)| occurrence)
+            .collect::<Vec<_>>();
+        let pending_items = pending_occurrences
+            .iter()
+            .map(|occurrence| occurrence.item.clone())
+            .collect::<Vec<_>>();
         let effective_effort = history
             .iter()
             .rev()
@@ -3376,6 +3394,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             items: history,
             usage,
             pending_calls: &pending_items,
+            pending_positions: &pending_positions,
+            pending_occurrences: &pending_occurrences,
+            occurrences: &window.occurrences,
             effort: effective_effort,
             server_compact: &server_compact,
             typed_turn: &typed_turn,
@@ -3445,6 +3466,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 &source_for_write,
                 &branch,
                 &window.items,
+                &window.retained,
+                &issued_occurrences,
                 &pending_operations,
                 identity.as_ref(),
                 server_response.as_ref(),
@@ -3504,52 +3527,24 @@ async fn load_history(store: Arc<Store>, id: RequestId) -> Result<Vec<Item>, Eng
     Ok(load_history_window(store, id).await?.items)
 }
 
-async fn load_history_pairs(
-    store: Arc<Store>,
-    id: RequestId,
-) -> Result<Vec<(RequestId, Item)>, EngineError> {
-    let history = load_history_window(store, id).await?;
-    Ok(history
-        .provenance
-        .into_iter()
-        .zip(history.items)
-        .map(|((request, _), item)| (request, item))
-        .collect())
-}
-
 async fn load_history_window(
     store: Arc<Store>,
     id: RequestId,
 ) -> Result<HistoryWindow, EngineError> {
     blocking(move || {
-        let mut cursor = Some(id);
-        let mut chain = Vec::new();
-        while let Some(request_id) = cursor {
-            let Some(request) = store.request(&request_id)? else {
-                return Err(StoreError::MissingRequest(request_id.0));
-            };
-            chain.push(
-                store
-                    .items_with_hashes(&request_id)?
-                    .into_iter()
-                    .map(|(hash, item)| (request_id.clone(), hash, item))
-                    .collect::<Vec<_>>(),
-            );
-            if store.is_compaction_boundary(&request_id)? {
-                break;
-            }
-            cursor = request.parent;
-        }
-        chain.reverse();
-        let mut items = Vec::new();
-        let mut provenance = Vec::new();
-        for (request, hash, item) in chain.into_iter().flatten() {
-            items.push(item);
-            provenance.push((request, hash));
+        let history = store.history_occurrences(&id)?;
+        let mut items = Vec::with_capacity(history.len());
+        let mut provenance = Vec::with_capacity(history.len());
+        let mut occurrences = Vec::with_capacity(history.len());
+        for occurrence in history {
+            items.push(occurrence.item.clone());
+            provenance.push((occurrence.request.clone(), occurrence.hash.clone()));
+            occurrences.push(Some(occurrence));
         }
         Ok(HistoryWindow {
             items,
             provenance,
+            occurrences,
             model: None,
         })
     })
@@ -3766,7 +3761,9 @@ mod tests {
                 .write_output(&operation, &output, crate::store::TerminalOutcome::Success)
                 .unwrap();
             if already_in_history {
-                store.append_items(&snapshot, &[output.clone()]).unwrap();
+                store
+                    .append_operation_output(&operation, &snapshot, &snapshot)
+                    .unwrap();
             }
             store
                 .lock()
@@ -4360,13 +4357,7 @@ mod tests {
             &crate::turn::JobOutput::Completed(Ok(Value::String("value".into()))),
         );
         store
-            .write_request(
-                &head,
-                None,
-                "/root",
-                &[invocation, output.clone(), output.clone()],
-                StoredUsage::default(),
-            )
+            .write_request(&head, None, "/root", &[invocation], StoredUsage::default())
             .unwrap();
         store.set_effort(&head, Effort::Low).unwrap();
         store.claim(&call, &head).unwrap();
@@ -4380,6 +4371,14 @@ mod tests {
                 .unwrap(),
             1
         );
+        let operation = store.claims(&call).unwrap()[0].operation.clone();
+        store
+            .append_operation_output(&operation, &head, &head)
+            .unwrap();
+        store.lock().execute(
+            "INSERT INTO request_items(request_id,position,item_hash,output_operation) SELECT request_id,(SELECT MAX(position)+1 FROM request_items WHERE request_id=?1),item_hash,output_operation FROM request_items WHERE request_id=?1 AND output_operation IS NOT NULL",
+            [&head.0],
+        ).unwrap();
         let engine = Engine::<FakeAuth, Echo, _>::with_transport(
             Replay {
                 requests: Arc::new(Mutex::new(Vec::new())),
@@ -5617,7 +5616,11 @@ mod tests {
         );
 
         store
-            .append_items(&invocation_request, std::slice::from_ref(&output))
+            .append_operation_output(
+                &claims[0].operation,
+                &invocation_request,
+                &invocation_request,
+            )
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
             .await

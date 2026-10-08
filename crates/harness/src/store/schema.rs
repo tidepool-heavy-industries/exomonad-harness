@@ -1,4 +1,4 @@
-pub const VERSION: u32 = 14;
+pub const VERSION: u32 = 15;
 pub const SQL: &str = include_str!("schema.sql");
 const MODEL_REQUEST_INDEXES: &str = "
     CREATE INDEX IF NOT EXISTS events_model_turn_recent ON events(id DESC,request_id) WHERE kind='model_turn';
@@ -104,6 +104,8 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
         tx.execute_batch("ALTER TABLE embedded_inputs RENAME TO legacy_embedded_inputs;")?;
     }
     tx.execute_batch(SQL)?;
+    // Historical outputs keep NULL ownership. Their source occurrence cannot
+    // be inferred from equal payload hashes or reused wire call IDs.
     let item_columns = {
         let mut statement = tx.prepare("PRAGMA table_info(request_items)")?;
         statement
@@ -116,6 +118,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
         "context_sources",
         "context_note",
         "context_overlays",
+        "output_operation",
     ] {
         if !item_columns.iter().any(|existing| existing == column) {
             let kind = if column == "context_note" {

@@ -443,16 +443,28 @@ fn replay_restores_historical_native_exchange_with_local_original_claim() {
         let head = RequestId("exchange".into());
         let completed_output =
             Item(json!({"type":"function_call_output","call_id":"done","output":"evidence"}));
-        store.write_request(&head, None, "/root", &[
-            Item(json!({"type":"function_call","call_id":"done","name":"read","arguments":"{}"})),
-            completed_output.clone(),
-            Item(json!({"type":"custom_tool_call","call_id":"delete","name":"haskell_sync","input":"delete"})),
-            Item(json!({"type":"custom_tool_call","call_id":"restore","name":"haskell_sync","input":"restore"})),
-        ], Usage::default()).unwrap();
+        store
+            .write_request(
+                &head,
+                None,
+                "/root",
+                &[Item(
+                    json!({"type":"function_call","call_id":"done","name":"read","arguments":"{}"}),
+                )],
+                Usage::default(),
+            )
+            .unwrap();
         let completed = store.claim(&CallId("done".into()), &head).unwrap();
         store
             .settle_claims(&completed, &completed_output, TerminalOutcome::Success)
             .unwrap();
+        store
+            .append_operation_output(&completed, &head, &head)
+            .unwrap();
+        store.append_items(&head, &[
+            Item(json!({"type":"custom_tool_call","call_id":"delete","name":"haskell_sync","input":"delete"})),
+            Item(json!({"type":"custom_tool_call","call_id":"restore","name":"haskell_sync","input":"restore"})),
+        ]).unwrap();
         let first = store.claim(&CallId("delete".into()), &head).unwrap();
         let second = store.claim(&CallId("restore".into()), &head).unwrap();
         (head, completed, first, second)
@@ -689,21 +701,35 @@ fn saved_context_restores_owned_prior_text_and_native_group_preserving_suffix() 
     let head = RequestId("saved".into());
     let first = CallId("first".into());
     let second = CallId("second".into());
-    store.write_request(&head,None,"/root",&[
-        Item(json!({"type":"message","role":"user","content":"original"})),
-        Item(json!({"type":"function_call","call_id":"done","name":"read","arguments":"{}"})),
-        Item(json!({"type":"function_call_output","call_id":"done","output":"evidence"})),
-        Item(json!({"type":"custom_tool_call","call_id":"first","name":"haskell_sync","input":"first"})),
-        Item(json!({"type":"custom_tool_call","call_id":"second","name":"haskell_sync","input":"second"})),
-    ],Usage::default()).unwrap();
+    store
+        .write_request(
+            &head,
+            None,
+            "/root",
+            &[
+                Item(json!({"type":"message","role":"user","content":"original"})),
+                Item(
+                    json!({"type":"function_call","call_id":"done","name":"read","arguments":"{}"}),
+                ),
+            ],
+            Usage::default(),
+        )
+        .unwrap();
     let completed = store.claim(&CallId("done".into()), &head).unwrap();
     store
         .settle_claims(
             &completed,
-            &store.items(&head).unwrap()[2],
+            &Item(json!({"type":"function_call_output","call_id":"done","output":"evidence"})),
             TerminalOutcome::Success,
         )
         .unwrap();
+    store
+        .append_operation_output(&completed, &head, &head)
+        .unwrap();
+    store.append_items(&head, &[
+        Item(json!({"type":"custom_tool_call","call_id":"first","name":"haskell_sync","input":"first"})),
+        Item(json!({"type":"custom_tool_call","call_id":"second","name":"haskell_sync","input":"second"})),
+    ]).unwrap();
     let op1 = store.claim(&first, &head).unwrap();
     let op2 = store.claim(&second, &head).unwrap();
     let snap1 = store.begin_context(&op1, &head).unwrap();
@@ -791,17 +817,14 @@ fn saved_native_restore_refuses_missing_or_forged_original_claim() {
         let completed_output =
             Item(json!({"type":"function_call_output","call_id":"done","output":"evidence"}));
         store
-            .write_request(
-                &parent,
-                None,
-                "/root",
-                &[invocation, completed_output.clone()],
-                Usage::default(),
-            )
+            .write_request(&parent, None, "/root", &[invocation], Usage::default())
             .unwrap();
         let completed = store.claim(&CallId("done".into()), &parent).unwrap();
         store
             .settle_claims(&completed, &completed_output, TerminalOutcome::Success)
+            .unwrap();
+        store
+            .append_operation_output(&completed, &parent, &parent)
             .unwrap();
         store
             .lock()
@@ -870,13 +893,14 @@ fn saved_native_restore_refuses_missing_or_forged_original_claim() {
             pending: &[],
         });
         if forged {
-            assert!(matches!(result, Err(StoreError::OperationOriginMismatch)));
+            assert!(matches!(
+                result,
+                Err(StoreError::InconsistentOutputPublication { .. })
+            ));
         } else {
             assert!(matches!(
                 result,
-                Err(StoreError::Context(
-                    ContextError::ProtectedGroup | ContextError::NativeEdit
-                ))
+                Err(StoreError::InconsistentOutputPublication { .. })
             ));
         }
         assert_eq!(store.context_history(&deleted.head).unwrap(), before);
@@ -1301,9 +1325,43 @@ fn blocks_preserve_duplicate_call_order_orphans_and_cut_opaque_groups() {
         Item(json!({"type":"message","role":"assistant","content":"after"})),
         Item(json!({"type":"reasoning","encrypted_content":"sealed-3"})),
     ];
+    let first = RequestId("grouping-first".into());
     store
-        .write_request(&parent, None, "/root", &items, Usage::default())
+        .write_request(&first, None, "/root", &items[..2], Usage::default())
         .unwrap();
+    let earlier = store.claim(&CallId("duplicate".into()), &first).unwrap();
+    store
+        .write_output(&earlier, &items[2], TerminalOutcome::Success)
+        .unwrap();
+    store
+        .append_operation_output(&earlier, &first, &first)
+        .unwrap();
+    store
+        .write_request(
+            &parent,
+            Some(&first),
+            "/root",
+            &items[3..4],
+            Usage::default(),
+        )
+        .unwrap();
+    let newer = store.claim(&CallId("duplicate".into()), &parent).unwrap();
+    store
+        .write_output(&newer, &items[4], TerminalOutcome::Success)
+        .unwrap();
+    store
+        .append_operation_output(&newer, &parent, &parent)
+        .unwrap();
+    let outside = RequestId("outside-visible-context".into());
+    store.write_request(&outside, None, "/foreign", &[Item(json!({"type":"function_call","call_id":"orphan","name":"outside","arguments":"{}"}))], Usage::default()).unwrap();
+    let orphan = store.claim(&CallId("orphan".into()), &outside).unwrap();
+    store
+        .write_output(&orphan, &items[5], TerminalOutcome::Success)
+        .unwrap();
+    store
+        .append_operation_output(&orphan, &outside, &parent)
+        .unwrap();
+    store.append_items(&parent, &items[6..]).unwrap();
     issued_response(
         &store,
         &parent,
@@ -1693,9 +1751,14 @@ fn here_context_snapshot() -> (Store, RequestId, RequestId, OperationId) {
         Item(json!({"type":"function_call_output","call_id":"spawn","output":"child admitted"}));
     store.append_items(&edited.head, &[
         Item(json!({"type":"function_call","call_id":"spawn","name":"spawn_agent","arguments":"{}"})),
-        spawn_output.clone(),
     ]).unwrap();
     let spawn = store.claim(&spawn_call, &edited.head).unwrap();
+    store
+        .settle_claims(&spawn, &spawn_output, TerminalOutcome::Success)
+        .unwrap();
+    store
+        .append_operation_output(&spawn, &edited.head, &edited.head)
+        .unwrap();
     let source = RequestId("rewritten-parent".into());
     let retained = store
         .context_history(&edited.head)

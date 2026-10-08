@@ -186,19 +186,26 @@ fn foreign_pending_call_in_opaque_envelope_refuses_and_rolls_back() {
 #[test]
 fn actual_output_without_settled_claim_does_not_close_foreign_call() {
     let (store, head, _, snapshot) = setup(vec![call("foreign")]);
-    store.claim(&CallId("foreign".into()), &head).unwrap();
-    store
-        .append_items(
+    let foreign = store.claim(&CallId("foreign".into()), &head).unwrap();
+    let before = store.context_history(&head).unwrap();
+    assert!(matches!(
+        store.append_items(
             &head,
             &[Item(
-                json!({"type":"custom_tool_call_output","call_id":"foreign","output":"unowned"}),
-            )],
-        )
-        .unwrap();
+                json!({"type":"custom_tool_call_output","call_id":"foreign","output":"unowned"})
+            )]
+        ),
+        Err(StoreError::UnboundOutputPublication { .. })
+    ));
+    assert_eq!(store.context_history(&head).unwrap(), before);
     assert!(matches!(
         switch(&store, &snapshot),
         Err(StoreError::Context(ContextError::OpaqueModel))
     ));
+    assert_eq!(
+        store.claims_for_operation(&foreign).unwrap()[0].state,
+        ClaimState::Pending
+    );
 }
 
 #[test]
@@ -261,7 +268,7 @@ fn interleaved_unrelated_calls_arrivals_and_settings_remain_exact() {
     let receipt = switch(&store, &snapshot).unwrap();
     // The unrelated invocation's result can arrive after the switching result.
     store
-        .append_items(&receipt.head, &[unrelated_output])
+        .append_operation_output(&unrelated, &head, &receipt.head)
         .unwrap();
     let raw = store.context_history(&receipt.head).unwrap();
     let projected = store
@@ -434,13 +441,10 @@ fn replay_collision_fixture(
         .unwrap();
     let a_output_request = RequestId("original-a-output".into());
     store
-        .write_request(
-            &a_output_request,
-            Some(&a),
-            "/root",
-            std::slice::from_ref(&same_output),
-            Usage::default(),
-        )
+        .write_request(&a_output_request, Some(&a), "/root", &[], Usage::default())
+        .unwrap();
+    store
+        .append_operation_output(&a_operation, &a, &a_output_request)
         .unwrap();
     let saved = store.read_context(&a_output_request).unwrap();
     let drop_head = RequestId("drop-original-a".into());
@@ -511,7 +515,7 @@ fn replay_collision_fixture(
     store
         .write_output(&b_operation, &same_output, TerminalOutcome::Success)
         .unwrap();
-    store.append_items(&b, &[same_output]).unwrap();
+    store.append_operation_output(&b_operation, &b, &b).unwrap();
     if duplicate_spine {
         store.set_effort(&b, Effort::Low).unwrap();
     }

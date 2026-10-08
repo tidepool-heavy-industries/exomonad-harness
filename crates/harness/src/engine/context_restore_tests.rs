@@ -76,8 +76,10 @@ async fn saved_native_exchange_restores_exact_claim_and_recovers_after_reopen() 
         store
             .settle_claims(&completed, &completed_output, TerminalOutcome::Success)
             .unwrap();
+        store
+            .append_operation_output(&completed, &original, &original)
+            .unwrap();
         store.append_items(&original, &[
-            completed_output.clone(),
             Item(json!({"type":"custom_tool_call","call_id":"delete","name":"haskell_sync","input":"delete saved native exchange"})),
             Item(json!({"type":"custom_tool_call","call_id":"restore","name":"haskell_sync","input":"restore saved context"})),
         ]).unwrap();

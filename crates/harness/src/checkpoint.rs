@@ -7,7 +7,7 @@ mod captured_tests;
 use crate::{
     item::{Item, ToolKind},
     model::{AgentPath, CallId, ConversationIdentity, OperationId, RequestId},
-    store::{Agent, AgentState, Result, Store, StoreError, utc_millis},
+    store::{Agent, AgentState, Result, Store, StoreError, context, utc_millis},
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
@@ -331,34 +331,10 @@ impl Store {
             return Err(StoreError::MissingAgentParent(origin.0.clone()));
         }
 
-        let stored: Vec<(RequestId, Item)> = {
-            let mut q = tx.prepare(
-                "WITH RECURSIVE lineage(id,parent_id,depth) AS (
-                     SELECT id,parent_id,0 FROM requests WHERE id=?1
-                     UNION ALL
-                     SELECT r.id,r.parent_id,lineage.depth+1
-                     FROM requests r JOIN lineage ON r.id=lineage.parent_id
-                     WHERE NOT EXISTS(
-                         SELECT 1 FROM session_state s
-                         WHERE s.session_id='harness:compaction:' || lineage.id
-                     )
-                 )
-                 SELECT lineage.id,i.json FROM lineage
-                 JOIN request_items ri ON ri.request_id=lineage.id
-                 JOIN items i ON i.hash=ri.item_hash
-                 ORDER BY lineage.depth DESC,ri.position",
-            )?;
-            q.query_map([&source_request.0], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .map(|row| {
-                let (request, raw) = row?;
-                Ok((RequestId(request), serde_json::from_str::<Item>(&raw)?))
-            })
-            .collect::<Result<Vec<_>>>()?
-        };
-        let boundary = stored.iter().position(|(request, item)| {
-            request == source_request
+        let stored = context::history(tx, source_request, true)?;
+        let boundary = stored.iter().position(|occurrence| {
+            let item = &occurrence.item;
+            &occurrence.request == source_request
                 && matches!(
                     item.0["type"].as_str(),
                     Some("function_call" | "custom_tool_call")
@@ -378,7 +354,9 @@ impl Store {
             CheckpointCut::BeforeCall => &stored[..boundary],
         };
         let mut call_kinds = HashMap::<(RequestId, CallId), ToolKind>::new();
-        for (request, item) in prefix {
+        for occurrence in prefix {
+            let item = &occurrence.item;
+            let request = &occurrence.origin.request;
             if let Some(call) =
                 item.tool_call()
                     .map_err(|reason| StoreError::MalformedReplayCall {
@@ -395,10 +373,11 @@ impl Store {
                 }
             }
         }
+        context::validate_canonical_history(tx, prefix)?;
         let effort = prefix
             .iter()
             .rev()
-            .find_map(|(_, item)| item.configuration_effort())
+            .find_map(|occurrence| occurrence.item.configuration_effort())
             .ok_or_else(|| StoreError::MissingCheckpointEffort(source_request.0.clone()))?;
         let id = uuid::Uuid::new_v4().to_string();
         let snapshot_request = RequestId(uuid::Uuid::new_v4().to_string());
@@ -406,18 +385,13 @@ impl Store {
             "INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros) VALUES (?1,NULL,?2,?3,0,0,0)",
             params![snapshot_request.0, format!("harness:checkpoint:{id}"), utc_millis()],
         )?;
-        for (position, (_, item)) in prefix
+        for (position, occurrence) in prefix
             .iter()
-            .filter(|(_, item)| !item.is_configuration_update())
+            .filter(|occurrence| !occurrence.item.is_configuration_update())
             .enumerate()
         {
-            let hash = Self::put_item_tx(&tx, item)?;
-            tx.execute(
-                "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
-                params![snapshot_request.0, position as i64, hash.0],
-            )?;
+            context::insert_occurrence(tx, &snapshot_request, position as i64, occurrence)?;
         }
-        Self::preserve_context_origins_tx(&tx, source_request, &snapshot_request)?;
         let claims: Vec<(
             String,
             String,
@@ -449,13 +423,24 @@ impl Store {
         };
         let mut pending_claims = Vec::new();
         let mut copied = std::collections::HashSet::new();
-        let boundary_claimed = claims.iter().any(|(_, _, call, request, _, _, _)| {
-            call == &boundary_call.0 && request == &source_request.0
-        });
+        let boundary_claimed =
+            claims
+                .iter()
+                .any(|(owner, original_request, call, request, _, _, _)| {
+                    if let Some(operation) = operation {
+                        *owner
+                            == serde_json::to_string(&operation.origin)
+                                .expect("serializable operation identity")
+                            && *original_request == operation.request.0
+                            && *call == operation.call.0
+                    } else {
+                        call == &boundary_call.0 && request == &source_request.0
+                    }
+                });
         for (origin, original_request, call_id, claim_request, state, output_hash, outcome) in
             claims
         {
-            let key = (RequestId(claim_request.clone()), CallId(call_id.clone()));
+            let key = (RequestId(original_request.clone()), CallId(call_id.clone()));
             if let Some(kind) = call_kinds.get(&key) {
                 let terminal = match state.as_str() {
                     "settled" => {
@@ -477,31 +462,6 @@ impl Store {
                     )),
                     _ => None,
                 };
-                if let Some(terminal) = terminal {
-                    if let Some(start) = prefix.iter().position(|(request, item)| {
-                        request.0 == claim_request
-                            && item
-                                .tool_call()
-                                .ok()
-                                .flatten()
-                                .is_some_and(|call| call.call_id.0 == call_id)
-                    }) {
-                        let before_next_call =
-                            prefix[start + 1..].iter().take_while(|(_, item)| {
-                                !item
-                                    .tool_call()
-                                    .ok()
-                                    .flatten()
-                                    .is_some_and(|call| call.call_id.0 == call_id)
-                            });
-                        if before_next_call
-                            .into_iter()
-                            .any(|(_, item)| *item == terminal)
-                        {
-                            continue;
-                        }
-                    }
-                }
                 let identity: ConversationIdentity = serde_json::from_str(&origin)?;
                 let operation = OperationId {
                     origin: identity,
@@ -510,6 +470,20 @@ impl Store {
                 };
                 if !copied.insert(operation.clone()) {
                     continue;
+                }
+                let published = prefix
+                    .iter()
+                    .filter(|occurrence| occurrence.output_operation.as_ref() == Some(&operation))
+                    .collect::<Vec<_>>();
+                match published.as_slice() {
+                    [] => {}
+                    [published] if terminal.as_ref() == Some(&published.item) => continue,
+                    _ => {
+                        return Err(StoreError::InvalidOutputPublication {
+                            operation,
+                            claimant: RequestId(claim_request),
+                        });
+                    }
                 }
                 if state == "pending" {
                     pending_claims.push(CheckpointClaim {
@@ -725,7 +699,9 @@ mod tests {
         store
             .write_output(&first_op, &output, crate::store::TerminalOutcome::Success)
             .unwrap();
-        store.append_items(&first, &[output]).unwrap();
+        store
+            .append_operation_output(&first_op, &first, &first)
+            .unwrap();
         store
             .create_request(&second, Some(&first), &root.0)
             .unwrap();

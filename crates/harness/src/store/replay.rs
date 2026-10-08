@@ -516,7 +516,14 @@ mod tests {
             store.create_request(&root, None, "/root").unwrap();
             store.append_items(&root, &[original]).unwrap();
             let sealed = store.seal_replay_request(&input).unwrap();
-            store.append_items(&root,&[Item(json!({"type":"custom_tool_call_output","call_id":"same-id","output":"late actual output"}))]).unwrap();
+            store
+                .append_items(
+                    &root,
+                    &[Item(
+                        json!({"type":"message","role":"user","content":"late actual input"}),
+                    )],
+                )
+                .unwrap();
             store
                 .record_issued_replay_turn(&root, sealed, &done)
                 .unwrap();

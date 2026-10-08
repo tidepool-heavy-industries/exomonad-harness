@@ -65,17 +65,16 @@ impl Store {
                 operation: local.clone(),
             });
         };
-        let history = self.items(&original.request)?;
+        let history = {
+            let c = self.lock();
+            let history = super::context::request_occurrences(&c, &original.request)?;
+            super::context::validate_canonical_history(&c, &history)?;
+            history
+        };
         let outputs = history
             .iter()
             .enumerate()
-            .filter(|(_, item)| {
-                item.0["call_id"].as_str() == Some(&original.call.0)
-                    && matches!(
-                        item.0["type"].as_str(),
-                        Some("function_call_output" | "custom_tool_call_output")
-                    )
-            })
+            .filter(|(_, occurrence)| occurrence.output_operation.as_ref() == Some(original))
             .collect::<Vec<_>>();
         let [(position, output)] = outputs.as_slice() else {
             // An interrupted claim can be retained before its synthetic Item is
@@ -87,13 +86,14 @@ impl Store {
                 operation: local.clone(),
             });
         };
-        if **output != recorded.item {
+        if output.item != recorded.item {
             return Err(StoreError::InvalidWaitContinuation {
                 operation: local.clone(),
             });
         }
         let following = history[position + 1..]
             .iter()
+            .map(|occurrence| &occurrence.item)
             .take_while(|item| item.0["type"] == "message")
             .collect::<Vec<_>>();
         if following.is_empty() {
@@ -133,6 +133,23 @@ impl Store {
             }
         }
         if !authorized {
+            return Err(StoreError::InvalidWaitContinuation {
+                operation: local.clone(),
+            });
+        }
+        // The external replay format carries Items, not occurrence identities.
+        // Refuse a cut whose equal bytes could denote another owned output.
+        let candidates = {
+            let c = self.lock();
+            let issued_history = super::context::history(&c, &next.request, true)?;
+            super::context::validate_canonical_history(&c, &issued_history)?;
+            issued_history
+                .iter()
+                .filter(|occurrence| occurrence.item == recorded.item)
+                .map(|occurrence| occurrence.output_operation.clone())
+                .collect::<Vec<_>>()
+        };
+        if candidates.as_slice() != [Some(original.clone())] {
             return Err(StoreError::InvalidWaitContinuation {
                 operation: local.clone(),
             });
@@ -227,7 +244,9 @@ mod tests {
             .unwrap();
         let message = Item(json!({"type":"message","role":"user","content":"recorded wake"}));
         let mut input = vec![invocation, output.clone()];
-        store.append_items(&source, &[output.clone()]).unwrap();
+        store
+            .append_operation_output(&original, &source, &source)
+            .unwrap();
         if include_message {
             store.append_items(&source, &[message.clone()]).unwrap();
             input.push(message.clone());
@@ -288,7 +307,7 @@ mod tests {
             .append_items(
                 &original.request,
                 &[
-                    Item(json!({"type":"function_call_output","call_id":"other","output":"{}"})),
+                    Item(json!({"type":"function_call","call_id":"other","name":"other","arguments":"{}"})),
                     late.clone(),
                 ],
             )
@@ -314,13 +333,16 @@ mod tests {
 
     #[test]
     fn wait_continuation_refuses_duplicate_output_or_missing_cut() {
-        let (store, local, original, next, output, _) = fixture(true);
+        let (store, local, original, next, _, _) = fixture(true);
         assert!(
             store
                 .replay_wait_continuation(&local, &original, None)
                 .is_err()
         );
-        store.append_items(&original.request, &[output]).unwrap();
+        let c = store.lock();
+        let row: (String, String) = c.query_row("SELECT item_hash,output_operation FROM request_items WHERE request_id=?1 AND position=1", [&original.request.0], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        c.execute("INSERT INTO request_items(request_id,position,item_hash,output_operation) VALUES(?1,3,?2,?3)", rusqlite::params![original.request.0,row.0,row.1]).unwrap();
+        drop(c);
         assert!(
             store
                 .replay_wait_continuation(&local, &original, Some(&next))
@@ -343,5 +365,30 @@ mod tests {
                 .into_items(&local, &Item(json!({"changed":true})))
                 .is_err()
         );
+    }
+    #[test]
+    fn raw_issued_wait_cut_refuses_equal_output_bytes_with_distinct_owners() {
+        let (store, local, original, next, output, _) = fixture(true);
+        store.append_items(&next.request, &[Item(json!({"type":"function_call","name":"wait_agent","call_id":original.call.0,"arguments":"{}"}))]).unwrap();
+        let other = store.claim(&original.call, &next.request).unwrap();
+        store
+            .write_output(&other, &output, super::super::TerminalOutcome::Success)
+            .unwrap();
+        store
+            .append_operation_output(&other, &next.request, &next.request)
+            .unwrap();
+        assert_ne!(other, original);
+        assert!(
+            matches!(store.replay_wait_continuation(&local,&original,Some(&next)), Err(StoreError::InvalidWaitContinuation { operation }) if operation == local)
+        );
+        let outputs = store
+            .recovery_history(&next.request)
+            .unwrap()
+            .into_iter()
+            .filter_map(|record| record.output)
+            .collect::<Vec<_>>();
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].item, outputs[1].item);
+        assert_ne!(outputs[0].operation, outputs[1].operation);
     }
 }

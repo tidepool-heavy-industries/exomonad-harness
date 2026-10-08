@@ -110,6 +110,7 @@ impl Store {
                 return Err(EmbeddedError::SeedRequiresFreshConversation);
             }
             let request = RequestId(uuid::Uuid::new_v4().to_string());
+            output_publication::require_ordinary(item, &request, 0)?;
             // Synthetic settled history is not an admitted model round.
             tx.execute(
                 "INSERT INTO requests(id,parent_id,branch,created_at) VALUES (?1,NULL,?2,?3)",

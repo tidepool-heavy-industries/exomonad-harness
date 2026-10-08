@@ -1,6 +1,6 @@
 //! Durable SQLite event and content-addressed request store.
 mod compaction;
-mod context;
+pub(crate) mod context;
 mod embedded;
 mod embedded_commands;
 mod embedded_round;
@@ -13,6 +13,8 @@ pub mod chat;
 pub mod forms;
 pub mod history;
 pub mod media;
+mod output_publication;
+pub(crate) use output_publication::RecoveryItem;
 pub mod presentation;
 mod replay;
 pub mod schema;
@@ -104,6 +106,29 @@ pub enum StoreError {
     },
     #[error("claim already exists for call/request")]
     DuplicateClaim,
+    #[error(
+        "operation output publication lacks valid retained claim evidence: {operation:?} at {claimant:?}"
+    )]
+    InvalidOutputPublication {
+        operation: OperationId,
+        claimant: RequestId,
+    },
+    #[error(
+        "tool output occurrence has no retained operation identity: {request:?} at {position}; preserve this history"
+    )]
+    UnboundOutputPublication { request: RequestId, position: i64 },
+    #[error(
+        "tool output occurrence disagrees with its retained operation identity: {request:?} at {position}"
+    )]
+    InconsistentOutputPublication { request: RequestId, position: i64 },
+    #[error(
+        "compaction ownership cannot be reconciled at {request:?} position {position}: {reason:?}"
+    )]
+    CompactionOwnership {
+        request: RequestId,
+        position: usize,
+        reason: CompactionOwnershipRefusal,
+    },
     #[error("operation origin does not match its issuing request and Store binding")]
     OperationOriginMismatch,
     #[error("invalid canonical agent path: {0}")]
@@ -144,6 +169,14 @@ pub enum StoreError {
         call_id: String,
         reason: String,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompactionOwnershipRefusal {
+    MissingSource,
+    AmbiguousSource(ItemHash),
+    DuplicateSource,
+    UnownedToolItem,
 }
 
 #[cfg(test)]
@@ -581,46 +614,24 @@ impl Store {
                 |row| Ok(row.get::<_, Option<String>>(0)?.map(RequestId)),
             )?
         };
-        let stored_history: Vec<(RequestId, Item)> = if let Some(head) = source_head.as_ref() {
+        let stored_history = if let Some(head) = source_head.as_ref() {
             let exists: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
                 [&head.0],
-                |r| r.get(0),
+                |row| row.get(0),
             )?;
             if !exists {
                 return Err(StoreError::MissingRequest(head.0.clone()));
             }
-            let mut q = tx.prepare(
-                "WITH RECURSIVE lineage(id,parent_id,depth) AS (
-                     SELECT id,parent_id,0 FROM requests WHERE id=?1
-                     UNION ALL
-                     SELECT r.id,r.parent_id,lineage.depth+1
-                     FROM requests r JOIN lineage ON r.id=lineage.parent_id
-                     WHERE NOT EXISTS(
-                         SELECT 1 FROM session_state s
-                         WHERE s.session_id='harness:compaction:' || lineage.id
-                     )
-                 )
-                 SELECT lineage.id,i.json FROM lineage
-                 JOIN request_items ri ON ri.request_id=lineage.id
-                 JOIN items i ON i.hash=ri.item_hash
-                 ORDER BY lineage.depth DESC,ri.position",
-            )?;
-            q.query_map([&head.0], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .map(|row| {
-                let (request, raw) = row?;
-                Ok((RequestId(request), serde_json::from_str::<Item>(&raw)?))
-            })
-            .collect::<Result<Vec<_>>>()?
+            context::history(&tx, head, true)?
         } else {
             Vec::new()
         };
-        let history_pairs: Vec<(RequestId, Item)> =
+        let selected_history =
             if let (Some(request), Some(call_id)) = (invocation_request, invocation_call_id) {
-                let end = stored_history.iter().position(|(item_request, item)| {
-                    item_request == request
+                let end = stored_history.iter().position(|occurrence| {
+                    let item = &occurrence.item;
+                    &occurrence.request == request
                         && item.0["type"] == "function_call"
                         && item.0["call_id"].as_str() == Some(&call_id.0)
                         && item.0["name"].as_str() == Some("spawn_agent")
@@ -636,80 +647,93 @@ impl Store {
                 stored_history
             };
         let inherited_operations = if let Some(head) = source_head.as_ref() {
-            let mut q = tx.prepare(
-                "WITH RECURSIVE lineage(id,parent_id) AS (
-                     SELECT id,parent_id FROM requests WHERE id=?1
-                     UNION ALL
-                     SELECT r.id,r.parent_id FROM requests r JOIN lineage ON r.id=lineage.parent_id
-                 )
-                 SELECT c.origin,c.origin_request_id,c.call_id,c.request_id FROM claims c
-                 JOIN lineage ON lineage.id=c.request_id
-                 WHERE c.state='pending' ORDER BY c.request_id,c.call_id",
+            let mut query = tx.prepare(
+                "WITH RECURSIVE lineage(id,parent_id,depth) AS (
+                     SELECT id,parent_id,0 FROM requests WHERE id=?1
+                     UNION ALL SELECT r.id,r.parent_id,lineage.depth+1 FROM requests r JOIN lineage ON r.id=lineage.parent_id
+                 ) SELECT c.origin,c.origin_request_id,c.call_id,c.state,c.output_hash,c.terminal_json FROM claims c
+                   JOIN lineage ON lineage.id=c.request_id ORDER BY lineage.depth ASC",
             )?;
-            let rows = q
+            let rows = query
                 .query_map([&head.0], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
                     ))
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            let mut same_request_calls =
-                std::collections::HashMap::<(String, String), usize>::new();
-            for (_, _, call, claim_request) in &rows {
-                *same_request_calls
-                    .entry((claim_request.clone(), call.clone()))
-                    .or_default() += 1;
+            let mut nearest = std::collections::HashMap::new();
+            for (origin, request, call, state, output, terminal) in rows {
+                let operation = OperationId {
+                    origin: serde_json::from_str(&origin)?,
+                    request: RequestId(request),
+                    call: CallId(call),
+                };
+                nearest
+                    .entry(operation)
+                    .or_insert((state, output, terminal));
             }
-            for ((claim_request, call), count) in same_request_calls {
-                if count <= 1 {
-                    continue;
-                }
-                let visible = history_pairs
+            let visible_calls = selected_history
+                .iter()
+                .filter_map(|occurrence| {
+                    occurrence
+                        .item
+                        .tool_call()
+                        .ok()
+                        .flatten()
+                        .map(|call| (occurrence.origin.request.clone(), call.call_id))
+                })
+                .collect::<HashSet<_>>();
+            nearest.retain(|operation, _| {
+                visible_calls.contains(&(operation.request.clone(), operation.call.clone()))
+            });
+            let ledger =
+                validation::invocations_for_operations(&tx, &nearest.keys().cloned().collect())?;
+            let mut selected = Vec::new();
+            for (operation, terminal) in nearest {
+                let Some(invocation) = ledger.get(&operation) else {
+                    return Err(StoreError::MissingCheckpointCall {
+                        request: operation.request.0,
+                        call_id: operation.call.0,
+                    });
+                };
+                let count = selected_history
                     .iter()
-                    .filter(|(request, item)| {
-                        request.0 == claim_request
-                            && !Self::strip_from_here_snapshot(item)
-                            && item
-                                .tool_call()
-                                .ok()
-                                .flatten()
-                                .is_some_and(|tool| tool.call_id.0 == call)
+                    .filter(|occurrence| {
+                        occurrence.origin == invocation.occurrence
+                            && !Self::strip_from_here_snapshot(&occurrence.item)
                     })
                     .count();
-                if visible > 0 && visible < count {
-                    return Err(StoreError::AmbiguousReplayCall { call_id: call });
+                if count > 1 {
+                    return Err(StoreError::AmbiguousReplayCall {
+                        call_id: operation.call.0,
+                    });
+                }
+                if count == 1
+                    && !selected_history
+                        .iter()
+                        .any(|occurrence| occurrence.output_operation.as_ref() == Some(&operation))
+                {
+                    selected.push((operation, terminal));
                 }
             }
-            let mut operations = HashSet::new();
-            for (origin, original_request, call, claim_request) in rows {
-                if history_pairs.iter().any(|(request, item)| {
-                    request.0 == claim_request
-                        && !Self::strip_from_here_snapshot(item)
-                        && item
-                            .tool_call()
-                            .ok()
-                            .flatten()
-                            .is_some_and(|tool| tool.call_id.0 == call)
-                }) {
-                    operations.insert((origin, original_request, call));
-                }
-            }
-            operations.into_iter().collect::<Vec<_>>()
+            selected
         } else {
             Vec::new()
         };
-        let history: Vec<Item> = history_pairs.into_iter().map(|(_, item)| item).collect();
-        let child_effort = history
+        context::validate_canonical_history(&tx, &selected_history)?;
+        let child_effort = selected_history
             .iter()
             .rev()
-            .find_map(Item::configuration_effort)
+            .find_map(|occurrence| occurrence.item.configuration_effort())
             .unwrap_or(Effort::Low);
-        let snapshot: Vec<_> = history
+        let snapshot: Vec<_> = selected_history
             .into_iter()
-            .filter(|item| !Self::strip_from_here_snapshot(item))
+            .filter(|occurrence| !Self::strip_from_here_snapshot(&occurrence.item))
             .collect();
         let source = serde_json::json!({
             "kind":"here",
@@ -723,25 +747,13 @@ impl Store {
             "INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros) VALUES (?1,NULL,?2,?3,0,0,0)",
             params![snapshot_request.0, path.0, utc_millis()],
         )?;
-        for (position, item) in snapshot.iter().enumerate() {
-            let hash = Self::put_item_tx(&tx, item)?;
-            tx.execute(
-                "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
-                params![snapshot_request.0, position as i64, hash.0],
-            )?;
+        for (position, occurrence) in snapshot.iter().enumerate() {
+            context::insert_occurrence(&tx, snapshot_request, position as i64, occurrence)?;
         }
-        if let Some(source_head) = &source_head {
-            context::preserve_origins(
-                &tx,
-                source_head,
-                snapshot_request,
-                context::CopyRepresentation::Canonical,
-            )?;
-        }
-        for (origin, original_request, call_id) in inherited_operations {
+        for (operation, (state, output, terminal)) in inherited_operations {
             tx.execute(
-                "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES (?1,?2,?3,?4,'pending')",
-                params![origin, original_request, call_id, snapshot_request.0],
+                "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash,terminal_json) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![serde_json::to_string(&operation.origin)?, operation.request.0, operation.call.0, snapshot_request.0, state, output, terminal],
             )?;
         }
         // The existing trusted writer is factored into a transaction helper,
@@ -957,6 +969,7 @@ impl Store {
             .filter(|item| !item.is_configuration_update())
             .enumerate()
         {
+            output_publication::require_ordinary(item, request, position as i64)?;
             let hash = Self::put_item_tx(&tx, item)?;
             tx.execute(
                 "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
@@ -994,7 +1007,19 @@ impl Store {
         identity: Option<&crate::embedding::HostIdentity>,
     ) -> Result<()> {
         self.write_compaction_request_with_evidence(
-            request, parent, branch, items, pending, identity, None,
+            request,
+            parent,
+            branch,
+            items,
+            &[],
+            &self
+                .history_occurrences(parent)?
+                .into_iter()
+                .map(Some)
+                .collect::<Vec<_>>(),
+            pending,
+            identity,
+            None,
         )
     }
     pub(crate) fn write_compaction_request_with_evidence(
@@ -1003,6 +1028,8 @@ impl Store {
         parent: &RequestId,
         branch: &str,
         items: &[Item],
+        retained: &[(usize, crate::context::Occurrence)],
+        issued: &[Option<crate::context::Occurrence>],
         pending: &[OperationId],
         identity: Option<&crate::embedding::HostIdentity>,
         response: Option<&ServerCompactionResponse>,
@@ -1029,37 +1056,41 @@ impl Store {
             tx.execute("UPDATE requests SET embedded_run=?2,embedded_incarnation=?3,round_phase='pending' WHERE id=?1",
                 params![request.0,identity.run,identity.incarnation])?;
         }
-        for (position, item) in items.iter().enumerate() {
-            let hash = Self::put_item_tx(&tx, item)?;
-            tx.execute(
-                "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
-                params![request.0, position as i64, hash.0],
-            )?;
+        let reconciled =
+            context::reconcile_compaction(&tx, request, parent, items, retained, issued, pending)?;
+        for (position, item) in reconciled.iter().enumerate() {
+            match item {
+                context::CompactionItem::Retained(occurrence) => {
+                    context::insert_occurrence(&tx, request, position as i64, occurrence)?
+                }
+                context::CompactionItem::Authored(item) => {
+                    output_publication::require_ordinary(item, request, position as i64)?;
+                    let hash = Self::put_item_tx(&tx, item)?;
+                    tx.execute("INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)", params![request.0, position as i64, hash.0])?;
+                }
+            }
         }
         let mut seen = HashSet::new();
+        let invocations =
+            validation::invocations_for_operations(&tx, &pending.iter().cloned().collect())?;
         for operation in pending {
             if !seen.insert(operation) {
                 return Err(StoreError::DuplicateClaim);
             }
-            let matching = items
-                .iter()
-                .filter_map(|item| item.tool_call().ok().flatten())
-                .filter(|call| call.call_id == operation.call)
-                .count();
-            let required = pending
-                .iter()
-                .filter(|other| other.call == operation.call)
-                .count();
-            if matching < required {
+            let invocation =
+                invocations
+                    .get(operation)
+                    .ok_or_else(|| StoreError::MissingCheckpointCall {
+                        request: operation.request.0.clone(),
+                        call_id: operation.call.0.clone(),
+                    })?;
+            let matching = reconciled.iter().filter(|item| matches!(item, context::CompactionItem::Retained(occurrence) if occurrence.origin == invocation.occurrence)).count();
+            if matching != 1 {
                 return Err(StoreError::AmbiguousReplayCall {
                     call_id: operation.call.0.clone(),
                 });
             }
-            let origin = serde_json::to_string(&operation.origin)?;
-            tx.execute(
-                "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES (?1,?2,?3,?4,'pending')",
-                params![origin,operation.request.0,operation.call.0,request.0],
-            )?;
+            context::carry_operation_claim(&tx, operation, parent, request)?;
         }
         let key = format!("harness:compaction:{}", request.0);
         tx.execute(
@@ -1237,6 +1268,14 @@ impl Store {
         )?;
         Ok(ItemHash(hash))
     }
+    fn put_item_tx_hash(item: &Item) -> Result<ItemHash> {
+        Ok(ItemHash(
+            blake3::hash(&serde_json::to_vec(item)?)
+                .to_hex()
+                .to_string(),
+        ))
+    }
+
     pub fn put_item(&self, item: &Item) -> Result<ItemHash> {
         let mut c = self.lock();
         let tx = c.transaction()?;
@@ -1281,6 +1320,7 @@ impl Store {
         )?;
         let mut hashes = Vec::new();
         for item in items {
+            output_publication::require_ordinary(item, request, pos)?;
             let h = Self::put_item_tx(&tx, item)?;
             tx.execute(
                 "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
@@ -1450,6 +1490,7 @@ impl Store {
             if item.is_configuration_update() {
                 continue;
             }
+            output_publication::require_ordinary(&item, request, position)?;
             tx.execute(
                 "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
                 params![request.0, position, hash],
@@ -1498,25 +1539,69 @@ impl Store {
         let mut c = self.lock();
         let tx = c.transaction()?;
         let source_items = context::request_occurrences(&tx, source)?;
-        let Some(output) = source_items.into_iter().find(|occurrence| {
-            occurrence.item.0["type"] == "function_call_output"
-                && occurrence.item.0["call_id"].as_str() == Some(&call_id.0)
-        }) else {
-            return Ok(false);
+        let source_calls = source_items
+            .iter()
+            .filter(|occurrence| {
+                occurrence.item.0["type"] == "function_call"
+                    && occurrence.item.0["call_id"].as_str() == Some(&call_id.0)
+                    && occurrence.item.0["name"] == "spawn_agent"
+            })
+            .collect::<Vec<_>>();
+        let [source_call] = source_calls.as_slice() else {
+            return Err(StoreError::AmbiguousReplayCall {
+                call_id: call_id.0.clone(),
+            });
         };
-        let target_items = context::request_occurrences(&tx, target)?;
-        if target_items.iter().any(|occurrence| {
+        let issuing_call = source_call.origin.clone();
+        drop(source_calls);
+        let mut candidates = Vec::new();
+        for occurrence in source_items.into_iter().filter(|occurrence| {
             occurrence.item.0["type"] == "function_call_output"
                 && occurrence.item.0["call_id"].as_str() == Some(&call_id.0)
         }) {
-            tx.commit()?;
-            return Ok(true);
+            let operation = occurrence.output_operation.as_ref().ok_or_else(|| {
+                StoreError::UnboundOutputPublication {
+                    request: occurrence.request.clone(),
+                    position: occurrence.position,
+                }
+            })?;
+            if context::original_call(&tx, operation)? == issuing_call {
+                candidates.push(occurrence);
+            }
         }
-        let Some(spawn_position) = target_items.iter().position(|occurrence| {
-            occurrence.item.0["type"] == "function_call"
-                && occurrence.item.0["call_id"].as_str() == Some(&call_id.0)
-                && occurrence.item.0["name"].as_str() == Some("spawn_agent")
-        }) else {
+        let Some(output) = candidates.pop() else {
+            return Ok(false);
+        };
+        if !candidates.is_empty() {
+            return Err(StoreError::InconsistentOutputPublication {
+                request: source.clone(),
+                position: output.position,
+            });
+        }
+        let target_items = context::request_occurrences(&tx, target)?;
+        context::validate_canonical_history(&tx, &target_items)?;
+        context::validate_canonical_history(&tx, std::slice::from_ref(&output))?;
+        let existing = target_items
+            .iter()
+            .filter(|occurrence| occurrence.output_operation == output.output_operation)
+            .collect::<Vec<_>>();
+        match existing.as_slice() {
+            [] => {}
+            [existing] if existing.origin == output.origin && existing.item == output.item => {
+                tx.commit()?;
+                return Ok(true);
+            }
+            _ => {
+                return Err(StoreError::InconsistentOutputPublication {
+                    request: target.clone(),
+                    position: output.position,
+                });
+            }
+        }
+        let Some(spawn_position) = target_items
+            .iter()
+            .position(|occurrence| occurrence.origin == issuing_call)
+        else {
             return Ok(false);
         };
         let mut ordered = target_items;
@@ -2340,8 +2425,8 @@ mod tests {
                 crate::store::TerminalOutcome::Success,
             )
             .unwrap();
-            s.append_items(&next, std::slice::from_ref(&output))
-                .unwrap();
+            let operation = s.claims(&call).unwrap()[0].operation.clone();
+            s.append_operation_output(&operation, &root, &next).unwrap();
             s.record_replay_turn(
                 &fork,
                 &model_request,

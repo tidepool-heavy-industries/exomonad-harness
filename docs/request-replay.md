@@ -56,6 +56,34 @@ or silently treating an unknown result as success. Ordinary diagnostic Item
 reads remain available. Successful tool payloads containing `error` or
 `failure` fields remain successful.
 
+Schema `15` stores the exact request-scoped `OperationId` on each published
+function or custom tool output occurrence. Store checks retained terminal claim
+authority and publishes its canonical Item in one transaction. Copies carry
+this identity with the original occurrence; recovery pairs by this identity,
+including late asynchronous outputs after a successor reuses the wire call ID.
+Identical output bytes and hashes do not establish operation ownership.
+
+The additive migration leaves historical unbound outputs unchanged. Ordinary
+Item reads remain available; recovery and context grouping explicitly refuse
+those outputs with `UnboundOutputPublication`. Missing or inconsistent issuance
+metadata is a refusal. There is no positional reconstruction or blanket call
+ID uniqueness requirement across requests.
+
+Generic request, append, inbox and seed writers reject fresh tool outputs;
+publication requires an exact retained operation and claimant. Here snapshots,
+checkpoints and context rewrites copy the canonical occurrence metadata. Claim
+copies preserve the nearest exact claimant's current state atomically, including
+settlement that finishes before the copy transaction.
+
+Server compaction returns raw Items. Its Store boundary reconciles tool Items
+against the occurrence sidecar captured for the actual issued context. Internal
+retained users and pending calls carry explicit source selections. An ambiguous
+or unowned raw tool Item refuses the whole boundary; ordinary messages can be
+fresh authored content without selecting an earlier occurrence. Immutable wait
+replay still has an Item-only issued cut and refuses equal output bytes when
+that cut cannot prove which operation supplied the output. Neither boundary
+uses a wire call ID to select operation ownership.
+
 Offline tests compare normalized issued requests after reopening, preserve
 projected/injected and unknown fields, reject old formats without modifying
 bytes, check transaction rollback and validate duplicate/malformed calls. The

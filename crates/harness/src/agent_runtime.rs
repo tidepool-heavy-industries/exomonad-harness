@@ -778,13 +778,19 @@ mod tests {
                 Some(&root_head),
                 "/root",
                 &[
-                    Item(json!({"type":"function_call","call_id":"spawn-1","name":"spawn_agent"})),
-                    Item(json!({"type":"function_call_output","call_id":"spawn-1","output":"child started"})),
-                    Item(json!({"type":"function_call","call_id":"inherited-work","name":"work","arguments":"{}"})),
+                    Item(json!({"type":"function_call","call_id":"spawn-1","name":"spawn_agent","arguments":"{}"})),
                 ],
                 Default::default(),
             )
             .unwrap();
+        let spawn = store
+            .claim(&crate::model::CallId("spawn-1".into()), &committed_boundary)
+            .unwrap();
+        store.write_output(&spawn, &Item(json!({"type":"function_call_output","call_id":"spawn-1","output":"child started"})), crate::store::TerminalOutcome::Success).unwrap();
+        store
+            .append_operation_output(&spawn, &committed_boundary, &committed_boundary)
+            .unwrap();
+        store.append_items(&committed_boundary, &[Item(json!({"type":"function_call","call_id":"inherited-work","name":"work","arguments":"{}"}))]).unwrap();
         assert!(
             store
                 .advance_agent_head(

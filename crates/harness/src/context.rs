@@ -136,6 +136,7 @@ pub(crate) struct Occurrence {
     pub position: i64,
     pub hash: ItemHash,
     pub item: Item,
+    pub output_operation: Option<OperationId>,
     pub origin: Origin,
     pub sources: Vec<ContextReference>,
     pub note: bool,
@@ -197,6 +198,7 @@ pub struct ContextRequestState {
     /// occurrences retain canonical request identity; editable references are
     /// resolved independently against raw Store provenance.
     pub history: Vec<(RequestId, ItemHash, Item)>,
+    pub(crate) occurrences: Vec<Option<Occurrence>>,
     pub model: Option<String>,
     pub generation: u64,
 }
