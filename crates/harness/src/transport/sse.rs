@@ -157,22 +157,29 @@ impl ResponseAssembly {
                 Ok(None)
             }
             Some(kind @ ("response.failed" | "error")) => {
-                let (failure, error) = if kind == "response.failed" {
-                    (
-                        ProviderStreamFailureEvent::ResponseFailed,
-                        event
-                            .get("response")
-                            .and_then(|response| response.get("error")),
-                    )
+                let failure = if kind == "response.failed" {
+                    ProviderStreamFailureEvent::ResponseFailed
                 } else {
-                    (ProviderStreamFailureEvent::Error, Some(&event))
+                    ProviderStreamFailureEvent::Error
+                };
+                let nested_error = match failure {
+                    ProviderStreamFailureEvent::ResponseFailed => event
+                        .get("response")
+                        .and_then(|response| response.get("error")),
+                    ProviderStreamFailureEvent::Error => {
+                        event.get("error").filter(|error| error.is_object())
+                    }
+                };
+                let error = match failure {
+                    ProviderStreamFailureEvent::ResponseFailed => nested_error,
+                    ProviderStreamFailureEvent::Error => nested_error.or(Some(&event)),
                 };
                 let field = |name: &str| error?.get(name)?.as_str();
                 Err(TransportError::ProviderStreamFailure {
                     event: failure,
                     diagnostic: super::http_error::diagnostic(
                         field("code"),
-                        None,
+                        nested_error.and_then(|error| error.get("type")?.as_str()),
                         field("param"),
                         field("message"),
                         token,
@@ -322,6 +329,59 @@ mod tests {
     }
 
     #[test]
+    fn nested_provider_errors_preserve_the_selected_diagnostic_envelope() {
+        // The public error event can carry the same error object as HTTP
+        // failures. Do not mistake the outer event type for an error class.
+        for error in [
+            serde_json::json!({"type":"subscription_sharing_error", "code":"subscription_sharing_unsupported_capability", "param":"tools[0]", "message":"Unsupported capability"}),
+            serde_json::json!({"type":"invalid_request_error", "code":"model_not_found", "param":"model", "message":"Model unavailable"}),
+        ] {
+            let packet = serde_json::json!({"type":"error", "error":error,
+                "code":"outer-unselected", "message":"outer-unselected",
+                "request":{"input":"private prompt"}, "unknown":"private metadata"});
+            let failure = ResponseAssembly::default()
+                .accept(&packet.to_string())
+                .unwrap_err();
+            let TransportError::ProviderStreamFailure {
+                event: ProviderStreamFailureEvent::Error,
+                diagnostic: Some(ref diagnostic),
+            } = failure
+            else {
+                panic!("nested provider diagnostic was discarded");
+            };
+            assert_eq!(diagnostic.code.as_deref(), error["code"].as_str());
+            assert_eq!(diagnostic.error_type.as_deref(), error["type"].as_str());
+            assert_eq!(diagnostic.param.as_deref(), error["param"].as_str());
+            assert_eq!(diagnostic.message.as_deref(), error["message"].as_str());
+            assert!(failure.request_failure().is_none());
+            let rendered = failure.to_string();
+            for excluded in ["outer-unselected", "private prompt", "private metadata"] {
+                assert!(!rendered.contains(excluded));
+            }
+        }
+        // An unstructured error member does not hide documented flat fields.
+        for nested in [
+            serde_json::Value::Null,
+            serde_json::json!(42),
+            serde_json::json!(["private"]),
+        ] {
+            let packet =
+                serde_json::json!({"type":"error", "error":nested, "message":"Flat diagnostic"});
+            let TransportError::ProviderStreamFailure {
+                diagnostic: Some(diagnostic),
+                ..
+            } = ResponseAssembly::default()
+                .accept(&packet.to_string())
+                .unwrap_err()
+            else {
+                panic!("flat diagnostic was discarded");
+            };
+            assert_eq!(diagnostic.message.as_deref(), Some("Flat diagnostic"));
+            assert_eq!(diagnostic.error_type, None);
+        }
+    }
+
+    #[test]
     fn provider_failure_diagnostics_share_bounds_and_credential_redaction() {
         let token = "active-request-secret";
         let account = "active-account-secret";
@@ -334,6 +394,7 @@ mod tests {
                 "code":format!("{}{}", "λ".repeat(255), token), "param":account, "message":message,
             }, "echoed_request":{"credentials":token}}}),
             serde_json::json!({"type":"error", "code":format!("{}{}", "λ".repeat(255), token), "param":account, "message":message, "authorization":token}),
+            serde_json::json!({"type":"error", "error":{"type":token,"code":format!("{}{}", "λ".repeat(255), token), "param":account, "message":message}, "authorization":token}),
         ] {
             let failure = ResponseAssembly::default()
                 .accept_with_credentials(&packet.to_string(), token, account)
