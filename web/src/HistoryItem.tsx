@@ -73,14 +73,14 @@ function TextPreview({ text, label }: { readonly text: string; readonly label: s
 }
 
 /** Plain React text retains wire strings; raw formatting happens only when shown. */
-export default function HistoryItem({ entry }: { readonly entry: HistoryEntry }) {
+export default function HistoryItem({ entry, listItem = true }: { readonly entry: HistoryEntry; readonly listItem?: boolean }) {
   const view = useMemo(() => readable(entry.item), [entry.item])
   const [showRaw, setShowRaw] = useState(false)
   const rawVisible = showRaw || !view
   const raw = useMemo(() => rawVisible ? JSON.stringify(entry.item, null, 2) : undefined, [entry.item, rawVisible])
   // Opaque reasoning items contain no readable summary and add no chat content.
   if (object(entry.item) && entry.item.type === 'reasoning' && view?.texts.length === 0) return null
-  return <div role="listitem" className="message">
+  return <div role={listItem ? 'listitem' : undefined} className="message">
     {view ? <>
       <h3>{view.label}</h3>
       {view.texts.map((part, index) => <TextPreview key={index} text={part.text} label={`${part.label} item ${entry.position}${view.texts.length > 1 ? ` block ${index + 1}` : ''}`} />)}
