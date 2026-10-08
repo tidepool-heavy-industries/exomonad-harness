@@ -187,7 +187,7 @@ async fn embedded_restart_recovers_admission_and_delivery_cuts_without_duplicate
             let identity = identity();
             let pending = RequestId("pending".into());
             let settled = has_head.then(|| RequestId("settled".into()));
-            let input = Item(json!({"role":"user","content":"retained input"}));
+            let input = Item(json!({"type":"message","role":"user","content":"retained input"}));
             {
                 let store = Store::open(&path).unwrap();
                 store.bind_embedded_actor(&identity, None).unwrap();
@@ -291,7 +291,9 @@ async fn embedded_restart_settles_durable_final_without_provider_then_waits_for_
         head = engine
             .run_embedded(
                 None,
-                vec![Item(json!({"role":"user","content":"first"}))],
+                vec![Item(
+                    json!({"type":"message","role":"user","content":"first"}),
+                )],
                 cancel,
                 incoming(),
             )
@@ -333,7 +335,9 @@ async fn embedded_restart_settles_durable_final_without_provider_then_waits_for_
     let completion = next
         .run_embedded(
             Some(head.clone()),
-            vec![Item(json!({"role":"user","content":"explicit followup"}))],
+            vec![Item(
+                json!({"type":"message","role":"user","content":"explicit followup"}),
+            )],
             cancel,
             incoming(),
         )
@@ -795,22 +799,27 @@ async fn embedded_restart_recovers_actual_internal_compaction_without_reexecutin
         })
         .with_plain_text_compaction(NonZeroU64::new(100).unwrap());
         let (_cancel, cancel) = watch::channel(false);
-        let task = tokio::spawn(async move {
+        let mut task = tokio::spawn(async move {
             runtime
                 .run_embedded(
                     None,
-                    vec![Item(json!({"role":"user","content":"keep this input"}))],
+                    vec![Item(
+                        json!({"type":"message","role":"user","content":"keep this input"}),
+                    )],
                     cancel,
                     incoming(),
                 )
                 .await
         });
-        tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            transport.parked.notified(),
-        )
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::select! {
+                biased;
+                result = &mut task => panic!("Engine ended before internal compaction: {result:?}"),
+                () = transport.parked.notified() => (),
+            }
+        })
         .await
-        .unwrap();
+        .expect("Engine parks after internal compaction");
         pending = store
             .embedded_round_frontier(&old)
             .unwrap()
@@ -885,8 +894,9 @@ async fn embedded_restart_retains_direct_followup_after_durable_final_response()
     let store = Arc::new(Store::memory().unwrap());
     let identity = identity();
     store.bind_embedded_actor(&identity, None).unwrap();
-    let first_input = Item(json!({"role":"user","content":"first direct input"}));
-    let next_input = Item(json!({"role":"user","content":"explicit direct followup"}));
+    let first_input = Item(json!({"type":"message","role":"user","content":"first direct input"}));
+    let next_input =
+        Item(json!({"type":"message","role":"user","content":"explicit direct followup"}));
     let (first, _) = engine(store.clone(), &identity, vec![Ok(final_turn())]);
     let (_cancel, cancel) = watch::channel(false);
     let pending = first

@@ -108,7 +108,7 @@ async fn engine_recovery_pending_claim_becomes_interrupted_and_completes_typed_r
         .unwrap();
     store.set_effort(&head, Effort::Low).unwrap();
     store.claim(&call, &head).unwrap();
-    let resumed_prompt = Item(json!({"role":"user","content":"continue"}));
+    let resumed_prompt = Item(json!({"type":"message","role":"user","content":"continue"}));
     let resumed_hash = store.put_item(&resumed_prompt).unwrap();
 
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -351,12 +351,18 @@ impl ResponsesTransport for StreamCustomThenWait {
         _: ResponsesRequest,
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
-        sink.send(StreamEvent::ItemDone(Item(json!({
+        let call = Item(json!({
             "type":"custom_tool_call", "call_id":"cancel-late-custom",
-            "name":"cell", "input":LATE_CUSTOM_RAW
-        }))))
-        .await
-        .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
+            "name":"cell", "input":LATE_CUSTOM_RAW, "async":true
+        }));
+        assert_eq!(
+            call.tool_call().unwrap().unwrap().execution,
+            crate::item::ToolExecution::Asynchronous,
+            "the provider must run before the parked model response completes"
+        );
+        sink.send(StreamEvent::ItemDone(call))
+            .await
+            .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
         std::future::pending().await
     }
 }
@@ -391,20 +397,25 @@ async fn engine_cancelled_custom_job_rejects_late_success_at_barrier() {
         },
     );
     let (cancel_tx, cancel_rx) = watch::channel(false);
-    let run = tokio::spawn(async move {
+    let mut run = tokio::spawn(async move {
         engine
             .run(
                 None,
-                vec![Item(json!({"role":"user","content":"go"}))],
+                vec![Item(json!({"type":"message","role":"user","content":"go"}))],
                 cancel_rx,
                 empty_mailbox(),
             )
             .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
-        .await
-        .expect("custom provider was dispatched")
-        .expect("provider start signal");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::select! {
+            biased;
+            result = &mut run => panic!("Engine ended before custom provider dispatch: {result:?}"),
+            started = started_rx => started.expect("provider start signal"),
+        }
+    })
+    .await
+    .expect("custom provider was dispatched");
     let call = CallId("cancel-late-custom".into());
     assert_eq!(
         store.claims(&call).unwrap().len(),
