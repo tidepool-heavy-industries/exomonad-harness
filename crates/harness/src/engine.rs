@@ -155,6 +155,10 @@ mod performance_tests;
 mod yield_tests;
 
 #[cfg(test)]
+#[path = "engine/ownership_history_tests.rs"]
+mod ownership_history_tests;
+
+#[cfg(test)]
 #[path = "engine/tool_execution_tests.rs"]
 mod tool_execution_tests;
 
