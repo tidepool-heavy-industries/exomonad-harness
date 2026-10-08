@@ -521,8 +521,10 @@ async fn pending_wait_cancellation_recovers_interruption_without_completion_noti
             )
             .unwrap();
         store.set_effort(&request, Effort::Low).unwrap();
+        let original_items = vec![invocation.clone(), Item::configuration_update(Effort::Low)];
+        assert_eq!(store.items(&request).unwrap(), original_items);
         let DispatchResult::Pending(pending) = runtime
-            .dispatch_completed_item(invocation, &request)
+            .dispatch_completed_item(invocation.clone(), &request)
             .await
             .unwrap()
         else {
@@ -570,9 +572,26 @@ async fn pending_wait_cancellation_recovers_interruption_without_completion_noti
                     .count(),
                 1
             );
+            assert_eq!(
+                result
+                    .transcript
+                    .iter()
+                    .filter(|item| **item == invocation)
+                    .count(),
+                1
+            );
             assert!(host.notifications.lock().unwrap().is_empty());
             assert!(!store.has_completed_output(&pending.operation).unwrap());
-            assert_eq!(store.items(&request).unwrap().len(), 1);
+            let retained = store
+                .replay_tool_output_operation(&pending.operation)
+                .unwrap()
+                .unwrap();
+            assert_eq!(retained.item, expected);
+            assert_eq!(
+                retained.terminal,
+                crate::store::TerminalOutcome::Interrupted
+            );
+            assert_eq!(store.items(&request).unwrap(), original_items);
             assert!(
                 store
                     .settle_embedded_round(
