@@ -611,16 +611,22 @@ fn compaction_preserves_exact_pending_occurrence_and_other_equal_wire_id() {
 
     // Settlement can race with the external request. The transaction copies
     // the actual terminal state, rather than reissuing a pending claim.
+    let race_issued = store.history_occurrences(&target).unwrap();
+    let race_pending = race_issued
+        .iter()
+        .find(|occurrence| occurrence.origin == pending.origin)
+        .unwrap()
+        .clone();
     retain(&store, &second, "late second result");
     let race = RequestId("settled-before-copy".into());
     store
         .write_compaction_request_with_evidence(
             &race,
-            &second.request,
+            &target,
             "/root",
-            std::slice::from_ref(&pending.item),
-            &[(0, pending.clone())],
-            &issued.iter().cloned().map(Some).collect::<Vec<_>>(),
+            std::slice::from_ref(&race_pending.item),
+            &[(0, race_pending.clone())],
+            &race_issued.iter().cloned().map(Some).collect::<Vec<_>>(),
             std::slice::from_ref(&second),
             None,
             None,

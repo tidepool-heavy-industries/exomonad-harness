@@ -1388,7 +1388,7 @@ fn blocks_preserve_duplicate_call_order_orphans_and_cut_opaque_groups() {
                 reference: reference(&grouped[1].items[1..]),
                 selector: ContextTextSelector::ToolResultText,
                 text: "first".into(),
-                editable: false,
+                editable: true,
             }],
         }
     );
@@ -1925,7 +1925,7 @@ fn here_output_copy_preserves_occurrences_and_child_context_freeze() {
 }
 
 #[test]
-fn here_child_context_freeze_refuses_forged_parent_authority() {
+fn here_child_context_refuses_forged_parent_authority_before_snapshot() {
     let (store, source, target, spawn) = here_context_snapshot();
     assert!(
         store
@@ -1934,6 +1934,7 @@ fn here_child_context_freeze_refuses_forged_parent_authority() {
     );
     store.append_items(&target, &[Item(json!({"type":"custom_tool_call","call_id":"child-edit","name":"haskell_sync","input":"keep context"}))]).unwrap();
     let operation = store.claim(&CallId("child-edit".into()), &target).unwrap();
+    store.begin_context(&operation, &target).unwrap();
     let foreign = store.standalone_identity(AgentPath("/foreign".into()));
     store
         .lock()
@@ -1946,24 +1947,14 @@ fn here_child_context_freeze_refuses_forged_parent_authority() {
             ],
         )
         .unwrap();
-    let snapshot = store.begin_context(&operation, &target).unwrap();
     let before = request_occurrences(&store.lock(), &target).unwrap();
     let requests: i64 = store
         .lock()
         .query_row("SELECT COUNT(*) FROM requests", [], |row| row.get(0))
         .unwrap();
     assert!(matches!(
-        store.commit_context(ContextCommit {
-            snapshot: &snapshot,
-            draft: &ContextDraft {
-                document: snapshot.document.clone(),
-                next_model: None,
-                next_effort: None
-            },
-            output: &output(),
-            pending: &[],
-        }),
-        Err(StoreError::OperationOriginMismatch)
+        store.begin_context(&operation, &target),
+        Err(StoreError::InconsistentOutputPublication { .. })
     ));
     assert_eq!(request_occurrences(&store.lock(), &target).unwrap(), before);
     assert_eq!(

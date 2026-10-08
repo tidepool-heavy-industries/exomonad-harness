@@ -68,14 +68,7 @@ fn fixture(store: Store) -> Fixture {
         .write_job_output(&completed, ToolKind::Custom, &terminal)
         .unwrap();
     store
-        .append_items(
-            &previous,
-            &[Item::tool_output(
-                &completed.call,
-                ToolKind::Custom,
-                &terminal,
-            )],
-        )
+        .append_operation_output(&completed, &previous, &previous)
         .unwrap();
     let head = RequestId("editing".into());
     let response = vec![
@@ -212,14 +205,7 @@ fn completed_result_trims_inside_protected_group_without_waiting_for_pending() {
         .unwrap();
     fixture
         .store
-        .append_items(
-            &receipt.head,
-            &[Item::tool_output(
-                &fixture.pending.call,
-                ToolKind::Custom,
-                &later,
-            )],
-        )
+        .append_operation_output(&fixture.pending, &fixture.pending.request, &receipt.head)
         .unwrap();
     let next = fixture
         .store
@@ -351,16 +337,19 @@ fn overlay_compaction_retains_canonical_outputs_and_projection() {
     let target = RequestId("compacted".into());
     fixture
         .store
-        .write_compaction_request_with_claims(
+        .write_compaction_request_with_evidence(
             &target,
             &receipt.head,
             "/root",
             &projected
                 .history
-                .into_iter()
-                .map(|(_, _, item)| item)
+                .iter()
+                .map(|(_, _, item)| item.clone())
                 .collect::<Vec<_>>(),
+            &[],
+            &projected.occurrences,
             std::slice::from_ref(&fixture.pending),
+            None,
             None,
         )
         .unwrap();
@@ -634,15 +623,25 @@ fn projected_compaction_preserves_distinct_equal_original_occurrences() {
         .unwrap();
     let target = RequestId("messages-compacted".into());
     store
-        .write_compaction_request(
+        .write_compaction_request_with_evidence(
             &target,
             &receipt.head,
             "/root",
             &projected
                 .history
-                .into_iter()
-                .map(|(_, _, item)| item)
+                .iter()
+                .map(|(_, _, item)| item.clone())
                 .collect::<Vec<_>>(),
+            &projected
+                .occurrences
+                .iter()
+                .enumerate()
+                .filter_map(|(position, source)| source.clone().map(|source| (position, source)))
+                .collect::<Vec<_>>(),
+            &projected.occurrences,
+            &[],
+            None,
+            None,
         )
         .unwrap();
     let canonical = request_occurrences(&store.lock(), &target).unwrap();
@@ -681,34 +680,64 @@ fn canonical_checkpoint_copy_preserves_projection_collision_without_ambiguity() 
 }
 
 #[test]
-fn ambiguous_projected_compaction_refuses_both_item_orders_atomically() {
+fn ambiguous_ordinary_compaction_authors_bytes_without_inventing_provenance() {
     for reversed in [false, true] {
         let (store, snapshot) = message_fixture("a", "b");
         let receipt = commit_messages(&store, &snapshot, &["b", "c"]);
-        let mut items = store
+        let projected = store
             .context_request_state(&receipt.head, &snapshot.operation.origin)
-            .unwrap()
+            .unwrap();
+        let mut items = projected
             .history
-            .into_iter()
-            .map(|(_, _, item)| item)
+            .iter()
+            .map(|(_, _, item)| item.clone())
             .collect::<Vec<_>>();
         if reversed {
             items.swap(0, 1);
         }
         let target = RequestId("ambiguous-compaction".into());
-        assert!(matches!(
-            store.write_compaction_request(&target, &receipt.head, "/root", &items),
-            Err(StoreError::Context(ContextError::InvalidReference))
-        ));
-        assert!(store.request(&target).unwrap().is_none());
+        store
+            .write_compaction_request_with_evidence(
+                &target,
+                &receipt.head,
+                "/root",
+                &items,
+                &[],
+                &projected.occurrences,
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
+        let canonical = request_occurrences(&store.lock(), &target).unwrap();
+        let ambiguous = &canonical[usize::from(reversed)];
+        assert_eq!(ambiguous.item.0["content"], "b");
+        assert_eq!(ambiguous.origin.request, target);
+        assert_eq!(ambiguous.origin.position, ambiguous.position);
+        assert!(ambiguous.overlays.is_empty());
+        assert!(ambiguous.sources.is_empty());
+        assert!(ambiguous.output_operation.is_none());
+        let unambiguous = &canonical[usize::from(!reversed)];
+        assert_eq!(unambiguous.origin, snapshot.prefix[1].origin);
+        assert_eq!(unambiguous.item.0["content"], "b");
+        assert_eq!(unambiguous.overlays[0].text, "c");
+        let after = store
+            .context_request_state(&target, &snapshot.operation.origin)
+            .unwrap();
+        assert_eq!(
+            after
+                .history
+                .iter()
+                .map(|(_, _, item)| item.clone())
+                .collect::<Vec<_>>(),
+            items
+        );
         assert_eq!(
             store
                 .context_request_state(&receipt.head, &snapshot.operation.origin)
                 .unwrap()
-                .history[0]
-                .2
-                .0["content"],
-            "b"
+                .history,
+            projected.history
         );
     }
 }
@@ -794,14 +823,41 @@ fn sealed_native_overlay_replay_resolves_local_owner_without_changing_terminal()
 #[test]
 fn visible_result_without_exact_terminal_has_no_edit_authority() {
     let fixture = fixture(Store::memory().unwrap());
+    let before = fixture.store.history_occurrences(&fixture.head).unwrap();
+    assert_eq!(
+        before
+            .iter()
+            .filter(|item| item.output_operation.as_ref() == Some(&fixture.completed))
+            .count(),
+        1
+    );
+    assert!(
+        fixture
+            .store
+            .replay_tool_output_operation(&fixture.completed)
+            .unwrap()
+            .is_some()
+    );
     fixture
         .store
         .lock()
         .execute(
-            "DELETE FROM claims WHERE origin_request_id=?1 AND call_id=?2",
+            // Remove terminal authority while retaining immutable issuing evidence.
+            "UPDATE claims SET state='pending',output_hash=NULL,terminal_json=NULL WHERE origin_request_id=?1 AND call_id=?2",
             params![fixture.completed.request.0, fixture.completed.call.0],
         )
         .unwrap();
+    assert!(
+        fixture
+            .store
+            .replay_tool_output_operation(&fixture.completed)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        fixture.store.history_occurrences(&fixture.head).unwrap(),
+        before
+    );
     let snapshot = fixture
         .store
         .begin_context(&fixture.edit, &fixture.head)
@@ -832,4 +888,15 @@ fn visible_result_without_exact_terminal_has_no_edit_authority() {
         }),
         Err(StoreError::Context(ContextError::NativeEdit))
     ));
+    assert_eq!(
+        fixture.store.history_occurrences(&fixture.head).unwrap(),
+        before
+    );
+    assert!(
+        fixture
+            .store
+            .context_receipt(&fixture.edit)
+            .unwrap()
+            .is_none()
+    );
 }
