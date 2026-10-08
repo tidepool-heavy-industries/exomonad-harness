@@ -175,6 +175,6 @@ function UnifiedOutput({ entry, origin, ready, active, onAuthExpired, onExpanded
 }
 
 function MountedFormEntry({ form, ready, active, onAuthExpired }: { form: StoredActorForm; ready: boolean; active: boolean; onAuthExpired?: () => void }) {
-  return <><h3>Form · {form.state}</h3><MountedForm form={form} ready={ready} active={active} onAuthExpired={onAuthExpired} />
+  return <><MountedForm form={form} ready={ready} active={active} onAuthExpired={onAuthExpired} />
   </>
 }
