@@ -184,6 +184,9 @@ impl Store {
         hashes: &[Option<ItemHash>],
         instructions: Option<&ItemHash>,
     ) -> Result<IssuedReplayRequest> {
+        let _seal = tracing::debug_span!(target: "harness::runtime_cost", "seal_replay_request_with_hashes",
+            session_id = %request.session_id, input_items = request.input.len(),
+            tool_count = request.tools.len()).entered();
         assert_eq!(
             hashes.len(),
             request.input.len(),

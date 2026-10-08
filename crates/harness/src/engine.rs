@@ -37,6 +37,7 @@ use std::{
 };
 use thiserror::Error;
 use tokio::sync::watch;
+use tracing::Instrument;
 
 #[path = "engine/items.rs"]
 mod items;
@@ -462,6 +463,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .transpose()?;
         let (_cancel, cancellation) = watch::channel(false);
         let (_incoming, envelopes) = tokio::sync::mpsc::unbounded_channel();
+        let span = tracing::debug_span!(target: "harness::runtime_cost", "engine_run",
+            actor = %self.config.agent.0, recovering = false, initial_items = initial.len());
         self.run_loop(
             None,
             initial,
@@ -471,6 +474,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             schema.as_ref(),
             false,
         )
+        .instrument(span)
         .await
     }
 
@@ -626,6 +630,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
             }
         });
+        let span = tracing::debug_span!(target: "harness::runtime_cost", "engine_run",
+            actor = %self.config.agent.0, recovering, initial_items = new_items.len());
         let result = self
             .run_loop(
                 head,
@@ -636,6 +642,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 finalize_schema.as_ref(),
                 recovering,
             )
+            .instrument(span)
             .await;
         drop(keepalive);
         forwarder.abort();
@@ -998,6 +1005,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     return Err(self.cleanup_pending(error, &pending).await);
                 }
             }
+            let request_preparation_started =
+                tracing::enabled!(target: "harness::runtime_cost", tracing::Level::DEBUG)
+                    .then(std::time::Instant::now);
             let history = match self.read_model_history_window(&parent).await {
                 Ok(history) => history,
                 Err(error) => return Err(self.cleanup_pending(error, &pending).await),
@@ -1296,6 +1306,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 Ok(sealed) => sealed,
                 Err(error) => return Err(self.cleanup_pending(error, &pending).await),
             };
+            if let Some(started) = request_preparation_started {
+                tracing::debug!(target: "harness::runtime_cost", request_id = %parent.0,
+                    elapsed_ns = started.elapsed().as_nanos() as u64,
+                    input_items = req.input.len(), tool_count = req.tools.len(),
+                    did_compact, "successor request prepared");
+            }
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
             // Retain completed calls while the provider is streaming. Their
             // output enters model history after this response, without changing
@@ -2987,27 +3003,34 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     }
 
     async fn acknowledge_output(&self, operation: &OperationId) -> Result<(), EngineError> {
-        // A fork replays its ancestor's result; only the issuing conversation
-        // can acknowledge the owner's live execution boundary.
-        if operation.origin == self.origin && self.store.has_completed_output(operation)? {
-            let invocation = self
-                .store
-                .invocation_item(&operation.request, &operation.call)?
-                .ok_or_else(|| EngineError::MissingOperationInvocation(operation.clone()))?;
-            // The reserved Engine wait has no provider-issued operation. Read
-            // its original invocation so recovery uses the same settlement owner.
-            if ToolSettlementOwner::for_invocation(&invocation) == ToolSettlementOwner::EngineYield
-            {
-                return Ok(());
+        let span = tracing::debug_span!(target: "harness::runtime_cost", "acknowledge_output",
+            origin_request_id = %operation.request.0, call_id = %operation.call.0);
+        async {
+            // A fork replays its ancestor's result; only the issuing conversation
+            // can acknowledge the owner's live execution boundary.
+            if operation.origin == self.origin && self.store.has_completed_output(operation)? {
+                let invocation = self
+                    .store
+                    .invocation_item(&operation.request, &operation.call)?
+                    .ok_or_else(|| EngineError::MissingOperationInvocation(operation.clone()))?;
+                // The reserved Engine wait has no provider-issued operation. Read
+                // its original invocation so recovery uses the same settlement owner.
+                if ToolSettlementOwner::for_invocation(&invocation)
+                    == ToolSettlementOwner::EngineYield
+                {
+                    return Ok(());
+                }
+                let required = self.retain_context_requirement(operation, false).await?;
+                if required && self.store.context_receipt(operation)?.is_none() {
+                    self.provider.output_aborted(operation).await?;
+                } else {
+                    self.provider.output_committed(operation).await?;
+                }
             }
-            let required = self.retain_context_requirement(operation, false).await?;
-            if required && self.store.context_receipt(operation)?.is_none() {
-                self.provider.output_aborted(operation).await?;
-            } else {
-                self.provider.output_committed(operation).await?;
-            }
+            Ok(())
         }
-        Ok(())
+        .instrument(span)
+        .await
     }
 
     async fn wait_for_resume(
@@ -3202,11 +3225,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         &self,
         id: &RequestId,
     ) -> Result<HistoryWindow, EngineError> {
+        let span = tracing::debug_span!(target: "harness::runtime_cost", "read_model_history_window",
+            request_id = %id.0, output_items = tracing::field::Empty);
         let store = self.store.clone();
         let request = id.clone();
         let identity = self.origin.clone();
         blocking(move || {
             let state = store.context_request_state(&request, &identity)?;
+            tracing::Span::current().record("output_items", state.history.len());
             let mut items = Vec::with_capacity(state.history.len());
             let mut provenance = Vec::with_capacity(state.history.len());
             for (request, hash, item) in state.history {
@@ -3220,6 +3246,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 model: state.model,
             })
         })
+        .instrument(span)
         .await
     }
 
@@ -3531,6 +3558,8 @@ async fn load_history_window(
     store: Arc<Store>,
     id: RequestId,
 ) -> Result<HistoryWindow, EngineError> {
+    let span = tracing::debug_span!(target: "harness::runtime_cost", "load_history_window",
+        request_id = %id.0, output_items = tracing::field::Empty);
     blocking(move || {
         let history = store.history_occurrences(&id)?;
         let mut items = Vec::with_capacity(history.len());
@@ -3541,6 +3570,7 @@ async fn load_history_window(
             provenance.push((occurrence.request.clone(), occurrence.hash.clone()));
             occurrences.push(Some(occurrence));
         }
+        tracing::Span::current().record("output_items", items.len());
         Ok(HistoryWindow {
             items,
             provenance,
@@ -3548,6 +3578,7 @@ async fn load_history_window(
             model: None,
         })
     })
+    .instrument(span)
     .await
 }
 
@@ -3617,10 +3648,25 @@ async fn await_cancellation(cancellation: &mut watch::Receiver<bool>) {
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, StoreError> + Send + 'static,
 ) -> Result<T, EngineError> {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|_| EngineError::StoreTask)?
-        .map_err(Into::into)
+    let span = tracing::Span::current();
+    let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+    let queued_at = tracing::enabled!(target: "harness::runtime_cost", tracing::Level::DEBUG)
+        .then(std::time::Instant::now);
+    tokio::task::spawn_blocking(move || {
+        tracing::dispatcher::with_default(&dispatcher, || {
+            span.in_scope(|| {
+                if let Some(queued_at) = queued_at {
+                    tracing::debug!(target: "harness::runtime_cost",
+                        blocking_pool_wait_ns = queued_at.elapsed().as_nanos() as u64,
+                        "Store worker started");
+                }
+                f()
+            })
+        })
+    })
+    .await
+    .map_err(|_| EngineError::StoreTask)?
+    .map_err(Into::into)
 }
 
 #[cfg(test)]

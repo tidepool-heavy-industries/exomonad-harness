@@ -1050,19 +1050,34 @@ impl Store {
         head: &RequestId,
         identity: &ConversationIdentity,
     ) -> Result<ContextRequestState> {
-        let mut c = self.lock();
+        let _projection =
+            tracing::debug_span!(target: "harness::runtime_cost", "context_request_state",
+            request_id = %head.0, actor = %identity.actor().0)
+            .entered();
+        let mut c = {
+            let _wait = tracing::debug_span!(target: "harness::runtime_cost", "sqlite_mutex_wait")
+                .entered();
+            self.lock()
+        };
+        let transaction_span = tracing::debug_span!(target: "harness::runtime_cost", "projected_history_transaction", output_items = tracing::field::Empty, committed = false);
+        let _transaction = transaction_span.enter();
         let tx = c.transaction()?;
         validate_identity(&tx, &self.store_id, identity)?;
         if branch(&tx, head)? != identity.actor().0 {
             return Err(StoreError::OperationOriginMismatch);
         }
         let current = state(&tx, identity)?;
-        let projected = portable_request(
-            &tx,
-            &history(&tx, head, true)?,
-            current.model.as_deref(),
-            None,
-        )?;
+        let canonical = {
+            let _read =
+                tracing::debug_span!(target: "harness::runtime_cost", "lineage_query_and_decode")
+                    .entered();
+            history(&tx, head, true)?
+        };
+        let projected = {
+            let _projection = tracing::debug_span!(target: "harness::runtime_cost", "portable_history_projection", input_items = canonical.len()).entered();
+            portable_request(&tx, &canonical, current.model.as_deref(), None)?
+        };
+        drop(canonical);
         let mut history = Vec::with_capacity(projected.len());
         let mut occurrences = Vec::with_capacity(projected.len());
         for (request, hash, item, occurrence) in projected {
@@ -1074,6 +1089,8 @@ impl Store {
             occurrences.push(occurrence);
         }
         tx.commit()?;
+        transaction_span.record("output_items", history.len());
+        transaction_span.record("committed", true);
         Ok(ContextRequestState {
             history,
             occurrences,

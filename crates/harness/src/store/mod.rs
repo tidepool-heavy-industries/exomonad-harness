@@ -1303,7 +1303,16 @@ impl Store {
         self.append_items_inner(request, &items)
     }
     fn append_items_inner(&self, request: &RequestId, items: &[&Item]) -> Result<Vec<ItemHash>> {
-        let mut c = self.lock();
+        let _append = tracing::debug_span!(target: "harness::runtime_cost", "append_items_inner",
+            request_id = %request.0, input_items = items.len())
+        .entered();
+        let mut c = {
+            let _wait = tracing::debug_span!(target: "harness::runtime_cost", "sqlite_mutex_wait")
+                .entered();
+            self.lock()
+        };
+        let transaction_span = tracing::debug_span!(target: "harness::runtime_cost", "append_items_transaction", committed = false);
+        let _transaction = transaction_span.enter();
         let tx = c.transaction()?;
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
@@ -1331,6 +1340,7 @@ impl Store {
             hashes.push(h);
         }
         tx.commit()?;
+        transaction_span.record("committed", true);
         Ok(hashes)
     }
 
@@ -2035,6 +2045,10 @@ impl Store {
     }
     /// Admit the original claimant under the request's exact conversation binding.
     pub fn claim_operation(&self, operation: &OperationId, request: &RequestId) -> Result<()> {
+        let _claim = tracing::debug_span!(target: "harness::runtime_cost", "claim_operation",
+            request_id = %request.0, origin_request_id = %operation.request.0,
+            call_id = %operation.call.0)
+        .entered();
         if request != &operation.request
             || *operation != self.operation_for_request(request, &operation.call)?
         {
