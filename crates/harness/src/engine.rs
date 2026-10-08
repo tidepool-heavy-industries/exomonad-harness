@@ -147,6 +147,9 @@ mod scheduling_tests;
 #[path = "engine/native_async_boundary_tests.rs"]
 mod native_async_boundary_tests;
 
+#[cfg(all(test, target_os = "linux"))]
+mod performance_tests;
+
 #[cfg(test)]
 #[path = "engine/yield_tests.rs"]
 mod yield_tests;
