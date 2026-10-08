@@ -126,8 +126,13 @@ impl Store {
         };
         let mut authorized = false;
         for (event, payload) in records {
+            if next.replay_event != Some(event) {
+                continue;
+            }
             let issued = self.decode_replay_record(event, &payload)?;
-            if issued.model_request.input == next.model_request.input {
+            if issued.model_request.input == next.model_request.input
+                && issued.issued_outputs == next.issued_outputs
+            {
                 authorized = true;
                 break;
             }
@@ -137,29 +142,20 @@ impl Store {
                 operation: local.clone(),
             });
         }
-        // The external replay format carries Items, not occurrence identities.
-        // Refuse a cut whose equal bytes could denote another owned output.
-        let candidates = {
-            let c = self.lock();
-            let issued_history = super::context::history(&c, &next.request, true)?;
-            super::context::validate_canonical_history(&c, &issued_history)?;
-            issued_history
-                .iter()
-                .filter(|occurrence| occurrence.item == recorded.item)
-                .map(|occurrence| occurrence.output_operation.clone())
-                .collect::<Vec<_>>()
-        };
-        if candidates.as_slice() != [Some(original.clone())] {
+        let Some(owners) = &next.issued_outputs else {
             return Err(StoreError::InvalidWaitContinuation {
                 operation: local.clone(),
             });
-        }
-        let positions = next
-            .model_request
-            .input
+        };
+        let positions = owners
             .iter()
             .enumerate()
-            .filter_map(|(index, item)| (item == &recorded.item).then_some(index))
+            .filter_map(|(index, owner)| {
+                owner
+                    .as_ref()
+                    .filter(|owner| owner.operation == *original && owner.origin == output.origin)
+                    .map(|_| index)
+            })
             .collect::<Vec<_>>();
         let [cut_start] = positions.as_slice() else {
             return Err(StoreError::InvalidWaitContinuation {
@@ -173,10 +169,11 @@ impl Store {
         if issued_messages.is_empty() {
             return Ok(None);
         }
-        if following
-            .iter()
-            .zip(&issued_messages)
-            .any(|(history, issued)| *history != *issued)
+        if following.len() < issued_messages.len()
+            || following
+                .iter()
+                .zip(&issued_messages)
+                .any(|(history, issued)| *history != *issued)
         {
             return Err(StoreError::InvalidWaitContinuation {
                 operation: local.clone(),
@@ -260,10 +257,25 @@ mod tests {
             pinned_effort: Effort::Low,
             session_id: "test".into(),
         };
-        store
-            .record_replay_turn(
-                &next,
+        let occurrences = store
+            .history_occurrences(&source)
+            .unwrap()
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
+        let issued = store
+            .seal_replay_request_with_occurrences(
+                &source,
                 &request,
+                &vec![None; request.input.len()],
+                None,
+                &occurrences,
+            )
+            .unwrap();
+        store
+            .record_issued_replay_turn(
+                &next,
+                issued,
                 &ResponsesTurn {
                     response_id: "next".into(),
                     items: vec![],
@@ -367,8 +379,8 @@ mod tests {
         );
     }
     #[test]
-    fn raw_issued_wait_cut_refuses_equal_output_bytes_with_distinct_owners() {
-        let (store, local, original, next, output, _) = fixture(true);
+    fn issued_wait_cut_keeps_original_owner_after_equal_late_output() {
+        let (store, local, original, next, output, message) = fixture(true);
         store.append_items(&next.request, &[Item(json!({"type":"function_call","name":"wait_agent","call_id":original.call.0,"arguments":"{}"}))]).unwrap();
         let other = store.claim(&original.call, &next.request).unwrap();
         store
@@ -378,8 +390,13 @@ mod tests {
             .append_operation_output(&other, &next.request, &next.request)
             .unwrap();
         assert_ne!(other, original);
-        assert!(
-            matches!(store.replay_wait_continuation(&local,&original,Some(&next)), Err(StoreError::InvalidWaitContinuation { operation }) if operation == local)
+        let continuation = store
+            .replay_wait_continuation(&local, &original, Some(&next))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            continuation.into_items(&local, &output).unwrap(),
+            vec![message]
         );
         let outputs = store
             .recovery_history(&next.request)
@@ -390,5 +407,46 @@ mod tests {
         assert_eq!(outputs.len(), 2);
         assert_eq!(outputs[0].item, outputs[1].item);
         assert_ne!(outputs[0].operation, outputs[1].operation);
+    }
+    #[test]
+    fn historical_issued_cut_is_readable_but_cannot_issue_wait_authority() {
+        let (store, local, original, next, _, _) = fixture(true);
+        let event = next.replay_event.unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&store.events(Some(&next.request)).unwrap()[0].payload).unwrap();
+        value["issued"].as_object_mut().unwrap().remove("outputs");
+        let payload = serde_json::to_string(&value).unwrap();
+        store
+            .lock()
+            .execute(
+                "UPDATE events SET payload=?2 WHERE id=?1",
+                rusqlite::params![event, payload],
+            )
+            .unwrap();
+        let old = store.replay_turns(&next.request).unwrap().remove(0);
+        assert_eq!(old.model_request.input, next.model_request.input);
+        assert!(old.issued_outputs.is_none());
+        assert!(matches!(
+            store.replay_wait_continuation(&local, &original, Some(&old)),
+            Err(StoreError::InvalidWaitContinuation { .. })
+        ));
+        assert_eq!(
+            store.events(Some(&next.request)).unwrap()[0].payload,
+            payload
+        );
+    }
+
+    #[test]
+    fn edited_ownership_cannot_borrow_an_authentic_issued_input() {
+        let (store, local, original, mut next, _, _) = fixture(true);
+        next.issued_outputs.as_mut().unwrap()[1]
+            .as_mut()
+            .unwrap()
+            .operation
+            .request = next.request.clone();
+        assert!(matches!(
+            store.replay_wait_continuation(&local, &original, Some(&next)),
+            Err(StoreError::InvalidWaitContinuation { .. })
+        ));
     }
 }

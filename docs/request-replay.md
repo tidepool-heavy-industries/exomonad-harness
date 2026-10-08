@@ -18,7 +18,11 @@ Engine loads each history window with its existing ordered content hashes.
 Unmodified history reuses those hashes for decision evidence and replay.
 Projected and hook-injected Items are interned as their exact issued values.
 Store seals these references before transport starts, so compaction, late
-output and subsequent request history cannot rewrite an issued window.
+output and subsequent request history cannot rewrite an issued window. Each
+issued output position also retains its exact canonical origin and operation.
+Store validates this aligned ownership against the captured occurrence cut;
+provider body projections preserve the owner, while injected Items carry none.
+The live sealed request cannot be constructed by deserializing stored data.
 
 Completed `model_turn` events use replay format `1`: ordered input and response
 Item hashes, instruction and manifest hashes, and the exact request scalar
@@ -86,10 +90,11 @@ Server compaction returns raw Items. Its Store boundary reconciles tool Items
 against the occurrence sidecar captured for the actual issued context. Internal
 retained users and pending calls carry explicit source selections. An ambiguous
 or unowned raw tool Item refuses the whole boundary; ordinary messages can be
-fresh authored content without selecting an earlier occurrence. Immutable wait
-replay still has an Item-only issued cut and refuses equal output bytes when
-that cut cannot prove which operation supplied the output. Neither boundary
-uses a wire call ID to select operation ownership.
+fresh authored content without selecting an earlier occurrence. Replay output visibility and wait continuation consume saved ownership at the
+issued position. A later operation publishing identical bytes cannot change an
+earlier cut. Historical records without this sidecar and Item-only seals remain
+readable, but they cannot grant output occurrence or wait continuation authority.
+Neither boundary uses a wire call ID to select operation ownership.
 
 Offline tests compare normalized issued requests after reopening, preserve
 projected/injected and unknown fields, reject old formats without modifying

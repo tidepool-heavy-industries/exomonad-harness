@@ -76,6 +76,8 @@ pub enum StoreError {
     ConflictingReplayOutcome { operation: OperationId },
     #[error("replay event {event} has unsupported format; preserve its bytes")]
     UnsupportedReplayFormat { event: i64 },
+    #[error("replay event {event} has invalid issued output ownership")]
+    InvalidReplayOwnership { event: i64 },
     #[error("replay event {event} has invalid Engine completion evidence")]
     InvalidCompletionMarker { event: i64 },
     #[error("replay event references missing item {0}")]
@@ -282,6 +284,10 @@ pub struct RecordedReplayTurn {
     pub request: RequestId,
     pub model_request: ResponsesRequest,
     pub model_response: ResponsesTurn,
+    #[serde(default, skip)]
+    pub(crate) issued_outputs: Option<Vec<Option<replay::IssuedOutputReference>>>,
+    #[serde(default, skip)]
+    pub(crate) replay_event: Option<i64>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Envelope {

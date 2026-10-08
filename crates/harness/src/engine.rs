@@ -1115,6 +1115,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .clone()
                 .unwrap_or_else(|| self.config.model.clone());
             let mut input_hashes = Vec::with_capacity(history.items.len());
+            let mut input_occurrences = history.occurrences;
             let model_input = history
                 .items
                 .into_iter()
@@ -1269,6 +1270,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                     req.input.push(item.clone());
                     input_hashes.push(None);
+                    input_occurrences.push(None);
                     tools_allowed.clone()
                 }
             };
@@ -1293,11 +1295,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
             let store = self.store.clone();
             let instructions = replay_instructions.clone();
+            let seal_head = parent.clone();
             let (req, replay_request) = match blocking(move || {
-                let issued = store.seal_replay_request_with_hashes(
+                let issued = store.seal_replay_request_with_occurrences(
+                    &seal_head,
                     &req,
                     &input_hashes,
                     Some(&instructions),
+                    &input_occurrences,
                 )?;
                 Ok((req, issued))
             })

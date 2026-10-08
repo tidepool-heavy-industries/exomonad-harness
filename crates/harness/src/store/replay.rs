@@ -1,10 +1,10 @@
 //! Exact issued windows reference immutable Store bytes, never later history.
 use super::{RecordedReplayTurn, Result, Store, StoreError, utc_millis};
 use crate::{
-    context::Origin,
+    context::{Occurrence, Origin},
     finalize::{FINALIZE_TOOL_NAME, ValidatedFinalize},
     item::{Item, ItemHash},
-    model::{Effort, RequestId},
+    model::{Effort, OperationId, RequestId},
     transport::{ResponsesRequest, ResponsesTurn, Usage},
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -14,25 +14,40 @@ use serde::{Deserialize, Serialize};
 const FORMAT: u32 = 1;
 
 /// Sealed before transport starts; later output cannot change these references.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct IssuedReplayRequest {
+    #[serde(flatten)]
+    record: IssuedRequestRecord,
+    #[cfg(test)]
+    #[serde(skip)]
+    input_reencodings: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct IssuedRequestRecord {
     input: Vec<ItemHash>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    outputs: Option<Vec<Option<IssuedOutputReference>>>,
     instructions: ItemHash,
     tools: ItemHash,
     tools_allowed: Option<Vec<String>>,
     model: String,
     pinned_effort: Effort,
     session_id: String,
-    #[cfg(test)]
-    #[serde(skip)]
-    input_reencodings: usize,
+}
+
+/// Issued position owns its immutable source independently of content equality.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct IssuedOutputReference {
+    pub(crate) origin: Origin,
+    pub(crate) operation: OperationId,
 }
 
 #[derive(Serialize, Deserialize)]
 struct ReplayRecord {
     format: u32,
     request: RequestId,
-    issued: IssuedReplayRequest,
+    issued: IssuedRequestRecord,
     response: ReplayResponse,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     completion: Option<CompletionMarker>,
@@ -168,8 +183,122 @@ fn read_item(tx: &Connection, hash: &ItemHash) -> Result<Item> {
     Ok(serde_json::from_str(&json)?)
 }
 
+fn seal_output_references(
+    c: &Connection,
+    head: &RequestId,
+    input: &[Item],
+    occurrences: &[Option<Occurrence>],
+) -> Result<Vec<Option<IssuedOutputReference>>> {
+    if input.len() != occurrences.len() {
+        return Err(StoreError::OperationOriginMismatch);
+    }
+    let selected = occurrences
+        .iter()
+        .flatten()
+        .filter(|occurrence| occurrence.output_operation.is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    let requests = selected
+        .iter()
+        .map(|occurrence| occurrence.request.clone())
+        .collect();
+    let persisted = super::context::occurrences_for_requests(c, &requests)?
+        .into_iter()
+        .map(|occurrence| {
+            (
+                (occurrence.request.clone(), occurrence.position),
+                occurrence,
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let visible = super::context::history(c, head, true)?
+        .into_iter()
+        .map(|occurrence| (occurrence.request, occurrence.position))
+        .collect::<std::collections::HashSet<_>>();
+    super::context::validate_canonical_history(c, &selected)?;
+    let mut seen = std::collections::HashSet::new();
+    input
+        .iter()
+        .zip(occurrences)
+        .map(|(item, occurrence)| {
+            let Some(occurrence) = occurrence.as_ref().filter(|o| o.output_operation.is_some())
+            else {
+                return Ok(None);
+            };
+            let key = (occurrence.request.clone(), occurrence.position);
+            if !visible.contains(&key) || persisted.get(&key) != Some(occurrence) {
+                return Err(StoreError::OperationOriginMismatch);
+            }
+            // Model projection may turn a native output into a readable message.
+            // That message carries no output publication authority.
+            if !super::output_publication::is_tool_output(item) {
+                return Ok(None);
+            }
+            let operation = occurrence.output_operation.as_ref().unwrap();
+            if item.0["type"] != occurrence.item.0["type"]
+                || item.0["call_id"] != operation.call.0
+                || !seen.insert(occurrence.origin.clone())
+            {
+                return Err(StoreError::OperationOriginMismatch);
+            }
+            Ok(Some(IssuedOutputReference {
+                origin: occurrence.origin.clone(),
+                operation: operation.clone(),
+            }))
+        })
+        .collect()
+}
+
+fn validate_output_references(
+    c: &Connection,
+    event: i64,
+    input: &[Item],
+    outputs: &[Option<IssuedOutputReference>],
+) -> Result<()> {
+    let invalid = || StoreError::InvalidReplayOwnership { event };
+    if outputs.len() != input.len() {
+        return Err(invalid());
+    }
+    let requests = outputs
+        .iter()
+        .flatten()
+        .map(|owner| owner.origin.request.clone())
+        .collect();
+    let sources = super::context::occurrences_for_requests(c, &requests)?
+        .into_iter()
+        .map(|occurrence| {
+            (
+                (occurrence.request.clone(), occurrence.position),
+                occurrence,
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut selected = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (item, owner) in input.iter().zip(outputs) {
+        let Some(owner) = owner else {
+            continue;
+        };
+        let source = sources
+            .get(&(owner.origin.request.clone(), owner.origin.position))
+            .ok_or_else(invalid)?;
+        if source.origin != owner.origin
+            || source.output_operation.as_ref() != Some(&owner.operation)
+            || item.0["type"] != source.item.0["type"]
+            || item.0["call_id"] != owner.operation.call.0
+            || !seen.insert(&owner.origin)
+        {
+            return Err(invalid());
+        }
+        selected.push(source.clone());
+    }
+    super::context::validate_canonical_history(c, &selected)?;
+    Ok(())
+}
+
 impl Store {
-    /// Intern an exact attempt, including transient hook or projection Items.
+    /// Intern exact bytes without output occurrence authority. Engine seals its
+    /// aligned occurrence cut through `seal_replay_request_with_occurrences`.
     pub fn seal_replay_request(&self, request: &ResponsesRequest) -> Result<IssuedReplayRequest> {
         self.seal_replay_request_with_hashes(request, &vec![None; request.input.len()], None)
     }
@@ -184,6 +313,27 @@ impl Store {
         hashes: &[Option<ItemHash>],
         instructions: Option<&ItemHash>,
     ) -> Result<IssuedReplayRequest> {
+        self.seal_replay_request_inner(request, hashes, instructions, None)
+    }
+
+    pub(crate) fn seal_replay_request_with_occurrences(
+        &self,
+        head: &RequestId,
+        request: &ResponsesRequest,
+        hashes: &[Option<ItemHash>],
+        instructions: Option<&ItemHash>,
+        occurrences: &[Option<Occurrence>],
+    ) -> Result<IssuedReplayRequest> {
+        self.seal_replay_request_inner(request, hashes, instructions, Some((head, occurrences)))
+    }
+
+    fn seal_replay_request_inner(
+        &self,
+        request: &ResponsesRequest,
+        hashes: &[Option<ItemHash>],
+        instructions: Option<&ItemHash>,
+        occurrences: Option<(&RequestId, &[Option<Occurrence>])>,
+    ) -> Result<IssuedReplayRequest> {
         let _seal = tracing::debug_span!(target: "harness::runtime_cost", "seal_replay_request_with_hashes",
             session_id = %request.session_id, input_items = request.input.len(),
             tool_count = request.tools.len()).entered();
@@ -194,13 +344,29 @@ impl Store {
         );
         let mut connection = self.lock();
         let tx = connection.transaction()?;
+        let outputs = occurrences
+            .map(|(head, occurrences)| {
+                seal_output_references(&tx, head, &request.input, occurrences)
+            })
+            .transpose()?;
         #[cfg(test)]
         let mut input_reencodings = 0;
         let input = request
             .input
             .iter()
             .zip(hashes)
-            .map(|(item, hash)| {
+            .enumerate()
+            .map(|(position, (item, hash))| {
+                if outputs
+                    .as_ref()
+                    .is_some_and(|owners| owners[position].is_some())
+                {
+                    if let Some(hash) = hash {
+                        if Self::put_item_tx_hash(item)? != *hash {
+                            return Err(StoreError::OperationOriginMismatch);
+                        }
+                    }
+                }
                 hash.clone().map_or_else(
                     || {
                         #[cfg(test)]
@@ -233,13 +399,16 @@ impl Store {
             )?;
         }
         let issued = IssuedReplayRequest {
-            input,
-            instructions,
-            tools: tools.clone(),
-            tools_allowed: request.tools_allowed.clone(),
-            model: request.model.clone(),
-            pinned_effort: request.pinned_effort,
-            session_id: request.session_id.clone(),
+            record: IssuedRequestRecord {
+                input,
+                outputs,
+                instructions,
+                tools: tools.clone(),
+                tools_allowed: request.tools_allowed.clone(),
+                model: request.model.clone(),
+                pinned_effort: request.pinned_effort,
+                session_id: request.session_id.clone(),
+            },
             #[cfg(test)]
             input_reencodings,
         };
@@ -264,7 +433,7 @@ impl Store {
         let record = ReplayRecord {
             format: FORMAT,
             request: request.clone(),
-            issued,
+            issued: issued.record,
             completion: None,
             response: ReplayResponse {
                 response_id: response.response_id.clone(),
@@ -360,6 +529,9 @@ impl Store {
             pinned_effort: record.issued.pinned_effort,
             session_id: record.issued.session_id,
         };
+        if let Some(outputs) = &record.issued.outputs {
+            validate_output_references(&tx, event, &request.input, outputs)?;
+        }
         let response = ResponsesTurn {
             response_id: record.response.response_id,
             items: record
@@ -375,6 +547,8 @@ impl Store {
             request: record.request,
             model_request: request,
             model_response: response,
+            issued_outputs: record.issued.outputs,
+            replay_event: Some(event),
         })
     }
 }
@@ -553,6 +727,8 @@ mod tests {
             request: root.clone(),
             model_request: request(vec![]),
             model_response: response(vec![]),
+            issued_outputs: None,
+            replay_event: None,
         };
         let sequence = store
             .record_event(
@@ -623,6 +799,8 @@ mod tests {
                 request: root.clone(),
                 model_request: issued.clone(),
                 model_response: response(vec![]),
+                issued_outputs: None,
+                replay_event: None,
             })
             .unwrap()
             .len()
@@ -647,3 +825,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "replay/ownership_tests.rs"]
+mod ownership_tests;
