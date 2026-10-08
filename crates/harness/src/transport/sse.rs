@@ -170,11 +170,14 @@ impl ResponseAssembly {
                         event.get("error").filter(|error| error.is_object())
                     }
                 };
-                let error = match failure {
-                    ProviderStreamFailureEvent::ResponseFailed => nested_error,
-                    ProviderStreamFailureEvent::Error => nested_error.or(Some(&event)),
+                let field = |name: &str| {
+                    nested_error
+                        .and_then(|error| error.get(name)?.as_str())
+                        .or_else(|| match failure {
+                            ProviderStreamFailureEvent::ResponseFailed => None,
+                            ProviderStreamFailureEvent::Error => event.get(name)?.as_str(),
+                        })
                 };
-                let field = |name: &str| error?.get(name)?.as_str();
                 Err(TransportError::ProviderStreamFailure {
                     event: failure,
                     diagnostic: super::http_error::diagnostic(
@@ -359,11 +362,13 @@ mod tests {
                 assert!(!rendered.contains(excluded));
             }
         }
-        // An unstructured error member does not hide documented flat fields.
+        // Missing or malformed nested fields do not hide documented flat fields.
         for nested in [
             serde_json::Value::Null,
             serde_json::json!(42),
             serde_json::json!(["private"]),
+            serde_json::json!({}),
+            serde_json::json!({"message":42,"code":null}),
         ] {
             let packet =
                 serde_json::json!({"type":"error", "error":nested, "message":"Flat diagnostic"});
@@ -379,6 +384,24 @@ mod tests {
             assert_eq!(diagnostic.message.as_deref(), Some("Flat diagnostic"));
             assert_eq!(diagnostic.error_type, None);
         }
+    }
+    #[test]
+    fn partial_nested_error_fields_fall_back_to_valid_flat_fields() {
+        let packet = serde_json::json!({"type":"error", "code":"unselected-outer-code", "message":"Useful message", "param":"model",
+            "error":{"code":"specific-inner-code", "message":null, "param":42}});
+        let TransportError::ProviderStreamFailure {
+            diagnostic: Some(diagnostic),
+            ..
+        } = ResponseAssembly::default()
+            .accept(&packet.to_string())
+            .unwrap_err()
+        else {
+            panic!("partial nested provider diagnostic was discarded");
+        };
+        assert_eq!(diagnostic.code.as_deref(), Some("specific-inner-code"));
+        assert_eq!(diagnostic.message.as_deref(), Some("Useful message"));
+        assert_eq!(diagnostic.param.as_deref(), Some("model"));
+        assert_eq!(diagnostic.error_type, None);
     }
 
     #[test]
