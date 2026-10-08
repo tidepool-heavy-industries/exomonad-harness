@@ -222,6 +222,8 @@ pub enum EngineError {
     IncompleteRecordedResponse(RequestId),
     #[error("inherited settled call {0} has no durable output item")]
     MissingInheritedOutput(String),
+    #[error("completed operation {0:?} has no original invocation")]
+    MissingOperationInvocation(OperationId),
     #[error("claim {0} changed during missing-job recovery and could not be reconciled")]
     ClaimRecoveryConflict(String),
     #[error("Here child has no durable snapshot request")]
@@ -2966,7 +2968,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let invocation = self
                 .store
                 .invocation_item(&operation.request, &operation.call)?
-                .ok_or_else(|| EngineError::MissingInheritedOutput(operation.call.0.clone()))?;
+                .ok_or_else(|| EngineError::MissingOperationInvocation(operation.clone()))?;
             // The reserved Engine wait has no provider-issued operation. Read
             // its original invocation so recovery uses the same settlement owner.
             if ToolSettlementOwner::for_invocation(&invocation) == ToolSettlementOwner::EngineYield

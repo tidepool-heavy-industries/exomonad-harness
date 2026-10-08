@@ -194,6 +194,42 @@ async fn engine_owned_yield_recovery_never_acknowledges_a_provider_operation() {
     assert_eq!(requests.lock().unwrap().len(), 2);
     assert!(engine.provider.acknowledgments.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn completed_output_without_original_invocation_refuses_provider_acknowledgment() {
+    let (engine, _, _) = engine(vec![], false);
+    let request = RequestId("missing-invocation".into());
+    engine
+        .store
+        .create_request(&request, None, "/root")
+        .unwrap();
+    let operation = engine
+        .store
+        .claim(&CallId("work-call".into()), &request)
+        .unwrap();
+    let output = JobOutput::Completed(Ok(json!({"done":true})));
+    assert_eq!(
+        engine
+            .store
+            .write_job_output(&operation, ToolKind::Function, &output)
+            .unwrap(),
+        1
+    );
+    assert!(engine.store.has_completed_output(&operation).unwrap());
+    assert!(
+        engine
+            .store
+            .invocation_item(&operation.request, &operation.call)
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        engine.acknowledge_output(&operation).await,
+        Err(EngineError::MissingOperationInvocation(actual)) if actual == operation
+    ));
+    assert!(engine.provider.acknowledgments.lock().unwrap().is_empty());
+    assert!(engine.store.has_completed_output(&operation).unwrap());
+}
 #[tokio::test]
 async fn yield_reserved_name_collision_refused_before_transport() {
     let (engine, requests, _) = engine(vec![], true);
