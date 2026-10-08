@@ -112,44 +112,85 @@ impl Operation {
             Self::Append => "append_one_item",
         }
     }
-    async fn run(self, seed: &Seed, item: Option<Item>) {
+    async fn run(self, seed: &Seed, item: Option<Item>) -> Result<(), EngineError> {
         match self {
             Self::CanonicalHistory => {
-                let history = load_history_window(seed.store.clone(), seed.head.clone())
-                    .await
-                    .unwrap();
+                let history = load_history_window(seed.store.clone(), seed.head.clone()).await?;
                 assert_eq!(history.items.len(), seed.items);
             }
             Self::ProjectedHistory => {
                 let store = seed.store.clone();
                 let head = seed.head.clone();
                 let identity = seed.identity.clone();
-                let history = blocking(move || store.context_request_state(&head, &identity))
-                    .await
-                    .unwrap();
+                let history =
+                    blocking(move || store.context_request_state(&head, &identity)).await?;
                 assert_eq!(history.history.len(), seed.items);
             }
             Self::Append => {
                 let item = item.unwrap();
                 let store = seed.store.clone();
                 let head = seed.head.clone();
-                let hashes = blocking(move || store.append_items(&head, &[item]))
-                    .await
-                    .unwrap();
+                let hashes = blocking(move || store.append_items(&head, &[item])).await?;
                 assert_eq!(hashes.len(), 1);
             }
         }
+        Ok(())
     }
 }
 
-fn emit(mut row: Value, samples: Vec<u128>, meter: Value) {
-    let mut ordered = samples.clone();
-    ordered.sort_unstable();
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum Outcome {
+    Succeeded,
+    SqliteBusy { extended_code: i32 },
+    SqliteLocked { extended_code: i32 },
+}
+
+#[derive(serde::Serialize)]
+struct Sample {
+    wall_ns: u128,
+    outcome: Outcome,
+}
+
+fn contention_refusal(error: EngineError) -> Outcome {
+    match error {
+        EngineError::Store(StoreError::Sql(rusqlite::Error::SqliteFailure(error, _))) => {
+            match error.code {
+                rusqlite::ErrorCode::DatabaseBusy => Outcome::SqliteBusy {
+                    extended_code: error.extended_code,
+                },
+                rusqlite::ErrorCode::DatabaseLocked => Outcome::SqliteLocked {
+                    extended_code: error.extended_code,
+                },
+                _ => panic!("unexpected SQLite failure: {error:?}"),
+            }
+        }
+        error => panic!("unexpected measurement failure: {error:?}"),
+    }
+}
+
+fn emit(mut row: Value, samples: Vec<Sample>, meter: Value) {
+    let mut successes = samples
+        .iter()
+        .filter(|sample| matches!(sample.outcome, Outcome::Succeeded))
+        .map(|sample| sample.wall_ns)
+        .collect::<Vec<_>>();
+    let mut refusals = samples
+        .iter()
+        .filter(|sample| !matches!(sample.outcome, Outcome::Succeeded))
+        .map(|sample| sample.wall_ns)
+        .collect::<Vec<_>>();
+    successes.sort_unstable();
+    refusals.sort_unstable();
     row["repetitions_per_conversation"] = json!(REPETITIONS);
     row["operation_count"] = json!(samples.len());
-    row["operation_wall_ns"] = json!(samples);
-    row["median_operation_wall_ns"] = json!(ordered[ordered.len() / 2]);
-    row["max_operation_wall_ns"] = json!(ordered.last().unwrap());
+    row["successful_operation_count"] = json!(successes.len());
+    row["refused_operation_count"] = json!(refusals.len());
+    row["median_success_wall_ns"] = json!(successes.get(successes.len() / 2));
+    row["max_success_wall_ns"] = json!(successes.last());
+    row["median_refusal_wall_ns"] = json!(refusals.get(refusals.len() / 2));
+    row["max_refusal_wall_ns"] = json!(refusals.last());
+    row["attempts"] = json!(samples);
     row["cohort"] = meter;
     println!(
         "HARNESS_HISTORY_PERF {}",
@@ -207,8 +248,20 @@ async fn store_cohort(depth: usize, payload_bytes: usize, workers: usize, separa
                 start.wait().await;
                 for item in inputs {
                     let started = Instant::now();
-                    operation.run(&seed, item).await;
-                    samples.push(started.elapsed().as_nanos());
+                    let result = operation.run(&seed, item).await;
+                    let wall_ns = started.elapsed().as_nanos();
+                    let outcome = match result {
+                        Ok(()) => Outcome::Succeeded,
+                        Err(error)
+                            if separate_handles
+                                && workers > 1
+                                && matches!(operation, Operation::Append) =>
+                        {
+                            contention_refusal(error)
+                        }
+                        Err(error) => panic!("unexpected measurement failure: {error:?}"),
+                    };
+                    samples.push(Sample { wall_ns, outcome });
                 }
                 samples
             }));
@@ -220,8 +273,30 @@ async fn store_cohort(depth: usize, payload_bytes: usize, workers: usize, separa
             samples.extend(task.await.unwrap());
         }
         let meter = meter.finish();
+        let resulting_history_items = if matches!(operation, Operation::Append) {
+            seeds
+                .iter()
+                .zip(samples.chunks_exact(REPETITIONS))
+                .map(|(seed, attempts)| {
+                    let successful_appends = attempts
+                        .iter()
+                        .filter(|sample| matches!(sample.outcome, Outcome::Succeeded))
+                        .count();
+                    let actual = seed
+                        .store
+                        .context_request_state(&seed.head, &seed.identity)
+                        .unwrap()
+                        .history
+                        .len();
+                    assert_eq!(actual, seed.items + successful_appends);
+                    actual
+                })
+                .collect::<Vec<_>>()
+        } else {
+            seeds.iter().map(|seed| seed.items).collect()
+        };
         emit(
-            json!({"operation":operation.name(),"connections":topology,"conversations":workers,"lineage_depth":depth,"payload_bytes":payload_bytes,"initial_history_items":depth+1,"initial_history_json_bytes":history_bytes,"mutex_wait_and_hold_ns":null,"boundary":"Engine blocking reader/append; wall includes blocking-pool dispatch; seed and JSON byte accounting excluded"}),
+            json!({"operation":operation.name(),"connections":topology,"conversations":workers,"lineage_depth":depth,"payload_bytes":payload_bytes,"initial_history_items":depth+1,"initial_history_json_bytes":history_bytes,"resulting_history_items":resulting_history_items,"mutex_wait_and_hold_ns":null,"boundary":"Engine blocking reader/append; wall includes blocking-pool dispatch; seed and JSON byte accounting excluded; separate-connection concurrent writer busy/locked refusal retained without retry"}),
             samples,
             meter,
         );
@@ -307,7 +382,10 @@ async fn engine_cohort(depth: usize, payload_bytes: usize, workers: usize) {
                     .run(Some(head), vec![item], cancelled, envelopes)
                     .await
                     .unwrap();
-                samples.push(started.elapsed().as_nanos());
+                samples.push(Sample {
+                    wall_ns: started.elapsed().as_nanos(),
+                    outcome: Outcome::Succeeded,
+                });
                 assert_eq!(completion.transcript.len(), depth + 1 + (ordinal + 1) * 2);
                 head = completion.head_request;
             }
@@ -338,7 +416,7 @@ async fn store_and_engine_transcript_scaling() {
         .expect("record exact built source via HARNESS_PERF_SOURCE");
     println!(
         "HARNESS_HISTORY_PERF {}",
-        json!({"schema":1,"source_revision_label":source,"pid":std::process::id(),"debug_assertions":cfg!(debug_assertions),"fixture":"ordinary editable messages; WAL/NORMAL durable Store; seeded histories warmed once; no timing acceptance threshold"})
+        json!({"schema":2,"source_revision_label":source,"pid":std::process::id(),"debug_assertions":cfg!(debug_assertions),"fixture":"ordinary editable messages; WAL/NORMAL durable Store; seeded histories warmed once; successful and refused attempts separate; no retry or timing acceptance threshold"})
     );
     for depth in [1, 32, 128] {
         for payload_bytes in [256, 4096] {
