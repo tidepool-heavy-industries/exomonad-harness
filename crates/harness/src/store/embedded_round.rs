@@ -246,6 +246,10 @@ impl Store {
 }
 
 #[cfg(test)]
+#[path = "embedded_round/history_model_tests.rs"]
+mod history_model_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{AgentPath, CallId, OperationId};
