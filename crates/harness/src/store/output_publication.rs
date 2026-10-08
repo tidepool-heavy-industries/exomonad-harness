@@ -97,26 +97,33 @@ pub(super) struct RecoveryLedger {
 
 impl RecoveryLedger {
     fn read(c: &Connection, history: &[Occurrence]) -> Result<Self> {
+        let _ledger = tracing::debug_span!(target: "harness::runtime_cost", "recovery_ledger", input_items = history.len()).entered();
         let operations = history
             .iter()
             .filter_map(|occurrence| occurrence.output_operation.as_ref())
             .cloned()
             .collect::<HashSet<_>>();
-        let invocations = super::validation::invocations_for_operations(c, &operations)?;
+        let invocations = {
+            let _read = tracing::debug_span!(target: "harness::runtime_cost", "recovery_invocations", unique_operations = operations.len()).entered();
+            super::validation::invocations_for_operations(c, &operations)?
+        };
         let requests = history
             .iter()
             .filter(|occurrence| occurrence.output_operation.is_some())
             .map(|occurrence| occurrence.origin.request.clone())
             .collect::<HashSet<_>>();
-        let sources = super::context::occurrences_for_requests(c, &requests)?
-            .into_iter()
-            .map(|occurrence| {
-                (
-                    (occurrence.request.clone(), occurrence.position),
-                    occurrence,
-                )
-            })
-            .collect();
+        let sources = {
+            let _read = tracing::debug_span!(target: "harness::runtime_cost", "recovery_sources", source_requests = requests.len()).entered();
+            super::context::occurrences_for_requests(c, &requests)?
+                .into_iter()
+                .map(|occurrence| {
+                    (
+                        (occurrence.request.clone(), occurrence.position),
+                        occurrence,
+                    )
+                })
+                .collect()
+        };
         Ok(Self {
             invocations,
             sources,
@@ -245,6 +252,7 @@ pub(super) fn append_tx(
 }
 
 pub(super) fn validate_history(c: &Connection, history: &[Occurrence]) -> Result<RecoveryLedger> {
+    let _validation = tracing::debug_span!(target: "harness::runtime_cost", "canonical_output_validation", input_items = history.len()).entered();
     let ledger = RecoveryLedger::read(c, history)?;
     for occurrence in history {
         validated_output(occurrence, &ledger)?;
@@ -261,17 +269,42 @@ impl Store {
         claimant: &RequestId,
         request: &RequestId,
     ) -> Result<AppendedOperationOutput> {
-        let mut c = self.lock();
+        let _publication =
+            tracing::debug_span!(target: "harness::runtime_cost", "append_operation_output",
+            request_id = %request.0, origin_request_id = %operation.request.0,
+            call_id = %operation.call.0, claimant_request_id = %claimant.0)
+            .entered();
+        let mut c = {
+            let _wait = tracing::debug_span!(target: "harness::runtime_cost", "sqlite_mutex_wait")
+                .entered();
+            self.lock()
+        };
+        let transaction_span = tracing::debug_span!(target: "harness::runtime_cost", "operation_output_transaction",
+            committed = false, appended = tracing::field::Empty);
+        let _transaction = transaction_span.enter();
         let tx = c.transaction()?;
         let output = append_tx(&tx, operation, claimant, request)?;
         tx.commit()?;
+        transaction_span.record("committed", true);
+        transaction_span.record("appended", output.appended);
         Ok(output)
     }
 
     pub(crate) fn recovery_history(&self, head: &RequestId) -> Result<Vec<RecoveryItem>> {
-        let c = self.lock();
-        let history = super::context::history(&c, head, true)?;
+        let _recovery = tracing::debug_span!(target: "harness::runtime_cost", "recovery_history", request_id = %head.0).entered();
+        let c = {
+            let _wait = tracing::debug_span!(target: "harness::runtime_cost", "sqlite_mutex_wait")
+                .entered();
+            self.lock()
+        };
+        let history = {
+            let _read =
+                tracing::debug_span!(target: "harness::runtime_cost", "lineage_query_and_decode")
+                    .entered();
+            super::context::history(&c, head, true)?
+        };
         let ledger = RecoveryLedger::read(&c, &history)?;
+        let _decode = tracing::debug_span!(target: "harness::runtime_cost", "recovery_occurrence_decode", input_items = history.len()).entered();
         history
             .into_iter()
             .map(|occurrence| decode(occurrence, &ledger))

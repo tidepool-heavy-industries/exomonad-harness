@@ -1989,32 +1989,39 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         operation: &OperationId,
         claimant: &RequestId,
     ) -> Result<(), EngineError> {
-        let store = self.store.clone();
-        let request = id.clone();
-        let operation = operation.clone();
-        let claimant = claimant.clone();
-        let observing = self.output_observer.is_some();
-        let (output, origin) = blocking(move || {
-            let output = store.append_operation_output(&operation, &claimant, &request)?;
-            let origin = if observing && output.appended {
-                Some(store.request_output_origin(&request)?)
-            } else {
-                None
-            };
-            Ok((output, origin))
-        })
-        .await?;
-        if let (Some(observer), Some(origin)) = (&self.output_observer, origin) {
-            observer.observe(ModelOutput {
-                origin,
-                request_id: id.clone(),
-                update: ModelOutputUpdate::Committed {
-                    item_id: output.item.0["id"].as_str().map(str::to_owned),
-                    hash: output.hash,
-                },
-            });
+        let span = tracing::debug_span!(target: "harness::runtime_cost", "publish_operation_output",
+            request_id = %id.0, origin_request_id = %operation.request.0,
+            call_id = %operation.call.0, claimant_request_id = %claimant.0);
+        async {
+            let store = self.store.clone();
+            let request = id.clone();
+            let operation = operation.clone();
+            let claimant = claimant.clone();
+            let observing = self.output_observer.is_some();
+            let (output, origin) = blocking(move || {
+                let output = store.append_operation_output(&operation, &claimant, &request)?;
+                let origin = if observing && output.appended {
+                    Some(store.request_output_origin(&request)?)
+                } else {
+                    None
+                };
+                Ok((output, origin))
+            })
+            .await?;
+            if let (Some(observer), Some(origin)) = (&self.output_observer, origin) {
+                observer.observe(ModelOutput {
+                    origin,
+                    request_id: id.clone(),
+                    update: ModelOutputUpdate::Committed {
+                        item_id: output.item.0["id"].as_str().map(str::to_owned),
+                        hash: output.hash,
+                    },
+                });
+            }
+            Ok(())
         }
-        Ok(())
+        .instrument(span)
+        .await
     }
 
     async fn append_retaining_items(
@@ -3262,9 +3269,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         &self,
         id: &RequestId,
     ) -> Result<Vec<crate::store::RecoveryItem>, EngineError> {
+        let span = tracing::debug_span!(target: "harness::runtime_cost", "read_recovery_history", request_id = %id.0);
         let store = self.store.clone();
         let head = id.clone();
-        blocking(move || store.recovery_history(&head)).await
+        blocking(move || store.recovery_history(&head))
+            .instrument(span)
+            .await
     }
 
     /// A model-facing Here child is admitted before its spawn tool returns.
