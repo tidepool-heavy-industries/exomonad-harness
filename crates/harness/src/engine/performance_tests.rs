@@ -409,22 +409,34 @@ async fn engine_cohort(depth: usize, payload_bytes: usize, workers: usize) {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "opt-in bounded performance fixture; retain emitted JSON and executable identity"]
-async fn store_and_engine_transcript_scaling() {
+async fn measure_grid(depths: &[usize], payload_sizes: &[usize], conversations: &[usize]) {
     let source = std::env::var("HARNESS_PERF_SOURCE")
         .expect("record exact built source via HARNESS_PERF_SOURCE");
     println!(
         "HARNESS_HISTORY_PERF {}",
-        json!({"schema":2,"source_revision_label":source,"pid":std::process::id(),"debug_assertions":cfg!(debug_assertions),"fixture":"ordinary editable messages; WAL/NORMAL durable Store; seeded histories warmed once; successful and refused attempts separate; no retry or timing acceptance threshold"})
+        json!({"schema":2,"source_revision_label":source,"pid":std::process::id(),"debug_assertions":cfg!(debug_assertions),"lineage_depths":depths,"payload_sizes":payload_sizes,"conversations":conversations,"expected_measurement_rows":depths.len()*payload_sizes.len()*conversations.len()*7,"expected_store_attempts":depths.len()*payload_sizes.len()*conversations.iter().sum::<usize>()*REPETITIONS*6,"expected_engine_rounds":depths.len()*payload_sizes.len()*conversations.iter().sum::<usize>()*REPETITIONS,"fixture":"ordinary editable messages; WAL/NORMAL durable Store; seeded histories warmed once; successful and refused attempts separate; no retry or timing acceptance threshold"})
     );
-    for depth in [1, 32, 128] {
-        for payload_bytes in [256, 4096] {
-            for workers in [1, 4] {
+    for &depth in depths {
+        for &payload_bytes in payload_sizes {
+            for &workers in conversations {
                 store_cohort(depth, payload_bytes, workers, false).await;
                 store_cohort(depth, payload_bytes, workers, true).await;
                 engine_cohort(depth, payload_bytes, workers).await;
             }
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "opt-in bounded performance fixture; retain emitted JSON and executable identity"]
+async fn store_and_engine_transcript_scaling() {
+    measure_grid(&[1, 32, 128], &[256, 4096], &[1, 4]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "opt-in protocol smoke control before the complete scaling matrix"]
+async fn store_and_engine_transcript_scaling_smoke() {
+    // Exercise both connection topologies, all readers, concurrent writer
+    // refusals and real Engine rounds without claiming a scaling comparison.
+    measure_grid(&[32], &[4096], &[4]).await;
 }
