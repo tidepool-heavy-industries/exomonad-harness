@@ -60,7 +60,7 @@ describe('mounted actor forms', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
     const payload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as { draft: Record<string, unknown> }
     expect(payload.draft).toEqual({ name: 'draft survives', choice: 'second', mode: 'b', onlyB: 'edited B' })
-    await screen.findByRole('alert')
+    await screen.findByText(/This form is no longer open/)
     expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('draft survives')
     expect((screen.getAllByLabelText('Same label')[1] as HTMLInputElement).checked).toBe(true)
   })
@@ -68,17 +68,16 @@ describe('mounted actor forms', () => {
   it('renders terminal form answers and submitted values read-only', () => {
     const terminal: StoredActorForm = { ...openForm, state: 'answered', draft: { name: 'final' }, answer: { kind: 'markdown', text: '**done**' } }
     render(<MountedForm form={terminal} ready active />)
-    expect((screen.getByLabelText('Name') as HTMLInputElement).disabled).toBe(true)
-    expect(screen.getByText('Submitted values').tagName).toBe('H4')
-    expect(screen.getByText(/"name": "final"/)).toBeTruthy()
+    expect(screen.queryByRole('textbox', { name: 'Name' })).toBeNull()
+    expect(screen.getByText('final')).toBeTruthy()
     expect(screen.getByText('done').tagName).toBe('STRONG')
     expect(screen.queryByRole('button', { name: 'Submit' })).toBeNull()
   })
 
   it('hydrates a reopened form from its stored server draft when browser retention is empty', () => {
     render(<MountedForm form={{ ...openForm, state: 'submitted', draft: { name: 'server draft' } }} ready active />)
-    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('server draft')
-    expect((screen.getByLabelText('Name') as HTMLInputElement).disabled).toBe(true)
+    expect(screen.getByText('server draft')).toBeTruthy()
+    expect(screen.queryByRole('textbox', { name: 'Name' })).toBeNull()
     expect(isStoredActorForm(openForm)).toBe(true)
     expect(isStoredActorForm({ ...openForm, revisionSequence: -1 })).toBe(false)
   })
@@ -98,12 +97,35 @@ describe('mounted actor forms', () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('rejected', { status: 409 }))
     vi.stubGlobal('fetch', fetchMock)
     render(<MountedForm form={{ ...openForm, state: 'submitted', draft: { name: 'sent' } }} ready active />)
-    expect((screen.getByLabelText('Name') as HTMLInputElement).disabled).toBe(true)
+    expect(screen.queryByRole('textbox', { name: 'Name' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Submit' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
     await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/actor-form/dismiss')
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).not.toHaveProperty('draft')
+  })
+
+  it('replaces browser edits with the durable response on the same accepted card and keeps its status current', async () => {
+    const mounted = render(<MountedForm form={openForm} ready active />)
+    const card = screen.getByRole('region', { name: 'Actor form' })
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'older local edit' } })
+    mounted.rerender(<MountedForm form={{ ...openForm, revisionSequence: 12, state: 'answered', draft: { name: 'durable response' }, answer: { kind: 'text', text: 'Accepted' } }} ready active />)
+    expect(screen.getByRole('region', { name: 'Actor form' })).toBe(card)
+    expect(screen.getByText('durable response')).toBeTruthy()
+    expect(screen.queryByDisplayValue('older local edit')).toBeNull()
+    expect(screen.queryByRole('textbox', { name: 'Name' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Submit' })).toBeNull()
+    expect(screen.getByRole('heading', { name: 'Form · response accepted' })).toBeTruthy()
+  })
+
+  it('uses the posted durable result for the card status before the next conversation refresh', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ ...openForm, revisionSequence: 11, state: 'submitted', attemptId: 'attempt', draft: { name: 'posted' } }))))
+    render(<MountedForm form={openForm} ready active />)
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'posted' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    await screen.findByRole('heading', { name: 'Form · response submitted' })
+    expect(screen.getByText('posted')).toBeTruthy()
+    expect(screen.queryByRole('textbox', { name: 'Name' })).toBeNull()
   })
 
   it('preserves integers beyond JavaScript safe range exactly through submission', async () => {

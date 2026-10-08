@@ -162,13 +162,17 @@ export default function MountedForm({ form, ready, active, onAuthExpired }: { fo
   const [issue, setIssue] = useState('')
   const [latest, setLatest] = useState(form)
   const editable = latest.state === 'open' && active && ready
+  const displayedDraft = latest.state === 'open' ? draft : hydratedDraft(latest)
   const dismissible = (latest.state === 'open' || latest.state === 'submitted') && active && ready
   useEffect(() => {
     const stale = form.revisionSequence < latest.revisionSequence
       || (form.revisionSequence === latest.revisionSequence && latest.state !== 'open' && form.state === 'open')
     if (stale) return
     if (latest !== form) setLatest(form)
-    if (!retainedDrafts.has(key)) setDraft(hydratedDraft(form))
+    if (form.state !== 'open') {
+      retainedDrafts.delete(key)
+      setDraft(hydratedDraft(form))
+    } else if (!retainedDrafts.has(key)) setDraft(hydratedDraft(form))
   }, [form, key, latest])
   useEffect(() => {
     if (editable) keepDraft(key, draft)
@@ -194,11 +198,14 @@ export default function MountedForm({ form, ready, active, onAuthExpired }: { fo
     finally { setBusy(false) }
   }
   return <section className="mounted-form" aria-label="Actor form" data-mount-id={latest.opening.mountId}>
-    <FormNodeView scope={key} node={latest.opening.form.root} draft={draft} setDraft={setDraft} editable={editable} />
-    {!!latest.errors.length && <ul className="form-errors" aria-label="Form errors">{latest.errors.map((error, i) => <li key={`${error.field ?? ''}:${i}`}>{error.field && <strong>{error.field}: </strong>}{error.message}</li>)}</ul>}
+    <h3>Form · {formStatus[latest.state]}</h3>
+    {latest.state === 'submitted' && <p role="status">Response submitted. Waiting for the actor to process it.</p>}
+    {latest.state !== 'open' && <p className="meta">This response is read-only.</p>}
+    <FormNodeView scope={key} node={latest.opening.form.root} draft={displayedDraft} setDraft={setDraft} editable={editable} readOnly={latest.state !== 'open'} />
+    {!!latest.errors.length && <ul className="form-errors" aria-label="Form errors" role="alert">{latest.errors.map((error, i) => <li key={`${error.field ?? ''}:${i}`}>{error.field && <strong>{fieldLabel(latest.opening.form.root, error.field) ?? 'Field'}: </strong>}{error.message}</li>)}</ul>}
     {issue && <p role="alert">{issue}</p>}
     {latest.answer && <div className="form-answer"><h4>Answer</h4><RichViewRenderer view={latest.answer} /></div>}
-    {latest.state !== 'open' && latest.draft && <section className="submitted-form-values"><h4>Submitted values</h4><pre>{JSON.stringify(latest.draft, null, 2)}</pre></section>}
+
     {(latest.state === 'open' || latest.state === 'submitted') && <div className="form-actions">
       {latest.state === 'open' && <button type="button" disabled={!editable || busy} onClick={() => void submit(false)}>{busy ? 'Sending…' : 'Submit'}</button>}
       <button type="button" disabled={!dismissible || busy} onClick={() => void submit(true)}>Dismiss</button>
@@ -207,20 +214,31 @@ export default function MountedForm({ form, ready, active, onAuthExpired }: { fo
   </section>
 }
 
-function FormNodeView({ scope, node, draft, setDraft, editable }: { scope: string; node: FormNode; draft: FormDraft; setDraft: (draft: FormDraft) => void; editable: boolean }) {
+const formStatus: Record<StoredActorForm['state'], string> = { open: 'response required', submitted: 'response submitted', answered: 'response accepted', dismissed: 'dismissed', cancelled: 'cancelled', interrupted: 'interrupted' }
+
+function fieldLabel(node: FormNode, id: string): string | undefined {
+  if ('id' in node && node.id === id) return node.label
+  if (node.kind === 'group') return node.children.map(child => fieldLabel(child, id)).find(label => label !== undefined)
+  if (node.kind === 'section') return fieldLabel(node.child, id)
+  if (node.kind === 'alternatives') return node.options.map(option => fieldLabel(option.form, id)).find(label => label !== undefined)
+  return undefined
+}
+
+function FormNodeView({ scope, node, draft, setDraft, editable, readOnly = false }: { scope: string; node: FormNode; draft: FormDraft; setDraft: (draft: FormDraft) => void; editable: boolean; readOnly?: boolean }) {
   const change = (id: string, value: DraftValue, base = draft) => setDraft({ ...base, [id]: value })
   if (node.kind === 'pure' || node.kind === 'empty') return null
-  if (node.kind === 'group') return <div className="form-group">{node.children.map((child, i) => <FormNodeView key={i} scope={scope} node={child} draft={draft} setDraft={setDraft} editable={editable} />)}</div>
-  if (node.kind === 'section') return <fieldset className="form-section"><legend>{node.title}</legend><FormNodeView scope={scope} node={node.child} draft={draft} setDraft={setDraft} editable={editable} /></fieldset>
+  if (node.kind === 'group') return <div className="form-group">{node.children.map((child, i) => <FormNodeView key={i} scope={scope} node={child} draft={draft} setDraft={setDraft} editable={editable} readOnly={readOnly} />)}</div>
+  if (node.kind === 'section') return <fieldset className="form-section"><legend>{node.title}</legend><FormNodeView scope={scope} node={node.child} draft={draft} setDraft={setDraft} editable={editable} readOnly={readOnly} /></fieldset>
   if (node.kind === 'view') return <RichViewRenderer view={node.presentation} />
+  if (readOnly && 'id' in node) return <ReadOnlyField scope={scope} node={node} draft={draft} setDraft={setDraft} />
   if (node.kind === 'alternatives') {
     const selectedValue = Object.hasOwn(draft, node.id) ? draft[node.id] : node.initial
     const selected = typeof selectedValue === 'string' ? selectedValue : ''
     const branch = node.options.find(item => item.id === selected)
     return <fieldset><legend>{node.label}</legend>{node.options.map(item => <label className="form-option" key={item.id}>
       <input type="radio" aria-label={item.label} name={`${scope}:${node.id}`} value={item.id} checked={selected === item.id} disabled={!editable} onChange={() => change(node.id, item.id, initialDraft(item.form, { ...draft }))} />
-      <span>{item.label}</span><RichViewRenderer view={item.presentation} />
-    </label>)}{branch && <FormNodeView scope={scope} node={branch.form} draft={draft} setDraft={setDraft} editable={editable} />}</fieldset>
+      <RichViewRenderer view={item.presentation} />
+    </label>)}{branch && <FormNodeView scope={scope} node={branch.form} draft={draft} setDraft={setDraft} editable={editable} readOnly={readOnly} />}</fieldset>
   }
   if (node.kind === 'choice' || node.kind === 'many') return <fieldset><legend>{node.label}</legend>{node.options.map(item => {
     const hasValue = Object.hasOwn(draft, node.id)
@@ -228,14 +246,26 @@ function FormNodeView({ scope, node, draft, setDraft, editable }: { scope: strin
       : typeof draft[node.id] === 'string' ? [draft[node.id] as string] : !hasValue && node.initial ? [node.initial] : []
     return <label className="form-option" key={item.id}><input aria-label={item.label} type={node.kind === 'many' ? 'checkbox' : 'radio'} name={`${scope}:${node.id}`} value={item.id} checked={selected.includes(item.id)} disabled={!editable}
       onChange={event => change(node.id, node.kind === 'many' ? event.target.checked ? [...selected, item.id] : selected.filter(id => id !== item.id) : item.id)} />
-      <span>{item.label}</span><RichViewRenderer view={item.presentation} /></label>
+      <RichViewRenderer view={item.presentation} /></label>
   })}</fieldset>
   const value = Object.hasOwn(draft, node.id) ? draft[node.id] : node.initial
-  if (node.kind === 'bool') return <label className="form-field"><input type="checkbox" checked={value === true} disabled={!editable} onChange={event => change(node.id, event.target.checked)} />{node.label}</label>
+  if (node.kind === 'bool') return <label className="form-toggle"><input type="checkbox" checked={value === true} disabled={!editable} onChange={event => change(node.id, event.target.checked)} />{node.label}</label>
   if (node.kind === 'int') return <label className="form-field">{node.label}<input type="text" inputMode="numeric" value={value === null ? '' : String(value)} disabled={!editable}
     onChange={event => change(node.id, event.target.value)} /></label>
   if (node.kind === 'text') return <label className="form-field">{node.label}<input type="text" value={value === null ? '' : String(value)} disabled={!editable}
     onChange={event => change(node.id, event.target.value)} /></label>
   return <label className="form-field">{node.label}<input type="number" step="any" value={value === null ? '' : String(value)} disabled={!editable}
     onChange={event => { const raw = event.target.value; change(node.id, raw === '' ? null : Number(raw)) }} /></label>
+}
+
+function ReadOnlyField({ scope, node, draft, setDraft }: { scope: string; node: Extract<FormNode, { id: string }>; draft: FormDraft; setDraft: (draft: FormDraft) => void }) {
+  const value = Object.hasOwn(draft, node.id) ? draft[node.id] : node.initial
+  if (node.kind === 'choice' || node.kind === 'many' || node.kind === 'alternatives') {
+    const selected = Array.isArray(value) ? value : typeof value === 'string' ? [value] : []
+    const branch = node.kind === 'alternatives' ? node.options.find(option => selected.includes(option.id)) : undefined
+    return <fieldset><legend>{node.label}</legend><ul className="form-fixed-options">{node.options.map(option => <li key={option.id} aria-label={option.label}>
+      <span className="form-selection">{selected.includes(option.id) ? 'Selected' : 'Not selected'}</span><RichViewRenderer view={option.presentation} />
+    </li>)}</ul>{!node.options.length && <p>No selections.</p>}{branch && <FormNodeView scope={scope} node={branch.form} draft={draft} setDraft={setDraft} editable={false} readOnly />}</fieldset>
+  }
+  return <dl className="form-fixed-field"><dt>{node.label}</dt><dd>{value === null ? 'No response' : node.kind === 'bool' ? value ? 'Yes' : 'No' : String(value)}</dd></dl>
 }
