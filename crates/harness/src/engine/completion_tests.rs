@@ -1047,7 +1047,7 @@ async fn closed_next_request_preserves_settlement_and_cleanup_without_transport_
                         .output(&pending_claim.operation)
                         .await
                         .unwrap(),
-                    crate::turn::JobOutput::CancellationUnconfirmed(_)
+                    Some(crate::turn::JobOutput::CancellationUnconfirmed(_))
                 ));
             }
             (_, _, error) => panic!("incorrect request-boundary disposition: {error:?}"),
