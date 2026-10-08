@@ -107,10 +107,10 @@ describe('mounted actor forms', () => {
 
   it('replaces browser edits with the durable response on the same accepted card and keeps its status current', async () => {
     const mounted = render(<MountedForm form={openForm} ready active />)
-    const card = screen.getByRole('region', { name: 'Actor form' })
+    const card = screen.getByRole('region', { name: /^Actor form / })
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'older local edit' } })
     mounted.rerender(<MountedForm form={{ ...openForm, revisionSequence: 12, state: 'answered', draft: { name: 'durable response' }, answer: { kind: 'text', text: 'Accepted' } }} ready active />)
-    expect(screen.getByRole('region', { name: 'Actor form' })).toBe(card)
+    expect(screen.getByRole('region', { name: /^Actor form / })).toBe(card)
     expect(screen.getByText('durable response')).toBeTruthy()
     expect(screen.queryByDisplayValue('older local edit')).toBeNull()
     expect(screen.queryByRole('textbox', { name: 'Name' })).toBeNull()
@@ -157,7 +157,7 @@ describe('mounted actor forms', () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('rejected', { status: 409 }))
     vi.stubGlobal('fetch', fetchMock)
     render(<><MountedForm form={radioForm('mount-a')} ready active /><MountedForm form={radioForm('mount-b')} ready active /></>)
-    const [formA, formB] = screen.getAllByRole('region', { name: 'Actor form' })
+    const [formA, formB] = screen.getAllByRole('region', { name: /^Actor form / })
     const cardA = within(formA!)
     const cardB = within(formB!)
     fireEvent.click(cardA.getByLabelText(/Quick/))

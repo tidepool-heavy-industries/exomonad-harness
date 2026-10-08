@@ -128,7 +128,7 @@ export default function UnifiedChat({ origin, requestId, revision, ready, active
     {failedRequests.map(item => <div className="error" role="alert" key={item.id}><strong>Exchange failed</strong><p className="meta">Exchange {item.id}</p><p>{item.detail ?? 'The model request failed.'}</p></div>)}
     {page && <div className="unified-entries" role="list" aria-label="Conversation entries">{visibleEntries.map(entry => <div role="listitem" className="message" key={entry.sequence} data-sequence={entry.sequence}>
       <div className="meta">Sequence {entry.sequence}</div>
-      {entry.kind === 'message' ? <HistoryItem entry={{ position: entry.position, hash: entry.hash, byteLen: new TextEncoder().encode(JSON.stringify(entry.item)).length, item: entry.item } satisfies HistoryEntry} /> :
+      {entry.kind === 'message' ? <HistoryItem listItem={false} entry={{ position: entry.position, hash: entry.hash, byteLen: new TextEncoder().encode(JSON.stringify(entry.item)).length, item: entry.item } satisfies HistoryEntry} /> :
         entry.kind === 'oversized' ? <p role="status">Message {entry.position} is too large to display ({entry.byteLen} bytes).</p> :
         entry.kind === 'output' ? <UnifiedOutput entry={entry} origin={origin} ready={ready} active={active} onAuthExpired={onAuthExpired} onExpanded={() => setAttempt(value => value + 1)} /> :
           <MountedFormEntry key={entry.form.opening.mountId} form={entry.form} ready={ready} active={active} onAuthExpired={onAuthExpired} />}

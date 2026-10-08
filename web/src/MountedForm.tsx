@@ -197,12 +197,12 @@ export default function MountedForm({ form, ready, active, onAuthExpired }: { fo
     } catch (error) { setIssue(error instanceof Error ? error.message : String(error)) }
     finally { setBusy(false) }
   }
-  return <section className="mounted-form" aria-label="Actor form" data-mount-id={latest.opening.mountId}>
+  return <section className="mounted-form" aria-label={`Actor form ${latest.sequence}`} data-mount-id={latest.opening.mountId}>
     <h3>Form · {formStatus[latest.state]}</h3>
     {latest.state === 'submitted' && <p role="status">Response submitted. Waiting for the actor to process it.</p>}
     {latest.state !== 'open' && <p className="meta">This response is read-only.</p>}
     <FormNodeView scope={key} node={latest.opening.form.root} draft={displayedDraft} setDraft={setDraft} editable={editable} readOnly={latest.state !== 'open'} />
-    {!!latest.errors.length && <ul className="form-errors" aria-label="Form errors" role="alert">{latest.errors.map((error, i) => <li key={`${error.field ?? ''}:${i}`}>{error.field && <strong>{fieldLabel(latest.opening.form.root, error.field) ?? 'Field'}: </strong>}{error.message}</li>)}</ul>}
+    {!!latest.errors.length && <div role="alert"><ul className="form-errors" aria-label="Form errors">{latest.errors.map((error, i) => <li key={`${error.field ?? ''}:${i}`}>{error.field && <strong>{fieldLabel(latest.opening.form.root, error.field) ?? 'Field'}: </strong>}{error.message}</li>)}</ul></div>}
     {issue && <p role="alert">{issue}</p>}
     {latest.answer && <div className="form-answer"><h4>Answer</h4><RichViewRenderer view={latest.answer} /></div>}
 
