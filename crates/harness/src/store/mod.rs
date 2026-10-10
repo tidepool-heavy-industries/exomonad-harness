@@ -3424,13 +3424,18 @@ mod tests {
         let spawn = item(serde_json::json!({
             "type":"function_call", "call_id":"spawn-boundary", "name":"spawn_agent", "arguments":"{}"
         }));
+        let issued = store.history_occurrences(&second).unwrap();
+        assert_eq!(issued.len(), 2);
         store
-            .write_compaction_request_with_claims(
+            .write_compaction_request_with_evidence(
                 &source,
                 &second,
                 "/root",
                 &[tool.clone(), spawn, tool],
+                &[(0, issued[0].clone()), (2, issued[1].clone())],
+                &issued.into_iter().map(Some).collect::<Vec<_>>(),
                 &[first_op, second_op],
+                None,
                 None,
             )
             .unwrap();

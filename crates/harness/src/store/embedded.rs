@@ -1111,6 +1111,7 @@ mod tests {
             let request = RequestId("issuer".into());
             let call = crate::model::CallId("call".into());
             store.write_request(&request, None, "/root", &[Item(serde_json::json!({"type":"function_call", "call_id":"call", "name":"read", "arguments":"{}"}))], Usage::default()).unwrap();
+            let original_events = store.events(Some(&request)).unwrap();
             let table = if claim { "claims" } else { "events" };
             store.lock().unwrap().execute_batch(&format!("CREATE TABLE commit_fault_parent(id INTEGER PRIMARY KEY); CREATE TABLE commit_fault_child(id INTEGER REFERENCES commit_fault_parent(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER small_writer_commit_fault AFTER INSERT ON {table} BEGIN INSERT INTO commit_fault_child VALUES(1); END;")).unwrap();
             let result = if claim {
@@ -1129,7 +1130,7 @@ mod tests {
             ));
             let recovered = Store::open(&path).unwrap();
             assert!(recovered.claims(&call).unwrap().is_empty());
-            assert!(recovered.events(Some(&request)).unwrap().is_empty());
+            assert_eq!(recovered.events(Some(&request)).unwrap(), original_events);
             recovered
                 .lock()
                 .unwrap()
@@ -1147,7 +1148,10 @@ mod tests {
                 recovered
                     .record_event(Some(&request), "diagnostic", &serde_json::json!({}))
                     .unwrap();
-                assert_eq!(recovered.events(Some(&request)).unwrap().len(), 1);
+                let events = recovered.events(Some(&request)).unwrap();
+                assert_eq!(&events[..original_events.len()], original_events);
+                assert_eq!(events.len(), original_events.len() + 1);
+                assert_eq!(events.last().unwrap().kind, "diagnostic");
             }
             drop(recovered);
             drop(sibling);
