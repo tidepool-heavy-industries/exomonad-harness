@@ -155,11 +155,7 @@ impl Store {
         identity: &HostIdentity,
     ) -> Result<EmbeddedRoundFrontier> {
         let mut c = self.lock()?;
-        let tx = c.transaction()?;
-        let result = frontier(&tx, identity);
-        let completion = tx.rollback();
-        c.complete_transaction(completion)?;
-        result
+        c.read_transaction(|tx| frontier(tx, identity))
     }
 
     pub fn settle_embedded_round(

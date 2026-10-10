@@ -1256,17 +1256,16 @@ impl Store {
 
     pub fn read_context(&self, head: &RequestId) -> Result<ContextDocument> {
         let mut c = self.lock()?;
-        let tx = c.transaction()?;
-        let all = history(&tx, head, true)?;
-        let document = ContextDocument {
-            blocks: blocks(&tx, &all, all.len())?
-                .into_iter()
-                .map(|b| b.block)
-                .collect(),
-        };
-        let completion = tx.rollback();
-        c.complete_transaction(completion)?;
-        Ok(document)
+        c.read_transaction(|tx| {
+            let all = history(tx, head, true)?;
+            let document = ContextDocument {
+                blocks: blocks(tx, &all, all.len())?
+                    .into_iter()
+                    .map(|b| b.block)
+                    .collect(),
+            };
+            Ok(document)
+        })
     }
 
     pub fn begin_context(
@@ -1275,48 +1274,47 @@ impl Store {
         head: &RequestId,
     ) -> Result<ContextSnapshot> {
         let mut c = self.lock()?;
-        let tx = c.transaction()?;
-        validate_identity(&tx, &self.store_id, &operation.origin)?;
-        if branch(&tx, head)? != operation.origin.actor().0 {
-            return Err(StoreError::OperationOriginMismatch);
-        }
-        let claim:Option<String>=tx.query_row("SELECT state FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?2",params![serde_json::to_string(&operation.origin)?,operation.request.0,operation.call.0],|r|r.get(0)).optional()?;
-        if claim.as_deref() != Some("pending") {
-            return Err(StoreError::CheckpointBoundaryNotPending(operation.clone()));
-        }
-        let origin = original_call(&tx, operation)?;
-        let all = history(&tx, head, true)?;
-        let matches = all
-            .iter()
-            .enumerate()
-            .filter(|(_, i)| i.origin == origin)
-            .map(|(n, _)| n)
-            .collect::<Vec<_>>();
-        let [cut] = matches.as_slice() else {
-            return Err(ContextError::MissingCall.into());
-        };
-        let stored = blocks(&tx, &all, *cut)?;
-        let document = ContextDocument {
-            blocks: stored.iter().map(|b| b.block.clone()).collect(),
-        };
-        let generation = state(&tx, &operation.origin)?.generation;
-        let snapshot = ContextSnapshot {
-            document,
-            generation,
-            head: head.clone(),
-            operation: operation.clone(),
-            prefix: all[..*cut].to_vec(),
-            blocks: stored,
-            store_id: self.store_id.clone(),
-            seal: SnapshotSeal {
-                operation: operation.clone(),
-                head: head.clone(),
+        c.read_transaction(|tx| {
+            validate_identity(tx, &self.store_id, &operation.origin)?;
+            if branch(tx, head)? != operation.origin.actor().0 {
+                return Err(StoreError::OperationOriginMismatch);
+            }
+            let claim:Option<String>=tx.query_row("SELECT state FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?2",params![serde_json::to_string(&operation.origin)?,operation.request.0,operation.call.0],|r|r.get(0)).optional()?;
+            if claim.as_deref() != Some("pending") {
+                return Err(StoreError::CheckpointBoundaryNotPending(operation.clone()));
+            }
+            let origin = original_call(tx, operation)?;
+            let all = history(tx, head, true)?;
+            let matches = all
+                .iter()
+                .enumerate()
+                .filter(|(_, i)| i.origin == origin)
+                .map(|(n, _)| n)
+                .collect::<Vec<_>>();
+            let [cut] = matches.as_slice() else {
+                return Err(ContextError::MissingCall.into());
+            };
+            let stored = blocks(tx, &all, *cut)?;
+            let document = ContextDocument {
+                blocks: stored.iter().map(|b| b.block.clone()).collect(),
+            };
+            let generation = state(tx, &operation.origin)?.generation;
+            let snapshot = ContextSnapshot {
+                document,
                 generation,
-            },
-        };
-        let completion = tx.rollback();
-        c.complete_transaction(completion)?;
-        Ok(snapshot)
+                head: head.clone(),
+                operation: operation.clone(),
+                prefix: all[..*cut].to_vec(),
+                blocks: stored,
+                store_id: self.store_id.clone(),
+                seal: SnapshotSeal {
+                    operation: operation.clone(),
+                    head: head.clone(),
+                    generation,
+                },
+            };
+            Ok(snapshot)
+        })
     }
 
     pub fn context_receipt(&self, operation: &OperationId) -> Result<Option<ContextCommitReceipt>> {

@@ -5,7 +5,7 @@ use super::{
     presentation::*,
 };
 use crate::model::ConversationIdentity;
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -118,8 +118,8 @@ fn key(origin: &ActorOutputOrigin, mount: &str) -> Result<String> {
     }
     Ok(serde_json::to_string(&(origin, mount))?)
 }
-fn load(tx: &Transaction<'_>, identity: &str) -> Result<StoredActorForm> {
-    let raw: Option<String> = tx
+fn load(connection: &Connection, identity: &str) -> Result<StoredActorForm> {
+    let raw: Option<String> = connection
         .query_row(
             "SELECT presentation FROM actor_forms WHERE identity=?1",
             [identity],
@@ -186,44 +186,46 @@ impl Store {
             }
         }
         let mut c = self.lock()?;
-        let tx = c.transaction()?;
-        if !authority
-            .validate_form(opening)
-            .map_err(StoreError::ActorOutputAuthority)?
-        {
-            return Err(StoreError::ActorOutputRefused);
-        }
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM actor_forms WHERE identity=?1)",
-            [&identity],
-            |r| r.get(0),
-        )?;
-        if exists {
-            let row = load(&tx, &identity)?;
-            if row.opening != *opening {
-                return Err(StoreError::ConflictingFormOperation);
+        let (row, changed) = c.write_transaction(|tx| {
+            if !authority
+                .validate_form(opening)
+                .map_err(StoreError::ActorOutputAuthority)?
+            {
+                return Err(StoreError::ActorOutputRefused);
             }
-            return Ok(row);
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM actor_forms WHERE identity=?1)",
+                [&identity],
+                |r| r.get(0),
+            )?;
+            if exists {
+                let row = load(tx, &identity)?;
+                if row.opening != *opening {
+                    return Err(StoreError::ConflictingFormOperation);
+                }
+                return Ok((row, false));
+            }
+            tx.execute("INSERT INTO events(request_id,kind,payload,created_at) VALUES(NULL,'actor_form_open',?1,?2)",params![serde_json::to_string(opening)?,super::utc_millis()])?;
+            let row = StoredActorForm {
+                sequence: tx.last_insert_rowid(),
+                revision_sequence: tx.last_insert_rowid(),
+                opening: opening.clone(),
+                state: ActorFormState::Open,
+                attempt_id: None,
+                draft: None,
+                errors: vec![],
+                answer: None,
+            };
+            row.validate()?;
+            tx.execute(
+                "INSERT INTO actor_forms(identity,opening_sequence,presentation) VALUES(?1,?2,?3)",
+                params![identity, row.sequence, serde_json::to_string(&row)?],
+            )?;
+            Ok((row, true))
+        })?;
+        if changed {
+            self.signal_actor_form_change();
         }
-        tx.execute("INSERT INTO events(request_id,kind,payload,created_at) VALUES(NULL,'actor_form_open',?1,?2)",params![serde_json::to_string(opening)?,super::utc_millis()])?;
-        let row = StoredActorForm {
-            sequence: tx.last_insert_rowid(),
-            revision_sequence: tx.last_insert_rowid(),
-            opening: opening.clone(),
-            state: ActorFormState::Open,
-            attempt_id: None,
-            draft: None,
-            errors: vec![],
-            answer: None,
-        };
-        row.validate()?;
-        tx.execute(
-            "INSERT INTO actor_forms(identity,opening_sequence,presentation) VALUES(?1,?2,?3)",
-            params![identity, row.sequence, serde_json::to_string(&row)?],
-        )?;
-        let completion = tx.commit();
-        c.complete_transaction(completion)?;
-        self.signal_actor_form_change();
         Ok(row)
     }
     pub fn submit_actor_form(
@@ -258,47 +260,49 @@ impl Store {
         }
         let payload = serde_json::to_string(&draft)?;
         let mut c = self.lock()?;
-        let tx = c.transaction()?;
-        let mut row = load(&tx, &identity)?;
-        let old: Option<String> = tx
-            .query_row(
-                "SELECT payload FROM actor_form_operations WHERE identity=?1 AND operation_id=?2",
-                params![identity, operation],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(old) = old {
-            if old != payload {
-                return Err(StoreError::ConflictingFormOperation);
+        let (row, changed) = c.write_transaction(|tx| {
+            let mut row = load(tx, &identity)?;
+            let old: Option<String> = tx
+                .query_row(
+                    "SELECT payload FROM actor_form_operations WHERE identity=?1 AND operation_id=?2",
+                    params![identity, operation],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(old) = old {
+                if old != payload {
+                    return Err(StoreError::ConflictingFormOperation);
+                }
+                return Ok((row, false));
             }
-            return Ok(row);
+            if row.state != ActorFormState::Open
+                && !(draft.is_none() && row.state == ActorFormState::Submitted)
+            {
+                return Err(StoreError::FormUnavailable);
+            }
+            if let Some(draft) = draft {
+                row.opening.form.validate_draft(draft)?;
+            }
+            if let Some(draft) = draft {
+                row.attempt_id = Some(operation.to_owned());
+                row.draft = Some(draft.clone());
+            }
+            row.errors = vec![];
+            row.state = if draft.is_some() {
+                ActorFormState::Submitted
+            } else {
+                ActorFormState::Dismissed
+            };
+            tx.execute(
+                "INSERT INTO actor_form_operations(identity,operation_id,payload) VALUES(?1,?2,?3)",
+                params![identity, operation, payload],
+            )?;
+            save(tx, &identity, &mut row)?;
+            Ok((row, true))
+        })?;
+        if changed {
+            self.signal_actor_form_change();
         }
-        if row.state != ActorFormState::Open
-            && !(draft.is_none() && row.state == ActorFormState::Submitted)
-        {
-            return Err(StoreError::FormUnavailable);
-        }
-        if let Some(draft) = draft {
-            row.opening.form.validate_draft(draft)?;
-        }
-        if let Some(draft) = draft {
-            row.attempt_id = Some(operation.to_owned());
-            row.draft = Some(draft.clone());
-        }
-        row.errors = vec![];
-        row.state = if draft.is_some() {
-            ActorFormState::Submitted
-        } else {
-            ActorFormState::Dismissed
-        };
-        tx.execute(
-            "INSERT INTO actor_form_operations(identity,operation_id,payload) VALUES(?1,?2,?3)",
-            params![identity, operation, payload],
-        )?;
-        save(&tx, &identity, &mut row)?;
-        let completion = tx.commit();
-        c.complete_transaction(completion)?;
-        self.signal_actor_form_change();
         Ok(row)
     }
     pub fn actor_form_attempt(
@@ -307,9 +311,8 @@ impl Store {
         mount: &str,
     ) -> Result<Option<ActorFormAttempt>> {
         let identity = key(origin, mount)?;
-        let mut c = self.lock()?;
-        let tx = c.transaction()?;
-        let row = load(&tx, &identity)?;
+        let c = self.lock()?;
+        let row = load(&c, &identity)?;
         Ok(match row.state {
             ActorFormState::Open => None,
             ActorFormState::Submitted => Some(ActorFormAttempt::Submitted {
@@ -374,48 +377,51 @@ impl Store {
     ) -> Result<bool> {
         let identity = key(origin, mount)?;
         let mut c = self.lock()?;
-        let tx = c.transaction()?;
-        let mut row = load(&tx, &identity)?;
-        match settlement {
-            SettleForm::Commit { attempt, answer } => {
-                if row.attempt_id.as_deref() != Some(attempt) {
-                    return Ok(false);
+        let (applied, changed) = c.write_transaction(|tx| -> Result<(bool, bool)> {
+            let mut row = load(tx, &identity)?;
+            match settlement {
+                SettleForm::Commit { attempt, answer } => {
+                    if row.attempt_id.as_deref() != Some(attempt) {
+                        return Ok((false, false));
+                    }
+                    if row.state == ActorFormState::Answered && row.answer.as_ref() == Some(answer)
+                    {
+                        return Ok((true, false));
+                    }
+                    if row.state != ActorFormState::Submitted {
+                        return Ok((false, false));
+                    }
+                    row.state = ActorFormState::Answered;
+                    row.answer = Some(answer.clone());
+                    row.errors = vec![];
                 }
-                if row.state == ActorFormState::Answered && row.answer.as_ref() == Some(answer) {
-                    return Ok(true);
+                SettleForm::Reject { attempt, errors } => {
+                    if row.attempt_id.as_deref() != Some(attempt) {
+                        return Ok((false, false));
+                    }
+                    if row.state == ActorFormState::Open && &row.errors == errors {
+                        return Ok((true, false));
+                    }
+                    if row.state != ActorFormState::Submitted {
+                        return Ok((false, false));
+                    }
+                    row.state = ActorFormState::Open;
+                    row.errors = errors.clone();
                 }
-                if row.state != ActorFormState::Submitted {
-                    return Ok(false);
+                SettleForm::Close => {
+                    if !matches!(row.state, ActorFormState::Open | ActorFormState::Submitted) {
+                        return Ok((false, false));
+                    }
+                    row.state = ActorFormState::Cancelled;
                 }
-                row.state = ActorFormState::Answered;
-                row.answer = Some(answer.clone());
-                row.errors = vec![];
             }
-            SettleForm::Reject { attempt, errors } => {
-                if row.attempt_id.as_deref() != Some(attempt) {
-                    return Ok(false);
-                }
-                if row.state == ActorFormState::Open && &row.errors == errors {
-                    return Ok(true);
-                }
-                if row.state != ActorFormState::Submitted {
-                    return Ok(false);
-                }
-                row.state = ActorFormState::Open;
-                row.errors = errors.clone();
-            }
-            SettleForm::Close => {
-                if !matches!(row.state, ActorFormState::Open | ActorFormState::Submitted) {
-                    return Ok(false);
-                }
-                row.state = ActorFormState::Cancelled;
-            }
+            save(tx, &identity, &mut row)?;
+            Ok((true, true))
+        })?;
+        if changed {
+            self.signal_actor_form_change();
         }
-        save(&tx, &identity, &mut row)?;
-        let completion = tx.commit();
-        c.complete_transaction(completion)?;
-        self.signal_actor_form_change();
-        Ok(true)
+        Ok(applied)
     }
     fn retain_form_media(&self, form: &FormSpec) -> Result<FormSpec> {
         fn node(store: &Store, n: &mut FormNode) -> Result<()> {
@@ -450,29 +456,27 @@ impl Store {
     }
     pub fn actor_form(&self, origin: &ActorOutputOrigin, mount: &str) -> Result<StoredActorForm> {
         let identity = key(origin, mount)?;
-        let mut c = self.lock()?;
-        let tx = c.transaction()?;
-        load(&tx, &identity)
+        let c = self.lock()?;
+        load(&c, &identity)
     }
 }
 fn interrupt_pending(c: &mut super::StoreConnection<'_>) -> Result<usize> {
-    let tx = c.transaction()?;
-    let rows = {
-        let mut q = tx.prepare("SELECT identity,presentation FROM actor_forms WHERE json_extract(presentation,'$.state') IN ('open','submitted')")?;
-        q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-            .collect::<std::result::Result<Vec<_>, _>>()?
-    };
-    let count = rows.len();
-    for (identity, raw) in rows {
-        let mut row: StoredActorForm = serde_json::from_str(&raw)?;
-        if matches!(row.state, ActorFormState::Open | ActorFormState::Submitted) {
-            row.state = ActorFormState::Interrupted;
-            save(&tx, &identity, &mut row)?;
+    c.write_transaction(|tx| {
+        let rows = {
+            let mut q = tx.prepare("SELECT identity,presentation FROM actor_forms WHERE json_extract(presentation,'$.state') IN ('open','submitted')")?;
+            q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let count = rows.len();
+        for (identity, raw) in rows {
+            let mut row: StoredActorForm = serde_json::from_str(&raw)?;
+            if matches!(row.state, ActorFormState::Open | ActorFormState::Submitted) {
+                row.state = ActorFormState::Interrupted;
+                save(tx, &identity, &mut row)?;
+            }
         }
-    }
-    let completion = tx.commit();
-    c.complete_transaction(completion)?;
-    Ok(count)
+        Ok(count)
+    })
 }
 
 #[cfg(test)]
@@ -1149,3 +1153,7 @@ mod history_model_tests {
         assert_eq!(histories, 800);
     }
 }
+
+#[cfg(test)]
+#[path = "forms/transaction_tests.rs"]
+mod transaction_tests;

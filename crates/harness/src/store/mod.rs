@@ -418,6 +418,21 @@ impl StoreConnection<'_> {
         }
     }
 
+    /// A coherent read snapshot must observe cleanup even when the read refuses.
+    /// Dropping a Transaction cannot report rollback failure to its consumer.
+    pub(crate) fn read_transaction<T, E: From<StoreError>>(
+        &mut self,
+        action: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E> {
+        let tx = self.transaction().map_err(StoreError::from)?;
+        let result = action(&tx);
+        if !tx.is_autocommit() {
+            let completion = tx.rollback();
+            self.complete_transaction(completion)?;
+        }
+        result
+    }
+
     pub(crate) fn complete_transaction(&mut self, completion: rusqlite::Result<()>) -> Result<()> {
         completion.map_err(|error| {
             self.fence();

@@ -551,44 +551,43 @@ impl Store {
         }
         let record: ReplayRecord = serde_json::from_value(value)?;
         let mut connection = self.lock()?;
-        let tx = connection.transaction()?;
-        let instructions = read_item(&tx, &record.issued.instructions)?;
-        let tools = read_item(&tx, &record.issued.tools)?;
-        let request = ResponsesRequest {
-            input: record
-                .issued
-                .input
-                .iter()
-                .map(|hash| read_item(&tx, hash))
-                .collect::<Result<_>>()?,
-            instructions: serde_json::from_value(instructions.0)?,
-            tools: serde_json::from_value(tools.0)?,
-            tools_allowed: record.issued.tools_allowed,
-            model: record.issued.model,
-            pinned_effort: record.issued.pinned_effort,
-            session_id: record.issued.session_id,
-        };
-        if let Some(outputs) = &record.issued.outputs {
-            validate_output_references(&tx, event, &request.input, outputs)?;
-        }
-        let response = ResponsesTurn {
-            response_id: record.response.response_id,
-            items: record
-                .response
-                .items
-                .iter()
-                .map(|hash| read_item(&tx, hash))
-                .collect::<Result<_>>()?,
-            usage: record.response.usage,
-        };
-        let completion = tx.rollback();
-        connection.complete_transaction(completion)?;
-        Ok(RecordedReplayTurn {
-            request: record.request,
-            model_request: request,
-            model_response: response,
-            issued_outputs: record.issued.outputs,
-            replay_event: Some(event),
+        connection.read_transaction(|tx| {
+            let instructions = read_item(tx, &record.issued.instructions)?;
+            let tools = read_item(tx, &record.issued.tools)?;
+            let request = ResponsesRequest {
+                input: record
+                    .issued
+                    .input
+                    .iter()
+                    .map(|hash| read_item(tx, hash))
+                    .collect::<Result<_>>()?,
+                instructions: serde_json::from_value(instructions.0)?,
+                tools: serde_json::from_value(tools.0)?,
+                tools_allowed: record.issued.tools_allowed,
+                model: record.issued.model,
+                pinned_effort: record.issued.pinned_effort,
+                session_id: record.issued.session_id,
+            };
+            if let Some(outputs) = &record.issued.outputs {
+                validate_output_references(tx, event, &request.input, outputs)?;
+            }
+            let response = ResponsesTurn {
+                response_id: record.response.response_id,
+                items: record
+                    .response
+                    .items
+                    .iter()
+                    .map(|hash| read_item(tx, hash))
+                    .collect::<Result<_>>()?,
+                usage: record.response.usage,
+            };
+            Ok(RecordedReplayTurn {
+                request: record.request,
+                model_request: request,
+                model_response: response,
+                issued_outputs: record.issued.outputs,
+                replay_event: Some(event),
+            })
         })
     }
 }
