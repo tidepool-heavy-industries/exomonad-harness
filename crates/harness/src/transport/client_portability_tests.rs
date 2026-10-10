@@ -82,15 +82,32 @@ async fn exchange(
 
 #[tokio::test]
 async fn captured_lite_history_seeds_standard_model_through_production_http_and_store() {
-    captured_history(false).await;
+    captured_history(false, Descendant::None).await;
 }
 
 #[tokio::test]
 async fn coissued_capture_preserves_only_its_authenticated_visible_response_prefix() {
-    captured_history(true).await;
+    captured_history(true, Descendant::None).await;
 }
 
-async fn captured_history(coissued: bool) {
+#[derive(Clone, Copy, PartialEq)]
+enum Descendant {
+    None,
+    Captured,
+    Here,
+}
+
+#[tokio::test]
+async fn recursive_captured_history_retains_original_model_cut_through_three_generations() {
+    captured_history(true, Descendant::Captured).await;
+}
+
+#[tokio::test]
+async fn recursive_here_history_retains_original_model_cut_through_three_generations() {
+    captured_history(true, Descendant::Here).await;
+}
+
+async fn captured_history(coissued: bool, descendant: Descendant) {
     let initial = Item(json!({"type":"message","role":"user","content":"original user input"}));
     let request = ResponsesRequest {
         model: "gpt-6.1-sol".into(),
@@ -237,9 +254,15 @@ async fn captured_history(coissued: bool) {
         session_id: "child-session".into(),
         ..request
     };
-    let answer = vec![Item(
+    let mut answer = vec![Item(
         json!({"type":"message","role":"assistant","content":"child ran"}),
     )];
+    if descendant != Descendant::None {
+        answer.insert(0, Item(json!({"type":"reasoning","summary":[],"content":[],"encrypted_content":"luna-native-continuity"})));
+    }
+    if descendant == Descendant::Captured {
+        answer.push(Item(json!({"type":"custom_tool_call","call_id":"recursive-call","name":"cell","input":"capture recursive helper"})));
+    }
     let (turn, sent) = exchange(&destination, ResponsesProtocol::Standard, &answer).await;
     assert_eq!(turn.items, answer);
     assert_eq!(sent["model"], "gpt-6-luna");
@@ -248,4 +271,182 @@ async fn captured_history(coissued: bool) {
         serde_json::to_value(&destination.input).unwrap()
     );
     assert_eq!(sent["instructions"], "source instructions");
+    if descendant == Descendant::None {
+        return;
+    }
+
+    let child_turn = RequestId("child-response".into());
+    store
+        .write_request(
+            &child_turn,
+            child.head_request.as_ref(),
+            &child.path.0,
+            &turn.items,
+            Default::default(),
+        )
+        .unwrap();
+    store
+        .record_replay_turn(&child_turn, &destination, &turn)
+        .unwrap();
+    assert!(
+        store
+            .advance_agent_head(&child.path, child.head_request.as_ref(), Some(&child_turn))
+            .unwrap()
+    );
+    let grandchild_path = AgentPath("/root/child/grandchild".into());
+    let grandchild = match descendant {
+        Descendant::Captured => {
+            let operation = store
+                .claim(&CallId("recursive-call".into()), &child_turn)
+                .unwrap();
+            let cuts = store
+                .capture_checkpoint_cuts(&operation, &json!({}), Arc::new(()))
+                .unwrap();
+            store
+                .attach_checkpoint_child(
+                    cuts.before_call(),
+                    CheckpointChild {
+                        path: &grandchild_path,
+                        parent: &child.path,
+                        contract: &json!({}),
+                        checkout: &json!({}),
+                        task: None,
+                    },
+                )
+                .unwrap()
+                .0
+        }
+        Descendant::Here => {
+            store
+                .admit_here_agent_with_snapshot(
+                    &grandchild_path,
+                    &child.path,
+                    &RequestId("here-grandchild".into()),
+                    &json!({}),
+                    &child.path.0,
+                    &grandchild_path.0,
+                    "new_task",
+                    &Item(json!({"type":"message","role":"user","content":"grandchild task"})),
+                )
+                .unwrap()
+                .0
+        }
+        Descendant::None => unreachable!(),
+    };
+    let grandchild_head = grandchild.head_request.as_ref().unwrap();
+    let grandchild_identity = store.standalone_identity(grandchild_path);
+    store
+        .initialize_context_model(&grandchild_identity, "gpt-6-luna")
+        .unwrap();
+    let canonical = store.context_history(grandchild_head).unwrap();
+    let state = store
+        .context_request_state(grandchild_head, &grandchild_identity)
+        .unwrap();
+    let visible = serde_json::to_string(&state.history).unwrap();
+    for text in [
+        "original user input",
+        "original visible answer",
+        "original Haskell input",
+        "original completed output",
+        "visible capture companion",
+        "child ran",
+    ] {
+        assert!(visible.contains(text), "recursive history lost {text}");
+    }
+    for excluded in [
+        "synthetic-ciphertext",
+        "capture-ciphertext",
+        "spawn-call",
+        "recursive-call",
+    ] {
+        assert!(
+            !visible.contains(excluded),
+            "recursive history leaked {excluded}"
+        );
+    }
+    assert!(
+        visible.contains("luna-native-continuity"),
+        "same-model native continuity must stay intact"
+    );
+    let retained = store.history_occurrences(grandchild_head).unwrap();
+    let wrong_head = RequestId("detached-recursive-prefix".into());
+    store
+        .write_request(
+            &wrong_head,
+            None,
+            &grandchild.path.0,
+            &[],
+            Default::default(),
+        )
+        .unwrap();
+    {
+        let mut connection = store.lock();
+        let transaction = connection.transaction().unwrap();
+        for (position, occurrence) in retained
+            .iter()
+            .filter(|occurrence| occurrence.origin.request == spawn_head)
+            .enumerate()
+        {
+            crate::store::context::insert_occurrence(
+                &transaction,
+                &wrong_head,
+                position as i64,
+                occurrence,
+            )
+            .unwrap();
+        }
+        transaction.commit().unwrap();
+    }
+    assert!(matches!(
+        store.context_request_state(&wrong_head, &grandchild_identity),
+        Err(crate::store::StoreError::Context(
+            crate::context::ContextError::OpaqueModel
+        ))
+    ));
+    store
+        .append_items(
+            &spawn_head,
+            &[Item(
+                json!({"type":"message","role":"assistant","content":"later root arrival"}),
+            )],
+        )
+        .unwrap();
+    store.append_items(&child_turn, &[Item(json!({"type":"message","role":"assistant","content":"later child arrival"})), Item(json!({"type":"custom_tool_call","call_id":"late-child-call","name":"cell","input":"later pending child call"}))]).unwrap();
+    store
+        .claim(&CallId("late-child-call".into()), &child_turn)
+        .unwrap();
+    assert_eq!(store.context_history(grandchild_head).unwrap(), canonical);
+    assert!(store.pending_at(grandchild_head).unwrap().is_empty());
+    assert!(
+        store
+            .claims_on_branch_lineage(grandchild_head, &grandchild.path.0)
+            .unwrap()
+            .iter()
+            .all(|claim| claim.operation.call.0 != "late-child-call")
+    );
+    let repeated = store
+        .context_request_state(grandchild_head, &grandchild_identity)
+        .unwrap();
+    assert_eq!(state.history, repeated.history);
+    let request = ResponsesRequest {
+        model: "gpt-6-luna".into(),
+        input: repeated
+            .history
+            .into_iter()
+            .map(|(_, _, item)| item)
+            .collect(),
+        session_id: "grandchild-session".into(),
+        ..destination
+    };
+    let grandchild_answer = vec![Item(
+        json!({"type":"message","role":"assistant","content":"grandchild ran"}),
+    )];
+    let (completed, sent) =
+        exchange(&request, ResponsesProtocol::Standard, &grandchild_answer).await;
+    assert_eq!(completed.items, grandchild_answer);
+    assert_eq!(sent["input"], serde_json::to_value(&request.input).unwrap());
+    assert_eq!(
+        store.items(&head).unwrap()[..source_items.len()],
+        source_items
+    );
 }

@@ -2111,28 +2111,44 @@ fn receipt(c: &Connection, operation: &OperationId) -> Result<Option<ReceiptReco
     }
 }
 
-/// Deferred children inherit a bounded immutable cut, never the continuing
-/// request to which future arrivals can still be appended.
+/// Frozen snapshots retain selected source ancestry without reading later
+/// arrivals or inheriting claims beyond the copied cut.
+pub(crate) fn insert_snapshot_request(
+    tx: &Transaction<'_>,
+    snapshot: &RequestId,
+    source: Option<&RequestId>,
+    branch: &str,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO requests(id,parent_id,branch,created_at) VALUES(?1,?2,?3,?4)",
+        params![
+            snapshot.0,
+            source.map(|head| head.0.as_str()),
+            branch,
+            utc_millis()
+        ],
+    )?;
+    // The selected source supplies proof ancestry; history and pending claims
+    // stop at the copied snapshot, independently of future source arrivals.
+    tx.execute(
+        "INSERT INTO session_state(session_id,state,updated_at) VALUES(?1,'true',?2)",
+        params![format!("harness:compaction:{}", snapshot.0), utc_millis()],
+    )?;
+    Ok(())
+}
+
+/// Deferred children inherit a bounded immutable cut of committed context.
 fn freeze_committed_context(
     tx: &Transaction<'_>,
     head: &RequestId,
     store_id: &str,
 ) -> Result<RequestId> {
     let snapshot = RequestId(uuid::Uuid::new_v4().to_string());
-    tx.execute(
-        "INSERT INTO requests(id,parent_id,branch,created_at) VALUES(?1,?2,?3,?4)",
-        params![
-            snapshot.0,
-            head.0,
-            format!("harness:context-release:{}", snapshot.0),
-            utc_millis()
-        ],
-    )?;
-    // Retain checkpoint proof ancestry while the ordinary history reader stops
-    // at this immutable copied prefix, independently of future parent arrivals.
-    tx.execute(
-        "INSERT INTO session_state(session_id,state,updated_at) VALUES(?1,'true',?2)",
-        params![format!("harness:compaction:{}", snapshot.0), utc_millis()],
+    insert_snapshot_request(
+        tx,
+        &snapshot,
+        Some(head),
+        &format!("harness:context-release:{}", snapshot.0),
     )?;
     let all = history(tx, head, true)?;
     validate_canonical_history(tx, &all)?;

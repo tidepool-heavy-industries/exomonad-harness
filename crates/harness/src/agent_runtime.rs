@@ -677,8 +677,8 @@ mod tests {
         assert_ne!(here_head, root_head);
         assert_eq!(
             store.request(&here_head).unwrap().unwrap().parent,
-            None,
-            "Here snapshots own a flattened request with no parent edge"
+            Some(root_head.clone()),
+            "Here snapshots retain their selected source as bounded proof ancestry"
         );
         assert_eq!(here.fork_source["source_head_request"], root_head.0);
         assert_eq!(here.fork_source["kind"], "here");
@@ -758,7 +758,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn here_fork_commits_filtered_flattened_snapshot_and_task_without_request_edge() {
+    async fn here_fork_commits_filtered_snapshot_and_task_with_bounded_source_ancestry() {
         let (service, store, root_head) = service().await;
         store
             .append_items(
@@ -820,7 +820,7 @@ mod tests {
         let child = store.agent(&child_path).unwrap().unwrap();
         let child_head = child.head_request.clone().unwrap();
         let child_request = store.request(&child_head).unwrap().unwrap();
-        assert_eq!(child_request.parent, None);
+        assert_eq!(child_request.parent, Some(committed_boundary.clone()));
         assert_eq!(child_request.branch, child_path.0);
         assert_eq!(
             child.fork_source["source_head_request"],
@@ -835,7 +835,7 @@ mod tests {
         assert_eq!(
             store.pending_at(&child_head).unwrap().len(),
             1,
-            "the child snapshot is a root request; its claim is attached directly"
+            "the frozen child inherits only its directly copied pending claim"
         );
         let history = store.items(&child_head).unwrap();
         assert_eq!(

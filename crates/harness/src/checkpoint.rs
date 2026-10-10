@@ -436,9 +436,11 @@ impl Store {
             .ok_or_else(|| StoreError::MissingCheckpointEffort(source_request.0.clone()))?;
         let id = uuid::Uuid::new_v4().to_string();
         let snapshot_request = RequestId(uuid::Uuid::new_v4().to_string());
-        tx.execute(
-            "INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros) VALUES (?1,NULL,?2,?3,0,0,0)",
-            params![snapshot_request.0, format!("harness:checkpoint:{id}"), utc_millis()],
+        context::insert_snapshot_request(
+            tx,
+            &snapshot_request,
+            Some(source_request),
+            &format!("harness:checkpoint:{id}"),
         )?;
         for (position, occurrence) in prefix
             .iter()

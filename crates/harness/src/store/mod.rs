@@ -509,8 +509,8 @@ impl Store {
     }
     /// Atomically fork a flattened `here` snapshot, admit its child, and put
     /// the initial NEW_TASK envelope in the child's mailbox. The snapshot
-    /// request deliberately has no request-parent edge: `source_head` is
-    /// retained only in the agent's fork metadata.
+    /// request retains its selected source as proof ancestry, with a history
+    /// fence keeping the copied contents independent of later source arrivals.
     #[allow(clippy::too_many_arguments)]
     pub fn admit_here_agent_with_snapshot(
         &self,
@@ -750,10 +750,7 @@ impl Store {
             "invocation_call_id":invocation_call_id
         });
 
-        tx.execute(
-            "INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros) VALUES (?1,NULL,?2,?3,0,0,0)",
-            params![snapshot_request.0, path.0, utc_millis()],
-        )?;
+        context::insert_snapshot_request(&tx, snapshot_request, source_head.as_ref(), &path.0)?;
         for (position, occurrence) in snapshot.iter().enumerate() {
             context::insert_occurrence(&tx, snapshot_request, position as i64, occurrence)?;
         }

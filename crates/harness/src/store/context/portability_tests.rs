@@ -319,6 +319,46 @@ fn interleaved_unrelated_calls_arrivals_and_settings_remain_exact() {
 }
 
 #[test]
+fn empty_here_child_without_source_remains_a_valid_frozen_context() {
+    let store = Store::memory().unwrap();
+    let parent = AgentPath("/root".into());
+    store
+        .admit_agent(&parent, None, None, &json!({}), &json!({}))
+        .unwrap();
+    let child = AgentPath("/root/child".into());
+    let head = RequestId("empty-here-snapshot".into());
+    let task = Item(json!({"type":"message","role":"user","content":"fresh child task"}));
+    store
+        .admit_here_agent_with_snapshot(
+            &child,
+            &parent,
+            &head,
+            &json!({}),
+            &parent.0,
+            &child.0,
+            "new_task",
+            &task,
+        )
+        .unwrap();
+    assert_eq!(store.request(&head).unwrap().unwrap().parent, None);
+    let identity = store.standalone_identity(child.clone());
+    store
+        .initialize_context_model(&identity, "gpt-6-luna")
+        .unwrap();
+    let context = store.context_request_state(&head, &identity).unwrap();
+    assert!(
+        context
+            .history
+            .iter()
+            .all(|(_, _, item)| item.is_configuration_update())
+    );
+    assert!(store.pending_at(&head).unwrap().is_empty());
+    let inbox = store.unread(&child.0).unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(store.get_item(&inbox[0].item_hash).unwrap(), Some(task));
+}
+
+#[test]
 fn cross_model_frozen_child_projects_without_losing_source_occurrences_or_claims() {
     let (store, _, operation, snapshot) = setup(vec![]);
     let receipt = switch(&store, &snapshot).unwrap();
