@@ -3444,7 +3444,7 @@ mod tests {
                     (2, issued[2].clone()),
                 ],
                 &issued.into_iter().map(Some).collect::<Vec<_>>(),
-                &[first_op.clone(), second_op.clone(), spawn_op],
+                &[first_op.clone(), second_op.clone(), spawn_op.clone()],
                 None,
                 None,
             )
@@ -3479,10 +3479,19 @@ mod tests {
             )
             .unwrap();
         let child_claims = store.claims_on(&snapshot).unwrap();
-        assert_eq!(child_claims.len(), 1);
-        assert_eq!(child_claims[0].operation, first_op);
-        assert_eq!(child_claims[0].state, ClaimState::Pending);
-        assert_eq!(child_claims[0].request, snapshot);
+        assert_eq!(child_claims.len(), 2);
+        assert_eq!(
+            child_claims
+                .iter()
+                .map(|claim| claim.operation.clone())
+                .collect::<HashSet<_>>(),
+            HashSet::from([first_op, spawn_op])
+        );
+        assert!(
+            child_claims
+                .iter()
+                .all(|claim| { claim.state == ClaimState::Pending && claim.request == snapshot })
+        );
         assert!(
             child_claims
                 .iter()
