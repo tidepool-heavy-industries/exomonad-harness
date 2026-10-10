@@ -153,7 +153,7 @@ pub(crate) fn history(
     FROM lineage l JOIN request_items ri ON ri.request_id=l.id JOIN items i ON i.hash=ri.item_hash ORDER BY l.depth DESC,ri.position", params![head.0, boundaries])
 }
 
-pub(super) fn request_occurrences(c: &Connection, request: &RequestId) -> Result<Vec<Occurrence>> {
+pub(crate) fn request_occurrences(c: &Connection, request: &RequestId) -> Result<Vec<Occurrence>> {
     query_occurrences(c, "SELECT ri.request_id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note,ri.context_overlays,ri.output_operation
         FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 ORDER BY ri.position", [&request.0])
 }
@@ -796,6 +796,7 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
 /// references, claims and receipts continue to refer to the original bytes.
 fn portable_request(
     c: &Connection,
+    consumer: &RequestId,
     all: &[Occurrence],
     model: Option<&str>,
     completing: Option<&OperationId>,
@@ -860,8 +861,37 @@ fn portable_request(
         if envelope.kind == super::replay::ResponseEnvelopeKind::ServerCompaction {
             return Err(ContextError::OpaqueModel.into());
         }
-        let mut members = Vec::with_capacity(envelope.origins.len());
-        for origin in &envelope.origins {
+        let complete = envelope
+            .origins
+            .iter()
+            .all(|origin| positions.contains_key(origin));
+        let prefix;
+        let origins = if complete {
+            envelope.origins.as_slice()
+        } else {
+            let cut = envelope
+                .origins
+                .iter()
+                .position(|origin| !positions.contains_key(origin))
+                .unwrap();
+            if cut == 0
+                || envelope.origins[cut..]
+                    .iter()
+                    .any(|origin| positions.contains_key(origin))
+            {
+                return Err(ContextError::OpaqueModel.into());
+            }
+            prefix = crate::checkpoint::before_call_response_prefix(
+                c,
+                consumer,
+                &envelope.origins,
+                &envelope.origins[..cut],
+            )?
+            .ok_or(ContextError::OpaqueModel)?;
+            &prefix
+        };
+        let mut members = Vec::with_capacity(origins.len());
+        for origin in origins {
             let Some(indices) = positions.get(origin) else {
                 return Err(ContextError::OpaqueModel.into());
             };
@@ -924,7 +954,23 @@ fn portable_request(
             .iter()
             .map(|index| all[*index].clone())
             .collect::<Vec<_>>();
-        notes.insert(members[0], portability_note::render(&items)?);
+        match portability_note::render(&items) {
+            Ok(note) => {
+                notes.insert(members[0], note);
+            }
+            Err(StoreError::Context(ContextError::Portability(
+                crate::context::ContextPortabilityRejection::NoVisibleContent,
+            ))) if !complete
+                && items
+                    .iter()
+                    .all(|occurrence| occurrence.item.0["type"] == "reasoning") =>
+            {
+                // The authenticated cut excludes its pending invocation.
+                // Validated reasoning metadata alone contributes no visible
+                // input, while its canonical Store occurrences stay exact.
+            }
+            Err(error) => return Err(error),
+        }
     }
     let mut projected = Vec::with_capacity(all.len());
     for (index, occurrence) in all.iter().enumerate() {
@@ -994,7 +1040,7 @@ pub(crate) fn insert_occurrence(
     Ok(())
 }
 
-pub(super) fn original_call(c: &Connection, operation: &OperationId) -> Result<Origin> {
+pub(crate) fn original_call(c: &Connection, operation: &OperationId) -> Result<Origin> {
     super::validation::invocation_item(c, &operation.request, &operation.call)?
         .ok_or(ContextError::MissingCall)?;
     let(position,hash):(i64,String)=c.query_row("SELECT ri.position,ri.item_hash FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 AND json_extract(i.json,'$.call_id')=?2 AND json_extract(i.json,'$.type') IN ('function_call','custom_tool_call')",params![operation.request.0,operation.call.0],|r|Ok((r.get(0)?,r.get(1)?)))?;
@@ -1028,7 +1074,7 @@ fn context_request_state_tx(
     validate_canonical_history(tx, &canonical)?;
     let projected = {
         let _projection = tracing::debug_span!(target: "harness::runtime_cost", "portable_history_projection", input_items = canonical.len()).entered();
-        portable_request(tx, &canonical, current.model.as_deref(), None)?
+        portable_request(tx, head, &canonical, current.model.as_deref(), None)?
     };
     drop(canonical);
     let mut history = Vec::with_capacity(projected.len());
@@ -1840,7 +1886,13 @@ impl Store {
             note: false,
             overlays: Vec::new(),
         });
-        portable_request(&tx, &prospective, selected_model, Some(&snapshot.operation))?;
+        portable_request(
+            &tx,
+            &snapshot.head,
+            &prospective,
+            selected_model,
+            Some(&snapshot.operation),
+        )?;
         if cancelled() {
             return Err(ContextError::Cancelled.into());
         }
@@ -2068,12 +2120,19 @@ fn freeze_committed_context(
 ) -> Result<RequestId> {
     let snapshot = RequestId(uuid::Uuid::new_v4().to_string());
     tx.execute(
-        "INSERT INTO requests(id,parent_id,branch,created_at) VALUES(?1,NULL,?2,?3)",
+        "INSERT INTO requests(id,parent_id,branch,created_at) VALUES(?1,?2,?3,?4)",
         params![
             snapshot.0,
+            head.0,
             format!("harness:context-release:{}", snapshot.0),
             utc_millis()
         ],
+    )?;
+    // Retain checkpoint proof ancestry while the ordinary history reader stops
+    // at this immutable copied prefix, independently of future parent arrivals.
+    tx.execute(
+        "INSERT INTO session_state(session_id,state,updated_at) VALUES(?1,'true',?2)",
+        params![format!("harness:compaction:{}", snapshot.0), utc_millis()],
     )?;
     let all = history(tx, head, true)?;
     validate_canonical_history(tx, &all)?;

@@ -1213,7 +1213,7 @@ impl Store {
     }
     pub fn pending_at(&self, request: &RequestId) -> Result<Vec<PendingCall>> {
         let c = self.lock();
-        let mut q=c.prepare("WITH RECURSIVE lineage(id,parent_id) AS (SELECT id,parent_id FROM requests WHERE id=?1 UNION ALL SELECT r.id,r.parent_id FROM requests r JOIN lineage l ON r.id=l.parent_id) SELECT c.origin,c.origin_request_id,c.call_id,c.request_id FROM claims c JOIN lineage l ON l.id=c.request_id WHERE c.state='pending' ORDER BY c.call_id,c.request_id")?;
+        let mut q=c.prepare("WITH RECURSIVE lineage(id,parent_id) AS (SELECT id,parent_id FROM requests WHERE id=?1 UNION ALL SELECT r.id,r.parent_id FROM requests r JOIN lineage l ON r.id=l.parent_id WHERE NOT EXISTS(SELECT 1 FROM session_state s WHERE s.session_id='harness:compaction:' || l.id)) SELECT c.origin,c.origin_request_id,c.call_id,c.request_id FROM claims c JOIN lineage l ON l.id=c.request_id WHERE c.state='pending' ORDER BY c.call_id,c.request_id")?;
         q.query_map([&request.0], |r| {
             let raw: String = r.get(0)?;
             let origin = serde_json::from_str(&raw).map_err(|e| {

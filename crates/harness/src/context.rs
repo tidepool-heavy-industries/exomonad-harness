@@ -203,6 +203,24 @@ pub struct ContextRequestState {
     pub generation: u64,
 }
 
+/// Structural portability refusals contain item/field names, never item values.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum ContextPortabilityRejection {
+    #[error("response group has no visible content")]
+    NoVisibleContent,
+    #[error("unsupported response item kind")]
+    UnsupportedItem,
+    #[error("unsupported {item} field: {field}")]
+    UnsupportedField { item: &'static str, field: String },
+    #[error("invalid {item} field: {field}")]
+    InvalidField {
+        item: &'static str,
+        field: &'static str,
+    },
+    #[error("encrypted payload outside reasoning continuity")]
+    EncryptedPayload,
+}
+
 #[derive(Debug, Error)]
 pub enum ContextError {
     #[error("context changed since this synchronous invocation began")]
@@ -225,6 +243,8 @@ pub enum ContextError {
     Cancelled,
     #[error("context state has an unsupported format")]
     UnsupportedState,
+    #[error("context portability refused: {0}")]
+    Portability(ContextPortabilityRejection),
     #[error("context model must be a nonempty resolved model name")]
     InvalidModel,
 }

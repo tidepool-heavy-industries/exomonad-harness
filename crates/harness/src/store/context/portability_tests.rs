@@ -671,3 +671,493 @@ fn whole_native_replay_preserves_later_async_output_with_reused_historical_call_
                 .is_some_and(|text| text.contains("identical result")))
     );
 }
+
+struct CutFixture {
+    store: Store,
+    source: RequestId,
+    cuts: crate::checkpoint::CheckpointCuts<()>,
+    child: crate::store::Agent,
+    identity: ConversationIdentity,
+}
+
+fn cut_fixture(earlier_pending: bool) -> CutFixture {
+    cut_fixture_with_reasoning(earlier_pending, true, reasoning())
+}
+
+fn cut_fixture_with_reasoning(earlier_pending: bool, visible: bool, reasoning: Item) -> CutFixture {
+    use crate::checkpoint::CheckpointChild;
+    let store = Store::memory().unwrap();
+    let initial = RequestId("cut-input".into());
+    let source = RequestId("cut-response".into());
+    store
+        .write_request(
+            &initial,
+            None,
+            "/root",
+            &[Item(
+                json!({"type":"message","role":"user","content":"earlier useful conversation"}),
+            )],
+            Usage::default(),
+        )
+        .unwrap();
+    store.set_effort(&initial, Effort::Low).unwrap();
+    let mut items = vec![reasoning];
+    if visible {
+        items.push(Item(
+            json!({"type":"message","role":"assistant","content":"visible prefix"}),
+        ));
+    }
+    if earlier_pending {
+        items.push(call("earlier"));
+    }
+    items.extend([
+        call("capture"),
+        Item(json!({"type":"message","role":"assistant","content":"excluded tail"})),
+    ]);
+    store
+        .write_request(&source, Some(&initial), "/root", &items, Usage::default())
+        .unwrap();
+    record(&store, &source, items, "model-a");
+    store.lock().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)", [&source.0]).unwrap();
+    if earlier_pending {
+        store.claim(&CallId("earlier".into()), &source).unwrap();
+    }
+    let operation = store.claim(&CallId("capture".into()), &source).unwrap();
+    let cuts = store
+        .capture_checkpoint_cuts(&operation, &json!({}), std::sync::Arc::new(()))
+        .unwrap();
+    let parent = AgentPath("/root".into());
+    let path = AgentPath("/root/child".into());
+    let (child, _) = store
+        .attach_checkpoint_child(
+            cuts.before_call(),
+            CheckpointChild {
+                path: &path,
+                parent: &parent,
+                contract: &json!({}),
+                checkout: &json!({}),
+                task: None,
+            },
+        )
+        .unwrap();
+    let identity = store.standalone_identity(path);
+    store
+        .initialize_context_model(&identity, "model-b")
+        .unwrap();
+    CutFixture {
+        store,
+        source,
+        cuts,
+        child,
+        identity,
+    }
+}
+
+#[test]
+fn authenticated_cut_survives_commit_freeze_and_deferred_child_without_later_arrivals() {
+    use crate::checkpoint::CheckpointChild;
+    let fixture = cut_fixture(false);
+    let CutFixture {
+        store,
+        source,
+        child,
+        identity,
+        ..
+    } = fixture;
+    let head = RequestId("child-turn".into());
+    let items = vec![call("child-capture")];
+    store
+        .write_request(
+            &head,
+            child.head_request.as_ref(),
+            &child.path.0,
+            &items,
+            Usage::default(),
+        )
+        .unwrap();
+    record(&store, &head, items, "model-b");
+    let operation = store.claim(&CallId("child-capture".into()), &head).unwrap();
+    let cuts = store
+        .capture_checkpoint_cuts(&operation, &json!({}), std::sync::Arc::new(()))
+        .unwrap();
+    let snapshot = store.begin_context(&operation, &head).unwrap();
+    let receipt = store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &ContextDraft {
+                document: snapshot.document.clone(),
+                next_model: None,
+                next_effort: None,
+            },
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    let committed = store
+        .context_request_state(&receipt.head, &identity)
+        .unwrap();
+    assert!(
+        serde_json::to_string(&committed.history)
+            .unwrap()
+            .contains("visible prefix")
+    );
+    store
+        .append_items(
+            &head,
+            &[
+                Item(json!({"type":"message","role":"user","content":"later parent arrival"})),
+                call("later-parent-call"),
+            ],
+        )
+        .unwrap();
+    let later = store
+        .claim(&CallId("later-parent-call".into()), &head)
+        .unwrap();
+    store
+        .append_items(
+            &source,
+            &[Item(
+                json!({"type":"message","role":"assistant","content":"later issuer arrival"}),
+            )],
+        )
+        .unwrap();
+    let path = AgentPath("/root/child/grandchild".into());
+    let (grandchild, _) = store
+        .attach_checkpoint_child(
+            cuts.deferred(),
+            CheckpointChild {
+                path: &path,
+                parent: &child.path,
+                contract: &json!({}),
+                checkout: &json!({}),
+                task: None,
+            },
+        )
+        .unwrap();
+    let grandchild_identity = store.standalone_identity(path);
+    store
+        .initialize_context_model(&grandchild_identity, "model-b")
+        .unwrap();
+    let projected = store
+        .context_request_state(
+            grandchild.head_request.as_ref().unwrap(),
+            &grandchild_identity,
+        )
+        .unwrap();
+    let rendered = serde_json::to_string(&projected.history).unwrap();
+    assert!(rendered.contains("visible prefix"));
+    assert!(rendered.contains("earlier useful conversation"));
+    assert!(rendered.contains("real successful result"));
+    for excluded in [
+        "excluded tail",
+        "later parent arrival",
+        "later issuer arrival",
+        "later-parent-call",
+        "model-a-secret",
+    ] {
+        assert!(!rendered.contains(excluded), "leaked {excluded}");
+    }
+    assert!(
+        !store
+            .pending_at(grandchild.head_request.as_ref().unwrap())
+            .unwrap()
+            .iter()
+            .any(|pending| pending.operation == later)
+    );
+    let claims = store.claims_for_operation(&later).unwrap();
+    assert!(claims.iter().all(|claim| claim.request == head));
+}
+
+#[test]
+fn partial_envelope_needs_selected_checkpoint_ancestry_and_exact_prefix_origins() {
+    let fixture = cut_fixture(false);
+    let CutFixture {
+        store,
+        source,
+        cuts,
+        child,
+        identity,
+    } = fixture;
+    let good = store
+        .context_request_state(child.head_request.as_ref().unwrap(), &identity)
+        .unwrap();
+    assert!(
+        serde_json::to_string(&good.history)
+            .unwrap()
+            .contains("visible prefix")
+    );
+    let copied = RequestId("detached-prefix".into());
+    store
+        .write_request(&copied, None, &child.path.0, &[], Usage::default())
+        .unwrap();
+    let originals =
+        request_occurrences(&store.lock(), cuts.before_call().snapshot_request()).unwrap();
+    {
+        let mut connection = store.lock();
+        let tx = connection.transaction().unwrap();
+        for (position, occurrence) in originals.iter().enumerate() {
+            insert_occurrence(&tx, &copied, position as i64, occurrence).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    assert!(matches!(
+        store.context_request_state(&copied, &identity),
+        Err(StoreError::Context(ContextError::OpaqueModel))
+    ));
+    // The real cut is present elsewhere in Store, but not on this lineage.
+    let equal = RequestId("equal-byte-prefix".into());
+    store
+        .write_request(
+            &equal,
+            None,
+            &child.path.0,
+            &originals.iter().map(|i| i.item.clone()).collect::<Vec<_>>(),
+            Usage::default(),
+        )
+        .unwrap();
+    assert!(matches!(
+        store.context_request_state(&equal, &identity),
+        Err(StoreError::Context(ContextError::OpaqueModel))
+    ));
+    // A checkpoint on the lineage cannot excuse a hole or reintroduced suffix.
+    let hole = RequestId("cut-prefix-hole".into());
+    store
+        .write_request(
+            &hole,
+            child.head_request.as_ref(),
+            &child.path.0,
+            &[],
+            Usage::default(),
+        )
+        .unwrap();
+    {
+        let mut connection = store.lock();
+        let tx = connection.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO session_state(session_id,state,updated_at) VALUES(?1,'true',0)",
+            [format!("harness:compaction:{}", hole.0)],
+        )
+        .unwrap();
+        let selected = originals
+            .iter()
+            .filter(|i| i.item.0["type"] != "message" || i.item.0["role"] == "user");
+        for (position, occurrence) in selected.enumerate() {
+            insert_occurrence(&tx, &hole, position as i64, occurrence).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    assert!(matches!(
+        store.context_request_state(&hole, &identity),
+        Err(StoreError::Context(ContextError::OpaqueModel))
+    ));
+    let suffix = request_occurrences(&store.lock(), &source)
+        .unwrap()
+        .into_iter()
+        .find(|i| i.item.0["content"] == "excluded tail")
+        .unwrap();
+    {
+        let mut connection = store.lock();
+        let tx = connection.transaction().unwrap();
+        insert_occurrence(&tx, child.head_request.as_ref().unwrap(), 99, &suffix).unwrap();
+        tx.commit().unwrap();
+    }
+    assert!(matches!(
+        store.context_request_state(child.head_request.as_ref().unwrap(), &identity),
+        Err(StoreError::Context(ContextError::OpaqueModel))
+    ));
+}
+
+#[test]
+fn captured_prefix_keeps_prior_pending_call_and_deferred_boundary_refusals() {
+    use crate::checkpoint::CheckpointChild;
+    let fixture = cut_fixture(true);
+    assert!(matches!(
+        fixture.store.context_request_state(
+            fixture.child.head_request.as_ref().unwrap(),
+            &fixture.identity
+        ),
+        Err(StoreError::Context(ContextError::OpaqueModel))
+    ));
+    let fixture = cut_fixture(false);
+    let parent = AgentPath("/root".into());
+    let path = AgentPath("/root/deferred".into());
+    let (child, _) = fixture
+        .store
+        .attach_checkpoint_child(
+            fixture.cuts.deferred(),
+            CheckpointChild {
+                path: &path,
+                parent: &parent,
+                contract: &json!({}),
+                checkout: &json!({}),
+                task: None,
+            },
+        )
+        .unwrap();
+    let identity = fixture.store.standalone_identity(path);
+    fixture
+        .store
+        .initialize_context_model(&identity, "model-b")
+        .unwrap();
+    assert!(matches!(
+        fixture
+            .store
+            .context_request_state(child.head_request.as_ref().unwrap(), &identity),
+        Err(StoreError::Context(ContextError::OpaqueModel))
+    ));
+}
+
+#[test]
+fn authenticated_metadata_only_cut_is_omitted_but_full_or_malformed_groups_refuse() {
+    for content in [
+        json!([]),
+        json!(null),
+        json!([{"type":"reasoning_text","text":"auxiliary hidden content"}]),
+    ] {
+        let item = Item(
+            json!({"type":"reasoning","summary":[],"content":content,"encrypted_content":"synthetic continuity"}),
+        );
+        let fixture = cut_fixture_with_reasoning(false, false, item);
+        let state = fixture
+            .store
+            .context_request_state(
+                fixture.child.head_request.as_ref().unwrap(),
+                &fixture.identity,
+            )
+            .unwrap();
+        let visible = serde_json::to_string(&state.history).unwrap();
+        assert!(visible.contains("earlier useful conversation"));
+        assert!(!visible.contains("synthetic continuity"));
+        assert!(!visible.contains("auxiliary hidden content"));
+        assert!(
+            !state
+                .history
+                .iter()
+                .any(|(_, _, item)| item.0["type"] == "reasoning")
+        );
+        assert!(
+            fixture
+                .store
+                .context_history(fixture.child.head_request.as_ref().unwrap())
+                .unwrap()
+                .iter()
+                .any(|(_, _, item)| item.0["type"] == "reasoning")
+        );
+    }
+    for item in [
+        Item(
+            json!({"type":"reasoning","summary":[],"unknown_provider_field":"must remain refused"}),
+        ),
+        Item(
+            json!({"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":7}]}),
+        ),
+        Item(json!({"type":"reasoning","summary":[],"encrypted_content":7})),
+    ] {
+        let fixture = cut_fixture_with_reasoning(false, false, item);
+        assert!(matches!(
+            fixture.store.context_request_state(
+                fixture.child.head_request.as_ref().unwrap(),
+                &fixture.identity
+            ),
+            Err(StoreError::Context(ContextError::Portability(_)))
+        ));
+    }
+    let store = Store::memory().unwrap();
+    let head = RequestId("full-empty-response".into());
+    let items = vec![Item(
+        json!({"type":"reasoning","summary":[],"content":[],"encrypted_content":"continuity"}),
+    )];
+    store
+        .write_request(&head, None, "/root", &items, Usage::default())
+        .unwrap();
+    record(&store, &head, items, "model-a");
+    let identity = store.standalone_identity(AgentPath("/root".into()));
+    store
+        .initialize_context_model(&identity, "model-b")
+        .unwrap();
+    assert!(matches!(
+        store.context_request_state(&head, &identity),
+        Err(StoreError::Context(ContextError::Portability(
+            crate::context::ContextPortabilityRejection::NoVisibleContent
+        )))
+    ));
+}
+
+#[test]
+fn genuine_saved_reference_from_unrelated_checkpoint_cannot_authorize_model_switch() {
+    let fixture = cut_fixture(false);
+    let store = &fixture.store;
+    let foreign = store
+        .read_context(fixture.child.head_request.as_ref().unwrap())
+        .unwrap();
+    let foreign_native = foreign
+        .blocks
+        .into_iter()
+        .filter(|block| matches!(block, ContextBlock::Native { texts, .. } if texts.iter().any(|text| text.text == "visible prefix")))
+        .collect::<Vec<_>>();
+    assert!(!foreign_native.is_empty());
+    let head = RequestId("independent-consumer".into());
+    store
+        .write_request(&head, None, "/other", &[call("edit")], Usage::default())
+        .unwrap();
+    let retained = store
+        .history_occurrences(fixture.child.head_request.as_ref().unwrap())
+        .unwrap();
+    {
+        let connection = store.lock();
+        assert!(
+            portable_request(
+                &connection,
+                fixture.child.head_request.as_ref().unwrap(),
+                &retained,
+                Some("model-b"),
+                None
+            )
+            .is_ok()
+        );
+        // Genuine retained occurrences carry the checkpoint's physical rows,
+        // but only the actual consuming head may select its issued authority.
+        assert!(matches!(
+            portable_request(&connection, &head, &retained, Some("model-b"), None),
+            Err(StoreError::Context(ContextError::OpaqueModel))
+        ));
+    }
+    let operation = store.claim(&CallId("edit".into()), &head).unwrap();
+    store
+        .initialize_context_model(&operation.origin, "model-a")
+        .unwrap();
+    let snapshot = store.begin_context(&operation, &head).unwrap();
+    let mut document = snapshot.document.clone();
+    document.blocks.extend(foreign_native);
+    let refusal = store.commit_context(ContextCommit {
+        snapshot: &snapshot,
+        draft: &ContextDraft {
+            document,
+            next_model: Some("model-b".into()),
+            next_effort: None,
+        },
+        output: &output(),
+        pending: &[],
+    });
+    // A genuine reference is still unavailable outside its owning lineage;
+    // refusal precedes projection, terminal publication and model selection.
+    assert!(matches!(
+        refusal,
+        Err(StoreError::Context(ContextError::InvalidReference))
+    ));
+    assert!(store.context_receipt(&operation).unwrap().is_none());
+    assert!(
+        store
+            .claims_for_operation(&operation)
+            .unwrap()
+            .iter()
+            .all(|claim| claim.state == ClaimState::Pending)
+    );
+    assert_eq!(
+        state(&store.lock(), &operation.origin)
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("model-a")
+    );
+}

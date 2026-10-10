@@ -9,7 +9,7 @@ use crate::{
     model::{AgentPath, CallId, ConversationIdentity, OperationId, RequestId},
     store::{Agent, AgentState, Result, Store, StoreError, context, utc_millis},
 };
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc};
 
@@ -59,6 +59,61 @@ impl CheckpointMetadata {
         }
         Ok(value)
     }
+}
+
+/// Authenticate a partial response only through a checkpoint on the consuming
+/// ancestry. Replay continues to own the complete original response envelope.
+pub(crate) fn before_call_response_prefix(
+    c: &Connection,
+    consumer: &RequestId,
+    origins: &[crate::context::Origin],
+    selected: &[crate::context::Origin],
+) -> Result<Option<Vec<crate::context::Origin>>> {
+    let mut query = c.prepare(
+        "WITH RECURSIVE ancestry(id,parent_id) AS (
+             SELECT id,parent_id FROM requests WHERE id=?1
+             UNION SELECT r.id,r.parent_id FROM requests r JOIN ancestry a ON r.id=a.parent_id
+         ) SELECT k.snapshot_request,k.boundary_call,k.metadata FROM checkpoints k
+           JOIN ancestry a ON a.id=k.snapshot_request",
+    )?;
+    let rows = query
+        .query_map([&consumer.0], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let membership = origins.iter().collect::<std::collections::HashSet<_>>();
+    for (snapshot, boundary_call, raw) in rows {
+        let metadata = CheckpointMetadata::decode(&raw)?;
+        if metadata.cut != CheckpointCut::BeforeCall {
+            continue;
+        }
+        let operation = metadata
+            .operation
+            .ok_or(StoreError::InvalidCheckpointMetadata)?;
+        if operation.call.0 != boundary_call {
+            return Err(StoreError::InvalidCheckpointMetadata);
+        }
+        let boundary = context::original_call(c, &operation)?;
+        let Some(cut) = origins.iter().position(|origin| origin == &boundary) else {
+            continue;
+        };
+        if cut == 0 || selected != &origins[..cut] {
+            continue;
+        }
+        let retained = context::request_occurrences(c, &RequestId(snapshot))?
+            .into_iter()
+            .filter(|occurrence| membership.contains(&occurrence.origin))
+            .map(|occurrence| occurrence.origin)
+            .collect::<Vec<_>>();
+        if retained == origins[..cut] {
+            return Ok(Some(retained));
+        }
+    }
+    Ok(None)
 }
 
 /// Two capabilities captured atomically at one exact pending operation.

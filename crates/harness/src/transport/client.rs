@@ -15,6 +15,10 @@ pub const CHATGPT_PLAN_ENDPOINT: &str = "https://api.openai.com/v1/responses";
 pub const CODEX_VERSION: &str = "0.160.0";
 const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 
+#[cfg(test)]
+#[path = "client_portability_tests.rs"]
+mod portability_tests;
+
 /// Only this transport builds the backend request; the stable session id is
 /// shared with prompt_cache_key, while caller controls the complete stateless
 /// item window. Never send previous_response_id or store:true.
