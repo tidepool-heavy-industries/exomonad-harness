@@ -1014,32 +1014,39 @@ fn branch(c: &Connection, head: &RequestId) -> Result<String> {
 }
 
 fn context_request_state_tx(
-    tx: &Transaction<'_>, head: &RequestId, identity: &ConversationIdentity,
+    tx: &Transaction<'_>,
+    head: &RequestId,
+    identity: &ConversationIdentity,
 ) -> Result<ContextRequestState> {
-        let current = state(tx, identity)?;
-        let canonical = {
-            let _read =
-                tracing::debug_span!(target: "harness::runtime_cost", "lineage_query_and_decode")
-                    .entered();
-            history(tx, head, true)?
+    let current = state(tx, identity)?;
+    let canonical = {
+        let _read =
+            tracing::debug_span!(target: "harness::runtime_cost", "lineage_query_and_decode")
+                .entered();
+        history(tx, head, true)?
+    };
+    validate_canonical_history(tx, &canonical)?;
+    let projected = {
+        let _projection = tracing::debug_span!(target: "harness::runtime_cost", "portable_history_projection", input_items = canonical.len()).entered();
+        portable_request(tx, &canonical, current.model.as_deref(), None)?
+    };
+    drop(canonical);
+    let mut history = Vec::with_capacity(projected.len());
+    let mut occurrences = Vec::with_capacity(projected.len());
+    for (request, hash, item, occurrence) in projected {
+        let hash = match hash {
+            Some(hash) => hash,
+            None => Store::put_item_tx(tx, &item)?,
         };
-        validate_canonical_history(tx, &canonical)?;
-        let projected = {
-            let _projection = tracing::debug_span!(target: "harness::runtime_cost", "portable_history_projection", input_items = canonical.len()).entered();
-            portable_request(tx, &canonical, current.model.as_deref(), None)?
-        };
-        drop(canonical);
-        let mut history = Vec::with_capacity(projected.len());
-        let mut occurrences = Vec::with_capacity(projected.len());
-        for (request, hash, item, occurrence) in projected {
-            let hash = match hash {
-                Some(hash) => hash,
-                None => Store::put_item_tx(tx, &item)?,
-            };
-            history.push((request, hash, item));
-            occurrences.push(occurrence);
-        }
-        Ok(ContextRequestState { history, occurrences, model: current.model, generation: current.generation })
+        history.push((request, hash, item));
+        occurrences.push(occurrence);
+    }
+    Ok(ContextRequestState {
+        history,
+        occurrences,
+        model: current.model,
+        generation: current.generation,
+    })
 }
 
 impl Store {
