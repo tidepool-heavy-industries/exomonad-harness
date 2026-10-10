@@ -3,8 +3,8 @@ use harness::{
     item::ToolInput,
     model::{AgentPath, CallId, ConversationIdentity, OperationId, RequestId},
     provider::{
-        CallContext, CancellationAcknowledgment, CancellationOwner, ContextDisposition, JobHandle,
-        Provider, ProviderCompletion, ProviderError, ToolFailure,
+        CallContext, CancellationAcknowledgment, CancellationOwner, CancellationWait,
+        ContextDisposition, JobHandle, Provider, ProviderCompletion, ProviderError, ToolFailure,
     },
     turn::{JobOutput, JobScheduler},
 };
@@ -13,7 +13,250 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use tokio::sync::{Mutex, Notify, oneshot};
+use tokio::sync::{Mutex, Notify, oneshot, watch};
+
+// The execution owns its retained outcome independently of cancellation observers.
+struct Supervised {
+    execution: Arc<External>,
+    terminal: watch::Receiver<Option<CancellationAcknowledgment>>,
+    observed: Mutex<Vec<OperationId>>,
+    entered: Notify,
+}
+
+#[async_trait]
+impl CancellationOwner for Supervised {
+    fn cancellation_wait(&self) -> CancellationWait {
+        CancellationWait::OwnerSettlement
+    }
+
+    async fn cancel(&self, operation: &OperationId, _: &JobHandle) -> CancellationAcknowledgment {
+        self.observed.lock().await.push(operation.clone());
+        self.entered.notify_one();
+        let mut terminal = self.terminal.clone();
+        loop {
+            if let Some(outcome) = terminal.borrow_and_update().clone() {
+                return outcome;
+            }
+            if terminal.changed().await.is_err() {
+                return CancellationAcknowledgment::Unconfirmed("execution owner lost".into());
+            }
+        }
+    }
+}
+
+struct SupervisedProvider(Arc<Supervised>);
+
+#[async_trait]
+impl Provider for SupervisedProvider {
+    fn cancellation_owner(&self) -> Option<Arc<dyn CancellationOwner>> {
+        Some(self.0.clone())
+    }
+
+    async fn call(&self, tool: &str, args: Value) -> Result<Value, ProviderError> {
+        ExternalProvider(self.0.execution.clone())
+            .call(tool, args)
+            .await
+    }
+
+    fn tools(&self) -> Vec<Value> {
+        vec![]
+    }
+}
+
+async fn supervised_job() -> (
+    Arc<JobScheduler>,
+    Arc<Supervised>,
+    watch::Sender<Option<CancellationAcknowledgment>>,
+    CallId,
+) {
+    let jobs = Arc::new(JobScheduler::new(1).unwrap());
+    let (terminal_tx, terminal) = watch::channel(None);
+    let owner = Arc::new(Supervised {
+        execution: external(),
+        terminal,
+        observed: Mutex::new(vec![]),
+        entered: Notify::new(),
+    });
+    let call = CallId("supervised".into());
+    jobs.start(
+        Arc::new(SupervisedProvider(owner.clone())),
+        call.clone(),
+        "run".into(),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    owner.execution.started.notified().await;
+    (jobs, owner, terminal_tx, call)
+}
+
+fn cancel_job(
+    jobs: Arc<JobScheduler>,
+    call: CallId,
+) -> tokio::task::JoinHandle<Result<Option<harness::turn::JobSettlement>, harness::turn::JobError>>
+{
+    tokio::spawn(async move { jobs.cancel(&call).await })
+}
+
+#[tokio::test]
+async fn provider_default_cancellation_remains_bounded_without_discarding_waiter() {
+    let jobs = Arc::new(JobScheduler::new(1).unwrap());
+    let owner = external();
+    let (_ack_tx, ack_rx) = oneshot::channel();
+    *owner.cancel_barrier.lock().await = Some(ack_rx);
+    let call = CallId("unresponsive-provider".into());
+    jobs.start(
+        Arc::new(ExternalProvider(owner.clone())),
+        call.clone(),
+        "run".into(),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    owner.started.notified().await;
+    let cancelled = tokio::time::timeout(std::time::Duration::from_secs(2), jobs.cancel(&call))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        cancelled.output,
+        JobOutput::CancellationUnconfirmed("owner acknowledgment timed out".into())
+    );
+    assert!(!owner.dropped.load(Ordering::SeqCst));
+    owner.release.notify_one();
+    let mut events = jobs.settlements();
+    events.recv().await.unwrap();
+    assert_eq!(
+        jobs.provider_completion(&call).await.unwrap(),
+        Some(Ok(json!("completed")))
+    );
+}
+
+#[tokio::test]
+async fn supervised_cancellation_joins_delayed_receipt_and_serializes_observers() {
+    let (jobs, owner, terminal, call) = supervised_job().await;
+    let first = cancel_job(jobs.clone(), call.clone());
+    owner.entered.notified().await;
+    let second = cancel_job(jobs.clone(), call.clone());
+    // Cross the provider safeguard while the exact owner remains independently pending.
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+    assert_eq!(jobs.output(&call).await.unwrap(), None);
+    assert!(!first.is_finished());
+    assert!(!second.is_finished());
+    assert!(!owner.execution.dropped.load(Ordering::SeqCst));
+    assert_eq!(owner.observed.lock().await.len(), 1);
+    let receipt = Ok(json!({"performed": "prefix"}));
+    terminal.send_replace(Some(CancellationAcknowledgment::StoppedWithReceipt(
+        receipt.clone(),
+    )));
+    let settlement = first.await.unwrap().unwrap().unwrap();
+    assert_eq!(settlement.output, JobOutput::CancelledWithReceipt(receipt));
+    assert_eq!(
+        owner.observed.lock().await.as_slice(),
+        &[settlement.operation]
+    );
+    assert!(second.await.unwrap().unwrap().is_none());
+    assert!(owner.execution.dropped.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn supervised_cancellation_observer_loss_preserves_exact_owner_and_waiter() {
+    // Both acknowledgment schedules must survive losing the first cancellation observer.
+    for acknowledge_before_rejoin in [false, true] {
+        let (jobs, owner, terminal, call) = supervised_job().await;
+        let observer = cancel_job(jobs.clone(), call.clone());
+        owner.entered.notified().await;
+        observer.abort();
+        assert!(observer.await.unwrap_err().is_cancelled());
+        assert!(!owner.execution.dropped.load(Ordering::SeqCst));
+        assert_eq!(jobs.output(&call).await.unwrap(), None);
+        if acknowledge_before_rejoin {
+            terminal.send_replace(Some(CancellationAcknowledgment::Stopped));
+        }
+        let rejoined = cancel_job(jobs.clone(), call.clone());
+        owner.entered.notified().await;
+        if !acknowledge_before_rejoin {
+            terminal.send_replace(Some(CancellationAcknowledgment::Stopped));
+        }
+        let settlement = rejoined.await.unwrap().unwrap().unwrap();
+        assert_eq!(settlement.output, JobOutput::Cancelled);
+        assert_eq!(
+            owner.observed.lock().await.as_slice(),
+            &[settlement.operation.clone(), settlement.operation]
+        );
+        assert!(owner.execution.dropped.load(Ordering::SeqCst));
+    }
+}
+
+#[tokio::test]
+async fn supervised_owner_loss_is_unconfirmed_and_preserves_result_observation() {
+    let (jobs, owner, terminal, call) = supervised_job().await;
+    let cancel = cancel_job(jobs.clone(), call.clone());
+    owner.entered.notified().await;
+    drop(terminal);
+    let emitted = cancel.await.unwrap().unwrap().unwrap().output;
+    assert_eq!(
+        emitted,
+        JobOutput::CancellationUnconfirmed("execution owner lost".into())
+    );
+    assert!(!owner.execution.dropped.load(Ordering::SeqCst));
+    owner.execution.release.notify_one();
+    let mut events = jobs.settlements();
+    events.recv().await.unwrap();
+    assert_eq!(
+        jobs.provider_completion(&call).await.unwrap(),
+        Some(Ok(json!("completed")))
+    );
+    assert_eq!(jobs.output(&call).await.unwrap(), Some(emitted));
+}
+
+#[tokio::test]
+async fn supervised_retry_joins_delayed_ack_without_rewriting_emitted_output() {
+    let (jobs, owner, terminal, call) = supervised_job().await;
+    terminal.send_replace(Some(CancellationAcknowledgment::Unconfirmed(
+        "cleanup not yet confirmed".into(),
+    )));
+    let emitted = jobs.cancel(&call).await.unwrap().unwrap().output;
+    terminal.send_replace(None);
+    // Consume admission of the first observer before installing the retry barrier.
+    owner.entered.notified().await;
+    let retry_jobs = jobs.clone();
+    let retry_call = call.clone();
+    let retry = tokio::spawn(async move { retry_jobs.retry_cancellation(&retry_call).await });
+    owner.entered.notified().await;
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+    assert!(!retry.is_finished());
+    assert!(!owner.execution.dropped.load(Ordering::SeqCst));
+    terminal.send_replace(Some(CancellationAcknowledgment::Stopped));
+    assert_eq!(
+        retry.await.unwrap().unwrap(),
+        Some(CancellationAcknowledgment::Stopped)
+    );
+    assert!(owner.execution.dropped.load(Ordering::SeqCst));
+    assert_eq!(jobs.output(&call).await.unwrap(), Some(emitted));
+}
+
+#[tokio::test]
+async fn supervised_completion_during_cancellation_wins_for_both_ack_schedules() {
+    for acknowledgment in [
+        CancellationAcknowledgment::Stopped,
+        CancellationAcknowledgment::Completed(Ok(json!("completed"))),
+    ] {
+        let (jobs, owner, terminal, call) = supervised_job().await;
+        let mut events = jobs.settlements();
+        let cancel = cancel_job(jobs.clone(), call.clone());
+        owner.entered.notified().await;
+        owner.execution.release.notify_one();
+        events.recv().await.unwrap();
+        terminal.send_replace(Some(acknowledgment));
+        assert!(cancel.await.unwrap().unwrap().is_none());
+        assert_eq!(
+            jobs.output(&call).await.unwrap(),
+            Some(JobOutput::Completed(Ok(json!("completed"))))
+        );
+    }
+}
 
 struct External {
     started: Notify,

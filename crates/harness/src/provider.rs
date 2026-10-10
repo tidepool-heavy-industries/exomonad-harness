@@ -313,12 +313,28 @@ pub enum CancellationAcknowledgment {
 
 #[async_trait]
 pub trait CancellationOwner: Send + Sync {
+    /// Choose who owns the cancellation observation's lifetime. OwnerSettlement
+    /// requires an independently retained terminal or owner-loss outcome and
+    /// idempotent cancellation of the exact operation. Dropping this observer
+    /// must not stop that owner or discard its eventual cleanup evidence.
+    fn cancellation_wait(&self) -> CancellationWait {
+        CancellationWait::ProviderGrace
+    }
+
     /// Stop or reconcile the exact admitted operation. A signal alone is not Stopped.
     async fn cancel(
         &self,
         operation: &OperationId,
         handle: &JobHandle,
     ) -> CancellationAcknowledgment;
+}
+
+/// A provider observer may need a scheduler safeguard; supervised work already
+/// has a lifecycle owner whose terminal includes cleanup and owner loss.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CancellationWait {
+    ProviderGrace,
+    OwnerSettlement,
 }
 
 /// Draft disposition belongs to the complete invocation, never streamed output.

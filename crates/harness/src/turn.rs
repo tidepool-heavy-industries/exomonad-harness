@@ -25,6 +25,25 @@ use tokio::{
 
 const JOB_CANCELLATION_GRACE: Duration = Duration::from_millis(250);
 
+async fn await_owner_cancellation(
+    owner: &dyn crate::provider::CancellationOwner,
+    operation: &OperationId,
+    handle: &JobHandle,
+) -> crate::provider::CancellationAcknowledgment {
+    use crate::provider::{CancellationAcknowledgment, CancellationWait};
+
+    match owner.cancellation_wait() {
+        CancellationWait::OwnerSettlement => owner.cancel(operation, handle).await,
+        CancellationWait::ProviderGrace => {
+            tokio::time::timeout(JOB_CANCELLATION_GRACE, owner.cancel(operation, handle))
+                .await
+                .unwrap_or_else(|_| {
+                    CancellationAcknowledgment::Unconfirmed("owner acknowledgment timed out".into())
+                })
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum JobOutput {
     Completed(Result<Value, ToolFailure>),
@@ -916,13 +935,7 @@ impl JobScheduler {
                 }
                 job.cancel.cancel();
             }
-            let ack = tokio::time::timeout(JOB_CANCELLATION_GRACE, owner.cancel(&call_id, &handle))
-                .await
-                .unwrap_or_else(|_| {
-                    crate::provider::CancellationAcknowledgment::Unconfirmed(
-                        "owner acknowledgment timed out".into(),
-                    )
-                });
+            let ack = await_owner_cancellation(owner.as_ref(), &call_id, &handle).await;
             // The native terminal can precede the ordinary result waiter. Its
             // publication metadata must be retained before waking the Engine.
             // Projection calls the invocation owner outside the scheduler lock.
@@ -1102,13 +1115,7 @@ impl JobScheduler {
                 Some(crate::provider::CancellationAcknowledgment::Unconfirmed(_)) => {}
             }
         }
-        let ack = tokio::time::timeout(JOB_CANCELLATION_GRACE, owner.cancel(&call_id, &handle))
-            .await
-            .unwrap_or_else(|_| {
-                crate::provider::CancellationAcknowledgment::Unconfirmed(
-                    "owner acknowledgment timed out".into(),
-                )
-            });
+        let ack = await_owner_cancellation(owner.as_ref(), &call_id, &handle).await;
         let task = {
             let mut jobs = self.jobs.lock().await;
             let job = jobs.get_mut(&call_id).ok_or(JobError::UnknownCall)?;
