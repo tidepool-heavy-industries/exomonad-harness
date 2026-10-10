@@ -32,20 +32,22 @@ fn durable_binding_transaction<T>(
     connection: &mut Connection,
     action: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, EmbeddedError>,
 ) -> std::result::Result<T, EmbeddedError> {
-    let tx = connection.transaction()?;
-    let result = action(&tx)?;
-    tx.commit().map_err(binding_commit_error)?;
-    Ok(result)
-}
-
-fn binding_commit_error(error: rusqlite::Error) -> EmbeddedError {
-    match error.sqlite_error_code() {
-        // An I/O failure cannot certify the durable outcome from visibility or
-        // transaction state. Reconcile by repeating the exact authorized call.
-        Some(rusqlite::ErrorCode::SystemIoFailure) => {
-            EmbeddedError::BindingCommitOutcomeUnknown(error)
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    match action(&tx) {
+        Ok(result) => {
+            // Drop attempts rollback on failure, but discards its error. No
+            // COMMIT error permits this handle to admit another operation.
+            tx.commit().map_err(EmbeddedError::RecoveryRequired)?;
+            Ok(result)
         }
-        _ => EmbeddedError::from(error),
+        Err(refusal) => {
+            // SQLite can already have rolled back a failed statement. Otherwise
+            // observe rollback success before reporting an ordinary refusal.
+            if !tx.is_autocommit() {
+                tx.rollback().map_err(EmbeddedError::RecoveryRequired)?;
+            }
+            Err(refusal)
+        }
     }
 }
 
@@ -173,8 +175,8 @@ impl Store {
     /// Historical inputs, command receipts and context seals keep their original
     /// identities; this does not enqueue work.
     /// FULL commit precedes success. Exact retries validate authority again and
-    /// preserve history. An unknown commit outcome requires this same authorized
-    /// transition before publishing attachment; readback alone is not authority.
+    /// preserve history. RecoveryRequired fences the embedding's run store until
+    /// authenticated reopen; readback alone never authorizes attachment.
     pub fn transfer_embedded_binding(
         &self,
         predecessor: &HostIdentity,
@@ -260,8 +262,8 @@ impl Store {
     /// Bind retained startup intent without attaching a Conversation or admitting
     /// live actor work. Exact retries validate authority again and preserve history.
     /// Binding writes use the Store's fixed FULL durability. A visible binding
-    /// after an unknown commit outcome is insufficient attachment evidence:
-    /// repeat this exact authorized call until it succeeds.
+    /// after a failed COMMIT is insufficient attachment evidence. RecoveryRequired
+    /// requires the embedding to fence its run store and reopen before admission.
     pub fn bind_initial_embedded_binding(
         &self,
         identity: &HostIdentity,
@@ -342,10 +344,9 @@ impl Store {
             return Err(EmbeddedError::Binding("empty input operation ID".into()));
         }
         let mut connection = self.lock();
-        let tx = connection.transaction()?;
-        let envelope = Self::admit_embedded_input_tx(&tx, identity, operation_id, sender, item)?;
-        tx.commit()?;
-        Ok(envelope)
+        durable_binding_transaction(&mut connection, |tx| {
+            Self::admit_embedded_input_tx(tx, identity, operation_id, sender, item)
+        })
     }
     pub(super) fn admit_embedded_input_tx(
         tx: &Transaction<'_>,
@@ -381,48 +382,48 @@ impl Store {
     ) -> std::result::Result<CommandInputAdmission, EmbeddedError> {
         use crate::server::{CommandReceipt, CommandReceiptOutcome, HostCommand};
         let mut c = self.lock();
-        let tx = c.transaction()?;
-        let expected = HostCommand::Input {
-            target: identity.clone(),
-            text: text.into(),
-        };
-        let row: Option<(String,String,Option<String>)> = tx.query_row(
+        durable_binding_transaction(&mut c, |tx| {
+            let expected = HostCommand::Input {
+                target: identity.clone(),
+                text: text.into(),
+            };
+            let row: Option<(String,String,Option<String>)> = tx.query_row(
             "SELECT command,state,outcome FROM embedded_commands WHERE run_id=?1 AND operation_id=?2",
             params![identity.run,operation.to_string()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-        let Some((command, state, outcome)) = row else {
-            return Err(StoreError::InvalidCommandState.into());
-        };
-        if serde_json::from_str::<HostCommand>(&command)? != expected {
-            return Err(StoreError::ConflictingCommand.into());
-        }
-        if state == "input_admitted" {
-            return Ok(CommandInputAdmission::Retained(serde_json::from_str(
-                &outcome.ok_or(StoreError::InvalidCommandState)?,
-            )?));
-        }
-        if state != "dispatching" {
-            return Err(StoreError::InvalidCommandState.into());
-        }
-        let item = Item(serde_json::json!({"type":"message","role":"user","content":text}));
-        let envelope = Self::admit_embedded_input_tx(
-            &tx,
-            identity,
-            &operation.to_string(),
-            "operator",
-            &item,
-        )?;
-        let receipt = CommandReceipt {
-            command_id: operation.to_string(),
-            outcome: CommandReceiptOutcome::Admitted {
-                target: Some(identity.clone()),
-                envelope_id: envelope.to_string(),
-                wake_error: None,
-            },
-        };
-        tx.execute("UPDATE embedded_commands SET state='input_admitted',envelope_id=?3,outcome=?4 WHERE run_id=?1 AND operation_id=?2 AND state='dispatching'",
+            let Some((command, state, outcome)) = row else {
+                return Err(StoreError::InvalidCommandState.into());
+            };
+            if serde_json::from_str::<HostCommand>(&command)? != expected {
+                return Err(StoreError::ConflictingCommand.into());
+            }
+            if state == "input_admitted" {
+                return Ok(CommandInputAdmission::Retained(serde_json::from_str(
+                    &outcome.ok_or(StoreError::InvalidCommandState)?,
+                )?));
+            }
+            if state != "dispatching" {
+                return Err(StoreError::InvalidCommandState.into());
+            }
+            let item = Item(serde_json::json!({"type":"message","role":"user","content":text}));
+            let envelope = Self::admit_embedded_input_tx(
+                tx,
+                identity,
+                &operation.to_string(),
+                "operator",
+                &item,
+            )?;
+            let receipt = CommandReceipt {
+                command_id: operation.to_string(),
+                outcome: CommandReceiptOutcome::Admitted {
+                    target: Some(identity.clone()),
+                    envelope_id: envelope.to_string(),
+                    wake_error: None,
+                },
+            };
+            tx.execute("UPDATE embedded_commands SET state='input_admitted',envelope_id=?3,outcome=?4 WHERE run_id=?1 AND operation_id=?2 AND state='dispatching'",
             params![identity.run,operation.to_string(),envelope,serde_json::to_string(&receipt)?])?;
-        tx.commit()?;
-        Ok(CommandInputAdmission::New(receipt))
+            Ok(CommandInputAdmission::New(receipt))
+        })
     }
 }
 
@@ -720,7 +721,7 @@ mod tests {
             assert_eq!(result.is_ok(), failure == 0);
             if failure == 3 {
                 assert!(
-                    matches!(result, Err(EmbeddedError::Store(StoreError::Sql(error))) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation))
+                    matches!(result, Err(EmbeddedError::RecoveryRequired(error)) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation))
                 );
             }
             assert_eq!(connection_modes(&connection), ("memory".into(), 2, true));
@@ -1028,26 +1029,121 @@ mod tests {
     }
 
     #[test]
-    fn commit_io_failure_preserves_typed_uncertainty_and_known_refusal_does_not() {
-        let io = rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR_FSYNC),
-            Some("sync fault".into()),
-        );
-        assert!(
-            matches!(binding_commit_error(io), EmbeddedError::BindingCommitOutcomeUnknown(error) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::SystemIoFailure))
-        );
-        for code in [
-            rusqlite::ffi::SQLITE_BUSY,
-            rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY,
-            rusqlite::ffi::SQLITE_FULL,
-            rusqlite::ffi::SQLITE_INTERRUPT,
-        ] {
-            let error = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
-            assert!(matches!(
-                binding_commit_error(error),
-                EmbeddedError::Store(StoreError::Sql(_))
-            ));
+    fn admission_commit_failure_requires_reopen_before_authorized_retry() {
+        let root =
+            std::env::temp_dir().join(format!("harness-admission-fault-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("store.sqlite");
+        let store = Store::open(&path).unwrap();
+        store.lock().execute_batch("CREATE TABLE commit_fault_parent(id INTEGER PRIMARY KEY); CREATE TABLE commit_fault_child(id INTEGER REFERENCES commit_fault_parent(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER binding_commit_fault AFTER INSERT ON embedded_bindings BEGIN INSERT INTO commit_fault_child VALUES(1); END;").unwrap();
+        let identity = root_identity();
+        assert!(matches!(
+            store.bind_initial_embedded_binding(&identity, None, &InitialAuthority(identity.clone())),
+            Err(EmbeddedError::RecoveryRequired(error)) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation)
+        ));
+        // The embedding discards this handle even though SQLite's Drop rollback
+        // closed the transaction. A SELECT cannot certify a failed COMMIT.
+        assert!(store.lock().is_autocommit());
+        drop(store);
+        let recovered = Store::open(&path).unwrap();
+        assert!(!recovered.embedded_binding_matches(&identity).unwrap());
+        recovered
+            .lock()
+            .execute_batch("DROP TRIGGER binding_commit_fault")
+            .unwrap();
+        recovered
+            .bind_initial_embedded_binding(&identity, None, &InitialAuthority(identity.clone()))
+            .unwrap();
+        recovered
+            .bind_initial_embedded_binding(&identity, None, &InitialAuthority(identity.clone()))
+            .unwrap();
+        assert!(recovered.embedded_binding_matches(&identity).unwrap());
+        let agents: i64 = recovered
+            .lock()
+            .query_row("SELECT COUNT(*) FROM agents", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(agents, 1);
+        drop(recovered);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_rollback_requires_recovery_instead_of_ordinary_refusal() {
+        unsafe extern "C" fn deny_rollback(
+            _: *mut std::ffi::c_void,
+            action: std::ffi::c_int,
+            operation: *const std::ffi::c_char,
+            _: *const std::ffi::c_char,
+            _: *const std::ffi::c_char,
+            _: *const std::ffi::c_char,
+        ) -> std::ffi::c_int {
+            if action == rusqlite::ffi::SQLITE_TRANSACTION && !operation.is_null() {
+                // SQLite owns this NUL-terminated authorizer argument for the call.
+                if unsafe { std::ffi::CStr::from_ptr(operation) }.to_bytes() == b"ROLLBACK" {
+                    return rusqlite::ffi::SQLITE_DENY;
+                }
+            }
+            rusqlite::ffi::SQLITE_OK
         }
+        let root =
+            std::env::temp_dir().join(format!("harness-admission-fault-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("store.sqlite");
+        let store = Store::open(&path).unwrap();
+        {
+            let mut connection = store.lock();
+            connection
+                .execute_batch("CREATE TABLE rollback_fault(id INTEGER PRIMARY KEY)")
+                .unwrap();
+            // No callback state or borrowed data; the locked connection outlives
+            // the registration and SQLite invokes the static callback synchronously.
+            assert_eq!(
+                unsafe {
+                    rusqlite::ffi::sqlite3_set_authorizer(
+                        connection.handle(),
+                        Some(deny_rollback),
+                        std::ptr::null_mut(),
+                    )
+                },
+                rusqlite::ffi::SQLITE_OK
+            );
+            let result: std::result::Result<(), EmbeddedError> =
+                durable_binding_transaction(&mut connection, |tx| {
+                    tx.execute("INSERT INTO rollback_fault VALUES(1)", [])?;
+                    Err(EmbeddedError::Binding("authority refused".into()))
+                });
+            assert!(
+                matches!(result, Err(EmbeddedError::RecoveryRequired(error)) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::AuthorizationForStatementDenied))
+            );
+            assert!(!connection.is_autocommit());
+        }
+        drop(store);
+        let recovered = Store::open(&path).unwrap();
+        let rows: i64 = recovered
+            .lock()
+            .query_row("SELECT COUNT(*) FROM rollback_fault", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+        drop(recovered);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn buck_linked_sqlite_matches_fixed_wal_bundle() {
+        assert_eq!(rusqlite::version(), "3.53.2");
+        assert_eq!(rusqlite::version_number(), 3_053_002);
+        let connection = Connection::open_in_memory().unwrap();
+        let (version, source): (String, String) = connection
+            .query_row("SELECT sqlite_version(),sqlite_source_id()", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(version, "3.53.2");
+        assert_eq!(
+            source,
+            "2026-06-03 19:12:13 d6e03d8c777cfa2d35e3b60d8ec3e0187f3e9f99d8e2ee9cac695fd6fcdf1a24"
+        );
+        println!("linked-sqlite version={version} source_id={source}");
     }
 
     #[test]

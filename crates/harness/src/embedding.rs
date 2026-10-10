@@ -72,8 +72,10 @@ pub enum EmbeddedError {
     AdmissionClosed,
     #[error("invalid embedded binding: {0}")]
     Binding(String),
-    #[error("binding commit outcome is unknown; retry only the exact authorized operation: {0}")]
-    BindingCommitOutcomeUnknown(#[source] rusqlite::Error),
+    /// The embedding must fence its run store and discard its admission handles.
+    /// Authenticated reopen is required before attempting another operation.
+    #[error("embedded admission requires recovery; fence the run store and reopen: {0}")]
+    RecoveryRequired(#[source] rusqlite::Error),
     #[error("invalid tool surface: {0}")]
     Surface(String),
     #[error("input operation was already admitted with different content")]
