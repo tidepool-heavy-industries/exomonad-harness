@@ -2462,7 +2462,10 @@ fn safe_transport_error(error: &TransportError) -> String {
         harness::transport::TransportError::Http { status, .. } => {
             format!("API returned HTTP status {status}")
         }
-        harness::transport::TransportError::Stream(_) => "API request or response failed".into(),
+        harness::transport::TransportError::Stream(_)
+        | harness::transport::TransportError::ProviderStreamFailure { .. } => {
+            "API request or response failed".into()
+        }
         harness::transport::TransportError::IncompleteResponse(cause) => {
             format!("API response interrupted: {cause}")
         }
@@ -3941,6 +3944,7 @@ mod tests {
                 host_run: None,
                 live_output: vec![],
                 history_revisions: vec![],
+                actor_output_revisions: vec![],
                 seq: 5,
                 actors: vec![],
                 command_receipts: vec![],
