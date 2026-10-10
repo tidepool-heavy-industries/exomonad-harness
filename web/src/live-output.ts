@@ -6,12 +6,23 @@ export interface OutputScope { origin: OutputOrigin; requestId: string }
 export type OutputChannel = 'assistant' | 'reasoning_summary' | 'reasoning' | 'tool_arguments' | 'tool_input' | 'refusal'
 export const outputLabels: Record<OutputChannel, string> = {assistant:'Assistant', reasoning_summary:'Reasoning summary', reasoning:'Reasoning', tool_arguments:'Tool arguments', tool_input:'Tool input', refusal:'Assistant refusal'}
 export interface OutputItem extends OutputScope { itemId: string; channel: OutputChannel; index: number }
-export interface LiveOutput extends OutputItem { text: string; overflow: boolean; streaming: boolean; version: number; committedHash?: string }
+export interface LiveOutput extends OutputItem { readonly text: string; overflow: boolean; streaming: boolean; version: number; committedHash?: string }
 export interface HistoryRevision extends OutputScope { version: number }
 export type OutputUpdate = OutputItem & { text: string; overflow: boolean; version: number }
 export type OutputCommit = OutputScope & { itemId: string | null; hash: string; version: number }
 const MAX_ITEMS = 128
 const MAX_BYTES = 64 * 1024
+// Preview values are immutable. Restored wire values acquire this derived count
+// on their first update; subsequent deltas never re-encode the retained prefix.
+const retainedBytes = new WeakMap<LiveOutput, number>()
+const encoder = new TextEncoder()
+const decoder = new TextDecoder('utf-8', {ignoreBOM:true})
+
+function completePrefix(encoded: Uint8Array, budget: number): number {
+  let end = Math.min(encoded.length, budget)
+  while (end < encoded.length && (encoded[end]! & 0xc0) === 0x80) end--
+  return end
+}
 
 export function originKey(origin: OutputOrigin): string {
   return origin.kind === 'embedded' ? actorIdentityKey(origin) : JSON.stringify([origin.store, origin.actor])
@@ -27,13 +38,25 @@ export function appendOutput(outputs: ReadonlyMap<string, LiveOutput> | undefine
   const next = new Map(outputs)
   const key = outputKey(delta)
   const old = next.get(key)
-  const encoded = new TextEncoder().encode((old?.text ?? '') + delta.text)
-  // Decode only complete UTF-8 characters at the retained preview boundary.
-  let end = Math.min(encoded.length, MAX_BYTES)
-  while (end < encoded.length && (encoded[end]! & 0xc0) === 0x80) end--
-  const text = new TextDecoder().decode(encoded.subarray(0, end))
-  next.set(key, { ...delta, streaming:true, text, overflow: delta.overflow || encoded.length > MAX_BYTES,
-    committedHash: old?.committedHash })
+  const bytes = old ? retainedBytes.get(old) : 0
+  const restoring = bytes === undefined
+  const remaining = MAX_BYTES - (bytes ?? 0)
+  // Restored wire values use the whole-prefix rule once. Every UTF-16 code
+  // unit needs at least one UTF-8 byte, so later input cannot fit after this
+  // prefix; even an oversized incoming delta has bounded encoding work.
+  const incoming = restoring ? old!.text + delta.text : delta.text
+  const prefix = incoming.slice(0, remaining)
+  const encoded = remaining > 0 ? encoder.encode(prefix) : new Uint8Array()
+  const end = completePrefix(encoded, remaining)
+  // Preserve the whole-prefix decoder's leading-BOM rule, but keep a BOM
+  // at an interior delta boundary. Its omitted bytes are not retained bytes.
+  const start = (restoring || !old?.text) && end >= 3 && encoded[0] === 0xef && encoded[1] === 0xbb && encoded[2] === 0xbf ? 3 : 0
+  const text = (restoring ? '' : old?.text ?? '') + (end > start ? decoder.decode(encoded.subarray(start, end)) : '')
+  const item: LiveOutput = { ...delta, streaming:true, text,
+    overflow: delta.overflow || prefix.length < incoming.length || end < encoded.length,
+    committedHash: old?.committedHash }
+  retainedBytes.set(item, (bytes ?? 0) + end - start)
+  next.set(key, item)
   while (next.size > MAX_ITEMS) next.delete(next.keys().next().value!)
   return next
 }

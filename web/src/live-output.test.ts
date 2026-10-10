@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { appendOutput, commitOutput, belongsTo, outputKey, visibleOutput, type OutputUpdate } from './live-output'
 import { applyStateEvent, isSequencedEvent, isSnapshot, normalizeSnapshot } from './protocol'
 import { toViewModel } from './integration'
@@ -9,6 +9,50 @@ const base = {seq:0, hostRun:'run', conversations:[], requests:[], jobs:[], enve
   identity:origin, parent:null, kind:'model' as const, lifecycle:'running' as const, modelConversation:'/root', modelHeadRequest:'settled'}]}
 
 describe('live output and retained history handoff', () => {
+  it('encodes only incoming text across thousands of updates and does no text work after the cap', () => {
+    const encode = vi.spyOn(TextEncoder.prototype, 'encode')
+    const decode = vi.spyOn(TextDecoder.prototype, 'decode')
+    try {
+      let outputs = appendOutput(undefined, {...delta, text:''})
+      for (let version = 1; version <= 4000; version++)
+        outputs = appendOutput(outputs, {...delta, text:'abcdefgh', version})
+      expect(outputs.get(outputKey(delta))?.text).toBe('abcdefgh'.repeat(4000))
+      expect(encode.mock.calls.reduce((sum, [text]) => sum + (text?.length ?? 0), 0)).toBe(32000)
+      expect(decode.mock.calls.reduce((sum, [bytes]) => sum + (bytes?.byteLength ?? 0), 0)).toBe(32000)
+      outputs = appendOutput(outputs, {...delta, text:'x'.repeat(1000000)})
+      expect(outputs.get(outputKey(delta))?.text.length).toBe(65536)
+      expect(outputs.get(outputKey(delta))?.overflow).toBe(true)
+      expect(encode.mock.calls.at(-1)?.[0]?.length).toBe(65536 - 32000)
+      const calls = [encode.mock.calls.length, decode.mock.calls.length]
+      for (let version = 4001; version <= 8000; version++)
+        outputs = appendOutput(outputs, {...delta, text:'😀'.repeat(100), overflow:true, version})
+      expect([encode.mock.calls.length, decode.mock.calls.length]).toEqual(calls)
+      expect(outputs.get(outputKey(delta))?.version).toBe(8000)
+    } finally {
+      encode.mockRestore()
+      decode.mockRestore()
+    }
+  })
+  it('matches whole-prefix UTF-8 projection across character boundaries and restored snapshots', () => {
+    const encoder = new TextEncoder()
+    const decoder = new TextDecoder()
+    for (const size of [0, 1, 65530, 65531, 65532, 65533, 65534, 65535, 65536]) {
+      let outputs = appendOutput(undefined, {...delta, text:'x'.repeat(size)})
+      // A wire round trip intentionally has no internal derived byte count.
+      const restored = JSON.parse(JSON.stringify(outputs.get(outputKey(delta))))
+      outputs = new Map([[outputKey(delta), restored]])
+      let expected = restored.text
+      for (const text of ['\ufeff', 'λ', '😀', 'a', '', '\ufeff', '中', 'b'.repeat(100000)]) {
+        const encoded = encoder.encode(expected + text)
+        let end = Math.min(encoded.length, 65536)
+        while (end < encoded.length && (encoded[end]! & 0xc0) === 0x80) end--
+        expected = decoder.decode(encoded.subarray(0, end))
+        outputs = appendOutput(outputs, {...delta, text})
+        expect(outputs.get(outputKey(delta))?.text).toBe(expected)
+        expect(outputs.get(outputKey(delta))?.overflow).toBe(encoded.length > 65536)
+      }
+    }
+  })
   it('separates exact actors, requests, items and channels, then reconciles a committed hash once', () => {
     let outputs = appendOutput(undefined, delta)
     outputs = appendOutput(outputs, {...delta, text:'world', version:2})
