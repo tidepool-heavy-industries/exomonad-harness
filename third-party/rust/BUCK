@@ -6,49 +6,6 @@ rust_library = cargo.rust_library
 rust_binary = cargo.rust_binary
 
 http_archive(
-    name = "ahash-0.8.12.crate",
-    sha256 = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75",
-    strip_prefix = "ahash-0.8.12",
-    urls = ["https://static.crates.io/crates/ahash/0.8.12/download"],
-    visibility = [],
-)
-
-rust_library(
-    name = "ahash-0.8",
-    srcs = [":ahash-0.8.12.crate"],
-    crate = "ahash",
-    crate_root = "ahash-0.8.12.crate/src/lib.rs",
-    edition = "2018",
-    env = {
-        "OUT_DIR": "$(location :ahash-0.8-build-script-run[out_dir])",
-    },
-    rustc_flags = ["@$(location :ahash-0.8-build-script-run[rustc_flags])"],
-    visibility = [],
-    deps = [
-        ":cfg-if-1",
-        ":once_cell-1",
-        ":zerocopy-0.8",
-    ],
-)
-
-rust_binary(
-    name = "ahash-0.8-build-script-build",
-    srcs = [":ahash-0.8.12.crate"],
-    crate = "build_script_build",
-    crate_root = "ahash-0.8.12.crate/build.rs",
-    edition = "2018",
-    visibility = [],
-    deps = [":version_check-0.9"],
-)
-
-tidepool_buildscript_run(
-    name = "ahash-0.8-build-script-run",
-    package_name = "ahash",
-    buildscript_rule = ":ahash-0.8-build-script-build",
-    version = "0.8.12",
-)
-
-http_archive(
     name = "arrayvec-0.7.8.crate",
     sha256 = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56",
     strip_prefix = "arrayvec-0.7.8",
@@ -774,6 +731,23 @@ rust_library(
 )
 
 http_archive(
+    name = "foldhash-0.2.0.crate",
+    sha256 = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb",
+    strip_prefix = "foldhash-0.2.0",
+    urls = ["https://static.crates.io/crates/foldhash/0.2.0/download"],
+    visibility = [],
+)
+
+rust_library(
+    name = "foldhash-0.2",
+    srcs = [":foldhash-0.2.0.crate"],
+    crate = "foldhash",
+    crate_root = "foldhash-0.2.0.crate/src/lib.rs",
+    edition = "2021",
+    visibility = [],
+)
+
+http_archive(
     name = "form_urlencoded-1.2.2.crate",
     sha256 = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf",
     strip_prefix = "form_urlencoded-1.2.2",
@@ -1208,43 +1182,40 @@ tidepool_buildscript_run(
 )
 
 http_archive(
-    name = "hashbrown-0.14.5.crate",
-    sha256 = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1",
-    strip_prefix = "hashbrown-0.14.5",
-    urls = ["https://static.crates.io/crates/hashbrown/0.14.5/download"],
+    name = "hashbrown-0.17.1.crate",
+    sha256 = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a",
+    strip_prefix = "hashbrown-0.17.1",
+    urls = ["https://static.crates.io/crates/hashbrown/0.17.1/download"],
     visibility = [],
 )
 
 rust_library(
-    name = "hashbrown-0.14",
-    srcs = [":hashbrown-0.14.5.crate"],
+    name = "hashbrown-0.17",
+    srcs = [":hashbrown-0.17.1.crate"],
     crate = "hashbrown",
-    crate_root = "hashbrown-0.14.5.crate/src/lib.rs",
-    edition = "2021",
-    features = [
-        "ahash",
-        "inline-more",
-    ],
+    crate_root = "hashbrown-0.17.1.crate/src/lib.rs",
+    edition = "2024",
+    features = ["default-hasher"],
     visibility = [],
-    deps = [":ahash-0.8"],
+    deps = [":foldhash-0.2"],
 )
 
 http_archive(
-    name = "hashlink-0.9.1.crate",
-    sha256 = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af",
-    strip_prefix = "hashlink-0.9.1",
-    urls = ["https://static.crates.io/crates/hashlink/0.9.1/download"],
+    name = "hashlink-0.12.2.crate",
+    sha256 = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb",
+    strip_prefix = "hashlink-0.12.2",
+    urls = ["https://static.crates.io/crates/hashlink/0.12.2/download"],
     visibility = [],
 )
 
 rust_library(
-    name = "hashlink-0.9",
-    srcs = [":hashlink-0.9.1.crate"],
+    name = "hashlink-0.12",
+    srcs = [":hashlink-0.12.2.crate"],
     crate = "hashlink",
-    crate_root = "hashlink-0.9.1.crate/src/lib.rs",
-    edition = "2018",
+    crate_root = "hashlink-0.12.2.crate/src/lib.rs",
+    edition = "2024",
     visibility = [],
-    deps = [":hashbrown-0.14"],
+    deps = [":hashbrown-0.17"],
 )
 
 http_archive(
@@ -1875,51 +1846,51 @@ tidepool_buildscript_run(
 )
 
 http_archive(
-    name = "libsqlite3-sys-0.30.1.crate",
-    sha256 = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149",
-    strip_prefix = "libsqlite3-sys-0.30.1",
-    urls = ["https://static.crates.io/crates/libsqlite3-sys/0.30.1/download"],
+    name = "libsqlite3-sys-0.38.2.crate",
+    sha256 = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8",
+    strip_prefix = "libsqlite3-sys-0.38.2",
+    urls = ["https://static.crates.io/crates/libsqlite3-sys/0.38.2/download"],
     visibility = [],
 )
 
 rust_library(
-    name = "libsqlite3-sys-0.30",
-    srcs = [":libsqlite3-sys-0.30.1.crate"],
+    name = "libsqlite3-sys-0.38",
+    srcs = [":libsqlite3-sys-0.38.2.crate"],
     crate = "libsqlite3_sys",
-    crate_root = "libsqlite3-sys-0.30.1.crate/src/lib.rs",
+    crate_root = "libsqlite3-sys-0.38.2.crate/src/lib.rs",
     edition = "2021",
     env = {
-        "CARGO_MANIFEST_DIR": "libsqlite3-sys-0.30.1.crate",
-        "OUT_DIR": "$(location :libsqlite3-sys-0.30-build-script-run[out_dir])",
+        "CARGO_MANIFEST_DIR": "libsqlite3-sys-0.38.2.crate",
+        "OUT_DIR": "$(location :libsqlite3-sys-0.38-build-script-run[out_dir])",
     },
     features = [
         "bundled",
         "bundled_bindings",
         "cc",
         "default",
-        "min_sqlite_version_3_14_0",
+        "min_sqlite_version_3_34_1",
         "pkg-config",
         "vcpkg",
     ],
-    rustc_flags = ["@$(location :libsqlite3-sys-0.30-build-script-run[rustc_flags])"],
+    rustc_flags = ["@$(location :libsqlite3-sys-0.38-build-script-run[rustc_flags])"],
     visibility = [],
 )
 
 rust_binary(
-    name = "libsqlite3-sys-0.30-build-script-build",
-    srcs = [":libsqlite3-sys-0.30.1.crate"],
+    name = "libsqlite3-sys-0.38-build-script-build",
+    srcs = [":libsqlite3-sys-0.38.2.crate"],
     crate = "build_script_build",
-    crate_root = "libsqlite3-sys-0.30.1.crate/build.rs",
+    crate_root = "libsqlite3-sys-0.38.2.crate/build.rs",
     edition = "2021",
     env = {
-        "CARGO_MANIFEST_DIR": "libsqlite3-sys-0.30.1.crate",
+        "CARGO_MANIFEST_DIR": "libsqlite3-sys-0.38.2.crate",
     },
     features = [
         "bundled",
         "bundled_bindings",
         "cc",
         "default",
-        "min_sqlite_version_3_14_0",
+        "min_sqlite_version_3_34_1",
         "pkg-config",
         "vcpkg",
     ],
@@ -1932,21 +1903,21 @@ rust_binary(
 )
 
 tidepool_buildscript_run(
-    name = "libsqlite3-sys-0.30-build-script-run",
+    name = "libsqlite3-sys-0.38-build-script-run",
     package_name = "libsqlite3-sys",
-    buildscript_rule = ":libsqlite3-sys-0.30-build-script-build",
+    buildscript_rule = ":libsqlite3-sys-0.38-build-script-build",
     features = [
         "bundled",
         "bundled_bindings",
         "cc",
         "default",
-        "min_sqlite_version_3_14_0",
+        "min_sqlite_version_3_34_1",
         "pkg-config",
         "vcpkg",
     ],
     rustc_link_lib = True,
     rustc_link_search = True,
-    version = "0.30.1",
+    version = "0.38.2",
 )
 
 http_archive(
@@ -2808,26 +2779,29 @@ rust_library(
 
 alias(
     name = "rusqlite",
-    actual = ":rusqlite-0.32",
+    actual = ":rusqlite-0.40",
     visibility = ["PUBLIC"],
 )
 
 http_archive(
-    name = "rusqlite-0.32.1.crate",
-    sha256 = "7753b721174eb8ff87a9a0e799e2d7bc3749323e773db92e0984debb00019d6e",
-    strip_prefix = "rusqlite-0.32.1",
-    urls = ["https://static.crates.io/crates/rusqlite/0.32.1/download"],
+    name = "rusqlite-0.40.2.crate",
+    sha256 = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3",
+    strip_prefix = "rusqlite-0.40.2",
+    urls = ["https://static.crates.io/crates/rusqlite/0.40.2/download"],
     visibility = [],
 )
 
 rust_library(
-    name = "rusqlite-0.32",
-    srcs = [":rusqlite-0.32.1.crate"],
+    name = "rusqlite-0.40",
+    srcs = [":rusqlite-0.40.2.crate"],
     crate = "rusqlite",
-    crate_root = "rusqlite-0.32.1.crate/src/lib.rs",
+    crate_root = "rusqlite-0.40.2.crate/src/lib.rs",
     edition = "2021",
     features = [
         "bundled",
+        "cache",
+        "fallible_uint",
+        "hashlink",
         "modern_sqlite",
     ],
     visibility = [],
@@ -2835,8 +2809,8 @@ rust_library(
         ":bitflags-2",
         ":fallible-iterator-0.3",
         ":fallible-streaming-iterator-0.1",
-        ":hashlink-0.9",
-        ":libsqlite3-sys-0.30",
+        ":hashlink-0.12",
+        ":libsqlite3-sys-0.38",
         ":smallvec-1",
     ],
 )
