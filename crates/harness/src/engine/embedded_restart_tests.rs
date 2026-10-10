@@ -399,7 +399,7 @@ async fn embedded_restart_refuses_recorded_response_with_incomplete_local_items(
     store.bind_embedded_actor(&identity, None).unwrap();
     // The response is interned before final Item persistence. Refuse that exact
     // append to preserve a real model_turn / request_items crash cut.
-    store.lock().execute_batch("CREATE TRIGGER cut_final BEFORE INSERT ON request_items WHEN (SELECT json FROM items WHERE hash=NEW.item_hash) LIKE '%final_answer%' BEGIN SELECT RAISE(ABORT,'cut'); END;").unwrap();
+    store.lock().unwrap().execute_batch("CREATE TRIGGER cut_final BEFORE INSERT ON request_items WHEN (SELECT json FROM items WHERE hash=NEW.item_hash) LIKE '%final_answer%' BEGIN SELECT RAISE(ABORT,'cut'); END;").unwrap();
     let (first, _) = engine(store.clone(), &identity, vec![Ok(final_turn())]);
     let (_cancel, cancel) = watch::channel(false);
     assert!(
@@ -422,6 +422,7 @@ async fn embedded_restart_refuses_recorded_response_with_incomplete_local_items(
     );
     store
         .lock()
+        .unwrap()
         .execute_batch("DROP TRIGGER cut_final")
         .unwrap();
     let (resumed, inputs) = engine(store.clone(), &identity, vec![]);

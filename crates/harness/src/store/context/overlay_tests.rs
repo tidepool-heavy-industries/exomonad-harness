@@ -444,7 +444,7 @@ fn overlay_survives_reopen_and_saved_context_restores_original_body() {
 }
 
 fn downgrade_receipt(store: &Store, operation: &OperationId, replay: bool) {
-    let c = store.lock();
+    let c = store.lock().unwrap();
     let (id, raw): (i64, String) = c.query_row("SELECT id,payload FROM events WHERE kind='context_commit' AND json_extract(payload,'$.operation')=?1",
         [serde_json::to_string(operation).unwrap()], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
     let mut record: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -536,6 +536,7 @@ fn v2_replay_retry_after_reopen_preserves_exact_receipt_and_terminal() {
     let before = store.context_history(&receipt.head).unwrap();
     let count = store
         .lock()
+        .unwrap()
         .query_row(
             "SELECT COUNT(*) FROM events WHERE kind='context_commit'",
             [],
@@ -552,6 +553,7 @@ fn v2_replay_retry_after_reopen_preserves_exact_receipt_and_terminal() {
     assert_eq!(
         store
             .lock()
+            .unwrap()
             .query_row(
                 "SELECT COUNT(*) FROM events WHERE kind='context_commit'",
                 [],
@@ -644,7 +646,7 @@ fn projected_compaction_preserves_distinct_equal_original_occurrences() {
             None,
         )
         .unwrap();
-    let canonical = request_occurrences(&store.lock(), &target).unwrap();
+    let canonical = request_occurrences(&store.lock().unwrap(), &target).unwrap();
     assert_eq!(canonical[0].origin, snapshot.prefix[0].origin);
     assert_eq!(canonical[1].origin, snapshot.prefix[1].origin);
     assert_eq!(canonical[0].item, canonical[1].item);
@@ -667,12 +669,15 @@ fn canonical_checkpoint_copy_preserves_projection_collision_without_ambiguity() 
         )
         .unwrap();
     let operation = store.claim(&CallId("checkpoint".into()), &next).unwrap();
-    store.lock().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)",[&next.0]).unwrap();
+    store.lock().unwrap().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)",[&next.0]).unwrap();
     let cuts = store
         .capture_checkpoint_cuts_at_head(&operation, &next, &json!({}), std::sync::Arc::new(()))
         .unwrap();
-    let canonical =
-        request_occurrences(&store.lock(), cuts.before_call().snapshot_request()).unwrap();
+    let canonical = request_occurrences(
+        &store.lock().unwrap(),
+        cuts.before_call().snapshot_request(),
+    )
+    .unwrap();
     assert_eq!(canonical[0].origin, snapshot.prefix[0].origin);
     assert_eq!(canonical[1].origin, snapshot.prefix[1].origin);
     assert_eq!(canonical[0].overlays[0].text, "trimmed");
@@ -709,7 +714,7 @@ fn ambiguous_ordinary_compaction_authors_bytes_without_inventing_provenance() {
                 None,
             )
             .unwrap();
-        let canonical = request_occurrences(&store.lock(), &target).unwrap();
+        let canonical = request_occurrences(&store.lock().unwrap(), &target).unwrap();
         let ambiguous = &canonical[usize::from(reversed)];
         assert_eq!(ambiguous.item.0["content"], "b");
         assert_eq!(ambiguous.origin.request, target);
@@ -840,7 +845,7 @@ fn visible_result_without_exact_terminal_has_no_edit_authority() {
     );
     fixture
         .store
-        .lock()
+        .lock().unwrap()
         .execute(
             // Remove terminal authority while retaining immutable issuing evidence.
             "UPDATE claims SET state='pending',output_hash=NULL,terminal_json=NULL WHERE origin_request_id=?1 AND call_id=?2",

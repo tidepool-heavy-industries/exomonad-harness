@@ -127,7 +127,7 @@ pub(super) fn invocations_for_operations(
 
 impl Store {
     pub fn invocation_item(&self, request: &RequestId, call: &CallId) -> Result<Option<ToolCall>> {
-        invocation_item(&self.lock(), request, call)
+        invocation_item(&*self.lock()?, request, call)
     }
 
     /// Historical origin is owned by the original claim, never today's binding.
@@ -136,7 +136,7 @@ impl Store {
         request: &RequestId,
         call: &CallId,
     ) -> Result<Option<OperationId>> {
-        let c = self.lock();
+        let c = self.lock()?;
         if invocation_item(&c, request, call)?.is_none() {
             return Ok(None);
         }
@@ -168,7 +168,7 @@ impl Store {
         if selected.len() != operations.len() {
             return Err(StoreError::DuplicateClaim);
         }
-        let ledger = invocations_for_operations(&self.lock(), &selected)?;
+        let ledger = invocations_for_operations(&*self.lock()?, &selected)?;
         operations
             .iter()
             .map(|operation| {
@@ -200,7 +200,7 @@ impl Store {
     }
 
     pub fn latest_tool_surface(&self, request: &RequestId) -> Result<Option<serde_json::Value>> {
-        let payload: Option<String> = self.lock().query_row(
+        let payload: Option<String> = self.lock()?.query_row(
             "SELECT payload FROM events WHERE request_id=?1 AND kind='tool_surface' ORDER BY id DESC LIMIT 1",
             [&request.0], |row| row.get(0),
         ).optional()?;
@@ -239,7 +239,7 @@ mod tests {
         let call = CallId("recorded".into());
         store.append_items(&request,&[Item(json!({"type":"function_call","call_id":call.0,"name":"probe","arguments":"{}"}))]).unwrap();
         let original = store.claim(&call, &request).unwrap();
-        store.lock().execute("UPDATE embedded_bindings SET run_id='new-run',incarnation='new' WHERE agent_path='/root'",[]).unwrap();
+        store.lock().unwrap().execute("UPDATE embedded_bindings SET run_id='new-run',incarnation='new' WHERE agent_path='/root'",[]).unwrap();
         assert_ne!(
             store.operation_for_request(&request, &call).unwrap(),
             original
@@ -268,7 +268,7 @@ mod tests {
         store.append_items(&request,&[Item(json!({"type":"function_call","call_id":call.0,"name":"probe","arguments":"{}"}))]).unwrap();
         store.claim(&call, &request).unwrap();
         let foreign = store.standalone_identity(crate::model::AgentPath("/foreign".into()));
-        store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES(?1,?2,?3,?2,'pending')",params![serde_json::to_string(&foreign).unwrap(),request.0,call.0]).unwrap();
+        store.lock().unwrap().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES(?1,?2,?3,?2,'pending')",params![serde_json::to_string(&foreign).unwrap(),request.0,call.0]).unwrap();
         assert!(matches!(
             store.recorded_operation_for_request(&request, &call),
             Err(StoreError::AmbiguousReplayCall { .. })
@@ -292,6 +292,7 @@ mod tests {
         assert_eq!(call.input, ToolInput::Custom(raw.into()));
         let plan = store
             .lock()
+            .unwrap()
             .prepare(&format!("EXPLAIN QUERY PLAN {INVOCATION}"))
             .unwrap()
             .query_map(params![root.0, "wanted"], |row| row.get::<_, String>(3))

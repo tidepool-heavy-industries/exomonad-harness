@@ -100,6 +100,10 @@ pub enum StoreError {
         wal_frames: i64,
         checkpointed_frames: i64,
     },
+    #[error("store requires recovery; discard admission handles and reopen: {0}")]
+    RecoveryRequired(#[source] rusqlite::Error),
+    #[error("store admission is fenced; authenticated reopen is required")]
+    AdmissionFenced,
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -358,12 +362,85 @@ pub struct Decision {
     pub latency_ms: Option<u64>,
 }
 
-/// Clones share one serialized SQLite connection. Use separate Store::open handles for read concurrency.
+/// Arc holders share one serialized connection and its one-way recovery fence.
+/// Independent opens require the embedding's store admission authority.
 pub struct Store {
-    pub(crate) conn: Mutex<Connection>,
+    conn: Mutex<Option<Connection>>,
+    recovery_required: tokio::sync::watch::Sender<bool>,
     pub(crate) process_identity: Arc<()>,
     store_id: String,
     actor_form_changes: tokio::sync::watch::Sender<u64>,
+}
+
+pub(super) struct StoreConnection<'a> {
+    connection: std::sync::MutexGuard<'a, Option<Connection>>,
+    recovery_required: &'a tokio::sync::watch::Sender<bool>,
+}
+impl std::ops::Deref for StoreConnection<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.connection.as_ref().expect("admitted connection")
+    }
+}
+impl std::ops::DerefMut for StoreConnection<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        self.connection.as_mut().expect("admitted connection")
+    }
+}
+impl StoreConnection<'_> {
+    /// Store admission confirmed inherited WAL and every writer uses FULL. A
+    /// successful COMMIT is the durability acknowledgement; checkpoint maintenance
+    /// and outcome readback cannot turn it into an ordinary failed operation.
+    pub(crate) fn write_transaction<T, E: From<StoreError>>(
+        &mut self,
+        action: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E> {
+        let tx = self
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(StoreError::from)?;
+        match action(&tx) {
+            Ok(result) => {
+                // Drop attempts rollback on failure, but discards its error. No
+                // COMMIT error permits this handle to admit another operation.
+                let completion = tx.commit();
+                self.complete_transaction(completion)?;
+                Ok(result)
+            }
+            Err(refusal) => {
+                // SQLite can already have rolled back a failed statement. Otherwise
+                // observe rollback success before reporting an ordinary refusal.
+                if !tx.is_autocommit() {
+                    let completion = tx.rollback();
+                    self.complete_transaction(completion)?;
+                }
+                Err(refusal)
+            }
+        }
+    }
+
+    pub(crate) fn complete_transaction(&mut self, completion: rusqlite::Result<()>) -> Result<()> {
+        completion.map_err(|error| {
+            self.fence();
+            StoreError::RecoveryRequired(error)
+        })
+    }
+    fn fence(&mut self) {
+        self.recovery_required.send_replace(true);
+        self.connection.take();
+    }
+}
+impl Drop for StoreConnection<'_> {
+    fn drop(&mut self) {
+        // A legacy early return may rely on Transaction's best-effort rollback.
+        // Never return an unresolved transaction to another holder of this Store.
+        if self
+            .connection
+            .as_ref()
+            .is_some_and(|connection| !connection.is_autocommit())
+        {
+            self.fence();
+        }
+    }
 }
 impl Store {
     pub(crate) fn validate_agent_path(path: &str, parent: Option<&str>) -> Result<()> {
@@ -419,40 +496,41 @@ impl Store {
         source: &serde_json::Value,
     ) -> Result<Agent> {
         Self::validate_agent_path(&path.0, parent.map(|p| p.0.as_str()))?;
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        if let Some(p) = parent {
-            let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM agents WHERE path=?1)",
-                [&p.0],
-                |r| r.get(0),
-            )?;
-            if !exists {
-                return Err(StoreError::MissingAgentParent(p.0.clone()));
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            if let Some(p) = parent {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM agents WHERE path=?1)",
+                    [&p.0],
+                    |r| r.get(0),
+                )?;
+                if !exists {
+                    return Err(StoreError::MissingAgentParent(p.0.clone()));
+                }
             }
-        }
-        if let Some(h) = head {
-            let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
-                [&h.0],
-                |r| r.get(0),
-            )?;
-            if !exists {
-                return Err(StoreError::MissingRequest(h.0.clone()));
+            if let Some(h) = head {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
+                    [&h.0],
+                    |r| r.get(0),
+                )?;
+                if !exists {
+                    return Err(StoreError::MissingRequest(h.0.clone()));
+                }
             }
-        }
-        let created_at = utc_millis();
-        tx.execute("INSERT INTO agents(path,parent_path,head_request,contract,fork_source,state,created_at) VALUES (?1,?2,?3,?4,?5,'active',?6)",
-            params![path.0,parent.map(|p|p.0.as_str()),head.map(|h|h.0.as_str()),serde_json::to_string(contract)?,serde_json::to_string(source)?,created_at])?;
-        tx.commit()?;
-        Ok(Agent {
-            path: path.clone(),
-            parent: parent.cloned(),
-            head_request: head.cloned(),
-            contract: contract.clone(),
-            fork_source: source.clone(),
-            state: AgentState::Active,
-            created_at,
+            let created_at = utc_millis();
+            tx.execute("INSERT INTO agents(path,parent_path,head_request,contract,fork_source,state,created_at) VALUES (?1,?2,?3,?4,?5,'active',?6)",
+                params![path.0,parent.map(|p|p.0.as_str()),head.map(|h|h.0.as_str()),serde_json::to_string(contract)?,serde_json::to_string(source)?,created_at])?;
+
+            Ok(Agent {
+                path: path.clone(),
+                parent: parent.cloned(),
+                head_request: head.cloned(),
+                contract: contract.clone(),
+                fork_source: source.clone(),
+                state: AgentState::Active,
+                created_at,
+        })
         })
     }
     /// Atomically admit an agent and persist its initial task envelope.
@@ -471,48 +549,49 @@ impl Store {
         item: &Item,
     ) -> Result<(Agent, i64)> {
         Self::validate_agent_path(&path.0, parent.map(|p| p.0.as_str()))?;
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        if let Some(p) = parent {
-            let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM agents WHERE path=?1)",
-                [&p.0],
-                |r| r.get(0),
-            )?;
-            if !exists {
-                return Err(StoreError::MissingAgentParent(p.0.clone()));
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            if let Some(p) = parent {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM agents WHERE path=?1)",
+                    [&p.0],
+                    |r| r.get(0),
+                )?;
+                if !exists {
+                    return Err(StoreError::MissingAgentParent(p.0.clone()));
+                }
             }
-        }
-        if let Some(h) = head {
-            let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
-                [&h.0],
-                |r| r.get(0),
-            )?;
-            if !exists {
-                return Err(StoreError::MissingRequest(h.0.clone()));
+            if let Some(h) = head {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
+                    [&h.0],
+                    |r| r.get(0),
+                )?;
+                if !exists {
+                    return Err(StoreError::MissingRequest(h.0.clone()));
+                }
             }
-        }
-        let created_at = utc_millis();
-        tx.execute("INSERT INTO agents(path,parent_path,head_request,contract,fork_source,state,created_at) VALUES (?1,?2,?3,?4,?5,'active',?6)",
-            params![path.0,parent.map(|p|p.0.as_str()),head.map(|h|h.0.as_str()),serde_json::to_string(contract)?,serde_json::to_string(source)?,created_at])?;
-        let hash = Self::put_item_tx(&tx, item)?;
-        tx.execute("INSERT INTO envelopes(sender,recipient,class,item_hash,delivered_request,created_at) VALUES (?1,?2,?3,?4,NULL,?5)",
-            params![sender, recipient, class, hash.0, utc_millis()])?;
-        let envelope_id = tx.last_insert_rowid();
-        tx.commit()?;
-        Ok((
-            Agent {
-                path: path.clone(),
-                parent: parent.cloned(),
-                head_request: head.cloned(),
-                contract: contract.clone(),
-                fork_source: source.clone(),
-                state: AgentState::Active,
-                created_at,
-            },
-            envelope_id,
-        ))
+            let created_at = utc_millis();
+            tx.execute("INSERT INTO agents(path,parent_path,head_request,contract,fork_source,state,created_at) VALUES (?1,?2,?3,?4,?5,'active',?6)",
+                params![path.0,parent.map(|p|p.0.as_str()),head.map(|h|h.0.as_str()),serde_json::to_string(contract)?,serde_json::to_string(source)?,created_at])?;
+            let hash = Self::put_item_tx(&tx, item)?;
+            tx.execute("INSERT INTO envelopes(sender,recipient,class,item_hash,delivered_request,created_at) VALUES (?1,?2,?3,?4,NULL,?5)",
+                params![sender, recipient, class, hash.0, utc_millis()])?;
+            let envelope_id = tx.last_insert_rowid();
+
+            Ok((
+                Agent {
+                    path: path.clone(),
+                    parent: parent.cloned(),
+                    head_request: head.cloned(),
+                    contract: contract.clone(),
+                    fork_source: source.clone(),
+                    state: AgentState::Active,
+                    created_at,
+                },
+                envelope_id,
+            ))
+        })
     }
     /// Atomically fork a flattened `here` snapshot, admit its child, and put
     /// the initial NEW_TASK envelope in the child's mailbox. The snapshot
@@ -591,170 +670,170 @@ impl Store {
         task_item: &Item,
     ) -> Result<(Agent, i64)> {
         Self::validate_agent_path(&path.0, Some(&parent.0))?;
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        let parent_exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM agents WHERE path=?1)",
-            [&parent.0],
-            |r| r.get(0),
-        )?;
-        if !parent_exists {
-            return Err(StoreError::MissingAgentParent(parent.0.clone()));
-        }
-
-        let source_head = if let Some(request) = invocation_request {
-            let branch: Option<String> = tx
-                .query_row(
-                    "SELECT branch FROM requests WHERE id=?1",
-                    [&request.0],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let Some(branch) = branch else {
-                return Err(StoreError::MissingRequest(request.0.clone()));
-            };
-            if branch != parent.0 {
-                return Err(StoreError::RequestAgentMismatch {
-                    request: request.0.clone(),
-                    expected: parent.0.clone(),
-                    actual: branch,
-                });
-            }
-            Some(request.clone())
-        } else {
-            tx.query_row(
-                "SELECT head_request FROM agents WHERE path=?1",
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let parent_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agents WHERE path=?1)",
                 [&parent.0],
-                |row| Ok(row.get::<_, Option<String>>(0)?.map(RequestId)),
-            )?
-        };
-        let stored_history = if let Some(head) = source_head.as_ref() {
-            let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
-                [&head.0],
-                |row| row.get(0),
+                |r| r.get(0),
             )?;
-            if !exists {
-                return Err(StoreError::MissingRequest(head.0.clone()));
+            if !parent_exists {
+                return Err(StoreError::MissingAgentParent(parent.0.clone()));
             }
-            context::history(&tx, head, true)?
-        } else {
-            Vec::new()
-        };
-        let selected_history =
-            if let (Some(request), Some(call_id)) = (invocation_request, invocation_call_id) {
-                let end = stored_history.iter().position(|occurrence| {
-                    let item = &occurrence.item;
-                    &occurrence.request == request
-                        && item.0["type"] == "function_call"
-                        && item.0["call_id"].as_str() == Some(&call_id.0)
-                        && item.0["name"].as_str() == Some("spawn_agent")
-                });
-                let Some(end) = end else {
-                    return Err(StoreError::MissingActiveSpawnCall {
+
+            let source_head = if let Some(request) = invocation_request {
+                let branch: Option<String> = tx
+                    .query_row(
+                        "SELECT branch FROM requests WHERE id=?1",
+                        [&request.0],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let Some(branch) = branch else {
+                    return Err(StoreError::MissingRequest(request.0.clone()));
+                };
+                if branch != parent.0 {
+                    return Err(StoreError::RequestAgentMismatch {
                         request: request.0.clone(),
-                        call_id: call_id.0.clone(),
+                        expected: parent.0.clone(),
+                        actual: branch,
                     });
-                };
-                stored_history.into_iter().take(end + 1).collect()
+                }
+                Some(request.clone())
             } else {
-                stored_history
+                tx.query_row(
+                    "SELECT head_request FROM agents WHERE path=?1",
+                    [&parent.0],
+                    |row| Ok(row.get::<_, Option<String>>(0)?.map(RequestId)),
+                )?
             };
-        let inherited_operations = if let Some(head) = source_head.as_ref() {
-            let mut query = tx.prepare(
-                "WITH RECURSIVE lineage(id,parent_id,depth) AS (
-                     SELECT id,parent_id,0 FROM requests WHERE id=?1
-                     UNION ALL SELECT r.id,r.parent_id,lineage.depth+1 FROM requests r JOIN lineage ON r.id=lineage.parent_id
-                 ) SELECT c.origin,c.origin_request_id,c.call_id,c.state,c.output_hash,c.terminal_json FROM claims c
-                   JOIN lineage ON lineage.id=c.request_id ORDER BY lineage.depth ASC",
-            )?;
-            let rows = query
-                .query_map([&head.0], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                    ))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let mut nearest = std::collections::HashMap::new();
-            for (origin, request, call, state, output, terminal) in rows {
-                let operation = OperationId {
-                    origin: serde_json::from_str(&origin)?,
-                    request: RequestId(request),
-                    call: CallId(call),
-                };
-                nearest
-                    .entry(operation)
-                    .or_insert((state, output, terminal));
-            }
-            let visible_calls = selected_history
-                .iter()
-                .filter_map(|occurrence| {
-                    occurrence
-                        .item
-                        .tool_call()
-                        .ok()
-                        .flatten()
-                        .map(|call| (occurrence.origin.request.clone(), call.call_id))
-                })
-                .collect::<HashSet<_>>();
-            nearest.retain(|operation, _| {
-                visible_calls.contains(&(operation.request.clone(), operation.call.clone()))
-            });
-            let ledger =
-                validation::invocations_for_operations(&tx, &nearest.keys().cloned().collect())?;
-            let mut selected = Vec::new();
-            for (operation, terminal) in nearest {
-                let Some(invocation) = ledger.get(&operation) else {
-                    return Err(StoreError::MissingCheckpointCall {
-                        request: operation.request.0,
-                        call_id: operation.call.0,
+            let stored_history = if let Some(head) = source_head.as_ref() {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
+                    [&head.0],
+                    |row| row.get(0),
+                )?;
+                if !exists {
+                    return Err(StoreError::MissingRequest(head.0.clone()));
+                }
+                context::history(&tx, head, true)?
+            } else {
+                Vec::new()
+            };
+            let selected_history =
+                if let (Some(request), Some(call_id)) = (invocation_request, invocation_call_id) {
+                    let end = stored_history.iter().position(|occurrence| {
+                        let item = &occurrence.item;
+                        &occurrence.request == request
+                            && item.0["type"] == "function_call"
+                            && item.0["call_id"].as_str() == Some(&call_id.0)
+                            && item.0["name"].as_str() == Some("spawn_agent")
                     });
+                    let Some(end) = end else {
+                        return Err(StoreError::MissingActiveSpawnCall {
+                            request: request.0.clone(),
+                            call_id: call_id.0.clone(),
+                        });
+                    };
+                    stored_history.into_iter().take(end + 1).collect()
+                } else {
+                    stored_history
                 };
-                let count = selected_history
+            let inherited_operations = if let Some(head) = source_head.as_ref() {
+                let mut query = tx.prepare(
+                    "WITH RECURSIVE lineage(id,parent_id,depth) AS (
+                         SELECT id,parent_id,0 FROM requests WHERE id=?1
+                         UNION ALL SELECT r.id,r.parent_id,lineage.depth+1 FROM requests r JOIN lineage ON r.id=lineage.parent_id
+                     ) SELECT c.origin,c.origin_request_id,c.call_id,c.state,c.output_hash,c.terminal_json FROM claims c
+                       JOIN lineage ON lineage.id=c.request_id ORDER BY lineage.depth ASC",
+                )?;
+                let rows = query
+                    .query_map([&head.0], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                        ))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let mut nearest = std::collections::HashMap::new();
+                for (origin, request, call, state, output, terminal) in rows {
+                    let operation = OperationId {
+                        origin: serde_json::from_str(&origin)?,
+                        request: RequestId(request),
+                        call: CallId(call),
+                    };
+                    nearest
+                        .entry(operation)
+                        .or_insert((state, output, terminal));
+                }
+                let visible_calls = selected_history
                     .iter()
-                    .filter(|occurrence| {
-                        occurrence.origin == invocation.occurrence
-                            && !Self::strip_from_here_snapshot(&occurrence.item)
+                    .filter_map(|occurrence| {
+                        occurrence
+                            .item
+                            .tool_call()
+                            .ok()
+                            .flatten()
+                            .map(|call| (occurrence.origin.request.clone(), call.call_id))
                     })
-                    .count();
-                if count > 1 {
-                    return Err(StoreError::AmbiguousReplayCall {
-                        call_id: operation.call.0,
-                    });
-                }
-                if count == 1
-                    && !selected_history
+                    .collect::<HashSet<_>>();
+                nearest.retain(|operation, _| {
+                    visible_calls.contains(&(operation.request.clone(), operation.call.clone()))
+                });
+                let ledger =
+                    validation::invocations_for_operations(&tx, &nearest.keys().cloned().collect())?;
+                let mut selected = Vec::new();
+                for (operation, terminal) in nearest {
+                    let Some(invocation) = ledger.get(&operation) else {
+                        return Err(StoreError::MissingCheckpointCall {
+                            request: operation.request.0,
+                            call_id: operation.call.0,
+                        });
+                    };
+                    let count = selected_history
                         .iter()
-                        .any(|occurrence| occurrence.output_operation.as_ref() == Some(&operation))
-                {
-                    selected.push((operation, terminal));
+                        .filter(|occurrence| {
+                            occurrence.origin == invocation.occurrence
+                                && !Self::strip_from_here_snapshot(&occurrence.item)
+                        })
+                        .count();
+                    if count > 1 {
+                        return Err(StoreError::AmbiguousReplayCall {
+                            call_id: operation.call.0,
+                        });
+                    }
+                    if count == 1
+                        && !selected_history
+                            .iter()
+                            .any(|occurrence| occurrence.output_operation.as_ref() == Some(&operation))
+                    {
+                        selected.push((operation, terminal));
+                    }
                 }
-            }
-            selected
-        } else {
-            Vec::new()
-        };
-        context::validate_canonical_history(&tx, &selected_history)?;
-        let child_effort = selected_history
-            .iter()
-            .rev()
-            .find_map(|occurrence| occurrence.item.configuration_effort())
-            .unwrap_or(Effort::Low);
-        let snapshot: Vec<_> = selected_history
-            .into_iter()
-            .filter(|occurrence| !Self::strip_from_here_snapshot(&occurrence.item))
-            .collect();
-        let source = serde_json::json!({
-            "kind":"here",
-            "source_head_request":source_head,
-            "snapshot_request":snapshot_request,
-            "invocation_request":invocation_request,
-            "invocation_call_id":invocation_call_id
+                selected
+            } else {
+                Vec::new()
+            };
+            context::validate_canonical_history(&tx, &selected_history)?;
+            let child_effort = selected_history
+                .iter()
+                .rev()
+                .find_map(|occurrence| occurrence.item.configuration_effort())
+                .unwrap_or(Effort::Low);
+            let snapshot: Vec<_> = selected_history
+                .into_iter()
+                .filter(|occurrence| !Self::strip_from_here_snapshot(&occurrence.item))
+                .collect();
+            let source = serde_json::json!({
+                "kind":"here",
+                "source_head_request":source_head,
+                "snapshot_request":snapshot_request,
+                "invocation_request":invocation_request,
+                "invocation_call_id":invocation_call_id
         });
 
         context::insert_snapshot_request(&tx, snapshot_request, source_head.as_ref(), &path.0)?;
@@ -788,7 +867,7 @@ impl Store {
             params![sender, recipient, class, hash.0, utc_millis()],
         )?;
         let envelope_id = tx.last_insert_rowid();
-        tx.commit()?;
+
         Ok((
             Agent {
                 path: path.clone(),
@@ -801,6 +880,7 @@ impl Store {
             },
             envelope_id,
         ))
+        })
     }
 
     fn strip_from_here_snapshot(item: &Item) -> bool {
@@ -811,7 +891,7 @@ impl Store {
             )
     }
     pub fn agent(&self, path: &AgentPath) -> Result<Option<Agent>> {
-        self.lock().query_row("SELECT path,parent_path,head_request,contract,fork_source,state,created_at FROM agents WHERE path=?1",[&path.0],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?.map(Self::decode_agent).transpose()
+        self.lock()?.query_row("SELECT path,parent_path,head_request,contract,fork_source,state,created_at FROM agents WHERE path=?1",[&path.0],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?.map(Self::decode_agent).transpose()
     }
     pub fn children_agents(&self, path: &AgentPath) -> Result<Vec<Agent>> {
         if path.0 == "/operator" {
@@ -825,7 +905,7 @@ impl Store {
         self.query_agents("SELECT path,parent_path,head_request,contract,fork_source,state,created_at FROM agents ORDER BY path",None)
     }
     fn query_agents(&self, sql: &str, arg: Option<&str>) -> Result<Vec<Agent>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let mut q = c.prepare(sql)?;
         let decode = |r: &rusqlite::Row<'_>| {
             Ok((
@@ -873,10 +953,13 @@ impl Store {
         expected: Option<&RequestId>,
         current: Option<&RequestId>,
     ) -> Result<bool> {
-        Ok(self.lock().execute(
-            "UPDATE agents SET head_request=?3 WHERE path=?1 AND head_request IS ?2",
-            params![path.0, expected.map(|x| &x.0), current.map(|x| &x.0)],
-        )? == 1)
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            Ok(tx.execute(
+                "UPDATE agents SET head_request=?3 WHERE path=?1 AND head_request IS ?2",
+                params![path.0, expected.map(|x| &x.0), current.map(|x| &x.0)],
+            )? == 1)
+        })
     }
     /// Atomically persist a successful agent completion and its optional
     /// parent answer. A lost head CAS cannot publish, and publication failure
@@ -888,28 +971,29 @@ impl Store {
         current: &RequestId,
         parent_answer: Option<(&AgentPath, &Item)>,
     ) -> Result<CompletionCommit> {
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        let changed = tx.execute(
-            "UPDATE agents SET head_request=?3 WHERE path=?1 AND head_request IS ?2",
-            params![path.0, expected.map(|x| x.0.as_str()), current.0],
-        )?;
-        if changed != 1 {
-            return Ok(CompletionCommit::HeadMismatch);
-        }
-        let envelope_id = if let Some((parent, answer)) = parent_answer {
-            let hash = Self::put_item_tx(&tx, answer)?;
-            tx.execute(
-                "INSERT INTO envelopes(sender,recipient,class,item_hash,delivered_request,created_at) \
-                 VALUES (?1,?2,'AtBoundary',?3,NULL,?4)",
-                params![path.0, parent.0, hash.0, utc_millis()],
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let changed = tx.execute(
+                "UPDATE agents SET head_request=?3 WHERE path=?1 AND head_request IS ?2",
+                params![path.0, expected.map(|x| x.0.as_str()), current.0],
             )?;
-            Some(tx.last_insert_rowid())
-        } else {
-            None
-        };
-        tx.commit()?;
-        Ok(CompletionCommit::Committed { envelope_id })
+            if changed != 1 {
+                return Ok(CompletionCommit::HeadMismatch);
+            }
+            let envelope_id = if let Some((parent, answer)) = parent_answer {
+                let hash = Self::put_item_tx(&tx, answer)?;
+                tx.execute(
+                    "INSERT INTO envelopes(sender,recipient,class,item_hash,delivered_request,created_at) \
+                     VALUES (?1,?2,'AtBoundary',?3,NULL,?4)",
+                    params![path.0, parent.0, hash.0, utc_millis()],
+                )?;
+                Some(tx.last_insert_rowid())
+            } else {
+                None
+            };
+
+            Ok(CompletionCommit::Committed { envelope_id })
+        })
     }
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -927,7 +1011,8 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Mutex::new(Some(conn)),
+            recovery_required: tokio::sync::watch::channel(false).0,
             process_identity: Arc::new(()),
             store_id,
             actor_form_changes: tokio::sync::watch::channel(0).0,
@@ -939,8 +1024,29 @@ impl Store {
             actor,
         }
     }
-    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap_or_else(|p| p.into_inner())
+    pub(crate) fn lock(&self) -> Result<StoreConnection<'_>> {
+        let connection = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        if connection.is_none() {
+            return Err(StoreError::AdmissionFenced);
+        }
+        Ok(StoreConnection {
+            connection,
+            recovery_required: &self.recovery_required,
+        })
+    }
+    /// A readiness hint; serialized connection admission remains authoritative.
+    pub fn ensure_ready(&self) -> Result<()> {
+        if *self.recovery_required.borrow() {
+            Err(StoreError::AdmissionFenced)
+        } else {
+            Ok(())
+        }
+    }
+    /// One-way supervision notification, including faults before subscription.
+    pub async fn wait_recovery_required(&self) -> StoreError {
+        let mut receiver = self.recovery_required.subscribe();
+        let _ = receiver.wait_for(|required| *required).await;
+        StoreError::AdmissionFenced
     }
     pub fn create_request(
         &self,
@@ -948,15 +1054,17 @@ impl Store {
         parent: Option<&RequestId>,
         branch: &str,
     ) -> Result<Request> {
-        let c = self.lock();
-        c.execute(
-            "INSERT INTO requests(id,parent_id,branch,created_at) VALUES (?1,?2,?3,?4)",
-            params![id.0, parent.map(|p| p.0.as_str()), branch, utc_millis()],
-        )?;
-        Ok(Request {
-            id: id.clone(),
-            parent: parent.cloned(),
-            branch: branch.into(),
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            tx.execute(
+                "INSERT INTO requests(id,parent_id,branch,created_at) VALUES (?1,?2,?3,?4)",
+                params![id.0, parent.map(|p| p.0.as_str()), branch, utc_millis()],
+            )?;
+            Ok(Request {
+                id: id.clone(),
+                parent: parent.cloned(),
+                branch: branch.into(),
+            })
         })
     }
     /// Create a request and persist its initial items in one commit, so recovery never sees a half-written prefix.
@@ -968,28 +1076,29 @@ impl Store {
         items: &[Item],
         usage: Usage,
     ) -> Result<Request> {
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        tx.execute("INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-            params![request.0,parent.map(|p|p.0.as_str()),branch,utc_millis(),usage.input_tokens,usage.output_tokens,usage.cost_micros])?;
-        for (position, item) in items
-            .iter()
-            .filter(|item| !item.is_configuration_update())
-            .enumerate()
-        {
-            output_publication::require_ordinary(item, request, position as i64)?;
-            let hash = Self::put_item_tx(&tx, item)?;
-            tx.execute(
-                "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
-                params![request.0, position as i64, hash.0],
-            )?;
-            chat::publish(&tx, request, position as i64, &hash, item)?;
-        }
-        tx.commit()?;
-        Ok(Request {
-            id: request.clone(),
-            parent: parent.cloned(),
-            branch: branch.into(),
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            tx.execute("INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![request.0,parent.map(|p|p.0.as_str()),branch,utc_millis(),usage.input_tokens,usage.output_tokens,usage.cost_micros])?;
+            for (position, item) in items
+                .iter()
+                .filter(|item| !item.is_configuration_update())
+                .enumerate()
+            {
+                output_publication::require_ordinary(item, request, position as i64)?;
+                let hash = Self::put_item_tx(&tx, item)?;
+                tx.execute(
+                    "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
+                    params![request.0, position as i64, hash.0],
+                )?;
+                chat::publish(&tx, request, position as i64, &hash, item)?;
+            }
+
+            Ok(Request {
+                id: request.clone(),
+                parent: parent.cloned(),
+                branch: branch.into(),
+        })
         })
     }
     /// Install a trusted compacted window atomically. The parent edge keeps the
@@ -1042,90 +1151,91 @@ impl Store {
         identity: Option<&crate::embedding::HostIdentity>,
         response: Option<&ServerCompactionResponse>,
     ) -> Result<()> {
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        if let Some(identity) = identity {
-            let current = embedded_round::frontier(&tx, identity)?;
-            if branch != identity.actor.0
-                || current
-                    .pending_head
-                    .as_ref()
-                    .or(current.settled_head.as_ref())
-                    != Some(parent)
-            {
-                return Err(StoreError::InvalidEmbeddedFrontier);
-            }
-        }
-        tx.execute(
-            "INSERT INTO requests(id,parent_id,branch,created_at) VALUES (?1,?2,?3,?4)",
-            params![request.0, parent.0, branch, utc_millis()],
-        )?;
-        if let Some(identity) = identity {
-            tx.execute("UPDATE requests SET embedded_run=?2,embedded_incarnation=?3,round_phase='pending' WHERE id=?1",
-                params![request.0,identity.run,identity.incarnation])?;
-        }
-        let reconciled =
-            context::reconcile_compaction(&tx, request, parent, items, retained, issued, pending)?;
-        for (position, item) in reconciled.iter().enumerate() {
-            match item {
-                context::CompactionItem::Retained(occurrence) => {
-                    context::insert_occurrence(&tx, request, position as i64, occurrence)?
-                }
-                context::CompactionItem::Authored(item) => {
-                    output_publication::require_ordinary(item, request, position as i64)?;
-                    let hash = Self::put_item_tx(&tx, item)?;
-                    tx.execute("INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)", params![request.0, position as i64, hash.0])?;
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            if let Some(identity) = identity {
+                let current = embedded_round::frontier(&tx, identity)?;
+                if branch != identity.actor.0
+                    || current
+                        .pending_head
+                        .as_ref()
+                        .or(current.settled_head.as_ref())
+                        != Some(parent)
+                {
+                    return Err(StoreError::InvalidEmbeddedFrontier);
                 }
             }
-        }
-        let retained_occurrences = reconciled
-            .iter()
-            .filter_map(|item| match item {
-                context::CompactionItem::Retained(occurrence) => Some(occurrence.clone()),
-                context::CompactionItem::Authored(_) => None,
-            })
-            .collect::<Vec<_>>();
-        let carried = context::carry_native_claims(
-            &tx,
-            &retained_occurrences,
-            parent,
-            request,
-            &self.store_id,
-            context::NativeClaimTransfer::Current,
-        )?;
-        let mut seen = HashSet::new();
-        let invocations =
-            validation::invocations_for_operations(&tx, &pending.iter().cloned().collect())?;
-        for operation in pending {
-            if !seen.insert(operation) {
-                return Err(StoreError::DuplicateClaim);
+            tx.execute(
+                "INSERT INTO requests(id,parent_id,branch,created_at) VALUES (?1,?2,?3,?4)",
+                params![request.0, parent.0, branch, utc_millis()],
+            )?;
+            if let Some(identity) = identity {
+                tx.execute("UPDATE requests SET embedded_run=?2,embedded_incarnation=?3,round_phase='pending' WHERE id=?1",
+                    params![request.0,identity.run,identity.incarnation])?;
             }
-            let invocation =
-                invocations
-                    .get(operation)
-                    .ok_or_else(|| StoreError::MissingCheckpointCall {
-                        request: operation.request.0.clone(),
+            let reconciled =
+                context::reconcile_compaction(&tx, request, parent, items, retained, issued, pending)?;
+            for (position, item) in reconciled.iter().enumerate() {
+                match item {
+                    context::CompactionItem::Retained(occurrence) => {
+                        context::insert_occurrence(&tx, request, position as i64, occurrence)?
+                    }
+                    context::CompactionItem::Authored(item) => {
+                        output_publication::require_ordinary(item, request, position as i64)?;
+                        let hash = Self::put_item_tx(&tx, item)?;
+                        tx.execute("INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)", params![request.0, position as i64, hash.0])?;
+                    }
+                }
+            }
+            let retained_occurrences = reconciled
+                .iter()
+                .filter_map(|item| match item {
+                    context::CompactionItem::Retained(occurrence) => Some(occurrence.clone()),
+                    context::CompactionItem::Authored(_) => None,
+                })
+                .collect::<Vec<_>>();
+            let carried = context::carry_native_claims(
+                &tx,
+                &retained_occurrences,
+                parent,
+                request,
+                &self.store_id,
+                context::NativeClaimTransfer::Current,
+            )?;
+            let mut seen = HashSet::new();
+            let invocations =
+                validation::invocations_for_operations(&tx, &pending.iter().cloned().collect())?;
+            for operation in pending {
+                if !seen.insert(operation) {
+                    return Err(StoreError::DuplicateClaim);
+                }
+                let invocation =
+                    invocations
+                        .get(operation)
+                        .ok_or_else(|| StoreError::MissingCheckpointCall {
+                            request: operation.request.0.clone(),
+                            call_id: operation.call.0.clone(),
+                        })?;
+                let matching = reconciled.iter().filter(|item| matches!(item, context::CompactionItem::Retained(occurrence) if occurrence.origin == invocation.occurrence)).count();
+                if matching != 1 {
+                    return Err(StoreError::AmbiguousReplayCall {
                         call_id: operation.call.0.clone(),
-                    })?;
-            let matching = reconciled.iter().filter(|item| matches!(item, context::CompactionItem::Retained(occurrence) if occurrence.origin == invocation.occurrence)).count();
-            if matching != 1 {
-                return Err(StoreError::AmbiguousReplayCall {
-                    call_id: operation.call.0.clone(),
-                });
+                    });
+                }
+                if !carried.contains(operation) {
+                    return Err(crate::context::ContextError::ProtectedGroup.into());
+                }
             }
-            if !carried.contains(operation) {
-                return Err(crate::context::ContextError::ProtectedGroup.into());
-            }
-        }
-        let key = format!("harness:compaction:{}", request.0);
-        tx.execute(
-            "INSERT INTO session_state(session_id,state,updated_at) VALUES (?1,'true',?2)",
-            params![key, utc_millis()],
-        )?;
-        context::compaction_generation(&tx, &self.store_id, parent, request, branch)?;
-        compaction::record(&tx, request, parent, response)?;
-        tx.commit()?;
-        Ok(())
+            let key = format!("harness:compaction:{}", request.0);
+            tx.execute(
+                "INSERT INTO session_state(session_id,state,updated_at) VALUES (?1,'true',?2)",
+                params![key, utc_millis()],
+            )?;
+            context::compaction_generation(&tx, &self.store_id, parent, request, branch)?;
+            compaction::record(&tx, request, parent, response)?;
+
+            Ok(())
+        })
     }
     pub(crate) fn is_compaction_boundary(&self, request: &RequestId) -> Result<bool> {
         let key = format!("harness:compaction:{}", request.0);
@@ -1155,7 +1265,7 @@ impl Store {
     }
     /// Crash recovery exposes all still-pending durable claims for the caller's resumption policy.
     pub fn recover_pending(&self) -> Result<Vec<PendingCall>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let mut q=c.prepare("SELECT origin,origin_request_id,call_id,request_id FROM claims WHERE state='pending' ORDER BY call_id,request_id")?;
         q.query_map([], |r| {
             let raw: String = r.get(0)?;
@@ -1181,26 +1291,29 @@ impl Store {
         .map_err(Into::into)
     }
     pub fn set_usage(&self, request: &RequestId, usage: Usage) -> Result<()> {
-        let n = self.lock().execute(
-            "UPDATE requests SET input_tokens=?2,output_tokens=?3,cost_micros=?4 WHERE id=?1",
-            params![
-                request.0,
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.cost_micros
-            ],
-        )?;
-        if n == 0 {
-            return Err(StoreError::MissingRequest(request.0.clone()));
-        }
-        Ok(())
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let n = tx.execute(
+                "UPDATE requests SET input_tokens=?2,output_tokens=?3,cost_micros=?4 WHERE id=?1",
+                params![
+                    request.0,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cost_micros
+                ],
+            )?;
+            if n == 0 {
+                return Err(StoreError::MissingRequest(request.0.clone()));
+            }
+            Ok(())
+        })
     }
     pub fn usage_subtree(&self, request: &RequestId) -> Result<Usage> {
-        let c = self.lock();
+        let c = self.lock()?;
         c.query_row("WITH RECURSIVE subtree(id) AS (SELECT id FROM requests WHERE id=?1 UNION ALL SELECT r.id FROM requests r JOIN subtree s ON r.parent_id=s.id) SELECT COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(cost_micros),0) FROM subtree JOIN requests USING(id)",[&request.0],|r|Ok(Usage{input_tokens:r.get(0)?,output_tokens:r.get(1)?,cost_micros:r.get(2)?})).map_err(Into::into)
     }
     pub fn siblings(&self, request: &RequestId) -> Result<Vec<Request>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let mut q=c.prepare("SELECT s.id,s.parent_id,s.branch FROM requests target JOIN requests s ON s.parent_id IS target.parent_id WHERE target.id=?1 AND s.id<>target.id ORDER BY s.branch")?;
         q.query_map([&request.0], |r| {
             Ok(Request {
@@ -1213,7 +1326,7 @@ impl Store {
         .map_err(Into::into)
     }
     pub fn pending_at(&self, request: &RequestId) -> Result<Vec<PendingCall>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let mut q=c.prepare("WITH RECURSIVE lineage(id,parent_id) AS (SELECT id,parent_id FROM requests WHERE id=?1 UNION ALL SELECT r.id,r.parent_id FROM requests r JOIN lineage l ON r.id=l.parent_id WHERE NOT EXISTS(SELECT 1 FROM session_state s WHERE s.session_id='harness:compaction:' || l.id)) SELECT c.origin,c.origin_request_id,c.call_id,c.request_id FROM claims c JOIN lineage l ON l.id=c.request_id WHERE c.state='pending' ORDER BY c.call_id,c.request_id")?;
         q.query_map([&request.0], |r| {
             let raw: String = r.get(0)?;
@@ -1248,11 +1361,14 @@ impl Store {
     }
 
     fn save_session_state_inner(&self, session_id: &str, state: &serde_json::Value) -> Result<()> {
-        self.lock().execute("INSERT INTO session_state(session_id,state,updated_at) VALUES (?1,?2,?3) ON CONFLICT(session_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at",params![session_id,serde_json::to_string(state)?,utc_millis()])?;
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+        tx.execute("INSERT INTO session_state(session_id,state,updated_at) VALUES (?1,?2,?3) ON CONFLICT(session_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at",params![session_id,serde_json::to_string(state)?,utc_millis()])?;
         Ok(())
+        })
     }
     pub fn session_state(&self, session_id: &str) -> Result<Option<SessionState>> {
-        self.lock()
+        self.lock()?
             .query_row(
                 "SELECT session_id,state,updated_at FROM session_state WHERE session_id=?1",
                 [session_id],
@@ -1268,7 +1384,7 @@ impl Store {
             .map_err(Into::into)
     }
     pub fn request(&self, id: &RequestId) -> Result<Option<Request>> {
-        self.lock()
+        self.lock()?
             .query_row(
                 "SELECT id,parent_id,branch FROM requests WHERE id=?1",
                 [&id.0],
@@ -1302,14 +1418,15 @@ impl Store {
     }
 
     pub fn put_item(&self, item: &Item) -> Result<ItemHash> {
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        let h = Self::put_item_tx(&tx, item)?;
-        tx.commit()?;
-        Ok(h)
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let h = Self::put_item_tx(&tx, item)?;
+
+            Ok(h)
+        })
     }
     pub fn get_item(&self, hash: &ItemHash) -> Result<Option<Item>> {
-        self.lock()
+        self.lock()?
             .query_row("SELECT json FROM items WHERE hash=?1", [&hash.0], |r| {
                 r.get::<_, String>(0)
             })
@@ -1334,49 +1451,53 @@ impl Store {
         let mut c = {
             let _wait = tracing::debug_span!(target: "harness::runtime_cost", "sqlite_mutex_wait")
                 .entered();
-            self.lock()
+            self.lock()?
         };
         let transaction_span = tracing::debug_span!(target: "harness::runtime_cost", "append_items_transaction", committed = false);
         let _transaction = transaction_span.enter();
-        let tx = c.transaction()?;
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
-            [&request.0],
-            |r| r.get(0),
-        )?;
-        if !exists {
-            return Err(StoreError::MissingRequest(request.0.clone()));
-        }
-        let mut pos: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(position)+1,0) FROM request_items WHERE request_id=?1",
-            [&request.0],
-            |r| r.get(0),
-        )?;
-        let mut hashes = Vec::new();
-        for item in items {
-            output_publication::require_ordinary(item, request, pos)?;
-            let h = Self::put_item_tx(&tx, item)?;
-            tx.execute(
-                "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
-                params![request.0, pos, h.0],
+        let result: Result<_> = c.write_transaction(|tx| {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
+                [&request.0],
+                |r| r.get(0),
             )?;
-            chat::publish(&tx, request, pos, &h, item)?;
-            pos += 1;
-            hashes.push(h);
-        }
-        tx.commit()?;
+            if !exists {
+                return Err(StoreError::MissingRequest(request.0.clone()));
+            }
+            let mut pos: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(position)+1,0) FROM request_items WHERE request_id=?1",
+                [&request.0],
+                |r| r.get(0),
+            )?;
+            let mut hashes = Vec::new();
+            for item in items {
+                output_publication::require_ordinary(item, request, pos)?;
+                let h = Self::put_item_tx(&tx, item)?;
+                tx.execute(
+                    "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
+                    params![request.0, pos, h.0],
+                )?;
+                chat::publish(&tx, request, pos, &h, item)?;
+                pos += 1;
+                hashes.push(h);
+            }
+
+            Ok(hashes)
+        });
+        let result = result?;
         transaction_span.record("committed", true);
-        Ok(hashes)
+        Ok(result)
     }
 
     /// Append the harness-owned effort item, replacing an immediately adjacent
     /// update so a second change before the next response does not grow history.
     pub(crate) fn set_effort(&self, request: &RequestId, effort: Effort) -> Result<ItemHash> {
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        let hash = Self::set_effort_tx(&tx, request, effort)?;
-        tx.commit()?;
-        Ok(hash)
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let hash = Self::set_effort_tx(&tx, request, effort)?;
+
+            Ok(hash)
+        })
     }
     // The single trusted positional-setting writer. Both the ordinary
     // Store::set_effort API and atomic pending-setting consumption route here;
@@ -1450,23 +1571,24 @@ impl Store {
         request: &RequestId,
     ) -> Result<Option<ItemHash>> {
         let key = Self::pending_effort_key(agent);
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        let pending: Option<String> = tx
-            .query_row(
-                "SELECT state FROM session_state WHERE session_id=?1",
-                [&key],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let Some(pending) = pending else {
-            return Ok(None);
-        };
-        let effort: Effort = serde_json::from_str(&pending)?;
-        let hash = Self::set_effort_tx(&tx, request, effort)?;
-        tx.execute("DELETE FROM session_state WHERE session_id=?1", [&key])?;
-        tx.commit()?;
-        Ok(Some(hash))
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let pending: Option<String> = tx
+                .query_row(
+                    "SELECT state FROM session_state WHERE session_id=?1",
+                    [&key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(pending) = pending else {
+                return Ok(None);
+            };
+            let effort: Effort = serde_json::from_str(&pending)?;
+            let hash = Self::set_effort_tx(&tx, request, effort)?;
+            tx.execute("DELETE FROM session_state WHERE session_id=?1", [&key])?;
+
+            Ok(Some(hash))
+        })
     }
 
     /// Atomically attach every unread envelope for `recipient` to `request` and
@@ -1477,81 +1599,82 @@ impl Store {
         recipient: &AgentPath,
         request: &RequestId,
     ) -> Result<Vec<Item>> {
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        let branch: Option<String> = tx
-            .query_row(
-                "SELECT branch FROM requests WHERE id=?1",
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let branch: Option<String> = tx
+                .query_row(
+                    "SELECT branch FROM requests WHERE id=?1",
+                    [&request.0],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(branch) = branch else {
+                return Err(StoreError::MissingRequest(request.0.clone()));
+            };
+            if branch != recipient.0 {
+                return Err(StoreError::RequestAgentMismatch {
+                    request: request.0.clone(),
+                    expected: recipient.0.clone(),
+                    actual: branch,
+                });
+            }
+
+            let envelopes = {
+                let mut q = tx.prepare(
+                    "SELECT e.id,e.item_hash,i.json FROM envelopes e JOIN items i ON i.hash=e.item_hash \
+                     WHERE e.recipient=?1 AND e.delivered_request IS NULL ORDER BY e.id",
+                )?;
+                q.query_map([&recipient.0], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            let mut position: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(position)+1,0) FROM request_items WHERE request_id=?1",
                 [&request.0],
                 |r| r.get(0),
-            )
-            .optional()?;
-        let Some(branch) = branch else {
-            return Err(StoreError::MissingRequest(request.0.clone()));
-        };
-        if branch != recipient.0 {
-            return Err(StoreError::RequestAgentMismatch {
-                request: request.0.clone(),
-                expected: recipient.0.clone(),
-                actual: branch,
-            });
-        }
-
-        let envelopes = {
-            let mut q = tx.prepare(
-                "SELECT e.id,e.item_hash,i.json FROM envelopes e JOIN items i ON i.hash=e.item_hash \
-                 WHERE e.recipient=?1 AND e.delivered_request IS NULL ORDER BY e.id",
             )?;
-            q.query_map([&recipient.0], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        let mut position: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(position)+1,0) FROM request_items WHERE request_id=?1",
-            [&request.0],
-            |r| r.get(0),
-        )?;
-        let mut items = Vec::with_capacity(envelopes.len());
-        for (_, hash, json) in &envelopes {
-            let item = serde_json::from_str::<Item>(json)?;
-            // Envelopes are untrusted ingress, not a trusted settings writer.
-            // Mark configuration updates delivered below, but never attach
-            // them to model history through this path.
-            if item.is_configuration_update() {
-                continue;
+            let mut items = Vec::with_capacity(envelopes.len());
+            for (_, hash, json) in &envelopes {
+                let item = serde_json::from_str::<Item>(json)?;
+                // Envelopes are untrusted ingress, not a trusted settings writer.
+                // Mark configuration updates delivered below, but never attach
+                // them to model history through this path.
+                if item.is_configuration_update() {
+                    continue;
+                }
+                output_publication::require_ordinary(&item, request, position)?;
+                tx.execute(
+                    "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
+                    params![request.0, position, hash],
+                )?;
+                chat::publish(&tx, request, position, &ItemHash(hash.clone()), &item)?;
+                position += 1;
+                items.push(item);
             }
-            output_publication::require_ordinary(&item, request, position)?;
-            tx.execute(
-                "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
-                params![request.0, position, hash],
-            )?;
-            chat::publish(&tx, request, position, &ItemHash(hash.clone()), &item)?;
-            position += 1;
-            items.push(item);
-        }
-        for (envelope_id, _, _) in &envelopes {
-            tx.execute(
-                "UPDATE envelopes SET delivered_request=?2 WHERE id=?1 AND delivered_request IS NULL",
-                params![envelope_id, request.0],
-            )?;
-        }
-        tx.commit()?;
-        Ok(items)
+            for (envelope_id, _, _) in &envelopes {
+                tx.execute(
+                    "UPDATE envelopes SET delivered_request=?2 WHERE id=?1 AND delivered_request IS NULL",
+                    params![envelope_id, request.0],
+                )?;
+            }
+
+            Ok(items)
+        })
     }
     pub fn items(&self, request: &RequestId) -> Result<Vec<Item>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let mut q=c.prepare("SELECT i.json FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 ORDER BY ri.position")?;
         q.query_map([&request.0], |r| r.get::<_, String>(0))?
             .map(|x| Ok(serde_json::from_str(&x?)?))
             .collect()
     }
     pub(crate) fn items_with_hashes(&self, request: &RequestId) -> Result<Vec<(ItemHash, Item)>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let mut q = c.prepare("SELECT ri.item_hash,i.json FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 ORDER BY ri.position")?;
         q.query_map([&request.0], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1571,92 +1694,92 @@ impl Store {
         target: &RequestId,
         call_id: &CallId,
     ) -> Result<bool> {
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        let source_items = context::request_occurrences(&tx, source)?;
-        let source_calls = source_items
-            .iter()
-            .filter(|occurrence| {
-                occurrence.item.0["type"] == "function_call"
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let source_items = context::request_occurrences(&tx, source)?;
+            let source_calls = source_items
+                .iter()
+                .filter(|occurrence| {
+                    occurrence.item.0["type"] == "function_call"
+                        && occurrence.item.0["call_id"].as_str() == Some(&call_id.0)
+                        && occurrence.item.0["name"] == "spawn_agent"
+                })
+                .collect::<Vec<_>>();
+            let [source_call] = source_calls.as_slice() else {
+                return Err(StoreError::AmbiguousReplayCall {
+                    call_id: call_id.0.clone(),
+                });
+            };
+            let issuing_call = source_call.origin.clone();
+            drop(source_calls);
+            let mut candidates = Vec::new();
+            for occurrence in source_items.into_iter().filter(|occurrence| {
+                occurrence.item.0["type"] == "function_call_output"
                     && occurrence.item.0["call_id"].as_str() == Some(&call_id.0)
-                    && occurrence.item.0["name"] == "spawn_agent"
-            })
-            .collect::<Vec<_>>();
-        let [source_call] = source_calls.as_slice() else {
-            return Err(StoreError::AmbiguousReplayCall {
-                call_id: call_id.0.clone(),
-            });
-        };
-        let issuing_call = source_call.origin.clone();
-        drop(source_calls);
-        let mut candidates = Vec::new();
-        for occurrence in source_items.into_iter().filter(|occurrence| {
-            occurrence.item.0["type"] == "function_call_output"
-                && occurrence.item.0["call_id"].as_str() == Some(&call_id.0)
-        }) {
-            let operation = occurrence.output_operation.as_ref().ok_or_else(|| {
-                StoreError::UnboundOutputPublication {
-                    request: occurrence.request.clone(),
-                    position: occurrence.position,
+            }) {
+                let operation = occurrence.output_operation.as_ref().ok_or_else(|| {
+                    StoreError::UnboundOutputPublication {
+                        request: occurrence.request.clone(),
+                        position: occurrence.position,
+                    }
+                })?;
+                if context::original_call(&tx, operation)? == issuing_call {
+                    candidates.push(occurrence);
                 }
-            })?;
-            if context::original_call(&tx, operation)? == issuing_call {
-                candidates.push(occurrence);
             }
-        }
-        let Some(output) = candidates.pop() else {
-            return Ok(false);
-        };
-        if !candidates.is_empty() {
-            return Err(StoreError::InconsistentOutputPublication {
-                request: source.clone(),
-                position: output.position,
-            });
-        }
-        let target_items = context::request_occurrences(&tx, target)?;
-        context::validate_canonical_history(&tx, &target_items)?;
-        context::validate_canonical_history(&tx, std::slice::from_ref(&output))?;
-        let existing = target_items
-            .iter()
-            .filter(|occurrence| occurrence.output_operation == output.output_operation)
-            .collect::<Vec<_>>();
-        match existing.as_slice() {
-            [] => {}
-            [existing] if existing.origin == output.origin && existing.item == output.item => {
-                tx.commit()?;
-                return Ok(true);
-            }
-            _ => {
+            let Some(output) = candidates.pop() else {
+                return Ok(false);
+            };
+            if !candidates.is_empty() {
                 return Err(StoreError::InconsistentOutputPublication {
-                    request: target.clone(),
+                    request: source.clone(),
                     position: output.position,
                 });
             }
-        }
-        let Some(spawn_position) = target_items
-            .iter()
-            .position(|occurrence| occurrence.origin == issuing_call)
-        else {
-            return Ok(false);
-        };
-        let mut ordered = target_items;
-        ordered.insert(spawn_position + 1, output);
-        tx.execute("DELETE FROM request_items WHERE request_id=?1", [&target.0])?;
-        for (position, occurrence) in ordered.iter().enumerate() {
-            context::insert_occurrence(&tx, target, position as i64, occurrence)?;
-        }
-        tx.commit()?;
-        Ok(true)
+            let target_items = context::request_occurrences(&tx, target)?;
+            context::validate_canonical_history(&tx, &target_items)?;
+            context::validate_canonical_history(&tx, std::slice::from_ref(&output))?;
+            let existing = target_items
+                .iter()
+                .filter(|occurrence| occurrence.output_operation == output.output_operation)
+                .collect::<Vec<_>>();
+            match existing.as_slice() {
+                [] => {}
+                [existing] if existing.origin == output.origin && existing.item == output.item => {
+                    return Ok(true);
+                }
+                _ => {
+                    return Err(StoreError::InconsistentOutputPublication {
+                        request: target.clone(),
+                        position: output.position,
+                    });
+                }
+            }
+            let Some(spawn_position) = target_items
+                .iter()
+                .position(|occurrence| occurrence.origin == issuing_call)
+            else {
+                return Ok(false);
+            };
+            let mut ordered = target_items;
+            ordered.insert(spawn_position + 1, output);
+            tx.execute("DELETE FROM request_items WHERE request_id=?1", [&target.0])?;
+            for (position, occurrence) in ordered.iter().enumerate() {
+                context::insert_occurrence(&tx, target, position as i64, occurrence)?;
+            }
+
+            Ok(true)
+        })
     }
     pub fn seen_by(&self, request: &RequestId) -> Result<Vec<ItemHash>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let mut q=c.prepare("WITH RECURSIVE lineage(id,parent_id) AS (SELECT id,parent_id FROM requests WHERE id=?1 UNION ALL SELECT r.id,r.parent_id FROM requests r JOIN lineage l ON r.id=l.parent_id) SELECT DISTINCT ri.item_hash FROM lineage JOIN request_items ri ON ri.request_id=lineage.id ORDER BY ri.item_hash")?;
         q.query_map([&request.0], |r| Ok(ItemHash(r.get(0)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
     pub fn children_of(&self, parent: &RequestId) -> Result<Vec<Request>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let mut q = c.prepare(
             "SELECT id,parent_id,branch FROM requests WHERE parent_id=?1 ORDER BY branch",
         )?;
@@ -1683,15 +1806,17 @@ impl Store {
             return Err(StoreError::ActorOutputNeedsAuthority);
         }
         let text = serde_json::to_string(payload)?;
-        let c = self.lock();
-        c.execute(
-            "INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,?2,?3,?4)",
-            params![request.map(|r| r.0.as_str()), kind, text, utc_millis()],
-        )?;
-        Ok(c.last_insert_rowid())
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            tx.execute(
+                "INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,?2,?3,?4)",
+                params![request.map(|r| r.0.as_str()), kind, text, utc_millis()],
+            )?;
+            Ok(tx.last_insert_rowid())
+        })
     }
     pub fn events(&self, request: Option<&RequestId>) -> Result<Vec<Event>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let mut q=c.prepare("SELECT id,request_id,kind,payload,created_at FROM events WHERE (?1 IS NULL OR request_id=?1) ORDER BY id")?;
         q.query_map([request.map(|r| r.0.as_str())], |r| {
             Ok(Event {
@@ -1722,7 +1847,7 @@ impl Store {
     /// Fork branches are excluded even when they inherit `root` as an ancestor.
     pub fn replay_turns(&self, root: &RequestId) -> Result<Vec<RecordedReplayTurn>> {
         let records = {
-            let c = self.lock();
+            let c = self.lock()?;
             let mut q = c.prepare(
                 "WITH RECURSIVE chain(id, branch) AS (
                 SELECT id, branch FROM requests WHERE id=?1
@@ -1752,7 +1877,7 @@ impl Store {
             return Ok(None);
         };
         let origin = serde_json::to_string(&operation.origin)?;
-        let c = self.lock();
+        let c = self.lock()?;
         let raw: Option<String> = c.query_row(
             "SELECT i.json FROM claims c JOIN items i ON i.hash=c.output_hash WHERE c.origin=?1 AND c.origin_request_id=?2 AND c.call_id=?3 AND c.state='settled' LIMIT 1",
             params![origin,operation.request.0,operation.call.0], |row| row.get(0),
@@ -1766,7 +1891,7 @@ impl Store {
     }
     /// Diagnostic lookup; refuses collisions instead of choosing an operation.
     pub fn replay_output(&self, call: &CallId) -> Result<Option<Item>> {
-        let c = self.lock();
+        let c = self.lock()?;
         // Claims can be inherited by Here/agent requests. A claim alone is
         // therefore not replay evidence: recognize a call only in the exact
         // request that owns a settled claim, and never walk request ancestry.
@@ -1822,7 +1947,7 @@ impl Store {
         request: &RequestId,
         call: &CallId,
     ) -> Result<Option<Item>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let Some(kind) = invocation_kind(&c, request, call)? else {
             return Ok(None);
         };
@@ -1870,7 +1995,7 @@ impl Store {
         request: &RequestId,
         call: &CallId,
     ) -> Result<Option<ToolKind>> {
-        let c = self.lock();
+        let c = self.lock()?;
         invocation_kind(&c, request, call)
     }
     pub fn add_envelope(
@@ -1881,13 +2006,14 @@ impl Store {
         item: &Item,
         delivered: Option<&RequestId>,
     ) -> Result<i64> {
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        let h = Self::put_item_tx(&tx, item)?;
-        tx.execute("INSERT INTO envelopes(sender,recipient,class,item_hash,delivered_request,created_at) VALUES (?1,?2,?3,?4,?5,?6)",params![sender,recipient,class,h.0,delivered.map(|r|r.0.as_str()),utc_millis()])?;
-        let id = tx.last_insert_rowid();
-        tx.commit()?;
-        Ok(id)
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let h = Self::put_item_tx(&tx, item)?;
+            tx.execute("INSERT INTO envelopes(sender,recipient,class,item_hash,delivered_request,created_at) VALUES (?1,?2,?3,?4,?5,?6)",params![sender,recipient,class,h.0,delivered.map(|r|r.0.as_str()),utc_millis()])?;
+            let id = tx.last_insert_rowid();
+
+            Ok(id)
+        })
     }
     pub fn inbox(&self, path: &str) -> Result<Vec<Envelope>> {
         self.envelopes(path, false)
@@ -1898,7 +2024,7 @@ impl Store {
     /// Resolve a stable envelope reference, including its persisted delivery
     /// request. The reference is the SQLite envelope ID returned at admission.
     pub fn envelope(&self, id: i64) -> Result<Option<Envelope>> {
-        let c = self.lock();
+        let c = self.lock()?;
         c.query_row(
             "SELECT id,sender,recipient,class,item_hash,delivered_request,created_at \
              FROM envelopes WHERE id=?1",
@@ -1926,7 +2052,7 @@ impl Store {
         recipient: &AgentPath,
         final_request: &RequestId,
     ) -> Result<CompletionProvenance> {
-        let c = self.lock();
+        let c = self.lock()?;
         let branch: Option<String> = c
             .query_row(
                 "SELECT branch FROM requests WHERE id=?1",
@@ -1976,7 +2102,7 @@ impl Store {
         })
     }
     pub fn decisions(&self, request: Option<&RequestId>) -> Result<Vec<StoredDecision>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let mut q=c.prepare("SELECT id,request_id,hook,event_refs,decision,evidence,latency_ms,created_at FROM decisions WHERE (?1 IS NULL OR request_id=?1) ORDER BY id")?;
         q.query_map([request.map(|r| r.0.as_str())], |r| {
             let decision = Decision {
@@ -2015,7 +2141,7 @@ impl Store {
         .map_err(Into::into)
     }
     fn envelopes(&self, path: &str, unread: bool) -> Result<Vec<Envelope>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let mut q=c.prepare("SELECT id,sender,recipient,class,item_hash,delivered_request,created_at FROM envelopes WHERE recipient=?1 AND (?2=0 OR delivered_request IS NULL) ORDER BY id")?;
         q.query_map(params![path, unread as i32], |r| {
             Ok(Envelope {
@@ -2032,7 +2158,7 @@ impl Store {
         .map_err(Into::into)
     }
     pub fn operation_for_request(&self, request: &RequestId, call: &CallId) -> Result<OperationId> {
-        let c = self.lock();
+        let c = self.lock()?;
         let branch: String = c
             .query_row(
                 "SELECT branch FROM requests WHERE id=?1",
@@ -2080,17 +2206,18 @@ impl Store {
             return Err(StoreError::OperationOriginMismatch);
         }
         let origin = serde_json::to_string(&operation.origin)?;
-        let result = self.lock().execute(
+        let mut c = self.lock()?;
+        let result = c.write_transaction(|tx| tx.execute(
             "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES (?1,?2,?3,?4,'pending')",
             params![origin,operation.request.0,operation.call.0,request.0],
-        ).map(|_|()).map_err(|e| if matches!(e,rusqlite::Error::SqliteFailure(ref x,_) if x.extended_code==rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY) { StoreError::DuplicateClaim } else { e.into() });
+        ).map(|_|()).map_err(|e| if matches!(e,rusqlite::Error::SqliteFailure(ref x,_) if x.extended_code==rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY) { StoreError::DuplicateClaim } else { e.into() }));
         if result.is_ok() {
             claim_span.record("admitted", true);
         }
         result
     }
     pub fn claims_for_operation(&self, operation: &OperationId) -> Result<Vec<Claim>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let mut q = c.prepare("SELECT origin,origin_request_id,call_id,request_id,state,output_hash FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 ORDER BY request_id")?;
         let origin = serde_json::to_string(&operation.origin)?;
         Ok(q.query_map(
@@ -2101,7 +2228,7 @@ impl Store {
     }
     /// Diagnostic enumeration only. A provider ID alone never selects an operation.
     pub fn claims(&self, call: &CallId) -> Result<Vec<Claim>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let mut q=c.prepare("SELECT origin,origin_request_id,call_id,request_id,state,output_hash FROM claims WHERE call_id=?1 ORDER BY request_id")?;
         q.query_map([&call.0], decode_claim)?
             .collect::<std::result::Result<Vec<_>, _>>()
@@ -2111,7 +2238,7 @@ impl Store {
     /// ancestry. Here-fork startup uses this to distinguish a child-owned
     /// inherited claim from a pending ancestor claim visible through lineage.
     pub fn claims_on(&self, request: &RequestId) -> Result<Vec<Claim>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let mut q = c.prepare(
             "SELECT origin,origin_request_id,call_id,request_id,state,output_hash FROM claims \
              WHERE request_id=?1 ORDER BY call_id",
@@ -2130,7 +2257,7 @@ impl Store {
         request: &RequestId,
         branch: &str,
     ) -> Result<Vec<Claim>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let mut q = c.prepare(
             "WITH RECURSIVE lineage(id,parent_id,branch,depth) AS (
                  SELECT id,parent_id,branch,0 FROM requests WHERE id=?1 AND branch=?2
@@ -2168,24 +2295,25 @@ impl Store {
                 call_id: operation.call.0.clone(),
             })?;
         validate_replay_output(&operation.call, kind, &output)?;
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        let h = Self::put_item_tx(&tx, output)?;
-        if let Some((previous_hash, previous_terminal)) = terminal::exact_terminal(&tx, operation)?
-        {
-            if previous_hash != h || previous_terminal != terminal {
-                return Err(StoreError::ConflictingReplayOutcome {
-                    operation: operation.clone(),
-                });
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let h = Self::put_item_tx(&tx, output)?;
+            if let Some((previous_hash, previous_terminal)) = terminal::exact_terminal(&tx, operation)?
+            {
+                if previous_hash != h || previous_terminal != terminal {
+                    return Err(StoreError::ConflictingReplayOutcome {
+                        operation: operation.clone(),
+                    });
+                }
             }
-        }
-        let origin = serde_json::to_string(&operation.origin)?;
-        let n = tx.execute(
-            "UPDATE claims SET state='settled',output_hash=?4,terminal_json=?5 WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND state='pending'",
-            params![origin,operation.request.0,operation.call.0,h.0,serde_json::to_string(&terminal)?],
-        )?;
-        tx.commit()?;
-        Ok(n)
+            let origin = serde_json::to_string(&operation.origin)?;
+            let n = tx.execute(
+                "UPDATE claims SET state='settled',output_hash=?4,terminal_json=?5 WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND state='pending'",
+                params![origin,operation.request.0,operation.call.0,h.0,serde_json::to_string(&terminal)?],
+            )?;
+
+            Ok(n)
+        })
     }
     pub fn interrupt_operation_claim(
         &self,
@@ -2193,7 +2321,10 @@ impl Store {
         request: &RequestId,
     ) -> Result<usize> {
         let origin = serde_json::to_string(&operation.origin)?;
-        Ok(self.lock().execute("UPDATE claims SET state='interrupted' WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?4 AND state='pending'",params![origin,operation.request.0,operation.call.0,request.0])?)
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+        Ok(tx.execute("UPDATE claims SET state='interrupted' WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?4 AND state='pending'",params![origin,operation.request.0,operation.call.0,request.0])?)
+        })
     }
     /// Request-scoped legacy caller. Ambiguous same-ID claims are refused.
     pub fn interrupt_claim(&self, call: &CallId, request: &RequestId) -> Result<usize> {
@@ -2213,9 +2344,12 @@ impl Store {
         }
     }
     pub fn record_decision(&self, request: Option<&RequestId>, d: &Decision) -> Result<i64> {
-        let c = self.lock();
-        c.execute("INSERT INTO decisions(request_id,hook,event_refs,decision,evidence,latency_ms,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![request.map(|r|r.0.as_str()),d.hook,serde_json::to_string(&d.event_refs)?,serde_json::to_string(&d.decision)?,serde_json::to_string(&d.evidence)?,d.latency_ms.map(|v|v as i64),utc_millis()])?;
-        Ok(c.last_insert_rowid())
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+
+        tx.execute("INSERT INTO decisions(request_id,hook,event_refs,decision,evidence,latency_ms,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![request.map(|r|r.0.as_str()),d.hook,serde_json::to_string(&d.event_refs)?,serde_json::to_string(&d.decision)?,serde_json::to_string(&d.evidence)?,d.latency_ms.map(|v|v as i64),utc_millis()])?;
+        Ok(tx.last_insert_rowid())
+        })
     }
 }
 
@@ -2362,7 +2496,7 @@ mod tests {
         assert_eq!(inbox[0].class, "NEW_TASK");
 
         // Force the second insert to fail after the agent and content write.
-        store.lock().execute_batch(
+        store.lock().unwrap().execute_batch(
             "CREATE TRIGGER reject_task BEFORE INSERT ON envelopes BEGIN SELECT RAISE(ABORT, 'rejected'); END;"
         ).unwrap();
         let rollback_path = AgentPath("/root/rejected".into());
@@ -2384,6 +2518,7 @@ mod tests {
         assert!(store.agent(&rollback_path).unwrap().is_none());
         let item_count: i64 = store
             .lock()
+            .unwrap()
             .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
             .unwrap();
         assert_eq!(item_count, 1);
@@ -2907,6 +3042,7 @@ mod tests {
         s.create_request(&id("request"), None, &recipient.0)
             .unwrap();
         s.lock()
+            .unwrap()
             .execute_batch(
                 "CREATE TRIGGER reject_inbox_append BEFORE INSERT ON request_items \
                  BEGIN SELECT RAISE(ABORT,'forced append failure'); END;",
@@ -3384,6 +3520,7 @@ mod tests {
         );
         let items_before_retry: i64 = store
             .lock()
+            .unwrap()
             .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
             .unwrap();
         let rejected_answer =
@@ -3403,6 +3540,7 @@ mod tests {
         assert_eq!(
             store
                 .lock()
+                .unwrap()
                 .query_row("SELECT COUNT(*) FROM items", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
             items_before_retry
@@ -3447,6 +3585,7 @@ mod tests {
         store.create_request(&current, None, &child.0).unwrap();
         store
             .lock()
+            .unwrap()
             .execute_batch(
                 "CREATE TRIGGER reject_completion_answer BEFORE INSERT ON envelopes \
                  BEGIN SELECT RAISE(ABORT, 'injected envelope failure'); END;",
@@ -3463,12 +3602,14 @@ mod tests {
         assert_eq!(
             store
                 .lock()
+                .unwrap()
                 .query_row("SELECT COUNT(*) FROM items", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
             0
         );
         store
             .lock()
+            .unwrap()
             .execute_batch("DROP TRIGGER reject_completion_answer")
             .unwrap();
         assert!(matches!(

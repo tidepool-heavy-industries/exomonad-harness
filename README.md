@@ -35,10 +35,12 @@ marker cannot change an already-open connection's mode. Older bundles refuse
 schema 16, so preserve the matching bundle for unmigrated runs.
 
 A successful binding COMMIT is durable acknowledgement. Checkpoint maintenance
-does not revoke it. Any embedded admission COMMIT error or failed rollback returns
-typed `EmbeddedError::RecoveryRequired`. The embedding must fence its run store,
-discard admission handles and reopen with retained authority before another
-operation. Binding readback alone grants no attachment authority.
+does not revoke it. Any explicit Store COMMIT error or failed transaction
+completion closes its serialized connection, fences sibling handles and notifies supervision. The first
+failure retains its SQLite cause as `StoreError::RecoveryRequired` (or
+`EmbeddedError::RecoveryRequired`); later access returns `StoreError::AdmissionFenced`.
+The embedding must discard admission handles and reopen with retained authority
+before another operation. Binding readback alone grants no attachment authority.
 
 The bundled SQLite is 3.53.2 through exact rusqlite 0.40.2 and libsqlite3-sys
 0.38.2. This includes the WAL-reset fix absent from the older 3.46.0 bundle;

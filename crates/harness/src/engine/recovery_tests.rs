@@ -226,6 +226,7 @@ async fn engine_recovery_zero_row_interrupt_uses_durable_settlement_output() {
     // when the winning settlement has no authoritative terminal marker.
     store
         .lock()
+        .unwrap()
         .execute(
             "UPDATE claims SET terminal_json=NULL WHERE state='settled'",
             [],

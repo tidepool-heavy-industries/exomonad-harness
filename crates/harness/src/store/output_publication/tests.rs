@@ -145,9 +145,11 @@ fn exact_output_histories_preserve_equal_hashes_order_and_here_copy() {
                     .unwrap();
                 assert_owners(&store, &copy, &expected);
                 let original =
-                    super::super::context::history(&store.lock(), &second.request, true).unwrap();
+                    super::super::context::history(&store.lock().unwrap(), &second.request, true)
+                        .unwrap();
                 let copied =
-                    super::super::context::request_occurrences(&store.lock(), &copy).unwrap();
+                    super::super::context::request_occurrences(&store.lock().unwrap(), &copy)
+                        .unwrap();
                 for source in original
                     .iter()
                     .filter(|source| source.output_operation.is_some())
@@ -231,7 +233,7 @@ fn output_publication_requires_exact_terminal_claim_and_is_atomic() {
         );
         assert_eq!(store.items(&target).unwrap(), before);
     }
-    store.lock().execute_batch("CREATE TRIGGER refuse_owned_output BEFORE INSERT ON request_items WHEN NEW.request_id='target' BEGIN SELECT RAISE(ABORT,'publication refused'); END;").unwrap();
+    store.lock().unwrap().execute_batch("CREATE TRIGGER refuse_owned_output BEFORE INSERT ON request_items WHEN NEW.request_id='target' BEGIN SELECT RAISE(ABORT,'publication refused'); END;").unwrap();
     assert!(
         store
             .append_operation_output(&operation, &operation.request, &target)
@@ -240,6 +242,7 @@ fn output_publication_requires_exact_terminal_claim_and_is_atomic() {
     assert_eq!(store.items(&target).unwrap(), before);
     store
         .lock()
+        .unwrap()
         .execute_batch("DROP TRIGGER refuse_owned_output;")
         .unwrap();
     assert!(
@@ -267,6 +270,7 @@ fn historical_unbound_outputs_refuse_without_rewriting_and_inconsistent_pairs_re
         .unwrap();
     store
         .lock()
+        .unwrap()
         .execute(
             "UPDATE request_items SET output_operation=NULL WHERE request_id=?1 AND position=1",
             [&operation.request.0],
@@ -280,6 +284,7 @@ fn historical_unbound_outputs_refuse_without_rewriting_and_inconsistent_pairs_re
     // The row decoder must reject operation metadata attached to ordinary Items.
     store
         .lock()
+        .unwrap()
         .execute(
             "UPDATE request_items SET output_operation=?2 WHERE request_id=?1 AND position=0",
             params![
@@ -296,12 +301,13 @@ fn historical_unbound_outputs_refuse_without_rewriting_and_inconsistent_pairs_re
     // A structurally valid output cannot borrow an ordinary occurrence's source.
     store
         .lock()
+        .unwrap()
         .execute(
             "UPDATE request_items SET output_operation=NULL WHERE request_id=?1 AND position=0",
             [&operation.request.0],
         )
         .unwrap();
-    store.lock().execute("UPDATE request_items SET output_operation=?2,source_request=?1,source_position=0 WHERE request_id=?1 AND position=1", params![operation.request.0,serde_json::to_string(&operation).unwrap()]).unwrap();
+    store.lock().unwrap().execute("UPDATE request_items SET output_operation=?2,source_request=?1,source_position=0 WHERE request_id=?1 AND position=1", params![operation.request.0,serde_json::to_string(&operation).unwrap()]).unwrap();
     assert!(matches!(
         store.context_request_state(&operation.request, &operation.origin),
         Err(StoreError::InconsistentOutputPublication { position: 1, .. })

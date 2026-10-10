@@ -102,7 +102,7 @@ impl Store {
         if after < 0 || limit == 0 || limit > MAX_HISTORY_ITEMS {
             return Err(StoreError::InvalidHistoryOffset);
         }
-        let c = self.lock();
+        let c = self.lock()?;
         if let Some(head) = head {
             let exists: bool = c.query_row(
                 "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
@@ -309,6 +309,7 @@ mod tests {
         assert_eq!(page.entries.len(), 1);
         store
             .lock()
+            .unwrap()
             .execute("DELETE FROM events WHERE kind='chat_message'", [])
             .unwrap();
         let page = store
@@ -322,7 +323,7 @@ mod tests {
         let store = Store::memory().unwrap();
         let request = RequestId("r".into());
         store.create_request(&request, None, "/root").unwrap();
-        store.lock().execute_batch("CREATE TRIGGER refuse_chat BEFORE INSERT ON events WHEN NEW.kind='chat_message' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+        store.lock().unwrap().execute_batch("CREATE TRIGGER refuse_chat BEFORE INSERT ON events WHEN NEW.kind='chat_message' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
         assert!(
             store
                 .append_items(
@@ -334,6 +335,7 @@ mod tests {
         assert!(store.items(&request).unwrap().is_empty());
         store
             .lock()
+            .unwrap()
             .execute_batch("DROP TRIGGER refuse_chat")
             .unwrap();
         store
@@ -429,7 +431,7 @@ mod publication_boundary_tests {
             marker = store
                 .record_event(Some(&head), "legacy_marker", &json!({}))
                 .unwrap();
-            let c = store.lock();
+            let c = store.lock().unwrap();
             c.execute_batch("DELETE FROM events WHERE kind='chat_message'; DELETE FROM session_state WHERE session_id='harness:chat-cutover'; UPDATE schema_version SET version=13;").unwrap();
         }
         {

@@ -121,7 +121,7 @@ fn failed_publication_rolls_back_model_prefix_terminal_and_receipt() {
     let (head, operation) = setup(&store);
     let snapshot = store.begin_context(&operation, &head).unwrap();
     let before = store.items(&head).unwrap();
-    store.lock().execute_batch("CREATE TRIGGER reject_context BEFORE INSERT ON events WHEN NEW.kind='context_commit' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+    store.lock().unwrap().execute_batch("CREATE TRIGGER reject_context BEFORE INSERT ON events WHEN NEW.kind='context_commit' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
     assert!(
         store
             .commit_context(ContextCommit {
@@ -293,6 +293,7 @@ fn pending_and_standing_groups_are_protected() {
     ],Usage::default()).unwrap();
     store
         .lock()
+        .unwrap()
         .execute(
             "UPDATE requests SET parent_id=?2 WHERE id=?1",
             params![head.0, prefix.0],
@@ -349,6 +350,7 @@ fn model_state_is_exact_incarnation_owned() {
     store.initialize_context_model(&origin, "luna").unwrap();
     store
         .lock()
+        .unwrap()
         .execute(
             "UPDATE embedded_bindings SET incarnation='2' WHERE agent_path='/root'",
             [],
@@ -542,7 +544,7 @@ fn replay_restores_historical_native_exchange_with_local_original_claim() {
         restored_claim[0].output,
         Some(local.put_item(&local.items(&head).unwrap()[1]).unwrap())
     );
-    let retained = history(&local.lock(), &restored.head, true).unwrap();
+    let retained = history(&local.lock().unwrap(), &restored.head, true).unwrap();
     assert_eq!(retained[0].origin.request, completed.request);
     assert_eq!(retained[0].origin.position, 0);
     assert_eq!(
@@ -585,7 +587,7 @@ fn replay_refuses_malformed_commit_evidence_and_wrong_output() {
             )
             .is_err()
     );
-    original.lock().execute("UPDATE events SET payload=json_remove(payload,'$.version') WHERE kind='context_commit'",[]).unwrap();
+    original.lock().unwrap().execute("UPDATE events SET payload=json_remove(payload,'$.version') WHERE kind='context_commit'",[]).unwrap();
     assert!(original.context_commit_evidence(&operation).is_err());
     assert!(local.context_receipt(&local_operation).unwrap().is_none());
 }
@@ -596,9 +598,10 @@ fn deferred_child_inherits_committed_context_and_terminal_before_call_stays_froz
     use std::sync::Arc;
     let store = Store::memory().unwrap();
     let (head, operation) = setup(&store);
-    store.lock().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)",[&head.0]).unwrap();
+    store.lock().unwrap().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)",[&head.0]).unwrap();
     store
         .lock()
+        .unwrap()
         .execute(
             "UPDATE request_items SET position=-1 WHERE request_id=?1 AND position=2",
             [&head.0],
@@ -828,6 +831,7 @@ fn saved_native_restore_refuses_missing_or_forged_original_claim() {
             .unwrap();
         store
             .lock()
+            .unwrap()
             .execute(
                 "UPDATE requests SET parent_id=?2 WHERE id=?1",
                 params![head.0, parent.0],
@@ -853,6 +857,7 @@ fn saved_native_restore_refuses_missing_or_forged_original_claim() {
             let foreign = store.standalone_identity(AgentPath("/foreign".into()));
             store
                 .lock()
+                .unwrap()
                 .execute(
                     "UPDATE claims SET origin=?2 WHERE origin_request_id=?1",
                     params![parent.0, serde_json::to_string(&foreign).unwrap()],
@@ -861,6 +866,7 @@ fn saved_native_restore_refuses_missing_or_forged_original_claim() {
         } else {
             store
                 .lock()
+                .unwrap()
                 .execute("DELETE FROM claims WHERE origin_request_id=?1", [&parent.0])
                 .unwrap();
         }
@@ -882,6 +888,8 @@ fn saved_native_restore_refuses_missing_or_forged_original_claim() {
                 .cloned(),
         );
         let before = store.context_history(&deleted.head).unwrap();
+        let frozen_children = store.children_of(&deleted.head).unwrap();
+        assert_eq!(frozen_children.len(), 1);
         let result = store.commit_context(ContextCommit {
             snapshot: &restore,
             draft: &ContextDraft {
@@ -911,7 +919,7 @@ fn saved_native_restore_refuses_missing_or_forged_original_claim() {
                 .unwrap()
                 .is_none()
         );
-        assert!(store.children_of(&deleted.head).unwrap().is_empty());
+        assert_eq!(store.children_of(&deleted.head).unwrap(), frozen_children);
     }
 }
 
@@ -1016,7 +1024,7 @@ fn model_switch_refuses_opaque_protected_suffix_without_settling_output() {
         Some("luna")
     );
     assert!(
-        terminal::exact_terminal(&store.lock(), &operation)
+        terminal::exact_terminal(&store.lock().unwrap(), &operation)
             .unwrap()
             .is_none()
     );
@@ -1028,6 +1036,7 @@ fn replay_keeps_duplicate_item_occurrences_distinct_for_later_edit() {
         let (head, operation) = setup(store);
         store
             .lock()
+            .unwrap()
             .execute(
                 "UPDATE request_items SET position=-position-10 WHERE request_id=?1",
                 [&head.0],
@@ -1035,6 +1044,7 @@ fn replay_keeps_duplicate_item_occurrences_distinct_for_later_edit() {
             .unwrap();
         store
             .lock()
+            .unwrap()
             .execute(
                 "UPDATE request_items SET position=-position-8 WHERE request_id=?1",
                 [&head.0],
@@ -1042,7 +1052,7 @@ fn replay_keeps_duplicate_item_occurrences_distinct_for_later_edit() {
             .unwrap();
         let item = Item(json!({"type":"message","role":"user","content":"same"}));
         let hash = store.put_item(&item).unwrap();
-        store.lock().execute("INSERT INTO request_items(request_id,position,item_hash) VALUES(?1,0,?2),(?1,1,?2)",params![head.0,hash.0]).unwrap();
+        store.lock().unwrap().execute("INSERT INTO request_items(request_id,position,item_hash) VALUES(?1,0,?2),(?1,1,?2)",params![head.0,hash.0]).unwrap();
         (head, operation)
     }
     let original = Store::memory().unwrap();
@@ -1123,13 +1133,14 @@ fn guarded_commit_cancellation_rolls_back_every_publication_write() {
     );
     assert!(store.context_receipt(&operation).unwrap().is_none());
     assert!(
-        terminal::exact_terminal(&store.lock(), &operation)
+        terminal::exact_terminal(&store.lock().unwrap(), &operation)
             .unwrap()
             .is_none()
     );
     assert_eq!(
         store
             .lock()
+            .unwrap()
             .query_row("SELECT COUNT(*) FROM requests", [], |r| r.get::<_, u64>(0))
             .unwrap(),
         1
@@ -1141,9 +1152,10 @@ fn second_sync_capture_uses_current_edited_context_and_original_call() {
     use std::sync::Arc;
     let store = Store::memory().unwrap();
     let (head, operation) = setup(&store);
-    store.lock().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)",[&head.0]).unwrap();
+    store.lock().unwrap().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)",[&head.0]).unwrap();
     store
         .lock()
+        .unwrap()
         .execute(
             "UPDATE request_items SET position=-1 WHERE request_id=?1 AND position=2",
             [&head.0],
@@ -1216,6 +1228,7 @@ fn authored_notes_project_attribution_without_changing_retained_item_bytes() {
     assert_ne!(raw[0].1, projected.history[0].1);
     let sealed_raw: String = store
         .lock()
+        .unwrap()
         .query_row(
             "SELECT json FROM items WHERE hash=?1",
             [&projected.history[0].1.0],
@@ -1369,7 +1382,7 @@ fn blocks_preserve_duplicate_call_order_orphans_and_cut_opaque_groups() {
         "luna",
     );
 
-    let c = store.lock();
+    let c = store.lock().unwrap();
     let all = history(&c, &parent, true).unwrap();
     let grouped = blocks(&c, &all, 10).unwrap();
     assert_eq!(grouped.len(), 5);
@@ -1431,7 +1444,7 @@ fn claim_lineage_selects_nearest_exact_operation_for_continuation() {
     }
     let origin = serde_json::to_string(&operation.origin).unwrap();
     let hash = store.put_item(&Item(json!({"result":"retained"}))).unwrap();
-    store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash) VALUES(?1,?2,?3,?4,'pending',NULL),(?1,?2,?3,?5,'settled',?6)",params![origin,operation.request.0,operation.call.0,initial.0,final_head.0,hash.0]).unwrap();
+    store.lock().unwrap().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash) VALUES(?1,?2,?3,?4,'pending',NULL),(?1,?2,?3,?5,'settled',?6)",params![origin,operation.request.0,operation.call.0,initial.0,final_head.0,hash.0]).unwrap();
     let claims = store
         .claims_on_branch_lineage(&next, "/root/child")
         .unwrap();
@@ -1464,7 +1477,7 @@ fn claim_lineage_stops_at_fork_and_compaction_boundaries() {
             .is_empty()
     );
     let origin = serde_json::to_string(&operation.origin).unwrap();
-    store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES(?1,?2,?3,?4,'pending')",params![origin,operation.request.0,operation.call.0,initial.0]).unwrap();
+    store.lock().unwrap().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES(?1,?2,?3,?4,'pending')",params![origin,operation.request.0,operation.call.0,initial.0]).unwrap();
     store
         .write_request(
             &compacted,
@@ -1476,6 +1489,7 @@ fn claim_lineage_stops_at_fork_and_compaction_boundaries() {
         .unwrap();
     store
         .lock()
+        .unwrap()
         .execute(
             "INSERT INTO session_state(session_id,state,updated_at) VALUES(?1,'true',0)",
             [format!("harness:compaction:{}", compacted.0)],
@@ -1487,7 +1501,7 @@ fn claim_lineage_stops_at_fork_and_compaction_boundaries() {
             .unwrap()
             .is_empty()
     );
-    store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES(?1,?2,?3,?4,'pending')",params![origin,operation.request.0,operation.call.0,compacted.0]).unwrap();
+    store.lock().unwrap().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) VALUES(?1,?2,?3,?4,'pending')",params![origin,operation.request.0,operation.call.0,compacted.0]).unwrap();
     let claims = store
         .claims_on_branch_lineage(&compacted, "/root/child")
         .unwrap();
@@ -1604,7 +1618,7 @@ fn staged_effort_publication_failure_and_cancellation_restore_pending_and_termin
             .save_pending_effort(operation.origin.actor(), Effort::Medium)
             .unwrap();
         if !cancel {
-            store.lock().execute_batch("CREATE TRIGGER reject_effort_commit BEFORE INSERT ON events WHEN NEW.kind='context_commit' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+            store.lock().unwrap().execute_batch("CREATE TRIGGER reject_effort_commit BEFORE INSERT ON events WHEN NEW.kind='context_commit' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
         }
         let draft = edited(&snapshot);
         let draft = ContextDraft {
@@ -1723,6 +1737,7 @@ fn staged_effort_receipt_requires_the_current_internal_version() {
         .unwrap();
     store
         .lock()
+        .unwrap()
         .execute(
             "UPDATE events SET payload=json_set(payload,'$.version',1) WHERE kind='context_commit'",
             [],
@@ -1818,8 +1833,8 @@ fn here_context_snapshot() -> (Store, RequestId, RequestId, OperationId) {
 #[test]
 fn here_output_copy_preserves_occurrences_and_child_context_freeze() {
     let (store, source, target, spawn) = here_context_snapshot();
-    let before = request_occurrences(&store.lock(), &target).unwrap();
-    let source_output = request_occurrences(&store.lock(), &source)
+    let before = request_occurrences(&store.lock().unwrap(), &target).unwrap();
+    let source_output = request_occurrences(&store.lock().unwrap(), &source)
         .unwrap()
         .into_iter()
         .find(|occurrence| {
@@ -1833,15 +1848,19 @@ fn here_output_copy_preserves_occurrences_and_child_context_freeze() {
             .iter()
             .any(|occurrence| !occurrence.overlays.is_empty())
     );
-    store.lock().execute_batch("CREATE TRIGGER refuse_here_copy BEFORE INSERT ON request_items WHEN NEW.request_id='here-snapshot' AND (SELECT json_extract(json,'$.type') FROM items WHERE hash=NEW.item_hash)='function_call_output' AND (SELECT json_extract(json,'$.call_id') FROM items WHERE hash=NEW.item_hash)='spawn' BEGIN SELECT RAISE(ABORT,'refuse output'); END;").unwrap();
+    store.lock().unwrap().execute_batch("CREATE TRIGGER refuse_here_copy BEFORE INSERT ON request_items WHEN NEW.request_id='here-snapshot' AND (SELECT json_extract(json,'$.type') FROM items WHERE hash=NEW.item_hash)='function_call_output' AND (SELECT json_extract(json,'$.call_id') FROM items WHERE hash=NEW.item_hash)='spawn' BEGIN SELECT RAISE(ABORT,'refuse output'); END;").unwrap();
     assert!(
         store
             .copy_call_output_if_persisted(&source, &target, &spawn.call)
             .is_err()
     );
-    assert_eq!(request_occurrences(&store.lock(), &target).unwrap(), before);
+    assert_eq!(
+        request_occurrences(&store.lock().unwrap(), &target).unwrap(),
+        before
+    );
     store
         .lock()
+        .unwrap()
         .execute_batch("DROP TRIGGER refuse_here_copy;")
         .unwrap();
     assert!(
@@ -1849,7 +1868,7 @@ fn here_output_copy_preserves_occurrences_and_child_context_freeze() {
             .copy_call_output_if_persisted(&source, &target, &spawn.call)
             .unwrap()
     );
-    let copied = request_occurrences(&store.lock(), &target).unwrap();
+    let copied = request_occurrences(&store.lock().unwrap(), &target).unwrap();
     let spawn_position = copied
         .iter()
         .position(|occurrence| {
@@ -1873,7 +1892,10 @@ fn here_output_copy_preserves_occurrences_and_child_context_freeze() {
             .copy_call_output_if_persisted(&source, &target, &spawn.call)
             .unwrap()
     );
-    assert_eq!(request_occurrences(&store.lock(), &target).unwrap(), copied);
+    assert_eq!(
+        request_occurrences(&store.lock().unwrap(), &target).unwrap(),
+        copied
+    );
     store.append_items(&target, &[Item(json!({"type":"custom_tool_call","call_id":"child-edit","name":"haskell_sync","input":"keep context"}))]).unwrap();
     let operation = store.claim(&CallId("child-edit".into()), &target).unwrap();
     let snapshot = store.begin_context(&operation, &target).unwrap();
@@ -1890,11 +1912,11 @@ fn here_output_copy_preserves_occurrences_and_child_context_freeze() {
         })
         .unwrap();
     assert!(!committed.changed);
-    let deferred = receipt(&store.lock(), &operation)
+    let deferred = receipt(&store.lock().unwrap(), &operation)
         .unwrap()
         .unwrap()
         .deferred_head;
-    let frozen = request_occurrences(&store.lock(), &deferred).unwrap();
+    let frozen = request_occurrences(&store.lock().unwrap(), &deferred).unwrap();
     for occurrence in copied {
         let retained = frozen
             .iter()
@@ -1938,6 +1960,7 @@ fn here_child_context_refuses_forged_parent_authority_before_snapshot() {
     let foreign = store.standalone_identity(AgentPath("/foreign".into()));
     store
         .lock()
+        .unwrap()
         .execute(
             "UPDATE claims SET origin=?3 WHERE origin_request_id=?1 AND call_id=?2",
             params![
@@ -1947,19 +1970,24 @@ fn here_child_context_refuses_forged_parent_authority_before_snapshot() {
             ],
         )
         .unwrap();
-    let before = request_occurrences(&store.lock(), &target).unwrap();
+    let before = request_occurrences(&store.lock().unwrap(), &target).unwrap();
     let requests: i64 = store
         .lock()
+        .unwrap()
         .query_row("SELECT COUNT(*) FROM requests", [], |row| row.get(0))
         .unwrap();
     assert!(matches!(
         store.begin_context(&operation, &target),
         Err(StoreError::InconsistentOutputPublication { .. })
     ));
-    assert_eq!(request_occurrences(&store.lock(), &target).unwrap(), before);
+    assert_eq!(
+        request_occurrences(&store.lock().unwrap(), &target).unwrap(),
+        before
+    );
     assert_eq!(
         store
             .lock()
+            .unwrap()
             .query_row("SELECT COUNT(*) FROM requests", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
@@ -2025,7 +2053,7 @@ fn validated_finalize_marker_survives_owned_context_rewrites_and_frozen_copies()
             pending: &[],
         })
         .unwrap();
-    let mut connection = store.lock();
+    let mut connection = store.lock().unwrap();
     let tx = connection.transaction().unwrap();
     let frozen = freeze_committed_context(&tx, &receipt.head, &store.store_id).unwrap();
     let all = history(&tx, &frozen, true).unwrap();
@@ -2092,7 +2120,7 @@ fn forged_finalize_marker_cannot_authenticate_a_schema_invalid_response() {
     let invalid_schema = crate::finalize::tool_schema::<u32>().unwrap();
     let schema_hash = store.put_item(&Item(invalid_schema.clone())).unwrap();
     let tools_hash = store.put_item(&Item(json!([invalid_schema]))).unwrap();
-    store.lock().execute("UPDATE events SET payload=json_set(payload,'$.completion.schema',?2,'$.issued.tools',?3) WHERE id=?1", params![event, schema_hash.0, tools_hash.0]).unwrap();
+    store.lock().unwrap().execute("UPDATE events SET payload=json_set(payload,'$.completion.schema',?2,'$.issued.tools',?3) WHERE id=?1", params![event, schema_hash.0, tools_hash.0]).unwrap();
     let snapshot = store.begin_context(&operation, &head).unwrap();
     assert!(matches!(
         store.commit_context(ContextCommit {

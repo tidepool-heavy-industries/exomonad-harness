@@ -1216,7 +1216,7 @@ async fn round_cancellation_while_store_is_locked_refuses_context_publication() 
     };
     let (cancel, cancelled) = watch::channel(false);
     let (entered, ready) = tokio::sync::oneshot::channel();
-    let lock = engine.store.lock();
+    let lock = engine.store.lock().unwrap();
     let store = engine.store.clone();
     let publication = tokio::task::spawn_blocking(move || {
         entered.send(()).unwrap();

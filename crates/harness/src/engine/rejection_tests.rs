@@ -148,7 +148,7 @@ async fn rejected_request_retains_exact_head_history_and_explicit_successor() {
 #[tokio::test]
 async fn failure_persistence_error_is_fatal_and_stream_error_is_not_rejection() {
     let (engine, store, _) = engine(TransportError::Authentication);
-    store.lock().execute_batch("CREATE TRIGGER reject_failure BEFORE INSERT ON events WHEN NEW.kind='request_failed' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+    store.lock().unwrap().execute_batch("CREATE TRIGGER reject_failure BEFORE INSERT ON events WHEN NEW.kind='request_failed' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
     let (_cancel, cancellation) = watch::channel(false);
     let error = engine
         .run(None, Vec::new(), cancellation.clone(), mailbox())
@@ -195,7 +195,11 @@ async fn rejection_cleanup_error_remains_fatal_without_failed_event() {
         completion: PendingCompletion::BlocksCompletion,
     };
     // A damaged claim owner cannot certify that cleanup settled.
-    store.lock().execute_batch("DROP TABLE claims").unwrap();
+    store
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TABLE claims")
+        .unwrap();
     let error = engine
         .reject_or_cleanup(TransportError::Authentication, None, &request, &[pending])
         .await;
@@ -409,7 +413,11 @@ async fn incomplete_response_cleanup_uncertainty_never_publishes_resumable_outco
         queued: false,
         completion: PendingCompletion::BlocksCompletion,
     };
-    store.lock().execute_batch("DROP TABLE claims").unwrap();
+    store
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TABLE claims")
+        .unwrap();
     let error = engine
         .reject_or_cleanup(
             TransportError::IncompleteResponse(

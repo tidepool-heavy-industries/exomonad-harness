@@ -25,32 +25,6 @@ pub(super) fn matches_binding(c: &Connection, identity: &HostIdentity) -> rusqli
     .is_some_and(|(run, incarnation)| run == identity.run && incarnation == identity.incarnation))
 }
 
-/// Store admission confirmed inherited WAL and every writer uses FULL. A
-/// successful COMMIT is the durability acknowledgement; checkpoint maintenance
-/// and outcome readback cannot turn it into an ordinary failed operation.
-fn durable_binding_transaction<T>(
-    connection: &mut Connection,
-    action: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, EmbeddedError>,
-) -> std::result::Result<T, EmbeddedError> {
-    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    match action(&tx) {
-        Ok(result) => {
-            // Drop attempts rollback on failure, but discards its error. No
-            // COMMIT error permits this handle to admit another operation.
-            tx.commit().map_err(EmbeddedError::RecoveryRequired)?;
-            Ok(result)
-        }
-        Err(refusal) => {
-            // SQLite can already have rolled back a failed statement. Otherwise
-            // observe rollback success before reporting an ordinary refusal.
-            if !tx.is_autocommit() {
-                tx.rollback().map_err(EmbeddedError::RecoveryRequired)?;
-            }
-            Err(refusal)
-        }
-    }
-}
-
 impl Store {
     pub(crate) fn seed_embedded_context(
         &self,
@@ -63,8 +37,8 @@ impl Store {
                 "empty context seed operation ID".into(),
             ));
         }
-        let mut connection = self.lock();
-        durable_binding_transaction(&mut connection, |tx| {
+        let mut connection = self.lock()?;
+        connection.write_transaction(|tx| {
             if !matches_binding(tx, identity)? {
                 return Err(EmbeddedError::Binding(
                     "context seed target is not bound to this host".into(),
@@ -130,7 +104,7 @@ impl Store {
         identity: &HostIdentity,
         operation_id: &str,
     ) -> std::result::Result<EmbeddedInputState, EmbeddedError> {
-        let connection = self.lock();
+        let connection = self.lock()?;
         let observation: Option<(i64, Option<i64>, Option<String>)> = connection
             .query_row(
                 "SELECT ei.envelope_id,e.id,e.delivered_request FROM embedded_inputs ei \
@@ -194,8 +168,8 @@ impl Store {
                 "invalid exact successor binding transition".into(),
             ));
         }
-        let mut connection = self.lock();
-        durable_binding_transaction(&mut connection, |tx| {
+        let mut connection = self.lock()?;
+        connection.write_transaction(|tx| {
             if !authority
                 .validate_successor(predecessor, successor)
                 .map_err(EmbeddedError::Host)?
@@ -230,7 +204,7 @@ impl Store {
         &self,
         identity: &HostIdentity,
     ) -> std::result::Result<bool, EmbeddedError> {
-        matches_binding(&self.lock(), identity).map_err(Into::into)
+        matches_binding(&*self.lock()?, identity).map_err(Into::into)
     }
 
     /// Observe the logical agent head only under its exact current host binding.
@@ -238,7 +212,7 @@ impl Store {
     /// including when another Store connection commits a successor concurrently.
     pub fn embedded_agent_head(&self, identity: &HostIdentity) -> Result<Option<RequestId>> {
         let head = self
-            .lock()
+            .lock()?
             .query_row(
                 "SELECT a.head_request FROM embedded_bindings b \
              JOIN agents a ON a.path=b.agent_path \
@@ -283,8 +257,8 @@ impl Store {
             return Err(EmbeddedError::Binding("empty run or incarnation".into()));
         }
         Self::validate_agent_path(&identity.actor.0, parent.map(|p| p.0.as_str()))?;
-        let mut connection = self.lock();
-        durable_binding_transaction(&mut connection, |tx| {
+        let mut connection = self.lock()?;
+        connection.write_transaction(|tx| {
             if let Some(authority) = authority {
                 if !authority
                     .validate_initial_binding(identity)
@@ -343,8 +317,8 @@ impl Store {
         if operation_id.is_empty() {
             return Err(EmbeddedError::Binding("empty input operation ID".into()));
         }
-        let mut connection = self.lock();
-        durable_binding_transaction(&mut connection, |tx| {
+        let mut connection = self.lock()?;
+        connection.write_transaction(|tx| {
             Self::admit_embedded_input_tx(tx, identity, operation_id, sender, item)
         })
     }
@@ -381,8 +355,8 @@ impl Store {
         text: &str,
     ) -> std::result::Result<CommandInputAdmission, EmbeddedError> {
         use crate::server::{CommandReceipt, CommandReceiptOutcome, HostCommand};
-        let mut c = self.lock();
-        durable_binding_transaction(&mut c, |tx| {
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
             let expected = HostCommand::Input {
                 target: identity.clone(),
                 text: text.into(),
@@ -521,7 +495,7 @@ mod tests {
                 .is_err()
         );
         assert!(store.embedded_binding_matches(&identity).unwrap());
-        let c = store.lock();
+        let c = store.lock().unwrap();
         for table in ["requests", "envelopes", "embedded_commands"] {
             let count: i64 = c
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -534,7 +508,7 @@ mod tests {
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
         let standalone = Store::memory().unwrap();
-        standalone.lock().execute("INSERT INTO agents(path,parent_path,contract,fork_source,state,created_at) VALUES('/root',NULL,'{}','{}','active',0)",[]).unwrap();
+        standalone.lock().unwrap().execute("INSERT INTO agents(path,parent_path,contract,fork_source,state,created_at) VALUES('/root',NULL,'{}','{}','active',0)",[]).unwrap();
         assert!(
             standalone
                 .bind_initial_embedded_binding(&identity, None, &InitialAuthority(identity.clone()))
@@ -641,7 +615,7 @@ mod tests {
                 } else {
                     ("2", "successor-head")
                 };
-                let mut connection = writer.lock();
+                let mut connection = writer.lock().unwrap();
                 let transaction = connection.transaction().unwrap();
                 transaction
                     .execute(
@@ -697,12 +671,12 @@ mod tests {
     }
 
     #[test]
-    fn binding_full_mode_survives_success_refusal_statement_and_commit_failure() {
-        let store = Store::memory().unwrap();
-        let mut connection = store.lock();
-        connection.execute_batch("CREATE TABLE durability_parent(id INTEGER PRIMARY KEY); CREATE TABLE durability_child(parent INTEGER REFERENCES durability_parent(id) DEFERRABLE INITIALLY DEFERRED);").unwrap();
+    fn binding_full_mode_and_transaction_closure_control_admission() {
         for failure in 0..4 {
-            let result = durable_binding_transaction(&mut connection, |tx| {
+            let store = Store::memory().unwrap();
+            let mut connection = store.lock().unwrap();
+            connection.execute_batch("CREATE TABLE durability_parent(id INTEGER PRIMARY KEY); CREATE TABLE durability_child(parent INTEGER REFERENCES durability_parent(id) DEFERRABLE INITIALLY DEFERRED);").unwrap();
+            let result = connection.write_transaction(|tx| {
                 assert_eq!(connection_modes(tx), ("memory".into(), 2, true));
                 tx.execute("INSERT INTO durability_parent VALUES(1)", [])?;
                 match failure {
@@ -723,6 +697,13 @@ mod tests {
                 assert!(
                     matches!(result, Err(EmbeddedError::RecoveryRequired(error)) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation))
                 );
+                assert!(matches!(
+                    store.ensure_ready(),
+                    Err(StoreError::AdmissionFenced)
+                ));
+                drop(connection);
+                assert!(matches!(store.lock(), Err(StoreError::AdmissionFenced)));
+                continue;
             }
             assert_eq!(connection_modes(&connection), ("memory".into(), 2, true));
             let parents: i64 = connection
@@ -746,6 +727,7 @@ mod tests {
         let store = Store::open(&path).unwrap();
         store
             .lock()
+            .unwrap()
             .busy_timeout(std::time::Duration::ZERO)
             .unwrap();
         let old = root_identity();
@@ -757,7 +739,7 @@ mod tests {
             .bind_initial_embedded_binding(&old, None, &InitialAuthority(old.clone()))
             .unwrap();
         let old_origin = super::super::context::identity_for_branch(
-            &store.lock(),
+            &store.lock().unwrap(),
             &store.store_id,
             &old.actor.0,
         )
@@ -777,6 +759,7 @@ mod tests {
         );
         let checkpoint: (i64, i64, i64) = store
             .lock()
+            .unwrap()
             .query_row("PRAGMA wal_checkpoint(FULL)", [], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })
@@ -785,7 +768,7 @@ mod tests {
         assert!(checkpoint.1 > checkpoint.2);
         assert!(store.embedded_binding_matches(&new).unwrap());
         let new_origin = super::super::context::identity_for_branch(
-            &store.lock(),
+            &store.lock().unwrap(),
             &store.store_id,
             &new.actor.0,
         )
@@ -805,7 +788,10 @@ mod tests {
                 .unwrap(),
             BindingSuccessorCommit::AlreadyInstalled
         );
-        assert_eq!(connection_modes(&store.lock()), ("wal".into(), 2, true));
+        assert_eq!(
+            connection_modes(&store.lock().unwrap()),
+            ("wal".into(), 2, true)
+        );
         drop(reader);
         drop(store);
         let store = Store::open(&path).unwrap();
@@ -815,7 +801,10 @@ mod tests {
             Some("model-b")
         );
         assert!(store.context_model(&old_origin).is_err());
-        assert_eq!(connection_modes(&store.lock()), ("wal".into(), 2, true));
+        assert_eq!(
+            connection_modes(&store.lock().unwrap()),
+            ("wal".into(), 2, true)
+        );
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -856,7 +845,10 @@ mod tests {
         let upgrade_at = std::time::Instant::now();
         let admitted = Store::open(&path).unwrap();
         let upgrade_micros = upgrade_at.elapsed().as_micros();
-        assert_eq!(connection_modes(&admitted.lock()), ("wal".into(), 2, true));
+        assert_eq!(
+            connection_modes(&admitted.lock().unwrap()),
+            ("wal".into(), 2, true)
+        );
         assert!(
             admitted
                 .transfer_embedded_binding(&old, &new, &TransferAuthority(false))
@@ -926,7 +918,7 @@ mod tests {
                     .transfer_embedded_binding(&current, &successor, &TransferAuthority(false))
                     .is_err()
             );
-            store.lock().execute_batch("CREATE TEMP TRIGGER reject_binding BEFORE UPDATE ON embedded_bindings BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+            store.lock().unwrap().execute_batch("CREATE TEMP TRIGGER reject_binding BEFORE UPDATE ON embedded_bindings BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
             assert!(
                 store
                     .transfer_embedded_binding(&current, &successor, &TransferAuthority(true))
@@ -935,6 +927,7 @@ mod tests {
             assert!(store.embedded_binding_matches(&current).unwrap());
             store
                 .lock()
+                .unwrap()
                 .execute_batch("DROP TRIGGER reject_binding")
                 .unwrap();
             assert_eq!(
@@ -975,7 +968,7 @@ mod tests {
                     EmbeddedInputState::Admitted
                 ));
             }
-            let connection = store.lock();
+            let connection = store.lock().unwrap();
             assert_eq!(connection_modes(&connection), ("wal".into(), 2, true));
             let count: i64 = connection
                 .query_row("SELECT COUNT(*) FROM envelopes", [], |row| row.get(0))
@@ -1003,11 +996,13 @@ mod tests {
         // commit disposition or allowing a foreign authorized transition.
         store
             .lock()
+            .unwrap()
             .execute_batch("ALTER TABLE embedded_bindings RENAME TO inaccessible_bindings")
             .unwrap();
         assert!(store.embedded_binding_matches(&identity).is_err());
         store
             .lock()
+            .unwrap()
             .execute_batch("ALTER TABLE inaccessible_bindings RENAME TO embedded_bindings")
             .unwrap();
         assert!(store.embedded_binding_matches(&identity).unwrap());
@@ -1028,27 +1023,60 @@ mod tests {
             .unwrap();
     }
 
-    #[test]
-    fn admission_commit_failure_requires_reopen_before_authorized_retry() {
+    #[tokio::test]
+    async fn admission_commit_failure_requires_reopen_before_authorized_retry() {
         let root =
             std::env::temp_dir().join(format!("harness-admission-fault-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         let path = root.join("store.sqlite");
-        let store = Store::open(&path).unwrap();
-        store.lock().execute_batch("CREATE TABLE commit_fault_parent(id INTEGER PRIMARY KEY); CREATE TABLE commit_fault_child(id INTEGER REFERENCES commit_fault_parent(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER binding_commit_fault AFTER INSERT ON embedded_bindings BEGIN INSERT INTO commit_fault_child VALUES(1); END;").unwrap();
+        let store = Arc::new(Store::open(&path).unwrap());
+        let sibling = store.clone();
+        let mut waiting = Box::pin(store.wait_recovery_required());
+        assert!(
+            std::future::poll_fn(|context| {
+                std::task::Poll::Ready(
+                    std::future::Future::poll(waiting.as_mut(), context).is_pending(),
+                )
+            })
+            .await
+        );
+        store.lock().unwrap().execute_batch("CREATE TABLE commit_fault_parent(id INTEGER PRIMARY KEY); CREATE TABLE commit_fault_child(id INTEGER REFERENCES commit_fault_parent(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER binding_commit_fault AFTER INSERT ON embedded_bindings BEGIN INSERT INTO commit_fault_child VALUES(1); END;").unwrap();
         let identity = root_identity();
         assert!(matches!(
             store.bind_initial_embedded_binding(&identity, None, &InitialAuthority(identity.clone())),
             Err(EmbeddedError::RecoveryRequired(error)) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation)
         ));
-        // The embedding discards this handle even though SQLite's Drop rollback
-        // closed the transaction. A SELECT cannot certify a failed COMMIT.
-        assert!(store.lock().is_autocommit());
+        assert!(matches!(waiting.await, StoreError::AdmissionFenced));
+        assert!(matches!(
+            store.wait_recovery_required().await,
+            StoreError::AdmissionFenced
+        ));
+        assert!(matches!(
+            sibling.ensure_ready(),
+            Err(StoreError::AdmissionFenced)
+        ));
+        assert!(matches!(
+            sibling.embedded_agent_head(&identity),
+            Err(StoreError::AdmissionFenced)
+        ));
+        assert!(matches!(
+            sibling.bind_initial_embedded_binding(
+                &identity,
+                None,
+                &InitialAuthority(identity.clone())
+            ),
+            Err(EmbeddedError::Store(StoreError::AdmissionFenced))
+        ));
+        assert!(matches!(
+            sibling.create_request(&RequestId("forbidden".into()), None, "/root"),
+            Err(StoreError::AdmissionFenced)
+        ));
         drop(store);
         let recovered = Store::open(&path).unwrap();
         assert!(!recovered.embedded_binding_matches(&identity).unwrap());
         recovered
             .lock()
+            .unwrap()
             .execute_batch("DROP TRIGGER binding_commit_fault")
             .unwrap();
         recovered
@@ -1060,11 +1088,104 @@ mod tests {
         assert!(recovered.embedded_binding_matches(&identity).unwrap());
         let agents: i64 = recovered
             .lock()
+            .unwrap()
             .query_row("SELECT COUNT(*) FROM agents", [], |row| row.get(0))
             .unwrap();
         assert_eq!(agents, 1);
+        drop(sibling);
         drop(recovered);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn event_and_claim_writers_fence_actual_commit_failures() {
+        for claim in [false, true] {
+            let root = std::env::temp_dir().join(format!(
+                "harness-small-writer-fault-{}",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            let path = root.join("store.sqlite");
+            let store = Arc::new(Store::open(&path).unwrap());
+            let sibling = store.clone();
+            let request = RequestId("issuer".into());
+            let call = crate::model::CallId("call".into());
+            store.write_request(&request, None, "/root", &[Item(serde_json::json!({"type":"function_call", "call_id":"call", "name":"read", "arguments":"{}"}))], Usage::default()).unwrap();
+            let table = if claim { "claims" } else { "events" };
+            store.lock().unwrap().execute_batch(&format!("CREATE TABLE commit_fault_parent(id INTEGER PRIMARY KEY); CREATE TABLE commit_fault_child(id INTEGER REFERENCES commit_fault_parent(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER small_writer_commit_fault AFTER INSERT ON {table} BEGIN INSERT INTO commit_fault_child VALUES(1); END;")).unwrap();
+            let result = if claim {
+                store.claim(&call, &request).map(|_| ())
+            } else {
+                store
+                    .record_event(Some(&request), "diagnostic", &serde_json::json!({}))
+                    .map(|_| ())
+            };
+            assert!(
+                matches!(result, Err(StoreError::RecoveryRequired(error)) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation))
+            );
+            assert!(matches!(
+                sibling.events(Some(&request)),
+                Err(StoreError::AdmissionFenced)
+            ));
+            let recovered = Store::open(&path).unwrap();
+            assert!(recovered.claims(&call).unwrap().is_empty());
+            assert!(recovered.events(Some(&request)).unwrap().is_empty());
+            recovered
+                .lock()
+                .unwrap()
+                .execute_batch("DROP TRIGGER small_writer_commit_fault")
+                .unwrap();
+            if claim {
+                recovered.claim(&call, &request).unwrap();
+                assert!(matches!(
+                    recovered.claim(&call, &request),
+                    Err(StoreError::DuplicateClaim)
+                ));
+                recovered.ensure_ready().unwrap();
+                assert_eq!(recovered.claims(&call).unwrap().len(), 1);
+            } else {
+                recovered
+                    .record_event(Some(&request), "diagnostic", &serde_json::json!({}))
+                    .unwrap();
+                assert_eq!(recovered.events(Some(&request)).unwrap().len(), 1);
+            }
+            drop(recovered);
+            drop(sibling);
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn ordinary_commit_failure_and_unresolved_guard_release_fence_store() {
+        let store = Arc::new(Store::memory().unwrap());
+        let sibling = store.clone();
+        store.lock().unwrap().execute_batch("CREATE TABLE commit_fault_parent(id INTEGER PRIMARY KEY); CREATE TABLE commit_fault_child(id INTEGER REFERENCES commit_fault_parent(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER item_commit_fault AFTER INSERT ON items BEGIN INSERT INTO commit_fault_child VALUES(1); END;").unwrap();
+        assert!(matches!(
+            store.put_item(&Item(serde_json::json!({"type":"message", "role":"user", "content":"fault"}))),
+            Err(StoreError::RecoveryRequired(error)) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation)
+        ));
+        assert!(matches!(
+            sibling.create_request(&RequestId("closed".into()), None, "/root"),
+            Err(StoreError::AdmissionFenced)
+        ));
+
+        let store = Arc::new(Store::memory().unwrap());
+        let sibling = store.clone();
+        {
+            let connection = store.lock().unwrap();
+            connection
+                .execute_batch(
+                    "BEGIN IMMEDIATE; INSERT INTO session_state VALUES('unresolved','true',0);",
+                )
+                .unwrap();
+            assert!(!connection.is_autocommit());
+            // Releasing an unresolved legacy transaction cannot make it available.
+        }
+        assert!(matches!(
+            sibling.session_state("unresolved"),
+            Err(StoreError::AdmissionFenced)
+        ));
     }
 
     #[test]
@@ -1091,7 +1212,7 @@ mod tests {
         let path = root.join("store.sqlite");
         let store = Store::open(&path).unwrap();
         {
-            let mut connection = store.lock();
+            let mut connection = store.lock().unwrap();
             connection
                 .execute_batch("CREATE TABLE rollback_fault(id INTEGER PRIMARY KEY)")
                 .unwrap();
@@ -1108,19 +1229,23 @@ mod tests {
                 rusqlite::ffi::SQLITE_OK
             );
             let result: std::result::Result<(), EmbeddedError> =
-                durable_binding_transaction(&mut connection, |tx| {
+                connection.write_transaction(|tx| {
                     tx.execute("INSERT INTO rollback_fault VALUES(1)", [])?;
                     Err(EmbeddedError::Binding("authority refused".into()))
                 });
             assert!(
                 matches!(result, Err(EmbeddedError::RecoveryRequired(error)) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::AuthorizationForStatementDenied))
             );
-            assert!(!connection.is_autocommit());
+            assert!(matches!(
+                store.ensure_ready(),
+                Err(StoreError::AdmissionFenced)
+            ));
         }
         drop(store);
         let recovered = Store::open(&path).unwrap();
         let rows: i64 = recovered
             .lock()
+            .unwrap()
             .query_row("SELECT COUNT(*) FROM rollback_fault", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, 0);
@@ -1180,7 +1305,10 @@ mod tests {
                 barrier.wait();
                 let admitted = Store::from_connection(connection).unwrap();
                 assert!(admitted.embedded_binding_matches(&new).unwrap());
-                assert_eq!(connection_modes(&admitted.lock()), ("wal".into(), 2, true));
+                assert_eq!(
+                    connection_modes(&admitted.lock().unwrap()),
+                    ("wal".into(), 2, true)
+                );
             }));
         }
         barrier.wait();
@@ -1230,6 +1358,7 @@ mod tests {
                 // fixture, transaction owner, payload and counts are identical.
                 store
                     .lock()
+                    .unwrap()
                     .pragma_update(None, "synchronous", mode)
                     .unwrap();
                 let started = std::time::Instant::now();
@@ -1245,7 +1374,7 @@ mod tests {
                         .unwrap();
                 }
                 let wall_micros = started.elapsed().as_micros();
-                let connection = store.lock();
+                let connection = store.lock().unwrap();
                 let requests: i64 = connection
                     .query_row("SELECT COUNT(*) FROM requests", [], |row| row.get(0))
                     .unwrap();
@@ -1299,7 +1428,7 @@ mod tests {
                 .transfer_embedded_binding(&old, &new, &TransferAuthority(false))
                 .is_err()
         );
-        store.lock().execute_batch("CREATE TRIGGER reject_successor BEFORE UPDATE ON embedded_bindings BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+        store.lock().unwrap().execute_batch("CREATE TRIGGER reject_successor BEFORE UPDATE ON embedded_bindings BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
         assert!(
             store
                 .transfer_embedded_binding(&old, &new, &TransferAuthority(true))
@@ -1313,6 +1442,7 @@ mod tests {
         assert!(store.context_model(&new_origin).is_err());
         store
             .lock()
+            .unwrap()
             .execute_batch("DROP TRIGGER reject_successor")
             .unwrap();
         store
@@ -1404,7 +1534,7 @@ mod tests {
                 )
                 .is_err()
         );
-        let connection = store.lock();
+        let connection = store.lock().unwrap();
         connection
             .execute(
                 "INSERT INTO requests(id,branch) VALUES ('retained-request','main')",
@@ -1442,7 +1572,7 @@ mod tests {
             .unwrap();
         // Model a deliberately authorized binding transition in the fixture.
         // Input history remains immutable and cannot become a new admission.
-        store.lock().execute("UPDATE embedded_bindings SET run_id='new-run',incarnation='new' WHERE agent_path='/root'",[]).unwrap();
+        store.lock().unwrap().execute("UPDATE embedded_bindings SET run_id='new-run',incarnation='new' WHERE agent_path='/root'",[]).unwrap();
         let second = HostIdentity {
             run: "new-run".into(),
             actor: first.actor.clone(),
@@ -1467,6 +1597,7 @@ mod tests {
         assert_eq!(store.unread("/root").unwrap().len(), 2);
         store
             .lock()
+            .unwrap()
             .execute(
                 "UPDATE embedded_bindings SET incarnation='third' WHERE agent_path='/root'",
                 [],
@@ -1558,6 +1689,7 @@ mod tests {
 
         store
             .lock()
+            .unwrap()
             .execute(
                 "UPDATE envelopes SET recipient='/root/other' \
                  WHERE id=(SELECT envelope_id FROM embedded_inputs \

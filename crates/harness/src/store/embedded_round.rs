@@ -132,7 +132,7 @@ pub(super) fn settle_tx(
 impl Store {
     /// Read immutable request issuer provenance, rather than its successor binding.
     pub(crate) fn request_output_origin(&self, id: &RequestId) -> Result<ConversationIdentity> {
-        let c = self.lock();
+        let c = self.lock()?;
         let (branch, run, incarnation): (String, Option<String>, Option<String>) = c.query_row(
             "SELECT branch,embedded_run,embedded_incarnation FROM requests WHERE id=?1",
             [&id.0],
@@ -154,11 +154,12 @@ impl Store {
         &self,
         identity: &HostIdentity,
     ) -> Result<EmbeddedRoundFrontier> {
-        let mut c = self.lock();
+        let mut c = self.lock()?;
         let tx = c.transaction()?;
-        let result = frontier(&tx, identity)?;
-        tx.commit()?;
-        Ok(result)
+        let result = frontier(&tx, identity);
+        let completion = tx.rollback();
+        c.complete_transaction(completion)?;
+        result
     }
 
     pub fn settle_embedded_round(
@@ -168,13 +169,8 @@ impl Store {
         request: &RequestId,
         outcome: EmbeddedRoundOutcome,
     ) -> Result<bool> {
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        let changed = settle_tx(&tx, identity, expected, request, outcome)?;
-        if changed {
-            tx.commit()?;
-        }
-        Ok(changed)
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| settle_tx(tx, identity, expected, request, outcome))
     }
 
     /// Admission closes the request-row cut before any input is marked delivered.
@@ -186,38 +182,38 @@ impl Store {
         items: &[Item],
         usage: Usage,
     ) -> Result<Request> {
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        // Check before INSERT: an unresolved predecessor must never be bypassed.
-        let current = frontier(&tx, identity)?;
-        if current
-            .pending_head
-            .as_ref()
-            .or(current.settled_head.as_ref())
-            != parent
-        {
-            return Err(StoreError::InvalidEmbeddedFrontier);
-        }
-        tx.execute("INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros,embedded_run,embedded_incarnation,round_phase) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'pending')",
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            // Check before INSERT: an unresolved predecessor must never be bypassed.
+            let current = frontier(tx, identity)?;
+            if current
+                .pending_head
+                .as_ref()
+                .or(current.settled_head.as_ref())
+                != parent
+            {
+                return Err(StoreError::InvalidEmbeddedFrontier);
+            }
+            tx.execute("INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros,embedded_run,embedded_incarnation,round_phase) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'pending')",
             params![request.0,parent.map(|id| &id.0),identity.actor.0,super::utc_millis(),usage.input_tokens,usage.output_tokens,usage.cost_micros,identity.run,identity.incarnation])?;
-        for (position, item) in items
-            .iter()
-            .filter(|item| !item.is_configuration_update())
-            .enumerate()
-        {
-            super::output_publication::require_ordinary(item, request, position as i64)?;
-            let hash = Self::put_item_tx(&tx, item)?;
-            tx.execute(
-                "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
-                params![request.0, position as i64, hash.0],
-            )?;
-            super::chat::publish(&tx, request, position as i64, &hash, item)?;
-        }
-        tx.commit()?;
-        Ok(Request {
-            id: request.clone(),
-            parent: parent.cloned(),
-            branch: identity.actor.0.clone(),
+            for (position, item) in items
+                .iter()
+                .filter(|item| !item.is_configuration_update())
+                .enumerate()
+            {
+                super::output_publication::require_ordinary(item, request, position as i64)?;
+                let hash = Self::put_item_tx(tx, item)?;
+                tx.execute(
+                    "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
+                    params![request.0, position as i64, hash.0],
+                )?;
+                super::chat::publish(tx, request, position as i64, &hash, item)?;
+            }
+            Ok(Request {
+                id: request.clone(),
+                parent: parent.cloned(),
+                branch: identity.actor.0.clone(),
+            })
         })
     }
 
@@ -226,7 +222,7 @@ impl Store {
         request: &RequestId,
     ) -> Result<Option<crate::transport::ResponsesTurn>> {
         let rows = {
-            let c = self.lock();
+            let c = self.lock()?;
             let mut q=c.prepare("SELECT id,payload FROM events WHERE request_id=?1 AND kind='model_turn' ORDER BY id LIMIT 2")?;
             q.query_map([&request.0], |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
@@ -272,6 +268,100 @@ mod tests {
             _: &HostIdentity,
         ) -> std::result::Result<bool, String> {
             Ok(true)
+        }
+    }
+    #[test]
+    fn request_and_settlement_commit_faults_fence_siblings_until_reopen() {
+        for settlement in [false, true] {
+            let file = path();
+            let store = std::sync::Arc::new(Store::open(&file).unwrap());
+            let sibling = store.clone();
+            let identity = identity();
+            store.bind_embedded_actor(&identity, None).unwrap();
+            let request = RequestId("commit-fault".into());
+            if settlement {
+                store
+                    .write_embedded_request(&identity, &request, None, &[], Usage::default())
+                    .unwrap();
+            }
+            let trigger = if settlement {
+                "CREATE TRIGGER round_commit_fault AFTER UPDATE OF head_request ON agents BEGIN INSERT INTO commit_fault_child VALUES(1); END;"
+            } else {
+                "CREATE TRIGGER round_commit_fault AFTER INSERT ON requests BEGIN INSERT INTO commit_fault_child VALUES(1); END;"
+            };
+            store.lock().unwrap().execute_batch(&format!("CREATE TABLE commit_fault_parent(id INTEGER PRIMARY KEY); CREATE TABLE commit_fault_child(id INTEGER REFERENCES commit_fault_parent(id) DEFERRABLE INITIALLY DEFERRED); {trigger}")).unwrap();
+            let result = if settlement {
+                store
+                    .settle_embedded_round(
+                        &identity,
+                        None,
+                        &request,
+                        EmbeddedRoundOutcome::Completed,
+                    )
+                    .map(|_| ())
+            } else {
+                store
+                    .write_embedded_request(&identity, &request, None, &[], Usage::default())
+                    .map(|_| ())
+            };
+            assert!(
+                matches!(result, Err(StoreError::RecoveryRequired(error)) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation))
+            );
+            assert!(matches!(
+                sibling.embedded_round_frontier(&identity),
+                Err(StoreError::AdmissionFenced)
+            ));
+            let recovered = Store::open(&file).unwrap();
+            let frontier = recovered.embedded_round_frontier(&identity).unwrap();
+            assert_eq!(frontier.settled_head, None);
+            assert_eq!(frontier.pending_head, settlement.then(|| request.clone()));
+            recovered
+                .lock()
+                .unwrap()
+                .execute_batch("DROP TRIGGER round_commit_fault")
+                .unwrap();
+            if !settlement {
+                recovered
+                    .write_embedded_request(&identity, &request, None, &[], Usage::default())
+                    .unwrap();
+            }
+            assert!(
+                recovered
+                    .settle_embedded_round(
+                        &identity,
+                        None,
+                        &request,
+                        EmbeddedRoundOutcome::Completed
+                    )
+                    .unwrap()
+            );
+            assert!(
+                !recovered
+                    .settle_embedded_round(
+                        &identity,
+                        None,
+                        &request,
+                        EmbeddedRoundOutcome::Completed
+                    )
+                    .unwrap()
+            );
+            assert_eq!(
+                recovered
+                    .embedded_round_frontier(&identity)
+                    .unwrap()
+                    .settled_head,
+                Some(request)
+            );
+            let count: i64 = recovered
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM requests", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 1);
+            drop(recovered);
+            drop(sibling);
+            drop(store);
+            std::fs::remove_file(file).unwrap();
         }
     }
     #[test]

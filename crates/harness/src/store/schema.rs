@@ -70,7 +70,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
         tx.execute("INSERT INTO schema_version(version) VALUES (?1)", [VERSION])?;
         super::schema_migration::ensure_store_id(&tx)?;
         super::chat::initialize_cutover(&tx, false)?;
-        tx.commit()?;
+        tx.commit().map_err(super::StoreError::RecoveryRequired)?;
         return Ok(());
     };
     if version == VERSION {
@@ -195,5 +195,5 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
     super::schema_migration::migrate_checkpoint_metadata(&tx)?;
     super::chat::initialize_cutover(&tx, true)?;
     tx.execute("UPDATE schema_version SET version=?1", [VERSION])?;
-    Ok(tx.commit()?)
+    Ok(tx.commit().map_err(super::StoreError::RecoveryRequired)?)
 }

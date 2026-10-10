@@ -55,22 +55,23 @@ impl Store {
         cause: crate::transport::StreamInterruption,
         agent_head: Option<(&crate::embedding::HostIdentity, Option<&RequestId>)>,
     ) -> Result<bool> {
-        let mut connection = self.lock();
-        let transaction = connection.transaction()?;
-        if let Some((identity, expected)) = agent_head {
-            let frontier = super::embedded_round::frontier(&transaction, identity)?;
-            if frontier.settled_head.as_ref() != expected
-                || frontier.pending_head.as_ref() != Some(request)
-            {
-                return Ok(false);
+        let mut connection = self.lock()?;
+        connection.write_transaction(|transaction| {
+            if let Some((identity, expected)) = agent_head {
+                let frontier = super::embedded_round::frontier(&transaction, identity)?;
+                if frontier.settled_head.as_ref() != expected
+                    || frontier.pending_head.as_ref() != Some(request)
+                {
+                    return Ok(false);
+                }
             }
-        }
-        transaction.execute(
-            "INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,'model_interrupted',?2,?3)",
-            params![request.0, serde_json::to_string(&cause)?, super::utc_millis()],
-        )?;
-        transaction.commit()?;
-        Ok(true)
+            transaction.execute(
+                "INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,'model_interrupted',?2,?3)",
+                params![request.0, serde_json::to_string(&cause)?, super::utc_millis()],
+            )?;
+
+            Ok(true)
+        })
     }
     /// Failure publication and an embedded actor's head advance share one
     /// transaction. A failed CAS or event write publishes neither fact.
@@ -80,25 +81,26 @@ impl Store {
         failure: &crate::transport::RequestFailure,
         agent_head: Option<(&crate::embedding::HostIdentity, Option<&RequestId>)>,
     ) -> Result<bool> {
-        let mut connection = self.lock();
-        let transaction = connection.transaction()?;
-        if let Some((identity, expected)) = agent_head {
-            if !super::embedded_round::settle_tx(
-                &transaction,
-                identity,
-                expected,
-                request,
-                super::EmbeddedRoundOutcome::Rejected,
-            )? {
-                return Ok(false);
+        let mut connection = self.lock()?;
+        connection.write_transaction(|transaction| {
+            if let Some((identity, expected)) = agent_head {
+                if !super::embedded_round::settle_tx(
+                    &transaction,
+                    identity,
+                    expected,
+                    request,
+                    super::EmbeddedRoundOutcome::Rejected,
+                )? {
+                    return Ok(false);
+                }
             }
-        }
-        transaction.execute(
-            "INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,'request_failed',?2,?3)",
-            params![request.0, serde_json::to_string(failure)?, super::utc_millis()],
-        )?;
-        transaction.commit()?;
-        Ok(true)
+            transaction.execute(
+                "INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,'request_failed',?2,?3)",
+                params![request.0, serde_json::to_string(failure)?, super::utc_millis()],
+            )?;
+
+            Ok(true)
+        })
     }
 
     /// Read durable success, rejection and interruption metadata without loading
@@ -107,7 +109,7 @@ impl Store {
         &self,
         limit: usize,
     ) -> Result<Vec<ModelRequestObservation>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let mut query = c.prepare(
             "WITH recent AS (
                 SELECT request_id,MAX(id) AS sequence FROM (
@@ -150,7 +152,7 @@ impl Store {
     pub fn history_page(&self, id: &RequestId, offset: u64, limit: usize) -> Result<HistoryPage> {
         let limit = limit.clamp(1, MAX_HISTORY_ITEMS);
         let offset = i64::try_from(offset).map_err(|_| StoreError::InvalidHistoryOffset)?;
-        let c = self.lock();
+        let c = self.lock()?;
         let request: Request = c
             .query_row(
                 "SELECT id,parent_id,branch FROM requests WHERE id=?1",
@@ -270,7 +272,7 @@ mod tests {
                 Err(StoreError::InvalidEmbeddedBinding)
             ));
 
-            store.lock().execute_batch("CREATE TRIGGER reject_failure BEFORE INSERT ON events WHEN NEW.kind='request_failed' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+            store.lock().unwrap().execute_batch("CREATE TRIGGER reject_failure BEFORE INSERT ON events WHEN NEW.kind='request_failed' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
             assert!(
                 store
                     .record_failed_model_request(
@@ -284,6 +286,7 @@ mod tests {
             assert!(store.events(Some(&request)).unwrap().is_empty());
             store
                 .lock()
+                .unwrap()
                 .execute_batch("DROP TRIGGER reject_failure")
                 .unwrap();
             assert!(
@@ -461,7 +464,7 @@ mod interruption_fencing_tests {
                     )
                     .unwrap()
             );
-            store.lock().execute_batch("CREATE TRIGGER reject_interruption BEFORE INSERT ON events WHEN NEW.kind='model_interrupted' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+            store.lock().unwrap().execute_batch("CREATE TRIGGER reject_interruption BEFORE INSERT ON events WHEN NEW.kind='model_interrupted' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
             assert!(
                 store
                     .record_interrupted_model_request(
@@ -474,6 +477,7 @@ mod interruption_fencing_tests {
             assert!(store.events(Some(&request)).unwrap().is_empty());
             store
                 .lock()
+                .unwrap()
                 .execute_batch("DROP TRIGGER reject_interruption")
                 .unwrap();
             assert!(
@@ -486,7 +490,7 @@ mod interruption_fencing_tests {
                     .unwrap()
             );
             // Emulate the previous v9 outcome index at a durable reopen cut.
-            store.lock().execute_batch("DROP INDEX events_model_outcomes_recent; CREATE INDEX events_model_settled_recent ON events(id DESC,request_id) WHERE kind IN ('model_turn','request_failed');").unwrap();
+            store.lock().unwrap().execute_batch("DROP INDEX events_model_outcomes_recent; CREATE INDEX events_model_settled_recent ON events(id DESC,request_id) WHERE kind IN ('model_turn','request_failed');").unwrap();
         }
         let store = Store::open(&path).unwrap();
         let frontier = store.embedded_round_frontier(&identity).unwrap();

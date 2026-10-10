@@ -65,7 +65,7 @@ pub enum BindingSuccessorCommit {
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddedError {
     #[error(transparent)]
-    Store(#[from] StoreError),
+    Store(StoreError),
     #[error("host refused: {0}")]
     Host(String),
     #[error("host request admission closed")]
@@ -84,6 +84,14 @@ pub enum EmbeddedError {
     ConflictingSeed,
     #[error("context seed requires a fresh conversation without history or inputs")]
     SeedRequiresFreshConversation,
+}
+impl From<StoreError> for EmbeddedError {
+    fn from(value: StoreError) -> Self {
+        match value {
+            StoreError::RecoveryRequired(error) => Self::RecoveryRequired(error),
+            other => Self::Store(other),
+        }
+    }
 }
 impl From<rusqlite::Error> for EmbeddedError {
     fn from(value: rusqlite::Error) -> Self {
@@ -869,6 +877,7 @@ mod tests {
             ));
             let count: i64 = store
                 .lock()
+                .unwrap()
                 .query_row("SELECT COUNT(*) FROM embedded_context_seeds", [], |row| {
                     row.get(0)
                 })

@@ -423,7 +423,7 @@ fn missing_and_conflicting_issuing_models_fail_closed() {
                 "model-other",
             );
         } else {
-            store.lock().execute("UPDATE events SET payload=json_remove(payload,'$.issued.model') WHERE kind='model_turn'", []).unwrap();
+            store.lock().unwrap().execute("UPDATE events SET payload=json_remove(payload,'$.issued.model') WHERE kind='model_turn'", []).unwrap();
         }
         assert!(matches!(
             switch(&store, &snapshot),
@@ -441,7 +441,7 @@ fn identical_bytes_do_not_establish_ambiguous_response_origin_membership() {
     let (store, head, operation, _) = setup(vec![reasoning()]);
     // Two equal hashes in the source request cannot be assigned to a response
     // that claims only one of those occurrences.
-    store.lock().execute("UPDATE events SET payload=json_remove(payload,'$.response.items[2]') WHERE kind='model_turn'", []).unwrap();
+    store.lock().unwrap().execute("UPDATE events SET payload=json_remove(payload,'$.response.items[2]') WHERE kind='model_turn'", []).unwrap();
     assert!(matches!(
         store.context_request_state(&head, &operation.origin),
         Err(StoreError::Context(ContextError::OpaqueModel))
@@ -593,7 +593,7 @@ fn replay_restores_a_whole_native_family_with_its_original_equal_byte_output() {
     let receipt = store
         .restore_context_commit(&snapshot, &evidence, &output(), &[])
         .unwrap();
-    let raw = history(&store.lock(), &receipt.head, true).unwrap();
+    let raw = history(&store.lock().unwrap(), &receipt.head, true).unwrap();
     let shared = raw
         .iter()
         .filter(|i| i.item.0["call_id"] == "shared")
@@ -681,7 +681,7 @@ fn whole_native_replay_preserves_later_async_output_with_reused_historical_call_
     let receipt = local
         .restore_context_commit(&snapshot, &evidence, &output(), &[])
         .unwrap();
-    let raw = history(&local.lock(), &receipt.head, true).unwrap();
+    let raw = history(&local.lock().unwrap(), &receipt.head, true).unwrap();
     let result = raw
         .iter()
         .find(|i| i.item.0["call_id"] == "shared" && i.item.0["type"] == "custom_tool_call_output")
@@ -758,7 +758,7 @@ fn cut_fixture_with_reasoning(earlier_pending: bool, visible: bool, reasoning: I
         .write_request(&source, Some(&initial), "/root", &items, Usage::default())
         .unwrap();
     record(&store, &source, items, "model-a");
-    store.lock().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)", [&source.0]).unwrap();
+    store.lock().unwrap().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)", [&source.0]).unwrap();
     if earlier_pending {
         store.claim(&CallId("earlier".into()), &source).unwrap();
     }
@@ -930,10 +930,13 @@ fn partial_envelope_needs_selected_checkpoint_ancestry_and_exact_prefix_origins(
     store
         .write_request(&copied, None, &child.path.0, &[], Usage::default())
         .unwrap();
-    let originals =
-        request_occurrences(&store.lock(), cuts.before_call().snapshot_request()).unwrap();
+    let originals = request_occurrences(
+        &store.lock().unwrap(),
+        cuts.before_call().snapshot_request(),
+    )
+    .unwrap();
     {
-        let mut connection = store.lock();
+        let mut connection = store.lock().unwrap();
         let tx = connection.transaction().unwrap();
         for (position, occurrence) in originals.iter().enumerate() {
             insert_occurrence(&tx, &copied, position as i64, occurrence).unwrap();
@@ -971,7 +974,7 @@ fn partial_envelope_needs_selected_checkpoint_ancestry_and_exact_prefix_origins(
         )
         .unwrap();
     {
-        let mut connection = store.lock();
+        let mut connection = store.lock().unwrap();
         let tx = connection.transaction().unwrap();
         tx.execute(
             "INSERT INTO session_state(session_id,state,updated_at) VALUES(?1,'true',0)",
@@ -990,13 +993,13 @@ fn partial_envelope_needs_selected_checkpoint_ancestry_and_exact_prefix_origins(
         store.context_request_state(&hole, &identity),
         Err(StoreError::Context(ContextError::OpaqueModel))
     ));
-    let suffix = request_occurrences(&store.lock(), &source)
+    let suffix = request_occurrences(&store.lock().unwrap(), &source)
         .unwrap()
         .into_iter()
         .find(|i| i.item.0["content"] == "excluded tail")
         .unwrap();
     {
-        let mut connection = store.lock();
+        let mut connection = store.lock().unwrap();
         let tx = connection.transaction().unwrap();
         insert_occurrence(&tx, child.head_request.as_ref().unwrap(), 99, &suffix).unwrap();
         tx.commit().unwrap();
@@ -1144,7 +1147,7 @@ fn genuine_saved_reference_from_unrelated_checkpoint_cannot_authorize_model_swit
         .history_occurrences(fixture.child.head_request.as_ref().unwrap())
         .unwrap();
     {
-        let connection = store.lock();
+        let connection = store.lock().unwrap();
         assert!(
             portable_request(
                 &connection,
@@ -1194,7 +1197,7 @@ fn genuine_saved_reference_from_unrelated_checkpoint_cannot_authorize_model_swit
             .all(|claim| claim.state == ClaimState::Pending)
     );
     assert_eq!(
-        state(&store.lock(), &operation.origin)
+        state(&store.lock().unwrap(), &operation.origin)
             .unwrap()
             .model
             .as_deref(),

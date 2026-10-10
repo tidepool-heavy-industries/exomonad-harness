@@ -146,7 +146,7 @@ impl Store {
     /// Exclusive runtime startup calls this once before admitting continuation scopes.
     /// Opening a connection or serving retained history never performs recovery.
     pub fn interrupt_actor_forms_for_restart(&self) -> Result<usize> {
-        let count = interrupt_pending(&mut self.lock())?;
+        let count = interrupt_pending(&mut self.lock()?)?;
         if count > 0 {
             self.signal_actor_form_change();
         }
@@ -185,7 +185,7 @@ impl Store {
                 return Err(StoreError::InvalidForm);
             }
         }
-        let mut c = self.lock();
+        let mut c = self.lock()?;
         let tx = c.transaction()?;
         if !authority
             .validate_form(opening)
@@ -221,7 +221,8 @@ impl Store {
             "INSERT INTO actor_forms(identity,opening_sequence,presentation) VALUES(?1,?2,?3)",
             params![identity, row.sequence, serde_json::to_string(&row)?],
         )?;
-        tx.commit()?;
+        let completion = tx.commit();
+        c.complete_transaction(completion)?;
         self.signal_actor_form_change();
         Ok(row)
     }
@@ -256,7 +257,7 @@ impl Store {
             return Err(StoreError::InvalidForm);
         }
         let payload = serde_json::to_string(&draft)?;
-        let mut c = self.lock();
+        let mut c = self.lock()?;
         let tx = c.transaction()?;
         let mut row = load(&tx, &identity)?;
         let old: Option<String> = tx
@@ -295,7 +296,8 @@ impl Store {
             params![identity, operation, payload],
         )?;
         save(&tx, &identity, &mut row)?;
-        tx.commit()?;
+        let completion = tx.commit();
+        c.complete_transaction(completion)?;
         self.signal_actor_form_change();
         Ok(row)
     }
@@ -305,7 +307,7 @@ impl Store {
         mount: &str,
     ) -> Result<Option<ActorFormAttempt>> {
         let identity = key(origin, mount)?;
-        let mut c = self.lock();
+        let mut c = self.lock()?;
         let tx = c.transaction()?;
         let row = load(&tx, &identity)?;
         Ok(match row.state {
@@ -371,7 +373,7 @@ impl Store {
         settlement: SettleForm<'_>,
     ) -> Result<bool> {
         let identity = key(origin, mount)?;
-        let mut c = self.lock();
+        let mut c = self.lock()?;
         let tx = c.transaction()?;
         let mut row = load(&tx, &identity)?;
         match settlement {
@@ -410,7 +412,8 @@ impl Store {
             }
         }
         save(&tx, &identity, &mut row)?;
-        tx.commit()?;
+        let completion = tx.commit();
+        c.complete_transaction(completion)?;
         self.signal_actor_form_change();
         Ok(true)
     }
@@ -447,12 +450,12 @@ impl Store {
     }
     pub fn actor_form(&self, origin: &ActorOutputOrigin, mount: &str) -> Result<StoredActorForm> {
         let identity = key(origin, mount)?;
-        let mut c = self.lock();
+        let mut c = self.lock()?;
         let tx = c.transaction()?;
         load(&tx, &identity)
     }
 }
-fn interrupt_pending(c: &mut rusqlite::Connection) -> Result<usize> {
+fn interrupt_pending(c: &mut super::StoreConnection<'_>) -> Result<usize> {
     let tx = c.transaction()?;
     let rows = {
         let mut q = tx.prepare("SELECT identity,presentation FROM actor_forms WHERE json_extract(presentation,'$.state') IN ('open','submitted')")?;
@@ -467,7 +470,8 @@ fn interrupt_pending(c: &mut rusqlite::Connection) -> Result<usize> {
             save(&tx, &identity, &mut row)?;
         }
     }
-    tx.commit()?;
+    let completion = tx.commit();
+    c.complete_transaction(completion)?;
     Ok(count)
 }
 
@@ -596,7 +600,7 @@ mod tests {
         store
             .submit_actor_form(&a.origin, "a", "one", &json!({"f0":"draft"}))
             .unwrap();
-        store.lock().execute_batch("CREATE TRIGGER refuse_form BEFORE INSERT ON events WHEN NEW.kind='actor_form_update' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+        store.lock().unwrap().execute_batch("CREATE TRIGGER refuse_form BEFORE INSERT ON events WHEN NEW.kind='actor_form_update' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
         assert!(
             store
                 .commit_actor_form(
@@ -613,6 +617,7 @@ mod tests {
         );
         store
             .lock()
+            .unwrap()
             .execute_batch("DROP TRIGGER refuse_form")
             .unwrap();
         store.close_actor_form(&a.origin, "a").unwrap();
@@ -775,7 +780,7 @@ mod notification_tests {
                 .unwrap()
                 .is_none()
         );
-        store.lock().execute_batch("CREATE TRIGGER refuse_form BEFORE INSERT ON events WHEN NEW.kind='actor_form_update' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+        store.lock().unwrap().execute_batch("CREATE TRIGGER refuse_form BEFORE INSERT ON events WHEN NEW.kind='actor_form_update' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
         assert!(
             store
                 .submit_actor_form(&o.origin, &o.mount_id, "two", &json!({"f0":"next"}))
@@ -784,6 +789,7 @@ mod notification_tests {
         assert!(!wake.has_changed().unwrap());
         store
             .lock()
+            .unwrap()
             .execute_batch("DROP TRIGGER refuse_form")
             .unwrap();
         store
@@ -859,6 +865,7 @@ mod notification_tests {
             .unwrap();
         store
             .lock()
+            .unwrap()
             .execute(
                 "UPDATE actor_forms SET presentation=json_set(presentation,'$.state','answered')",
                 [],
@@ -868,7 +875,7 @@ mod notification_tests {
             store.actor_form(&o.origin, &o.mount_id),
             Err(StoreError::InvalidForm)
         ));
-        store.lock().execute("UPDATE actor_forms SET presentation=json_set(presentation,'$.state','open','$.errors',json(?1))", [serde_json::to_string(&json!([{"field":null,"message":"x".repeat(32768)}])).unwrap()]).unwrap();
+        store.lock().unwrap().execute("UPDATE actor_forms SET presentation=json_set(presentation,'$.state','open','$.errors',json(?1))", [serde_json::to_string(&json!([{"field":null,"message":"x".repeat(32768)}])).unwrap()]).unwrap();
         assert!(matches!(
             store.actor_form(&o.origin, &o.mount_id),
             Err(StoreError::InvalidForm)

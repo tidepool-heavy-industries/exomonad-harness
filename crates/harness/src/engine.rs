@@ -3832,6 +3832,7 @@ mod tests {
             }
             store
                 .lock()
+                .unwrap()
                 .execute(
                     "UPDATE claims SET terminal_json=NULL WHERE state='settled'",
                     [],
@@ -4440,7 +4441,7 @@ mod tests {
         store
             .append_operation_output(&operation, &head, &head)
             .unwrap();
-        store.lock().execute(
+        store.lock().unwrap().execute(
             "INSERT INTO request_items(request_id,position,item_hash,output_operation) SELECT request_id,(SELECT MAX(position)+1 FROM request_items WHERE request_id=?1),item_hash,output_operation FROM request_items WHERE request_id=?1 AND output_operation IS NOT NULL",
             [&head.0],
         ).unwrap();

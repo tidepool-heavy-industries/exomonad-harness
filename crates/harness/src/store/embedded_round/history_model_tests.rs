@@ -159,6 +159,7 @@ impl Model {
         for issued in &self.issued {
             let persisted_phase: String = store
                 .lock()
+                .unwrap()
                 .query_row(
                     "SELECT round_phase FROM requests WHERE id=?1",
                     [&issued.request.0],

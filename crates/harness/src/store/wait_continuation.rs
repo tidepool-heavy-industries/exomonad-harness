@@ -66,7 +66,7 @@ impl Store {
             });
         };
         let history = {
-            let c = self.lock();
+            let c = self.lock()?;
             let history = super::context::request_occurrences(&c, &original.request)?;
             super::context::validate_canonical_history(&c, &history)?;
             history
@@ -107,7 +107,7 @@ impl Store {
         // A caller cannot turn a reconstructed or edited view into authority.
         // Match the cut against the immutable reference event owned by Store.
         let records = {
-            let c = self.lock();
+            let c = self.lock()?;
             let descendant: bool = c.query_row(
                 "WITH RECURSIVE ancestry(id) AS (SELECT ?1 UNION ALL SELECT r.parent_id FROM requests r JOIN ancestry a ON r.id=a.id WHERE r.parent_id IS NOT NULL) SELECT EXISTS(SELECT 1 FROM ancestry WHERE id=?2) AND (SELECT branch FROM requests WHERE id=?1)=(SELECT branch FROM requests WHERE id=?2)",
                 rusqlite::params![next.request.0,original.request.0], |row| row.get(0),
@@ -351,7 +351,7 @@ mod tests {
                 .replay_wait_continuation(&local, &original, None)
                 .is_err()
         );
-        let c = store.lock();
+        let c = store.lock().unwrap();
         let row: (String, String) = c.query_row("SELECT item_hash,output_operation FROM request_items WHERE request_id=?1 AND position=1", [&original.request.0], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
         c.execute("INSERT INTO request_items(request_id,position,item_hash,output_operation) VALUES(?1,3,?2,?3)", rusqlite::params![original.request.0,row.0,row.1]).unwrap();
         drop(c);
@@ -418,6 +418,7 @@ mod tests {
         let payload = serde_json::to_string(&value).unwrap();
         store
             .lock()
+            .unwrap()
             .execute(
                 "UPDATE events SET payload=?2 WHERE id=?1",
                 rusqlite::params![event, payload],

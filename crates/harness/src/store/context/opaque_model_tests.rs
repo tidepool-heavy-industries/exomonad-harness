@@ -123,13 +123,13 @@ fn prepare(provenance: Provenance<'_>, selected: &str) -> Restoration {
         .restore_context_commit(&snapshot, &legacy, &output(), std::slice::from_ref(&second))
         .unwrap();
     if matches!(provenance, Provenance::MissingModel) {
-        store.lock().execute("UPDATE events SET payload=json_remove(payload,'$.issued.model') WHERE kind='model_turn'", []).unwrap();
+        store.lock().unwrap().execute("UPDATE events SET payload=json_remove(payload,'$.issued.model') WHERE kind='model_turn'", []).unwrap();
     }
     if matches!(provenance, Provenance::NotInResponse) {
-        store.lock().execute("UPDATE events SET payload=json_remove(payload,'$.response.items[0]') WHERE kind='model_turn'", []).unwrap();
+        store.lock().unwrap().execute("UPDATE events SET payload=json_remove(payload,'$.response.items[0]') WHERE kind='model_turn'", []).unwrap();
     }
     if matches!(provenance, Provenance::UnversionedTurn) {
-        store.lock().execute("UPDATE events SET payload=json_remove(payload,'$.format','$.issued') WHERE kind='model_turn'", []).unwrap();
+        store.lock().unwrap().execute("UPDATE events SET payload=json_remove(payload,'$.format','$.issued') WHERE kind='model_turn'", []).unwrap();
     }
     if matches!(
         provenance,
@@ -162,7 +162,7 @@ fn prepare(provenance: Provenance<'_>, selected: &str) -> Restoration {
 }
 
 fn counts(store: &Store) -> Vec<i64> {
-    let c = store.lock();
+    let c = store.lock().unwrap();
     [
         "requests",
         "request_items",
@@ -318,7 +318,7 @@ fn historical_opaque_restore_accepts_original_issuing_model() {
                 .iter()
                 .any(|(_, _, item)| item.0["encrypted_content"] == "same-opaque-bytes")
         );
-        let retained = history(&fixture.store.lock(), &receipt.head, true).unwrap();
+        let retained = history(&fixture.store.lock().unwrap(), &receipt.head, true).unwrap();
         assert_eq!(retained[0].origin.request.0, "opaque-response");
     }
 }

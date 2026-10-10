@@ -178,7 +178,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
     store
         .record_replay_turn(&spawn_head, &request, &spawn_turn)
         .unwrap();
-    store.lock().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)", [&spawn_head.0]).unwrap();
+    store.lock().unwrap().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)", [&spawn_head.0]).unwrap();
     let spawn = store
         .claim(&CallId("spawn-call".into()), &spawn_head)
         .unwrap();
@@ -380,7 +380,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         )
         .unwrap();
     {
-        let mut connection = store.lock();
+        let mut connection = store.lock().unwrap();
         let transaction = connection.transaction().unwrap();
         for (position, occurrence) in retained
             .iter()

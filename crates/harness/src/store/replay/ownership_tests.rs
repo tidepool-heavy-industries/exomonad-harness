@@ -211,7 +211,7 @@ fn issued_ownership_reopens_and_atomic_failure_leaves_no_completion() {
                 &occurrences,
             )
             .unwrap();
-        store.lock().execute_batch("CREATE TRIGGER reject_owned_replay BEFORE INSERT ON events WHEN NEW.kind='model_turn' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+        store.lock().unwrap().execute_batch("CREATE TRIGGER reject_owned_replay BEFORE INSERT ON events WHEN NEW.kind='model_turn' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
         let failed_response = ResponsesTurn {
             items: vec![Item(json!({"new":"response"}))],
             ..response()
@@ -230,6 +230,7 @@ fn issued_ownership_reopens_and_atomic_failure_leaves_no_completion() {
         assert!(store.get_item(&hash).unwrap().is_none());
         store
             .lock()
+            .unwrap()
             .execute_batch("DROP TRIGGER reject_owned_replay")
             .unwrap();
         let replay_event = store

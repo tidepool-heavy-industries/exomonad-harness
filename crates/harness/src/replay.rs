@@ -1780,6 +1780,7 @@ mod tests {
         let changed = Item::tool_output(&operation.call, ToolKind::Custom, &JobOutput::Cancelled);
         store
             .lock()
+            .unwrap()
             .execute(
                 "UPDATE items SET json=?1 WHERE hash=?2",
                 rusqlite::params![serde_json::to_string(&changed).unwrap(), hash.0],
@@ -1874,7 +1875,7 @@ mod tests {
         let child = RequestId("terminal-child".into());
         store.create_request(&child, Some(&root), "/root").unwrap();
         let parent_op = store.operation_for_request(&root, &call).unwrap();
-        store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) SELECT origin,origin_request_id,call_id,?1,'pending' FROM claims WHERE request_id=?2", rusqlite::params![child.0, root.0]).unwrap();
+        store.lock().unwrap().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) SELECT origin,origin_request_id,call_id,?1,'pending' FROM claims WHERE request_id=?2", rusqlite::params![child.0, root.0]).unwrap();
         store
             .write_job_output(
                 &parent_op,

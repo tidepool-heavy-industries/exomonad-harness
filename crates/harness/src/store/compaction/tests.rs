@@ -77,7 +77,7 @@ fn fresh_server_membership_excludes_reinserted_users_and_pending_calls() {
         ],
         vec![opaque.clone(), visible.clone(), user, pending],
     );
-    let c = store.lock();
+    let c = store.lock().unwrap();
     let envelopes = response_envelopes(&c, &target).unwrap();
     assert_eq!(envelopes.len(), 1);
     assert_eq!(envelopes[0].model, "actual-model");
@@ -150,7 +150,7 @@ fn equal_bytes_and_duplicate_raw_occurrences_have_unknown_provenance() {
             generated,
         ],
     );
-    let c = store.lock();
+    let c = store.lock().unwrap();
     let envelopes = response_envelopes(&c, &target).unwrap();
     let occurrences = context::request_occurrences(&c, &target).unwrap();
     assert_eq!(occurrences[1].origin.request.0, "source");
@@ -177,7 +177,7 @@ fn legacy_boundary_does_not_infer_the_selected_model() {
         )
         .unwrap();
     assert!(
-        response_envelopes(&store.lock(), &target)
+        response_envelopes(&store.lock().unwrap(), &target)
             .unwrap()
             .is_empty()
     );
@@ -197,8 +197,13 @@ fn invalid_or_conflicting_evidence_is_unknown() {
         let store = Store::memory().unwrap();
         let opaque = Item(json!({"type":"compaction","encrypted_content":"opaque"}));
         let target = boundary(&store, &[], vec![opaque.clone()], vec![opaque]);
-        assert_eq!(response_envelopes(&store.lock(), &target).unwrap().len(), 1);
-        let c = store.lock();
+        assert_eq!(
+            response_envelopes(&store.lock().unwrap(), &target)
+                .unwrap()
+                .len(),
+            1
+        );
+        let c = store.lock().unwrap();
         let sql = match mutation {
             "format" => {
                 "UPDATE events SET payload=json_set(payload,'$.evidence.format',999) WHERE kind='compaction'"
@@ -239,7 +244,7 @@ fn evidence_failure_rolls_back_the_boundary_and_raw_items() {
     store
         .write_request(&source, None, "/root", &[], Usage::default())
         .unwrap();
-    store.lock().execute_batch("CREATE TRIGGER reject_compaction BEFORE INSERT ON events WHEN NEW.kind='compaction' BEGIN SELECT RAISE(ABORT,'reject'); END;").unwrap();
+    store.lock().unwrap().execute_batch("CREATE TRIGGER reject_compaction BEFORE INSERT ON events WHEN NEW.kind='compaction' BEGIN SELECT RAISE(ABORT,'reject'); END;").unwrap();
     let raw_only = item("filtered raw");
     let opaque = Item(json!({"type":"compaction","encrypted_content":"fresh"}));
     assert!(
@@ -273,6 +278,7 @@ fn evidence_failure_rolls_back_the_boundary_and_raw_items() {
     assert!(
         !store
             .lock()
+            .unwrap()
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM items WHERE hash=?1)",
                 [hash],
@@ -293,10 +299,10 @@ fn later_duplicate_summary_bytes_do_not_change_sealed_membership() {
         vec![opaque.clone(), visible.clone()],
         vec![opaque, visible.clone()],
     );
-    let before = response_envelopes(&store.lock(), &target).unwrap();
+    let before = response_envelopes(&store.lock().unwrap(), &target).unwrap();
     assert_eq!(before[0].origins.len(), 2);
     store.append_items(&target, &[visible]).unwrap();
-    let c = store.lock();
+    let c = store.lock().unwrap();
     let after = response_envelopes(&c, &target).unwrap();
     assert_eq!(after, before);
     let appended = context::request_occurrences(&c, &target)
@@ -324,12 +330,12 @@ fn later_filtered_raw_bytes_do_not_enter_sealed_membership() {
         vec![opaque.clone(), filtered_pending.clone()],
         vec![opaque, pending.clone()],
     );
-    let before = response_envelopes(&store.lock(), &target).unwrap();
+    let before = response_envelopes(&store.lock().unwrap(), &target).unwrap();
     assert_eq!(before[0].origins.len(), 1);
     store
         .append_items(&target, &[filtered_pending, item("later assistant")])
         .unwrap();
-    let c = store.lock();
+    let c = store.lock().unwrap();
     let after = response_envelopes(&c, &target).unwrap();
     assert_eq!(after, before);
     let occurrences = context::request_occurrences(&c, &target).unwrap();

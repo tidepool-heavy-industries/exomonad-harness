@@ -277,14 +277,12 @@ impl Store {
         let mut c = {
             let _wait = tracing::debug_span!(target: "harness::runtime_cost", "sqlite_mutex_wait")
                 .entered();
-            self.lock()
+            self.lock()?
         };
         let transaction_span = tracing::debug_span!(target: "harness::runtime_cost", "operation_output_transaction",
             committed = false, appended = tracing::field::Empty);
         let _transaction = transaction_span.enter();
-        let tx = c.transaction()?;
-        let output = append_tx(&tx, operation, claimant, request)?;
-        tx.commit()?;
+        let output = c.write_transaction(|tx| append_tx(tx, operation, claimant, request))?;
         transaction_span.record("committed", true);
         transaction_span.record("appended", output.appended);
         Ok(output)
@@ -295,7 +293,7 @@ impl Store {
         let c = {
             let _wait = tracing::debug_span!(target: "harness::runtime_cost", "sqlite_mutex_wait")
                 .entered();
-            self.lock()
+            self.lock()?
         };
         let history = {
             let _read =

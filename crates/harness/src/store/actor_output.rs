@@ -218,52 +218,53 @@ impl Store {
             }
         }
         let payload = serde_json::to_string(emission)?;
-        let mut connection = self.lock();
-        let transaction = connection.transaction()?;
-        if !authority
-            .validate_output(emission)
-            .map_err(StoreError::ActorOutputAuthority)?
-        {
-            return Err(StoreError::ActorOutputRefused);
-        }
-        let existing: Option<(i64, String, i64)> = transaction
-            .query_row(
-                "SELECT id,payload,created_at FROM events WHERE kind='actor_output'
-             AND json_extract(payload,'$.origin.run')=?1
-             AND json_extract(payload,'$.origin.nativeActor')=?2
-             AND json_extract(payload,'$.origin.incarnation')=?3
-             AND json_extract(payload,'$.id.displaySlot')=?4
-             AND json_extract(payload,'$.id.pageOrdinal')=?5",
-                params![
-                    emission.origin.run,
-                    emission.origin.native_actor,
-                    emission.origin.incarnation,
-                    emission.id.display_slot,
-                    emission.id.page_ordinal
-                ],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
-        if let Some((sequence, retained, created_at)) = existing {
-            let stored = row(sequence, retained, created_at)?;
-            if stored.emission != *emission {
-                return Err(StoreError::ConflictingActorOutput);
+        let mut connection = self.lock()?;
+        connection.write_transaction(|transaction| {
+            if !authority
+                .validate_output(emission)
+                .map_err(StoreError::ActorOutputAuthority)?
+            {
+                return Err(StoreError::ActorOutputRefused);
             }
-            transaction.commit()?;
-            return Ok(ActorOutputCommit::Existing(stored));
-        }
-        let created_at = super::utc_millis();
-        transaction.execute("INSERT INTO events(request_id,kind,payload,created_at) VALUES (NULL,'actor_output',?1,?2)", params![payload, created_at])?;
-        let sequence = transaction.last_insert_rowid();
-        transaction.commit()?;
-        Ok(ActorOutputCommit::Appended(StoredActorOutput {
-            reference: ActorOutputReference {
-                origin: emission.origin.clone(),
-                sequence,
-            },
-            emission: emission.clone(),
-            created_at,
-        }))
+            let existing: Option<(i64, String, i64)> = transaction
+                .query_row(
+                    "SELECT id,payload,created_at FROM events WHERE kind='actor_output'
+                 AND json_extract(payload,'$.origin.run')=?1
+                 AND json_extract(payload,'$.origin.nativeActor')=?2
+                 AND json_extract(payload,'$.origin.incarnation')=?3
+                 AND json_extract(payload,'$.id.displaySlot')=?4
+                 AND json_extract(payload,'$.id.pageOrdinal')=?5",
+                    params![
+                        emission.origin.run,
+                        emission.origin.native_actor,
+                        emission.origin.incarnation,
+                        emission.id.display_slot,
+                        emission.id.page_ordinal
+                    ],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            if let Some((sequence, retained, created_at)) = existing {
+                let stored = row(sequence, retained, created_at)?;
+                if stored.emission != *emission {
+                    return Err(StoreError::ConflictingActorOutput);
+                }
+
+                return Ok(ActorOutputCommit::Existing(stored));
+            }
+            let created_at = super::utc_millis();
+            transaction.execute("INSERT INTO events(request_id,kind,payload,created_at) VALUES (NULL,'actor_output',?1,?2)", params![payload, created_at])?;
+            let sequence = transaction.last_insert_rowid();
+
+            Ok(ActorOutputCommit::Appended(StoredActorOutput {
+                reference: ActorOutputReference {
+                    origin: emission.origin.clone(),
+                    sequence,
+                },
+                emission: emission.clone(),
+                created_at,
+            }))
+        })
     }
 
     /// Read exact actor history in journal order with the existing history response bounds.
@@ -277,7 +278,7 @@ impl Store {
         if after < 0 || limit == 0 || limit > MAX_HISTORY_ITEMS {
             return Err(StoreError::InvalidHistoryOffset);
         }
-        let connection = self.lock();
+        let connection = self.lock()?;
         let mut query = connection.prepare(
             "SELECT id,payload,created_at FROM events WHERE kind='actor_output' AND id>?1
              AND json_extract(payload,'$.origin.run')=?2
@@ -495,6 +496,7 @@ mod tests {
         assert_eq!(migrated.events(None).unwrap().len(), 2);
         let version: u32 = migrated
             .lock()
+            .unwrap()
             .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, super::super::schema::VERSION);

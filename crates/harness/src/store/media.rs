@@ -30,14 +30,17 @@ impl Store {
         hasher.update(&[0]);
         hasher.update(bytes);
         let hash = hasher.finalize().to_hex().to_string();
-        self.lock().execute(
-            "INSERT OR IGNORE INTO actor_media(hash,mime,bytes) VALUES(?1,?2,?3)",
-            params![hash, mime, bytes],
-        )?;
-        Ok(RetainedActorMedia {
-            hash,
-            mime: mime.into(),
-            bytes: bytes.into(),
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO actor_media(hash,mime,bytes) VALUES(?1,?2,?3)",
+                params![hash, mime, bytes],
+            )?;
+            Ok(RetainedActorMedia {
+                hash,
+                mime: mime.into(),
+                bytes: bytes.into(),
+            })
         })
     }
     pub fn actor_media(&self, hash: &str) -> Result<Option<RetainedActorMedia>> {
@@ -45,7 +48,7 @@ impl Store {
             return Err(StoreError::InvalidMedia);
         }
         Ok(self
-            .lock()
+            .lock()?
             .query_row(
                 "SELECT mime,bytes FROM actor_media WHERE hash=?1",
                 [hash],

@@ -378,78 +378,79 @@ impl Store {
             request.input.len(),
             "Engine input provenance must align"
         );
-        let mut connection = self.lock();
-        let tx = connection.transaction()?;
-        let outputs = occurrences
-            .map(|(head, occurrences)| {
-                seal_output_references(&tx, head, &request.input, occurrences)
-            })
-            .transpose()?;
-        #[cfg(test)]
-        let mut input_reencodings = 0;
-        let input = request
-            .input
-            .iter()
-            .zip(hashes)
-            .enumerate()
-            .map(|(position, (item, hash))| {
-                if outputs
-                    .as_ref()
-                    .is_some_and(|owners| owners[position].is_some())
-                {
-                    if let Some(hash) = hash {
-                        if Self::put_item_tx_hash(item)? != *hash {
-                            return Err(StoreError::OperationOriginMismatch);
+        let mut connection = self.lock()?;
+        connection.write_transaction(|tx| {
+            let outputs = occurrences
+                .map(|(head, occurrences)| {
+                    seal_output_references(&tx, head, &request.input, occurrences)
+                })
+                .transpose()?;
+            #[cfg(test)]
+            let mut input_reencodings = 0;
+            let input = request
+                .input
+                .iter()
+                .zip(hashes)
+                .enumerate()
+                .map(|(position, (item, hash))| {
+                    if outputs
+                        .as_ref()
+                        .is_some_and(|owners| owners[position].is_some())
+                    {
+                        if let Some(hash) = hash {
+                            if Self::put_item_tx_hash(item)? != *hash {
+                                return Err(StoreError::OperationOriginMismatch);
+                            }
                         }
                     }
-                }
-                hash.clone().map_or_else(
-                    || {
-                        #[cfg(test)]
-                        {
-                            input_reencodings += 1;
-                        }
-                        Self::put_item_tx(&tx, item)
-                    },
-                    Ok,
-                )
-            })
-            .collect::<Result<_>>()?;
-        let instructions = match instructions {
-            Some(hash) => hash.clone(),
-            None => Self::put_item_tx(
-                &tx,
-                &Item(serde_json::Value::String(request.instructions.clone())),
-            )?,
-        };
-        let (tools, json) = request.tools.encoded();
-        let present: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM items WHERE hash=?1)",
-            [&tools.0],
-            |row| row.get(0),
-        )?;
-        if !present {
-            tx.execute(
-                "INSERT INTO items(hash,json) VALUES (?1,?2)",
-                params![tools.0, json],
+                    hash.clone().map_or_else(
+                        || {
+                            #[cfg(test)]
+                            {
+                                input_reencodings += 1;
+                            }
+                            Self::put_item_tx(&tx, item)
+                        },
+                        Ok,
+                    )
+                })
+                .collect::<Result<_>>()?;
+            let instructions = match instructions {
+                Some(hash) => hash.clone(),
+                None => Self::put_item_tx(
+                    &tx,
+                    &Item(serde_json::Value::String(request.instructions.clone())),
+                )?,
+            };
+            let (tools, json) = request.tools.encoded();
+            let present: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM items WHERE hash=?1)",
+                [&tools.0],
+                |row| row.get(0),
             )?;
-        }
-        let issued = IssuedReplayRequest {
-            record: IssuedRequestRecord {
-                input,
-                outputs,
-                instructions,
-                tools: tools.clone(),
-                tools_allowed: request.tools_allowed.clone(),
-                model: request.model.clone(),
-                pinned_effort: request.pinned_effort,
-                session_id: request.session_id.clone(),
-            },
-            #[cfg(test)]
-            input_reencodings,
-        };
-        tx.commit()?;
-        Ok(issued)
+            if !present {
+                tx.execute(
+                    "INSERT INTO items(hash,json) VALUES (?1,?2)",
+                    params![tools.0, json],
+                )?;
+            }
+            let issued = IssuedReplayRequest {
+                record: IssuedRequestRecord {
+                    input,
+                    outputs,
+                    instructions,
+                    tools: tools.clone(),
+                    tools_allowed: request.tools_allowed.clone(),
+                    model: request.model.clone(),
+                    pinned_effort: request.pinned_effort,
+                    session_id: request.session_id.clone(),
+                },
+                #[cfg(test)]
+                input_reencodings,
+            };
+
+            Ok(issued)
+        })
     }
 
     /// Completion and references commit atomically; no request payload is copied.
@@ -459,32 +460,33 @@ impl Store {
         issued: IssuedReplayRequest,
         response: &ResponsesTurn,
     ) -> Result<i64> {
-        let mut connection = self.lock();
-        let tx = connection.transaction()?;
-        let items = response
-            .items
-            .iter()
-            .map(|item| Self::put_item_tx(&tx, item))
-            .collect::<Result<_>>()?;
-        let record = ReplayRecord {
-            format: FORMAT,
-            request: request.clone(),
-            issued: issued.record,
-            completion: None,
-            response: ReplayResponse {
-                response_id: response.response_id.clone(),
-                items,
-                usage: response.usage.clone(),
-            },
-        };
-        let payload = serde_json::to_string(&record)?;
-        tx.execute(
+        let mut connection = self.lock()?;
+        connection.write_transaction(|tx| {
+            let items = response
+                .items
+                .iter()
+                .map(|item| Self::put_item_tx(&tx, item))
+                .collect::<Result<_>>()?;
+            let record = ReplayRecord {
+                format: FORMAT,
+                request: request.clone(),
+                issued: issued.record,
+                completion: None,
+                response: ReplayResponse {
+                    response_id: response.response_id.clone(),
+                    items,
+                    usage: response.usage.clone(),
+                },
+            };
+            let payload = serde_json::to_string(&record)?;
+            tx.execute(
             "INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,'model_turn',?2,?3)",
             params![request.0, payload, utc_millis()],
         )?;
-        let sequence = tx.last_insert_rowid();
-        tx.commit()?;
-        Ok(sequence)
+            let sequence = tx.last_insert_rowid();
+
+            Ok(sequence)
+        })
     }
 
     /// Bind parser-validated Engine completion to the exact persisted response
@@ -495,46 +497,47 @@ impl Store {
         request: &RequestId,
         completion: &ValidatedFinalize,
     ) -> Result<()> {
-        let mut connection = self.lock();
-        let tx = connection.transaction()?;
-        let payload: Option<String> = tx
-            .query_row(
-                "SELECT payload FROM events WHERE id=?1 AND request_id=?2 AND kind='model_turn'",
-                params![event, request.0],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let mut record: ReplayRecord =
-            serde_json::from_str(&payload.ok_or(StoreError::InvalidCompletionMarker { event })?)?;
-        let hash = Self::put_item_tx(&tx, completion.item())?;
-        let mut query = tx.prepare(
-            "SELECT position FROM request_items WHERE request_id=?1 AND item_hash=?2 AND (source_request IS NULL OR (source_request=request_id AND source_position=position))",
-        )?;
-        let positions = query
-            .query_map(params![request.0, hash.0], |row| row.get::<_, i64>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let [position] = positions.as_slice() else {
-            return Err(StoreError::InvalidCompletionMarker { event });
-        };
-        let origin = Origin {
-            request: request.clone(),
-            position: *position,
-            hash,
-        };
-        let schema = Self::put_item_tx(&tx, &Item(completion.schema().clone()))?;
-        let marker = CompletionMarker::Finalize { origin, schema };
-        if record.completion.as_ref().is_some_and(|old| old != &marker) {
-            return Err(StoreError::InvalidCompletionMarker { event });
-        }
-        record.completion = Some(marker);
-        validate_completion_record(&tx, event, &record)?;
-        tx.execute(
-            "UPDATE events SET payload=?2 WHERE id=?1",
-            params![event, serde_json::to_string(&record)?],
-        )?;
-        drop(query);
-        tx.commit()?;
-        Ok(())
+        let mut connection = self.lock()?;
+        connection.write_transaction(|tx| {
+            let payload: Option<String> = tx
+                .query_row(
+                    "SELECT payload FROM events WHERE id=?1 AND request_id=?2 AND kind='model_turn'",
+                    params![event, request.0],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let mut record: ReplayRecord =
+                serde_json::from_str(&payload.ok_or(StoreError::InvalidCompletionMarker { event })?)?;
+            let hash = Self::put_item_tx(&tx, completion.item())?;
+            let mut query = tx.prepare(
+                "SELECT position FROM request_items WHERE request_id=?1 AND item_hash=?2 AND (source_request IS NULL OR (source_request=request_id AND source_position=position))",
+            )?;
+            let positions = query
+                .query_map(params![request.0, hash.0], |row| row.get::<_, i64>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let [position] = positions.as_slice() else {
+                return Err(StoreError::InvalidCompletionMarker { event });
+            };
+            let origin = Origin {
+                request: request.clone(),
+                position: *position,
+                hash,
+            };
+            let schema = Self::put_item_tx(&tx, &Item(completion.schema().clone()))?;
+            let marker = CompletionMarker::Finalize { origin, schema };
+            if record.completion.as_ref().is_some_and(|old| old != &marker) {
+                return Err(StoreError::InvalidCompletionMarker { event });
+            }
+            record.completion = Some(marker);
+            validate_completion_record(&tx, event, &record)?;
+            tx.execute(
+                "UPDATE events SET payload=?2 WHERE id=?1",
+                params![event, serde_json::to_string(&record)?],
+            )?;
+            drop(query);
+
+            Ok(())
+        })
     }
 
     pub(super) fn decode_replay_record(
@@ -547,7 +550,7 @@ impl Store {
             return Err(StoreError::UnsupportedReplayFormat { event });
         }
         let record: ReplayRecord = serde_json::from_value(value)?;
-        let mut connection = self.lock();
+        let mut connection = self.lock()?;
         let tx = connection.transaction()?;
         let instructions = read_item(&tx, &record.issued.instructions)?;
         let tools = read_item(&tx, &record.issued.tools)?;
@@ -578,7 +581,8 @@ impl Store {
                 .collect::<Result<_>>()?,
             usage: record.response.usage,
         };
-        tx.commit()?;
+        let completion = tx.rollback();
+        connection.complete_transaction(completion)?;
         Ok(RecordedReplayTurn {
             request: record.request,
             model_request: request,
@@ -786,7 +790,7 @@ mod tests {
         let root = RequestId("root".into());
         store.create_request(&root, None, "/root").unwrap();
         let sealed = store.seal_replay_request(&request(vec![])).unwrap();
-        store.lock().execute_batch("CREATE TRIGGER reject_replay BEFORE INSERT ON events WHEN NEW.kind='model_turn' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+        store.lock().unwrap().execute_batch("CREATE TRIGGER reject_replay BEFORE INSERT ON events WHEN NEW.kind='model_turn' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
         let output = Item(json!({"type":"message","role":"assistant","content":"new output"}));
         let hash = ItemHash(
             blake3::hash(&serde_json::to_vec(&output).unwrap())
@@ -850,6 +854,7 @@ mod tests {
             assert_eq!(store.replay_turns(&root).unwrap().len(), 4);
             let stored_items: usize = store
                 .lock()
+                .unwrap()
                 .query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))
                 .unwrap();
             assert_eq!(stored_items, count + 2);

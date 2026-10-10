@@ -243,6 +243,7 @@ fn captured_cut_refuses_stale_incarnation_and_nonpending_original_transactionall
     ));
     let count: i64 = store
         .lock()
+        .unwrap()
         .query_row("SELECT COUNT(*) FROM checkpoints", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 0);
@@ -278,7 +279,7 @@ fn captured_metadata_migrates_schema_five_as_deferred_and_refuses_unknown_cuts()
             Arc::new(()),
         )
         .unwrap();
-    let mut conn = store.lock();
+    let mut conn = store.lock().unwrap();
     conn.execute("UPDATE schema_version SET version=5", [])
         .unwrap();
     conn.execute(
@@ -306,7 +307,7 @@ fn captured_metadata_migrates_schema_five_as_deferred_and_refuses_unknown_cuts()
             .iter()
             .all(|claim| claim.operation == operation && claim.state == ClaimState::Pending)
     );
-    let mut conn = store.lock();
+    let mut conn = store.lock().unwrap();
     for invalid in [
         json!({"version":1,"cut":"unknown","operation":null,"host":{}}),
         json!({"version":2,"cut":"deferred","operation":null,"host":{}}),

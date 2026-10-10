@@ -240,6 +240,7 @@ async fn completed_output_without_original_invocation_refuses_provider_acknowled
         engine
             .store
             .lock()
+            .unwrap()
             .execute(
                 "DELETE FROM request_items WHERE request_id=?1 AND position=0",
                 [&request.0],
@@ -251,6 +252,7 @@ async fn completed_output_without_original_invocation_refuses_provider_acknowled
         engine
             .store
             .lock()
+            .unwrap()
             .query_row(
                 "SELECT count(*) FROM pragma_foreign_key_check()",
                 [],

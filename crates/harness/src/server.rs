@@ -1453,11 +1453,12 @@ mod tests {
                 .unwrap();
             store
                 .lock()
+                .unwrap()
                 .execute_batch("DROP INDEX events_model_turn_recent")
                 .unwrap();
         }
         let store = Store::open(&path).unwrap();
-        let index: bool = store.lock().query_row(
+        let index: bool = store.lock().unwrap().query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='events_model_turn_recent')",
             [], |row| row.get(0),
         ).unwrap();
@@ -1471,7 +1472,7 @@ mod tests {
             control.snapshot.read().unwrap().requests[0]["id"],
             "retained"
         );
-        let conn = store.lock();
+        let conn = store.lock().unwrap();
         let mut query = conn.prepare(
             "EXPLAIN QUERY PLAN SELECT id,request_id FROM events WHERE kind='model_turn' ORDER BY id DESC LIMIT 128",
         ).unwrap();
