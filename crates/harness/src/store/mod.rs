@@ -3399,7 +3399,7 @@ mod tests {
     }
 
     #[test]
-    fn here_boundary_refuses_partial_same_id_copied_claims() {
+    fn here_boundary_inherits_only_selected_same_id_copied_claims() {
         let store = Store::memory().unwrap();
         let first = id("first-origin");
         let second = id("second-origin");
@@ -3414,6 +3414,15 @@ mod tests {
             .append_items(&first, std::slice::from_ref(&tool))
             .unwrap();
         let first_op = store.claim(&call, &first).unwrap();
+        let spawn = item(serde_json::json!({
+            "type":"function_call", "call_id":"spawn-boundary", "name":"spawn_agent", "arguments":"{}"
+        }));
+        store
+            .append_items(&first, std::slice::from_ref(&spawn))
+            .unwrap();
+        let spawn_op = store
+            .claim(&CallId("spawn-boundary".into()), &first)
+            .unwrap();
         store
             .create_request(&second, Some(&first), "/root")
             .unwrap();
@@ -3421,20 +3430,21 @@ mod tests {
             .append_items(&second, std::slice::from_ref(&tool))
             .unwrap();
         let second_op = store.claim(&call, &second).unwrap();
-        let spawn = item(serde_json::json!({
-            "type":"function_call", "call_id":"spawn-boundary", "name":"spawn_agent", "arguments":"{}"
-        }));
         let issued = store.history_occurrences(&second).unwrap();
-        assert_eq!(issued.len(), 2);
+        assert_eq!(issued.len(), 3);
         store
             .write_compaction_request_with_evidence(
                 &source,
                 &second,
                 "/root",
                 &[tool.clone(), spawn, tool],
-                &[(0, issued[0].clone()), (2, issued[1].clone())],
+                &[
+                    (0, issued[0].clone()),
+                    (1, issued[1].clone()),
+                    (2, issued[2].clone()),
+                ],
                 &issued.into_iter().map(Some).collect::<Vec<_>>(),
-                &[first_op, second_op],
+                &[first_op.clone(), second_op.clone(), spawn_op],
                 None,
                 None,
             )
@@ -3450,8 +3460,10 @@ mod tests {
             )
             .unwrap();
         let child = AgentPath("/root/child".into());
-        assert!(matches!(
-            store.admit_here_agent_from_invocation(
+        let source_claims = store.claims_on(&source).unwrap();
+        assert_eq!(source_claims.len(), 3);
+        store
+            .admit_here_agent_from_invocation(
                 &child,
                 &root,
                 &snapshot,
@@ -3462,13 +3474,21 @@ mod tests {
                 &child.0,
                 "AtBoundary",
                 &item(
-                    serde_json::json!({"type":"message","role":"assistant","content":"NEW_TASK"})
+                    serde_json::json!({"type":"message","role":"assistant","content":"NEW_TASK"}),
                 ),
-            ),
-            Err(StoreError::AmbiguousReplayCall { .. })
-        ));
-        assert!(store.request(&snapshot).unwrap().is_none());
-        assert!(store.claims_on(&snapshot).unwrap().is_empty());
+            )
+            .unwrap();
+        let child_claims = store.claims_on(&snapshot).unwrap();
+        assert_eq!(child_claims.len(), 1);
+        assert_eq!(child_claims[0].operation, first_op);
+        assert_eq!(child_claims[0].state, ClaimState::Pending);
+        assert_eq!(child_claims[0].request, snapshot);
+        assert!(
+            child_claims
+                .iter()
+                .all(|claim| claim.operation != second_op)
+        );
+        assert_eq!(store.claims_on(&source).unwrap(), source_claims);
     }
 
     #[test]
