@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f7d794918e77ae339cca529d5dded6c6193b418fac175bbdb5011b660a86eb72 # shrinks to shape = Nullable(Nullable(Integer(0), true), false), seed = 0

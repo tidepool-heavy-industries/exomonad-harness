@@ -45,7 +45,9 @@ rust_test(
     crate_root = "src/lib.rs",
     edition = "2024",
     srcs = HARNESS_SRCS,
-    deps = HARNESS_DEPS,
+    deps = HARNESS_DEPS + ["//third-party/rust:proptest"],
+    # The counted focused runner executes from this package directory.
+    env = {"HARNESS_PROPTEST_REGRESSIONS": "proptest-regressions/finalize.txt"},
 )
 
 # Integration tests are independent libtest binaries, as in Cargo. Keeping

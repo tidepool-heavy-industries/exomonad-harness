@@ -36,3 +36,4 @@ tokio-util = { version = "0.7", features = ["rt"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tokio-tungstenite = "0.29"
 tempfile = "3"
+proptest = "1.11.0"

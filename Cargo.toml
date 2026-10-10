@@ -28,3 +28,4 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "process", "signal", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+proptest = "1.11.0"

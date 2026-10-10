@@ -196,6 +196,8 @@ pub struct Callback {
     /// Exact original operation; provider call IDs may recur in later requests.
     pub operation: crate::model::OperationId,
     pub name: String,
+    /// Validated strict JSON, including explicit null carriers for omitted
+    /// optional fields. Callback hosts decode their own input contract.
     pub arguments: Value,
     pub call_id: String,
     admission: Arc<AtomicU8>,
@@ -1402,6 +1404,39 @@ mod tests {
         let receipt = finish(&mut invocation).await;
         assert!(matches!(receipt.outcome,Outcome::Typed(value) if value==result));
         assert_eq!(receipt.counts.tools, 0);
+    }
+
+    #[tokio::test]
+    async fn callback_null_carriers_remain_strict_json_for_host_decoding() {
+        let mut config = config();
+        config.tools[0]["parameters"] = json!({"type":"object","properties":{
+            "optional":{"type":"string"},
+            "required":{"type":["integer","null"],"minimum":0}
+        },"required":["required"],"additionalProperties":false});
+        let arguments = json!({"optional":null,"required":null});
+        let callback = Item(
+            json!({"type":"function_call","call_id":"null-carrier","name":"echo","arguments":arguments.to_string()}),
+        );
+        let mut invocation = Invocation::start::<TestAuth, _>(
+            Script(Mutex::new(vec![turn(vec![callback]), final_turn()].into())),
+            Arc::new(Store::memory().unwrap()),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            config,
+            "cell1".into(),
+            CellBudget::new(Limits::default()),
+            vec![],
+            InvocationOptions::default(),
+        )
+        .unwrap();
+        let Step::Callback(callback) = invocation.next().await else {
+            panic!("callback expected");
+        };
+        assert_eq!(callback.arguments, arguments);
+        callback.complete(Ok(json!("decoded by host"))).unwrap();
+        assert!(matches!(
+            finish(&mut invocation).await.outcome,
+            Outcome::Text(_)
+        ));
     }
     #[tokio::test]
     async fn bounded_callbacks_do_not_stall_provider_stream_polling() {
