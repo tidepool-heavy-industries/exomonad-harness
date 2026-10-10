@@ -1,6 +1,7 @@
 //! Durable SQLite event and content-addressed request store.
 mod compaction;
 pub(crate) mod context;
+pub use context::{EmbeddedConversationHistory, EmbeddedModelResponseState};
 mod embedded;
 mod embedded_commands;
 mod embedded_round;

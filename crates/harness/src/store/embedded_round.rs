@@ -275,6 +275,128 @@ mod tests {
         }
     }
     #[test]
+    fn conversation_history_distinguishes_completion_without_identity_from_missing_response() {
+        use crate::store::EmbeddedModelResponseState;
+        let store = Store::memory().unwrap();
+        let identity = identity();
+        store.bind_embedded_actor(&identity, None).unwrap();
+        let request = RequestId("empty-response-id".into());
+        store
+            .write_embedded_request(&identity, &request, None, &[], Usage::default())
+            .unwrap();
+        let active = store.embedded_conversation_history(&identity).unwrap();
+        assert_eq!(active.head, Some(request.clone()));
+        assert!(active.history.is_empty());
+        assert_eq!(
+            active.responses[&request],
+            EmbeddedModelResponseState::InProgress
+        );
+        let model_request = crate::transport::ResponsesRequest {
+            input: vec![],
+            instructions: "test".into(),
+            tools: vec![].into(),
+            tools_allowed: None,
+            model: "mock".into(),
+            pinned_effort: crate::model::Effort::Low,
+            session_id: "test".into(),
+        };
+        let response = crate::transport::ResponsesTurn {
+            response_id: String::new(),
+            items: vec![],
+            usage: Default::default(),
+        };
+        store
+            .record_replay_turn(&request, &model_request, &response)
+            .unwrap();
+        assert_eq!(
+            store
+                .embedded_conversation_history(&identity)
+                .unwrap()
+                .responses[&request],
+            EmbeddedModelResponseState::Completed { response_id: None }
+        );
+        assert!(
+            store
+                .settle_embedded_round(&identity, None, &request, EmbeddedRoundOutcome::Completed)
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .embedded_conversation_history(&identity)
+                .unwrap()
+                .responses[&request],
+            EmbeddedModelResponseState::Completed { response_id: None }
+        );
+        // A synthetic or retained request can be settled without a model response.
+        let retained = RequestId("retained-history".into());
+        store
+            .write_embedded_request(&identity, &retained, Some(&request), &[], Usage::default())
+            .unwrap();
+        assert!(
+            store
+                .settle_embedded_round(
+                    &identity,
+                    Some(&request),
+                    &retained,
+                    EmbeddedRoundOutcome::Completed
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .embedded_conversation_history(&identity)
+                .unwrap()
+                .responses[&retained],
+            EmbeddedModelResponseState::Unknown
+        );
+        let stale = HostIdentity {
+            incarnation: "stale".into(),
+            ..identity
+        };
+        assert!(matches!(
+            store.embedded_conversation_history(&stale),
+            Err(StoreError::InvalidEmbeddedBinding)
+        ));
+    }
+
+    #[test]
+    fn conversation_history_refuses_conflicting_completed_response_records() {
+        let store = Store::memory().unwrap();
+        let identity = identity();
+        store.bind_embedded_actor(&identity, None).unwrap();
+        let request = RequestId("conflicting-response".into());
+        store
+            .write_embedded_request(&identity, &request, None, &[], Usage::default())
+            .unwrap();
+        let model_request = crate::transport::ResponsesRequest {
+            input: vec![],
+            instructions: "test".into(),
+            tools: vec![].into(),
+            tools_allowed: None,
+            model: "mock".into(),
+            pinned_effort: crate::model::Effort::Low,
+            session_id: "test".into(),
+        };
+        for response_id in ["first", "second"] {
+            store
+                .record_replay_turn(
+                    &request,
+                    &model_request,
+                    &crate::transport::ResponsesTurn {
+                        response_id: response_id.into(),
+                        items: vec![],
+                        usage: Default::default(),
+                    },
+                )
+                .unwrap();
+        }
+        assert!(matches!(
+            store.embedded_conversation_history(&identity),
+            Err(StoreError::InvalidEmbeddedFrontier)
+        ));
+    }
+
+    #[test]
     fn live_output_origin_keeps_request_issuer_after_binding_transfer() {
         let store = Store::memory().unwrap();
         let first = identity();

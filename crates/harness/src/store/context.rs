@@ -20,6 +20,26 @@ mod compaction_reconciliation;
 mod portability_note;
 pub(super) use compaction_reconciliation::{CompactionItem, reconcile as reconcile_compaction};
 
+/// A request's recorded model-response state, independent of timestamp availability.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EmbeddedModelResponseState {
+    InProgress,
+    Completed {
+        response_id: Option<String>,
+    },
+    Interrupted,
+    /// Retained or synthetic context without an original model-response observation.
+    Unknown,
+}
+
+/// Effective history and response observations from one exact binding and SQLite snapshot.
+#[derive(Clone, Debug)]
+pub struct EmbeddedConversationHistory {
+    pub head: Option<RequestId>,
+    pub history: Vec<(RequestId, ItemHash, Item)>,
+    pub responses: HashMap<RequestId, EmbeddedModelResponseState>,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct InferenceState {
     generation: u64,
@@ -993,6 +1013,35 @@ fn branch(c: &Connection, head: &RequestId) -> Result<String> {
     .ok_or_else(|| StoreError::MissingRequest(head.0.clone()))
 }
 
+fn context_request_state_tx(
+    tx: &Transaction<'_>, head: &RequestId, identity: &ConversationIdentity,
+) -> Result<ContextRequestState> {
+        let current = state(tx, identity)?;
+        let canonical = {
+            let _read =
+                tracing::debug_span!(target: "harness::runtime_cost", "lineage_query_and_decode")
+                    .entered();
+            history(tx, head, true)?
+        };
+        validate_canonical_history(tx, &canonical)?;
+        let projected = {
+            let _projection = tracing::debug_span!(target: "harness::runtime_cost", "portable_history_projection", input_items = canonical.len()).entered();
+            portable_request(tx, &canonical, current.model.as_deref(), None)?
+        };
+        drop(canonical);
+        let mut history = Vec::with_capacity(projected.len());
+        let mut occurrences = Vec::with_capacity(projected.len());
+        for (request, hash, item, occurrence) in projected {
+            let hash = match hash {
+                Some(hash) => hash,
+                None => Store::put_item_tx(tx, &item)?,
+            };
+            history.push((request, hash, item));
+            occurrences.push(occurrence);
+        }
+        Ok(ContextRequestState { history, occurrences, model: current.model, generation: current.generation })
+}
+
 impl Store {
     pub(crate) fn context_call_cut_tx(
         tx: &Transaction<'_>,
@@ -1066,37 +1115,72 @@ impl Store {
         if branch(&tx, head)? != identity.actor().0 {
             return Err(StoreError::OperationOriginMismatch);
         }
-        let current = state(&tx, identity)?;
-        let canonical = {
-            let _read =
-                tracing::debug_span!(target: "harness::runtime_cost", "lineage_query_and_decode")
-                    .entered();
-            history(&tx, head, true)?
+        let result = context_request_state_tx(&tx, head, identity)?;
+        tx.commit()?;
+        transaction_span.record("output_items", result.history.len());
+        transaction_span.record("committed", true);
+        Ok(result)
+    }
+
+    /// Include the current pending request without widening the actor's exact binding.
+    /// Frontier, effective context and model-response observations share one transaction.
+    pub fn embedded_conversation_history(
+        &self,
+        host: &crate::embedding::HostIdentity,
+    ) -> Result<EmbeddedConversationHistory> {
+        let mut connection = self.lock();
+        let tx = connection.transaction()?;
+        let frontier = embedded_round::frontier(&tx, host)?;
+        let head = frontier
+            .pending_head
+            .as_ref()
+            .or(frontier.settled_head.as_ref())
+            .cloned();
+        let identity = ConversationIdentity::Embedded {
+            run: host.run.clone(),
+            actor: host.actor.clone(),
+            incarnation: host.incarnation.clone(),
         };
-        validate_canonical_history(&tx, &canonical)?;
-        let projected = {
-            let _projection = tracing::debug_span!(target: "harness::runtime_cost", "portable_history_projection", input_items = canonical.len()).entered();
-            portable_request(&tx, &canonical, current.model.as_deref(), None)?
+        let history = match &head {
+            Some(head) => context_request_state_tx(&tx, head, &identity)?.history,
+            None => Vec::new(),
         };
-        drop(canonical);
-        let mut history = Vec::with_capacity(projected.len());
-        let mut occurrences = Vec::with_capacity(projected.len());
-        for (request, hash, item, occurrence) in projected {
-            let hash = match hash {
-                Some(hash) => hash,
-                None => Self::put_item_tx(&tx, &item)?,
+        let requests: HashSet<_> = history
+            .iter()
+            .map(|(request, _, _)| request.clone())
+            .chain(head.iter().cloned())
+            .collect();
+        let mut responses = HashMap::new();
+        for request in requests {
+            let response = match super::replay::recorded_response_identity(&tx, &request)? {
+                Some(response) => EmbeddedModelResponseState::Completed {
+                    response_id: response.response_id,
+                },
+                None => {
+                    let interrupted: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM events WHERE request_id=?1 AND kind='model_interrupted')",
+                        [&request.0], |row| row.get(0),
+                    )?;
+                    let synthetic: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM events WHERE request_id=?1 AND kind='server_compaction')",
+                        [&request.0], |row| row.get(0),
+                    )?;
+                    if interrupted {
+                        EmbeddedModelResponseState::Interrupted
+                    } else if frontier.pending_head.as_ref() == Some(&request) && !synthetic {
+                        EmbeddedModelResponseState::InProgress
+                    } else {
+                        EmbeddedModelResponseState::Unknown
+                    }
+                }
             };
-            history.push((request, hash, item));
-            occurrences.push(occurrence);
+            responses.insert(request, response);
         }
         tx.commit()?;
-        transaction_span.record("output_items", history.len());
-        transaction_span.record("committed", true);
-        Ok(ContextRequestState {
+        Ok(EmbeddedConversationHistory {
+            head,
             history,
-            occurrences,
-            model: current.model,
-            generation: current.generation,
+            responses,
         })
     }
 

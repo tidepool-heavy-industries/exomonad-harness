@@ -79,6 +79,42 @@ pub(super) struct ResponseEnvelope {
     pub(super) kind: ResponseEnvelopeKind,
 }
 
+/// Presence of a completed record is independent of provider identity availability.
+pub(super) struct RecordedResponseIdentity {
+    pub(super) response_id: Option<String>,
+}
+
+pub(super) fn recorded_response_identity(
+    c: &Connection,
+    request: &RequestId,
+) -> Result<Option<RecordedResponseIdentity>> {
+    let mut query = c.prepare(
+        "SELECT id,payload FROM events WHERE request_id=?1 AND kind='model_turn' ORDER BY id LIMIT 2",
+    )?;
+    let records = query
+        .query_map([&request.0], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if records.len() > 1 {
+        return Err(StoreError::InvalidEmbeddedFrontier);
+    }
+    let Some((event, payload)) = records.into_iter().next() else {
+        return Ok(None);
+    };
+    let record: ReplayRecord = serde_json::from_str(&payload)?;
+    if record.format != FORMAT {
+        return Err(StoreError::UnsupportedReplayFormat { event });
+    }
+    if record.request != *request {
+        return Err(StoreError::InvalidEmbeddedFrontier);
+    }
+    Ok(Some(RecordedResponseIdentity {
+        response_id: (!record.response.response_id.is_empty())
+            .then_some(record.response.response_id),
+    }))
+}
+
 /// Group membership and the issuing model share one evidence reader. Hashes
 /// identify bytes, so response hashes must resolve to a unique ordered sequence
 /// of original occurrences before they authorize an envelope.
