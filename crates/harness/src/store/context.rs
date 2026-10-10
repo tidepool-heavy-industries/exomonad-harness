@@ -1162,7 +1162,7 @@ impl Store {
                         [&request.0], |row| row.get(0),
                     )?;
                     let synthetic: bool = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM events WHERE request_id=?1 AND kind='server_compaction')",
+                        "SELECT EXISTS(SELECT 1 FROM session_state WHERE session_id='harness:compaction:' || ?1)",
                         [&request.0], |row| row.get(0),
                     )?;
                     if interrupted {

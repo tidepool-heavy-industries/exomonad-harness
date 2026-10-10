@@ -360,6 +360,34 @@ mod tests {
     }
 
     #[test]
+    fn conversation_history_does_not_treat_a_pending_compaction_cut_as_a_model_response() {
+        let store = Store::memory().unwrap();
+        let identity = identity();
+        store.bind_embedded_actor(&identity, None).unwrap();
+        let request = RequestId("original".into());
+        store
+            .write_embedded_request(&identity, &request, None, &[], Usage::default())
+            .unwrap();
+        let cut = RequestId("compaction".into());
+        store
+            .write_compaction_request_with_claims(
+                &cut,
+                &request,
+                &identity.actor.0,
+                &[],
+                &[],
+                Some(&identity),
+            )
+            .unwrap();
+        let snapshot = store.embedded_conversation_history(&identity).unwrap();
+        assert_eq!(snapshot.head, Some(cut.clone()));
+        assert_eq!(
+            snapshot.responses[&cut],
+            crate::store::EmbeddedModelResponseState::Unknown
+        );
+    }
+
+    #[test]
     fn conversation_history_refuses_conflicting_completed_response_records() {
         let store = Store::memory().unwrap();
         let identity = identity();
