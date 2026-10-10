@@ -26,6 +26,19 @@ Produced by the run: `docs/findings.md` (API facts measured live), `docs/questio
 
 Companion on the consumer side: `~/dev/tidepool/plans/harness-adoption.md`.
 
+Persistent stores use WAL with `synchronous=FULL` on every writer connection.
+Schema 16 records this durability contract. Opening an older store first confirms its
+inherited WAL with a FULL checkpoint; a blocked checkpoint refuses admission
+before retained bindings can authorize attachment. Matching schema-16 writers
+reopen without that barrier. Stop older writers before migration: a version
+marker cannot change an already-open connection's mode. Older bundles refuse
+schema 16, so preserve the matching bundle for unmigrated runs.
+
+A successful binding COMMIT is durable acknowledgement. Checkpoint maintenance
+does not revoke it. A binding COMMIT I/O error returns typed
+`EmbeddedError::BindingCommitOutcomeUnknown`; reconcile with the exact authorized
+operation, since binding readback alone grants no attachment authority.
+
 ## Focused tests
 
 ### Native Buck2 on x86_64 Linux

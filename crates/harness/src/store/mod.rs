@@ -93,6 +93,13 @@ pub enum StoreError {
     UnownedEmbeddedRequest,
     #[error("embedded conversation does not match its host binding")]
     InvalidEmbeddedBinding,
+    #[error(
+        "store admission cannot confirm legacy WAL durability: {checkpointed_frames} of {wal_frames} frames checkpointed"
+    )]
+    DurabilityAdmissionBusy {
+        wal_frames: i64,
+        checkpointed_frames: i64,
+    },
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -912,9 +919,6 @@ impl Store {
         Self::from_connection(Connection::open_in_memory()?)
     }
     fn from_connection(conn: Connection) -> Result<Self> {
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
-        )?;
         let mut conn = conn;
         schema::initialize(&mut conn)?;
         let store_id: String = conn.query_row(

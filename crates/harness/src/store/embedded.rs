@@ -25,37 +25,27 @@ pub(super) fn matches_binding(c: &Connection, identity: &HostIdentity) -> rusqli
     .is_some_and(|(run, incarnation)| run == identity.run && incarnation == identity.incarnation))
 }
 
-/// ApplicationBound may be fsynced immediately after this owner returns. Confirm
-/// the binding's SQLite durability even when an exact retry writes no new rows.
-/// Ordinary request/event transactions retain the connection's original mode.
+/// Store admission confirmed inherited WAL and every writer uses FULL. A
+/// successful COMMIT is the durability acknowledgement; checkpoint maintenance
+/// and outcome readback cannot turn it into an ordinary failed operation.
 fn durable_binding_transaction<T>(
     connection: &mut Connection,
     action: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, EmbeddedError>,
 ) -> std::result::Result<T, EmbeddedError> {
-    let original: i64 = connection.pragma_query_value(None, "synchronous", |row| row.get(0))?;
-    connection.pragma_update(None, "synchronous", "FULL")?;
-    let result = (|| {
-        let tx = connection.transaction()?;
-        let result = action(&tx)?;
-        tx.commit()?;
-        let (busy, pages, checkpointed): (i64, i64, i64) =
-            connection.query_row("PRAGMA wal_checkpoint(FULL)", [], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
-        if busy != 0 || pages != checkpointed {
-            return Err(EmbeddedError::Binding(
-                "binding committed but WAL durability confirmation is unavailable".into(),
-            ));
+    let tx = connection.transaction()?;
+    let result = action(&tx)?;
+    tx.commit().map_err(binding_commit_error)?;
+    Ok(result)
+}
+
+fn binding_commit_error(error: rusqlite::Error) -> EmbeddedError {
+    match error.sqlite_error_code() {
+        // An I/O failure cannot certify the durable outcome from visibility or
+        // transaction state. Reconcile by repeating the exact authorized call.
+        Some(rusqlite::ErrorCode::SystemIoFailure) => {
+            EmbeddedError::BindingCommitOutcomeUnknown(error)
         }
-        Ok(result)
-    })();
-    let restored = connection.pragma_update(None, "synchronous", original);
-    match (result, restored) {
-        (result, Ok(())) => result,
-        (Ok(_), Err(error)) => Err(error.into()),
-        (Err(primary), Err(error)) => Err(EmbeddedError::Binding(format!(
-            "{primary}; restoring binding durability mode failed: {error}"
-        ))),
+        _ => EmbeddedError::from(error),
     }
 }
 
@@ -182,9 +172,9 @@ impl Store {
     /// Transfer the existing exact binding and its inferred model/generation.
     /// Historical inputs, command receipts and context seals keep their original
     /// identities; this does not enqueue work.
-    /// FULL commit and WAL checkpoint confirmation precede success, including
-    /// exact retries. An error can leave the successor visible; retry this same
-    /// authorized transition to confirm durability before publishing attachment.
+    /// FULL commit precedes success. Exact retries validate authority again and
+    /// preserve history. An unknown commit outcome requires this same authorized
+    /// transition before publishing attachment; readback alone is not authority.
     pub fn transfer_embedded_binding(
         &self,
         predecessor: &HostIdentity,
@@ -269,9 +259,9 @@ impl Store {
 
     /// Bind retained startup intent without attaching a Conversation or admitting
     /// live actor work. Exact retries validate authority again and preserve history.
-    /// Binding writes use FULL commit and WAL checkpoint confirmation, then restore
-    /// the ordinary connection mode. A visible binding after error is insufficient
-    /// attachment evidence: repeat this exact authorized call until it succeeds.
+    /// Binding writes use the Store's fixed FULL durability. A visible binding
+    /// after an unknown commit outcome is insufficient attachment evidence:
+    /// repeat this exact authorized call until it succeeds.
     pub fn bind_initial_embedded_binding(
         &self,
         identity: &HostIdentity,
@@ -691,37 +681,63 @@ mod tests {
         );
     }
 
+    fn connection_modes(connection: &Connection) -> (String, i64, bool) {
+        (
+            connection
+                .pragma_query_value(None, "journal_mode", |row| row.get(0))
+                .unwrap(),
+            connection
+                .pragma_query_value(None, "synchronous", |row| row.get(0))
+                .unwrap(),
+            connection
+                .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+                .unwrap(),
+        )
+    }
+
     #[test]
-    fn binding_durability_mode_restores_after_success_refusal_and_sql_failure() {
+    fn binding_full_mode_survives_success_refusal_statement_and_commit_failure() {
         let store = Store::memory().unwrap();
-        let mut c = store.lock();
-        for original in [1, 2] {
-            c.pragma_update(None, "synchronous", original).unwrap();
-            for failure in [0, 1, 2] {
-                let result = durable_binding_transaction(&mut c, |tx| {
-                    let current: i64 =
-                        tx.pragma_query_value(None, "synchronous", |row| row.get(0))?;
-                    assert_eq!(current, 2);
-                    match failure {
-                        0 => Ok(()),
-                        1 => Err(EmbeddedError::Binding("authority refused".into())),
-                        _ => {
-                            tx.execute("INSERT INTO missing_binding_table VALUES(1)", [])?;
-                            Ok(())
-                        }
+        let mut connection = store.lock();
+        connection.execute_batch("CREATE TABLE durability_parent(id INTEGER PRIMARY KEY); CREATE TABLE durability_child(parent INTEGER REFERENCES durability_parent(id) DEFERRABLE INITIALLY DEFERRED);").unwrap();
+        for failure in 0..4 {
+            let result = durable_binding_transaction(&mut connection, |tx| {
+                assert_eq!(connection_modes(tx), ("memory".into(), 2, true));
+                tx.execute("INSERT INTO durability_parent VALUES(1)", [])?;
+                match failure {
+                    0 => Ok(()),
+                    1 => Err(EmbeddedError::Binding("authority refused".into())),
+                    2 => {
+                        tx.execute("INSERT INTO missing_binding_table VALUES(1)", [])?;
+                        Ok(())
                     }
-                });
-                assert_eq!(result.is_ok(), failure == 0);
-                let restored: i64 = c
-                    .pragma_query_value(None, "synchronous", |row| row.get(0))
-                    .unwrap();
-                assert_eq!(restored, original);
+                    _ => {
+                        tx.execute("INSERT INTO durability_child VALUES(2)", [])?;
+                        Ok(())
+                    }
+                }
+            });
+            assert_eq!(result.is_ok(), failure == 0);
+            if failure == 3 {
+                assert!(
+                    matches!(result, Err(EmbeddedError::Store(StoreError::Sql(error))) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation))
+                );
             }
+            assert_eq!(connection_modes(&connection), ("memory".into(), 2, true));
+            let parents: i64 = connection
+                .query_row("SELECT COUNT(*) FROM durability_parent", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(parents, i64::from(failure == 0));
+            connection
+                .execute("DELETE FROM durability_parent", [])
+                .unwrap();
         }
     }
 
     #[test]
-    fn busy_binding_confirmation_requires_exact_retry_and_restores_normal_mode() {
+    fn busy_checkpoint_does_not_revoke_committed_binding_or_authorize_retry() {
         let root =
             std::env::temp_dir().join(format!("harness-binding-busy-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
@@ -752,11 +768,20 @@ mod tests {
         reader
             .execute_batch("BEGIN; SELECT COUNT(*) FROM embedded_bindings;")
             .unwrap();
-        assert!(
+        assert_eq!(
             store
                 .transfer_embedded_binding(&old, &new, &TransferAuthority(true))
-                .is_err()
+                .unwrap(),
+            BindingSuccessorCommit::Installed
         );
+        let checkpoint: (i64, i64, i64) = store
+            .lock()
+            .query_row("PRAGMA wal_checkpoint(FULL)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(checkpoint.0, 1);
+        assert!(checkpoint.1 > checkpoint.2);
         assert!(store.embedded_binding_matches(&new).unwrap());
         let new_origin = super::super::context::identity_for_branch(
             &store.lock(),
@@ -768,25 +793,19 @@ mod tests {
             store.context_model(&new_origin).unwrap().as_deref(),
             Some("model-b")
         );
-        let mode: i64 = store
-            .lock()
-            .pragma_query_value(None, "synchronous", |row| row.get(0))
-            .unwrap();
-        assert_eq!(mode, 1);
-        drop(reader);
+        assert!(
+            store
+                .transfer_embedded_binding(&old, &new, &TransferAuthority(false))
+                .is_err()
+        );
         assert_eq!(
             store
                 .transfer_embedded_binding(&old, &new, &TransferAuthority(true))
                 .unwrap(),
             BindingSuccessorCommit::AlreadyInstalled
         );
-        assert_eq!(
-            store
-                .lock()
-                .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
+        assert_eq!(connection_modes(&store.lock()), ("wal".into(), 2, true));
+        drop(reader);
         drop(store);
         let store = Store::open(&path).unwrap();
         assert!(store.embedded_binding_matches(&new).unwrap());
@@ -795,7 +814,354 @@ mod tests {
             Some("model-b")
         );
         assert!(store.context_model(&old_origin).is_err());
+        assert_eq!(connection_modes(&store.lock()), ("wal".into(), 2, true));
         drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_normal_wal_requires_admission_barrier_before_exact_retry() {
+        let root =
+            std::env::temp_dir().join(format!("harness-legacy-admission-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("store.sqlite");
+        let store = Store::open(&path).unwrap();
+        let old = root_identity();
+        let new = HostIdentity {
+            incarnation: "2".into(),
+            ..old.clone()
+        };
+        store
+            .bind_initial_embedded_binding(&old, None, &InitialAuthority(old.clone()))
+            .unwrap();
+        let reader = Connection::open(&path).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT COUNT(*) FROM embedded_bindings;")
+            .unwrap();
+        let legacy = Connection::open(&path).unwrap();
+        legacy.execute_batch("PRAGMA synchronous=NORMAL; UPDATE schema_version SET version=15; UPDATE embedded_bindings SET incarnation='2' WHERE agent_path='/root';").unwrap();
+        let connection = Connection::open(&path).unwrap();
+        connection.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let refused_at = std::time::Instant::now();
+        assert!(
+            matches!(Store::from_connection(connection), Err(StoreError::DurabilityAdmissionBusy { wal_frames, checkpointed_frames }) if wal_frames > checkpointed_frames)
+        );
+        let refusal_micros = refused_at.elapsed().as_micros();
+        assert!(
+            store.embedded_binding_matches(&new).unwrap(),
+            "visibility must not bypass failed admission"
+        );
+        drop(reader);
+        let upgrade_at = std::time::Instant::now();
+        let admitted = Store::open(&path).unwrap();
+        let upgrade_micros = upgrade_at.elapsed().as_micros();
+        assert_eq!(connection_modes(&admitted.lock()), ("wal".into(), 2, true));
+        assert!(
+            admitted
+                .transfer_embedded_binding(&old, &new, &TransferAuthority(false))
+                .is_err()
+        );
+        assert_eq!(
+            admitted
+                .transfer_embedded_binding(&old, &new, &TransferAuthority(true))
+                .unwrap(),
+            BindingSuccessorCommit::AlreadyInstalled
+        );
+        drop(admitted);
+        let reopen_at = std::time::Instant::now();
+        let reopened = Store::open(&path).unwrap();
+        let reopen_micros = reopen_at.elapsed().as_micros();
+        assert!(reopened.embedded_binding_matches(&new).unwrap());
+        println!(
+            "legacy-admission refused_us={refusal_micros} upgrade_us={upgrade_micros} full_reopen_us={reopen_micros}"
+        );
+        drop(reopened);
+        drop(legacy);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn binding_histories_preserve_once_only_seed_input_and_exact_successors() {
+        let root =
+            std::env::temp_dir().join(format!("harness-binding-history-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("store.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let mut current = root_identity();
+        store
+            .bind_initial_embedded_binding(&current, None, &InitialAuthority(current.clone()))
+            .unwrap();
+        let seed = Item(serde_json::json!({"type":"message","role":"user","content":"seed"}));
+        let head = store
+            .seed_embedded_context(&current, "seed", &seed)
+            .unwrap();
+        assert_eq!(
+            store
+                .seed_embedded_context(&current, "seed", &seed)
+                .unwrap(),
+            head
+        );
+        let item = Item(serde_json::json!({"type":"message","role":"user","content":"input"}));
+        let mut envelopes = Vec::new();
+        for step in 0..24 {
+            let operation = format!("input-{step}");
+            let envelope = store
+                .admit_embedded_input(&current, &operation, "operator", &item)
+                .unwrap();
+            assert_eq!(
+                store
+                    .admit_embedded_input(&current, &operation, "operator", &item)
+                    .unwrap(),
+                envelope
+            );
+            envelopes.push((current.clone(), operation, envelope));
+            let successor = HostIdentity {
+                incarnation: (step + 2).to_string(),
+                ..current.clone()
+            };
+            assert!(
+                store
+                    .transfer_embedded_binding(&current, &successor, &TransferAuthority(false))
+                    .is_err()
+            );
+            store.lock().execute_batch("CREATE TEMP TRIGGER reject_binding BEFORE UPDATE ON embedded_bindings BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+            assert!(
+                store
+                    .transfer_embedded_binding(&current, &successor, &TransferAuthority(true))
+                    .is_err()
+            );
+            assert!(store.embedded_binding_matches(&current).unwrap());
+            store
+                .lock()
+                .execute_batch("DROP TRIGGER reject_binding")
+                .unwrap();
+            assert_eq!(
+                store
+                    .transfer_embedded_binding(&current, &successor, &TransferAuthority(true))
+                    .unwrap(),
+                BindingSuccessorCommit::Installed
+            );
+            assert_eq!(
+                store
+                    .transfer_embedded_binding(&current, &successor, &TransferAuthority(true))
+                    .unwrap(),
+                BindingSuccessorCommit::AlreadyInstalled
+            );
+            assert!(
+                store
+                    .transfer_embedded_binding(
+                        &current,
+                        &HostIdentity {
+                            incarnation: "foreign".into(),
+                            ..successor.clone()
+                        },
+                        &TransferAuthority(true)
+                    )
+                    .is_err()
+            );
+            drop(store);
+            store = Store::open(&path).unwrap();
+            current = successor;
+            assert_eq!(
+                store.embedded_agent_head(&current).unwrap(),
+                Some(head.clone())
+            );
+            assert_eq!(store.history_page(&head, 0, 100).unwrap().items.len(), 1);
+            for (origin, operation, _) in &envelopes {
+                assert!(matches!(
+                    store.embedded_input_state(origin, operation).unwrap(),
+                    EmbeddedInputState::Admitted
+                ));
+            }
+            let connection = store.lock();
+            assert_eq!(connection_modes(&connection), ("wal".into(), 2, true));
+            let count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM envelopes", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, (step + 1) as i64);
+            let seeds: i64 = connection
+                .query_row("SELECT COUNT(*) FROM embedded_context_seeds", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(seeds, 1);
+        }
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_binding_does_not_depend_on_outcome_readback() {
+        let store = Store::memory().unwrap();
+        let identity = root_identity();
+        store
+            .bind_initial_embedded_binding(&identity, None, &InitialAuthority(identity.clone()))
+            .unwrap();
+        // Force a subsequent observation failure without changing the returned
+        // commit disposition or allowing a foreign authorized transition.
+        store
+            .lock()
+            .execute_batch("ALTER TABLE embedded_bindings RENAME TO inaccessible_bindings")
+            .unwrap();
+        assert!(store.embedded_binding_matches(&identity).is_err());
+        store
+            .lock()
+            .execute_batch("ALTER TABLE inaccessible_bindings RENAME TO embedded_bindings")
+            .unwrap();
+        assert!(store.embedded_binding_matches(&identity).unwrap());
+        assert!(
+            store
+                .bind_initial_embedded_binding(
+                    &identity,
+                    None,
+                    &InitialAuthority(HostIdentity {
+                        run: "foreign".into(),
+                        ..identity.clone()
+                    })
+                )
+                .is_err()
+        );
+        store
+            .bind_initial_embedded_binding(&identity, None, &InitialAuthority(identity.clone()))
+            .unwrap();
+    }
+
+    #[test]
+    fn commit_io_failure_preserves_typed_uncertainty_and_known_refusal_does_not() {
+        let io = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR_FSYNC),
+            Some("sync fault".into()),
+        );
+        assert!(
+            matches!(binding_commit_error(io), EmbeddedError::BindingCommitOutcomeUnknown(error) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::SystemIoFailure))
+        );
+        for code in [
+            rusqlite::ffi::SQLITE_BUSY,
+            rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY,
+            rusqlite::ffi::SQLITE_FULL,
+            rusqlite::ffi::SQLITE_INTERRUPT,
+        ] {
+            let error = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
+            assert!(matches!(
+                binding_commit_error(error),
+                EmbeddedError::Store(StoreError::Sql(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn full_contract_reopen_is_not_blocked_by_old_readers_or_concurrent_opens() {
+        let root =
+            std::env::temp_dir().join(format!("harness-full-reopen-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("store.sqlite");
+        let store = Store::open(&path).unwrap();
+        let old = root_identity();
+        let new = HostIdentity {
+            incarnation: "2".into(),
+            ..old.clone()
+        };
+        store
+            .bind_initial_embedded_binding(&old, None, &InitialAuthority(old.clone()))
+            .unwrap();
+        let reader = Connection::open(&path).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT COUNT(*) FROM embedded_bindings;")
+            .unwrap();
+        store
+            .transfer_embedded_binding(&old, &new, &TransferAuthority(true))
+            .unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(5));
+        let mut threads = Vec::new();
+        for _ in 0..4 {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            let new = new.clone();
+            threads.push(std::thread::spawn(move || {
+                let connection = Connection::open(path).unwrap();
+                connection.busy_timeout(std::time::Duration::ZERO).unwrap();
+                barrier.wait();
+                let admitted = Store::from_connection(connection).unwrap();
+                assert!(admitted.embedded_binding_matches(&new).unwrap());
+                assert_eq!(connection_modes(&admitted.lock()), ("wal".into(), 2, true));
+            }));
+        }
+        barrier.wait();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        drop(reader);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn future_schema_refusal_precedes_journal_mode_changes() {
+        let root =
+            std::env::temp_dir().join(format!("harness-future-schema-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("store.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TABLE schema_version(version INTEGER); INSERT INTO schema_version VALUES(999); CREATE TABLE retained_fact(value TEXT); INSERT INTO retained_fact VALUES('unchanged');").unwrap();
+        assert!(Store::open(&path).is_err());
+        let mode: String = connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        let value: String = connection
+            .query_row("SELECT value FROM retained_fact", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, "unchanged");
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_write_full_cost_same_fixture_as_legacy_normal() {
+        let root =
+            std::env::temp_dir().join(format!("harness-write-cost-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let item =
+            Item(serde_json::json!({"type":"message","role":"user","content":"x".repeat(2048)}));
+        for pair in 0..6 {
+            for mode in if pair % 2 == 0 { [1, 2] } else { [2, 1] } {
+                let path = root.join(format!("{pair}-{mode}.sqlite"));
+                let admission = std::time::Instant::now();
+                let store = Store::open(path).unwrap();
+                let admission_micros = admission.elapsed().as_micros();
+                // NORMAL is the previous production writer configuration. The
+                // fixture, transaction owner, payload and counts are identical.
+                store
+                    .lock()
+                    .pragma_update(None, "synchronous", mode)
+                    .unwrap();
+                let started = std::time::Instant::now();
+                for index in 0..400 {
+                    store
+                        .write_request(
+                            &RequestId(index.to_string()),
+                            None,
+                            "/root",
+                            std::slice::from_ref(&item),
+                            Usage::default(),
+                        )
+                        .unwrap();
+                }
+                let wall_micros = started.elapsed().as_micros();
+                let connection = store.lock();
+                let requests: i64 = connection
+                    .query_row("SELECT COUNT(*) FROM requests", [], |row| row.get(0))
+                    .unwrap();
+                let items: i64 = connection
+                    .query_row("SELECT COUNT(*) FROM request_items", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!((requests, items), (400, 400));
+                println!(
+                    "ordinary-write pair={pair} synchronous={mode} requests={requests} items={items} payload_bytes=2048 admission_us={admission_micros} write_us={wall_micros}"
+                );
+            }
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
