@@ -679,3 +679,38 @@ mod tests {
         }
     }
 }
+
+/// Order retained facts without authorizing continuity or certifying absence.
+/// Provider indices and immutable durable occurrence positions are distinct.
+pub(super) fn output_order(
+    c: &Connection,
+    requests: &std::collections::HashSet<RequestId>,
+) -> Result<HashMap<Origin, u64>> {
+    let mut result = HashMap::new();
+    for request in requests {
+        let mut q=c.prepare("SELECT p.output_index,p.occurrence_position,p.item_hash,i.item_hash FROM provider_items p LEFT JOIN request_items i ON i.request_id=p.request_id AND i.position=p.occurrence_position WHERE p.request_id=?1 ORDER BY p.output_index")?;
+        let rows = q.query_map([&request.0], |r| {
+            Ok((
+                r.get::<_, u64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (index, position, hash, actual) = row?;
+            if actual.as_deref() != Some(hash.as_str()) {
+                return Err(StoreError::InvalidProviderEvidence(request.clone()));
+            }
+            let origin = Origin {
+                request: request.clone(),
+                position,
+                hash: ItemHash(hash),
+            };
+            if result.insert(origin, index).is_some() {
+                return Err(StoreError::InvalidProviderEvidence(request.clone()));
+            }
+        }
+    }
+    Ok(result)
+}
