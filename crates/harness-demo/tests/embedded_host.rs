@@ -925,6 +925,7 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
                 model_conversation: Some("/root".into()),
                 model_head_request: None,
                 active_round: None,
+            inference: None,
             },
             HostActorProjection {
                 output_origin: None,
@@ -939,6 +940,7 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
                 model_conversation: None,
                 model_head_request: None,
                 active_round: None,
+            inference: None,
             },
         ],
         conversations: vec![json!({"id":"/root","path":"/root","state":"idle"})],

@@ -39,6 +39,41 @@ pub struct HostIdentity {
     pub incarnation: String,
 }
 
+/// A durable interruption is independent of the host actor's lifetime.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceBlock {
+    pub request: RequestId,
+    pub generation: u64,
+    pub reason: InferenceBlockReason,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InferenceBlockReason {
+    StreamInterrupted { cause: crate::transport::StreamInterruption },
+    ProviderStreamFailure { event: crate::transport::ProviderStreamFailureEvent },
+    RequestRejected { failure: crate::transport::RequestFailure },
+    ContinuityUnproven,
+    HostInterrupted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryMode {
+    Exact,
+    VisibleHistory,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum HostInferenceState {
+    Idle,
+    Running,
+    Blocked { block: InferenceBlock },
+    Recovering { operation_id: ClientOperationId, block: InferenceBlock },
+}
+
 /// Native composition retains an admitted startup intent and the run lease.
 /// Validation runs under the Store binding transaction and must not reenter Store.
 pub trait BindingInitialAuthority: Send + Sync {
@@ -135,6 +170,9 @@ pub trait HostActor: Send + Sync {
     /// Wake after the input transaction commits. Failure leaves the envelope
     /// admitted and retryable by its original operation ID.
     async fn wake(&self, envelope_id: i64) -> Result<(), String>;
+    /// A notification after the Store commits an explicit recovery grant.
+    /// The notification itself never authorizes inference.
+    async fn wake_recovery(&self) -> Result<(), String> { Ok(()) }
     /// A request to the host owner, not proof that retirement has completed.
     async fn control(&self, control: HostControl) -> Result<Value, HostControlError>;
     /// The owning conversation has durably retained this operation's real result.
@@ -488,6 +526,21 @@ impl Conversation {
         Ok(envelope
             .delivered_request
             .map_or(InputObservation::Admitted, InputObservation::Included))
+    }
+    pub async fn command_recover(&self, operation: ClientOperationId) -> Result<crate::server::CommandReceipt, EmbeddedError> {
+        let record = self.store.embedded_command(&self.identity().run, operation)?
+            .ok_or(StoreError::InvalidCommandState)?;
+        if !matches!(&record.command, crate::server::HostCommand::Recover { target, .. } if target == self.identity()) {
+            return Err(StoreError::ConflictingCommand.into());
+        }
+        if let Some(receipt) = record.receipt { return Ok(receipt); }
+        let admission = self.host.admit()?;
+        let receipt = self.store.authorize_embedded_recovery(self.identity(), operation)?;
+        drop(admission);
+        if matches!(receipt.outcome, crate::server::CommandReceiptOutcome::RecoveryAuthorized { .. }) {
+            let _ = self.host.wake_recovery().await;
+        }
+        Ok(receipt)
     }
     /// Read whether this exact host operation has been admitted or included
     /// in a request. Observation remains available after actor retirement and

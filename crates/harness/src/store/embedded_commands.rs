@@ -11,6 +11,7 @@ pub enum EmbeddedCommandState {
     Dispatching,
     InputAdmitted,
     ControlRequested,
+    RecoveryAuthorized,
     Refused,
     Unconfirmed,
 }
@@ -25,7 +26,7 @@ pub struct EmbeddedCommandRecord {
     pub receipt: Option<CommandReceipt>,
 }
 
-fn read(
+pub(super) fn read(
     c: &Connection,
     run: &str,
     operation: ClientOperationId,
@@ -132,6 +133,7 @@ impl Store {
                     ("interrupt", "", Some(expected_round.to_string()))
                 }
                 HostCommand::Retire { .. } => ("retire", "", None),
+                HostCommand::Recover { .. } => ("recover", "", None),
             };
             tx.execute("INSERT INTO embedded_commands(run_id,operation_id,target,action,payload,expected_round,command,state,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,'queued',?8)",
                 params![run,operation.to_string(),serde_json::to_string(command.target())?,action,payload,round,serde_json::to_string(command)?,utc_millis()])?;
@@ -194,7 +196,7 @@ impl Store {
             CommandReceiptOutcome::ControlRequested { .. } => "control_requested",
             CommandReceiptOutcome::Refused { .. } => "refused",
             CommandReceiptOutcome::Unconfirmed { .. } => "unconfirmed",
-            CommandReceiptOutcome::Admitted { .. } => return Err(StoreError::InvalidCommandState),
+            CommandReceiptOutcome::Admitted { .. } | CommandReceiptOutcome::RecoveryAuthorized { .. } => return Err(StoreError::InvalidCommandState),
         };
         let receipt = CommandReceipt {
             command_id: operation.to_string(),

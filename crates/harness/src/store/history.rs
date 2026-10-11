@@ -69,6 +69,10 @@ impl Store {
                 "INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,'model_interrupted',?2,?3)",
                 params![request.0, serde_json::to_string(&cause)?, super::utc_millis()],
             )?;
+            if let Some((identity, _)) = agent_head {
+                super::inference::block_tx(transaction, identity, request,
+                    crate::embedding::InferenceBlockReason::StreamInterrupted { cause })?;
+            }
 
             Ok(true)
         })
@@ -98,6 +102,10 @@ impl Store {
                 "INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,'request_failed',?2,?3)",
                 params![request.0, serde_json::to_string(failure)?, super::utc_millis()],
             )?;
+            if let Some((identity, _)) = agent_head {
+                super::inference::block_tx(transaction, identity, request,
+                    crate::embedding::InferenceBlockReason::RequestRejected { failure: failure.clone() })?;
+            }
 
             Ok(true)
         })

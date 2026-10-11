@@ -5,6 +5,7 @@ pub use context::{EmbeddedConversationHistory, EmbeddedModelResponseState};
 mod embedded;
 mod embedded_commands;
 mod embedded_round;
+mod inference;
 pub(crate) use compaction::ServerCompactionResponse;
 pub(crate) use embedded::{CommandInputAdmission, EmbeddedInputState};
 pub use embedded_commands::{EmbeddedCommandRecord, EmbeddedCommandState};
@@ -87,6 +88,14 @@ pub enum StoreError {
     ConflictingCommand,
     #[error("command does not have the required durable claim or outcome")]
     InvalidCommandState,
+    #[error("inference is durably blocked: {block:?}")]
+    InferenceBlocked { block: crate::embedding::InferenceBlock },
+    #[error("inference is already owned by an active attempt")]
+    InferenceRunning,
+    #[error("inference recovery fence no longer matches")]
+    StaleInferenceRecovery,
+    #[error("affected operation {operation:?} is not cleanup-confirmed")]
+    InferenceRecoveryUncertain { operation: OperationId },
     #[error("embedded request frontier is unavailable or conflicts with the retained branch")]
     InvalidEmbeddedFrontier,
     #[error("embedded pending request has no durable admission provenance")]

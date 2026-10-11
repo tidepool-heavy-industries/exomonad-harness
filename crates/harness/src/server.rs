@@ -19,6 +19,7 @@ pub use ws_protocol::{
 };
 
 pub use crate::embedding::{ClientOperationId, EmbeddedRoundId};
+pub use crate::embedding::{HostInferenceState, InferenceBlock, InferenceBlockReason, RecoveryMode};
 use crate::store::Store;
 use axum::extract::ws::{Message, WebSocket};
 use axum::{
@@ -103,6 +104,11 @@ pub enum HostCommand {
     Retire {
         target: HostActorIdentity,
     },
+    Recover {
+        target: HostActorIdentity,
+        expected_block: InferenceBlock,
+        mode: RecoveryMode,
+    },
 }
 
 impl HostCommand {
@@ -110,7 +116,8 @@ impl HostCommand {
         match self {
             Self::Input { target, .. }
             | Self::Interrupt { target, .. }
-            | Self::Retire { target } => target,
+            | Self::Retire { target }
+            | Self::Recover { target, .. } => target,
         }
     }
 }
@@ -1686,6 +1693,7 @@ mod tests {
             model_conversation: None,
             model_head_request: None,
             active_round: None,
+            inference: None,
         }
     }
 
