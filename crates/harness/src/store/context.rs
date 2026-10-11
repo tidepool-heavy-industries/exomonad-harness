@@ -2603,4 +2603,6 @@ mod overlay_tests;
 #[cfg(test)]
 mod portability_tests;
 #[cfg(test)]
+mod projection_tests;
+#[cfg(test)]
 mod tests;

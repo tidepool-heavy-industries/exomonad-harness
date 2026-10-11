@@ -668,6 +668,15 @@ impl Store {
             } else {
                 checkpoint.snapshot_request.clone()
             };
+            if checkpoint.cut == CheckpointCut::BeforeCall {
+                let raw: String = tx.query_row("SELECT metadata FROM checkpoints WHERE id=?1",
+                    [&checkpoint.id], |row| row.get(0))?;
+                let metadata = CheckpointMetadata::decode(&raw)?;
+                if !matches!(metadata.response_prefix, Some(CapturedResponsePrefix::Valid { .. })) {
+                    return Err(crate::context::ContextError::Replay(
+                        crate::context::ContextReplayRejection::InvalidPrefix).into());
+                }
+            }
             context::preflight_target(tx, &inherited_head, child.target)?;
             let snapshot_request = RequestId(uuid::Uuid::new_v4().to_string());
             tx.execute(
@@ -1078,6 +1087,9 @@ mod tests {
         }
         #[async_trait]
         impl ResponsesTransport for Replay {
+    fn response_contract(&self) -> std::result::Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+        Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+    }
             async fn create(
                 &self,
                 request: ResponsesRequest,
@@ -1261,6 +1273,9 @@ mod tests {
         }
         #[async_trait]
         impl ResponsesTransport for Replay {
+    fn response_contract(&self) -> std::result::Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+        Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+    }
             async fn create(
                 &self,
                 request: ResponsesRequest,
@@ -1465,6 +1480,9 @@ mod tests {
         }
         #[async_trait]
         impl ResponsesTransport for Replay {
+    fn response_contract(&self) -> std::result::Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+        Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+    }
             async fn create(
                 &self,
                 _request: ResponsesRequest,

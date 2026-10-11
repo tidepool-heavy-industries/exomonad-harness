@@ -1152,19 +1152,20 @@ fn genuine_saved_reference_from_unrelated_checkpoint_cannot_authorize_model_swit
     {
         let connection = store.lock().unwrap();
         assert!(
-            portable_request(
+            checked_projection(
                 &connection,
                 fixture.child.head_request.as_ref().unwrap(),
                 &retained,
                 Some("model-b"),
-                None
+                None,
+                Some((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
             )
             .is_ok()
         );
         // Genuine retained occurrences carry the checkpoint's physical rows,
         // but only the actual consuming head may select its issued authority.
         assert!(matches!(
-            portable_request(&connection, &head, &retained, Some("model-b"), None),
+            checked_projection(&connection, &head, &retained, Some("model-b"), None, Some((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))),
             Err(StoreError::Context(ContextError::OpaqueModel))
         ));
     }

@@ -62,6 +62,9 @@ impl Replay {
 }
 #[async_trait]
 impl ResponsesTransport for Replay {
+    fn response_contract(&self) -> std::result::Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+        Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+    }
     async fn create(
         &self,
         request: ResponsesRequest,
@@ -325,6 +328,9 @@ struct StalledTransport {
 }
 #[async_trait]
 impl ResponsesTransport for StalledTransport {
+    fn response_contract(&self) -> std::result::Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+        Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+    }
     async fn create(
         &self,
         _request: ResponsesRequest,
@@ -347,6 +353,9 @@ struct ParentTransport {
 }
 #[async_trait]
 impl ResponsesTransport for ParentTransport {
+    fn response_contract(&self) -> std::result::Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+        Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+    }
     async fn create(
         &self,
         request: ResponsesRequest,
