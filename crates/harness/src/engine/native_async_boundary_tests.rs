@@ -1,5 +1,5 @@
 use super::*;
-use crate::transport::{ResponsesProtocol, ResponsesRoute};
+use crate::transport::ResponsesRoute;
 use crate::{
     context::{ContextBlock, ContextDraft, ContextRole},
     provider::{CallContext, ContextDisposition, ProviderCompletion, ProviderError},
