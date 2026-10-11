@@ -141,7 +141,7 @@ fn run_history(
                         Err(_) => Err(StoreError::InvalidProviderEvidence(head.clone())),
                         _ => panic!("done event must either complete or refuse"),
                     };
-                    prop_assert_eq!(observed.is_ok(), expected, "operation {op:?}");
+                    prop_assert_eq!(observed.is_ok(), expected, "operation {:?}", op);
                     if expected {
                         if previous.is_some() {
                             coverage.borrow_mut().done_duplicate += 1;
@@ -174,7 +174,7 @@ fn run_history(
                     };
                     let observed = store.record_provider_turn(&issued, &turn);
                     let expected = terminal != Some(false);
-                    prop_assert_eq!(observed.is_ok(), expected, "operation {op:?}");
+                    prop_assert_eq!(observed.is_ok(), expected, "operation {:?}", op);
                     if expected {
                         accepted = after;
                         terminal = Some(true);
@@ -235,9 +235,11 @@ fn run_history(
                     prop_assert_eq!(
                         observed.is_ok(),
                         expected,
-                        "operation {op:?}, capture-valid={}, capture-epoch={}, current-epoch={epoch}",
+                        "operation {:?}, capture-valid={}, capture-epoch={}, current-epoch={}",
+                        op,
                         capture.valid,
-                        capture.epoch
+                        capture.epoch,
+                        epoch
                     );
                     if let Ok((child, _)) = observed {
                         coverage.borrow_mut().projects_accepted += 1;
@@ -298,7 +300,7 @@ fn run_history(
                     .iter()
                     .map(|(index, class)| (head.0.clone(), *index as i64, payload(*class)))
                     .collect::<Vec<_>>();
-                prop_assert_eq!(actual, expected, "immutable cut after {op:?}");
+                prop_assert_eq!(actual, expected, "immutable cut after {:?}", op);
             }
         }
         coverage.borrow_mut().histories += 1;
