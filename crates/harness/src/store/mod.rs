@@ -27,8 +27,8 @@ mod validation;
 mod wait_continuation;
 pub use provider_response::ProviderResponseState;
 pub use replay::IssuedReplayRequest;
-pub use terminal::{RecordedToolOutput, TerminalOutcome};
 pub(crate) use terminal::OperationCleanupEvidence;
+pub use terminal::{RecordedToolOutput, TerminalOutcome};
 pub(crate) use wait_continuation::RecordedWaitContinuation;
 
 use crate::{
@@ -100,7 +100,9 @@ pub enum StoreError {
     #[error("command does not have the required durable claim or outcome")]
     InvalidCommandState,
     #[error("inference is durably blocked: {block:?}")]
-    InferenceBlocked { block: crate::embedding::InferenceBlock },
+    InferenceBlocked {
+        block: crate::embedding::InferenceBlock,
+    },
     #[error("inference is already owned by an active attempt")]
     InferenceRunning,
     #[error("inference recovery fence no longer matches")]
@@ -2371,9 +2373,13 @@ impl Store {
     /// Only the Engine's undispatched queue may issue this proof. A missing
     /// scheduler job or process does not establish that execution never started.
     pub(crate) fn interrupt_unstarted_operation_claim(
-        &self, operation: &OperationId, request: &RequestId,
+        &self,
+        operation: &OperationId,
+        request: &RequestId,
     ) -> Result<usize> {
-        if &operation.request != request { return Err(StoreError::OperationOriginMismatch); }
+        if &operation.request != request {
+            return Err(StoreError::OperationOriginMismatch);
+        }
         let mut c = self.lock()?;
         c.write_transaction(|tx| {
             Ok(tx.execute("UPDATE claims SET state='interrupted',terminal_json=?5 WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?4 AND state='pending'",

@@ -51,9 +51,15 @@ pub struct InferenceBlock {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InferenceBlockReason {
-    StreamInterrupted { cause: crate::transport::StreamInterruption },
-    ProviderStreamFailure { event: crate::transport::ProviderStreamFailureEvent },
-    RequestRejected { failure: crate::transport::RequestFailure },
+    StreamInterrupted {
+        cause: crate::transport::StreamInterruption,
+    },
+    ProviderStreamFailure {
+        event: crate::transport::ProviderStreamFailureEvent,
+    },
+    RequestRejected {
+        failure: crate::transport::RequestFailure,
+    },
     ContinuityUnproven,
     HostInterrupted,
 }
@@ -66,12 +72,21 @@ pub enum RecoveryMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "state",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum HostInferenceState {
     Idle,
     Running,
-    Blocked { block: InferenceBlock },
-    Recovering { operation_id: ClientOperationId, block: InferenceBlock },
+    Blocked {
+        block: InferenceBlock,
+    },
+    Recovering {
+        operation_id: ClientOperationId,
+        block: InferenceBlock,
+    },
 }
 
 /// Native composition retains an admitted startup intent and the run lease.
@@ -174,7 +189,9 @@ pub trait HostActor: Send + Sync {
     async fn wake(&self, envelope_id: i64) -> Result<(), String>;
     /// A notification after the Store commits an explicit recovery grant.
     /// The notification itself never authorizes inference.
-    async fn wake_recovery(&self) -> Result<(), String> { Ok(()) }
+    async fn wake_recovery(&self) -> Result<(), String> {
+        Ok(())
+    }
     /// A request to the host owner, not proof that retirement has completed.
     async fn control(&self, control: HostControl) -> Result<Value, HostControlError>;
     /// The owning conversation has durably retained this operation's real result.
@@ -403,9 +420,14 @@ impl Conversation {
             incarnation: self.identity().incarnation.clone(),
         };
         let (route, protocol) = transport.response_contract()?;
-        self.store.initialize_context_target(&origin, &crate::context::ContextProjectionTarget {
-            model: config.model.clone(), route, protocol,
-        })?;
+        self.store.initialize_context_target(
+            &origin,
+            &crate::context::ContextProjectionTarget {
+                model: config.model.clone(),
+                route,
+                protocol,
+            },
+        )?;
         Ok(crate::engine::Engine::with_transport(
             transport,
             self.store.clone(),
@@ -536,17 +558,30 @@ impl Conversation {
             .delivered_request
             .map_or(InputObservation::Admitted, InputObservation::Included))
     }
-    pub async fn command_recover(&self, operation: ClientOperationId) -> Result<crate::server::CommandReceipt, EmbeddedError> {
-        let record = self.store.embedded_command(&self.identity().run, operation)?
+    pub async fn command_recover(
+        &self,
+        operation: ClientOperationId,
+    ) -> Result<crate::server::CommandReceipt, EmbeddedError> {
+        let record = self
+            .store
+            .embedded_command(&self.identity().run, operation)?
             .ok_or(StoreError::InvalidCommandState)?;
-        if !matches!(&record.command, crate::server::HostCommand::Recover { target, .. } if target == self.identity()) {
+        if !matches!(&record.command, crate::server::HostCommand::Recover { target, .. } if target == self.identity())
+        {
             return Err(StoreError::ConflictingCommand.into());
         }
-        if let Some(receipt) = record.receipt { return Ok(receipt); }
+        if let Some(receipt) = record.receipt {
+            return Ok(receipt);
+        }
         let admission = self.host.admit()?;
-        let receipt = self.store.authorize_embedded_recovery(self.identity(), operation)?;
+        let receipt = self
+            .store
+            .authorize_embedded_recovery(self.identity(), operation)?;
         drop(admission);
-        if matches!(receipt.outcome, crate::server::CommandReceiptOutcome::RecoveryAuthorized { .. }) {
+        if matches!(
+            receipt.outcome,
+            crate::server::CommandReceiptOutcome::RecoveryAuthorized { .. }
+        ) {
             let _ = self.host.wake_recovery().await;
         }
         Ok(receipt)

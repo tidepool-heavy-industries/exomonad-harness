@@ -373,25 +373,61 @@ async fn incomplete_response_retains_pending_frontier_and_requires_explicit_reco
                 .iter()
                 .any(|e| e.kind == "request_failed")
         );
-        assert!(matches!(engine.run_recovering_embedded(None, vec![], cancel.clone(),
-            tokio::sync::mpsc::unbounded_channel().1).await,
-            Err(EngineError::InferenceBlocked { .. })));
+        assert!(matches!(
+            engine
+                .run_recovering_embedded(
+                    None,
+                    vec![],
+                    cancel.clone(),
+                    tokio::sync::mpsc::unbounded_channel().1
+                )
+                .await,
+            Err(EngineError::InferenceBlocked { .. })
+        ));
         let queued = Item(json!({"type":"message","role":"user","content":"queued after EOF"}));
-        store.admit_embedded_input(&identity, "after-eof", "human", &queued).unwrap();
-        assert!(matches!(engine.run_embedded(None, vec![], cancel.clone(),
-            tokio::sync::mpsc::unbounded_channel().1).await,
-            Err(EngineError::InferenceBlocked { .. })));
+        store
+            .admit_embedded_input(&identity, "after-eof", "human", &queued)
+            .unwrap();
+        assert!(matches!(
+            engine
+                .run_embedded(
+                    None,
+                    vec![],
+                    cancel.clone(),
+                    tokio::sync::mpsc::unbounded_channel().1
+                )
+                .await,
+            Err(EngineError::InferenceBlocked { .. })
+        ));
         assert_eq!(requests.lock().unwrap().len(), 1);
         assert_eq!(store.unread(&identity.actor.0).unwrap().len(), 1);
-        let crate::embedding::HostInferenceState::Blocked { block } = store.embedded_inference_state(&identity).unwrap()
-            else { panic!("durable block"); };
+        let crate::embedding::HostInferenceState::Blocked { block } =
+            store.embedded_inference_state(&identity).unwrap()
+        else {
+            panic!("durable block");
+        };
         let recovery = crate::embedding::ClientOperationId(uuid::Uuid::new_v4());
-        store.enqueue_embedded_command(recovery, &crate::server::HostCommand::Recover {
-            target:identity.clone(), expected_block:block, mode:crate::embedding::RecoveryMode::Exact,
-        }).unwrap();
-        store.claim_embedded_command(&identity.run, recovery).unwrap().unwrap();
-        let receipt = store.authorize_embedded_recovery(&identity, recovery).unwrap();
-        assert!(matches!(receipt.outcome, crate::server::CommandReceiptOutcome::RecoveryAuthorized { .. }));
+        store
+            .enqueue_embedded_command(
+                recovery,
+                &crate::server::HostCommand::Recover {
+                    target: identity.clone(),
+                    expected_block: block,
+                    mode: crate::embedding::RecoveryMode::Exact,
+                },
+            )
+            .unwrap();
+        store
+            .claim_embedded_command(&identity.run, recovery)
+            .unwrap()
+            .unwrap();
+        let receipt = store
+            .authorize_embedded_recovery(&identity, recovery)
+            .unwrap();
+        assert!(matches!(
+            receipt.outcome,
+            crate::server::CommandReceiptOutcome::RecoveryAuthorized { .. }
+        ));
         let completed = engine
             .run_recovering_embedded(
                 None,
@@ -402,7 +438,12 @@ async fn incomplete_response_retains_pending_frontier_and_requires_explicit_reco
             .await
             .unwrap();
         assert_eq!(requests.lock().unwrap().len(), 2);
-        assert_eq!(store.authorize_embedded_recovery(&identity, recovery).unwrap(), receipt);
+        assert_eq!(
+            store
+                .authorize_embedded_recovery(&identity, recovery)
+                .unwrap(),
+            receipt
+        );
         assert!(requests.lock().unwrap()[1].input.contains(&queued));
         assert_eq!(
             store

@@ -14,7 +14,7 @@ pub struct EmbeddedRoundFrontier {
     /// A durably admitted continuation exists even when its inbox is empty.
     pub pending_head: Option<RequestId>,
     /// Cleanup-confirmed interruption of the pending provider attempt. It
-    /// requires fresh explicit input before another model request is admitted.
+    /// requires a journaled explicit recovery grant before another model request.
     pub pending_interruption: Option<crate::transport::StreamInterruption>,
 }
 

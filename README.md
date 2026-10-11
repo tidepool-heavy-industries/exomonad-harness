@@ -46,6 +46,15 @@ The bundled SQLite is 3.53.2 through exact rusqlite 0.40.2 and libsqlite3-sys
 0.38.2. This includes the WAL-reset fix absent from the older 3.46.0 bundle;
 the focused store controls verify the library linked by Buck at runtime.
 
+Embedded inference uses a durable Store gate independently of actor lifetime.
+Messages can queue while blocked. An explicit `Recover` command names the exact
+run, incarnation, request and block generation; its checked projection, once-only
+authorization and receipt commit together in the existing command journal.
+Recovery refuses uncertain affected work and never reexecutes effects. Visible
+history recovery records exact omissions while preserving canonical history and
+operation identities. Exclusive host startup fences earlier attempts and unused
+grants; passive Store reopen, input and wake notifications grant no inference.
+
 ## Focused tests
 
 ### Native Buck2 on x86_64 Linux

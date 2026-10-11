@@ -98,6 +98,62 @@ fn engine(
     });
     (engine, inputs)
 }
+fn authorize_restart(
+    store: &Store,
+    identity: &HostIdentity,
+    mode: crate::embedding::RecoveryMode,
+) -> crate::server::CommandReceipt {
+    store
+        .initialize_context_target(
+            &ConversationIdentity::Embedded {
+                run: identity.run.clone(),
+                actor: identity.actor.clone(),
+                incarnation: identity.incarnation.clone(),
+            },
+            &crate::context::ContextProjectionTarget {
+                model: "test".into(),
+                route: ResponsesRoute::Codex,
+                protocol: ResponsesProtocol::Standard,
+            },
+        )
+        .unwrap();
+    store
+        .recover_embedded_inference_after_host_loss(&identity.run)
+        .unwrap();
+    let crate::embedding::HostInferenceState::Blocked { block } =
+        store.embedded_inference_state(identity).unwrap()
+    else {
+        panic!("restart requires an explicit durable block");
+    };
+    let command = crate::embedding::ClientOperationId(uuid::Uuid::new_v4());
+    store
+        .enqueue_embedded_command(
+            command,
+            &crate::server::HostCommand::Recover {
+                target: identity.clone(),
+                expected_block: block,
+                mode,
+            },
+        )
+        .unwrap();
+    store
+        .claim_embedded_command(&identity.run, command)
+        .unwrap()
+        .unwrap();
+    store
+        .authorize_embedded_recovery(identity, command)
+        .unwrap()
+}
+fn authorize_exact_restart(store: &Store, identity: &HostIdentity) {
+    let receipt = authorize_restart(store, identity, crate::embedding::RecoveryMode::Exact);
+    assert!(
+        matches!(
+            receipt.outcome,
+            crate::server::CommandReceiptOutcome::RecoveryAuthorized { .. }
+        ),
+        "{receipt:?}"
+    );
+}
 fn incoming() -> tokio::sync::mpsc::UnboundedReceiver<DurableMailboxWake> {
     tokio::sync::mpsc::unbounded_channel().1
 }
@@ -233,6 +289,7 @@ async fn embedded_restart_recovers_admission_and_delivery_cuts_without_duplicate
             let store = Arc::new(Store::open(&path).unwrap());
             let (engine, inputs) = engine(store.clone(), &identity, vec![Ok(final_turn())]);
             let (_cancel, cancel) = watch::channel(false);
+            authorize_exact_restart(&store, &identity);
             let completion = engine
                 .run_recovering_embedded(settled.clone(), vec![], cancel, incoming())
                 .await
@@ -318,6 +375,7 @@ async fn embedded_restart_settles_durable_final_without_provider_then_waits_for_
     let store = Arc::new(Store::open(&path).unwrap());
     let (resumed, inputs) = engine(store.clone(), &identity, vec![]);
     let (_cancel, cancel) = watch::channel(false);
+    authorize_exact_restart(&store, &identity);
     let completion = resumed
         .run_recovering_embedded(None, vec![], cancel.clone(), incoming())
         .await
@@ -384,7 +442,7 @@ async fn embedded_restart_refuses_orphan_streamed_call_before_provider_or_claim(
     let (engine, inputs) = engine(store.clone(), &identity, vec![]);
     let (_cancel, cancel) = watch::channel(false);
     assert!(
-        matches!(engine.run_recovering_embedded(None,vec![],cancel,incoming()).await,Err(EngineError::UnclaimedInheritedCall{request,call:actual}) if request==head && actual==call)
+        matches!(engine.run_recovering_embedded(None,vec![],cancel,incoming()).await,Err(EngineError::InferenceBlocked{block}) if block.request==head)
     );
     assert!(inputs.lock().unwrap().is_empty());
     assert!(store.claims(&call).unwrap().is_empty());
@@ -398,12 +456,11 @@ async fn embedded_restart_refuses_orphan_streamed_call_before_provider_or_claim(
 }
 
 #[tokio::test]
-async fn embedded_restart_refuses_recorded_response_with_incomplete_local_items() {
+async fn embedded_restart_recovers_atomic_completion_cut_without_inventing_missing_items() {
     let store = Arc::new(Store::memory().unwrap());
     let identity = identity();
     store.bind_embedded_actor(&identity, None).unwrap();
-    // The response is interned before final Item persistence. Refuse that exact
-    // append to preserve a real model_turn / request_items crash cut.
+    // Refuse final publication and retain the actual atomic Store rollback cut.
     store.lock().unwrap().execute_batch("CREATE TRIGGER cut_final BEFORE INSERT ON request_items WHEN (SELECT json FROM items WHERE hash=NEW.item_hash) LIKE '%final_answer%' BEGIN SELECT RAISE(ABORT,'cut'); END;").unwrap();
     let (first, _) = engine(store.clone(), &identity, vec![Ok(final_turn())]);
     let (_cancel, cancel) = watch::channel(false);
@@ -419,7 +476,7 @@ async fn embedded_restart_refuses_recorded_response_with_incomplete_local_items(
         .pending_head
         .unwrap();
     assert!(
-        store
+        !store
             .events(Some(&head))
             .unwrap()
             .iter()
@@ -430,16 +487,25 @@ async fn embedded_restart_refuses_recorded_response_with_incomplete_local_items(
         .unwrap()
         .execute_batch("DROP TRIGGER cut_final")
         .unwrap();
-    let (resumed, inputs) = engine(store.clone(), &identity, vec![]);
+    let (resumed, inputs) = engine(store.clone(), &identity, vec![Ok(final_turn())]);
+    authorize_exact_restart(&store, &identity);
+    let completed = resumed
+        .run_recovering_embedded(None, vec![], cancel, incoming())
+        .await
+        .unwrap();
+    assert_eq!(inputs.lock().unwrap().len(), 1);
     assert!(
-        matches!(resumed.run_recovering_embedded(None,vec![],cancel,incoming()).await,Err(EngineError::IncompleteRecordedResponse(actual)) if actual==head)
+        !inputs.lock().unwrap()[0]
+            .input
+            .iter()
+            .any(|item| item.0["phase"] == "final_answer")
     );
-    assert!(inputs.lock().unwrap().is_empty());
     assert_eq!(
         store
-            .embedded_round_frontier(&identity)
+            .request(&completed.head_request)
             .unwrap()
-            .pending_head,
+            .unwrap()
+            .parent,
         Some(head)
     );
 }
@@ -579,19 +645,42 @@ async fn embedded_restart_preserves_committed_model_for_retained_opaque_history(
     );
     let (engine, inputs) = engine(store.clone(), &next, vec![Ok(final_turn())]);
     let (_cancel, cancel) = watch::channel(false);
+    assert!(matches!(
+        engine
+            .run_recovering_embedded(
+                Some(opaque_head.clone()),
+                vec![],
+                cancel.clone(),
+                incoming()
+            )
+            .await,
+        Err(EngineError::InferenceBlocked { .. })
+    ));
+    let migration = authorize_restart(
+        &store,
+        &next,
+        crate::embedding::RecoveryMode::VisibleHistory,
+    );
+    let crate::server::CommandReceiptOutcome::RecoveryAuthorized { projection, .. } =
+        migration.outcome
+    else {
+        panic!("{migration:?}");
+    };
+    assert_eq!(projection.omitted.len(), 1);
     engine
         .run_recovering_embedded(Some(opaque_head.clone()), vec![], cancel, incoming())
         .await
         .unwrap();
     let requests = inputs.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert!(requests[0].input.contains(&opaque));
+    assert!(!requests[0].input.contains(&opaque));
+    assert!(store.items(&opaque_head).unwrap().contains(&opaque));
     assert_eq!(requests[0].model, "model-b");
     let state = store
         .context_request_state(&opaque_head, &next_origin)
         .unwrap();
     assert_eq!(state.model.as_deref(), Some("model-b"));
-    assert_eq!(state.generation, receipt.generation);
+    assert!(state.generation > receipt.generation);
     drop(requests);
     drop(engine);
     drop(store);
@@ -649,6 +738,7 @@ async fn embedded_restart_replays_compacted_settled_claim_with_original_incarnat
         .unwrap();
     let (engine, inputs) = engine(store.clone(), &next, vec![Ok(final_turn())]);
     let (_cancel, cancel) = watch::channel(false);
+    authorize_exact_restart(&store, &next);
     let completion = engine
         .run_recovering_embedded(None, vec![], cancel, incoming())
         .await
@@ -869,6 +959,7 @@ async fn embedded_restart_recovers_actual_internal_compaction_without_reexecutin
         .unwrap();
     let (engine, inputs) = engine(store.clone(), &next, vec![Ok(final_turn())]);
     let (_cancel, cancel) = watch::channel(false);
+    authorize_exact_restart(&store, &next);
     let completion = engine
         .run_recovering_embedded(None, vec![], cancel, incoming())
         .await
@@ -927,6 +1018,7 @@ async fn embedded_restart_retains_direct_followup_after_durable_final_response()
         .unwrap()
         .head_request;
     let (resumed, inputs) = engine(store.clone(), &identity, vec![Ok(final_turn())]);
+    authorize_exact_restart(&store, &identity);
     let completion = resumed
         .run_recovering_embedded(None, vec![next_input.clone()], cancel, incoming())
         .await

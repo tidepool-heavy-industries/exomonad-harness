@@ -196,7 +196,10 @@ impl Store {
             CommandReceiptOutcome::ControlRequested { .. } => "control_requested",
             CommandReceiptOutcome::Refused { .. } => "refused",
             CommandReceiptOutcome::Unconfirmed { .. } => "unconfirmed",
-            CommandReceiptOutcome::Admitted { .. } | CommandReceiptOutcome::RecoveryAuthorized { .. } => return Err(StoreError::InvalidCommandState),
+            CommandReceiptOutcome::Admitted { .. }
+            | CommandReceiptOutcome::RecoveryAuthorized { .. } => {
+                return Err(StoreError::InvalidCommandState);
+            }
         };
         let receipt = CommandReceipt {
             command_id: operation.to_string(),

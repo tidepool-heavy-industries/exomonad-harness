@@ -99,10 +99,15 @@ pub(super) fn operation_cleanup_evidence(
 ) -> Result<OperationCleanupEvidence> {
     if let Some((_, terminal)) = exact_terminal(c, operation)? {
         return Ok(match terminal {
-            TerminalOutcome::Success | TerminalOutcome::Failure(_) | TerminalOutcome::Cancelled
-            | TerminalOutcome::CancelledWithReceipt(_) => OperationCleanupEvidence::Terminal(terminal),
-            TerminalOutcome::NotStarted | TerminalOutcome::Interrupted | TerminalOutcome::CancellationUnconfirmed(_) =>
-                OperationCleanupEvidence::Uncertain,
+            TerminalOutcome::Success
+            | TerminalOutcome::Failure(_)
+            | TerminalOutcome::Cancelled
+            | TerminalOutcome::CancelledWithReceipt(_) => {
+                OperationCleanupEvidence::Terminal(terminal)
+            }
+            TerminalOutcome::NotStarted
+            | TerminalOutcome::Interrupted
+            | TerminalOutcome::CancellationUnconfirmed(_) => OperationCleanupEvidence::Uncertain,
         });
     }
     let terminal: Option<String> = c.query_row(
@@ -110,10 +115,15 @@ pub(super) fn operation_cleanup_evidence(
         params![serde_json::to_string(&operation.origin)?, operation.request.0, operation.call.0],
         |row| row.get(0),
     ).optional()?.flatten();
-    Ok(match terminal.map(|raw| serde_json::from_str::<TerminalOutcome>(&raw)).transpose()? {
-        Some(TerminalOutcome::NotStarted) => OperationCleanupEvidence::NotStarted,
-        _ => OperationCleanupEvidence::Uncertain,
-    })
+    Ok(
+        match terminal
+            .map(|raw| serde_json::from_str::<TerminalOutcome>(&raw))
+            .transpose()?
+        {
+            Some(TerminalOutcome::NotStarted) => OperationCleanupEvidence::NotStarted,
+            _ => OperationCleanupEvidence::Uncertain,
+        },
+    )
 }
 
 fn exact_claim_state(
@@ -138,7 +148,10 @@ fn exact_claim_state(
 }
 
 impl Store {
-    pub(crate) fn operation_cleanup_evidence(&self, operation: &OperationId) -> Result<OperationCleanupEvidence> {
+    pub(crate) fn operation_cleanup_evidence(
+        &self,
+        operation: &OperationId,
+    ) -> Result<OperationCleanupEvidence> {
         operation_cleanup_evidence(&*self.lock()?, operation)
     }
     /// Exact original operation; inherited claimants must retain identical evidence.

@@ -171,7 +171,9 @@ mod tool_execution_tests;
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error("inference is durably blocked: {block:?}")]
-    InferenceBlocked { block: crate::embedding::InferenceBlock },
+    InferenceBlocked {
+        block: crate::embedding::InferenceBlock,
+    },
     #[error(transparent)]
     Transport(#[from] TransportError),
     /// Stream completion is unknown, but every locally admitted outstanding
@@ -566,7 +568,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     /// including foreign invocations attached by a Here snapshot. Missing
     /// in-memory jobs are durably interrupted unless settlement already won;
     /// provider calls are never replayed. Recovery also reconciles an unfinished
-    /// embedded request instead of starting a new round.
+    /// embedded request. A durable block requires a journaled recovery grant;
+    /// this entry point alone grants no authority to continue.
     pub async fn run_recovering(
         &self,
         head: Option<RequestId>,
@@ -650,18 +653,31 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         recovering: bool,
     ) -> Result<EngineCompletion, EngineError> {
         let (route, protocol) = self.client.response_contract()?;
-        self.store.initialize_context_target(&self.origin, &crate::context::ContextProjectionTarget {
-            model: self.config.model.clone(), route, protocol,
-        })?;
+        self.store.initialize_context_target(
+            &self.origin,
+            &crate::context::ContextProjectionTarget {
+                model: self.config.model.clone(),
+                route,
+                protocol,
+            },
+        )?;
         let inference_attempt = match self.embedded_identity() {
-            Some(identity) => match self.store.begin_embedded_inference(&identity, head.as_ref()) {
+            Some(identity) => match self
+                .store
+                .begin_embedded_inference(&identity, head.as_ref())
+            {
                 Ok(attempt) => Some(attempt),
-                Err(StoreError::InferenceBlocked { block }) => return Err(EngineError::InferenceBlocked { block }),
+                Err(StoreError::InferenceBlocked { block }) => {
+                    return Err(EngineError::InferenceBlocked { block });
+                }
                 Err(error) => return Err(error.into()),
             },
             None => None,
         };
-        let recovering = recovering || inference_attempt.as_ref().is_some_and(|attempt| attempt.recovering);
+        let recovering = recovering
+            || inference_attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.recovering);
         let (envelope_tx, envelopes) = tokio::sync::mpsc::unbounded_channel();
         let keepalive = envelope_tx.clone();
         let forwarder = tokio::spawn(async move {
@@ -690,13 +706,22 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         if let Some(attempt) = &inference_attempt {
             if result.is_ok() {
                 self.store.finish_embedded_inference(attempt)?;
-            } else if matches!(result, Err(EngineError::Store(StoreError::Context(_)
-                | StoreError::IncompleteProviderPrefix { .. } | StoreError::InvalidProviderEvidence(_)))) {
+            } else if matches!(
+                result,
+                Err(EngineError::Store(
+                    StoreError::Context(_)
+                        | StoreError::IncompleteProviderPrefix { .. }
+                        | StoreError::InvalidProviderEvidence(_)
+                ))
+            ) {
                 let identity = self.embedded_identity().expect("embedded attempt");
                 let frontier = self.store.embedded_round_frontier(&identity)?;
                 if let Some(request) = frontier.pending_head.or(frontier.settled_head) {
-                    let block = self.store.block_embedded_inference(&identity, &request,
-                        crate::embedding::InferenceBlockReason::ContinuityUnproven)?;
+                    let block = self.store.block_embedded_inference(
+                        &identity,
+                        &request,
+                        crate::embedding::InferenceBlockReason::ContinuityUnproven,
+                    )?;
                     result = Err(EngineError::InferenceBlocked { block });
                 }
             }
@@ -2531,14 +2556,21 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         for call in pending {
             let mut persisted_terminal = false;
             match self.store.operation_cleanup_evidence(&call.operation) {
-                Ok(crate::store::OperationCleanupEvidence::NotStarted | crate::store::OperationCleanupEvidence::Terminal(_)) => continue,
-                Err(error) => { first_error.get_or_insert(EngineError::Store(error)); },
-                _ => {},
+                Ok(
+                    crate::store::OperationCleanupEvidence::NotStarted
+                    | crate::store::OperationCleanupEvidence::Terminal(_),
+                ) => continue,
+                Err(error) => {
+                    first_error.get_or_insert(EngineError::Store(error));
+                }
+                _ => {}
             }
             if call.cancel_job_on_cleanup && call.wait.is_none() {
                 if let Err(error) = self.scheduler.cancel(&call.operation).await {
                     first_error.get_or_insert_with(|| match error {
-                        JobError::UnknownCall => EngineError::UnconfirmedCancellation { operation: call.operation.clone() },
+                        JobError::UnknownCall => EngineError::UnconfirmedCancellation {
+                            operation: call.operation.clone(),
+                        },
                         other => EngineError::Job(other),
                     });
                 }
@@ -2579,7 +2611,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         }
                     }
                     Err(JobError::UnknownCall) | Ok(None) => {
-                        first_error.get_or_insert_with(|| EngineError::UnconfirmedCancellation { operation: call.operation.clone() });
+                        first_error.get_or_insert_with(|| EngineError::UnconfirmedCancellation {
+                            operation: call.operation.clone(),
+                        });
                     }
                     Err(error) => {
                         first_error.get_or_insert(EngineError::Job(error));
@@ -2592,13 +2626,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 let request = call.claim_request.clone();
                 let not_started = call.wait.is_some();
                 if !not_started && call.operation.origin.actor() == self.origin.actor() {
-                    first_error.get_or_insert_with(|| EngineError::UnconfirmedCancellation { operation: call.operation.clone() });
+                    first_error.get_or_insert_with(|| EngineError::UnconfirmedCancellation {
+                        operation: call.operation.clone(),
+                    });
                 }
-                if let Err(error) = blocking(move || if not_started {
-                    store.interrupt_unstarted_operation_claim(&operation, &request)
-                } else {
-                    store.interrupt_operation_claim(&operation, &request)
-                }).await
+                if let Err(error) = blocking(move || {
+                    if not_started {
+                        store.interrupt_unstarted_operation_claim(&operation, &request)
+                    } else {
+                        store.interrupt_operation_claim(&operation, &request)
+                    }
+                })
+                .await
                 {
                     first_error.get_or_insert(error);
                 }
@@ -2618,11 +2657,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let event = *event;
             let primary = EngineError::Transport(error);
             if let Err(cleanup) = self.cancel_pending(pending).await {
-                return EngineError::Cleanup { primary: Box::new(primary), cleanup: cleanup.to_string() };
+                return EngineError::Cleanup {
+                    primary: Box::new(primary),
+                    cleanup: cleanup.to_string(),
+                };
             }
             if let Some(identity) = self.embedded_identity() {
-                return match self.store.block_embedded_inference(&identity, request,
-                    crate::embedding::InferenceBlockReason::ProviderStreamFailure { event }) {
+                return match self.store.block_embedded_inference(
+                    &identity,
+                    request,
+                    crate::embedding::InferenceBlockReason::ProviderStreamFailure { event },
+                ) {
                     Ok(block) => EngineError::InferenceBlocked { block },
                     Err(error) => error.into(),
                 };

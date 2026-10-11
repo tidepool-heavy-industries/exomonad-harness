@@ -19,7 +19,9 @@ pub use ws_protocol::{
 };
 
 pub use crate::embedding::{ClientOperationId, EmbeddedRoundId};
-pub use crate::embedding::{HostInferenceState, InferenceBlock, InferenceBlockReason, RecoveryMode};
+pub use crate::embedding::{
+    HostInferenceState, InferenceBlock, InferenceBlockReason, RecoveryMode,
+};
 use crate::store::Store;
 use axum::extract::ws::{Message, WebSocket};
 use axum::{
