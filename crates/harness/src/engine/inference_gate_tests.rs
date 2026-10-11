@@ -270,11 +270,23 @@ async fn run_history(
         let claims = store.claims(&head_request).unwrap();
         prop_assert_eq!(claims.len(), 1);
         let original = claims[0].operation.clone();
+        let expected_operations = if queued {
+            vec![]
+        } else {
+            vec![original.clone()]
+        };
+        prop_assert_eq!(
+            *effects.operations.lock().unwrap(),
+            expected_operations.clone()
+        );
         let cleanup = store.operation_cleanup_evidence(&original).unwrap();
         if queued {
             prop_assert!(
-                matches!(cleanup, OperationCleanupEvidence::NotStarted),
-                "queued operation lacks proven NotStarted closure"
+                matches!(
+                    cleanup,
+                    OperationCleanupEvidence::Terminal(TerminalOutcome::Cancelled)
+                ),
+                "admitted queued operation lacks actual scheduler cancellation"
             );
         } else {
             prop_assert!(
@@ -481,6 +493,36 @@ async fn run_history(
                 .unwrap(),
             retained
         );
+        prop_assert_eq!(*effects.operations.lock().unwrap(), expected_operations);
+        if queued {
+            match scheduler.output(&original).await {
+                Ok(Some(crate::turn::JobOutput::Cancelled)) => {
+                    scheduler.release_operation(&original, None).await.unwrap();
+                    prop_assert!(
+                        matches!(
+                            scheduler.wait(&original).await.unwrap(),
+                            crate::turn::JobOutput::Cancelled
+                        ),
+                        "retired queue launched after recovery"
+                    );
+                }
+                Err(JobError::UnknownCall) => {
+                    prop_assert!(
+                        matches!(
+                            scheduler.release_operation(&original, None).await,
+                            Err(JobError::UnknownCall)
+                        ),
+                        "retired queue was recreated"
+                    );
+                }
+                _ => {
+                    return Err(TestCaseError::fail(
+                        "old admitted queue lacks a retained or released cancellation",
+                    ));
+                }
+            }
+            prop_assert_eq!(effects.calls.load(Ordering::SeqCst), 0);
+        }
         let requests = requests.lock().unwrap();
         let input = &requests[1].input;
         prop_assert_eq!(
@@ -531,11 +573,17 @@ fn settled_done_effect_eof_histories_require_explicit_recovery_without_replay() 
         .unwrap();
     let strategy = (any::<bool>(), proptest::collection::vec(0_u8..6, 0..24));
     let completed = std::cell::Cell::new([0_usize; 2]);
-    let result = TestRunner::new(Config {
+    let mut config = Config {
         cases: 32,
+        source_file: Some(file!()),
         ..Config::default()
-    })
-    .run(&strategy, |(queued, actions)| {
+    };
+    if let Ok(path) = std::env::var("HARNESS_PROPTEST_REGRESSIONS") {
+        config.failure_persistence = Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(Box::leak(path.into_boxed_str())),
+        ));
+    }
+    let result = TestRunner::new(config).run(&strategy, |(queued, actions)| {
         runtime.block_on(run_history(queued, &actions, false))?;
         let mut counts = completed.get();
         counts[usize::from(queued)] += 1;
