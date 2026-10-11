@@ -174,7 +174,7 @@ impl Action {
                 .submit_actor_form(&o.origin, &o.mount_id, "one", &json!({"f0":"different"}))
                 .map(|_| ()),
             Self::InvalidDraft => store
-                .submit_actor_form(&o.origin, &o.mount_id, "bad", &json!({"foreign":"value"}))
+                .submit_actor_form(&o.origin, &o.mount_id, "bad", &json!({"f0":123}))
                 .map(|_| ()),
             Self::Reject | Self::RepeatReject => store
                 .reject_actor_form(
@@ -269,9 +269,9 @@ fn failed_form_rollback_retains_cause_and_acknowledged_prefix() {
         let changes = store.subscribe_actor_form_changes();
         deny_completion(&store, Fault::Rollback);
         assert_recovery(
-            action
-                .run(&store, &o)
-                .expect_err("rollback fault must override ordinary refusal"),
+            action.run(&store, &o).expect_err(&format!(
+                "{action:?}: rollback fault must override ordinary refusal"
+            )),
             action,
         );
         assert!(
@@ -388,7 +388,9 @@ fn ordinary_form_refusals_preserve_error_and_ready_connection() {
         action.prepare(&store, &o);
         let before = snapshot(&store);
         let changes = store.subscribe_actor_form_changes();
-        let error = action.run(&store, &o).expect_err("ordinary refusal");
+        let error = action
+            .run(&store, &o)
+            .expect_err(&format!("{action:?}: ordinary refusal"));
         assert!(
             match action {
                 Action::RefuseAuthority => matches!(error, StoreError::ActorOutputRefused),
