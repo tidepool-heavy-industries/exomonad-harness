@@ -1,4 +1,5 @@
 use super::*;
+use crate::transport::{ResponsesProtocol, ResponsesRoute};
 use serde_json::Value;
 use std::{collections::VecDeque, sync::Mutex};
 
@@ -24,6 +25,10 @@ struct Script {
 }
 #[async_trait::async_trait]
 impl ResponsesTransport for Script {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         self.requests.lock().unwrap().push(request);
         self.turns

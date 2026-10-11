@@ -1,5 +1,6 @@
 //! Historical native context retains exact claim authority across restart.
 use super::*;
+use crate::transport::{ResponsesProtocol, ResponsesRoute};
 use crate::{
     context::{ContextBlock, ContextCommit, ContextDocument, ContextDraft},
     embedding::HostIdentity,
@@ -32,6 +33,10 @@ impl Provider for NoTools {
 struct FinalResponse(Arc<Mutex<Vec<ResponsesRequest>>>);
 #[async_trait::async_trait]
 impl ResponsesTransport for FinalResponse {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         let mut requests = self.0.lock().unwrap();
         assert!(requests.is_empty(), "one recovery continuation");

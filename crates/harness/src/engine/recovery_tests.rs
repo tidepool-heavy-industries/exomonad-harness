@@ -1,5 +1,6 @@
 //! Request-boundary recovery tests.
 use super::*;
+use crate::transport::{ResponsesProtocol, ResponsesRoute};
 
 use crate::{
     provider::{CallContext, ProviderError},
@@ -25,6 +26,10 @@ struct Replay {
 
 #[async_trait]
 impl ResponsesTransport for Replay {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         self.requests.lock().unwrap().push(request);
         self.turn
@@ -343,6 +348,10 @@ struct StreamCustomThenWait;
 
 #[async_trait]
 impl ResponsesTransport for StreamCustomThenWait {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         unreachable!("streaming path expected")
     }
@@ -361,9 +370,21 @@ impl ResponsesTransport for StreamCustomThenWait {
             crate::item::ToolExecution::Asynchronous,
             "the provider must run before the parked model response completes"
         );
-        sink.send(StreamEvent::ItemDone(call))
-            .await
-            .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
+        sink.send(
+            crate::transport::sse::ResponseAssembly::default()
+                .accept(
+                    &serde_json::json!({
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": (call).0,
+                    })
+                    .to_string(),
+                )
+                .expect("authored indexed done event is valid")
+                .expect("done event publishes a completed item"),
+        )
+        .await
+        .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
         std::future::pending().await
     }
 }

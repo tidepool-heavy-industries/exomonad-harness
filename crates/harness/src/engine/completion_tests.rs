@@ -1,5 +1,6 @@
 use super::*;
 use crate::provider::{CancellationAcknowledgment, CancellationOwner, ProviderError};
+use crate::transport::{ResponsesProtocol, ResponsesRoute};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::{
@@ -19,6 +20,10 @@ impl Auth for TestAuth {
 struct FinalTransport;
 #[async_trait]
 impl ResponsesTransport for FinalTransport {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         Ok(ResponsesTurn {
             response_id: "final".into(),
@@ -353,6 +358,10 @@ struct StalledTransport {
 
 #[async_trait]
 impl ResponsesTransport for StalledTransport {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         self.inputs.lock().await.push(request.input);
         let round = self.round.fetch_add(1, Ordering::SeqCst);
@@ -707,6 +716,10 @@ struct RequestBoundaryTransport {
 }
 #[async_trait]
 impl ResponsesTransport for RequestBoundaryTransport {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         assert_eq!(self.calls.fetch_add(1, Ordering::SeqCst), 0);
         let mut items = vec![];

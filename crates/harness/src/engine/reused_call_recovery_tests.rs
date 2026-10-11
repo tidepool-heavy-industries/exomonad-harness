@@ -1,5 +1,6 @@
 use super::*;
 use crate::provider::{CallContext, ProviderError};
+use crate::transport::{ResponsesProtocol, ResponsesRoute};
 use std::sync::{
     Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -99,6 +100,10 @@ fn invocation(name: &str) -> Item {
 
 #[async_trait::async_trait]
 impl ResponsesTransport for Script {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         let index = self.turns.fetch_add(1, Ordering::SeqCst);
         let items = match index {
@@ -154,6 +159,10 @@ fn engine(
 struct Finish;
 #[async_trait::async_trait]
 impl ResponsesTransport for Finish {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         Ok(ResponsesTurn {
             response_id: "recovered".into(),

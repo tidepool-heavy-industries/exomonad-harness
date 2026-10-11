@@ -1,5 +1,6 @@
 //! Process-reopen cuts through the embedded Store frontier and real Engine.
 use super::*;
+use crate::transport::{ResponsesProtocol, ResponsesRoute};
 use crate::{
     embedding::{BindingSuccessorAuthority, HostIdentity},
     store::EmbeddedRoundOutcome,
@@ -32,6 +33,10 @@ struct Script {
 }
 #[async_trait::async_trait]
 impl ResponsesTransport for Script {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         self.inputs.lock().unwrap().push(request);
         self.turns
@@ -710,6 +715,10 @@ struct CutAfterCompaction {
 }
 #[async_trait::async_trait]
 impl ResponsesTransport for Arc<CutAfterCompaction> {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         use std::sync::atomic::Ordering;
         if request.tools_allowed.as_ref().is_some_and(Vec::is_empty) {
@@ -749,10 +758,22 @@ impl ResponsesTransport for Arc<CutAfterCompaction> {
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         let turn = self.create(request).await?;
-        for item in &turn.items {
-            sink.send(StreamEvent::ItemDone(item.clone()))
-                .await
-                .unwrap();
+        for (index, item) in turn.items.iter().enumerate() {
+            sink.send(
+                crate::transport::sse::ResponseAssembly::default()
+                    .accept(
+                        &serde_json::json!({
+                            "type": "response.output_item.done",
+                            "output_index": index as u64,
+                            "item": (item.clone()).0,
+                        })
+                        .to_string(),
+                    )
+                    .expect("authored indexed done event is valid")
+                    .expect("done event publishes a completed item"),
+            )
+            .await
+            .unwrap();
         }
         self.provider.acknowledged.notified().await;
         Ok(turn)

@@ -1,4 +1,5 @@
 use super::*;
+use crate::transport::{ResponsesProtocol, ResponsesRoute};
 use crate::{
     context::{ContextBlock, ContextDraft, ContextRole},
     provider::{CallContext, ContextDisposition, ProviderCompletion, ProviderError},
@@ -90,6 +91,10 @@ struct NativeScript {
 
 #[async_trait::async_trait]
 impl ResponsesTransport for NativeScript {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         let index = {
             let mut requests = self.requests.lock().unwrap();

@@ -1,4 +1,5 @@
 use super::*;
+use crate::transport::{ResponsesProtocol, ResponsesRoute};
 use crate::{embedding::HostIdentity, provider::ProviderError, turn::JobOutput};
 use std::sync::Mutex;
 
@@ -146,6 +147,10 @@ impl Provider for Host {
 struct Finish;
 #[async_trait::async_trait]
 impl ResponsesTransport for Finish {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         Ok(ResponsesTurn {
             response_id: "finished".into(),

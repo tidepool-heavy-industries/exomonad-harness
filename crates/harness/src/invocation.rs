@@ -802,6 +802,7 @@ impl Drop for Invocation {
 mod tests {
     use super::*;
     use crate::model::Effort;
+    use crate::transport::{ResponsesProtocol, ResponsesRoute};
     use std::collections::VecDeque;
     #[derive(Clone)]
     struct TestAuth;
@@ -813,6 +814,10 @@ mod tests {
     struct Script(Mutex<VecDeque<ResponsesTurn>>);
     #[async_trait]
     impl ResponsesTransport for Script {
+        fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+            Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             self.0
                 .lock()
@@ -1230,6 +1235,12 @@ mod tests {
         }
         #[async_trait]
         impl ResponsesTransport for Inspect {
+            fn response_contract(
+                &self,
+            ) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+                Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+            }
+
             async fn create(
                 &self,
                 request: ResponsesRequest,
@@ -1337,6 +1348,12 @@ mod tests {
         }
         #[async_trait]
         impl ResponsesTransport for Pending {
+            fn response_contract(
+                &self,
+            ) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+                Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+            }
+
             async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
                 let _guard = Guard(self.dropped.clone());
                 self.entered.notify_one();
@@ -1449,6 +1466,12 @@ mod tests {
         }
         #[async_trait]
         impl ResponsesTransport for Streaming {
+            fn response_contract(
+                &self,
+            ) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+                Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+            }
+
             async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
                 unreachable!()
             }
@@ -1459,10 +1482,22 @@ mod tests {
                 sink: mpsc::Sender<StreamEvent>,
             ) -> Result<ResponsesTurn, TransportError> {
                 let turn = self.turns.lock().unwrap().pop_front().unwrap();
-                for item in &turn.items {
-                    sink.send(StreamEvent::ItemDone(item.clone()))
-                        .await
-                        .unwrap();
+                for (index, item) in turn.items.iter().enumerate() {
+                    sink.send(
+                        crate::transport::sse::ResponseAssembly::default()
+                            .accept(
+                                &serde_json::json!({
+                                    "type": "response.output_item.done",
+                                    "output_index": index as u64,
+                                    "item": (item.clone()).0,
+                                })
+                                .to_string(),
+                            )
+                            .expect("authored indexed done event is valid")
+                            .expect("done event publishes a completed item"),
+                    )
+                    .await
+                    .unwrap();
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 self.completed.store(true, Ordering::Release);
@@ -1534,6 +1569,12 @@ mod tests {
         struct Conflict;
         #[async_trait]
         impl ResponsesTransport for Conflict {
+            fn response_contract(
+                &self,
+            ) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+                Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+            }
+
             async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
                 unreachable!()
             }
@@ -1543,7 +1584,21 @@ mod tests {
                 _: ResponsesRequest,
                 sink: mpsc::Sender<StreamEvent>,
             ) -> Result<ResponsesTurn, TransportError> {
-                sink.send(StreamEvent::ItemDone(call("a"))).await.unwrap();
+                sink.send(
+                    crate::transport::sse::ResponseAssembly::default()
+                        .accept(
+                            &serde_json::json!({
+                                "type": "response.output_item.done",
+                                "output_index": 0,
+                                "item": (call("a")).0,
+                            })
+                            .to_string(),
+                        )
+                        .expect("authored indexed done event is valid")
+                        .expect("done event publishes a completed item"),
+                )
+                .await
+                .unwrap();
                 let mut changed = call("a");
                 changed.0["arguments"] = json!("{\"unexpected\":true}");
                 Ok(turn(vec![changed]))

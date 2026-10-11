@@ -1,6 +1,7 @@
 //! Opt-in measurements of production history readers and scripted Engine rounds.
 //! No provider traffic, compiler, compaction, or elapsed-time acceptance threshold.
 use super::*;
+use crate::transport::{ResponsesProtocol, ResponsesRoute};
 use serde_json::Value;
 use std::{path::PathBuf, sync::Mutex, time::Instant};
 
@@ -325,6 +326,10 @@ impl Provider for NoTools {
 struct Scripted(Arc<Mutex<Vec<ResponsesRequest>>>);
 #[async_trait::async_trait]
 impl ResponsesTransport for Scripted {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         self.0.lock().unwrap().push(request);
         Ok(ResponsesTurn {
