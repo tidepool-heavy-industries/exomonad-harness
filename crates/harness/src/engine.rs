@@ -170,6 +170,8 @@ mod tool_execution_tests;
 
 #[derive(Debug, Error)]
 pub enum EngineError {
+    #[error("inference is durably blocked: {block:?}")]
+    InferenceBlocked { block: crate::embedding::InferenceBlock },
     #[error(transparent)]
     Transport(#[from] TransportError),
     /// Stream completion is unknown, but every locally admitted outstanding
@@ -621,6 +623,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         finalize_schema: Option<serde_json::Value>,
         recovering: bool,
     ) -> Result<EngineCompletion, EngineError> {
+        let inference_attempt = match self.embedded_identity() {
+            Some(identity) => match self.store.begin_embedded_inference(&identity, head.as_ref()) {
+                Ok(attempt) => Some(attempt),
+                Err(StoreError::InferenceBlocked { block }) => return Err(EngineError::InferenceBlocked { block }),
+                Err(error) => return Err(error.into()),
+            },
+            None => None,
+        };
+        let recovering = recovering || inference_attempt.as_ref().is_some_and(|attempt| attempt.recovering);
         let (envelope_tx, envelopes) = tokio::sync::mpsc::unbounded_channel();
         let keepalive = envelope_tx.clone();
         let forwarder = tokio::spawn(async move {
@@ -632,7 +643,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         });
         let span = tracing::debug_span!(target: "harness::runtime_cost", "engine_run",
             actor = %self.config.agent.0, recovering, initial_items = new_items.len());
-        let result = self
+        let mut result = self
             .run_loop(
                 head,
                 new_items,
@@ -646,6 +657,19 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .await;
         drop(keepalive);
         forwarder.abort();
+        if let Some(attempt) = &inference_attempt {
+            if result.is_ok() {
+                self.store.finish_embedded_inference(attempt)?;
+            } else if matches!(result, Err(EngineError::Store(StoreError::Context(_)))) {
+                let identity = self.embedded_identity().expect("embedded attempt");
+                let frontier = self.store.embedded_round_frontier(&identity)?;
+                if let Some(request) = frontier.pending_head.or(frontier.settled_head) {
+                    let block = self.store.block_embedded_inference(&identity, &request,
+                        crate::embedding::InferenceBlockReason::ContinuityUnproven)?;
+                    result = Err(EngineError::InferenceBlocked { block });
+                }
+            }
+        }
         result
     }
 
@@ -2510,6 +2534,21 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         request: &RequestId,
         pending: &[PendingCall],
     ) -> EngineError {
+        if let TransportError::ProviderStreamFailure { event, .. } = &error {
+            let event = *event;
+            let primary = EngineError::Transport(error);
+            if let Err(cleanup) = self.cancel_pending(pending).await {
+                return EngineError::Cleanup { primary: Box::new(primary), cleanup: cleanup.to_string() };
+            }
+            if let Some(identity) = self.embedded_identity() {
+                return match self.store.block_embedded_inference(&identity, request,
+                    crate::embedding::InferenceBlockReason::ProviderStreamFailure { event }) {
+                    Ok(block) => EngineError::InferenceBlocked { block },
+                    Err(error) => error.into(),
+                };
+            }
+            return primary;
+        }
         if let TransportError::IncompleteResponse(cause) = &error {
             let cause = *cause;
             let primary = EngineError::Transport(error);

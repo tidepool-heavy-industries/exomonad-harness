@@ -244,3 +244,94 @@ impl Store {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{embedding::RecoveryMode, model::{AgentPath, CallId}, store::Usage, transport::StreamInterruption};
+    fn identity() -> HostIdentity { HostIdentity { run: "gate-run".into(), actor: AgentPath("/root".into()), incarnation: "first".into() } }
+    fn ready(store: &Store, identity: &HostIdentity) {
+        store.bind_embedded_actor(identity, None).unwrap();
+        store.initialize_context_target(&crate::model::ConversationIdentity::Embedded {
+            run: identity.run.clone(), actor: identity.actor.clone(), incarnation: identity.incarnation.clone(),
+        }, &crate::context::ContextProjectionTarget {
+            model: "test".into(), route: crate::transport::ResponsesRoute::Codex,
+            protocol: crate::transport::ResponsesProtocol::Standard,
+        }).unwrap();
+        assert_eq!(store.embedded_inference_state(identity).unwrap(), HostInferenceState::Idle);
+    }
+    fn interrupt(store: &Store, identity: &HostIdentity, parent: Option<&RequestId>, request: &RequestId) -> InferenceBlock {
+        let _attempt = store.begin_embedded_inference(identity, parent).unwrap();
+        store.write_embedded_request(identity, request, parent, &[], Usage::default()).unwrap();
+        assert!(store.record_interrupted_model_request(request, StreamInterruption::MissingCompletion, Some((identity, parent))).unwrap());
+        let HostInferenceState::Blocked { block } = store.embedded_inference_state(identity).unwrap() else { panic!("blocked"); };
+        block
+    }
+    fn recovery(store: &Store, identity: &HostIdentity, block: &InferenceBlock) -> ClientOperationId {
+        let operation = ClientOperationId(uuid::Uuid::new_v4());
+        store.enqueue_embedded_command(operation, &HostCommand::Recover { target: identity.clone(), expected_block: block.clone(), mode: RecoveryMode::Exact }).unwrap();
+        store.claim_embedded_command(&identity.run, operation).unwrap().unwrap();
+        operation
+    }
+    #[test]
+    fn eof_input_and_wake_cannot_authorize_and_duplicate_recovery_is_once_only() {
+        let store = Store::memory().unwrap(); let identity = identity(); ready(&store, &identity);
+        let request = RequestId("request".into()); let block = interrupt(&store, &identity, None, &request);
+        store.admit_embedded_input(&identity, "queued", "human", &crate::item::Item(serde_json::json!({"type":"message","role":"user","content":"new input"}))).unwrap();
+        for _ in 0..3 { assert!(matches!(store.begin_embedded_inference(&identity, None), Err(StoreError::InferenceBlocked { .. }))); }
+        assert_eq!(store.unread("/root").unwrap().len(), 1);
+        let operation = recovery(&store, &identity, &block);
+        let receipt = store.authorize_embedded_recovery(&identity, operation).unwrap();
+        assert!(matches!(receipt.outcome, CommandReceiptOutcome::RecoveryAuthorized { .. }));
+        let attempt = store.begin_embedded_inference(&identity, None).unwrap();
+        assert!(attempt.recovering);
+        assert_eq!(store.authorize_embedded_recovery(&identity, operation).unwrap(), receipt);
+        assert!(matches!(store.begin_embedded_inference(&identity, None), Err(StoreError::InferenceRunning)));
+        assert_eq!(store.unread("/root").unwrap().len(), 1);
+    }
+    #[test]
+    fn stale_block_wrong_incarnation_and_uncertain_terminal_refuse_atomically() {
+        let store = Store::memory().unwrap(); let identity = identity(); ready(&store, &identity);
+        let request = RequestId("request".into()); let block = interrupt(&store, &identity, None, &request);
+        let mut stale = block.clone(); stale.generation += 1;
+        let operation = recovery(&store, &identity, &stale);
+        assert!(matches!(store.authorize_embedded_recovery(&identity, operation).unwrap().outcome, CommandReceiptOutcome::Refused { .. }));
+        let foreign = HostIdentity { incarnation:"other".into(), ..identity.clone() };
+        let operation = recovery(&store, &foreign, &block);
+        assert!(matches!(store.authorize_embedded_recovery(&foreign, operation).unwrap().outcome, CommandReceiptOutcome::Refused { .. }));
+        let op = OperationId { origin: crate::model::ConversationIdentity::Embedded { run:identity.run.clone(), actor:identity.actor.clone(), incarnation:identity.incarnation.clone() }, request:request.clone(), call:CallId("uncertain".into()) };
+        store.lock().unwrap().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,terminal_json) VALUES(?1,?2,?3,?2,'settled',?4)", params![serde_json::to_string(&op.origin).unwrap(), request.0, op.call.0, serde_json::to_string(&super::super::TerminalOutcome::CancellationUnconfirmed("lost cleanup".into())).unwrap()]).unwrap();
+        let operation = recovery(&store, &identity, &block);
+        let receipt = store.authorize_embedded_recovery(&identity, operation).unwrap();
+        assert!(matches!(receipt.outcome, CommandReceiptOutcome::Refused { .. }));
+        assert_eq!(store.embedded_inference_state(&identity).unwrap(), HostInferenceState::Blocked { block });
+        assert_eq!(store.authorize_embedded_recovery(&identity, operation).unwrap(), receipt);
+    }
+    #[test]
+    fn restart_fences_old_grants_and_second_block_retains_monotonic_generation() {
+        let path = std::env::temp_dir().join(format!("harness-gate-{}.sqlite",uuid::Uuid::new_v4()));
+        let identity = identity(); let request = RequestId("request".into());
+        let first; let operation; let receipt;
+        {
+            let store = Store::open(&path).unwrap(); ready(&store, &identity);
+            first = interrupt(&store, &identity, None, &request);
+            operation = recovery(&store, &identity, &first);
+            receipt = store.authorize_embedded_recovery(&identity, operation).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert!(matches!(store.embedded_inference_state(&identity).unwrap(), HostInferenceState::Recovering { .. }));
+        assert_eq!(store.recover_embedded_inference_after_host_loss(&identity.run).unwrap(), 1);
+        let HostInferenceState::Blocked { block:second } = store.embedded_inference_state(&identity).unwrap() else { panic!("blocked"); };
+        assert!(second.generation > first.generation);
+        assert_eq!(store.authorize_embedded_recovery(&identity, operation).unwrap(), receipt);
+        assert!(matches!(store.begin_embedded_inference(&identity, None), Err(StoreError::InferenceBlocked { .. })));
+        let fresh = recovery(&store, &identity, &second);
+        assert!(matches!(store.authorize_embedded_recovery(&identity, fresh).unwrap().outcome, CommandReceiptOutcome::RecoveryAuthorized { .. }));
+        let _attempt = store.begin_embedded_inference(&identity, None).unwrap();
+        assert_eq!(store.recover_embedded_inference_after_host_loss(&identity.run).unwrap(), 1);
+        let HostInferenceState::Blocked { block:third } = store.embedded_inference_state(&identity).unwrap() else { panic!("blocked"); };
+        assert!(third.generation > second.generation);
+        assert_eq!(store.recover_embedded_inference_after_host_loss(&identity.run).unwrap(), 0);
+        drop(store); std::fs::remove_file(path).unwrap();
+    }
+}
