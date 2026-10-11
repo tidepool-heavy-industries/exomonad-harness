@@ -1109,6 +1109,7 @@ fn context_request_state_tx(
     tx: &Transaction<'_>,
     head: &RequestId,
     identity: &ConversationIdentity,
+    transport: Option<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol)>,
 ) -> Result<ContextRequestState> {
     let current = state(tx, identity)?;
     let canonical = {
@@ -1120,7 +1121,7 @@ fn context_request_state_tx(
     validate_canonical_history(tx, &canonical)?;
     let projected = {
         let _projection = tracing::debug_span!(target: "harness::runtime_cost", "portable_history_projection", input_items = canonical.len()).entered();
-        checked_projection(tx, head, &canonical, current.model.as_deref(), None, current.route.zip(current.protocol))?.into_items()
+        checked_projection(tx, head, &canonical, current.model.as_deref(), None, transport.or_else(|| current.route.zip(current.protocol)))?.into_items()
     };
     drop(canonical);
     let mut history = Vec::with_capacity(projected.len());
@@ -1359,6 +1360,25 @@ impl Store {
         head: &RequestId,
         identity: &ConversationIdentity,
     ) -> Result<ContextRequestState> {
+        self.context_request_state_with_transport(head, identity, None)
+    }
+
+    /// Use the current staged model and the actual per-request transport contract.
+    pub fn context_request_state_for_transport(
+        &self,
+        head: &RequestId,
+        identity: &ConversationIdentity,
+        transport: (crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol),
+    ) -> Result<ContextRequestState> {
+        self.context_request_state_with_transport(head, identity, Some(transport))
+    }
+
+    fn context_request_state_with_transport(
+        &self,
+        head: &RequestId,
+        identity: &ConversationIdentity,
+        transport: Option<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol)>,
+    ) -> Result<ContextRequestState> {
         let _projection =
             tracing::debug_span!(target: "harness::runtime_cost", "context_request_state",
             request_id = %head.0, actor = %identity.actor().0)
@@ -1375,7 +1395,7 @@ impl Store {
             if branch(&tx, head)? != identity.actor().0 {
                 return Err(StoreError::OperationOriginMismatch);
             }
-            let result = context_request_state_tx(&tx, head, identity)?;
+            let result = context_request_state_tx(&tx, head, identity, transport)?;
 
             Ok(result)
         });
@@ -1602,7 +1622,7 @@ impl Store {
         let Some(record) = receipt(&c, operation)? else {
             return Ok(None);
         };
-        if !matches!(record.version, 2 | 3)
+        if !matches!(record.version, 2 | 3 | 4)
             || terminal::exact_terminal(&c, operation)?
                 != Some((record.output.clone(), TerminalOutcome::Success))
         {
@@ -1628,6 +1648,20 @@ impl Store {
         if output.0["call_id"].as_str() != Some(operation.call.0.as_str()) {
             return Err(ContextError::UnsupportedState.into());
         }
+        if record.version >= 4 {
+            let frozen = history(&c, &record.deferred_head, true)?;
+            if frozen.len() < record.prefix.len()
+                || !frozen.iter().zip(&record.prefix).all(|(occurrence, entry)| {
+                    entry.origin.as_ref() == Some(&occurrence.origin)
+                        && entry.hash == occurrence.hash
+                        && entry.sources == occurrence.sources
+                        && entry.note == occurrence.note
+                        && entry.overlays == occurrence.overlays
+                })
+            {
+                return Err(ContextError::UnsupportedState.into());
+            }
+        }
         let prefix = record
             .prefix
             .iter()
@@ -1644,6 +1678,9 @@ impl Store {
             version: record.version,
             original_operation: record.original_operation.unwrap_or(record.operation),
             prefix,
+            prefix_origins: (record.version >= 4).then(|| record.prefix.iter()
+                .map(|entry| entry.origin.clone().ok_or(ContextError::UnsupportedState))
+                .collect::<std::result::Result<Vec<_>, _>>()).transpose()?,
             output,
             invocation: load(&original_call(&c, operation)?.hash)?,
             model: record.receipt.model,
@@ -1685,6 +1722,11 @@ impl Store {
             let output_item = Item::tool_output(&snapshot.operation.call, call.input.kind(), output);
             let output_hash = Self::put_item_tx(&tx, &output_item)?;
             if let Some(evidence) = replay {
+                if evidence.version >= 4 && evidence.prefix_origins.as_ref()
+                    .is_none_or(|origins| origins.len() != evidence.prefix.len())
+                {
+                    return Err(ContextError::UnsupportedState.into());
+                }
                 let original = original_call(&tx, &snapshot.operation)?;
                 let raw: String = tx.query_row(
                     "SELECT json FROM items WHERE hash=?1",
@@ -1712,6 +1754,7 @@ impl Store {
                         .collect::<Vec<_>>(),
                     &evidence.model,
                     evidence.next_effort,
+                    &evidence.prefix_origins,
                 ))?
             } else {
                 serde_json::to_string(draft)?
@@ -1880,6 +1923,10 @@ impl Store {
                             let current = matches!(&stored.block, ContextBlock::Native {reference,..} if current_refs.contains(reference));
                             (!stored.mandatory || current)
                                 && end <= evidence.prefix.len()
+                                && evidence.prefix_origins.as_ref().is_none_or(|origins| {
+                                    stored.items.iter().enumerate().all(|(offset, occurrence)|
+                                        origins.get(cursor + offset) == Some(&occurrence.origin))
+                                })
                                 && stored.items.iter().zip(&evidence.prefix[cursor..end]).all(
                                     |(local, (item, _, _, _))| {
                                         local.item == *item && !used_origins.contains(&local.origin)
@@ -1931,7 +1978,8 @@ impl Store {
                         .get(&hash)
                         .into_iter()
                         .flatten()
-                        .find(|i| !used_origins.contains(&i.origin) && i.item == *item)
+                        .find(|i| !used_origins.contains(&i.origin) && i.item == *item
+                            && evidence.prefix_origins.as_ref().is_none_or(|origins| origins.get(cursor) == Some(&i.origin)))
                     {
                         used_origins.insert(existing.origin.clone());
                         let mut occurrence = (*existing).clone();
@@ -2135,11 +2183,15 @@ impl Store {
         };
         let prefix_evidence = rewritten
             .iter()
-            .map(|i| PrefixEvidence {
+            .enumerate()
+            .map(|(position, i)| PrefixEvidence {
                 hash: i.hash.clone(),
                 sources: i.sources.clone(),
                 note: i.note,
                 overlays: i.overlays.clone(),
+                origin: Some(if i.origin.request.0.is_empty() {
+                    Origin { request: head.clone(), position: position as i64, hash: i.hash.clone() }
+                } else { i.origin.clone() }),
             })
             .collect();
         if text_changed {
@@ -2209,7 +2261,7 @@ impl Store {
         let deferred_head = freeze_committed_context(&tx, &receipt.head, &self.store_id)?;
         let record = ReceiptRecord {
             deferred_head,
-            version: 3,
+            version: 4,
             next_effort: draft.next_effort,
             prefix: prefix_evidence,
             candidate,
@@ -2250,6 +2302,8 @@ struct PrefixEvidence {
     note: bool,
     #[serde(default)]
     overlays: Vec<ContextTextOverlay>,
+    #[serde(default)]
+    origin: Option<Origin>,
 }
 
 fn legacy_candidate_matches(
@@ -2317,8 +2371,10 @@ fn receipt(c: &Connection, operation: &OperationId) -> Result<Option<ReceiptReco
         [] => Ok(None),
         [raw] => {
             let record: ReceiptRecord = serde_json::from_str(raw)?;
-            if !matches!(record.version, 2 | 3)
+            if !matches!(record.version, 2 | 3 | 4)
                 || record.operation != *operation
+                || (record.version >= 4 && record.prefix.iter().any(|entry|
+                    entry.origin.as_ref().is_none_or(|origin| origin.hash != entry.hash)))
                 || (record.version == 2
                     && record.prefix.iter().any(|entry| !entry.overlays.is_empty()))
             {

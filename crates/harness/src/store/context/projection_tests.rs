@@ -154,3 +154,36 @@ fn visible_recovery_preserves_pending_operation_and_original_opaque_bytes() {
     assert_eq!(projected.history.iter().filter(|(_, _, item)| item.tool_call().unwrap().is_some()).count(), 1);
     assert!(store.claims_for_operation(&operation).unwrap().iter().any(|claim| claim.request == replacement && claim.state == crate::store::ClaimState::Pending));
 }
+
+#[test]
+fn committed_native_prefix_retains_exact_origins_and_rejects_corrupted_restore_provenance() {
+    let store = Store::memory().unwrap();
+    let root = AgentPath("/root".into());
+    let identity = store.standalone_identity(root);
+    store.initialize_context_target(&identity, &target("astra")).unwrap();
+    let first = RequestId("native-first".into());
+    store.create_request(&first, None, "/root").unwrap();
+    store.set_effort(&first, Effort::Low).unwrap();
+    let turn = crate::transport::ResponsesTurn { response_id:"native-response".into(), items:vec![reasoning("native visible finding")], usage:Default::default() };
+    store.record_replay_turn_for_target(&first, &request("astra"), &turn, ResponsesRoute::Codex, ResponsesProtocol::Standard).unwrap();
+    let edit = RequestId("native-edit".into());
+    store.create_request(&edit, Some(&first), "/root").unwrap();
+    let turn = crate::transport::ResponsesTurn { response_id:"edit-response".into(), items:vec![capture_call()], usage:Default::default() };
+    store.record_replay_turn_for_target(&edit, &request("astra"), &turn, ResponsesRoute::Codex, ResponsesProtocol::Standard).unwrap();
+    let operation = store.claim(&CallId("capture".into()), &edit).unwrap();
+    let snapshot = store.begin_context(&operation, &edit).unwrap();
+    store.commit_context(ContextCommit { snapshot:&snapshot, draft:&ContextDraft {
+        document:snapshot.document.clone(), next_model:None, next_effort:Some(Effort::High),
+    }, output:&JobOutput::Completed(Ok(json!("completed"))), pending:&[] }).unwrap();
+    let evidence = store.context_commit_evidence(&operation).unwrap().unwrap();
+    assert_eq!(evidence.version, 4);
+    let origins = evidence.prefix_origins.unwrap();
+    assert!(origins.iter().any(|origin| origin.request == first));
+    let c = store.lock().unwrap();
+    let (event, raw): (i64,String) = c.query_row("SELECT id,payload FROM events WHERE kind='context_commit' ORDER BY id DESC LIMIT 1", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+    let mut record: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    record["prefix"][0]["origin"]["request"] = json!("unrelated-equal-bytes");
+    c.execute("UPDATE events SET payload=?2 WHERE id=?1", params![event,record.to_string()]).unwrap();
+    drop(c);
+    assert!(matches!(store.context_commit_evidence(&operation), Err(StoreError::Context(ContextError::UnsupportedState))));
+}

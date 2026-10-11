@@ -505,6 +505,7 @@ fn replay_collision_fixture(
     // deletion to new drafts.
     let legacy = ContextCommitEvidence {
         version: 2,
+        prefix_origins: None,
         original_operation: drop_operation.clone(),
         prefix: snapshot
             .blocks

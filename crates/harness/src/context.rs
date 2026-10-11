@@ -209,6 +209,7 @@ pub struct ContextCommitEvidence {
     pub(crate) version: u32,
     pub(crate) original_operation: OperationId,
     pub(crate) prefix: Vec<(Item, Vec<ContextReference>, bool, Vec<ContextTextOverlay>)>,
+    pub(crate) prefix_origins: Option<Vec<Origin>>,
     pub(crate) output: Item,
     pub(crate) invocation: Item,
     pub(crate) model: Option<String>,

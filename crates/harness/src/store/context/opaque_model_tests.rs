@@ -102,6 +102,7 @@ fn prepare(provenance: Provenance<'_>, selected: &str) -> Restoration {
     // reader; new drafts cannot remove the group.
     let legacy = ContextCommitEvidence {
         version: 2,
+        prefix_origins: None,
         original_operation: first.clone(),
         prefix: vec![(
             Item(json!({"type":"message","role":"user","content":"discovery note"})),
