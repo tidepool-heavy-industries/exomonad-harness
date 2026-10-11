@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn out_of_order_done_keeps_provider_order_and_gap_never_certifies_a_prefix() {
+    fn out_of_order_done_preserves_arrival_and_authenticated_provider_order() {
         let store = Store::memory().unwrap();
         let issued = issue(&store);
         store
@@ -474,7 +474,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             store.items(&issued.request).unwrap(),
-            vec![item(1), item(2)]
+            vec![item(2), item(1)]
         );
         let c = store.lock().unwrap();
         let owned = response_envelopes(&c, &issued.request).unwrap().unwrap();
