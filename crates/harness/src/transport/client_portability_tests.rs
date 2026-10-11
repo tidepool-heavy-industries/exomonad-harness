@@ -196,6 +196,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
                 contract: &json!({}),
                 checkout: &json!({}),
                 task: None,
+                target: &crate::context::ContextProjectionTarget { model: "gpt-6-luna".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
             },
         )
         .unwrap();
@@ -311,6 +312,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
                         contract: &json!({}),
                         checkout: &json!({}),
                         task: None,
+                        target: &crate::context::ContextProjectionTarget { model: "gpt-6-luna".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
                     },
                 )
                 .unwrap()

@@ -175,6 +175,7 @@ fn captured_cut_preserves_multicall_order_and_exact_earlier_dependencies() {
                     contract: &json!({}),
                     checkout: &json!({}),
                     task: None,
+                    target: &crate::context::ContextProjectionTarget { model: "test".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
                 },
             )
             .unwrap();
@@ -537,6 +538,7 @@ async fn captured_cut_two_child_engines_finish_while_original_provider_call_is_p
                     contract: &json!({}),
                     checkout: &json!({}),
                     task: None,
+                    target: &crate::context::ContextProjectionTarget { model: "test".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
                 },
             )
             .unwrap();
@@ -602,6 +604,7 @@ async fn captured_cut_two_child_engines_finish_while_original_provider_call_is_p
                 contract: &json!({}),
                 checkout: &json!({}),
                 task: None,
+                target: &crate::context::ContextProjectionTarget { model: "test".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
             },
         )
         .unwrap();

@@ -109,7 +109,7 @@ pub(super) fn transfer_embedded_state(
     Ok(())
 }
 
-pub(super) fn identity_for_branch(
+pub(crate) fn identity_for_branch(
     c: &Connection,
     store_id: &str,
     branch: &str,
@@ -596,6 +596,12 @@ pub(crate) fn capture_response_prefix(
     prefix: &[Occurrence],
     boundary: &Origin,
 ) -> Result<Option<Vec<Origin>>> {
+    let owned: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM provider_requests WHERE request_id=?1)",
+        [&boundary.request.0], |row| row.get(0))?;
+    if owned {
+        return super::provider_response::captured_prefix(c, &boundary.request, boundary,
+            &prefix.iter().map(|occurrence| occurrence.origin.clone()).collect::<Vec<_>>());
+    }
     let evidence = super::replay::response_envelopes(c, &boundary.request)?;
     let Some(envelope) = evidence.get(boundary) else {
         return Ok(None);
@@ -1211,13 +1217,14 @@ pub(super) fn publish_recovery_projection(
         return Ok((head.clone(), RecoveryProjectionReceipt::default()));
     }
     let canonical = history(tx, head, true)?;
-    validate_canonical_history(tx, &canonical)?;
     let replacement = RequestId(uuid::Uuid::new_v4().to_string());
     let mut retained = Vec::with_capacity(canonical.len());
     let mut receipt = RecoveryProjectionReceipt::default();
     let mut unknown = HashSet::new();
     for occurrence in canonical {
-        if !opaque(&occurrence.item) || occurrence.item.is_configuration_update()
+        let unbound_output = super::output_publication::is_tool_output(&occurrence.item)
+            && occurrence.output_operation.is_none();
+        if (!opaque(&occurrence.item) && !unbound_output) || occurrence.item.is_configuration_update()
             || (occurrence.item.0["type"] == "message"
                 && matches!(occurrence.item.0["role"].as_str(), Some("system" | "developer")))
         {
@@ -1395,7 +1402,6 @@ impl Store {
         let history = match &head {
             Some(head) => {
                 let retained = history(tx, head, true)?;
-                validate_canonical_history(tx, &retained)?;
                 retained.iter().map(|occurrence| {
                     let item = project_context_note(occurrence)?;
                     let hash = if occurrence.note || !occurrence.overlays.is_empty() {

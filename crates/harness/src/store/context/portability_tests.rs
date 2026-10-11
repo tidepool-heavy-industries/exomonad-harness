@@ -777,6 +777,7 @@ fn cut_fixture_with_reasoning(earlier_pending: bool, visible: bool, reasoning: I
                 contract: &json!({}),
                 checkout: &json!({}),
                 task: None,
+                target: &crate::context::ContextProjectionTarget { model: "model-b".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
             },
         )
         .unwrap();
@@ -871,6 +872,7 @@ fn authenticated_cut_survives_commit_freeze_and_deferred_child_without_later_arr
                 contract: &json!({}),
                 checkout: &json!({}),
                 task: None,
+                target: &crate::context::ContextProjectionTarget { model: "model-b".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
             },
         )
         .unwrap();
@@ -1034,6 +1036,7 @@ fn captured_prefix_keeps_prior_pending_call_and_deferred_boundary_refusals() {
                 contract: &json!({}),
                 checkout: &json!({}),
                 task: None,
+                target: &crate::context::ContextProjectionTarget { model: "model-b".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
             },
         )
         .unwrap();

@@ -17,6 +17,7 @@ pub struct ContextProjectionTarget {
 
 /// Exact continuity losses from an explicitly selected visible-history recovery.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RecoveryProjectionReceipt {
     pub omitted: Vec<ContextReference>,
     pub unknown_response_completeness: Vec<RequestId>,

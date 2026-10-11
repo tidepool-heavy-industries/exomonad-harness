@@ -724,7 +724,12 @@ impl Store {
                 params![binding.actor.0, binding.run, binding.incarnation],
             )?;
         }
-        let identity = context::identity_for_branch(tx, &self.store_id, &child.path.0)?;
+        let identity = match binding {
+            Some(binding) => ConversationIdentity::Embedded {
+                run: binding.run.clone(), actor: binding.actor.clone(), incarnation: binding.incarnation.clone(),
+            },
+            None => self.standalone_identity(child.path.clone()),
+        };
         context::save_target(tx, &identity, child.target)?;
         let envelope_id = if let Some(task) = child.task {
             let hash = Self::put_item_tx(&tx, task.item)?;
@@ -902,6 +907,7 @@ mod tests {
                     contract: &json!({"task":"implement"}),
                     checkout: &json!({"revision":"a1"}),
                     task: None,
+                    target: &crate::context::ContextProjectionTarget { model: "test".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
                 },
             )
             .unwrap();
@@ -914,6 +920,7 @@ mod tests {
                     contract: &json!({"task":"review"}),
                     checkout: &json!({"revision":"b2"}),
                     task: None,
+                    target: &crate::context::ContextProjectionTarget { model: "test".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
                 },
             )
             .unwrap();
@@ -1029,6 +1036,7 @@ mod tests {
                     contract: &json!({}),
                     checkout: &json!({}),
                     task: None,
+                    target: &crate::context::ContextProjectionTarget { model: "test".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
                 }
             ),
             Err(StoreError::ForeignCheckpoint)
@@ -1155,6 +1163,7 @@ mod tests {
                     contract: &json!({}),
                     checkout: &json!({"revision":"exact"}),
                     task: None,
+                    target: &crate::context::ContextProjectionTarget { model: "test".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
                 },
             )
             .unwrap();
@@ -1369,6 +1378,7 @@ mod tests {
                     contract: &json!({}),
                     checkout: &json!({"revision":"later"}),
                     task: None,
+                    target: &crate::context::ContextProjectionTarget { model: "test".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
                 },
             )
             .unwrap();
