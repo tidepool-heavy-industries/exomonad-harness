@@ -29,7 +29,7 @@ pub enum ProviderResponseState {
 pub(crate) struct IssuedProviderRequest {
     pub(super) request: RequestId,
     store_id: String,
-    pub(super) issued: IssuedReplayRequest,
+    pub(super) issued: Arc<IssuedReplayRequest>,
 }
 
 impl Store {
@@ -56,7 +56,7 @@ impl Store {
                 let base_position: i64 = tx.query_row("SELECT COALESCE(MAX(position)+1,0) FROM request_items WHERE request_id=?1", [&request.0], |r| r.get(0))?;
                 tx.execute("INSERT INTO provider_requests(request_id,issued_json,route,protocol,base_position,state) VALUES (?1,?2,?3,?4,?5,'streaming')", params![request.0,encoded,route,protocol,base_position])?;
             }
-            Ok(IssuedProviderRequest { request: request.clone(), store_id: self.store_id.clone(), issued })
+            Ok(IssuedProviderRequest { request: request.clone(), store_id: self.store_id.clone(), issued: Arc::new(issued) })
         })
     }
 
@@ -85,7 +85,8 @@ impl Store {
         // compare the complete issued input window again.
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM provider_requests WHERE request_id=?1)",
-            [&issued.request.0], |r| r.get(0),
+            [&issued.request.0],
+            |r| r.get(0),
         )?;
         if !exists {
             return Err(StoreError::InvalidProviderEvidence(issued.request.clone()));

@@ -254,7 +254,11 @@ async fn checkpoint_child_context_rewrite_preserves_consuming_claim_through_reco
                         contract: &json!({}),
                         checkout: &json!({}),
                         task: None,
-                        target: &crate::context::ContextProjectionTarget { model: "test".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
+                        target: &crate::context::ContextProjectionTarget {
+                            model: "test".into(),
+                            route: crate::transport::ResponsesRoute::Codex,
+                            protocol: crate::transport::ResponsesProtocol::Standard,
+                        },
                     },
                 )
                 .unwrap();

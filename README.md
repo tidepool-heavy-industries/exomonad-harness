@@ -29,10 +29,13 @@ Companion on the consumer side: `~/dev/tidepool/plans/harness-adoption.md`.
 Persistent stores use WAL with `synchronous=FULL` on every writer connection.
 Schema 16 records this durability contract. Opening an older store first confirms its
 inherited WAL with a FULL checkpoint; a blocked checkpoint refuses admission
-before retained bindings can authorize attachment. Matching schema-16 writers
+before retained bindings can authorize attachment. Matching current writers
 reopen without that barrier. Stop older writers before migration: a version
 marker cannot change an already-open connection's mode. Older bundles refuse
-schema 16, so preserve the matching bundle for unmigrated runs.
+newer schemas, so preserve the matching bundle for unmigrated runs. Schema 17
+records provider issuance, indexed output ownership and explicit inference
+recovery grants. Legacy response records retain unknown transport provenance;
+opening a store never certifies it from the current provider configuration.
 
 A successful binding COMMIT is durable acknowledgement. Checkpoint maintenance
 does not revoke it. Any explicit Store COMMIT error or failed transaction

@@ -2573,6 +2573,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     crate::store::OperationCleanupEvidence::NotStarted
                     | crate::store::OperationCleanupEvidence::Terminal(_),
                 ) => continue,
+
                 Err(error) => {
                     first_error.get_or_insert(EngineError::Store(error));
                 }
@@ -2643,6 +2644,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         operation: call.operation.clone(),
                     });
                 }
+
                 if let Err(error) = blocking(move || {
                     if not_started {
                         store.interrupt_unstarted_operation_claim(&operation, &request)
