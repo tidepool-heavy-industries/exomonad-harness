@@ -630,6 +630,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         finalize_schema: Option<serde_json::Value>,
         recovering: bool,
     ) -> Result<EngineCompletion, EngineError> {
+        let (route, protocol) = self.client.response_contract()?;
+        self.store.initialize_context_target(&self.origin, &crate::context::ContextProjectionTarget {
+            model: self.config.model.clone(), route, protocol,
+        })?;
         let inference_attempt = match self.embedded_identity() {
             Some(identity) => match self.store.begin_embedded_inference(&identity, head.as_ref()) {
                 Ok(attempt) => Some(attempt),
@@ -2505,11 +2509,19 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let mut first_error = None;
         for call in pending {
             let mut persisted_terminal = false;
-            if call.cancel_job_on_cleanup && call.wait.is_none() {
+            match self.store.replay_tool_output_claim(&call.operation, &call.claim_request) {
+                Ok(Some(output)) if matches!(output.terminal, crate::store::TerminalOutcome::Success
+                    | crate::store::TerminalOutcome::Failure(_) | crate::store::TerminalOutcome::Cancelled
+                    | crate::store::TerminalOutcome::CancelledWithReceipt(_)) => continue,
+                Err(error) => { first_error.get_or_insert(EngineError::Store(error)); },
+                _ => {},
+            }
+            if call.cancel_job_on_cleanup && call.wait.is_none() && !call.queued {
                 if let Err(error) = self.scheduler.cancel(&call.operation).await {
-                    if !matches!(error, JobError::UnknownCall) {
-                        first_error.get_or_insert_with(|| EngineError::Job(error));
-                    }
+                    first_error.get_or_insert_with(|| match error {
+                        JobError::UnknownCall => EngineError::UnconfirmedCancellation { operation: call.operation.clone() },
+                        other => EngineError::Job(other),
+                    });
                 }
                 match self.scheduler.unpublished_output(&call.operation).await {
                     Ok(Some(output)) => {
@@ -2547,8 +2559,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             }
                         }
                     }
-                    Err(JobError::UnknownCall) => {}
-                    Ok(None) => {}
+                    Err(JobError::UnknownCall) | Ok(None) => {
+                        first_error.get_or_insert_with(|| EngineError::UnconfirmedCancellation { operation: call.operation.clone() });
+                    }
                     Err(error) => {
                         first_error.get_or_insert(EngineError::Job(error));
                     }
@@ -2558,8 +2571,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 let store = self.store.clone();
                 let operation = call.operation.clone();
                 let request = call.claim_request.clone();
-                if let Err(error) =
-                    blocking(move || store.interrupt_operation_claim(&operation, &request)).await
+                let not_started = call.queued || call.wait.is_some();
+                if let Err(error) = blocking(move || if not_started {
+                    store.interrupt_unstarted_operation_claim(&operation, &request)
+                } else {
+                    store.interrupt_operation_claim(&operation, &request)
+                }).await
                 {
                     first_error.get_or_insert(error);
                 }

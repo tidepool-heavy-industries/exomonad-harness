@@ -252,7 +252,7 @@ impl ReplayProvider {
             TerminalOutcome::CancelledWithReceipt(receipt) => {
                 JobOutput::CancelledWithReceipt(receipt)
             }
-            TerminalOutcome::Interrupted => JobOutput::Interrupted,
+            TerminalOutcome::NotStarted | TerminalOutcome::Interrupted => JobOutput::Interrupted,
             TerminalOutcome::CancellationUnconfirmed(detail) => {
                 JobOutput::CancellationUnconfirmed(detail)
             }

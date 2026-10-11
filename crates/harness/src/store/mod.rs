@@ -2364,6 +2364,17 @@ impl Store {
         Ok(tx.execute("UPDATE claims SET state='interrupted' WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?4 AND state='pending'",params![origin,operation.request.0,operation.call.0,request.0])?)
         })
     }
+    /// Only the Engine's undispatched queue may issue this proof. A missing
+    /// scheduler job or process does not establish that execution never started.
+    pub(crate) fn interrupt_unstarted_operation_claim(
+        &self, operation: &OperationId, request: &RequestId,
+    ) -> Result<usize> {
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            Ok(tx.execute("UPDATE claims SET state='interrupted',terminal_json=?5 WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?4 AND state='pending'",
+                params![serde_json::to_string(&operation.origin)?,operation.request.0,operation.call.0,request.0,serde_json::to_string(&TerminalOutcome::NotStarted)?])?)
+        })
+    }
     /// Request-scoped legacy caller. Ambiguous same-ID claims are refused.
     pub fn interrupt_claim(&self, call: &CallId, request: &RequestId) -> Result<usize> {
         let candidates: Vec<_> = self

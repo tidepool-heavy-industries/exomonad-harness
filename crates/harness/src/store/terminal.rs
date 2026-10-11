@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", content = "detail", rename_all = "snake_case")]
 pub enum TerminalOutcome {
+    /// The Engine retained the invocation but never admitted external execution.
+    NotStarted,
     Success,
     Failure(ToolFailure),
     Cancelled,

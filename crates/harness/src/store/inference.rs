@@ -49,8 +49,26 @@ fn initialize(tx: &Transaction<'_>, identity: &HostIdentity) -> Result<(u64, Gat
     if !embedded::matches_binding(tx, identity)? {
         return Err(StoreError::InvalidEmbeddedBinding);
     }
-    if let Some(state) = read(tx, identity)? {
-        return Ok(state);
+    if let Some((generation, state)) = read(tx, identity)? {
+        let old_owner = match &state {
+            Gate::Running { incarnation, .. } | Gate::Recovering { incarnation, .. } => incarnation != &identity.incarnation,
+            _ => false,
+        };
+        if old_owner {
+            let frontier = embedded_round::frontier(tx, identity)?;
+            let state = match frontier.pending_head.or(frontier.settled_head) {
+                Some(request) => {
+                    let generation = generation.checked_add(1).ok_or(StoreError::StaleInferenceRecovery)?;
+                    let state = Gate::Blocked { block: InferenceBlock { request, generation, reason: InferenceBlockReason::HostInterrupted } };
+                    write(tx, identity, generation, &state)?;
+                    return Ok((generation, state));
+                },
+                None => Gate::Idle,
+            };
+            write(tx, identity, generation, &state)?;
+            return Ok((generation, state));
+        }
+        return Ok((generation, state));
     }
     let frontier = embedded_round::frontier(tx, identity)?;
     let (generation, state) = match frontier.pending_head {
@@ -111,7 +129,8 @@ fn validate_cleanup(c: &Connection, identity: &HostIdentity, head: &RequestId) -
         let (origin, request, call, state, terminal) = row?;
         let operation = OperationId { origin: serde_json::from_str(&origin)?, request: RequestId(request), call: crate::model::CallId(call) };
         let safe = match state.as_str() {
-            "interrupted" => true,
+            "interrupted" => terminal.map(|raw| serde_json::from_str::<super::TerminalOutcome>(&raw))
+                .transpose()?.is_some_and(|outcome| matches!(outcome, super::TerminalOutcome::NotStarted)),
             "settled" => terminal.map(|raw| serde_json::from_str::<super::TerminalOutcome>(&raw))
                 .transpose()?.is_some_and(|outcome| !matches!(outcome, super::TerminalOutcome::CancellationUnconfirmed(_))),
             _ => false,
