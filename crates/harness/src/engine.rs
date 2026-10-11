@@ -1379,7 +1379,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let store = self.store.clone();
             let instructions = replay_instructions.clone();
             let seal_head = parent.clone();
-            let contract = self.client.response_contract()?;
+            let contract = match self.client.response_contract() {
+                Ok(contract) => contract,
+                Err(error) => return Err(self.cleanup_pending(error.into(), &pending).await),
+            };
             let (req, provider_request) = match blocking(move || {
                 let issued = store.seal_replay_request_with_occurrences(
                     &seal_head,
@@ -1472,16 +1475,23 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                             Err(retain_error) => return Err(self.cleanup_pending(retain_error, &pending).await),
                                         };
                                         if inserted {
-                                            if let Some(call) = parsed_call_id(&item)? {
+                                            let call = match parsed_call_id(&item) {
+                                                Ok(call) => call,
+                                                Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                                            };
+                                            if let Some(call) = call {
                                                 let store = self.store.clone();
                                                 let stopped_request = parent.clone();
-                                                blocking(move || {
+                                                let interrupted_claim = blocking(move || {
                                                     match store.claim(&call, &stopped_request) {
-                                                        Ok(operation) => store.interrupt_operation_claim(&operation, &stopped_request).map(|_| ()),
+                                                        Ok(operation) => store.interrupt_unstarted_operation_claim(&operation, &stopped_request).map(|_| ()),
                                                         Err(StoreError::DuplicateClaim) => Ok(()),
                                                         Err(error) => Err(error),
                                                     }
-                                                }).await?;
+                                                }).await;
+                                                if let Err(error) = interrupted_claim {
+                                                    return Err(self.cleanup_pending(error, &pending).await);
+                                                }
                                             }
                                         }
                                     }

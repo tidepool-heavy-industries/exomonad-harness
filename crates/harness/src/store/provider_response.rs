@@ -80,14 +80,14 @@ impl Store {
         if issued.store_id != self.store_id {
             return Err(StoreError::InvalidProviderEvidence(issued.request.clone()));
         }
-        let raw: Option<String> = tx
-            .query_row(
-                "SELECT issued_json FROM provider_requests WHERE request_id=?1",
-                [&issued.request.0],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if raw.as_deref() != Some(serde_json::to_string(&issued.issued.record)?.as_str()) {
+        // Issuance fields have no mutation API. The private handle binds this
+        // immutable request key to its Store; item admission need not encode or
+        // compare the complete issued input window again.
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM provider_requests WHERE request_id=?1)",
+            [&issued.request.0], |r| r.get(0),
+        )?;
+        if !exists {
             return Err(StoreError::InvalidProviderEvidence(issued.request.clone()));
         }
         Ok(())
