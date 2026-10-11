@@ -61,7 +61,7 @@ fn boundary() -> Item {
 
 fn target(kind: u8) -> ContextProjectionTarget {
     ContextProjectionTarget {
-        model: if kind == 0 { "astra" } else { "luna" }.into(),
+        model: if kind == 1 { "luna" } else { "astra" }.into(),
         route: if kind == 2 {
             ResponsesRoute::ChatGptPlan
         } else {
