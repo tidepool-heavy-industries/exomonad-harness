@@ -44,7 +44,10 @@ pub(crate) struct CheckpointMetadata {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 enum CapturedResponsePrefix {
-    Valid { origins: Vec<crate::context::Origin>, boundary: crate::context::Origin },
+    Valid {
+        origins: Vec<crate::context::Origin>,
+        boundary: crate::context::Origin,
+    },
     Unproven,
 }
 
@@ -63,7 +66,9 @@ impl CheckpointMetadata {
         let value: Self = serde_json::from_str(raw)?;
         if !matches!(value.version, 1 | 2)
             || (value.cut == CheckpointCut::BeforeCall && value.operation.is_none())
-            || (value.version == 2 && value.cut == CheckpointCut::BeforeCall && value.response_prefix.is_none())
+            || (value.version == 2
+                && value.cut == CheckpointCut::BeforeCall
+                && value.response_prefix.is_none())
         {
             return Err(StoreError::InvalidCheckpointMetadata);
         }
@@ -107,10 +112,15 @@ pub(crate) fn before_call_response_prefix(
             return Err(StoreError::InvalidCheckpointMetadata);
         }
         let boundary = context::original_call(c, &operation)?;
-        let Some(CapturedResponsePrefix::Valid { origins: frozen, boundary: frozen_boundary }) = metadata.response_prefix else {
+        let Some(CapturedResponsePrefix::Valid {
+            origins: frozen,
+            boundary: frozen_boundary,
+        }) = metadata.response_prefix
+        else {
             continue;
         };
-        if boundary != frozen_boundary || selected != frozen
+        if boundary != frozen_boundary
+            || selected != frozen
             || origins.get(..frozen.len()) != Some(frozen.as_slice())
             || origins.get(frozen.len()) != Some(&boundary)
         {
@@ -447,10 +457,15 @@ impl Store {
         context::validate_canonical_history(tx, prefix)?;
         let response_prefix = if cut == CheckpointCut::BeforeCall {
             let boundary_origin = stored[boundary].origin.clone();
-            Some(match context::capture_response_prefix(tx, prefix, &boundary_origin)? {
-                Some(origins) => CapturedResponsePrefix::Valid { origins, boundary: boundary_origin },
-                None => CapturedResponsePrefix::Unproven,
-            })
+            Some(
+                match context::capture_response_prefix(tx, prefix, &boundary_origin)? {
+                    Some(origins) => CapturedResponsePrefix::Valid {
+                        origins,
+                        boundary: boundary_origin,
+                    },
+                    None => CapturedResponsePrefix::Unproven,
+                },
+            )
         } else {
             None
         };
@@ -916,7 +931,11 @@ mod tests {
                     contract: &json!({"task":"implement"}),
                     checkout: &json!({"revision":"a1"}),
                     task: None,
-                    target: &crate::context::ContextProjectionTarget { model: "test".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
+                    target: &crate::context::ContextProjectionTarget {
+                        model: "test".into(),
+                        route: crate::transport::ResponsesRoute::Codex,
+                        protocol: crate::transport::ResponsesProtocol::Standard,
+                    },
                 },
             )
             .unwrap();
@@ -929,7 +948,11 @@ mod tests {
                     contract: &json!({"task":"review"}),
                     checkout: &json!({"revision":"b2"}),
                     task: None,
-                    target: &crate::context::ContextProjectionTarget { model: "test".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
+                    target: &crate::context::ContextProjectionTarget {
+                        model: "test".into(),
+                        route: crate::transport::ResponsesRoute::Codex,
+                        protocol: crate::transport::ResponsesProtocol::Standard,
+                    },
                 },
             )
             .unwrap();
@@ -1045,7 +1068,11 @@ mod tests {
                     contract: &json!({}),
                     checkout: &json!({}),
                     task: None,
-                    target: &crate::context::ContextProjectionTarget { model: "test".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
+                    target: &crate::context::ContextProjectionTarget {
+                        model: "test".into(),
+                        route: crate::transport::ResponsesRoute::Codex,
+                        protocol: crate::transport::ResponsesProtocol::Standard
+                    },
                 }
             ),
             Err(StoreError::ForeignCheckpoint)
@@ -1087,9 +1114,20 @@ mod tests {
         }
         #[async_trait]
         impl ResponsesTransport for Replay {
-    fn response_contract(&self) -> std::result::Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
-        Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
-    }
+            fn response_contract(
+                &self,
+            ) -> std::result::Result<
+                (
+                    crate::transport::ResponsesRoute,
+                    crate::transport::ResponsesProtocol,
+                ),
+                TransportError,
+            > {
+                Ok((
+                    crate::transport::ResponsesRoute::Codex,
+                    crate::transport::ResponsesProtocol::Standard,
+                ))
+            }
             async fn create(
                 &self,
                 request: ResponsesRequest,
@@ -1175,7 +1213,11 @@ mod tests {
                     contract: &json!({}),
                     checkout: &json!({"revision":"exact"}),
                     task: None,
-                    target: &crate::context::ContextProjectionTarget { model: "test".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
+                    target: &crate::context::ContextProjectionTarget {
+                        model: "test".into(),
+                        route: crate::transport::ResponsesRoute::Codex,
+                        protocol: crate::transport::ResponsesProtocol::Standard,
+                    },
                 },
             )
             .unwrap();
@@ -1273,9 +1315,20 @@ mod tests {
         }
         #[async_trait]
         impl ResponsesTransport for Replay {
-    fn response_contract(&self) -> std::result::Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
-        Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
-    }
+            fn response_contract(
+                &self,
+            ) -> std::result::Result<
+                (
+                    crate::transport::ResponsesRoute,
+                    crate::transport::ResponsesProtocol,
+                ),
+                TransportError,
+            > {
+                Ok((
+                    crate::transport::ResponsesRoute::Codex,
+                    crate::transport::ResponsesProtocol::Standard,
+                ))
+            }
             async fn create(
                 &self,
                 request: ResponsesRequest,
@@ -1393,7 +1446,11 @@ mod tests {
                     contract: &json!({}),
                     checkout: &json!({"revision":"later"}),
                     task: None,
-                    target: &crate::context::ContextProjectionTarget { model: "test".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
+                    target: &crate::context::ContextProjectionTarget {
+                        model: "test".into(),
+                        route: crate::transport::ResponsesRoute::Codex,
+                        protocol: crate::transport::ResponsesProtocol::Standard,
+                    },
                 },
             )
             .unwrap();
@@ -1480,9 +1537,20 @@ mod tests {
         }
         #[async_trait]
         impl ResponsesTransport for Replay {
-    fn response_contract(&self) -> std::result::Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
-        Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
-    }
+            fn response_contract(
+                &self,
+            ) -> std::result::Result<
+                (
+                    crate::transport::ResponsesRoute,
+                    crate::transport::ResponsesProtocol,
+                ),
+                TransportError,
+            > {
+                Ok((
+                    crate::transport::ResponsesRoute::Codex,
+                    crate::transport::ResponsesProtocol::Standard,
+                ))
+            }
             async fn create(
                 &self,
                 _request: ResponsesRequest,

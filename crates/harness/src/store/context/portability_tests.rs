@@ -778,7 +778,11 @@ fn cut_fixture_with_reasoning(earlier_pending: bool, visible: bool, reasoning: I
                 contract: &json!({}),
                 checkout: &json!({}),
                 task: None,
-                target: &crate::context::ContextProjectionTarget { model: "model-b".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
+                target: &crate::context::ContextProjectionTarget {
+                    model: "model-b".into(),
+                    route: crate::transport::ResponsesRoute::Codex,
+                    protocol: crate::transport::ResponsesProtocol::Standard,
+                },
             },
         )
         .unwrap();
@@ -873,7 +877,11 @@ fn authenticated_cut_survives_commit_freeze_and_deferred_child_without_later_arr
                 contract: &json!({}),
                 checkout: &json!({}),
                 task: None,
-                target: &crate::context::ContextProjectionTarget { model: "model-b".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
+                target: &crate::context::ContextProjectionTarget {
+                    model: "model-b".into(),
+                    route: crate::transport::ResponsesRoute::Codex,
+                    protocol: crate::transport::ResponsesProtocol::Standard,
+                },
             },
         )
         .unwrap();
@@ -1037,7 +1045,11 @@ fn captured_prefix_keeps_prior_pending_call_and_deferred_boundary_refusals() {
                 contract: &json!({}),
                 checkout: &json!({}),
                 task: None,
-                target: &crate::context::ContextProjectionTarget { model: "model-b".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
+                target: &crate::context::ContextProjectionTarget {
+                    model: "model-b".into(),
+                    route: crate::transport::ResponsesRoute::Codex,
+                    protocol: crate::transport::ResponsesProtocol::Standard,
+                },
             },
         )
         .unwrap();
@@ -1159,14 +1171,27 @@ fn genuine_saved_reference_from_unrelated_checkpoint_cannot_authorize_model_swit
                 &retained,
                 Some("model-b"),
                 None,
-                Some((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+                Some((
+                    crate::transport::ResponsesRoute::Codex,
+                    crate::transport::ResponsesProtocol::Standard
+                ))
             )
             .is_ok()
         );
         // Genuine retained occurrences carry the checkpoint's physical rows,
         // but only the actual consuming head may select its issued authority.
         assert!(matches!(
-            checked_projection(&connection, &head, &retained, Some("model-b"), None, Some((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))),
+            checked_projection(
+                &connection,
+                &head,
+                &retained,
+                Some("model-b"),
+                None,
+                Some((
+                    crate::transport::ResponsesRoute::Codex,
+                    crate::transport::ResponsesProtocol::Standard
+                ))
+            ),
             Err(StoreError::Context(ContextError::OpaqueModel))
         ));
     }

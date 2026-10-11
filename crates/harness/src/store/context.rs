@@ -3,10 +3,10 @@ use super::{Result, Store, StoreError, TerminalOutcome, embedded_round, terminal
 use crate::{
     context::{
         ContextBlock, ContextCommit, ContextCommitEvidence, ContextCommitReceipt, ContextDocument,
-        ContextDraft, ContextError, ContextNativeKind, ContextReference, ContextRequestState,
-        ContextProjectionTarget, ContextReplayRejection, RecoveryProjectionReceipt,
-        ContextRole, ContextSnapshot, ContextTextOverlay, ContextTextSelector, ContextVisibleText,
-        Occurrence, Origin, SnapshotSeal, StoredBlock,
+        ContextDraft, ContextError, ContextNativeKind, ContextProjectionTarget, ContextReference,
+        ContextReplayRejection, ContextRequestState, ContextRole, ContextSnapshot,
+        ContextTextOverlay, ContextTextSelector, ContextVisibleText, Occurrence, Origin,
+        RecoveryProjectionReceipt, SnapshotSeal, StoredBlock,
     },
     item::{Item, ItemHash},
     model::{AgentPath, ConversationIdentity, OperationId, RequestId},
@@ -150,12 +150,74 @@ pub(crate) fn history(
     head: &RequestId,
     boundaries: bool,
 ) -> Result<Vec<Occurrence>> {
+    ordered_occurrences(c, &retained_history(c, head, boundaries)?)
+}
+
+/// Original occurrence positions remain durable journal identities.
+pub(crate) fn retained_history(
+    c: &Connection,
+    head: &RequestId,
+    boundaries: bool,
+) -> Result<Vec<Occurrence>> {
     query_occurrences(c, "WITH RECURSIVE lineage(id,parent_id,depth) AS (
         SELECT id,parent_id,0 FROM requests WHERE id=?1
         UNION ALL SELECT r.id,r.parent_id,l.depth+1 FROM requests r JOIN lineage l ON r.id=l.parent_id
         WHERE ?2=0 OR NOT EXISTS(SELECT 1 FROM session_state s WHERE s.session_id='harness:compaction:'||l.id)
     ) SELECT l.id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note,ri.context_overlays,ri.output_operation
     FROM lineage l JOIN request_items ri ON ri.request_id=l.id JOIN items i ON i.hash=ri.item_hash ORDER BY l.depth DESC,ri.position", params![head.0, boundaries])
+}
+
+/// Provider order is issued independently of arrival order. Interleaved terminal
+/// publications follow their observed provider group; already-late outputs stay late.
+fn ordered_occurrences(c: &Connection, retained: &[Occurrence]) -> Result<Vec<Occurrence>> {
+    let requests = retained
+        .iter()
+        .map(|occurrence| occurrence.origin.request.clone())
+        .collect();
+    let indices = super::provider_response::output_order(c, &requests)?;
+    let mut slots = HashMap::<RequestId, Vec<usize>>::new();
+    for (position, occurrence) in retained.iter().enumerate() {
+        if indices.contains_key(&occurrence.origin) {
+            slots
+                .entry(occurrence.origin.request.clone())
+                .or_default()
+                .push(position);
+        }
+    }
+    let mut ordered = retained.to_vec();
+    let mut ends = HashMap::new();
+    for (request, positions) in slots {
+        let mut members = positions
+            .iter()
+            .map(|position| retained[*position].clone())
+            .collect::<Vec<_>>();
+        members.sort_by_key(|occurrence| indices[&occurrence.origin]);
+        ends.insert(request, *positions.last().expect("nonempty provider group"));
+        for (position, occurrence) in positions.into_iter().zip(members) {
+            ordered[position] = occurrence;
+        }
+    }
+    let mut delayed = HashMap::<usize, Vec<Occurrence>>::new();
+    let mut removed = HashSet::new();
+    for (position, occurrence) in ordered.iter().enumerate() {
+        if let Some(operation) = &occurrence.output_operation
+            && let Some(end) = ends.get(&operation.request)
+            && position < *end
+        {
+            delayed.entry(*end).or_default().push(occurrence.clone());
+            removed.insert(position);
+        }
+    }
+    let mut result = Vec::with_capacity(ordered.len());
+    for (position, occurrence) in ordered.into_iter().enumerate() {
+        if !removed.contains(&position) {
+            result.push(occurrence);
+        }
+        if let Some(outputs) = delayed.remove(&position) {
+            result.extend(outputs);
+        }
+    }
+    Ok(result)
 }
 
 pub(crate) fn request_occurrences(c: &Connection, request: &RequestId) -> Result<Vec<Occurrence>> {
@@ -596,22 +658,39 @@ pub(crate) fn capture_response_prefix(
     prefix: &[Occurrence],
     boundary: &Origin,
 ) -> Result<Option<Vec<Origin>>> {
-    let owned: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM provider_requests WHERE request_id=?1)",
-        [&boundary.request.0], |row| row.get(0))?;
+    let owned: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM provider_requests WHERE request_id=?1)",
+        [&boundary.request.0],
+        |row| row.get(0),
+    )?;
     if owned {
-        return super::provider_response::captured_prefix(c, &boundary.request, boundary,
-            &prefix.iter().map(|occurrence| occurrence.origin.clone()).collect::<Vec<_>>());
+        return super::provider_response::captured_prefix(
+            c,
+            &boundary.request,
+            boundary,
+            &prefix
+                .iter()
+                .map(|occurrence| occurrence.origin.clone())
+                .collect::<Vec<_>>(),
+        );
     }
     let evidence = super::replay::response_envelopes(c, &boundary.request)?;
     let Some(envelope) = evidence.get(boundary) else {
         return Ok(None);
     };
-    let Some(cut) = envelope.origins.iter().position(|origin| origin == boundary) else {
+    let Some(cut) = envelope
+        .origins
+        .iter()
+        .position(|origin| origin == boundary)
+    else {
         return Ok(None);
     };
     let membership = envelope.origins.iter().collect::<HashSet<_>>();
-    let selected = prefix.iter().filter(|occurrence| membership.contains(&occurrence.origin))
-        .map(|occurrence| occurrence.origin.clone()).collect::<Vec<_>>();
+    let selected = prefix
+        .iter()
+        .filter(|occurrence| membership.contains(&occurrence.origin))
+        .map(|occurrence| occurrence.origin.clone())
+        .collect::<Vec<_>>();
     Ok((selected == envelope.origins[..cut]).then_some(selected))
 }
 
@@ -824,7 +903,9 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
 /// Construct the only provider-facing projection. Stored history, native
 /// references, claims and receipts continue to refer to the original bytes.
 /// Store owns the checked input. Callers may consume it but cannot construct it.
-pub(super) struct CheckedContextProjection(Vec<(RequestId, Option<ItemHash>, Item, Option<Occurrence>)>);
+pub(super) struct CheckedContextProjection(
+    Vec<(RequestId, Option<ItemHash>, Item, Option<Occurrence>)>,
+);
 
 impl CheckedContextProjection {
     pub(super) fn into_items(self) -> Vec<(RequestId, Option<ItemHash>, Item, Option<Occurrence>)> {
@@ -838,8 +919,13 @@ pub(super) fn checked_projection(
     all: &[Occurrence],
     model: Option<&str>,
     completing: Option<&OperationId>,
-    transport: Option<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol)>,
+    transport: Option<(
+        crate::transport::ResponsesRoute,
+        crate::transport::ResponsesProtocol,
+    )>,
 ) -> Result<CheckedContextProjection> {
+    let ordered = ordered_occurrences(c, all)?;
+    let all = ordered.as_slice();
     validate_canonical_history(c, all)?;
     for occurrence in all {
         if occurrence
@@ -957,7 +1043,9 @@ pub(super) fn checked_projection(
         }
         if envelope.model == selected {
             if envelope.route.zip(envelope.protocol) != transport || transport.is_none() {
-                return Err(ContextError::Replay(ContextReplayRejection::IncompatibleTransport).into());
+                return Err(
+                    ContextError::Replay(ContextReplayRejection::IncompatibleTransport).into(),
+                );
             }
             continue;
         }
@@ -1127,7 +1215,10 @@ fn context_request_state_tx(
     tx: &Transaction<'_>,
     head: &RequestId,
     identity: &ConversationIdentity,
-    transport: Option<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol)>,
+    transport: Option<(
+        crate::transport::ResponsesRoute,
+        crate::transport::ResponsesProtocol,
+    )>,
 ) -> Result<ContextRequestState> {
     let current = state(tx, identity)?;
     let canonical = {
@@ -1139,7 +1230,15 @@ fn context_request_state_tx(
     validate_canonical_history(tx, &canonical)?;
     let projected = {
         let _projection = tracing::debug_span!(target: "harness::runtime_cost", "portable_history_projection", input_items = canonical.len()).entered();
-        checked_projection(tx, head, &canonical, current.model.as_deref(), None, transport.or_else(|| current.route.zip(current.protocol)))?.into_items()
+        checked_projection(
+            tx,
+            head,
+            &canonical,
+            current.model.as_deref(),
+            None,
+            transport.or_else(|| current.route.zip(current.protocol)),
+        )?
+        .into_items()
     };
     drop(canonical);
     let mut history = Vec::with_capacity(projected.len());
@@ -1175,7 +1274,8 @@ pub(crate) fn preflight_target(
         Some(&target.model),
         None,
         Some((target.route, target.protocol)),
-    ).map(drop)
+    )
+    .map(drop)
 }
 
 pub(super) fn current_projection_target(
@@ -1185,8 +1285,12 @@ pub(super) fn current_projection_target(
     let current = state(c, identity)?;
     Ok(ContextProjectionTarget {
         model: current.model.ok_or(ContextError::InvalidModel)?,
-        route: current.route.ok_or(ContextError::Replay(ContextReplayRejection::IncompatibleTransport))?,
-        protocol: current.protocol.ok_or(ContextError::Replay(ContextReplayRejection::IncompatibleTransport))?,
+        route: current.route.ok_or(ContextError::Replay(
+            ContextReplayRejection::IncompatibleTransport,
+        ))?,
+        protocol: current.protocol.ok_or(ContextError::Replay(
+            ContextReplayRejection::IncompatibleTransport,
+        ))?,
     })
 }
 
@@ -1196,8 +1300,15 @@ pub(super) fn preflight_current(
     identity: &ConversationIdentity,
 ) -> Result<()> {
     let current = state(c, identity)?;
-    checked_projection(c, head, &history(c, head, true)?, current.model.as_deref(), None,
-        current.route.zip(current.protocol)).map(drop)
+    checked_projection(
+        c,
+        head,
+        &history(c, head, true)?,
+        current.model.as_deref(),
+        None,
+        current.route.zip(current.protocol),
+    )
+    .map(drop)
 }
 
 pub(crate) fn save_target(
@@ -1227,7 +1338,9 @@ pub(super) fn publish_recovery_projection(
     store_id: &str,
 ) -> Result<(RequestId, RecoveryProjectionReceipt)> {
     let conversation = ConversationIdentity::Embedded {
-        run: identity.run.clone(), actor: identity.actor.clone(), incarnation: identity.incarnation.clone(),
+        run: identity.run.clone(),
+        actor: identity.actor.clone(),
+        incarnation: identity.incarnation.clone(),
     };
     validate_identity(tx, store_id, &conversation)?;
     let target = current_projection_target(tx, &conversation)?;
@@ -1254,9 +1367,13 @@ pub(super) fn publish_recovery_projection(
         let unbound_call = call.is_some() && !operation_owned;
         if operation_owned
             || (!opaque(&occurrence.item) && !unbound_output && !unbound_call)
+
             || occurrence.item.is_configuration_update()
             || (occurrence.item.0["type"] == "message"
-                && matches!(occurrence.item.0["role"].as_str(), Some("system" | "developer")))
+                && matches!(
+                    occurrence.item.0["role"].as_str(),
+                    Some("system" | "developer")
+                ))
         {
             retained.push(occurrence);
             continue;
@@ -1268,11 +1385,15 @@ pub(super) fn publish_recovery_projection(
             ))) if occurrence.item.0["type"] == "reasoning" => None,
             Err(error) => return Err(error),
         };
-        receipt.omitted.push(reference(std::slice::from_ref(&occurrence)));
+        receipt
+            .omitted
+            .push(reference(std::slice::from_ref(&occurrence)));
         if super::replay::recorded_response_identity(tx, &occurrence.origin.request)?.is_none()
             && unknown.insert(occurrence.origin.request.clone())
         {
-            receipt.unknown_response_completeness.push(occurrence.origin.request.clone());
+            receipt
+                .unknown_response_completeness
+                .push(occurrence.origin.request.clone());
         }
         if let Some(mut item) = note {
             let attribution = if unbound_call {
@@ -1287,23 +1408,44 @@ pub(super) fn publish_recovery_projection(
             let hash = Store::put_item_tx(tx, &item)?;
             let position = retained.len() as i64;
             retained.push(Occurrence {
-                request: replacement.clone(), position, hash: hash.clone(), item,
+                request: replacement.clone(),
+                position,
+                hash: hash.clone(),
+                item,
                 output_operation: None,
-                origin: Origin { request: replacement.clone(), position, hash },
+                origin: Origin {
+                    request: replacement.clone(),
+                    position,
+                    hash,
+                },
                 sources: vec![reference(std::slice::from_ref(&occurrence))],
-                note: false, overlays: Vec::new(),
+                note: false,
+                overlays: Vec::new(),
             });
         }
     }
-    checked_projection(tx, head, &retained, Some(&target.model), None,
-        Some((target.route, target.protocol)))?;
+    checked_projection(
+        tx,
+        head,
+        &retained,
+        Some(&target.model),
+        None,
+        Some((target.route, target.protocol)),
+    )?;
     insert_snapshot_request(tx, &replacement, Some(head), &identity.actor.0)?;
     tx.execute("UPDATE requests SET embedded_run=?2,embedded_incarnation=?3,round_phase='pending' WHERE id=?1",
         params![replacement.0, identity.run, identity.incarnation])?;
     for (position, occurrence) in retained.iter().enumerate() {
         insert_occurrence(tx, &replacement, position as i64, occurrence)?;
     }
-    carry_native_claims(tx, &retained, head, &replacement, store_id, NativeClaimTransfer::Current)?;
+    carry_native_claims(
+        tx,
+        &retained,
+        head,
+        &replacement,
+        store_id,
+        NativeClaimTransfer::Current,
+    )?;
     compaction_generation(tx, store_id, head, &replacement, &identity.actor.0)?;
     Ok((replacement, receipt))
 }
@@ -1406,7 +1548,10 @@ impl Store {
         &self,
         head: &RequestId,
         identity: &ConversationIdentity,
-        transport: (crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol),
+        transport: (
+            crate::transport::ResponsesRoute,
+            crate::transport::ResponsesProtocol,
+        ),
     ) -> Result<ContextRequestState> {
         self.context_request_state_with_transport(head, identity, Some(transport))
     }
@@ -1415,7 +1560,10 @@ impl Store {
         &self,
         head: &RequestId,
         identity: &ConversationIdentity,
-        transport: Option<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol)>,
+        transport: Option<(
+            crate::transport::ResponsesRoute,
+            crate::transport::ResponsesProtocol,
+        )>,
     ) -> Result<ContextRequestState> {
         let _projection =
             tracing::debug_span!(target: "harness::runtime_cost", "context_request_state",
@@ -1689,13 +1837,16 @@ impl Store {
         if record.version >= 4 {
             let frozen = history(&c, &record.deferred_head, true)?;
             if frozen.len() < record.prefix.len()
-                || !frozen.iter().zip(&record.prefix).all(|(occurrence, entry)| {
-                    entry.origin.as_ref() == Some(&occurrence.origin)
-                        && entry.hash == occurrence.hash
-                        && entry.sources == occurrence.sources
-                        && entry.note == occurrence.note
-                        && entry.overlays == occurrence.overlays
-                })
+                || !frozen
+                    .iter()
+                    .zip(&record.prefix)
+                    .all(|(occurrence, entry)| {
+                        entry.origin.as_ref() == Some(&occurrence.origin)
+                            && entry.hash == occurrence.hash
+                            && entry.sources == occurrence.sources
+                            && entry.note == occurrence.note
+                            && entry.overlays == occurrence.overlays
+                    })
             {
                 return Err(ContextError::UnsupportedState.into());
             }
@@ -1716,9 +1867,15 @@ impl Store {
             version: record.version,
             original_operation: record.original_operation.unwrap_or(record.operation),
             prefix,
-            prefix_origins: (record.version >= 4).then(|| record.prefix.iter()
-                .map(|entry| entry.origin.clone().ok_or(ContextError::UnsupportedState))
-                .collect::<std::result::Result<Vec<_>, _>>()).transpose()?,
+            prefix_origins: (record.version >= 4)
+                .then(|| {
+                    record
+                        .prefix
+                        .iter()
+                        .map(|entry| entry.origin.clone().ok_or(ContextError::UnsupportedState))
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                })
+                .transpose()?,
             output,
             invocation: load(&original_call(&c, operation)?.hash)?,
             model: record.receipt.model,
@@ -2411,8 +2568,13 @@ fn receipt(c: &Connection, operation: &OperationId) -> Result<Option<ReceiptReco
             let record: ReceiptRecord = serde_json::from_str(raw)?;
             if !matches!(record.version, 2 | 3 | 4)
                 || record.operation != *operation
-                || (record.version >= 4 && record.prefix.iter().any(|entry|
-                    entry.origin.as_ref().is_none_or(|origin| origin.hash != entry.hash)))
+                || (record.version >= 4
+                    && record.prefix.iter().any(|entry| {
+                        entry
+                            .origin
+                            .as_ref()
+                            .is_none_or(|origin| origin.hash != entry.hash)
+                    }))
                 || (record.version == 2
                     && record.prefix.iter().any(|entry| !entry.overlays.is_empty()))
             {

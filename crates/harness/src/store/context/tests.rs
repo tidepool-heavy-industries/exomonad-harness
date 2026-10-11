@@ -643,7 +643,11 @@ fn deferred_child_inherits_committed_context_and_terminal_before_call_stays_froz
                 contract: &json!({}),
                 checkout: &json!({}),
                 task: None,
-                target: &crate::context::ContextProjectionTarget { model: "sol".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
+                target: &crate::context::ContextProjectionTarget {
+                    model: "sol".into(),
+                    route: crate::transport::ResponsesRoute::Codex,
+                    protocol: crate::transport::ResponsesProtocol::Standard,
+                },
             },
         )
         .unwrap();
@@ -685,7 +689,11 @@ fn deferred_child_inherits_committed_context_and_terminal_before_call_stays_froz
                 contract: &json!({}),
                 checkout: &json!({}),
                 task: None,
-                target: &crate::context::ContextProjectionTarget { model: "sol".into(), route: crate::transport::ResponsesRoute::Codex, protocol: crate::transport::ResponsesProtocol::Standard },
+                target: &crate::context::ContextProjectionTarget {
+                    model: "sol".into(),
+                    route: crate::transport::ResponsesRoute::Codex,
+                    protocol: crate::transport::ResponsesProtocol::Standard,
+                },
             },
         )
         .unwrap();
