@@ -116,8 +116,8 @@ impl Operation {
     async fn run(self, seed: &Seed, item: Option<Item>) -> Result<(), EngineError> {
         match self {
             Self::CanonicalHistory => {
-                let history = load_history_window(seed.store.clone(), seed.head.clone()).await?;
-                assert_eq!(history.items.len(), seed.items);
+                let history = load_history(seed.store.clone(), seed.head.clone()).await?;
+                assert_eq!(history.len(), seed.items);
             }
             Self::ProjectedHistory => {
                 let store = seed.store.clone();
