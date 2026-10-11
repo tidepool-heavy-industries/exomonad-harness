@@ -841,6 +841,24 @@ pub(super) fn checked_projection(
     transport: Option<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol)>,
 ) -> Result<CheckedContextProjection> {
     validate_canonical_history(c, all)?;
+    for occurrence in all {
+        if occurrence
+            .item
+            .tool_call()
+            .map_err(|_| ContextError::UnsupportedState)?
+            .is_some()
+            && super::validation::operation_for_occurrence(c, occurrence)?.is_none()
+            && !super::replay::is_validated_completion(c, &occurrence.origin)?
+        {
+            return Err(
+                ContextError::Replay(ContextReplayRejection::UnownedInvocation {
+                    request: occurrence.origin.request.clone(),
+                    position: occurrence.origin.position,
+                })
+                .into(),
+            );
+        }
+    }
     let evidence = response_evidence(c, all)?;
     let positions = occurrence_positions(all);
     let operations = all
@@ -1225,7 +1243,18 @@ pub(super) fn publish_recovery_projection(
     for occurrence in canonical {
         let unbound_output = super::output_publication::is_tool_output(&occurrence.item)
             && occurrence.output_operation.is_none();
-        if (!opaque(&occurrence.item) && !unbound_output) || occurrence.item.is_configuration_update()
+        let call = occurrence
+            .item
+            .tool_call()
+            .map_err(|_| ContextError::UnsupportedState)?;
+        let operation_owned = occurrence.output_operation.is_some()
+            || (call.is_some()
+                && (super::validation::operation_for_occurrence(tx, &occurrence)?.is_some()
+                    || super::replay::is_validated_completion(tx, &occurrence.origin)?));
+        let unbound_call = call.is_some() && !operation_owned;
+        if operation_owned
+            || (!opaque(&occurrence.item) && !unbound_output && !unbound_call)
+            || occurrence.item.is_configuration_update()
             || (occurrence.item.0["type"] == "message"
                 && matches!(occurrence.item.0["role"].as_str(), Some("system" | "developer")))
         {
@@ -1245,7 +1274,16 @@ pub(super) fn publish_recovery_projection(
         {
             receipt.unknown_response_completeness.push(occurrence.origin.request.clone());
         }
-        if let Some(item) = note {
+        if let Some(mut item) = note {
+            let attribution = if unbound_call {
+                "[Visible-history recovery: invocation ownership and execution outcome are unproven.]"
+            } else if unbound_output {
+                "[Visible-history recovery: output has no bound operation or established terminal outcome.]"
+            } else {
+                "[Visible-history recovery: opaque provider continuity was omitted.]"
+            };
+            let text = item.0["content"].as_str().ok_or(ContextError::UnsupportedState)?;
+            item.0["content"] = json!(format!("{attribution}\n{text}"));
             let hash = Store::put_item_tx(tx, &item)?;
             let position = retained.len() as i64;
             retained.push(Occurrence {

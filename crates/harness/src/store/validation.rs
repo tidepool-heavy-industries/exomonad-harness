@@ -57,6 +57,62 @@ pub(crate) struct IssuedInvocation {
     pub occurrence: Origin,
 }
 
+/// Original claims issue operation identity; byte equality cannot bind a copied call.
+pub(super) fn operation_for_occurrence(
+    c: &Connection,
+    occurrence: &crate::context::Occurrence,
+) -> Result<Option<OperationId>> {
+    let Some(call) =
+        occurrence
+            .item
+            .tool_call()
+            .map_err(|reason| StoreError::MalformedReplayCall {
+                request: occurrence.origin.request.0.clone(),
+                call_id: occurrence.item.0["call_id"].as_str().unwrap_or("").into(),
+                reason: reason.into(),
+            })?
+    else {
+        return Ok(None);
+    };
+    let operation = recorded_operation(c, &occurrence.origin.request, &call.call_id)?;
+    let Some(operation) = operation else {
+        return Ok(None);
+    };
+    let issued = invocations_for_operations(c, &HashSet::from([operation.clone()]))?;
+    if issued
+        .get(&operation)
+        .is_none_or(|issued| issued.occurrence != occurrence.origin)
+    {
+        return Err(StoreError::OperationOriginMismatch);
+    }
+    Ok(Some(operation))
+}
+
+fn recorded_operation(
+    c: &Connection,
+    request: &RequestId,
+    call: &CallId,
+) -> Result<Option<OperationId>> {
+    if invocation_item(c, request, call)?.is_none() {
+        return Ok(None);
+    }
+    let mut query = c.prepare("SELECT origin FROM claims WHERE origin_request_id=?1 AND request_id=?1 AND call_id=?2 ORDER BY origin")?;
+    let origins = query
+        .query_map(params![request.0, call.0], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    match origins.as_slice() {
+        [] => Ok(None),
+        [origin] => Ok(Some(OperationId {
+            origin: serde_json::from_str(origin)?,
+            request: request.clone(),
+            call: call.clone(),
+        })),
+        _ => Err(StoreError::AmbiguousReplayCall {
+            call_id: call.0.clone(),
+        }),
+    }
+}
+
 /// Read immutable issuance for exactly the requested operations in bounded batches.
 /// Equal wire IDs in different issuing requests remain separate ledger entries.
 pub(super) fn invocations_for_operations(
@@ -136,27 +192,7 @@ impl Store {
         request: &RequestId,
         call: &CallId,
     ) -> Result<Option<OperationId>> {
-        let c = self.lock()?;
-        if invocation_item(&c, request, call)?.is_none() {
-            return Ok(None);
-        }
-        let mut query = c.prepare(
-            "SELECT origin FROM claims WHERE origin_request_id=?1 AND request_id=?1 AND call_id=?2 ORDER BY origin",
-        )?;
-        let origins = query
-            .query_map(params![request.0, call.0], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        match origins.as_slice() {
-            [] => Ok(None),
-            [origin] => Ok(Some(OperationId {
-                origin: serde_json::from_str(origin)?,
-                request: request.clone(),
-                call: call.clone(),
-            })),
-            _ => Err(StoreError::AmbiguousReplayCall {
-                call_id: call.0.clone(),
-            }),
-        }
+        recorded_operation(&*self.lock()?, request, call)
     }
 
     pub(crate) fn select_operation_occurrences(

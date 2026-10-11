@@ -34,6 +34,8 @@ pub enum ContextReplayRejection {
     InvalidPrefix,
     #[error("opaque provider continuity has no established route or protocol compatibility")]
     IncompatibleTransport,
+    #[error("native invocation has no exact owning operation at {request:?}:{position}")]
+    UnownedInvocation { request: RequestId, position: i64 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

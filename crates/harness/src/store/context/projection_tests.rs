@@ -187,3 +187,76 @@ fn committed_native_prefix_retains_exact_origins_and_rejects_corrupted_restore_p
     drop(c);
     assert!(matches!(store.context_commit_evidence(&operation), Err(StoreError::Context(ContextError::UnsupportedState))));
 }
+
+#[test]
+fn exact_recovery_refuses_unowned_invocations_and_visible_mode_cites_the_loss() {
+    let store = Store::memory().unwrap();
+    let host = HostIdentity {
+        run: "unowned-invocation".into(),
+        actor: AgentPath("/root".into()),
+        incarnation: "first".into(),
+    };
+    store.bind_embedded_actor(&host, None).unwrap();
+    let identity = ConversationIdentity::Embedded {
+        run: host.run.clone(),
+        actor: host.actor.clone(),
+        incarnation: host.incarnation.clone(),
+    };
+    store
+        .initialize_context_target(&identity, &target("astra"))
+        .unwrap();
+    let head = RequestId("unclaimed-source".into());
+    store
+        .write_embedded_request(
+            &host,
+            &head,
+            None,
+            &[capture_call()],
+            crate::store::Usage::default(),
+        )
+        .unwrap();
+    let originals = store.context_history(&head).unwrap();
+    let mut c = store.lock().unwrap();
+    assert!(matches!(
+        c.write_transaction(|tx| publish_recovery_projection(
+            tx,
+            &host,
+            &head,
+            RecoveryMode::Exact,
+            &store.store_id
+        )),
+        Err(StoreError::Context(ContextError::Replay(
+            ContextReplayRejection::UnownedInvocation { .. }
+        )))
+    ));
+    let (replacement, receipt) = c
+        .write_transaction(|tx| {
+            publish_recovery_projection(
+                tx,
+                &host,
+                &head,
+                RecoveryMode::VisibleHistory,
+                &store.store_id,
+            )
+        })
+        .unwrap();
+    drop(c);
+    assert_eq!(receipt.omitted.len(), 1);
+    assert_eq!(store.context_history(&head).unwrap(), originals);
+    let rendered = store
+        .context_request_state(&replacement, &identity)
+        .unwrap();
+    assert!(
+        rendered
+            .history
+            .iter()
+            .all(|(_, _, item)| item.tool_call().unwrap().is_none())
+    );
+    assert!(
+        rendered.history[0].2.0["content"]
+            .as_str()
+            .unwrap()
+            .contains("checkpoint")
+    );
+    assert!(store.claims(&CallId("capture".into())).unwrap().is_empty());
+}
