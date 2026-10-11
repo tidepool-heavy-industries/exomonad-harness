@@ -177,7 +177,15 @@ impl<T> TraceTransport<T> {
 
 #[async_trait]
 impl<T: ResponsesTransport + 'static> ResponsesTransport for TraceTransport<T> {
-    fn response_contract(&self) -> Result<(harness::transport::ResponsesRoute, harness::transport::ResponsesProtocol), TransportError> {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        TransportError,
+    > {
         self.inner.response_contract()
     }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {

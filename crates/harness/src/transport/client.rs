@@ -458,6 +458,9 @@ async fn read_response(
                     let _ = sender.send(event).await;
                 }
             }
+            if assembly.is_complete() {
+                return assembly.finish();
+            }
         }
     }
     assembly.finish()

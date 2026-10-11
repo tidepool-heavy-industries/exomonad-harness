@@ -13,11 +13,21 @@ pub struct CompletedOutputItem {
     sequence_number: Option<u64>,
 }
 impl CompletedOutputItem {
-    pub fn item(&self) -> &Item { &self.item }
-    pub fn output_index(&self) -> u64 { self.output_index }
-    pub fn sequence_number(&self) -> Option<u64> { self.sequence_number }
+    pub fn item(&self) -> &Item {
+        &self.item
+    }
+    pub fn output_index(&self) -> u64 {
+        self.output_index
+    }
+    pub fn sequence_number(&self) -> Option<u64> {
+        self.sequence_number
+    }
     pub(crate) fn from_complete_response(item: Item, output_index: u64) -> Self {
-        Self { item, output_index, sequence_number: None }
+        Self {
+            item,
+            output_index,
+            sequence_number: None,
+        }
     }
 }
 
@@ -27,6 +37,7 @@ impl CompletedOutputItem {
 pub struct ResponseAssembly {
     items: BTreeMap<u64, Item>,
     completed: Option<(String, Usage)>,
+    response_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -67,20 +78,37 @@ impl ResponseAssembly {
         let event: Value = serde_json::from_str(data)
             .map_err(|_| TransportError::Stream("invalid SSE JSON".into()))?;
         match event.get("type").and_then(Value::as_str) {
+            Some("response.created") => {
+                let id = event
+                    .get("response")
+                    .and_then(|response| response.get("id"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| TransportError::Stream("created response missing id".into()))?;
+                if self.response_id.as_deref().is_some_and(|prior| prior != id) {
+                    return Err(TransportError::Stream("response identity changed".into()));
+                }
+                self.response_id = Some(id.to_owned());
+                Ok(None)
+            }
             Some("response.output_item.done") => {
                 let item = event
                     .get("item")
                     .cloned()
                     .ok_or_else(|| TransportError::Stream("missing done item".into()))?;
-                let output_index = event.get("output_index").and_then(Value::as_u64)
-                    .ok_or_else(|| TransportError::Stream("done item missing output_index".into()))?;
+                let output_index = event
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .ok_or(TransportError::MissingOutputIndex)?;
                 let done = CompletedOutputItem {
-                    item: Item(item), output_index,
+                    item: Item(item),
+                    output_index,
                     sequence_number: event.get("sequence_number").and_then(Value::as_u64),
                 };
                 if let Some(previous) = self.items.get(&output_index) {
                     if previous != done.item() {
-                        return Err(TransportError::Stream("conflicting done item output_index".into()));
+                        return Err(TransportError::ConflictingOutputIndex {
+                            index: output_index,
+                        });
                     }
                 } else {
                     self.items.insert(output_index, done.item.clone());
@@ -140,6 +168,36 @@ impl ResponseAssembly {
                     .get("id")
                     .and_then(Value::as_str)
                     .ok_or_else(|| TransportError::Stream("missing response id".into()))?;
+                if self.response_id.as_deref().is_some_and(|prior| prior != id) {
+                    return Err(TransportError::Stream("response identity changed".into()));
+                }
+                // A nonempty terminal output array carries authoritative output
+                // positions, including items whose streamed events were absent.
+                // The Codex backend may omit this array's contents entirely.
+                if let Some(output) = response
+                    .get("output")
+                    .and_then(Value::as_array)
+                    .filter(|output| !output.is_empty())
+                {
+                    for (index, item) in output.iter().enumerate() {
+                        let item = Item(item.clone());
+                        if self
+                            .items
+                            .get(&(index as u64))
+                            .is_some_and(|prior| prior != &item)
+                        {
+                            return Err(TransportError::ConflictingOutputIndex {
+                                index: index as u64,
+                            });
+                        }
+                        self.items.insert(index as u64, item);
+                    }
+                    if self.items.len() != output.len() {
+                        return Err(TransportError::IncompleteOutputIndices {
+                            index: output.len() as u64,
+                        });
+                    }
+                }
                 let usage = response.get("usage").unwrap_or(&Value::Null);
                 let details = usage.get("input_tokens_details").unwrap_or(&Value::Null);
                 let output_details = usage.get("output_tokens_details").unwrap_or(&Value::Null);
@@ -231,7 +289,9 @@ impl ResponseAssembly {
         let mut items = Vec::with_capacity(self.items.len());
         for (expected, (index, item)) in self.items.into_iter().enumerate() {
             if index != expected as u64 {
-                return Err(TransportError::Stream("completed response output_index gap".into()));
+                return Err(TransportError::IncompleteOutputIndices {
+                    index: expected as u64,
+                });
             }
             items.push(item);
         }
@@ -240,6 +300,10 @@ impl ResponseAssembly {
             items,
             usage,
         })
+    }
+
+    pub(super) fn is_complete(&self) -> bool {
+        self.completed.is_some()
     }
 }
 
@@ -251,7 +315,10 @@ mod tests {
     fn item_done_supplies_phase_when_completed_output_is_empty() {
         let mut a = ResponseAssembly::default();
         let done = r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"ok"}]}}"#;
-        assert!(matches!(a.accept(done), Ok(Some(StreamEvent::CompletedItem(_)))));
+        assert!(matches!(
+            a.accept(done),
+            Ok(Some(StreamEvent::CompletedItem(_)))
+        ));
         let completed = r#"{"type":"response.completed","response":{"id":"resp_1","output":[],"usage":{"input_tokens":12,"output_tokens":2,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":4}}}}"#;
         assert!(matches!(a.accept(completed), Ok(None)));
         let turn = a.finish().expect("complete");
@@ -534,12 +601,16 @@ mod lite_tests {
                 json!({"arguments":"{\"until\":null}"}),
             ),
             ("custom_tool_call", "cell", json!({"input":"raw Haskell λ"})),
-        ].into_iter().enumerate() {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut item = json!({"type":kind,"namespace":"functions","name":name,"call_id":format!("original-{name}"),"id":format!("item-{name}"),"encrypted_function_args":["retained"]});
             item.as_object_mut()
                 .unwrap()
                 .extend(payload.as_object().unwrap().clone());
-            let event = json!({"type":"response.output_item.done","output_index":index,"item":item});
+            let event =
+                json!({"type":"response.output_item.done","output_index":index,"item":item});
             let Some(StreamEvent::CompletedItem(done)) =
                 assembly.accept(&event.to_string()).unwrap()
             else {

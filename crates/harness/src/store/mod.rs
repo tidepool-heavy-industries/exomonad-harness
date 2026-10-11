@@ -18,15 +18,15 @@ pub mod media;
 mod output_publication;
 pub(crate) use output_publication::RecoveryItem;
 pub mod presentation;
-mod replay;
 pub(crate) mod provider_response;
+mod replay;
 pub mod schema;
 mod schema_migration;
 mod terminal;
 mod validation;
 mod wait_continuation;
-pub use replay::IssuedReplayRequest;
 pub use provider_response::ProviderResponseState;
+pub use replay::IssuedReplayRequest;
 pub use terminal::{RecordedToolOutput, TerminalOutcome};
 pub(crate) use wait_continuation::RecordedWaitContinuation;
 
@@ -316,7 +316,10 @@ pub struct RecordedReplayTurn {
     pub model_request: ResponsesRequest,
     pub model_response: ResponsesTurn,
     #[serde(default)]
-    pub provider_contract: Option<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol)>,
+    pub provider_contract: Option<(
+        crate::transport::ResponsesRoute,
+        crate::transport::ResponsesProtocol,
+    )>,
     #[serde(default, skip)]
     pub(crate) issued_outputs: Option<Vec<Option<replay::IssuedOutputReference>>>,
     #[serde(default, skip)]

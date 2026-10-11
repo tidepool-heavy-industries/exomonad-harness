@@ -52,7 +52,10 @@ struct ReplayRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     completion: Option<CompletionMarker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    provider_contract: Option<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol)>,
+    provider_contract: Option<(
+        crate::transport::ResponsesRoute,
+        crate::transport::ResponsesProtocol,
+    )>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -843,6 +846,7 @@ mod tests {
             request: root.clone(),
             model_request: request(vec![]),
             model_response: response(vec![]),
+            provider_contract: None,
             issued_outputs: None,
             replay_event: None,
         };
@@ -915,6 +919,7 @@ mod tests {
                 request: root.clone(),
                 model_request: issued.clone(),
                 model_response: response(vec![]),
+                provider_contract: None,
                 issued_outputs: None,
                 replay_event: None,
             })

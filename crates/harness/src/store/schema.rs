@@ -134,7 +134,17 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
     if legacy_inputs && version < 7 {
         tx.execute_batch("ALTER TABLE embedded_inputs RENAME TO legacy_embedded_inputs;")?;
     }
+    let migrate_commands = version < 17 && tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='embedded_commands')",
+        [], |r| r.get::<_, bool>(0),
+    )?;
+    if migrate_commands {
+        tx.execute_batch("ALTER TABLE embedded_commands RENAME TO legacy_embedded_commands; DROP INDEX IF EXISTS embedded_commands_queued;")?;
+    }
     tx.execute_batch(SQL)?;
+    if migrate_commands {
+        tx.execute_batch("INSERT INTO embedded_commands SELECT * FROM legacy_embedded_commands; DROP TABLE legacy_embedded_commands;")?;
+    }
     // Historical outputs keep NULL ownership. Their source occurrence cannot
     // be inferred from equal payload hashes or reused wire call IDs.
     let item_columns = {

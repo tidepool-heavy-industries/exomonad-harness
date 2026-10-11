@@ -573,8 +573,19 @@ impl ReplayProvider {
 
 #[async_trait]
 impl ResponsesTransport for ReplayProvider {
-    fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
-        self.turns.get(*lock(&self.progress.cursor)).and_then(|turn| turn.provider_contract).ok_or(TransportError::UnprovenResponseContract)
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            crate::transport::ResponsesRoute,
+            crate::transport::ResponsesProtocol,
+        ),
+        TransportError,
+    > {
+        self.turns
+            .get(*lock(&self.progress.cursor))
+            .and_then(|turn| turn.provider_contract)
+            .ok_or(TransportError::UnprovenResponseContract)
     }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         self.next_turn(None, request)
@@ -586,8 +597,11 @@ impl ResponsesTransport for ReplayProvider {
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         let turn = self.next_turn(Some(local), request)?;
-        for (index,item) in turn.items.iter().enumerate() {
-            let done = crate::transport::sse::CompletedOutputItem::from_complete_response(item.clone(), index as u64);
+        for (index, item) in turn.items.iter().enumerate() {
+            let done = crate::transport::sse::CompletedOutputItem::from_complete_response(
+                item.clone(),
+                index as u64,
+            );
             let _ = sink.send(StreamEvent::CompletedItem(done)).await;
         }
         Ok(turn)
@@ -596,7 +610,17 @@ impl ResponsesTransport for ReplayProvider {
 
 #[async_trait]
 impl ResponsesTransport for Arc<ReplayProvider> {
-    fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> { self.as_ref().response_contract() }
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            crate::transport::ResponsesRoute,
+            crate::transport::ResponsesProtocol,
+        ),
+        TransportError,
+    > {
+        self.as_ref().response_contract()
+    }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         self.as_ref().create(request).await
     }
@@ -842,7 +866,10 @@ fn request_mismatch(
 /// turn is removed from the queue, including requests whose queue is exhausted.
 pub struct ReplayTransport {
     turns: Mutex<VecDeque<ResponsesTurn>>,
-    contract: (crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol),
+    contract: (
+        crate::transport::ResponsesRoute,
+        crate::transport::ResponsesProtocol,
+    ),
     requests: Mutex<Vec<ResponsesRequest>>,
     request_count: Mutex<usize>,
     observer: Option<Arc<ReplayObserver>>,
@@ -866,7 +893,10 @@ impl ReplayTransport {
     fn with_gate(turns: impl IntoIterator<Item = ResponsesTurn>, gated: bool) -> Self {
         Self {
             turns: Mutex::new(turns.into_iter().collect()),
-            contract: (crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard),
+            contract: (
+                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesProtocol::Standard,
+            ),
             requests: Mutex::new(Vec::new()),
             request_count: Mutex::new(0),
             observer: None,
@@ -932,7 +962,17 @@ impl ReplayTransport {
 
 #[async_trait]
 impl ResponsesTransport for ReplayTransport {
-    fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> { Ok(self.contract) }
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            crate::transport::ResponsesRoute,
+            crate::transport::ResponsesProtocol,
+        ),
+        TransportError,
+    > {
+        Ok(self.contract)
+    }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         lock(&self.requests).push(request.clone());
         let mut turn = lock(&self.turns)
@@ -957,8 +997,11 @@ impl ResponsesTransport for ReplayTransport {
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         let turn = self.create(request).await?;
-        for (index,item) in turn.items.iter().enumerate() {
-            let done = crate::transport::sse::CompletedOutputItem::from_complete_response(item.clone(), index as u64);
+        for (index, item) in turn.items.iter().enumerate() {
+            let done = crate::transport::sse::CompletedOutputItem::from_complete_response(
+                item.clone(),
+                index as u64,
+            );
             let _ = sink.send(StreamEvent::CompletedItem(done)).await;
         }
         Ok(turn)
@@ -1315,7 +1358,10 @@ mod tests {
 
     #[tokio::test]
     async fn gated_transport_waits_for_each_boundary_release() {
-        let replay = Arc::new(ReplayTransport::scripted_codex_standard_gated([turn("r1"), turn("r2")]));
+        let replay = Arc::new(ReplayTransport::scripted_codex_standard_gated([
+            turn("r1"),
+            turn("r2"),
+        ]));
         let running = {
             let replay = replay.clone();
             tokio::spawn(async move {
@@ -1357,8 +1403,10 @@ mod tests {
                 },
             )
         };
-        let replay =
-            Arc::new(ReplayTransport::scripted_codex_standard_gated([turn("r1"), turn("r2")]).with_observer(observer));
+        let replay = Arc::new(
+            ReplayTransport::scripted_codex_standard_gated([turn("r1"), turn("r2")])
+                .with_observer(observer),
+        );
         let running = {
             let replay = replay.clone();
             tokio::spawn(async move {

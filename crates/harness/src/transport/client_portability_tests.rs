@@ -20,7 +20,8 @@ async fn exchange(
     let address = listener.local_addr().unwrap();
     let mut events = items
         .iter()
-        .enumerate().map(|(index,item)| {
+        .enumerate()
+        .map(|(index, item)| {
             format!(
                 "data: {}\n\n",
                 json!({"type":"response.output_item.done","output_index":index,"item":item.0})
