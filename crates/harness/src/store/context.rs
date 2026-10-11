@@ -2867,3 +2867,7 @@ mod portability_tests;
 mod projection_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "context/conversation_history_model_tests.rs"]
+mod conversation_history_model_tests;
