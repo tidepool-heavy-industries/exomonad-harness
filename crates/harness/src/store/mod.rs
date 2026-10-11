@@ -19,12 +19,14 @@ mod output_publication;
 pub(crate) use output_publication::RecoveryItem;
 pub mod presentation;
 mod replay;
+pub(crate) mod provider_response;
 pub mod schema;
 mod schema_migration;
 mod terminal;
 mod validation;
 mod wait_continuation;
 pub use replay::IssuedReplayRequest;
+pub use provider_response::ProviderResponseState;
 pub use terminal::{RecordedToolOutput, TerminalOutcome};
 pub(crate) use wait_continuation::RecordedWaitContinuation;
 
@@ -48,6 +50,14 @@ pub const SQL: &str = schema::SQL;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("provider request issuance conflicts with its retained owner: {0:?}")]
+    ConflictingProviderIssuance(RequestId),
+    #[error("provider output index {index} has conflicting bytes in {request:?}")]
+    ConflictingProviderItem { request: RequestId, index: u64 },
+    #[error("provider response {request:?} has incomplete ordered output at index {index}")]
+    IncompleteProviderPrefix { request: RequestId, index: u64 },
+    #[error("provider response ownership is invalid for {0:?}")]
+    InvalidProviderEvidence(RequestId),
     #[error("invalid mounted form or submitted control values")]
     InvalidForm,
     #[error("form mount unavailable or already terminal")]

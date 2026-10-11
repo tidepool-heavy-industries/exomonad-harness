@@ -17,21 +17,21 @@ const FORMAT: u32 = 1;
 #[derive(Clone, Debug, Serialize)]
 pub struct IssuedReplayRequest {
     #[serde(flatten)]
-    record: IssuedRequestRecord,
+    pub(super) record: IssuedRequestRecord,
     #[cfg(test)]
     #[serde(skip)]
     input_reencodings: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct IssuedRequestRecord {
+pub(super) struct IssuedRequestRecord {
     input: Vec<ItemHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     outputs: Option<Vec<Option<IssuedOutputReference>>>,
     instructions: ItemHash,
     tools: ItemHash,
     tools_allowed: Option<Vec<String>>,
-    model: String,
+    pub(super) model: String,
     pinned_effort: Effort,
     session_id: String,
 }
@@ -77,6 +77,15 @@ pub(super) struct ResponseEnvelope {
     pub(super) model: String,
     pub(super) origins: Vec<Origin>,
     pub(super) kind: ResponseEnvelopeKind,
+    pub(super) completeness: ResponseCompleteness,
+    pub(super) route: Option<crate::transport::ResponsesRoute>,
+    pub(super) protocol: Option<crate::transport::ResponsesProtocol>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ResponseCompleteness {
+    Completed,
+    ObservedPrefix,
 }
 
 /// Presence of a completed record is independent of provider identity availability.
@@ -122,6 +131,9 @@ pub(super) fn response_envelopes(
     c: &Connection,
     request: &RequestId,
 ) -> Result<std::collections::HashMap<Origin, std::sync::Arc<ResponseEnvelope>>> {
+    if let Some(envelopes) = super::provider_response::response_envelopes(c, request)? {
+        return Ok(envelopes);
+    }
     use std::collections::{HashMap, HashSet};
     let mut query =
         c.prepare("SELECT payload FROM events WHERE request_id=?1 AND kind='model_turn'")?;
@@ -164,6 +176,9 @@ pub(super) fn response_envelopes(
             model: record.issued.model,
             origins,
             kind: ResponseEnvelopeKind::ModelTurn,
+            completeness: ResponseCompleteness::Completed,
+            route: None,
+            protocol: None,
         });
     }
     envelopes.extend(super::compaction::response_envelopes(c, request)?);
@@ -486,6 +501,63 @@ impl Store {
             let sequence = tx.last_insert_rowid();
 
             Ok(sequence)
+        })
+    }
+
+    /// Record an exact response through the same issuance and occurrence owner
+    /// used by streaming. The response owns its output positions, rather than
+    /// selecting equal bytes already present in request history.
+    pub fn record_replay_turn_for_target(
+        &self,
+        request: &RequestId,
+        model_request: &ResponsesRequest,
+        response: &ResponsesTurn,
+        route: crate::transport::ResponsesRoute,
+        protocol: crate::transport::ResponsesProtocol,
+    ) -> Result<i64> {
+        let sealed = self.seal_replay_request(model_request)?;
+        let issued = self.issue_provider_request(request, sealed, (route, protocol))?;
+        self.record_provider_turn(&issued, response)
+    }
+
+    pub(crate) fn record_provider_turn(
+        &self,
+        issued: &super::provider_response::IssuedProviderRequest,
+        response: &ResponsesTurn,
+    ) -> Result<i64> {
+        let request = &issued.request;
+        let mut connection = self.lock()?;
+        connection.write_transaction(|tx| {
+            self.validate_provider_issuer(tx, issued)?;
+            let state: String = tx.query_row("SELECT state FROM provider_requests WHERE request_id=?1", [&request.0], |r| r.get(0))?;
+            if !matches!(state.as_str(), "streaming" | "completed") {
+                return Err(StoreError::InvalidProviderEvidence(request.clone()));
+            }
+            let mut items = Vec::with_capacity(response.items.len());
+            for (index, item) in response.items.iter().enumerate() {
+                super::provider_response::append_item(tx, request, index as u64, item)?;
+                items.push(Self::put_item_tx(tx, item)?);
+            }
+            let count: u64 = tx.query_row("SELECT COUNT(*) FROM provider_items WHERE request_id=?1", [&request.0], |r| r.get(0))?;
+            if count != response.items.len() as u64 {
+                return Err(StoreError::InvalidProviderEvidence(request.clone()));
+            }
+            let record = ReplayRecord {
+                format: FORMAT, request: request.clone(), issued: issued.issued.record.clone(),
+                completion: None,
+                response: ReplayResponse { response_id: response.response_id.clone(), items, usage: response.usage.clone() },
+            };
+            let payload = serde_json::to_string(&record)?;
+            let prior: Option<i64> = tx.query_row("SELECT completion_event FROM provider_requests WHERE request_id=?1", [&request.0], |r| r.get(0))?;
+            if let Some(event) = prior {
+                let previous: String = tx.query_row("SELECT payload FROM events WHERE id=?1", [event], |r| r.get(0))?;
+                if previous != payload { return Err(StoreError::InvalidProviderEvidence(request.clone())); }
+                return Ok(event);
+            }
+            tx.execute("INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,'model_turn',?2,?3)", params![request.0,payload,utc_millis()])?;
+            let event = tx.last_insert_rowid();
+            tx.execute("UPDATE provider_requests SET state='completed',response_id=?2,completion_event=?3 WHERE request_id=?1", params![request.0,response.response_id,event])?;
+            Ok(event)
         })
     }
 

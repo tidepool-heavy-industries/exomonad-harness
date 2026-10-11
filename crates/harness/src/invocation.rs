@@ -423,6 +423,9 @@ struct BudgetTransport<C> {
 }
 #[async_trait]
 impl<C: ResponsesTransport> ResponsesTransport for BudgetTransport<C> {
+    fn response_contract(&self) -> (crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol) {
+        self.inner.response_contract()
+    }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(TransportError::Stream("invocation closed".into()));

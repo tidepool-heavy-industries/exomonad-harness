@@ -1,6 +1,6 @@
 // Version 16 requires fixed FULL writer durability. Earlier writers refuse it
 // instead of reopening the database with NORMAL after its admission barrier.
-pub const VERSION: u32 = 16;
+pub const VERSION: u32 = 17;
 const FULL_DURABILITY_VERSION: u32 = 16;
 pub const SQL: &str = include_str!("schema.sql");
 const MODEL_REQUEST_INDEXES: &str = "

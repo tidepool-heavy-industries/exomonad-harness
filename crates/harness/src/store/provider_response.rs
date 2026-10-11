@@ -1,0 +1,171 @@
+//! Provider issuance owns streamed occurrences before any response termination.
+use super::{Result, Store, StoreError};
+use super::replay::{IssuedReplayRequest, IssuedRequestRecord, ResponseCompleteness, ResponseEnvelope, ResponseEnvelopeKind};
+use crate::{context::Origin, item::{Item, ItemHash}, model::RequestId, transport::{ResponsesProtocol, ResponsesRoute, sse::CompletedOutputItem}};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, sync::Arc};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderResponseState {
+    Streaming,
+    Completed,
+    Interrupted,
+    Failed,
+    Rejected,
+}
+
+/// Only Store issuance creates this handle; restored JSON is not admission authority.
+#[derive(Clone, Debug)]
+pub(crate) struct IssuedProviderRequest {
+    pub(super) request: RequestId,
+    store_id: String,
+    pub(super) issued: IssuedReplayRequest,
+}
+
+impl Store {
+    pub(crate) fn issue_provider_request(
+        &self,
+        request: &RequestId,
+        issued: IssuedReplayRequest,
+        contract: (ResponsesRoute, ResponsesProtocol),
+    ) -> Result<IssuedProviderRequest> {
+        let encoded = serde_json::to_string(&issued.record)?;
+        let route = serde_json::to_string(&contract.0)?;
+        let protocol = serde_json::to_string(&contract.1)?;
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let prior: Option<(String, String, String)> = tx.query_row(
+                "SELECT issued_json,route,protocol FROM provider_requests WHERE request_id=?1",
+                [&request.0], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            ).optional()?;
+            if let Some(prior) = prior {
+                if prior != (encoded.clone(), route.clone(), protocol.clone()) {
+                    return Err(StoreError::ConflictingProviderIssuance(request.clone()));
+                }
+            } else {
+                let base_position: i64 = tx.query_row("SELECT COALESCE(MAX(position)+1,0) FROM request_items WHERE request_id=?1", [&request.0], |r| r.get(0))?;
+                tx.execute("INSERT INTO provider_requests(request_id,issued_json,route,protocol,base_position,state) VALUES (?1,?2,?3,?4,?5,'streaming')", params![request.0,encoded,route,protocol,base_position])?;
+            }
+            Ok(IssuedProviderRequest { request: request.clone(), store_id: self.store_id.clone(), issued })
+        })
+    }
+
+    pub(crate) fn append_provider_done(&self, issued: &IssuedProviderRequest, done: &CompletedOutputItem) -> Result<bool> {
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            self.validate_provider_issuer(tx, issued)?;
+            append_item(tx, &issued.request, done.output_index(), done.item())
+        })
+    }
+
+    pub(super) fn validate_provider_issuer(&self, tx: &Connection, issued: &IssuedProviderRequest) -> Result<()> {
+        if issued.store_id != self.store_id {
+            return Err(StoreError::InvalidProviderEvidence(issued.request.clone()));
+        }
+        let raw: Option<String> = tx.query_row("SELECT issued_json FROM provider_requests WHERE request_id=?1", [&issued.request.0], |r| r.get(0)).optional()?;
+        if raw.as_deref() != Some(serde_json::to_string(&issued.issued.record)?.as_str()) {
+            return Err(StoreError::InvalidProviderEvidence(issued.request.clone()));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn stop_provider_response(&self, request: &RequestId, state: ProviderResponseState) -> Result<()> {
+        if matches!(state, ProviderResponseState::Streaming | ProviderResponseState::Completed) {
+            return Err(StoreError::InvalidProviderEvidence(request.clone()));
+        }
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            tx.execute("UPDATE provider_requests SET state=?2 WHERE request_id=?1 AND state='streaming'", params![request.0, state_name(state)])?;
+            Ok(())
+        })
+    }
+
+    pub fn provider_response_state(&self, request: &RequestId) -> Result<Option<ProviderResponseState>> {
+        let raw: Option<String> = self.lock()?.query_row("SELECT state FROM provider_requests WHERE request_id=?1", [&request.0], |r| r.get(0)).optional()?;
+        raw.map(|state| parse_state(&state, request)).transpose()
+    }
+}
+
+fn state_name(state: ProviderResponseState) -> &'static str {
+    match state { ProviderResponseState::Streaming => "streaming", ProviderResponseState::Completed => "completed", ProviderResponseState::Interrupted => "interrupted", ProviderResponseState::Failed => "failed", ProviderResponseState::Rejected => "rejected" }
+}
+fn parse_state(state: &str, request: &RequestId) -> Result<ProviderResponseState> {
+    match state { "streaming" => Ok(ProviderResponseState::Streaming), "completed" => Ok(ProviderResponseState::Completed), "interrupted" => Ok(ProviderResponseState::Interrupted), "failed" => Ok(ProviderResponseState::Failed), "rejected" => Ok(ProviderResponseState::Rejected), _ => Err(StoreError::InvalidProviderEvidence(request.clone())) }
+}
+
+pub(super) fn append_item(tx: &Transaction<'_>, request: &RequestId, index: u64, item: &Item) -> Result<bool> {
+    let index_i64 = i64::try_from(index).map_err(|_| StoreError::InvalidProviderEvidence(request.clone()))?;
+    if item.is_configuration_update() {
+        return Err(StoreError::InvalidProviderEvidence(request.clone()));
+    }
+    let hash = Store::put_item_tx(tx, item)?;
+    let prior: Option<(i64, String)> = tx.query_row("SELECT occurrence_position,item_hash FROM provider_items WHERE request_id=?1 AND output_index=?2", params![request.0,index_i64], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+    if let Some((position, prior_hash)) = prior {
+        if prior_hash != hash.0 {
+            return Err(StoreError::ConflictingProviderItem { request: request.clone(), index });
+        }
+        let occurrence_hash: String = tx.query_row("SELECT item_hash FROM request_items WHERE request_id=?1 AND position=?2", params![request.0,position], |r| r.get(0))?;
+        if occurrence_hash != hash.0 {
+            return Err(StoreError::InvalidProviderEvidence(request.clone()));
+        }
+        return Ok(false);
+    }
+    let state: String = tx.query_row("SELECT state FROM provider_requests WHERE request_id=?1", [&request.0], |r| r.get(0))?;
+    if state != "streaming" {
+        return Err(StoreError::InvalidProviderEvidence(request.clone()));
+    }
+    let base_position: i64 = tx.query_row("SELECT base_position FROM provider_requests WHERE request_id=?1", [&request.0], |r| r.get(0))?;
+    let position = base_position.checked_add(index_i64).ok_or_else(|| StoreError::InvalidProviderEvidence(request.clone()))?;
+    super::output_publication::require_ordinary(item, request, position)?;
+    tx.execute("INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)", params![request.0,position,hash.0])?;
+    tx.execute("INSERT INTO provider_items(request_id,output_index,occurrence_position,item_hash) VALUES (?1,?2,?3,?4)", params![request.0,index_i64,position,hash.0])?;
+    super::chat::publish(tx, request, position, &hash, item)?;
+    Ok(true)
+}
+
+/// New records use exact occurrence ownership. Absence means legacy evidence;
+/// a malformed or incomplete new record never falls back to hash matching.
+pub(super) fn response_envelopes(c: &Connection, request: &RequestId) -> Result<Option<HashMap<Origin, Arc<ResponseEnvelope>>>> {
+    let issuance: Option<(String, String, String, String)> = c.query_row("SELECT issued_json,route,protocol,state FROM provider_requests WHERE request_id=?1", [&request.0], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    let Some((issued, route, protocol, state)) = issuance else { return Ok(None); };
+    let issued: IssuedRequestRecord = serde_json::from_str(&issued)?;
+    if issued.model.trim().is_empty() { return Err(StoreError::InvalidProviderEvidence(request.clone())); }
+    let route = Some(serde_json::from_str(&route)?);
+    let protocol = Some(serde_json::from_str(&protocol)?);
+    let state = parse_state(&state, request)?;
+    let rows = {
+        let mut q = c.prepare("SELECT p.output_index,p.occurrence_position,p.item_hash,i.item_hash FROM provider_items p JOIN request_items i ON i.request_id=p.request_id AND i.position=p.occurrence_position WHERE p.request_id=?1 ORDER BY p.output_index")?;
+        q.query_map([&request.0], |r| Ok((r.get::<_, u64>(0)?,r.get::<_, i64>(1)?,r.get::<_, String>(2)?,r.get::<_, String>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut origins = Vec::with_capacity(rows.len());
+    for (expected, (index, position, hash, occurrence_hash)) in rows.into_iter().enumerate() {
+        if hash != occurrence_hash { return Err(StoreError::InvalidProviderEvidence(request.clone())); }
+        if index != expected as u64 { return Err(StoreError::IncompleteProviderPrefix {request: request.clone(), index: expected as u64}); }
+        origins.push(Origin { request: request.clone(), position, hash: ItemHash(hash) });
+    }
+    let envelope = Arc::new(ResponseEnvelope { model: issued.model, origins, kind: ResponseEnvelopeKind::ModelTurn, completeness: if state == ProviderResponseState::Completed { ResponseCompleteness::Completed } else { ResponseCompleteness::ObservedPrefix }, route, protocol });
+    Ok(Some(envelope.origins.iter().cloned().map(|origin| (origin, envelope.clone())).collect()))
+}
+
+/// Freeze only the exact authenticated prefix preceding a captured invocation.
+/// Later response items cannot enlarge this proof or repair an unproven cut.
+pub(super) fn captured_prefix(c: &Connection, request: &RequestId, boundary: &Origin, selected: &[Origin]) -> Result<Option<Vec<Origin>>> {
+    let owned: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM provider_requests WHERE request_id=?1)", [&request.0], |r| r.get(0))?;
+    if !owned || boundary.request != *request { return Ok(None); }
+    let boundary_index: Option<u64> = c.query_row("SELECT output_index FROM provider_items WHERE request_id=?1 AND occurrence_position=?2 AND item_hash=?3", params![request.0,boundary.position,boundary.hash.0], |r| r.get(0)).optional()?;
+    let Some(boundary_index) = boundary_index else { return Ok(None); };
+    let rows = {
+        let mut q = c.prepare("SELECT p.output_index,p.occurrence_position,p.item_hash,i.item_hash FROM provider_items p JOIN request_items i ON i.request_id=p.request_id AND i.position=p.occurrence_position WHERE p.request_id=?1 AND p.output_index<?2 ORDER BY p.output_index")?;
+        q.query_map(params![request.0,boundary_index], |r| Ok((r.get::<_,u64>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if rows.len() as u64 != boundary_index { return Ok(None); }
+    let mut origins = Vec::with_capacity(rows.len());
+    for (expected,(index,position,hash,actual)) in rows.into_iter().enumerate() {
+        let origin = Origin {request:request.clone(),position,hash:ItemHash(hash.clone())};
+        if index != expected as u64 || actual != hash || selected.iter().filter(|candidate| **candidate==origin).count()!=1 { return Ok(None); }
+        origins.push(origin);
+    }
+    Ok(Some(origins))
+}

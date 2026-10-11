@@ -224,7 +224,8 @@ pub enum AuthCredentials {
 }
 
 /// The credential authority determines the fixed provider endpoint.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResponsesRoute {
     #[default]
     Codex,
@@ -250,7 +251,8 @@ pub trait Auth: Send + Sync {
 }
 
 /// Selected wire contract, independent of model-name spelling and Engine jobs.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResponsesProtocol {
     #[default]
     Standard,
@@ -274,6 +276,8 @@ impl<A: Auth + Clone + 'static> ResponsesClient<A> {
         self.protocol = protocol;
         self
     }
+
+    pub fn protocol(&self) -> ResponsesProtocol { self.protocol }
 
     pub async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         client::execute(self.auth.clone(), self.protocol, request, None).await

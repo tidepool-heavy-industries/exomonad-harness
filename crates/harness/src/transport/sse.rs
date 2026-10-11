@@ -2,12 +2,30 @@ use super::{ProviderStreamFailureEvent, ResponsesTurn, TransportError, Usage};
 use crate::item::Item;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
+
+/// A finalized item carrying its provider-issued output position. Only the
+/// transport assembly constructs this evidence; deltas cannot become items.
+#[derive(Clone, Debug)]
+pub struct CompletedOutputItem {
+    item: Item,
+    output_index: u64,
+    sequence_number: Option<u64>,
+}
+impl CompletedOutputItem {
+    pub fn item(&self) -> &Item { &self.item }
+    pub fn output_index(&self) -> u64 { self.output_index }
+    pub fn sequence_number(&self) -> Option<u64> { self.sequence_number }
+    pub(crate) fn from_complete_response(item: Item, output_index: u64) -> Self {
+        Self { item, output_index, sequence_number: None }
+    }
+}
 
 /// Completed output items are carried by SSE `response.output_item.done`;
 /// this backend may leave `response.completed.response.output` empty.
 #[derive(Default)]
 pub struct ResponseAssembly {
-    items: Vec<Item>,
+    items: BTreeMap<u64, Item>,
     completed: Option<(String, Usage)>,
 }
 
@@ -24,7 +42,7 @@ pub enum OutputChannel {
 
 #[derive(Debug)]
 pub enum StreamEvent {
-    ItemDone(Item),
+    CompletedItem(CompletedOutputItem),
     Delta {
         item_id: String,
         channel: OutputChannel,
@@ -54,8 +72,20 @@ impl ResponseAssembly {
                     .get("item")
                     .cloned()
                     .ok_or_else(|| TransportError::Stream("missing done item".into()))?;
-                self.items.push(Item(item.clone()));
-                Ok(Some(StreamEvent::ItemDone(Item(item))))
+                let output_index = event.get("output_index").and_then(Value::as_u64)
+                    .ok_or_else(|| TransportError::Stream("done item missing output_index".into()))?;
+                let done = CompletedOutputItem {
+                    item: Item(item), output_index,
+                    sequence_number: event.get("sequence_number").and_then(Value::as_u64),
+                };
+                if let Some(previous) = self.items.get(&output_index) {
+                    if previous != done.item() {
+                        return Err(TransportError::Stream("conflicting done item output_index".into()));
+                    }
+                } else {
+                    self.items.insert(output_index, done.item.clone());
+                }
+                Ok(Some(StreamEvent::CompletedItem(done)))
             }
             Some(
                 kind @ ("response.output_text.delta"
@@ -198,9 +228,16 @@ impl ResponseAssembly {
         let (response_id, usage) = self.completed.ok_or(TransportError::IncompleteResponse(
             super::StreamInterruption::MissingCompletion,
         ))?;
+        let mut items = Vec::with_capacity(self.items.len());
+        for (expected, (index, item)) in self.items.into_iter().enumerate() {
+            if index != expected as u64 {
+                return Err(TransportError::Stream("completed response output_index gap".into()));
+            }
+            items.push(item);
+        }
         Ok(ResponsesTurn {
             response_id,
-            items: self.items,
+            items,
             usage,
         })
     }
@@ -213,8 +250,8 @@ mod tests {
     #[test]
     fn item_done_supplies_phase_when_completed_output_is_empty() {
         let mut a = ResponseAssembly::default();
-        let done = r#"{"type":"response.output_item.done","item":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"ok"}]}}"#;
-        assert!(matches!(a.accept(done), Ok(Some(StreamEvent::ItemDone(_)))));
+        let done = r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"ok"}]}}"#;
+        assert!(matches!(a.accept(done), Ok(Some(StreamEvent::CompletedItem(_)))));
         let completed = r#"{"type":"response.completed","response":{"id":"resp_1","output":[],"usage":{"input_tokens":12,"output_tokens":2,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":4}}}}"#;
         assert!(matches!(a.accept(completed), Ok(None)));
         let turn = a.finish().expect("complete");
@@ -490,24 +527,25 @@ mod lite_tests {
     #[test]
     fn lite_namespaced_tool_done_uses_existing_call_and_completion_contract() {
         let mut assembly = ResponseAssembly::default();
-        for (kind, name, payload) in [
+        for (index, (kind, name, payload)) in [
             (
                 "function_call",
                 "yield",
                 json!({"arguments":"{\"until\":null}"}),
             ),
             ("custom_tool_call", "cell", json!({"input":"raw Haskell λ"})),
-        ] {
+        ].into_iter().enumerate() {
             let mut item = json!({"type":kind,"namespace":"functions","name":name,"call_id":format!("original-{name}"),"id":format!("item-{name}"),"encrypted_function_args":["retained"]});
             item.as_object_mut()
                 .unwrap()
                 .extend(payload.as_object().unwrap().clone());
-            let event = json!({"type":"response.output_item.done","item":item});
-            let Some(StreamEvent::ItemDone(retained)) =
+            let event = json!({"type":"response.output_item.done","output_index":index,"item":item});
+            let Some(StreamEvent::CompletedItem(done)) =
                 assembly.accept(&event.to_string()).unwrap()
             else {
                 panic!("completed call expected");
             };
+            let retained = done.item();
             assert_eq!(retained.0, item);
             let call = retained.tool_call().unwrap().unwrap();
             assert_eq!(call.call_id.0, format!("original-{name}"));

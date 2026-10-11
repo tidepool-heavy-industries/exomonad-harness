@@ -278,6 +278,9 @@ pub struct EngineCompletion {
 /// recorded turns without credentials or live network access.
 #[async_trait::async_trait]
 pub trait ResponsesTransport: Send + Sync {
+    /// Exact transport selection, frozen before durable issuance and network dispatch.
+    fn response_contract(&self) -> (crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol);
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError>;
 
     async fn create_streaming(
@@ -286,8 +289,9 @@ pub trait ResponsesTransport: Send + Sync {
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         let turn = self.create(request).await?;
-        for item in &turn.items {
-            let _ = sink.send(StreamEvent::ItemDone(item.clone())).await;
+        for (index, item) in turn.items.iter().enumerate() {
+            let done = crate::transport::sse::CompletedOutputItem::from_complete_response(item.clone(), index as u64);
+            let _ = sink.send(StreamEvent::CompletedItem(done)).await;
         }
         Ok(turn)
     }
@@ -304,6 +308,9 @@ pub trait ResponsesTransport: Send + Sync {
 
 #[async_trait::async_trait]
 impl<A: Auth + Clone + 'static> ResponsesTransport for ResponsesClient<A> {
+    fn response_contract(&self) -> (crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol) {
+        (self.auth.route(), self.protocol())
+    }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         ResponsesClient::create(self, request).await
     }
@@ -1320,7 +1327,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let store = self.store.clone();
             let instructions = replay_instructions.clone();
             let seal_head = parent.clone();
-            let (req, replay_request) = match blocking(move || {
+            let contract = self.client.response_contract();
+            let (req, provider_request) = match blocking(move || {
                 let issued = store.seal_replay_request_with_occurrences(
                     &seal_head,
                     &req,
@@ -1328,7 +1336,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     Some(&instructions),
                     &input_occurrences,
                 )?;
-                Ok((req, issued))
+                let provider_request = store.issue_provider_request(&seal_head, issued, contract)?;
+                Ok((req, provider_request))
             })
             .await
             {
@@ -1399,6 +1408,39 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         Ok(turn) => break turn,
                         Err(error) => {
                             output_lifetime.stop();
+                            // Transport may finish while finalized items remain buffered.
+                            // Retain those facts before interruption; never dispatch a
+                            // buffered invocation after observing stream failure.
+                            while let Ok(event) = event_rx.try_recv() {
+                                match event {
+                                    StreamEvent::CompletedItem(done) => {
+                                        let (item, inserted) = match self.retain_provider_item(&provider_request, done).await {
+                                            Ok(retained) => retained,
+                                            Err(retain_error) => return Err(self.cleanup_pending(retain_error, &pending).await),
+                                        };
+                                        if inserted {
+                                            if let Some(call) = parsed_call_id(&item)? {
+                                                let store = self.store.clone();
+                                                let stopped_request = parent.clone();
+                                                blocking(move || {
+                                                    match store.claim(&call, &stopped_request) {
+                                                        Ok(operation) => store.interrupt_operation_claim(&operation, &stopped_request).map(|_| ()),
+                                                        Err(StoreError::DuplicateClaim) => Ok(()),
+                                                        Err(error) => Err(error),
+                                                    }
+                                                }).await?;
+                                            }
+                                        }
+                                    }
+                                    StreamEvent::Delta {item_id, channel, index, text} => self.observe_delta(&parent, item_id, channel, index, text),
+                                }
+                            }
+                            let state = if matches!(error, TransportError::IncompleteResponse(_)) { crate::store::ProviderResponseState::Interrupted } else if error.request_failure().is_some() { crate::store::ProviderResponseState::Rejected } else { crate::store::ProviderResponseState::Failed };
+                            let store = self.store.clone();
+                            let stopped_request = parent.clone();
+                            if let Err(stop_error) = blocking(move || store.stop_provider_response(&stopped_request, state)).await {
+                                return Err(self.cleanup_pending(stop_error, &pending).await);
+                            }
                             return Err(self.reject_or_cleanup(error, settled_head.as_ref(), &parent, &pending).await);
                         }
                     },
@@ -1410,7 +1452,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                     event = event_rx.recv(), if event_stream_open => {
                         match event {
-                            Some(StreamEvent::ItemDone(item)) => {
+                            Some(StreamEvent::CompletedItem(done)) => {
+                                let (item, inserted) = match self.retain_provider_item(&provider_request, done).await {
+                                    Ok(retained) => retained,
+                                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                                };
                                 let call_id = match parsed_call_id(&item) {
                                     Ok(call_id) => call_id,
                                     Err(error) => return Err(self.cleanup_pending(error, &pending).await),
@@ -1423,10 +1469,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                         continue;
                                     }
                                 }
-                                if let Err(error) = self.append(&parent, vec![item.clone()]).await {
-                                    return Err(self.cleanup_pending(error, &pending).await);
-                                }
                                 persisted_items.push(item.clone());
+                                if !inserted { continue; }
                                 // Bounded callbacks are sequential continuations. Finish
                                 // receiving the provider round before awaiting one, so
                                 // its stream keeps progressing while items are retained.
@@ -1478,9 +1522,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             // durable even if a subsequent dispatch or output step fails.
             let (turn, replay_event) = {
                 let store = self.store.clone();
-                let request = parent.clone();
+                let provider_request = provider_request.clone();
                 match blocking(move || {
-                    let event = store.record_issued_replay_turn(&request, replay_request, &turn)?;
+                    let event = store.record_provider_turn(&provider_request, &turn)?;
                     Ok((turn, event))
                 })
                 .await
@@ -1501,7 +1545,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     self.observe_delta(&parent, item_id, channel, index, text);
                     continue;
                 }
-                if let StreamEvent::ItemDone(item) = event {
+                if let StreamEvent::CompletedItem(done) = event {
+                    let (item, _) = match self.retain_provider_item(&provider_request, done).await {
+                        Ok(retained) => retained,
+                        Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                    };
                     let call_id = match parsed_call_id(&item) {
                         Ok(call_id) => call_id,
                         Err(error) => return Err(self.cleanup_pending(error, &pending).await),
@@ -1515,9 +1563,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             }
                             continue;
                         }
-                    }
-                    if let Err(error) = self.append(&parent, vec![item.clone()]).await {
-                        return Err(self.cleanup_pending(error, &pending).await);
                     }
                     persisted_items.push(item.clone());
                     if self.bounded_invocation {
@@ -1602,11 +1647,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             .await);
                     }
                 }
-                if !remove_matching_item(&mut persisted_items, item) {
-                    if let Err(error) = self.append(&parent, vec![item.clone()]).await {
-                        return Err(self.cleanup_pending(error, &pending).await);
-                    }
-                }
+                remove_matching_item(&mut persisted_items, item);
                 if deferred_dispatch_error.is_some() {
                     continue;
                 }
@@ -3274,6 +3315,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
         }
         Ok(())
+    }
+
+    async fn retain_provider_item(
+        &self,
+        issued: &crate::store::provider_response::IssuedProviderRequest,
+        done: crate::transport::sse::CompletedOutputItem,
+    ) -> Result<(Item, bool), EngineError> {
+        let store = self.store.clone();
+        let issued = issued.clone();
+        let item = done.item().clone();
+        let inserted = blocking(move || store.append_provider_done(&issued, &done)).await?;
+        Ok((item, inserted))
     }
 
     async fn read_model_history_window(

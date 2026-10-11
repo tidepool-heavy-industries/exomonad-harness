@@ -25,6 +25,23 @@ CREATE TABLE IF NOT EXISTS events (
  id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT REFERENCES requests(id),
  kind TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT(CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
 );
+CREATE TABLE IF NOT EXISTS provider_requests (
+ request_id TEXT PRIMARY KEY REFERENCES requests(id),
+ issued_json TEXT NOT NULL, route TEXT NOT NULL, protocol TEXT NOT NULL,
+ base_position INTEGER NOT NULL CHECK(base_position>=0),
+ state TEXT NOT NULL CHECK(state IN ('streaming','completed','interrupted','failed','rejected')),
+ response_id TEXT, completion_event INTEGER REFERENCES events(id),
+ CHECK(length(route)>0 AND length(protocol)>0)
+);
+CREATE TABLE IF NOT EXISTS provider_items (
+ request_id TEXT NOT NULL REFERENCES provider_requests(request_id),
+ output_index INTEGER NOT NULL CHECK(output_index>=0),
+ occurrence_position INTEGER NOT NULL,
+ item_hash TEXT NOT NULL REFERENCES items(hash),
+ PRIMARY KEY(request_id,output_index),
+ UNIQUE(request_id,occurrence_position),
+ FOREIGN KEY(request_id,occurrence_position) REFERENCES request_items(request_id,position)
+);
 CREATE TABLE IF NOT EXISTS envelopes (
  id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL,
  class TEXT NOT NULL, item_hash TEXT NOT NULL REFERENCES items(hash),
