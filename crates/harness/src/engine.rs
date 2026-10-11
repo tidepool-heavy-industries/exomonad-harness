@@ -128,6 +128,9 @@ enum ReplayBarrierStage {
 #[cfg(test)]
 #[path = "engine/recovery_tests.rs"]
 mod recovery_tests;
+#[cfg(test)]
+#[path = "engine/inference_gate_tests.rs"]
+mod inference_gate_tests;
 
 #[cfg(test)]
 #[path = "engine/completion_tests.rs"]
