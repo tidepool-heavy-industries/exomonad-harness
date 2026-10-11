@@ -82,6 +82,11 @@ impl Store {
         })
     }
 
+    pub(super) fn provider_contract_tx(&self, c: &Connection, request: &RequestId) -> Result<(ResponsesRoute, ResponsesProtocol)> {
+        let (route, protocol): (String, String) = c.query_row("SELECT route,protocol FROM provider_requests WHERE request_id=?1", [&request.0], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        Ok((serde_json::from_str(&route)?,serde_json::from_str(&protocol)?))
+    }
+
     pub fn provider_response_state(&self, request: &RequestId) -> Result<Option<ProviderResponseState>> {
         let raw: Option<String> = self.lock()?.query_row("SELECT state FROM provider_requests WHERE request_id=?1", [&request.0], |r| r.get(0)).optional()?;
         raw.map(|state| parse_state(&state, request)).transpose()

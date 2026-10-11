@@ -279,7 +279,7 @@ pub struct EngineCompletion {
 #[async_trait::async_trait]
 pub trait ResponsesTransport: Send + Sync {
     /// Exact transport selection, frozen before durable issuance and network dispatch.
-    fn response_contract(&self) -> (crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol);
+    fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError>;
 
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError>;
 
@@ -308,8 +308,8 @@ pub trait ResponsesTransport: Send + Sync {
 
 #[async_trait::async_trait]
 impl<A: Auth + Clone + 'static> ResponsesTransport for ResponsesClient<A> {
-    fn response_contract(&self) -> (crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol) {
-        (self.auth.route(), self.protocol())
+    fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+        Ok((self.auth.route(), self.protocol()))
     }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         ResponsesClient::create(self, request).await
@@ -1327,7 +1327,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let store = self.store.clone();
             let instructions = replay_instructions.clone();
             let seal_head = parent.clone();
-            let contract = self.client.response_contract();
+            let contract = self.client.response_contract()?;
             let (req, provider_request) = match blocking(move || {
                 let issued = store.seal_replay_request_with_occurrences(
                     &seal_head,
@@ -3811,6 +3811,10 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for Replay {
+        fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+            Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+        }
+
         async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             self.requests.lock().unwrap().push(request);
             self.turns
@@ -3827,6 +3831,10 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for EffortSettlementBarrier {
+        fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+            Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+        }
+
         async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             self.replay.create(request).await
         }
@@ -3836,9 +3844,16 @@ mod tests {
             request: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_index = 0_u64;
             let turn = self.replay.create(request).await?;
             for item in &turn.items {
-                let _ = sink.send(StreamEvent::ItemDone(item.clone())).await;
+                let _ = sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(item.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                }).await;
             }
             let release = { self.release_first_turn.lock().await.take() };
             if let Some(release) = release {
@@ -4297,6 +4312,10 @@ mod tests {
         struct MutatingCopy;
         #[async_trait]
         impl ResponsesTransport for MutatingCopy {
+        fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+            Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+        }
+
             async fn create(
                 &self,
                 _request: ResponsesRequest,
@@ -4308,9 +4327,16 @@ mod tests {
                 _request: ResponsesRequest,
                 sink: tokio::sync::mpsc::Sender<StreamEvent>,
             ) -> Result<ResponsesTurn, TransportError> {
-                sink.send(StreamEvent::ItemDone(Item(json!({
+            let mut response_output_index = 0_u64;
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(Item(json!({
                     "type":"custom_tool_call","call_id":"same-id","name":"cell","input":"first"
-                }))))
+                }))).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                })
                 .await
                 .unwrap();
                 Ok(turn(
@@ -6116,6 +6142,10 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for AsyncContinuation {
+        fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+            Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
@@ -6125,6 +6155,7 @@ mod tests {
             request: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_index = 0_u64;
             let index = {
                 let mut requests = self.requests.lock().unwrap();
                 let index = requests.len();
@@ -6136,7 +6167,13 @@ mod tests {
                     let call = Item(json!({
                         "type":"function_call","call_id":"slow-call","async":true,"name":"slow","arguments":"{}"
                     }));
-                    sink.send(StreamEvent::ItemDone(call.clone()))
+                    sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(call.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                })
                         .await
                         .map_err(|_| {
                             TransportError::Stream("engine event receiver closed".into())
@@ -6154,7 +6191,13 @@ mod tests {
                     let wait = Item(json!({
                         "type":"function_call","call_id":"wait-call","name":"wait_agent","arguments":"{}"
                     }));
-                    sink.send(StreamEvent::ItemDone(wait.clone()))
+                    sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(wait.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                })
                         .await
                         .map_err(|_| {
                             TransportError::Stream("engine event receiver closed".into())
@@ -6165,7 +6208,13 @@ mod tests {
                     let final_item = Item(json!({
                         "type":"message","role":"assistant","phase":"final_answer","content":"done"
                     }));
-                    sink.send(StreamEvent::ItemDone(final_item.clone()))
+                    sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(final_item.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                })
                         .await
                         .map_err(|_| {
                             TransportError::Stream("engine event receiver closed".into())
@@ -6185,6 +6234,10 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for LateFinal {
+        fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+            Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
@@ -6194,6 +6247,7 @@ mod tests {
             request: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_index = 0_u64;
             let index = {
                 let mut requests = self.requests.lock().unwrap();
                 let index = requests.len();
@@ -6207,10 +6261,22 @@ mod tests {
                 let final_item = Item(json!({
                     "type":"message","role":"assistant","phase":"final_answer","content":"provisional"
                 }));
-                sink.send(StreamEvent::ItemDone(call.clone()))
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(call.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                })
                     .await
                     .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
-                sink.send(StreamEvent::ItemDone(final_item.clone()))
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(final_item.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                })
                     .await
                     .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
                 tokio::time::timeout(std::time::Duration::from_secs(2), self.started.notified())
@@ -6223,7 +6289,13 @@ mod tests {
                 let final_item = Item(json!({
                     "type":"message","role":"assistant","phase":"final_answer","content":"continued"
                 }));
-                sink.send(StreamEvent::ItemDone(final_item.clone()))
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(final_item.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                })
                     .await
                     .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
                 Ok(turn("late-continued", vec![final_item]))
@@ -6238,6 +6310,10 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for WaitEnvelopeTransport {
+        fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+            Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
@@ -6247,6 +6323,7 @@ mod tests {
             request: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_index = 0_u64;
             let index = {
                 let mut requests = self.requests.lock().unwrap();
                 let index = requests.len();
@@ -6262,7 +6339,13 @@ mod tests {
                     "type":"message","role":"assistant","phase":"final_answer","content":"resumed"
                 }))
             };
-            sink.send(StreamEvent::ItemDone(item.clone()))
+            sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(item.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                })
                 .await
                 .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
             Ok(turn(
@@ -6280,6 +6363,10 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for QueueInboxBeforeContinuation {
+        fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+            Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
@@ -6289,6 +6376,7 @@ mod tests {
             request: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_index = 0_u64;
             let index = {
                 let mut requests = self.requests.lock().unwrap();
                 let index = requests.len();
@@ -6314,7 +6402,13 @@ mod tests {
                 }))]
             };
             for item in &items {
-                sink.send(StreamEvent::ItemDone(item.clone()))
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(item.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                })
                     .await
                     .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
             }
@@ -6359,6 +6453,10 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for ControlledStream {
+        fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+            Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             Err(TransportError::Stream(
                 "controlled transport must use streaming".into(),
@@ -6370,6 +6468,7 @@ mod tests {
             request: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_index = 0_u64;
             let turn_index = {
                 let mut requests = self.requests.lock().unwrap();
                 let index = requests.len();
@@ -6380,7 +6479,13 @@ mod tests {
                 let call = Item(json!({
                     "type":"function_call","call_id":"gate-call","name":"echo","arguments":"{}"
                 }));
-                sink.send(StreamEvent::ItemDone(call.clone()))
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(call.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                })
                     .await
                     .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
                 tokio::time::timeout(std::time::Duration::from_secs(2), self.started.notified())
@@ -6395,7 +6500,13 @@ mod tests {
                 let final_item = Item(json!({
                     "type":"message","role":"assistant","phase":"final_answer","content":"done"
                 }));
-                sink.send(StreamEvent::ItemDone(final_item.clone()))
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(final_item.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                })
                     .await
                     .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
                 Ok(turn("gated-final", vec![final_item]))
@@ -6466,6 +6577,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ResponsesTransport for DeliverBWhileAPending {
+        fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+            Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+        }
+
         async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             let index = {
                 let mut requests = self.requests.lock().unwrap();
@@ -6641,6 +6756,10 @@ mod tests {
     struct PartialForever;
     #[async_trait::async_trait]
     impl ResponsesTransport for PartialForever {
+        fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+            Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             unreachable!()
         }
@@ -6711,6 +6830,10 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for OutputBeforeTool {
+        fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+            Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             unreachable!()
         }
@@ -6719,6 +6842,7 @@ mod tests {
             _: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_index = 0_u64;
             let release = self.stream_release.lock().await.take();
             if let Some(release) = release {
                 sink.send(StreamEvent::Delta {
@@ -6735,10 +6859,22 @@ mod tests {
                 let call = Item(
                     json!({"id":"tool-live","type":"function_call","call_id":"slow-live","name":"slow","arguments":"{}"}),
                 );
-                sink.send(StreamEvent::ItemDone(message.clone()))
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(message.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                })
                     .await
                     .unwrap();
-                sink.send(StreamEvent::ItemDone(call.clone()))
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(call.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                })
                     .await
                     .unwrap();
                 release.await.unwrap();
@@ -8084,6 +8220,10 @@ mod tests {
     struct NeverComplete;
     #[async_trait::async_trait]
     impl ResponsesTransport for NeverComplete {
+        fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+            Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             std::future::pending().await
         }
@@ -8093,10 +8233,17 @@ mod tests {
             _: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_index = 0_u64;
             for (call_id, name) in [("cancel-one", "one"), ("cancel-two", "two")] {
-                sink.send(StreamEvent::ItemDone(Item(json!({
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(Item(json!({
                     "type":"function_call","call_id":call_id,"name":name,"arguments":"{}"
-                }))))
+                }))).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                })
                 .await
                 .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
             }
@@ -8124,6 +8271,10 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for FailAfterStart {
+        fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+            Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
@@ -8133,9 +8284,16 @@ mod tests {
             _: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
-            sink.send(StreamEvent::ItemDone(Item(json!({
+            let mut response_output_index = 0_u64;
+            sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(Item(json!({
                 "type":"function_call","call_id":"transport-fail","name":"pending","arguments":"{}"
-            }))))
+            }))).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                })
             .await
             .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
             self.started.notified().await;
@@ -8148,6 +8306,10 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for MalformedAfterStart {
+        fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
+            Ok((crate::transport::ResponsesRoute::Codex, crate::transport::ResponsesProtocol::Standard))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
@@ -8157,17 +8319,30 @@ mod tests {
             _: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_index = 0_u64;
             let first = Item(json!({
                 "type":"function_call","call_id":"before-malformed","name":"pending","arguments":"{}"
             }));
             let malformed = Item(json!({
                 "type":"function_call","call_id":"malformed-later","name":"pending","arguments":"["
             }));
-            sink.send(StreamEvent::ItemDone(first.clone()))
+            sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(first.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                })
                 .await
                 .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
             self.started.notified().await;
-            sink.send(StreamEvent::ItemDone(malformed.clone()))
+            sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_index, "item":(malformed.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    response_output_index += 1;
+                    event
+                })
                 .await
                 .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
             Ok(turn("malformed-after-start", vec![first, malformed]))

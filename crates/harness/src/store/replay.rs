@@ -51,6 +51,8 @@ struct ReplayRecord {
     response: ReplayResponse,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     completion: Option<CompletionMarker>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_contract: Option<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -487,6 +489,7 @@ impl Store {
                 request: request.clone(),
                 issued: issued.record,
                 completion: None,
+                provider_contract: None,
                 response: ReplayResponse {
                     response_id: response.response_id.clone(),
                     items,
@@ -545,6 +548,7 @@ impl Store {
             let record = ReplayRecord {
                 format: FORMAT, request: request.clone(), issued: issued.issued.record.clone(),
                 completion: None,
+                provider_contract: Some(self.provider_contract_tx(tx, request)?),
                 response: ReplayResponse { response_id: response.response_id.clone(), items, usage: response.usage.clone() },
             };
             let payload = serde_json::to_string(&record)?;
@@ -657,6 +661,7 @@ impl Store {
                 request: record.request,
                 model_request: request,
                 model_response: response,
+                provider_contract: record.provider_contract,
                 issued_outputs: record.issued.outputs,
                 replay_event: Some(event),
             })

@@ -146,6 +146,8 @@ pub struct ResponsesTurn {
 
 #[derive(Debug, Error)]
 pub enum TransportError {
+    #[error("provider request has no retained transport contract")]
+    UnprovenResponseContract,
     #[error("authentication expired; operator action required")]
     Authentication,
     #[error("terminal HTTP status {status}{suffix}", suffix = diagnostic_suffix(.diagnostic.as_ref()))]

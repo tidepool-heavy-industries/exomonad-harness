@@ -315,6 +315,8 @@ pub struct RecordedReplayTurn {
     pub request: RequestId,
     pub model_request: ResponsesRequest,
     pub model_response: ResponsesTurn,
+    #[serde(default)]
+    pub provider_contract: Option<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol)>,
     #[serde(default, skip)]
     pub(crate) issued_outputs: Option<Vec<Option<replay::IssuedOutputReference>>>,
     #[serde(default, skip)]

@@ -423,7 +423,7 @@ struct BudgetTransport<C> {
 }
 #[async_trait]
 impl<C: ResponsesTransport> ResponsesTransport for BudgetTransport<C> {
-    fn response_contract(&self) -> (crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol) {
+    fn response_contract(&self) -> Result<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol), TransportError> {
         self.inner.response_contract()
     }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
