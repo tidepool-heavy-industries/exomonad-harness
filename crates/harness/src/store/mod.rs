@@ -1257,6 +1257,8 @@ impl Store {
             )?;
             context::compaction_generation(&tx, &self.store_id, parent, request, branch)?;
             compaction::record(&tx, request, parent, response)?;
+            let selected = context::identity_for_branch(tx, &self.store_id, branch)?;
+            context::preflight_current(tx, request, &selected)?;
 
             Ok(())
         })

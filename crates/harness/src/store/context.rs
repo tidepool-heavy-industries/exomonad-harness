@@ -4,6 +4,7 @@ use crate::{
     context::{
         ContextBlock, ContextCommit, ContextCommitEvidence, ContextCommitReceipt, ContextDocument,
         ContextDraft, ContextError, ContextNativeKind, ContextReference, ContextRequestState,
+        ContextProjectionTarget, ContextReplayRejection, RecoveryProjectionReceipt,
         ContextRole, ContextSnapshot, ContextTextOverlay, ContextTextSelector, ContextVisibleText,
         Occurrence, Origin, SnapshotSeal, StoredBlock,
     },
@@ -44,6 +45,10 @@ pub struct EmbeddedConversationHistory {
 struct InferenceState {
     generation: u64,
     model: Option<String>,
+    #[serde(default)]
+    route: Option<crate::transport::ResponsesRoute>,
+    #[serde(default)]
+    protocol: Option<crate::transport::ResponsesProtocol>,
 }
 
 fn state_key(identity: &ConversationIdentity) -> Result<String> {
@@ -65,7 +70,7 @@ fn state(c: &Connection, identity: &ConversationIdentity) -> Result<InferenceSta
         None => Ok(InferenceState::default()),
         Some(raw) => {
             let value: serde_json::Value = serde_json::from_str(&raw)?;
-            if value["version"] != 1 {
+            if value["version"] != 1 && value["version"] != 2 {
                 return Err(ContextError::UnsupportedState.into());
             }
             Ok(serde_json::from_value(value["state"].clone())?)
@@ -78,7 +83,7 @@ fn save_state(
     identity: &ConversationIdentity,
     state: &InferenceState,
 ) -> Result<()> {
-    tx.execute("INSERT INTO session_state(session_id,state,updated_at) VALUES(?1,?2,?3) ON CONFLICT(session_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at", params![state_key(identity)?, json!({"version":1,"state":state}).to_string(),utc_millis()])?;
+    tx.execute("INSERT INTO session_state(session_id,state,updated_at) VALUES(?1,?2,?3) ON CONFLICT(session_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at", params![state_key(identity)?, json!({"version":2,"state":state}).to_string(),utc_millis()])?;
     Ok(())
 }
 
@@ -586,6 +591,24 @@ fn response_evidence(
     Ok(evidence)
 }
 
+pub(crate) fn capture_response_prefix(
+    c: &Connection,
+    prefix: &[Occurrence],
+    boundary: &Origin,
+) -> Result<Option<Vec<Origin>>> {
+    let evidence = super::replay::response_envelopes(c, &boundary.request)?;
+    let Some(envelope) = evidence.get(boundary) else {
+        return Ok(None);
+    };
+    let Some(cut) = envelope.origins.iter().position(|origin| origin == boundary) else {
+        return Ok(None);
+    };
+    let membership = envelope.origins.iter().collect::<HashSet<_>>();
+    let selected = prefix.iter().filter(|occurrence| membership.contains(&occurrence.origin))
+        .map(|occurrence| occurrence.origin.clone()).collect::<Vec<_>>();
+    Ok((selected == envelope.origins[..cut]).then_some(selected))
+}
+
 fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBlock>> {
     let publication_ledger = super::output_publication::validate_history(c, all)?;
     // Group by the issuing occurrence. Wire call IDs can repeat, and an older
@@ -794,13 +817,24 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
 
 /// Construct the only provider-facing projection. Stored history, native
 /// references, claims and receipts continue to refer to the original bytes.
-fn portable_request(
+/// Store owns the checked input. Callers may consume it but cannot construct it.
+pub(super) struct CheckedContextProjection(Vec<(RequestId, Option<ItemHash>, Item, Option<Occurrence>)>);
+
+impl CheckedContextProjection {
+    pub(super) fn into_items(self) -> Vec<(RequestId, Option<ItemHash>, Item, Option<Occurrence>)> {
+        self.0
+    }
+}
+
+pub(super) fn checked_projection(
     c: &Connection,
     consumer: &RequestId,
     all: &[Occurrence],
     model: Option<&str>,
     completing: Option<&OperationId>,
-) -> Result<Vec<(RequestId, Option<ItemHash>, Item, Option<Occurrence>)>> {
+    transport: Option<(crate::transport::ResponsesRoute, crate::transport::ResponsesProtocol)>,
+) -> Result<CheckedContextProjection> {
+    validate_canonical_history(c, all)?;
     let evidence = response_evidence(c, all)?;
     let positions = occurrence_positions(all);
     let operations = all
@@ -846,20 +880,14 @@ fn portable_request(
         {
             continue;
         }
-        let envelope = evidence
-            .get(&occurrence.origin)
-            .ok_or(ContextError::OpaqueModel)?;
-        let selected = model.ok_or(ContextError::OpaqueModel)?;
-        if envelope.model == selected || !seen.insert(envelope.origins[0].clone()) {
+        let envelope = evidence.get(&occurrence.origin).ok_or_else(|| {
+            ContextError::Replay(ContextReplayRejection::MissingProvenance {
+                request: occurrence.origin.request.clone(),
+            })
+        })?;
+        let selected = model.ok_or(ContextError::InvalidModel)?;
+        if !seen.insert(envelope.origins[0].clone()) {
             continue;
-        }
-        // A visible edit preserves opaque continuity; changing models must not
-        // silently discard that continuity through the portability renderer.
-        if all.iter().any(|occurrence| !occurrence.overlays.is_empty()) {
-            return Err(ContextError::OpaqueModel.into());
-        }
-        if envelope.kind == super::replay::ResponseEnvelopeKind::ServerCompaction {
-            return Err(ContextError::OpaqueModel.into());
         }
         let complete = envelope
             .origins
@@ -879,7 +907,7 @@ fn portable_request(
                     .iter()
                     .any(|origin| positions.contains_key(origin))
             {
-                return Err(ContextError::OpaqueModel.into());
+                return Err(ContextError::Replay(ContextReplayRejection::InvalidMembership).into());
             }
             prefix = crate::checkpoint::before_call_response_prefix(
                 c,
@@ -887,21 +915,33 @@ fn portable_request(
                 &envelope.origins,
                 &envelope.origins[..cut],
             )?
-            .ok_or(ContextError::OpaqueModel)?;
+            .ok_or(ContextError::Replay(ContextReplayRejection::InvalidPrefix))?;
             &prefix
         };
         let mut members = Vec::with_capacity(origins.len());
         for origin in origins {
             let Some(indices) = positions.get(origin) else {
-                return Err(ContextError::OpaqueModel.into());
+                return Err(ContextError::Replay(ContextReplayRejection::InvalidMembership).into());
             };
             let [index] = indices.as_slice() else {
-                return Err(ContextError::OpaqueModel.into());
+                return Err(ContextError::Replay(ContextReplayRejection::InvalidMembership).into());
             };
             if members.last().is_some_and(|previous| previous >= index) {
-                return Err(ContextError::OpaqueModel.into());
+                return Err(ContextError::Replay(ContextReplayRejection::InvalidMembership).into());
             }
             members.push(*index);
+        }
+        if envelope.model == selected {
+            if envelope.route.zip(envelope.protocol) != transport || transport.is_none() {
+                return Err(ContextError::Replay(ContextReplayRejection::IncompatibleTransport).into());
+            }
+            continue;
+        }
+        // Editing visible native fields does not authorize losing their opaque continuity.
+        if all.iter().any(|occurrence| !occurrence.overlays.is_empty())
+            || envelope.kind == super::replay::ResponseEnvelopeKind::ServerCompaction
+        {
+            return Err(ContextError::OpaqueModel.into());
         }
         let mut paired_outputs = HashSet::new();
         let mut membership = members.iter().copied().collect::<HashSet<_>>();
@@ -986,7 +1026,7 @@ fn portable_request(
             ));
         }
     }
-    Ok(projected)
+    Ok(CheckedContextProjection(projected))
 }
 
 /// A retained output closes its original invocation only when Store owns that
@@ -1074,7 +1114,7 @@ fn context_request_state_tx(
     validate_canonical_history(tx, &canonical)?;
     let projected = {
         let _projection = tracing::debug_span!(target: "harness::runtime_cost", "portable_history_projection", input_items = canonical.len()).entered();
-        portable_request(tx, head, &canonical, current.model.as_deref(), None)?
+        checked_projection(tx, head, &canonical, current.model.as_deref(), None, current.route.zip(current.protocol))?.into_items()
     };
     drop(canonical);
     let mut history = Vec::with_capacity(projected.len());
@@ -1095,7 +1135,166 @@ fn context_request_state_tx(
     })
 }
 
+pub(crate) fn preflight_target(
+    c: &Connection,
+    head: &RequestId,
+    target: &ContextProjectionTarget,
+) -> Result<()> {
+    if target.model.trim().is_empty() {
+        return Err(ContextError::InvalidModel.into());
+    }
+    checked_projection(
+        c,
+        head,
+        &history(c, head, true)?,
+        Some(&target.model),
+        None,
+        Some((target.route, target.protocol)),
+    ).map(drop)
+}
+
+pub(super) fn current_projection_target(
+    c: &Connection,
+    identity: &ConversationIdentity,
+) -> Result<ContextProjectionTarget> {
+    let current = state(c, identity)?;
+    Ok(ContextProjectionTarget {
+        model: current.model.ok_or(ContextError::InvalidModel)?,
+        route: current.route.ok_or(ContextError::Replay(ContextReplayRejection::IncompatibleTransport))?,
+        protocol: current.protocol.ok_or(ContextError::Replay(ContextReplayRejection::IncompatibleTransport))?,
+    })
+}
+
+pub(super) fn preflight_current(
+    c: &Connection,
+    head: &RequestId,
+    identity: &ConversationIdentity,
+) -> Result<()> {
+    let current = state(c, identity)?;
+    checked_projection(c, head, &history(c, head, true)?, current.model.as_deref(), None,
+        current.route.zip(current.protocol)).map(drop)
+}
+
+pub(crate) fn save_target(
+    tx: &Transaction<'_>,
+    identity: &ConversationIdentity,
+    target: &ContextProjectionTarget,
+) -> Result<()> {
+    if target.model.trim().is_empty() {
+        return Err(ContextError::InvalidModel.into());
+    }
+    let mut current = state(tx, identity)?;
+    if current.model.is_none() {
+        current.model = Some(target.model.clone());
+    }
+    current.route = Some(target.route);
+    current.protocol = Some(target.protocol);
+    save_state(tx, identity, &current)
+}
+
+/// Publish an explicit recovery cut through the existing occurrence owner.
+/// Retained calls and outputs keep their exact issuing operations; this does no dispatch.
+pub(super) fn publish_recovery_projection(
+    tx: &Transaction<'_>,
+    identity: &crate::embedding::HostIdentity,
+    head: &RequestId,
+    mode: crate::embedding::RecoveryMode,
+    store_id: &str,
+) -> Result<(RequestId, RecoveryProjectionReceipt)> {
+    let conversation = ConversationIdentity::Embedded {
+        run: identity.run.clone(), actor: identity.actor.clone(), incarnation: identity.incarnation.clone(),
+    };
+    validate_identity(tx, store_id, &conversation)?;
+    let target = current_projection_target(tx, &conversation)?;
+    if mode == crate::embedding::RecoveryMode::Exact {
+        preflight_target(tx, head, &target)?;
+        return Ok((head.clone(), RecoveryProjectionReceipt::default()));
+    }
+    let canonical = history(tx, head, true)?;
+    validate_canonical_history(tx, &canonical)?;
+    let replacement = RequestId(uuid::Uuid::new_v4().to_string());
+    let mut retained = Vec::with_capacity(canonical.len());
+    let mut receipt = RecoveryProjectionReceipt::default();
+    let mut unknown = HashSet::new();
+    for occurrence in canonical {
+        if !opaque(&occurrence.item) || occurrence.item.is_configuration_update()
+            || (occurrence.item.0["type"] == "message"
+                && matches!(occurrence.item.0["role"].as_str(), Some("system" | "developer")))
+        {
+            retained.push(occurrence);
+            continue;
+        }
+        let note = match portability_note::render(std::slice::from_ref(&occurrence)) {
+            Ok(note) => Some(note),
+            Err(StoreError::Context(ContextError::Portability(
+                crate::context::ContextPortabilityRejection::NoVisibleContent,
+            ))) if occurrence.item.0["type"] == "reasoning" => None,
+            Err(error) => return Err(error),
+        };
+        receipt.omitted.push(reference(std::slice::from_ref(&occurrence)));
+        if super::replay::recorded_response_identity(tx, &occurrence.origin.request)?.is_none()
+            && unknown.insert(occurrence.origin.request.clone())
+        {
+            receipt.unknown_response_completeness.push(occurrence.origin.request.clone());
+        }
+        if let Some(item) = note {
+            let hash = Store::put_item_tx(tx, &item)?;
+            let position = retained.len() as i64;
+            retained.push(Occurrence {
+                request: replacement.clone(), position, hash: hash.clone(), item,
+                output_operation: None,
+                origin: Origin { request: replacement.clone(), position, hash },
+                sources: vec![reference(std::slice::from_ref(&occurrence))],
+                note: false, overlays: Vec::new(),
+            });
+        }
+    }
+    checked_projection(tx, head, &retained, Some(&target.model), None,
+        Some((target.route, target.protocol)))?;
+    insert_snapshot_request(tx, &replacement, Some(head), &identity.actor.0)?;
+    tx.execute("UPDATE requests SET embedded_run=?2,embedded_incarnation=?3,round_phase='pending' WHERE id=?1",
+        params![replacement.0, identity.run, identity.incarnation])?;
+    for (position, occurrence) in retained.iter().enumerate() {
+        insert_occurrence(tx, &replacement, position as i64, occurrence)?;
+    }
+    carry_native_claims(tx, &retained, head, &replacement, store_id, NativeClaimTransfer::Current)?;
+    compaction_generation(tx, store_id, head, &replacement, &identity.actor.0)?;
+    Ok((replacement, receipt))
+}
+
 impl Store {
+    /// Bind the next provider projection to the actual transport selection.
+    pub fn initialize_context_target(
+        &self,
+        identity: &ConversationIdentity,
+        target: &ContextProjectionTarget,
+    ) -> Result<()> {
+        if target.model.trim().is_empty() {
+            return Err(ContextError::InvalidModel.into());
+        }
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            validate_identity(tx, &self.store_id, identity)?;
+            save_target(tx, identity, target)
+        })
+    }
+
+    /// Preflight an exact retained context for its resolved destination.
+    pub fn preflight_context_target(
+        &self,
+        head: &RequestId,
+        identity: &ConversationIdentity,
+        target: &ContextProjectionTarget,
+    ) -> Result<()> {
+        let mut c = self.lock()?;
+        c.read_transaction(|tx| {
+            validate_identity(tx, &self.store_id, identity)?;
+            if branch(tx, head)? != identity.actor().0 {
+                return Err(StoreError::OperationOriginMismatch);
+            }
+            preflight_target(tx, head, target).map(drop)
+        })
+    }
     pub(crate) fn context_call_cut_tx(
         tx: &Transaction<'_>,
         operation: &OperationId,
@@ -1180,7 +1379,7 @@ impl Store {
     }
 
     /// Include the current pending request without widening the actor's exact binding.
-    /// Frontier, effective context and model-response observations share one transaction.
+    /// Frontier, retained context and model-response observations share one transaction.
     pub fn embedded_conversation_history(
         &self,
         host: &crate::embedding::HostIdentity,
@@ -1193,13 +1392,20 @@ impl Store {
             .as_ref()
             .or(frontier.settled_head.as_ref())
             .cloned();
-        let identity = ConversationIdentity::Embedded {
-            run: host.run.clone(),
-            actor: host.actor.clone(),
-            incarnation: host.incarnation.clone(),
-        };
         let history = match &head {
-            Some(head) => context_request_state_tx(&tx, head, &identity)?.history,
+            Some(head) => {
+                let retained = history(tx, head, true)?;
+                validate_canonical_history(tx, &retained)?;
+                retained.iter().map(|occurrence| {
+                    let item = project_context_note(occurrence)?;
+                    let hash = if occurrence.note || !occurrence.overlays.is_empty() {
+                        Store::put_item_tx(tx, &item)?
+                    } else {
+                        occurrence.hash.clone()
+                    };
+                    Ok((occurrence.request.clone(), hash, item))
+                }).collect::<Result<Vec<_>>>()?
+            },
             None => Vec::new(),
         };
         let requests: HashSet<_> = history
@@ -1891,12 +2097,13 @@ impl Store {
                 note: false,
                 overlays: Vec::new(),
         });
-        portable_request(
+        checked_projection(
             &tx,
             &snapshot.head,
             &prospective,
             selected_model,
             Some(&snapshot.operation),
+            current.route.zip(current.protocol),
         )?;
         if cancelled() {
             return Err(ContextError::Cancelled.into());

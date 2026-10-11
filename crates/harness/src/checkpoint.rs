@@ -38,6 +38,14 @@ pub(crate) struct CheckpointMetadata {
     cut: CheckpointCut,
     operation: Option<OperationId>,
     host: Value,
+    #[serde(default)]
+    response_prefix: Option<CapturedResponsePrefix>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+enum CapturedResponsePrefix {
+    Valid { origins: Vec<crate::context::Origin>, boundary: crate::context::Origin },
+    Unproven,
 }
 
 impl CheckpointMetadata {
@@ -47,13 +55,15 @@ impl CheckpointMetadata {
             cut: CheckpointCut::Deferred,
             operation: None,
             host,
+            response_prefix: None,
         }
     }
 
     pub(crate) fn decode(raw: &str) -> Result<Self> {
         let value: Self = serde_json::from_str(raw)?;
-        if value.version != 1
+        if !matches!(value.version, 1 | 2)
             || (value.cut == CheckpointCut::BeforeCall && value.operation.is_none())
+            || (value.version == 2 && value.cut == CheckpointCut::BeforeCall && value.response_prefix.is_none())
         {
             return Err(StoreError::InvalidCheckpointMetadata);
         }
@@ -61,8 +71,7 @@ impl CheckpointMetadata {
     }
 }
 
-/// Authenticate a partial response only through a checkpoint on the consuming
-/// ancestry. Replay continues to own the complete original response envelope.
+/// Authenticate the exact response cut frozen by a checkpoint on this ancestry.
 pub(crate) fn before_call_response_prefix(
     c: &Connection,
     consumer: &RequestId,
@@ -98,10 +107,13 @@ pub(crate) fn before_call_response_prefix(
             return Err(StoreError::InvalidCheckpointMetadata);
         }
         let boundary = context::original_call(c, &operation)?;
-        let Some(cut) = origins.iter().position(|origin| origin == &boundary) else {
+        let Some(CapturedResponsePrefix::Valid { origins: frozen, boundary: frozen_boundary }) = metadata.response_prefix else {
             continue;
         };
-        if cut == 0 || selected != &origins[..cut] {
+        if boundary != frozen_boundary || selected != frozen
+            || origins.get(..frozen.len()) != Some(frozen.as_slice())
+            || origins.get(frozen.len()) != Some(&boundary)
+        {
             continue;
         }
         let retained = context::request_occurrences(c, &RequestId(snapshot))?
@@ -109,7 +121,7 @@ pub(crate) fn before_call_response_prefix(
             .filter(|occurrence| membership.contains(&occurrence.origin))
             .map(|occurrence| occurrence.origin)
             .collect::<Vec<_>>();
-        if retained == origins[..cut] {
+        if retained == frozen {
             return Ok(Some(retained));
         }
     }
@@ -218,6 +230,8 @@ pub struct CheckpointChild<'a> {
     pub contract: &'a Value,
     pub checkout: &'a Value,
     pub task: Option<CheckpointTask<'a>>,
+    /// Resolved from the child's actual transport before admission.
+    pub target: &'a crate::context::ContextProjectionTarget,
 }
 
 struct CaptureBoundary<'a> {
@@ -431,6 +445,15 @@ impl Store {
             }
         }
         context::validate_canonical_history(tx, prefix)?;
+        let response_prefix = if cut == CheckpointCut::BeforeCall {
+            let boundary_origin = stored[boundary].origin.clone();
+            Some(match context::capture_response_prefix(tx, prefix, &boundary_origin)? {
+                Some(origins) => CapturedResponsePrefix::Valid { origins, boundary: boundary_origin },
+                None => CapturedResponsePrefix::Unproven,
+            })
+        } else {
+            None
+        };
         let effort = prefix
             .iter()
             .rev()
@@ -573,7 +596,7 @@ impl Store {
         Self::set_effort_tx(&tx, &snapshot_request, effort)?;
         tx.execute(
             "INSERT INTO checkpoints(id,origin_agent,source_request,snapshot_request,boundary_call,metadata,pending_claims,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![id,origin.0,source_request.0,snapshot_request.0,boundary_call.0,serde_json::to_string(&CheckpointMetadata { version: 1, cut, operation: operation.cloned(), host: metadata.clone() })?,serde_json::to_string(&pending_claims)?,utc_millis()],
+            params![id,origin.0,source_request.0,snapshot_request.0,boundary_call.0,serde_json::to_string(&CheckpointMetadata { version: 2, cut, operation: operation.cloned(), host: metadata.clone(), response_prefix })?,serde_json::to_string(&pending_claims)?,utc_millis()],
         )?;
         Ok(Checkpoint {
             id,
@@ -645,6 +668,7 @@ impl Store {
             } else {
                 checkpoint.snapshot_request.clone()
             };
+            context::preflight_target(tx, &inherited_head, child.target)?;
             let snapshot_request = RequestId(uuid::Uuid::new_v4().to_string());
             tx.execute(
                 "INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros) VALUES (?1,?2,?3,?4,0,0,0)",
@@ -700,6 +724,8 @@ impl Store {
                 params![binding.actor.0, binding.run, binding.incarnation],
             )?;
         }
+        let identity = context::identity_for_branch(tx, &self.store_id, &child.path.0)?;
+        context::save_target(tx, &identity, child.target)?;
         let envelope_id = if let Some(task) = child.task {
             let hash = Self::put_item_tx(&tx, task.item)?;
             tx.execute(

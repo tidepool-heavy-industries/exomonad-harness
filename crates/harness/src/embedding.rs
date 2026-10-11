@@ -362,6 +362,7 @@ impl Conversation {
         checkpoint: &crate::checkpoint::Checkpoint<T>,
         contract: &Value,
         checkout: &Value,
+        target: &crate::context::ContextProjectionTarget,
     ) -> Result<Self, EmbeddedError> {
         let _admission = host.admit()?;
         store.attach_bound_checkpoint_child(
@@ -372,6 +373,7 @@ impl Conversation {
                 contract,
                 checkout,
                 task: None,
+                target,
             },
             host.identity(),
         )?;

@@ -7,6 +7,34 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// The resolved provider contract selected by the transport owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextProjectionTarget {
+    pub model: String,
+    pub route: crate::transport::ResponsesRoute,
+    pub protocol: crate::transport::ResponsesProtocol,
+}
+
+/// Exact continuity losses from an explicitly selected visible-history recovery.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryProjectionReceipt {
+    pub omitted: Vec<ContextReference>,
+    pub unknown_response_completeness: Vec<RequestId>,
+}
+
+/// Structural replay refusals retain identities, never provider payloads.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum ContextReplayRejection {
+    #[error("provider response provenance is unavailable for request {request:?}")]
+    MissingProvenance { request: RequestId },
+    #[error("provider response membership is not an exact ordered selection")]
+    InvalidMembership,
+    #[error("captured context is not an authenticated provider response prefix")]
+    InvalidPrefix,
+    #[error("opaque provider continuity has no established route or protocol compatibility")]
+    IncompatibleTransport,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ContextReference(pub(crate) String);
@@ -237,6 +265,8 @@ pub enum ContextError {
     NativeOrder,
     #[error("opaque provider continuity has no established compatibility with the requested model")]
     OpaqueModel,
+    #[error("context replay refused: {0}")]
+    Replay(ContextReplayRejection),
     #[error("context publication requires a successful complete invocation")]
     Ineligible,
     #[error("context publication was cancelled before admission")]
