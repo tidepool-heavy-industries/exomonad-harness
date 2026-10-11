@@ -53,8 +53,7 @@ impl Store {
                     return Err(StoreError::ConflictingProviderIssuance(request.clone()));
                 }
             } else {
-                let base_position: i64 = tx.query_row("SELECT COALESCE(MAX(position)+1,0) FROM request_items WHERE request_id=?1", [&request.0], |r| r.get(0))?;
-                tx.execute("INSERT INTO provider_requests(request_id,issued_json,route,protocol,base_position,state) VALUES (?1,?2,?3,?4,?5,'streaming')", params![request.0,encoded,route,protocol,base_position])?;
+                tx.execute("INSERT INTO provider_requests(request_id,issued_json,route,protocol,state) VALUES (?1,?2,?3,?4,'streaming')", params![request.0,encoded,route,protocol])?;
             }
             Ok(IssuedProviderRequest { request: request.clone(), store_id: self.store_id.clone(), issued: Arc::new(issued) })
         })
@@ -205,14 +204,11 @@ pub(super) fn append_item(
     if state != "streaming" {
         return Err(StoreError::InvalidProviderEvidence(request.clone()));
     }
-    let base_position: i64 = tx.query_row(
-        "SELECT base_position FROM provider_requests WHERE request_id=?1",
+    let position: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(position)+1,0) FROM request_items WHERE request_id=?1",
         [&request.0],
         |r| r.get(0),
     )?;
-    let position = base_position
-        .checked_add(index_i64)
-        .ok_or_else(|| StoreError::InvalidProviderEvidence(request.clone()))?;
     super::output_publication::require_ordinary(item, request, position)?;
     tx.execute(
         "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
@@ -492,7 +488,53 @@ mod tests {
                 .iter()
                 .map(|o| o.position)
                 .collect::<Vec<_>>(),
-            vec![0, 1]
+            vec![1, 0]
+        );
+    }
+
+    #[test]
+    fn provider_indices_remain_distinct_from_interleaved_operation_output_positions() {
+        let store = Store::memory().unwrap();
+        let issued = issue(&store);
+        let invocation = Item(
+            json!({"type":"function_call","call_id":"early-call","name":"work","arguments":"{}"}),
+        );
+        store
+            .append_provider_done(&issued, &done(0, &invocation))
+            .unwrap();
+        let operation = store
+            .claim(&crate::model::CallId("early-call".into()), &issued.request)
+            .unwrap();
+        let output = crate::turn::JobOutput::Completed(Ok(json!({"result":"effect-once"})));
+        store
+            .write_job_output(&operation, crate::item::ToolKind::Function, &output)
+            .unwrap();
+        store
+            .append_operation_output(&operation, &issued.request, &issued.request)
+            .unwrap();
+        store
+            .append_provider_done(&issued, &done(1, &item(2)))
+            .unwrap();
+        store
+            .record_provider_turn(&issued, &turn(vec![invocation.clone(), item(2)]))
+            .unwrap();
+        let history = store.items(&issued.request).unwrap();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0], invocation);
+        assert_eq!(history[1].0["type"], "function_call_output");
+        assert_eq!(history[2], item(2));
+        let c = store.lock().unwrap();
+        let owned = response_envelopes(&c, &issued.request).unwrap().unwrap();
+        assert_eq!(
+            owned
+                .values()
+                .next()
+                .unwrap()
+                .origins
+                .iter()
+                .map(|o| o.position)
+                .collect::<Vec<_>>(),
+            vec![0, 2]
         );
     }
 
@@ -620,14 +662,15 @@ mod tests {
         fn indexed_history_matches_independent_map_under_duplicates_conflicts_and_reordering(history in prop::collection::vec((0_u8..7,0_u8..4),1..55)) {
             let store=Store::memory().unwrap();let issued=issue(&store);
             let mut expected=std::collections::BTreeMap::<u8,u8>::new();
+            let mut arrival=Vec::new();
             for (index,value) in history {
                 let result=store.append_provider_done(&issued,&done(index as u64,&item(value)));
                 match expected.get(&index) {
                     Some(previous) if *previous!=value => prop_assert!(matches!(result,Err(StoreError::ConflictingProviderItem{..})), "typed index conflict expected"),
                     Some(_) => prop_assert!(!result.unwrap()),
-                    None => { prop_assert!(result.unwrap());expected.insert(index,value); }
+                    None => { prop_assert!(result.unwrap());expected.insert(index,value);arrival.push(item(value)); }
                 }
-                prop_assert_eq!(store.items(&issued.request).unwrap(),expected.values().map(|v|item(*v)).collect::<Vec<_>>());
+                prop_assert_eq!(store.items(&issued.request).unwrap(),arrival.clone());
                 let continuous=expected.keys().copied().eq(0..expected.len() as u8);
                 let evidence=response_envelopes(&store.lock().unwrap(),&issued.request);
                 if continuous { prop_assert_eq!(evidence.unwrap().unwrap().len(),expected.len()); }

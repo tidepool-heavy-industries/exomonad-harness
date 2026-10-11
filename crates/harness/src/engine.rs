@@ -47,6 +47,10 @@ struct HistoryWindow {
     provenance: Vec<(RequestId, ItemHash)>,
     occurrences: Vec<Option<crate::context::Occurrence>>,
     model: Option<String>,
+    contract: (
+        crate::transport::ResponsesRoute,
+        crate::transport::ResponsesProtocol,
+    ),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1193,6 +1197,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         .map(|name| (name.to_owned(), request_provider.tool_scheduling(name)))
                 })
                 .collect::<HashMap<_, _>>();
+            let contract = history.contract;
             let continuing_model = history
                 .model
                 .clone()
@@ -1379,10 +1384,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let store = self.store.clone();
             let instructions = replay_instructions.clone();
             let seal_head = parent.clone();
-            let contract = match self.client.response_contract() {
-                Ok(contract) => contract,
-                Err(error) => return Err(self.cleanup_pending(error.into(), &pending).await),
-            };
             let (req, provider_request) = match blocking(move || {
                 let issued = store.seal_replay_request_with_occurrences(
                     &seal_head,
@@ -3437,8 +3438,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let store = self.store.clone();
         let request = id.clone();
         let identity = self.origin.clone();
+        let contract = self.client.response_contract()?;
         blocking(move || {
-            let state = store.context_request_state(&request, &identity)?;
+            let state = store.context_request_state_for_transport(&request, &identity, contract)?;
             tracing::Span::current().record("output_items", state.history.len());
             let mut items = Vec::with_capacity(state.history.len());
             let mut provenance = Vec::with_capacity(state.history.len());
@@ -3451,6 +3453,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 provenance,
                 occurrences: state.occurrences,
                 model: state.model,
+                contract,
             })
         })
         .instrument(span)
@@ -3761,32 +3764,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
 }
 
 async fn load_history(store: Arc<Store>, id: RequestId) -> Result<Vec<Item>, EngineError> {
-    Ok(load_history_window(store, id).await?.items)
-}
-
-async fn load_history_window(
-    store: Arc<Store>,
-    id: RequestId,
-) -> Result<HistoryWindow, EngineError> {
-    let span = tracing::debug_span!(target: "harness::runtime_cost", "load_history_window",
-        request_id = %id.0, output_items = tracing::field::Empty);
+    let span =
+        tracing::debug_span!(target: "harness::runtime_cost", "load_history", request_id = %id.0);
     blocking(move || {
-        let history = store.history_occurrences(&id)?;
-        let mut items = Vec::with_capacity(history.len());
-        let mut provenance = Vec::with_capacity(history.len());
-        let mut occurrences = Vec::with_capacity(history.len());
-        for occurrence in history {
-            items.push(occurrence.item.clone());
-            provenance.push((occurrence.request.clone(), occurrence.hash.clone()));
-            occurrences.push(Some(occurrence));
-        }
-        tracing::Span::current().record("output_items", items.len());
-        Ok(HistoryWindow {
-            items,
-            provenance,
-            occurrences,
-            model: None,
-        })
+        Ok(store
+            .context_history(&id)?
+            .into_iter()
+            .map(|(_, _, item)| item)
+            .collect())
     })
     .instrument(span)
     .await

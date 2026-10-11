@@ -28,7 +28,6 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS provider_requests (
  request_id TEXT PRIMARY KEY REFERENCES requests(id),
  issued_json TEXT NOT NULL, route TEXT NOT NULL, protocol TEXT NOT NULL,
- base_position INTEGER NOT NULL CHECK(base_position>=0),
  state TEXT NOT NULL CHECK(state IN ('streaming','completed','interrupted','failed','rejected')),
  response_id TEXT, completion_event INTEGER REFERENCES events(id),
  CHECK(length(route)>0 AND length(protocol)>0)
