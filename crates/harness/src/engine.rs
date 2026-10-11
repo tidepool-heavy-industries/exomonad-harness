@@ -690,7 +690,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         if let Some(attempt) = &inference_attempt {
             if result.is_ok() {
                 self.store.finish_embedded_inference(attempt)?;
-            } else if matches!(result, Err(EngineError::Store(StoreError::Context(_)))) {
+            } else if matches!(result, Err(EngineError::Store(StoreError::Context(_)
+                | StoreError::IncompleteProviderPrefix { .. } | StoreError::InvalidProviderEvidence(_)))) {
                 let identity = self.embedded_identity().expect("embedded attempt");
                 let frontier = self.store.embedded_round_frontier(&identity)?;
                 if let Some(request) = frontier.pending_head.or(frontier.settled_head) {
@@ -2529,14 +2530,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let mut first_error = None;
         for call in pending {
             let mut persisted_terminal = false;
-            match self.store.replay_tool_output_claim(&call.operation, &call.claim_request) {
-                Ok(Some(output)) if matches!(output.terminal, crate::store::TerminalOutcome::Success
-                    | crate::store::TerminalOutcome::Failure(_) | crate::store::TerminalOutcome::Cancelled
-                    | crate::store::TerminalOutcome::CancelledWithReceipt(_)) => continue,
+            match self.store.operation_cleanup_evidence(&call.operation) {
+                Ok(crate::store::OperationCleanupEvidence::NotStarted | crate::store::OperationCleanupEvidence::Terminal(_)) => continue,
                 Err(error) => { first_error.get_or_insert(EngineError::Store(error)); },
                 _ => {},
             }
-            if call.cancel_job_on_cleanup && call.wait.is_none() && !call.queued {
+            if call.cancel_job_on_cleanup && call.wait.is_none() {
                 if let Err(error) = self.scheduler.cancel(&call.operation).await {
                     first_error.get_or_insert_with(|| match error {
                         JobError::UnknownCall => EngineError::UnconfirmedCancellation { operation: call.operation.clone() },
@@ -2591,7 +2590,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 let store = self.store.clone();
                 let operation = call.operation.clone();
                 let request = call.claim_request.clone();
-                let not_started = call.queued || call.wait.is_some();
+                let not_started = call.wait.is_some();
+                if !not_started && call.operation.origin.actor() == self.origin.actor() {
+                    first_error.get_or_insert_with(|| EngineError::UnconfirmedCancellation { operation: call.operation.clone() });
+                }
                 if let Err(error) = blocking(move || if not_started {
                     store.interrupt_unstarted_operation_claim(&operation, &request)
                 } else {

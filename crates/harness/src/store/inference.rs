@@ -118,22 +118,24 @@ fn projection(state: Gate) -> HostInferenceState {
 fn validate_cleanup(c: &Connection, identity: &HostIdentity, head: &RequestId) -> Result<()> {
     let mut statement = c.prepare(
         "WITH RECURSIVE lineage(id) AS (SELECT ?1 UNION ALL SELECT r.parent_id FROM requests r JOIN lineage l ON r.id=l.id WHERE r.parent_id IS NOT NULL) \
-         SELECT origin,origin_request_id,call_id,state,terminal_json FROM claims \
+         SELECT DISTINCT origin,origin_request_id,call_id FROM claims \
          WHERE request_id IN lineage AND json_extract(origin,'$.actor')=?2 \
          AND (json_extract(origin,'$.run')=?3 OR json_extract(origin,'$.kind')='standalone')",
     )?;
     let rows = statement.query_map(params![head.0, identity.actor.0, identity.run], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, Option<String>>(4)?))
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
     })?;
     for row in rows {
-        let (origin, request, call, state, terminal) = row?;
+        let (origin, request, call) = row?;
         let operation = OperationId { origin: serde_json::from_str(&origin)?, request: RequestId(request), call: crate::model::CallId(call) };
-        let safe = match state.as_str() {
-            "interrupted" => terminal.map(|raw| serde_json::from_str::<super::TerminalOutcome>(&raw))
-                .transpose()?.is_some_and(|outcome| matches!(outcome, super::TerminalOutcome::NotStarted)),
-            "settled" => terminal.map(|raw| serde_json::from_str::<super::TerminalOutcome>(&raw))
-                .transpose()?.is_some_and(|outcome| !matches!(outcome, super::TerminalOutcome::CancellationUnconfirmed(_))),
-            _ => false,
+        let safe = match super::terminal::operation_cleanup_evidence(c, &operation)? {
+            super::terminal::OperationCleanupEvidence::NotStarted => true,
+            super::terminal::OperationCleanupEvidence::Terminal(terminal) => {
+                debug_assert!(matches!(terminal, super::TerminalOutcome::Success | super::TerminalOutcome::Failure(_)
+                    | super::TerminalOutcome::Cancelled | super::TerminalOutcome::CancelledWithReceipt(_)));
+                true
+            },
+            super::terminal::OperationCleanupEvidence::Uncertain => false,
         };
         if !safe { return Err(StoreError::InferenceRecoveryUncertain { operation }); }
     }
@@ -189,7 +191,10 @@ impl Store {
 
     pub(crate) fn block_embedded_inference(&self, identity: &HostIdentity, request: &RequestId, reason: InferenceBlockReason) -> Result<InferenceBlock> {
         let mut c = self.lock()?;
-        c.write_transaction(|tx| block_tx(tx, identity, request, reason))
+        c.write_transaction(|tx| {
+            validate_cleanup(tx, identity, request)?;
+            block_tx(tx, identity, request, reason)
+        })
     }
 
     /// The exclusive host-owner startup path fences old attempts and grants.
@@ -250,7 +255,8 @@ impl Store {
                     tx.execute_batch("RELEASE inference_recovery")?;
                     ("recovery_authorized", outcome)
                 },
-                Err(error @ (StoreError::StaleInferenceRecovery | StoreError::InvalidEmbeddedBinding | StoreError::InferenceRecoveryUncertain { .. } | StoreError::Context(_))) => {
+                Err(error @ (StoreError::StaleInferenceRecovery | StoreError::InvalidEmbeddedBinding | StoreError::InferenceRecoveryUncertain { .. }
+                    | StoreError::ConflictingReplayOutcome { .. } | StoreError::UnsupportedReplayOutcome { .. } | StoreError::Context(_))) => {
                     tx.execute_batch("ROLLBACK TO inference_recovery; RELEASE inference_recovery")?;
                     ("refused", CommandReceiptOutcome::Refused { target: Some(identity.clone()), reason: error.to_string() })
                 },
@@ -353,4 +359,86 @@ mod tests {
         assert_eq!(store.recover_embedded_inference_after_host_loss(&identity.run).unwrap(), 0);
         drop(store); std::fs::remove_file(path).unwrap();
     }
+    #[test]
+    fn legacy_pending_frontier_without_gate_cannot_use_queued_input_as_authority() {
+        for interrupted in [false, true] {
+            let store = Store::memory().unwrap(); let identity = identity();
+            store.bind_embedded_actor(&identity, None).unwrap();
+            let request = RequestId("legacy-pending".into());
+            store.write_embedded_request(&identity, &request, None, &[], Usage::default()).unwrap();
+            if interrupted {
+                store.record_interrupted_model_request(&request, StreamInterruption::ReadFailed, Some((&identity, None))).unwrap();
+                store.lock().unwrap().execute("DELETE FROM embedded_inference", []).unwrap();
+            }
+            store.admit_embedded_input(&identity, "queued", "human", &crate::item::Item(serde_json::json!({"type":"message","role":"user","content":"queued"}))).unwrap();
+            store.recover_embedded_inference_after_host_loss(&identity.run).unwrap();
+            let HostInferenceState::Blocked { block } = store.embedded_inference_state(&identity).unwrap() else { panic!("legacy pending must block"); };
+            assert_eq!(block.request, request); assert_eq!(block.generation, 1);
+            assert_eq!(block.reason, if interrupted { InferenceBlockReason::StreamInterrupted { cause:StreamInterruption::ReadFailed } } else { InferenceBlockReason::ContinuityUnproven });
+            assert!(matches!(store.begin_embedded_inference(&identity, None), Err(StoreError::InferenceBlocked { .. })));
+            assert_eq!(store.unread("/root").unwrap().len(), 1);
+        }
+    }
+    #[test]
+    fn bare_interruption_and_settled_interruption_are_uncertain_but_not_started_is_proven() {
+        for proof in 0..3 {
+            let store = Store::memory().unwrap(); let identity = identity(); ready(&store, &identity);
+            let request = RequestId("cleanup".into()); let _attempt = store.begin_embedded_inference(&identity, None).unwrap();
+            store.write_embedded_request(&identity, &request, None, &[crate::item::Item(serde_json::json!({"type":"function_call","call_id":"effect","name":"effect","arguments":"{}"}))], Usage::default()).unwrap();
+            let operation = store.claim(&CallId("effect".into()), &request).unwrap();
+            match proof {
+                0 => { store.interrupt_operation_claim(&operation, &request).unwrap(); },
+                1 => { store.write_job_output(&operation, crate::item::ToolKind::Function, &crate::turn::JobOutput::Interrupted).unwrap(); },
+                _ => { store.interrupt_unstarted_operation_claim(&operation, &request).unwrap(); },
+            }
+            store.record_interrupted_model_request(&request, StreamInterruption::MissingCompletion, Some((&identity, None))).unwrap();
+            let HostInferenceState::Blocked { block } = store.embedded_inference_state(&identity).unwrap() else { panic!("blocked"); };
+            let command = recovery(&store, &identity, &block);
+            let receipt = store.authorize_embedded_recovery(&identity, command).unwrap();
+            assert_eq!(matches!(receipt.outcome, CommandReceiptOutcome::RecoveryAuthorized { .. }), proof == 2);
+            assert_eq!(store.claims_for_operation(&operation).unwrap().len(), 1);
+        }
+    }
+    #[test]
+    fn operation_wide_terminal_closes_cleanup_without_rewriting_claim_local_interruption() {
+        let store = Store::memory().unwrap(); let identity = identity(); ready(&store, &identity);
+        let source = RequestId("original".into()); let snapshot = RequestId("snapshot".into());
+        let item = crate::item::Item(serde_json::json!({"type":"function_call","call_id":"effect","name":"effect","arguments":"{}"}));
+        let _attempt = store.begin_embedded_inference(&identity, None).unwrap();
+        store.write_embedded_request(&identity, &source, None, std::slice::from_ref(&item), Usage::default()).unwrap();
+        let operation = store.claim(&CallId("effect".into()), &source).unwrap();
+        store.write_compaction_request_with_claims(&snapshot, &source, "/root", std::slice::from_ref(&item), std::slice::from_ref(&operation), Some(&identity)).unwrap();
+        store.interrupt_operation_claim(&operation, &source).unwrap();
+        store.write_job_output(&operation, crate::item::ToolKind::Function, &crate::turn::JobOutput::Completed(Ok(serde_json::json!(42)))).unwrap();
+        store.record_interrupted_model_request(&snapshot, StreamInterruption::MissingCompletion, Some((&identity, None))).unwrap();
+        let HostInferenceState::Blocked { block } = store.embedded_inference_state(&identity).unwrap() else { panic!("blocked"); };
+        let command = recovery(&store, &identity, &block);
+        assert!(matches!(store.authorize_embedded_recovery(&identity, command).unwrap().outcome, CommandReceiptOutcome::RecoveryAuthorized { .. }));
+        assert_eq!(store.replay_tool_output_claim(&operation, &source).unwrap().unwrap().terminal, super::super::TerminalOutcome::Interrupted);
+        assert_eq!(store.replay_tool_output_claim(&operation, &snapshot).unwrap().unwrap().terminal, super::super::TerminalOutcome::Success);
+    }
+    #[test]
+    fn recovery_commit_failure_fences_without_publishing_snapshot_or_authorization() {
+        let path = std::env::temp_dir().join(format!("harness-gate-commit-{}.sqlite",uuid::Uuid::new_v4()));
+        let identity = identity(); let request = RequestId("request".into());
+        let store = std::sync::Arc::new(Store::open(&path).unwrap()); ready(&store, &identity);
+        let block = interrupt(&store, &identity, None, &request);
+        let command = ClientOperationId(uuid::Uuid::new_v4());
+        store.enqueue_embedded_command(command, &HostCommand::Recover { target: identity.clone(), expected_block:block.clone(), mode:RecoveryMode::VisibleHistory }).unwrap();
+        store.claim_embedded_command(&identity.run, command).unwrap().unwrap();
+        store.lock().unwrap().execute_batch("CREATE TABLE fault_parent(id INTEGER PRIMARY KEY); CREATE TABLE fault_child(id INTEGER REFERENCES fault_parent(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER recovery_fault AFTER UPDATE OF outcome ON embedded_commands BEGIN INSERT INTO fault_child VALUES(1); END;").unwrap();
+        assert!(matches!(store.authorize_embedded_recovery(&identity, command), Err(StoreError::RecoveryRequired(_))));
+        assert!(matches!(store.embedded_inference_state(&identity), Err(StoreError::AdmissionFenced)));
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.embedded_inference_state(&identity).unwrap(), HostInferenceState::Blocked { block });
+        assert_eq!(reopened.embedded_round_frontier(&identity).unwrap().pending_head, Some(request));
+        assert_eq!(reopened.lock().unwrap().query_row("SELECT COUNT(*) FROM requests", [], |r|r.get::<_, usize>(0)).unwrap(), 1);
+        let retained = reopened.embedded_command(&identity.run, command).unwrap().unwrap();
+        assert_eq!(retained.state, super::super::EmbeddedCommandState::Dispatching); assert!(retained.receipt.is_none());
+        reopened.lock().unwrap().execute_batch("DROP TRIGGER recovery_fault").unwrap();
+        reopened.recover_embedded_command_claims(&identity.run).unwrap();
+        assert!(matches!(reopened.authorize_embedded_recovery(&identity, command).unwrap().outcome, CommandReceiptOutcome::Unconfirmed { .. }));
+        drop(reopened); drop(store); std::fs::remove_file(path).unwrap();
+    }
+
 }

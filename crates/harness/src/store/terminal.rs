@@ -85,6 +85,37 @@ pub(super) fn exact_terminal(
     Ok(found)
 }
 
+/// Operation closure is independent of a claimant's interruption tombstone.
+/// Only the issuing claim can establish that execution never started.
+pub(crate) enum OperationCleanupEvidence {
+    NotStarted,
+    Terminal(TerminalOutcome),
+    Uncertain,
+}
+
+pub(super) fn operation_cleanup_evidence(
+    c: &Connection,
+    operation: &OperationId,
+) -> Result<OperationCleanupEvidence> {
+    if let Some((_, terminal)) = exact_terminal(c, operation)? {
+        return Ok(match terminal {
+            TerminalOutcome::Success | TerminalOutcome::Failure(_) | TerminalOutcome::Cancelled
+            | TerminalOutcome::CancelledWithReceipt(_) => OperationCleanupEvidence::Terminal(terminal),
+            TerminalOutcome::NotStarted | TerminalOutcome::Interrupted | TerminalOutcome::CancellationUnconfirmed(_) =>
+                OperationCleanupEvidence::Uncertain,
+        });
+    }
+    let terminal: Option<String> = c.query_row(
+        "SELECT terminal_json FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?2 AND state='interrupted'",
+        params![serde_json::to_string(&operation.origin)?, operation.request.0, operation.call.0],
+        |row| row.get(0),
+    ).optional()?.flatten();
+    Ok(match terminal.map(|raw| serde_json::from_str::<TerminalOutcome>(&raw)).transpose()? {
+        Some(TerminalOutcome::NotStarted) => OperationCleanupEvidence::NotStarted,
+        _ => OperationCleanupEvidence::Uncertain,
+    })
+}
+
 fn exact_claim_state(
     c: &Connection,
     operation: &OperationId,
@@ -107,6 +138,9 @@ fn exact_claim_state(
 }
 
 impl Store {
+    pub(crate) fn operation_cleanup_evidence(&self, operation: &OperationId) -> Result<OperationCleanupEvidence> {
+        operation_cleanup_evidence(&*self.lock()?, operation)
+    }
     /// Exact original operation; inherited claimants must retain identical evidence.
     pub fn replay_tool_output_operation(
         &self,

@@ -100,6 +100,8 @@ pub enum BindingSuccessorCommit {
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddedError {
     #[error(transparent)]
+    Transport(#[from] crate::transport::TransportError),
+    #[error(transparent)]
     Store(StoreError),
     #[error("host refused: {0}")]
     Host(String),
@@ -395,6 +397,15 @@ impl Conversation {
                 "Engine identity/tools must come from its bound host".into(),
             ));
         }
+        let origin = ConversationIdentity::Embedded {
+            run: self.identity().run.clone(),
+            actor: self.identity().actor.clone(),
+            incarnation: self.identity().incarnation.clone(),
+        };
+        let (route, protocol) = transport.response_contract()?;
+        self.store.initialize_context_target(&origin, &crate::context::ContextProjectionTarget {
+            model: config.model.clone(), route, protocol,
+        })?;
         Ok(crate::engine::Engine::with_transport(
             transport,
             self.store.clone(),
@@ -402,11 +413,7 @@ impl Conversation {
             self.provider(),
             config,
         )
-        .with_origin(ConversationIdentity::Embedded {
-            run: self.identity().run.clone(),
-            actor: self.identity().actor.clone(),
-            incarnation: self.identity().incarnation.clone(),
-        })
+        .with_origin(origin)
         .with_plain_text_compaction(context_capacity))
     }
     pub fn active_round(&self) -> Option<EmbeddedRoundId> {
