@@ -27,6 +27,7 @@ struct Frozen {
     entries: Vec<(u64, u8)>,
     valid: bool,
     epoch: usize,
+    observed_at_capture: Vec<(String, i64, Item)>,
 }
 
 #[derive(Default, Debug)]
@@ -205,11 +206,22 @@ fn run_history(
                     } else {
                         coverage.borrow_mut().captures_invalid += 1;
                     }
+                    let observed_at_capture = {
+                        let c = store.lock().unwrap();
+                        history(&c, cuts.before_call().snapshot_request(), true)
+                            .unwrap()
+                            .into_iter()
+                            .map(|entry| {
+                                (entry.origin.request.0, entry.origin.position, entry.item)
+                            })
+                            .collect()
+                    };
                     frozen.push(Frozen {
                         cuts,
                         entries,
                         valid,
                         epoch,
+                        observed_at_capture,
                     });
                 }
                 Op::Project(which, kind) => {
@@ -252,6 +264,7 @@ fn run_history(
                             prop_assert_eq!(
                                 history
                                     .iter()
+                                    .filter(|entry| entry.2.0["type"] != "configuration_update")
                                     .map(|entry| entry.2.clone())
                                     .collect::<Vec<_>>(),
                                 capture
@@ -300,7 +313,25 @@ fn run_history(
                     .iter()
                     .map(|(index, class)| (head.0.clone(), *index as i64, payload(*class)))
                     .collect::<Vec<_>>();
-                prop_assert_eq!(actual, expected, "immutable cut after {:?}", op);
+                let provider_occurrences = actual
+                    .iter()
+                    .filter(|(request, _, _)| request == &head.0)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                prop_assert_eq!(
+                    provider_occurrences,
+                    expected,
+                    "provider cut after {:?}",
+                    op
+                );
+                // Configuration is outside provider occurrence composition. The
+                // whole issued cut additionally obeys immutable-snapshot identity.
+                prop_assert_eq!(
+                    &actual,
+                    &capture.observed_at_capture,
+                    "whole cut changed after {:?}",
+                    op
+                );
             }
         }
         coverage.borrow_mut().histories += 1;
@@ -335,6 +366,7 @@ fn captured_cuts_match_independent_occurrence_histories() {
     });
     let mut config = Config {
         cases: 96,
+        source_file: Some(file!()),
         ..Config::default()
     };
     if let Ok(path) = std::env::var("HARNESS_PROPTEST_REGRESSIONS") {
