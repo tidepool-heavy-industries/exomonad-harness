@@ -1367,7 +1367,6 @@ pub(super) fn publish_recovery_projection(
         let unbound_call = call.is_some() && !operation_owned;
         if operation_owned
             || (!opaque(&occurrence.item) && !unbound_output && !unbound_call)
-
             || occurrence.item.is_configuration_update()
             || (occurrence.item.0["type"] == "message"
                 && matches!(
