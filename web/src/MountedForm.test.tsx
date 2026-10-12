@@ -211,3 +211,64 @@ describe('mounted actor forms', () => {
     expect(isStoredActorForm({ ...openForm, errors: [{ field: null, message: 'x'.repeat(32 * 1024 + 1) }] })).toBe(false)
   })
 })
+
+describe('companion form controls', () => {
+  const form: StoredActorForm = { ...openForm, opening: { ...openForm.opening, mountId: 'companion', form: { version: 1, root: {
+    kind: 'alternatives_many', id: 'doors', label: 'Open some doors', initial: [], options: [
+      { id: 'world', label: 'World', presentation: view, form: { kind: 'slider', id: 'strange', label: 'How strange?', minimum: 0, maximum: 10, initial: 4 } },
+      { id: 'inside', label: 'Inside', presentation: view, form: { kind: 'text', id: 'thought', label: 'A thought', initial: 'seed' } },
+    ],
+  } } } }
+  it('reveals several branches locally, retains toggled drafts, and submits only selected branches', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<MountedForm form={form} ready active />)
+    expect(screen.queryByRole('slider')).toBeNull()
+    fireEvent.click(screen.getByLabelText('World'))
+    fireEvent.change(screen.getByRole('slider'), { target: { value: '8' } })
+    fireEvent.click(screen.getByLabelText('Inside'))
+    fireEvent.change(screen.getByLabelText('A thought'), { target: { value: 'remember this' } })
+    fireEvent.click(screen.getByLabelText('World'))
+    fireEvent.click(screen.getByLabelText('World'))
+    expect(screen.getByRole('slider')).toHaveValue('8')
+    expect(screen.getByLabelText('A thought')).toHaveValue('remember this')
+    fireEvent.click(screen.getByLabelText('Inside'))
+    expect(fetchMock).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    const submitted = JSON.parse(fetchMock.mock.calls[0]![1]!.body)
+    expect(submitted.draft).toEqual({ doors: ['world'], strange: 8 })
+  })
+  it('rejects invalid slider ranges and duplicate initial selections', () => {
+    const root = form.opening.form.root
+    expect(isStoredActorForm(form)).toBe(true)
+    expect(isFormSpec(form.opening.form)).toBe(true)
+    expect(isFormSpec({ version: 1, root: { ...root, initial: ['world', 'world'] } })).toBe(false)
+    for (const [minimum, maximum, initial] of [[2, 1, 1], [0, 1, 2], [0, Infinity, 1], [0, 1, NaN]]) {
+      expect(isFormSpec({ version: 1, root: { kind: 'slider', id: 's', label: 's', minimum, maximum, initial } })).toBe(false)
+    }
+  })
+  it('omits an untouched prototype-named field without an initial value', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const unusual: StoredActorForm = { ...form, opening: { ...form.opening, mountId: 'unseeded-prototype', form: { version: 1, root: { kind: 'text', id: '__proto__', label: 'Unseeded identity', initial: null } } } }
+    expect(isStoredActorForm(unusual)).toBe(true)
+    render(<MountedForm form={unusual} ready active />)
+    expect(screen.getByLabelText('Unseeded identity')).toHaveValue('')
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(JSON.parse(fetchMock.mock.calls[0]![1]!.body).draft).toEqual({})
+  })
+  it('retains an accepted field identity named __proto__ in submitted JSON', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const unusual: StoredActorForm = { ...form, opening: { ...form.opening, mountId: 'prototype', form: { version: 1, root: { kind: 'text', id: '__proto__', label: 'Unusual identity', initial: 'seed' } } } }
+    render(<MountedForm form={unusual} ready active />)
+    expect(screen.getByLabelText('Unusual identity')).toHaveValue('seed')
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    const draft = JSON.parse(fetchMock.mock.calls[0]![1]!.body).draft
+    expect(Object.hasOwn(draft, '__proto__')).toBe(true)
+    expect(draft.__proto__).toBe('seed')
+  })
+})
