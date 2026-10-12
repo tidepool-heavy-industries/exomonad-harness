@@ -1403,7 +1403,9 @@ pub(super) fn publish_recovery_projection(
             } else {
                 "[Visible-history recovery: opaque provider continuity was omitted.]"
             };
-            let text = item.0["content"].as_str().ok_or(ContextError::UnsupportedState)?;
+            let text = item.0["content"]
+                .as_str()
+                .ok_or(ContextError::UnsupportedState)?;
             item.0["content"] = json!(format!("{attribution}\n{text}"));
             let hash = Store::put_item_tx(tx, &item)?;
             let position = retained.len() as i64;
@@ -2331,21 +2333,24 @@ impl Store {
             let selected_model = draft.next_model.as_deref().or(current.model.as_deref());
             let mut prospective = rewritten.clone();
             prospective.extend_from_slice(&all[snapshot.prefix.len()..]);
-            prospective.push(Occurrence {
-                request: snapshot.head.clone(),
-                position: i64::MAX,
-                hash: output_hash.clone(),
-                item: output_item,
-                output_operation: Some(snapshot.operation.clone()),
-                origin: Origin {
-                    request: snapshot.head.clone(),
-                    position: i64::MAX,
-                    hash: output_hash.clone(),
-                },
-                sources: Vec::new(),
-                note: false,
-                overlays: Vec::new(),
-        });
+            // Publish through the output owner before checking the prospective
+            // view. A refusal rolls this terminal and its exact occurrence back
+            // with the rest of the context transaction.
+            settle_success(&tx, &snapshot.operation, &output_hash)?;
+            super::output_publication::append_tx(
+                &tx,
+                &snapshot.operation,
+                &snapshot.operation.request,
+                &snapshot.head,
+            )?;
+            let published = history(&tx, &snapshot.head, true)?
+                .into_iter()
+                .filter(|occurrence| occurrence.output_operation.as_ref() == Some(&snapshot.operation))
+                .collect::<Vec<_>>();
+            let [published] = published.as_slice() else {
+                return Err(ContextError::UnsupportedState.into());
+            };
+            prospective.push(published.clone());
         checked_projection(
             &tx,
             &snapshot.head,
@@ -2392,6 +2397,7 @@ impl Store {
         if text_changed {
             tx.execute("INSERT INTO requests(id,parent_id,branch,created_at,embedded_run,embedded_incarnation,round_phase) SELECT ?1,id,branch,?2,embedded_run,embedded_incarnation,round_phase FROM requests WHERE id=?3",params![head.0,utc_millis(),snapshot.head.0])?;
             rewritten.extend_from_slice(&all[snapshot.prefix.len()..]);
+            rewritten.push(published.clone());
             for (position, occurrence) in rewritten.iter_mut().enumerate() {
                 if occurrence.origin.request.0.is_empty() {
                     occurrence.origin.request = head.clone();
@@ -2429,7 +2435,6 @@ impl Store {
             current.model = Some(model.clone());
         }
         save_state(&tx, &snapshot.operation.origin, &current)?;
-        settle_success(&tx, &snapshot.operation, &output_hash)?;
         super::output_publication::append_tx(
             &tx,
             &snapshot.operation,
