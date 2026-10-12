@@ -826,7 +826,7 @@ impl Drop for Invocation {
 mod tests {
     use super::*;
     use crate::model::Effort;
-    use crate::transport::ResponsesRequest;
+    use crate::transport::{PreparedProviderRequest, ResponsesRequest};
     use crate::transport::{ResponsesProtocol, ResponsesRoute};
     use std::collections::VecDeque;
     #[derive(Clone)]
@@ -843,7 +843,10 @@ mod tests {
             Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
         }
 
-        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            _: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             self.0
                 .lock()
                 .unwrap()
@@ -1268,9 +1271,9 @@ mod tests {
 
             async fn create(
                 &self,
-                request: ResponsesRequest,
+                request: PreparedProviderRequest,
             ) -> Result<ResponsesTurn, TransportError> {
-                self.inputs.lock().unwrap().push(request);
+                self.inputs.lock().unwrap().push(request.request().clone());
                 Ok(self.turns.lock().unwrap().pop_front().unwrap())
             }
         }
@@ -1379,7 +1382,10 @@ mod tests {
                 Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
             }
 
-            async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            async fn create(
+                &self,
+                _: PreparedProviderRequest,
+            ) -> Result<ResponsesTurn, TransportError> {
                 let _guard = Guard(self.dropped.clone());
                 self.entered.notify_one();
                 std::future::pending().await
@@ -1497,13 +1503,15 @@ mod tests {
                 Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
             }
 
-            async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            async fn create(
+                &self,
+                _: PreparedProviderRequest,
+            ) -> Result<ResponsesTurn, TransportError> {
                 unreachable!()
             }
-            async fn create_streaming_for_request(
+            async fn create_streaming(
                 &self,
-                _: &RequestId,
-                _: ResponsesRequest,
+                _: PreparedProviderRequest,
                 sink: mpsc::Sender<StreamEvent>,
             ) -> Result<ResponsesTurn, TransportError> {
                 let turn = self.turns.lock().unwrap().pop_front().unwrap();
@@ -1600,13 +1608,15 @@ mod tests {
                 Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
             }
 
-            async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            async fn create(
+                &self,
+                _: PreparedProviderRequest,
+            ) -> Result<ResponsesTurn, TransportError> {
                 unreachable!()
             }
-            async fn create_streaming_for_request(
+            async fn create_streaming(
                 &self,
-                _: &RequestId,
-                _: ResponsesRequest,
+                _: PreparedProviderRequest,
                 sink: mpsc::Sender<StreamEvent>,
             ) -> Result<ResponsesTurn, TransportError> {
                 sink.send(
