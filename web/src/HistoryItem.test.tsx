@@ -16,6 +16,23 @@ describe('retained Item presentation', () => {
     expect(container.textContent).toBe('')
   })
 
+  it('omits opaque-only reasoning with no summary field', () => {
+    const { container } = render(<HistoryItem entry={entry({ type: 'reasoning', encrypted_content: 'opaque' })} />)
+    expect(container.textContent).toBe('')
+  })
+
+  it.each([
+    { type: 'reasoning', summary: [{ type: 'future_summary', payload: 'λ 🐈' }], encrypted_content: 'opaque' },
+    { type: 'reasoning', summary: { future: 'summary shape' } },
+    { type: 'reasoning', summary: [], content: [{ type: 'future_reasoning', payload: 'λ 🐈' }] },
+    { type: 'reasoning', content: { future: 'content shape' } },
+  ])('preserves unfamiliar reasoning blocks and shapes for exact raw inspection: %j', item => {
+    render(<HistoryItem entry={entry(item)} />)
+    expect(screen.getByText(/Unknown content is retained/)).toBeVisible()
+    showRaw()
+    expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
+  })
+
   it('renders assistant Markdown and preserves the entire original wire item for inspection', () => {
     const item = { type: 'message', role: 'assistant', phase: 'commentary', content: '# Result\n\n**Ready** with `code`.\n\n<script>alert(1)</script>' }
     const { container } = render(<HistoryItem entry={entry(item)} />)

@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import Markdown, { type Components } from 'react-markdown'
 import './MessagePresentation.css'
 
@@ -76,7 +76,7 @@ export function MessageContent({ text, copyText = text, label, format = 'plain',
     window.addEventListener('resize', measure)
     return () => { observer?.disconnect(); window.removeEventListener('resize', measure) }
   }, [text, format, expanded])
-  const components: Components = {
+  const components = useMemo<Components>(() => ({
     pre({ children, node }) {
       // Markdown's code text is the rendered block, including its final newline.
       const code = node?.children.find(child => child.type === 'element' && child.tagName === 'code')
@@ -86,7 +86,7 @@ export function MessageContent({ text, copyText = text, label, format = 'plain',
         <pre>{children}</pre>
       </div>
     },
-  }
+  }), [label])
   return <div className={`message-content message-content-${format}`}>
     <div className={`message-content-viewport${expanded ? ' message-content-expanded' : ''}`} ref={viewport}
       onFocusCapture={() => { if (overflowing) setExpanded(true) }}>

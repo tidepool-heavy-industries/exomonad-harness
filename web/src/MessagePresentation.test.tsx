@@ -93,6 +93,17 @@ describe('message presentation', () => {
     await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(`${copyText}\n`))
   })
 
+  it('keeps the code copy state through streamed prose updates', async () => {
+    clipboard()
+    const text = '```text\nretained code\n```\n\nFirst paragraph.'
+    const { rerender } = render(<MessageContent text={text} label="Live answer" format="markdown" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Copy code from Live answer' }))
+    await screen.findByText('Copied to clipboard.')
+    rerender(<MessageContent text={`${text}\n\nNext paragraph.`} label="Live answer" format="markdown" />)
+    expect(screen.getByRole('button', { name: 'Copy code from Live answer' })).toHaveTextContent('Copied')
+    expect(screen.getByText('Copied to clipboard.')).toBeInTheDocument()
+  })
+
   it('collapses by measured display height while preserving complete Unicode source and whole code blocks', async () => {
     overflowingViewport()
     const writeText = clipboard()
