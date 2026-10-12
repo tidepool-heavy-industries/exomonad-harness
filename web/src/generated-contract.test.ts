@@ -67,6 +67,7 @@ describe('Rust-owned browser wire contracts', () => {
     const first = { request:'request', generation:'9007199254740993', reason:{kind:'request_rejected' as const, failure:{kind:'http' as const, status:400, diagnostic:{code:'code', message:'message'}}} };
     const reordered = { ...first, reason:{kind:'request_rejected' as const, failure:{kind:'http' as const, status:400, diagnostic:{message:'message', code:'code'}}} };
     expect(sameInferenceBlock(first, reordered)).toBe(true);
+    expect(sameInferenceBlock(first, {...reordered, reason:{...reordered.reason, failure:{...reordered.reason.failure, diagnostic:{...reordered.reason.failure.diagnostic, param:null}}}})).toBe(true);
     expect(sameInferenceBlock(first, {...reordered, generation:'9007199254740994'})).toBe(false);
   });
 
