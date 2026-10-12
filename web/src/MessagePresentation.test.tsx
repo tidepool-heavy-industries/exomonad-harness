@@ -78,6 +78,21 @@ describe('message presentation', () => {
     await waitFor(() => expect(writeText).toHaveBeenLastCalledWith('First λ, then 🐈'))
   })
 
+  it('copies the retained source when display text is formatted and updates its copy state by source identity', async () => {
+    const writeText = clipboard()
+    const copyText = ' { "cat" : "🐈 λ" }\n'
+    const text = '{\n  "cat": "🐈 λ"\n}'
+    const { rerender } = render(<MessageContent text={text} copyText={copyText} label="Result" />)
+    expect(screen.getByLabelText('Result').textContent).toBe(text)
+    fireEvent.click(screen.getByRole('button', { name: 'Copy Result' }))
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(copyText))
+    await screen.findByText('Copied to clipboard.')
+    rerender(<MessageContent text={text} copyText={`${copyText}\n`} label="Result" />)
+    expect(screen.queryByText('Copied to clipboard.')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Copy Result' }))
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(`${copyText}\n`))
+  })
+
   it('keeps the code copy state through streamed prose updates', async () => {
     clipboard()
     const text = '```text\nretained code\n```\n\nFirst paragraph.'

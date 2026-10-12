@@ -50,13 +50,15 @@ function CopyButton({ text, label, children }: { readonly text: string; readonly
 
 export interface MessageContentProps {
   readonly text: string
+  /** Original retained string when text is a formatted presentation. */
+  readonly copyText?: string
   readonly label: string
   readonly format?: 'markdown' | 'plain'
   readonly copy?: boolean
 }
 
 /** Collapse the reading viewport, never the retained source or Markdown input. */
-export function MessageContent({ text, label, format = 'plain', copy = true }: MessageContentProps) {
+export function MessageContent({ text, copyText = text, label, format = 'plain', copy = true }: MessageContentProps) {
   const [expanded, setExpanded] = useState(false)
   const [overflowing, setOverflowing] = useState(false)
   const viewport = useRef<HTMLDivElement>(null)
@@ -96,7 +98,7 @@ export function MessageContent({ text, label, format = 'plain', copy = true }: M
       {overflowing && <button type="button" aria-expanded={expanded} aria-controls={id} onClick={() => setExpanded(value => !value)}>
         {expanded ? 'Collapse' : 'Expand'} {label}
       </button>}
-      {copy && <CopyButton text={text} label={`Copy ${label}`}>Copy text</CopyButton>}
+      {copy && <CopyButton text={copyText} label={`Copy ${label}`}>Copy text</CopyButton>}
     </div>
     {overflowing && <p className="message-content-note">{expanded ? 'Showing all fetched content.' : 'Reading view is collapsed. Expand to see all fetched content.'} Copy retains the complete text.</p>}
   </div>
