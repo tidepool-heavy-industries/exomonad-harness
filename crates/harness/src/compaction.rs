@@ -350,7 +350,17 @@ fn is_setting(item: &Item) -> bool {
 }
 
 pub(crate) fn server_keeps(item: &Item) -> bool {
-    !is_setting(item) && !is_user_message(item)
+    !is_setting(item)
+        && !is_user_message(item)
+        && !matches!(
+            item.0["type"].as_str(),
+            Some(
+                "function_call"
+                    | "custom_tool_call"
+                    | "function_call_output"
+                    | "custom_tool_call_output"
+            )
+        )
 }
 
 #[cfg(test)]

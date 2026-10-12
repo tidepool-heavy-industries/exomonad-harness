@@ -1459,45 +1459,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         Ok(turn) => break turn,
                         Err(error) => {
                             output_lifetime.stop();
-                            // Transport may finish while finalized items remain buffered.
-                            // Retain those facts before interruption; never dispatch a
-                            // buffered invocation after observing stream failure.
-                            while let Ok(event) = event_rx.try_recv() {
-                                match event {
-                                    StreamEvent::CompletedItem(done) => {
-                                        let (item, inserted) = match self.retain_provider_item(&provider_request, done).await {
-                                            Ok(retained) => retained,
-                                            Err(retain_error) => return Err(self.cleanup_pending(retain_error, &pending).await),
-                                        };
-                                        if inserted {
-                                            let call = match parsed_call_id(&item) {
-                                                Ok(call) => call,
-                                                Err(error) => return Err(self.cleanup_pending(error, &pending).await),
-                                            };
-                                            if let Some(call) = call {
-                                                let store = self.store.clone();
-                                                let stopped_request = parent.clone();
-                                                let interrupted_claim = blocking(move || {
-                                                    match store.claim(&call, &stopped_request) {
-                                                        Ok(operation) => store.interrupt_unstarted_operation_claim(&operation, &stopped_request).map(|_| ()),
-                                                        Err(StoreError::DuplicateClaim) => Ok(()),
-                                                        Err(error) => Err(error),
-                                                    }
-                                                }).await;
-                                                if let Err(error) = interrupted_claim {
-                                                    return Err(self.cleanup_pending(error, &pending).await);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    StreamEvent::Delta {item_id, channel, index, text} => self.observe_delta(&parent, item_id, channel, index, text),
-                                }
-                            }
+                            let retained_tail = self.retain_provider_tail(&provider_request, &parent, &mut event_rx).await;
                             let state = if matches!(error, TransportError::IncompleteResponse(_)) { crate::store::ProviderResponseState::Interrupted } else if error.request_failure().is_some() { crate::store::ProviderResponseState::Rejected } else { crate::store::ProviderResponseState::Failed };
                             let store = self.store.clone();
                             let stopped_request = parent.clone();
                             if let Err(stop_error) = blocking(move || store.stop_provider_response(&stopped_request, state)).await {
                                 return Err(self.cleanup_pending(stop_error, &pending).await);
+                            }
+                            if let Err(retain_error) = retained_tail {
+                                return Err(self.cleanup_pending(retain_error, &pending).await);
                             }
                             return Err(self.reject_or_cleanup(error, settled_head.as_ref(), &parent, &pending).await);
                         }
@@ -1505,6 +1475,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     changed = cancellation.changed() => {
                         if changed.is_err() || *cancellation.borrow() {
                             output_lifetime.stop();
+                            let retained_tail = self.retain_provider_tail(&provider_request, &parent, &mut event_rx).await;
+                            let store = self.store.clone();
+                            let stopped = parent.clone();
+                            if let Err(error) = blocking(move || store.stop_provider_response(&stopped, crate::store::ProviderResponseState::Interrupted)).await {
+                                return Err(self.cleanup_pending(error, &pending).await);
+                            }
+                            if let Err(error) = retained_tail {
+                                return Err(self.cleanup_pending(error, &pending).await);
+                            }
                             return Err(self.cleanup_pending(EngineError::Cancelled { head_request: Some(parent.clone()) }, &pending).await);
                         }
                     }
@@ -3411,6 +3390,59 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         Ok(())
     }
 
+    /// A stopped stream retains buffered facts and settles undispatched calls;
+    /// it never starts effects. Retention failure does not hide later buffered facts.
+    async fn retain_provider_tail(
+        &self,
+        issued: &crate::store::provider_response::IssuedProviderRequest,
+        request: &RequestId,
+        events: &mut tokio::sync::mpsc::Receiver<StreamEvent>,
+    ) -> Result<(), EngineError> {
+        let mut failure = None;
+        while let Ok(event) = events.try_recv() {
+            let result = match event {
+                StreamEvent::CompletedItem(done) => {
+                    async {
+                        let (item, inserted) = self.retain_provider_item(issued, done).await?;
+                        if inserted
+                            && issued.purpose() == crate::store::ProviderRequestPurpose::Inference
+                        {
+                            if let Some(call) = parsed_call_id(&item)? {
+                                let store = self.store.clone();
+                                let request = request.clone();
+                                blocking(move || match store.claim(&call, &request) {
+                                    Ok(operation) => store
+                                        .interrupt_unstarted_operation_claim(&operation, &request)
+                                        .map(|_| ()),
+                                    Err(StoreError::DuplicateClaim) => Ok(()),
+                                    Err(error) => Err(error),
+                                })
+                                .await?;
+                            }
+                        }
+                        Ok(())
+                    }
+                    .await
+                }
+                StreamEvent::Delta {
+                    item_id,
+                    channel,
+                    index,
+                    text,
+                } => {
+                    if issued.purpose() == crate::store::ProviderRequestPurpose::Inference {
+                        self.observe_delta(request, item_id, channel, index, text);
+                    }
+                    Ok(())
+                }
+            };
+            if let Err(error) = result {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
     async fn retain_provider_item(
         &self,
         issued: &crate::store::provider_response::IssuedProviderRequest,
@@ -3793,16 +3825,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
             }
         };
-        while let Ok(event) = rx.try_recv() {
-            if let StreamEvent::CompletedItem(done) = event {
-                self.retain_provider_item(&issued, done).await?;
-            }
-        }
+        let retained_tail = self.retain_provider_tail(&issued, &request, &mut rx).await;
         match result {
             Ok(turn) => {
                 let store = self.store.clone();
                 let recorded = turn.clone();
                 blocking(move || store.record_provider_turn(&issued, &recorded)).await?;
+                retained_tail?;
                 Ok(turn)
             }
             Err(error) => {
@@ -3815,6 +3844,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 };
                 let store = self.store.clone();
                 blocking(move || store.stop_provider_response(&request, state)).await?;
+                retained_tail?;
                 Err(error.into())
             }
         }

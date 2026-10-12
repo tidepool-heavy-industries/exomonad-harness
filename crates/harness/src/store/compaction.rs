@@ -99,6 +99,7 @@ fn raw_response(
     let issued: super::replay::IssuedRequestRecord = serde_json::from_str(&issued)?;
     if parent.as_deref() != Some(&source.0)
         || state != "completed"
+        || issued.model.trim().is_empty()
         || issued.purpose != Some(super::ProviderRequestPurpose::ServerCompaction)
     {
         return Err(StoreError::InvalidProviderEvidence(request.clone()));

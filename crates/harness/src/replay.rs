@@ -31,10 +31,22 @@ use tokio::sync::Notify;
 /// matched local request.
 pub struct ReplayProvider {
     store: Arc<Store>,
-    turns: Arc<[RecordedReplayTurn]>,
+    turns: Arc<[ReplayTurn]>,
     progress: Arc<ReplayProgress>,
     tool_schemas: crate::transport::ToolManifest,
     calls: HashMap<OperationId, RecordedCall>,
+}
+
+struct ReplayTurn {
+    record: RecordedReplayTurn,
+    purpose: crate::store::ProviderRequestPurpose,
+}
+
+impl std::ops::Deref for ReplayTurn {
+    type Target = RecordedReplayTurn;
+    fn deref(&self) -> &Self::Target {
+        &self.record
+    }
 }
 
 struct RecordedCall {
@@ -60,6 +72,7 @@ pub(crate) struct PreparedReplayStep {
         crate::transport::ResponsesRoute,
         crate::transport::ResponsesProtocol,
     ),
+    purpose: crate::store::ProviderRequestPurpose,
 }
 
 impl PreparedReplayStep {
@@ -130,13 +143,23 @@ pub enum ReplayError {
 impl ReplayProvider {
     /// Load all recorded turns on `root`'s branch from the Store.
     pub fn new(store: Arc<Store>, root: &RequestId) -> Result<Self, ReplayError> {
-        let turns = store.replay_turns(root)?;
-        let tool_schemas = turns
-            .first()
-            .map(|turn| turn.model_request.tools.clone())
-            .unwrap_or_default();
+        let turns = store
+            .replay_turns(root)?
+            .into_iter()
+            .map(|record| {
+                let purpose = store
+                    .provider_request_purpose(&record.request)?
+                    .unwrap_or(crate::store::ProviderRequestPurpose::Inference);
+                Ok(ReplayTurn { record, purpose })
+            })
+            .collect::<Result<Vec<_>, ReplayError>>()?;
+        let mut tool_schemas = None;
         let mut calls = HashMap::new();
         for (issued, turn) in turns.iter().enumerate() {
+            if turn.purpose != crate::store::ProviderRequestPurpose::Inference {
+                continue;
+            }
+            tool_schemas.get_or_insert_with(|| turn.model_request.tools.clone());
             let persisted = store.items(&turn.request)?;
             for item in &turn.model_response.items {
                 if let Some(call) = item.tool_call().map_err(ReplayError::MalformedCall)? {
@@ -182,7 +205,7 @@ impl ReplayProvider {
                 local_requests: Mutex::new(HashMap::new()),
                 changed: Notify::new(),
             }),
-            tool_schemas,
+            tool_schemas: tool_schemas.unwrap_or_default(),
             calls,
         })
     }
@@ -560,6 +583,7 @@ impl ReplayProvider {
         if !Arc::ptr_eq(&selected.progress, &self.progress)
             || selected.index != *cursor
             || selected.request != next.request
+            || selected.purpose != request.purpose()
         {
             return Err(TransportError::PreparedSelectionMismatch);
         }
@@ -606,6 +630,7 @@ impl ResponsesTransport for ReplayProvider {
             index,
             request: turn.request.clone(),
             contract,
+            purpose: turn.purpose,
         }))
     }
     fn response_contract(
@@ -974,8 +999,8 @@ mod tests {
                 ResponsesProtocol::Standard,
             )
             .unwrap();
-        let replay = ReplayProvider::new(source.clone(), &second).unwrap();
-        let foreign = ReplayProvider::new(source, &second).unwrap();
+        let replay = ReplayProvider::new(source.clone(), &first).unwrap();
+        let foreign = ReplayProvider::new(source, &first).unwrap();
         let local = Store::memory().unwrap();
         let prepare = |id: &str, contract| {
             let id = RequestId(id.into());

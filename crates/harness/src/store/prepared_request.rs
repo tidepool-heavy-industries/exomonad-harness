@@ -64,6 +64,9 @@ impl PreparedProviderRequest {
     pub(crate) fn selection(&self) -> &PreparedTransportSelection {
         &self.selection
     }
+    pub(crate) fn purpose(&self) -> ProviderRequestPurpose {
+        self.issued.purpose()
+    }
     pub(crate) fn into_dispatch_parts(
         self,
     ) -> (
@@ -89,7 +92,7 @@ impl Store {
         instructions: Option<&ItemHash>,
         selection: PreparedTransportSelection,
         purpose: ProviderRequestPurpose,
-    ) -> Result<PreparedProviderRequest, PrepareProviderError> {
+    ) -> Result<PreparedProviderRequest, super::PrepareProviderError> {
         if request.input.len() != occurrences.len() {
             return Err(StoreError::InvalidProviderEvidence(local.clone()).into());
         }

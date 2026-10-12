@@ -23,7 +23,7 @@ pub struct IssuedReplayRequest {
     input_reencodings: usize,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct IssuedRequestRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) purpose: Option<super::ProviderRequestPurpose>,
@@ -634,6 +634,18 @@ impl Store {
         let record: ReplayRecord = serde_json::from_value(value)?;
         let mut connection = self.lock()?;
         connection.read_transaction(|tx| {
+            let issuance: Option<(String, String, String, String, Option<i64>)> = tx.query_row("SELECT issued_json,route,protocol,state,completion_event FROM provider_requests WHERE request_id=?1", [&record.request.0], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?;
+            let provider_contract = match issuance {
+                None => None,
+                Some((issued, route, protocol, state, completed)) => {
+                    let issued: IssuedRequestRecord = serde_json::from_str(&issued)?;
+                    let contract = (serde_json::from_str(&route)?, serde_json::from_str(&protocol)?);
+                    if issued != record.issued || state != "completed" || completed != Some(event) || record.provider_contract != Some(contract) {
+                        return Err(StoreError::InvalidProviderEvidence(record.request.clone()));
+                    }
+                    Some(contract)
+                }
+            };
             let instructions = read_item(tx, &record.issued.instructions)?;
             let tools = read_item(tx, &record.issued.tools)?;
             let request = ResponsesRequest {
@@ -667,7 +679,7 @@ impl Store {
                 request: record.request,
                 model_request: request,
                 model_response: response,
-                provider_contract: record.provider_contract,
+                provider_contract,
                 issued_outputs: record.issued.outputs,
                 replay_event: Some(event),
             })

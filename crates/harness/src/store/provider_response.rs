@@ -32,7 +32,27 @@ pub(crate) struct IssuedProviderRequest {
     pub(super) issued: Arc<IssuedReplayRequest>,
 }
 
+impl IssuedProviderRequest {
+    pub(crate) fn purpose(&self) -> super::ProviderRequestPurpose {
+        self.issued
+            .record
+            .purpose
+            .unwrap_or(super::ProviderRequestPurpose::Inference)
+    }
+}
+
 impl Store {
+    pub(crate) fn provider_request_purpose(
+        &self,
+        request: &RequestId,
+    ) -> Result<Option<super::ProviderRequestPurpose>> {
+        let purpose: Option<Option<String>> = self.lock()?.query_row("SELECT json_extract(issued_json,'$.purpose') FROM provider_requests WHERE request_id=?1", [&request.0], |row| row.get(0)).optional()?;
+        purpose
+            .flatten()
+            .map(|purpose| serde_json::from_value(serde_json::Value::String(purpose)))
+            .transpose()
+            .map_err(Into::into)
+    }
     pub(crate) fn issue_provider_request(
         &self,
         request: &RequestId,
@@ -172,9 +192,23 @@ pub(super) fn append_item(
     index: u64,
     item: &Item,
 ) -> Result<bool> {
+    let purpose: Option<String> = tx.query_row(
+        "SELECT json_extract(issued_json,'$.purpose') FROM provider_requests WHERE request_id=?1",
+        [&request.0],
+        |row| row.get(0),
+    )?;
+    let purpose = purpose
+        .map(|purpose| {
+            serde_json::from_value::<super::ProviderRequestPurpose>(serde_json::Value::String(
+                purpose,
+            ))
+        })
+        .transpose()?
+        .unwrap_or(super::ProviderRequestPurpose::Inference);
+    let inference = purpose == super::ProviderRequestPurpose::Inference;
     let index_i64 =
         i64::try_from(index).map_err(|_| StoreError::InvalidProviderEvidence(request.clone()))?;
-    if item.is_configuration_update() {
+    if inference && item.is_configuration_update() {
         return Err(StoreError::InvalidProviderEvidence(request.clone()));
     }
     let hash = Store::put_item_tx(tx, item)?;
@@ -209,13 +243,17 @@ pub(super) fn append_item(
         [&request.0],
         |r| r.get(0),
     )?;
-    super::output_publication::require_ordinary(item, request, position)?;
+    if inference {
+        super::output_publication::require_ordinary(item, request, position)?;
+    }
     tx.execute(
         "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
         params![request.0, position, hash.0],
     )?;
     tx.execute("INSERT INTO provider_items(request_id,output_index,occurrence_position,item_hash) VALUES (?1,?2,?3,?4)", params![request.0,index_i64,position,hash.0])?;
-    super::chat::publish(tx, request, position, &hash, item)?;
+    if inference {
+        super::chat::publish(tx, request, position, &hash, item)?;
+    }
     Ok(true)
 }
 
