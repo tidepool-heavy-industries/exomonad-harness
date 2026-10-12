@@ -433,12 +433,12 @@ dependencies = [
  "fs2",
  "futures-util",
  "getrandom 0.3.4",
+ "harness-presentation",
  "harness-schema",
  "jsonwebtoken",
  "libc",
  "proptest",
  "reqwest",
- "roxmltree",
  "rusqlite",
  "schemars",
  "serde",
@@ -464,6 +464,16 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+]
+
+[[package]]
+name = "harness-presentation"
+version = "0.1.0"
+dependencies = [
+ "roxmltree",
+ "schemars",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

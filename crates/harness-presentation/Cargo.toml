@@ -1,0 +1,11 @@
+[package]
+name = "harness-presentation"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+roxmltree.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
