@@ -753,7 +753,26 @@ struct DeterministicServerTransport {
 
 #[async_trait]
 impl harness::engine::ResponsesTransport for DeterministicServerTransport {
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::auth::ResponsesRoute,
+            harness::auth::ResponsesProtocol,
+        ),
+        TransportError,
+    > {
+        Ok((
+            harness::auth::ResponsesRoute::Codex,
+            harness::auth::ResponsesProtocol::Standard,
+        ))
+    }
+
+    async fn create(
+        &self,
+        prepared: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = prepared.request();
         self.tool_jobs
             .observe_input(&request.input)
             .map_err(TransportError::Stream)?;
@@ -2581,7 +2600,13 @@ fn safe_transport_error(error: &TransportError) -> String {
             format!("API returned HTTP status {status}")
         }
         harness::transport::TransportError::Stream(_)
-        | harness::transport::TransportError::ProviderStreamFailure { .. } => {
+        | harness::transport::TransportError::ProviderStreamFailure { .. }
+        | harness::transport::TransportError::PreparedSelectionMismatch
+        | harness::transport::TransportError::ReplayContractMismatch
+        | harness::transport::TransportError::UnprovenResponseContract
+        | harness::transport::TransportError::MissingOutputIndex
+        | harness::transport::TransportError::ConflictingOutputIndex { .. }
+        | harness::transport::TransportError::IncompleteOutputIndices { .. } => {
             "API request or response failed".into()
         }
         harness::transport::TransportError::IncompleteResponse(cause) => {
