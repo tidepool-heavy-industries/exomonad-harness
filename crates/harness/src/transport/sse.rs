@@ -312,6 +312,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn indexed_items_require_positions_and_conflicting_duplicates_refuse() {
+        let mut assembly = ResponseAssembly::default();
+        assert!(matches!(
+            assembly.accept(
+                r#"{"type":"response.output_item.done","item":{"type":"reasoning","id":"r"}}"#
+            ),
+            Err(TransportError::MissingOutputIndex)
+        ));
+        let done = r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"r"}}"#;
+        assert!(matches!(
+            assembly.accept(done),
+            Ok(Some(StreamEvent::CompletedItem(_)))
+        ));
+        assert!(matches!(
+            assembly.accept(done),
+            Ok(Some(StreamEvent::CompletedItem(_)))
+        ));
+        assert!(matches!(
+            assembly.accept(r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"other"}}"#),
+            Err(TransportError::ConflictingOutputIndex { index: 0 })
+        ));
+    }
+
+    #[test]
+    fn terminal_output_reconciles_observed_gaps_without_inventing_items() {
+        let mut assembly = ResponseAssembly::default();
+        assembly.accept(r#"{"type":"response.output_item.done","output_index":1,"item":{"type":"reasoning","id":"second"}}"#).unwrap();
+        assembly.accept(r#"{"type":"response.completed","response":{"id":"complete","output":[{"type":"reasoning","id":"first"},{"type":"reasoning","id":"second"}]}}"#).unwrap();
+        let turn = assembly.finish().unwrap();
+        assert_eq!(
+            turn.items
+                .iter()
+                .map(|item| item.0["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+
+        let mut gap = ResponseAssembly::default();
+        gap.accept(r#"{"type":"response.output_item.done","output_index":1,"item":{"type":"reasoning","id":"second"}}"#).unwrap();
+        gap.accept(r#"{"type":"response.completed","response":{"id":"complete","output":[]}}"#)
+            .unwrap();
+        assert!(matches!(
+            gap.finish(),
+            Err(TransportError::IncompleteOutputIndices { index: 0 })
+        ));
+    }
+
+    #[test]
+    fn terminal_output_conflicts_and_changed_response_identity_refuse() {
+        let mut assembly = ResponseAssembly::default();
+        assembly.accept(r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"observed"}}"#).unwrap();
+        assert!(matches!(
+            assembly.accept(r#"{"type":"response.completed","response":{"id":"complete","output":[{"type":"reasoning","id":"changed"}]}}"#),
+            Err(TransportError::ConflictingOutputIndex { index: 0 })
+        ));
+        let mut identity = ResponseAssembly::default();
+        identity
+            .accept(r#"{"type":"response.created","response":{"id":"original"}}"#)
+            .unwrap();
+        assert!(
+            identity
+                .accept(r#"{"type":"response.completed","response":{"id":"changed","output":[]}}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn item_done_supplies_phase_when_completed_output_is_empty() {
         let mut a = ResponseAssembly::default();
         let done = r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"ok"}]}}"#;

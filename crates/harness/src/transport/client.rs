@@ -689,7 +689,7 @@ mod tests {
             let body = if completed {
                 "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"terminal-proof\",\"output\":[]}}\n\n"
             } else {
-                "data: {\"type\":\"response.created\"}\n\n"
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"terminal-proof\"}}\n\n"
             };
             let server = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await.unwrap();

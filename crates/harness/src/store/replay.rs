@@ -129,9 +129,9 @@ pub(super) fn recorded_response_identity(
     }))
 }
 
-/// Group membership and the issuing model share one evidence reader. Hashes
-/// identify bytes, so response hashes must resolve to a unique ordered sequence
-/// of original occurrences before they authorize an envelope.
+/// Issuance records bind the model and output indexes to exact occurrences.
+/// Legacy records use only uniquely resolved ordered membership and retain
+/// unknown transport provenance.
 pub(super) fn response_envelopes(
     c: &Connection,
     request: &RequestId,
