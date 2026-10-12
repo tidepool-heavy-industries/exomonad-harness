@@ -1049,7 +1049,7 @@ async fn websocket_session(
                     Ok(_event) => {
                         #[cfg(test)]
                         if let Some(hooks) = state.websocket_test_hooks.get() {
-                            if _event.sequence == last_sent {
+                            if _event.sequence.get() == last_sent {
                                 hooks.covered_events_drained.notify_one();
                             }
                         }
@@ -1958,7 +1958,7 @@ mod tests {
         let snapshot = control.snapshot.read().unwrap().clone();
         assert_eq!(event.event.kind(), "command.receipt");
         assert_eq!(event.sequence, snapshot.seq);
-        assert_eq!(snapshot.command_receipts, vec![receipt]);
+        assert_eq!(snapshot.command_receipts, vec![browser_contract::CommandReceipt::from(&receipt)]);
         assert_eq!(event_value(&event)["outcome"], "admitted");
         assert_eq!(event_value(&event)["envelopeId"], "4");
 
@@ -1982,7 +1982,7 @@ mod tests {
         let event = control.publish_command_receipt(requested.clone());
         let snapshot = control.snapshot.read().unwrap();
         assert_eq!(snapshot.seq, event.sequence);
-        assert_eq!(snapshot.command_receipts.last(), Some(&requested));
+        assert_eq!(snapshot.command_receipts.last(), Some(&browser_contract::CommandReceipt::from(&requested)));
         assert_eq!(event_value(&event)["outcome"], "control_requested");
         assert_eq!(event_value(&event)["control"], "interrupt");
         assert_ne!(event_value(&event)["outcome"], "completed");
@@ -3416,7 +3416,7 @@ mod durable_command_tests {
         assert_eq!(
             record.command,
             match command.clone() {
-                ClientCommand::Host { command, .. } => command,
+                ClientCommand::Host { command, .. } => (&command).into(),
                 _ => unreachable!(),
             }
         );
@@ -3480,7 +3480,7 @@ mod durable_command_tests {
             .json()
             .await
             .unwrap();
-        assert_eq!(record.receipt, Some(receipt));
+        assert_eq!(record.receipt, Some(browser_contract::CommandReceipt::from(&receipt)));
         server.abort();
     }
 }
