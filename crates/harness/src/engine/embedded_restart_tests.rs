@@ -656,6 +656,7 @@ async fn embedded_restart_preserves_committed_model_for_retained_opaque_history(
             .await,
         Err(EngineError::InferenceBlocked { .. })
     ));
+    let original_items = store.items(&opaque_head).unwrap();
     let migration = authorize_restart(
         &store,
         &next,
@@ -674,17 +675,18 @@ async fn embedded_restart_preserves_committed_model_for_retained_opaque_history(
     let requests = inputs.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert!(!requests[0].input.contains(&opaque));
-    assert!(store.items(&opaque_head).unwrap().contains(&opaque));
+    assert_eq!(store.items(&opaque_head).unwrap(), original_items);
     assert_eq!(requests[0].model, "model-b");
-    assert!(
-        store
-            .context_request_state_for_transport(
-                &opaque_head,
-                &next_origin,
-                (ResponsesRoute::Codex, ResponsesProtocol::Standard),
-            )
-            .is_err()
-    );
+    assert!(matches!(
+        store.context_request_state_for_transport(
+            &opaque_head,
+            &next_origin,
+            (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+        ),
+        Err(StoreError::Context(crate::context::ContextError::Replay(
+            crate::context::ContextReplayRejection::IncompatibleTransport,
+        )))
+    ));
     let state = store
         .context_request_state_for_transport(
             &completion.head_request,
