@@ -859,7 +859,12 @@ async fn browser_journey_custom_cancel_is_retained_after_process_reopen() {
         .expect("custom job disappeared after cancellation");
     assert_eq!(cancelled_job.tool_kind, Some(ToolKind::Custom));
     assert_eq!(cancelled_job.state, ToolJobState::Cancelled);
-    assert!(cancelled_job.output.as_ref().is_none_or(|value| value.0.is_null()));
+    assert!(
+        cancelled_job
+            .output
+            .as_ref()
+            .is_none_or(|value| value.0.is_null())
+    );
 
     Demo::close_ws(&mut ws).await;
     drop(ws);
@@ -883,7 +888,12 @@ async fn browser_journey_custom_cancel_is_retained_after_process_reopen() {
         .unwrap();
     assert_eq!(retained.tool_kind, Some(ToolKind::Custom));
     assert_eq!(retained.state, ToolJobState::Cancelled);
-    assert!(retained.output.as_ref().is_none_or(|value| value.0.is_null()));
+    assert!(
+        retained
+            .output
+            .as_ref()
+            .is_none_or(|value| value.0.is_null())
+    );
     let requests = restored.requests;
     assert!(
         requests

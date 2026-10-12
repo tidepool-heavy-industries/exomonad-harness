@@ -1025,7 +1025,10 @@ async fn standalone_missing_assets_and_clean_and_process_loss_reopen() {
     let released_a = await_job_state(&base, &cookie, gate_call_id, ToolJobState::Settled).await;
     assert_eq!(released_a.request_id.as_deref(), Some(gate_request_id));
     assert_eq!(
-        released_a.output.as_ref().and_then(Value::as_str),
+        released_a
+            .output
+            .as_ref()
+            .and_then(|value| value.0.as_str()),
         Some("A released")
     );
     assert_eq!(
