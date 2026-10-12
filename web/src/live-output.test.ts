@@ -15,7 +15,7 @@ describe('live output and retained history handoff', () => {
     try {
       let outputs = appendOutput(undefined, {...delta, text:''})
       for (let version = 1; version <= 4000; version++)
-        outputs = appendOutput(outputs, {...delta, text:'abcdefgh', version})
+        outputs = appendOutput(outputs, {...delta, text:'abcdefgh', version:version.toString()})
       expect(outputs.get(outputKey(delta))?.text).toBe('abcdefgh'.repeat(4000))
       expect(encode.mock.calls.reduce((sum, [text]) => sum + (text?.length ?? 0), 0)).toBe(32000)
       expect(decode.mock.calls.reduce((sum, [bytes]) => sum + (bytes?.byteLength ?? 0), 0)).toBe(32000)
@@ -25,9 +25,9 @@ describe('live output and retained history handoff', () => {
       expect(encode.mock.calls.at(-1)?.[0]?.length).toBe(65536 - 32000)
       const calls = [encode.mock.calls.length, decode.mock.calls.length]
       for (let version = 4001; version <= 8000; version++)
-        outputs = appendOutput(outputs, {...delta, text:'😀'.repeat(100), overflow:true, version})
+        outputs = appendOutput(outputs, {...delta, text:'😀'.repeat(100), overflow:true, version:version.toString()})
       expect([encode.mock.calls.length, decode.mock.calls.length]).toEqual(calls)
-      expect(outputs.get(outputKey(delta))?.version).toBe(8000)
+      expect(outputs.get(outputKey(delta))?.version).toBe('8000')
     } finally {
       encode.mockRestore()
       decode.mockRestore()

@@ -5,7 +5,7 @@ import { toViewModel } from './integration'
 
 describe('actor authored output', () => {
   const origin = { run: 'run', nativeActor: '2', incarnation: '3' }
-  const output = { reference: { origin, sequence: '5' }, emission: { origin,
+  const output = { reference: { origin, sequence: '5' }, emission: { origin, execution: {kind:'actor_program' as const}, conversation:null,
     id: { displaySlot: '1', pageOrdinal: '1' }, page: { text: 'value', expansions: [['1', 'field']] as [string, string][], unavailable: false } } }
   const snapshot = { seq: '0', conversations: [], requests: [], jobs: [], envelopes: [], actorOutputRevisions: [output.reference] }
   it('retains canonical output identity without creating a provider exchange', () => {
@@ -25,7 +25,7 @@ describe('actor authored output', () => {
   })
   it('reads full native actor and display identities without rounding its history cursor', () => {
     const exact = { run: 'run', nativeActor: '18446744073709551615', incarnation: '9007199254740993' }
-    const retained = { reference: { origin: exact, sequence: '9223372036854775807' }, emission: { origin: exact,
+    const retained = { reference: { origin: exact, sequence: '9223372036854775807' }, emission: { origin: exact, execution: {kind:'actor_program' as const}, conversation:null,
       id: { displaySlot: '18446744073709551615', pageOrdinal: '9007199254740993' },
       page: { text: 'value', expansions: [['18446744073709551615', 'detail']], unavailable: false } } }
     const page = { origin: exact, outputs: [retained], nextAfter: '9223372036854775807' }
