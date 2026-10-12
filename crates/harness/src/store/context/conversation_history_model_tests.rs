@@ -259,11 +259,12 @@ fn run_history(
                     prop_assert_eq!(
                         observed.is_ok(),
                         expected,
-                        "operation {:?}, capture-valid={}, capture-epoch={}, current-epoch={}",
+                        "operation {:?}, capture-valid={}, capture-epoch={}, current-epoch={}, refusal={:?}",
                         op,
                         capture.valid,
                         capture.epoch,
-                        epoch
+                        epoch,
+                        observed.as_ref().err()
                     );
                     if let Ok((child, _)) = observed {
                         coverage.borrow_mut().projects_accepted += 1;
