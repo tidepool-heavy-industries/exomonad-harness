@@ -509,7 +509,7 @@ mod tests {
         item::Item,
         provider::Provider,
         store::Store,
-        transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, Usage},
+        transport::{Auth, ResponsesTurn, TransportError, Usage},
         turn::JobScheduler,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -808,7 +808,25 @@ mod tests {
 
     #[async_trait]
     impl ResponsesTransport for SequenceTransport {
-        async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                harness::transport::ResponsesRoute,
+                harness::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                harness::transport::ResponsesRoute::Codex,
+                harness::transport::ResponsesProtocol::Standard,
+            ))
+        }
+        async fn create(
+            &self,
+            prepared: harness::transport::PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
+            let request = prepared.request();
             self.inputs
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())

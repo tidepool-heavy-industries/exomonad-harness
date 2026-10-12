@@ -3840,9 +3840,23 @@ mod tests {
 
     #[async_trait]
     impl ResponsesTransport for FinalResponse {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                harness::transport::ResponsesRoute,
+                harness::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                harness::transport::ResponsesRoute::Codex,
+                harness::transport::ResponsesProtocol::Standard,
+            ))
+        }
         async fn create(
             &self,
-            _request: ResponsesRequest,
+            _request: harness::transport::PreparedProviderRequest,
         ) -> Result<ResponsesTurn, TransportError> {
             Ok(ResponsesTurn {
                 response_id: "offline-final".into(),

@@ -101,7 +101,7 @@ mod tests {
         lifecycle::PublishedAnswer,
         mailbox::EnvelopeType,
         store::Usage as StoredUsage,
-        transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, Usage as TurnUsage},
+        transport::{Auth, ResponsesTurn, TransportError, Usage as TurnUsage},
     };
     use serde_json::Value;
     use serde_json::json;
@@ -133,7 +133,25 @@ mod tests {
 
     #[async_trait]
     impl ResponsesTransport for ReplayTransport {
-        async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                harness::transport::ResponsesRoute,
+                harness::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                harness::transport::ResponsesRoute::Codex,
+                harness::transport::ResponsesProtocol::Standard,
+            ))
+        }
+        async fn create(
+            &self,
+            prepared: harness::transport::PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
+            let request = prepared.request();
             let key = self.agent.clone();
             assert!(request.session_id.ends_with(&key));
             self.inputs
@@ -183,7 +201,21 @@ mod tests {
 
     #[async_trait]
     impl ResponsesTransport for GatedReplayTransport {
-        async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                harness::transport::ResponsesRoute,
+                harness::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            self.replay.response_contract()
+        }
+        async fn create(
+            &self,
+            prepared: harness::transport::PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             if let Some(gate) = &self.first_response_gate {
                 let release = gate.release.lock().unwrap().take();
                 if let Some(release) = release {
@@ -192,7 +224,7 @@ mod tests {
                         .map_err(|_| TransportError::Stream("response gate dropped".into()))?;
                 }
             }
-            self.replay.create(request).await
+            self.replay.create(prepared).await
         }
     }
 
@@ -309,7 +341,21 @@ mod tests {
 
     #[async_trait]
     impl ResponsesTransport for BarrierReplayTransport {
-        async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                harness::transport::ResponsesRoute,
+                harness::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            self.replay.response_contract()
+        }
+        async fn create(
+            &self,
+            prepared: harness::transport::PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             if let Some(barrier) = &self.barrier {
                 let release = barrier.release.lock().unwrap().take();
                 if let Some(release) = release {
@@ -319,7 +365,7 @@ mod tests {
                         .map_err(|_| TransportError::Stream("barrier dropped".into()))?;
                 }
             }
-            self.replay.create(request).await
+            self.replay.create(prepared).await
         }
     }
 

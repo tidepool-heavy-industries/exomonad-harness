@@ -20,7 +20,7 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 
 #[cfg(test)]
-use harness::transport::{ResponsesRequest, client::request_body};
+use harness::transport::ResponsesRequest;
 
 const QUEUE_CAPACITY: usize = 32;
 
@@ -418,18 +418,110 @@ mod tests {
     };
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    struct CapturePrepared(std::sync::Arc<std::sync::Mutex<Option<PreparedProviderRequest>>>);
+    #[async_trait]
+    impl ResponsesTransport for CapturePrepared {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                harness::transport::ResponsesRoute,
+                harness::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                harness::transport::ResponsesRoute::Codex,
+                harness::transport::ResponsesProtocol::Standard,
+            ))
+        }
+        async fn create(
+            &self,
+            request: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
+            *self.0.lock().unwrap() = Some(request);
+            Err(TransportError::Stream("capture without dispatch".into()))
+        }
+    }
+    struct NoTools;
+    #[async_trait]
+    impl harness::provider::Provider for NoTools {
+        fn tools(&self) -> Vec<Value> {
+            vec![]
+        }
+        async fn call(&self, _: &str, _: Value) -> Result<Value, harness::provider::ProviderError> {
+            panic!("trace fixture must not execute tools")
+        }
+    }
+    #[derive(Clone)]
+    struct OfflineAuth;
+    impl harness::transport::Auth for OfflineAuth {
+        fn access(&self) -> Result<(String, String), TransportError> {
+            Err(TransportError::Authentication)
+        }
+    }
+    // The production Engine owns durable preparation. The capture transport
+    // retains its issued request without performing a provider dispatch.
+    async fn prepared_request(request: ResponsesRequest) -> PreparedProviderRequest {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let engine = harness::engine::Engine::<OfflineAuth, _, _>::with_transport(
+            CapturePrepared(captured.clone()),
+            std::sync::Arc::new(harness::store::Store::memory().unwrap()),
+            std::sync::Arc::new(harness::turn::JobScheduler::new(1).unwrap()),
+            std::sync::Arc::new(NoTools),
+            harness::engine::EngineConfig {
+                instructions: request.instructions,
+                tools: request.tools.to_vec(),
+                model: request.model,
+                effort: request.pinned_effort,
+                session_id: request.session_id,
+                agent: harness::model::AgentPath("/root".into()),
+            },
+        );
+        let (_cancel, cancellation) = tokio::sync::watch::channel(false);
+        let (_input, incoming) = mpsc::unbounded_channel();
+        assert!(
+            engine
+                .run(None, request.input, cancellation, incoming)
+                .await
+                .is_err()
+        );
+        captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("Engine must issue the fixture request")
+    }
+
     struct MustNotDispatch(AtomicBool);
 
     #[async_trait]
     impl ResponsesTransport for MustNotDispatch {
-        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                harness::transport::ResponsesRoute,
+                harness::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                harness::transport::ResponsesRoute::Codex,
+                harness::transport::ResponsesProtocol::Standard,
+            ))
+        }
+        async fn create(
+            &self,
+            _: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             self.0.store(true, Ordering::SeqCst);
             Err(TransportError::Stream("unexpected dispatch".into()))
         }
 
         async fn create_streaming(
             &self,
-            _: ResponsesRequest,
+            _: PreparedProviderRequest,
             _: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
             self.0.store(true, Ordering::SeqCst);
@@ -441,13 +533,30 @@ mod tests {
 
     #[async_trait]
     impl ResponsesTransport for StreamingProbe {
-        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                harness::transport::ResponsesRoute,
+                harness::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                harness::transport::ResponsesRoute::Codex,
+                harness::transport::ResponsesProtocol::Standard,
+            ))
+        }
+        async fn create(
+            &self,
+            _: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             Err(TransportError::Stream("create should not be called".into()))
         }
 
         async fn create_streaming(
             &self,
-            _: ResponsesRequest,
+            _: PreparedProviderRequest,
             sink: mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
             sink.send(StreamEvent::Delta {
@@ -470,7 +579,24 @@ mod tests {
 
     #[async_trait]
     impl ResponsesTransport for AcceptAny {
-        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                harness::transport::ResponsesRoute,
+                harness::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                harness::transport::ResponsesRoute::Codex,
+                harness::transport::ResponsesProtocol::Standard,
+            ))
+        }
+        async fn create(
+            &self,
+            _: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             Ok(ResponsesTurn {
                 response_id: "response".into(),
                 items: vec![],
@@ -570,7 +696,12 @@ mod tests {
             pinned_effort: harness::model::Effort::Low,
             session_id: "not-traced".into(),
         };
-        assert!(transport.create(request).await.is_err());
+        assert!(
+            transport
+                .create(prepared_request(request).await)
+                .await
+                .is_err()
+        );
         assert!(!transport.inner.0.load(Ordering::SeqCst));
     }
 
@@ -608,7 +739,7 @@ mod tests {
             session_id: "not-traced".into(),
         };
         transport
-            .create_streaming(request, events_tx)
+            .create_streaming(prepared_request(request).await, events_tx)
             .await
             .unwrap();
         assert!(matches!(
@@ -628,11 +759,16 @@ mod tests {
             instructions: String::new(),
             tools: vec![].into(),
             tools_allowed: None,
-            model: String::new(),
+            model: "safe-model".into(),
             pinned_effort: harness::model::Effort::Low,
             session_id: String::new(),
         };
-        assert!(transport.create(request).await.is_ok());
+        assert!(
+            transport
+                .create(prepared_request(request).await)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
