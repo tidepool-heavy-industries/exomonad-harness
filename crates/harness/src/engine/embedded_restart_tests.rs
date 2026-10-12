@@ -147,7 +147,7 @@ fn authorize_restart(
         .authorize_embedded_recovery(identity, command)
         .unwrap()
 }
-fn authorize_exact_restart(store: &Store, identity: &HostIdentity) {
+pub(super) fn authorize_exact_restart(store: &Store, identity: &HostIdentity) {
     let receipt = authorize_restart(store, identity, crate::embedding::RecoveryMode::Exact);
     assert!(
         matches!(

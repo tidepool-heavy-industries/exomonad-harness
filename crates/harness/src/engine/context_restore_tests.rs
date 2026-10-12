@@ -203,6 +203,7 @@ async fn saved_native_exchange_restores_exact_claim_and_recovers_after_reopen() 
     )
     .with_origin(completed.origin.clone());
     let (_cancel, cancel) = watch::channel(false);
+    super::embedded_restart_tests::authorize_exact_restart(&store, &identity);
     engine
         .run_recovering_embedded(
             None,
@@ -501,6 +502,7 @@ async fn embedded_compaction_retains_terminal_claims_before_fresh_recovery() {
             )
             .with_origin(origin);
             let (_cancel, cancel) = watch::channel(false);
+            super::embedded_restart_tests::authorize_exact_restart(&store, &identity);
             let completion = engine
                 .run_recovering_embedded(
                     None,
