@@ -998,6 +998,7 @@ pub(super) struct CheckedContextProjection {
     consumer: RequestId,
     model: Option<String>,
     items: Vec<(RequestId, Option<ItemHash>, Item, Option<Occurrence>)>,
+    output_items: HashMap<(RequestId, i64), usize>,
 }
 
 impl CheckedContextProjection {
@@ -1011,9 +1012,12 @@ impl CheckedContextProjection {
         self.store == store && self.consumer == *consumer && self.model.as_deref() == Some(model)
     }
     pub(super) fn admits(&self, item: &Item, occurrence: &Occurrence) -> bool {
-        self.items.iter().any(|(_, _, projected, selected)| {
-            projected == item && selected.as_ref() == Some(occurrence)
-        })
+        self.output_items
+            .get(&(occurrence.request.clone(), occurrence.position))
+            .is_some_and(|index| {
+                let (_, _, projected, selected) = &self.items[*index];
+                projected == item && selected.as_ref() == Some(occurrence)
+            })
     }
 }
 
@@ -1242,7 +1246,17 @@ pub(super) fn checked_projection(
             ));
         }
     }
+    let output_items = projected
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, _, _, selected))| {
+            let occurrence = selected.as_ref()?;
+            occurrence.output_operation.as_ref()?;
+            Some(((occurrence.request.clone(), occurrence.position), index))
+        })
+        .collect();
     Ok(CheckedContextProjection {
+        output_items,
         store: c.query_row(
             "SELECT state FROM session_state WHERE session_id='harness:store-id'",
             [],

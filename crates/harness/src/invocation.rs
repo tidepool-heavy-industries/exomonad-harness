@@ -1288,7 +1288,9 @@ mod tests {
                 Ok(self.turns.lock().unwrap().pop_front().unwrap())
             }
         }
-        let store = Arc::new(Store::memory().unwrap());
+        let path =
+            std::env::temp_dir().join(format!("pruned-replay-{}.sqlite", uuid::Uuid::new_v4()));
+        let store = Arc::new(Store::open(&path).unwrap());
         let inputs = Arc::new(Mutex::new(Vec::new()));
         let config = EngineConfig {
             instructions: String::new(),
@@ -1333,6 +1335,7 @@ mod tests {
                 .iter()
                 .any(|event| event.id == hook.ordinal)
         );
+        let operation = hook.operation.clone();
         hook.complete(HookAnnotation::Pruned {
             replacement: json!("short"),
             annotation: "retained full output".into(),
@@ -1360,6 +1363,32 @@ mod tests {
             serde_json::from_str::<Value>(original.0["output"].as_str().unwrap()).unwrap(),
             json!({"full":"original"})
         );
+        let projected = projected.clone();
+        let original = original.clone();
+        drop(inputs);
+        drop(invocation);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let replay = reopened.replay_turns(&receipt.requests[0]).unwrap();
+        assert_eq!(replay.len(), 2);
+        let index = replay[1]
+            .model_request
+            .input
+            .iter()
+            .position(|item| item.0["type"] == "function_call_output")
+            .unwrap();
+        assert_eq!(replay[1].model_request.input[index], projected);
+        let owner = replay[1].issued_outputs.as_ref().unwrap()[index]
+            .as_ref()
+            .unwrap();
+        assert_eq!(owner.operation, operation);
+        assert_eq!(owner.origin.request, operation.request);
+        assert_eq!(
+            reopened.replay_output_operation(&operation).unwrap(),
+            Some(original)
+        );
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
     }
     #[test]
     fn duplicate_and_reserved_manifests_fail_before_any_provider_request() {

@@ -241,6 +241,19 @@ fn read_item(tx: &Connection, hash: &ItemHash) -> Result<Item> {
     Ok(serde_json::from_str(&json)?)
 }
 
+enum SealProvenance<'a> {
+    None,
+    Raw {
+        head: &'a RequestId,
+        occurrences: &'a [Option<Occurrence>],
+    },
+    Checked {
+        head: &'a RequestId,
+        occurrences: &'a [Option<Occurrence>],
+        projection: &'a super::context::CheckedContextProjection,
+    },
+}
+
 fn seal_output_references(
     c: &Connection,
     head: &RequestId,
@@ -385,7 +398,7 @@ impl Store {
         hashes: &[Option<ItemHash>],
         instructions: Option<&ItemHash>,
     ) -> Result<IssuedReplayRequest> {
-        self.seal_replay_request_inner(request, hashes, instructions, None, None)
+        self.seal_replay_request_inner(request, hashes, instructions, SealProvenance::None)
     }
 
     pub(crate) fn seal_replay_request_with_occurrences(
@@ -400,8 +413,7 @@ impl Store {
             request,
             hashes,
             instructions,
-            Some((head, occurrences)),
-            None,
+            SealProvenance::Raw { head, occurrences },
         )
     }
 
@@ -421,8 +433,11 @@ impl Store {
             request,
             hashes,
             instructions,
-            Some((head, occurrences)),
-            Some(&projection),
+            SealProvenance::Checked {
+                head,
+                occurrences,
+                projection: &projection,
+            },
         )
     }
 
@@ -431,8 +446,7 @@ impl Store {
         request: &ResponsesRequest,
         hashes: &[Option<ItemHash>],
         instructions: Option<&ItemHash>,
-        occurrences: Option<(&RequestId, &[Option<Occurrence>])>,
-        projection: Option<&super::context::CheckedContextProjection>,
+        provenance: SealProvenance<'_>,
     ) -> Result<IssuedReplayRequest> {
         let _seal = tracing::debug_span!(target: "harness::runtime_cost", "seal_replay_request_with_hashes",
             session_id = %request.session_id, input_items = request.input.len(),
@@ -444,11 +458,27 @@ impl Store {
         );
         let mut connection = self.lock()?;
         connection.write_transaction(|tx| {
-            let outputs = occurrences
-                .map(|(head, occurrences)| {
-                    seal_output_references(&tx, head, &request.input, occurrences, projection)
-                })
-                .transpose()?;
+            let outputs = match provenance {
+                SealProvenance::None => None,
+                SealProvenance::Raw { head, occurrences } => Some(seal_output_references(
+                    &tx,
+                    head,
+                    &request.input,
+                    occurrences,
+                    None,
+                )?),
+                SealProvenance::Checked {
+                    head,
+                    occurrences,
+                    projection,
+                } => Some(seal_output_references(
+                    &tx,
+                    head,
+                    &request.input,
+                    occurrences,
+                    Some(projection),
+                )?),
+            };
             #[cfg(test)]
             let mut input_reencodings = 0;
             let input = request
