@@ -30,13 +30,18 @@ head before subsequent work. These repairs have production-path regression cover
 ## Implemented public interfaces
 
 - `embedding::{HostActor, AdmissionGuard, HostIdentity, Conversation, ToolSurface}`:
-  host capabilities admit exact incarnations. `Conversation::attach` binds history;
+  host capabilities asynchronously admit exact incarnations. `Conversation::attach` binds history;
   `from_checkpoint` atomically registers checkpoint history and the host binding.
   The host guard protects admission from retirement. The harness does not invent
   a host or supervise it. Low-level Store registration remains a trusted host API.
+  Attachment and context seeding await admission before their Store transaction.
+  Dropping an admission future must release any issued guard; returned guards
+  remain retained through the original protected transaction.
 - `Conversation::engine` binds identity/tools and selects plain-text compaction.
   `Provider::request_snapshot` retains the immutable manifest and dispatcher for
-  every call from an issued request. Engine records the surface version, persists
+  every call from an issued request. Snapshot capture is asynchronous, including
+  server compaction; the unpinned bound provider advertises no tools. Engine
+  observes cancellation while awaiting the request snapshot. It records the surface version, persists
   each claim before execution, and validates a call before interpreting reserved
   operations. The bound provider checks exact durable call identity/input/version.
 - `Conversation::input` commits an operation-ID-deduplicated envelope before wake.
