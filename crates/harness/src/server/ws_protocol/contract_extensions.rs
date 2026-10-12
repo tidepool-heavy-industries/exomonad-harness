@@ -373,6 +373,7 @@ pub enum ChatEntry {
         item: JsonValue,
         tool: Option<ChatTool>,
         input_operation: Option<ChatInputOperation>,
+        provider_item_id: Option<String>,
     },
     Output {
         sequence: WireI64,
@@ -415,12 +416,14 @@ impl From<&crate::store::chat::ChatPage> for ChatPage {
                     item,
                     tool,
                     input_operation,
+                    provider_item_id,
                 } => ChatEntry::Message {
                     sequence: (*sequence).into(),
                     request_id: request_id.clone(),
                     position: (*position).into(),
                     hash: hash.clone(),
                     item: item.clone().into(),
+                    provider_item_id: provider_item_id.clone(),
                     input_operation: input_operation.as_ref().map(|input| ChatInputOperation {
                         envelope_id: input.envelope_id.into(),
                         operation_id: input.operation_id.clone(),
@@ -521,6 +524,7 @@ pub(super) fn extension_samples() -> serde_json::Value {
                 hash: "a".repeat(64),
                 item: serde_json::json!([null, "opaque"]).into(),
                 tool: None,
+                provider_item_id: None,
                 input_operation: Some(ChatInputOperation {
                     envelope_id: i64::MAX.into(),
                     operation_id: uuid::Uuid::nil().to_string(),
@@ -659,6 +663,7 @@ mod chat_bounds_tests {
                 .into(),
             tool: None,
             input_operation: None,
+            provider_item_id: None,
         };
         page.entries = vec![
             message(9_007_199_254_740_993),
