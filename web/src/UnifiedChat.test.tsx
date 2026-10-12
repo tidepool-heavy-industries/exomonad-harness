@@ -105,7 +105,7 @@ describe('unified conversation pages', () => {
     const modelOrigin = { kind: 'embedded' as const, run: 'r', actor: '/worker', incarnation: 'one' }
     const live = { origin: modelOrigin, requestId: 'req', itemId: 'final-item', channel: 'assistant' as const, index: '0', text: 'partial already finalized', streaming: false, version: '1', overflow: false, committedHash: 'a'.repeat(64) }
     const all = Array.from({ length: 9 }, (_, index) => ({ sequence: String(index + 1), kind: 'message', requestId: 'req', position: String(index), hash: 'a'.repeat(64), tool: null, providerItemId: index === 8 ? 'final-item' : null, inputOperation: null,
-      item: { type: 'message', role: 'assistant', content: `message ${index + 1} ` + 'x'.repeat(249_950), ...(index === 8 ? { id: 'final-item' } : {}) } }))
+      item: { type: 'message', role: 'assistant', content: `message ${index + 1}`, retained_metadata: 'x'.repeat(249_950), ...(index === 8 ? { id: 'final-item' } : {}) } }))
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const before = new URL(String(input), 'http://localhost').searchParams.get('before')
       const available = all.filter(entry => before === null || BigInt(entry.sequence) < BigInt(before))
