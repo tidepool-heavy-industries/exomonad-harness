@@ -5,6 +5,7 @@ load("//:rust_tests.bzl", "integration_test")
 # These are the direct dependencies in crates/harness/Cargo.toml. Reindeer
 # supplies one Buck alias for each root dependency from the locked graph.
 HARNESS_DEPS = [
+    "//crates/harness-schema:harness_schema",
     "//third-party/rust:async-trait",
     "//third-party/rust:axum",
     "//third-party/rust:base64",

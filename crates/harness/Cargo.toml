@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+harness-schema = { path = "../harness-schema" }
 async-trait.workspace = true
 base64.workspace = true
 fs2.workspace = true

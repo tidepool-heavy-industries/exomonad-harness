@@ -433,6 +433,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "getrandom 0.3.4",
+ "harness-schema",
  "jsonwebtoken",
  "libc",
  "proptest",
@@ -463,6 +464,15 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+]
+
+[[package]]
+name = "harness-schema"
+version = "0.1.0"
+dependencies = [
+ "schemars",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
