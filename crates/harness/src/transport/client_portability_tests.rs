@@ -183,6 +183,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         .history_occurrences(&initial_head)
         .unwrap()
         .into_iter()
+        .filter(|occurrence| !occurrence.item.is_configuration_update())
         .map(Some)
         .collect::<Vec<_>>();
     let (turn, sent) = exchange(
