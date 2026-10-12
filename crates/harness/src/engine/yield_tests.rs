@@ -649,12 +649,12 @@ impl crate::embedding::HostActor for Host {
     fn identity(&self) -> &HostIdentity {
         &self.identity
     }
-    fn admit(
+    async fn admit(
         &self,
     ) -> Result<Box<dyn crate::embedding::AdmissionGuard>, crate::embedding::EmbeddedError> {
         Ok(Box::new(Guard))
     }
-    fn tool_surface(
+    async fn tool_surface(
         &self,
     ) -> Result<Arc<crate::embedding::ToolSurface>, crate::embedding::EmbeddedError> {
         Ok(self.surface.clone())
@@ -697,11 +697,11 @@ async fn yield_pinned_embedded_surface_allows_intrinsic_without_host_authority()
             surface,
         }),
         None,
-    )
+    ).await
     .unwrap();
     // PinnedProvider validates solely against the immutable host manifest.
     // The engine adds and interprets its intrinsic without granting host tools.
-    let snapshot = conversation.provider().request_snapshot().unwrap().unwrap();
+    let snapshot = conversation.provider().request_snapshot().await.unwrap().unwrap();
     assert!(snapshot.validate_call("yield", ToolKind::Function).is_err());
     let requests = Arc::new(Mutex::new(vec![]));
     let engine = conversation

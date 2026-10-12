@@ -46,14 +46,14 @@ impl HostActor for Host {
     fn identity(&self) -> &HostIdentity {
         &self.identity
     }
-    fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+    async fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
         if self.alive.load(Ordering::SeqCst) {
             Ok(Box::new(Permit))
         } else {
             Err(EmbeddedError::Host("retired".into()))
         }
     }
-    fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+    async fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
         Ok(self.surface.read().unwrap().clone())
     }
     async fn wake(&self, envelope_id: i64) -> Result<(), String> {
@@ -195,7 +195,7 @@ async fn embedded_requests_pin_dispatch_and_inputs_record_actual_inclusion() {
     let store = Arc::new(Store::memory().unwrap());
     let seen = Arc::new(Mutex::new(vec![]));
     let host = host(store.clone(), seen.clone());
-    let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+    let conversation = Conversation::attach(store.clone(), host.clone(), None).await.unwrap();
     let observer = conversation.input_observer();
     let receipt = conversation
         .input("message-1", "operator", "do work")
@@ -448,7 +448,7 @@ async fn embedded_final_waits_internally_and_durable_input_resumes_once() {
         )
         .unwrap(),
     );
-    let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+    let conversation = Conversation::attach(store.clone(), host.clone(), None).await.unwrap();
     let (wake_tx, wake_rx) = tokio::sync::mpsc::unbounded_channel();
     *host.wake_tx.lock().unwrap() = Some(wake_tx);
     let transport = ResumeAfterInput {
@@ -594,7 +594,7 @@ async fn committed_input_survives_reconnect_without_a_wake_hint() {
     let path = directory.path().join("embedded.sqlite");
     let store = Arc::new(Store::open(&path).unwrap());
     let initial_host = host(store.clone(), Arc::new(Mutex::new(vec![])));
-    let conversation = Conversation::attach(store.clone(), initial_host, None).unwrap();
+    let conversation = Conversation::attach(store.clone(), initial_host, None).await.unwrap();
     let receipt = conversation
         .input("before-reconnect", "operator", "retained")
         .await
@@ -604,7 +604,7 @@ async fn committed_input_survives_reconnect_without_a_wake_hint() {
 
     let store = Arc::new(Store::open(&path).unwrap());
     let host = host(store.clone(), Arc::new(Mutex::new(vec![])));
-    let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+    let conversation = Conversation::attach(store.clone(), host.clone(), None).await.unwrap();
     let transport = FinalOnly(Arc::new(Mutex::new(vec![])));
     let engine = conversation
         .engine::<Offline, _>(
@@ -652,10 +652,10 @@ async fn unavailable_host_snapshot_fails_before_model_request() {
         fn identity(&self) -> &HostIdentity {
             self.0.identity()
         }
-        fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
-            self.0.admit()
+        async fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+            self.0.admit().await
         }
-        fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+        async fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
             Err(EmbeddedError::Surface("source lease retired".into()))
         }
         async fn wake(&self, envelope_id: i64) -> Result<(), String> {
@@ -671,7 +671,7 @@ async fn unavailable_host_snapshot_fails_before_model_request() {
         store.clone(),
         Arc::new(Mutex::new(vec![])),
     )));
-    let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+    let conversation = Conversation::attach(store.clone(), host.clone(), None).await.unwrap();
     let transport = FinalOnly(Arc::new(Mutex::new(vec![])));
     let engine = conversation
         .engine::<Offline, _>(
@@ -744,7 +744,7 @@ impl ResponsesTransport for NativeWaitAttempt {
 async fn embedded_surface_does_not_advertise_or_accept_native_wait_agent() {
     let store = Arc::new(Store::memory().unwrap());
     let host = host(store.clone(), Arc::new(Mutex::new(vec![])));
-    let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+    let conversation = Conversation::attach(store.clone(), host.clone(), None).await.unwrap();
     let transport = NativeWaitAttempt(Arc::new(Mutex::new(vec![])));
     let engine = conversation
         .engine::<Offline, _>(
@@ -791,12 +791,12 @@ async fn embedded_binding_rejects_foreign_context_kind_and_retired_input() {
     let store = Arc::new(Store::memory().unwrap());
     let seen = Arc::new(Mutex::new(vec![]));
     let host = host(store.clone(), seen.clone());
-    let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+    let conversation = Conversation::attach(store.clone(), host.clone(), None).await.unwrap();
     let request = RequestId("request".into());
     store
         .write_request(&request, None, "/root", &[], Default::default())
         .unwrap();
-    let provider = conversation.provider().request_snapshot().unwrap().unwrap();
+    let provider = conversation.provider().request_snapshot().await.unwrap().unwrap();
     let jobs = JobScheduler::new(1).unwrap();
     jobs.start_for_agent(
         provider.clone(),
@@ -852,7 +852,7 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
     let store = Arc::new(Store::memory().unwrap());
     let seen = Arc::new(Mutex::new(vec![]));
     let host = host(store.clone(), seen.clone());
-    let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+    let conversation = Conversation::attach(store.clone(), host.clone(), None).await.unwrap();
     let secret = "embedded-browser-offline-test-secret-32-bytes";
     let assets = std::env::var_os("HARNESS_WEB_DIST")
         .map(std::path::PathBuf::from)
@@ -1109,11 +1109,11 @@ async fn structured_host_calls_retain_progress_and_admitted_input_survives_faile
         fn identity(&self) -> &HostIdentity {
             &self.0.identity
         }
-        fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
-            self.0.admit()
+        async fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+            self.0.admit().await
         }
-        fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
-            self.0.tool_surface()
+        async fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+            self.0.tool_surface().await
         }
         async fn wake(&self, _: i64) -> Result<(), String> {
             Err("host wake queue temporarily closed".into())
@@ -1126,7 +1126,7 @@ async fn structured_host_calls_retain_progress_and_admitted_input_survives_faile
     let host = host(store.clone(), Arc::new(Mutex::new(vec![])));
     *host.surface.write().unwrap()=Arc::new(ToolSurface::new("structured".into(),vec![json!({"type":"function","name":"echo","strict":true,"parameters":{"type":"object","properties":{"answer":{"type":"integer"}},"required":["answer"],"additionalProperties":false}})],Arc::new(Structured)).unwrap());
     let conversation =
-        Conversation::attach(store.clone(), Arc::new(WakeFailure(host)), None).unwrap();
+        Conversation::attach(store.clone(), Arc::new(WakeFailure(host)), None).await.unwrap();
     let first = conversation
         .input("once", "operator", "hello")
         .await
@@ -1163,7 +1163,7 @@ async fn structured_host_calls_retain_progress_and_admitted_input_survives_faile
     let operation = store.claim(&call, &request).unwrap();
     let jobs = JobScheduler::new(1).unwrap();
     jobs.start_operation(
-        conversation.provider().request_snapshot().unwrap().unwrap(),
+        conversation.provider().request_snapshot().await.unwrap().unwrap(),
         operation.clone(),
         AgentPath("/root".into()),
         Some(request),
@@ -1186,7 +1186,7 @@ async fn structured_host_calls_retain_progress_and_admitted_input_survives_faile
 async fn checkpoint_conversations_keep_independent_children_after_origin_failure() {
     let store = Arc::new(Store::memory().unwrap());
     let root = host(store.clone(), Arc::new(Mutex::new(vec![])));
-    let root_conversation = Conversation::attach(store.clone(), root.clone(), None).unwrap();
+    let root_conversation = Conversation::attach(store.clone(), root.clone(), None).await.unwrap();
     struct Finished;
     #[async_trait]
     impl ResponsesTransport for Finished {
@@ -1256,7 +1256,7 @@ async fn checkpoint_conversations_keep_independent_children_after_origin_failure
                 actor: AgentPath(actor.into()),
                 incarnation: incarnation.into(),
             },
-            surface: RwLock::new(root.tool_surface().unwrap()),
+            surface: RwLock::new(root.tool_surface().await.unwrap()),
             alive: AtomicBool::new(alive),
             wakes: AtomicUsize::new(0),
             wake_tx: Mutex::new(None),
@@ -1272,7 +1272,7 @@ async fn checkpoint_conversations_keep_independent_children_after_origin_failure
         &json!({"task":"first"}),
         &json!({"revision":"checkout-a"}),
         &projection_target(),
-    )
+    ).await
     .unwrap();
     let child_a_record = store.agent(&child_a.identity().actor).unwrap().unwrap();
     let child_a_head = child_a_record.head_request.clone().unwrap();
@@ -1285,7 +1285,7 @@ async fn checkpoint_conversations_keep_independent_children_after_origin_failure
         &json!({"task":"second"}),
         &json!({"revision":"checkout-b"}),
         &projection_target(),
-    )
+    ).await
     .unwrap();
     let child_b_record = store.agent(&child_b.identity().actor).unwrap().unwrap();
     let child_b_head = child_b_record.head_request.clone().unwrap();
@@ -1332,7 +1332,7 @@ async fn checkpoint_conversations_keep_independent_children_after_origin_failure
             &json!({}),
             &json!({"revision":"retired"}),
             &projection_target(),
-        )
+        ).await
         .is_err(),
         "a released child host rejects a new checkpoint admission"
     );
@@ -1441,7 +1441,7 @@ async fn checkpoint_conversations_keep_independent_children_after_origin_failure
 async fn checkpoint_attachment_uses_host_admission_and_commits_binding_atomically() {
     let store = Arc::new(Store::memory().unwrap());
     let root = host(store.clone(), Arc::new(Mutex::new(vec![])));
-    let root_conversation = Conversation::attach(store.clone(), root.clone(), None).unwrap();
+    let root_conversation = Conversation::attach(store.clone(), root.clone(), None).await.unwrap();
     struct Finished;
     #[async_trait]
     impl ResponsesTransport for Finished {
@@ -1502,7 +1502,7 @@ async fn checkpoint_attachment_uses_host_admission_and_commits_binding_atomicall
                 actor: AgentPath("/root/child".into()),
                 incarnation: "child-one".into(),
             },
-            surface: RwLock::new(root.tool_surface().unwrap()),
+            surface: RwLock::new(root.tool_surface().await.unwrap()),
             alive: AtomicBool::new(alive),
             wakes: AtomicUsize::new(0),
             wake_tx: Mutex::new(None),
@@ -1518,7 +1518,7 @@ async fn checkpoint_attachment_uses_host_admission_and_commits_binding_atomicall
             &json!({}),
             &json!({"revision":"abc"}),
             &projection_target(),
-        )
+        ).await
         .is_err()
     );
     assert!(
@@ -1535,7 +1535,7 @@ async fn checkpoint_attachment_uses_host_admission_and_commits_binding_atomicall
         &json!({}),
         &json!({"revision":"abc"}),
         &projection_target(),
-    )
+    ).await
     .unwrap();
     assert_eq!(child.identity().incarnation, "child-one");
     assert_eq!(root_conversation.identity(), &root.identity);
@@ -1554,7 +1554,7 @@ async fn browser_command_admission_retry_after_retirement_never_wakes_or_readmit
     use harness::{embedding::ClientOperationId, server::HostCommand, store::EmbeddedCommandState};
     let store = Arc::new(Store::memory().unwrap());
     let host = host(store.clone(), Arc::new(Mutex::new(vec![])));
-    let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+    let conversation = Conversation::attach(store.clone(), host.clone(), None).await.unwrap();
     let observer = conversation.input_observer();
     let operation: ClientOperationId =
         serde_json::from_value(json!("71546150-7b90-41d6-b06e-34b62df86058")).unwrap();
@@ -1618,11 +1618,11 @@ async fn browser_command_wake_failure_retains_admission_and_retry_receipt() {
         fn identity(&self) -> &HostIdentity {
             self.0.identity()
         }
-        fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
-            self.0.admit()
+        async fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+            self.0.admit().await
         }
-        fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
-            self.0.tool_surface()
+        async fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+            self.0.tool_surface().await
         }
         async fn wake(&self, _: i64) -> Result<(), String> {
             self.0.wakes.fetch_add(1, Ordering::SeqCst);
@@ -1635,7 +1635,7 @@ async fn browser_command_wake_failure_retains_admission_and_retry_receipt() {
     let store = Arc::new(Store::memory().unwrap());
     let host = host(store.clone(), Arc::new(Mutex::new(vec![])));
     let conversation =
-        Conversation::attach(store.clone(), Arc::new(FailedWake(host.clone())), None).unwrap();
+        Conversation::attach(store.clone(), Arc::new(FailedWake(host.clone())), None).await.unwrap();
     let operation: ClientOperationId =
         serde_json::from_value(json!("efece25b-e375-4a0c-bfda-7a44a10720b9")).unwrap();
     store
@@ -1693,15 +1693,15 @@ async fn overlapping_browser_input_admissions_wake_once_and_retain_first_wake_fa
         fn identity(&self) -> &HostIdentity {
             self.host.identity()
         }
-        fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
-            let permit = self.host.admit()?;
+        async fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+            let permit = self.host.admit().await?;
             if self.enabled.load(Ordering::SeqCst) {
                 self.admission_barrier.wait();
             }
             Ok(permit)
         }
-        fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
-            self.host.tool_surface()
+        async fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+            self.host.tool_surface().await
         }
         async fn wake(&self, _: i64) -> Result<(), String> {
             self.host.wakes.fetch_add(1, Ordering::SeqCst);
@@ -1719,7 +1719,7 @@ async fn overlapping_browser_input_admissions_wake_once_and_retain_first_wake_fa
         enabled: AtomicBool::new(false),
     });
     let conversation =
-        Arc::new(Conversation::attach(store.clone(), overlap.clone(), None).unwrap());
+        Arc::new(Conversation::attach(store.clone(), overlap.clone(), None).await.unwrap());
     let operation: ClientOperationId =
         serde_json::from_value(json!("72d54f4c-f168-47dd-bee7-c9018c4d636e")).unwrap();
     store

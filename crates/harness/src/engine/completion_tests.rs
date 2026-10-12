@@ -629,7 +629,7 @@ impl crate::embedding::HostActor for ClosingRequestHost {
     fn identity(&self) -> &crate::embedding::HostIdentity {
         &self.identity
     }
-    fn admit(
+    async fn admit(
         &self,
     ) -> Result<Box<dyn crate::embedding::AdmissionGuard>, crate::embedding::EmbeddedError> {
         if self.closed.load(Ordering::SeqCst) {
@@ -638,7 +638,7 @@ impl crate::embedding::HostActor for ClosingRequestHost {
             Ok(Box::new(ClosingAdmissionLease))
         }
     }
-    fn tool_surface(
+    async fn tool_surface(
         &self,
     ) -> Result<Arc<crate::embedding::ToolSurface>, crate::embedding::EmbeddedError> {
         if self.closed.load(Ordering::SeqCst) {
@@ -791,7 +791,7 @@ async fn closed_next_request_preserves_settlement_and_cleanup_without_transport_
             acknowledgments: AtomicUsize::new(0),
         });
         let conversation =
-            crate::embedding::Conversation::attach(store.clone(), host.clone(), None).unwrap();
+            crate::embedding::Conversation::attach(store.clone(), host.clone(), None).await.unwrap();
         let transport_calls = Arc::new(AtomicUsize::new(0));
         let runtime = conversation
             .engine::<TestAuth, _>(

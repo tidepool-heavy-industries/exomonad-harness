@@ -441,7 +441,7 @@ pub trait Provider: Send + Sync {
 
     /// A stable view retained for an entire model request, including its later
     /// tool calls. Reloadable providers return an immutable snapshot here.
-    fn request_snapshot(&self) -> Result<Option<std::sync::Arc<dyn Provider>>, ProviderError> {
+    async fn request_snapshot(&self) -> Result<Option<std::sync::Arc<dyn Provider>>, ProviderError> {
         Ok(None)
     }
 

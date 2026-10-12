@@ -1161,7 +1161,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .iter()
                 .find_map(Item::configuration_effort)
                 .ok_or(EngineError::MissingEffortPin)?;
-            let snapshot = match self.provider.request_snapshot() {
+            let snapshot = match self.provider.request_snapshot().await {
                 Ok(snapshot) => snapshot,
                 Err(crate::provider::ProviderError::RequestAdmissionClosed) => {
                     return Err(self
