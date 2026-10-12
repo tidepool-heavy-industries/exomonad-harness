@@ -968,18 +968,22 @@ mod tests {
             (
                 "/root".to_owned(),
                 VecDeque::from([
-                    vec![function_call(
-                        "spawn-1",
-                        "spawn_agent",
-                        json!({
-                            "task_name":"child",
-                            "from":{"kind":"prompt","name":null},
-                            "task":{
-                                "clauses":["answer child task"],"acceptance":["child answer"],
-                                "owned":[],"must_not":[],"introduces":[],"consumes":[],"boundaries":[]
-                            }
-                        }),
-                    )],
+                    vec![{
+                        let mut call = function_call(
+                            "spawn-1",
+                            "spawn_agent",
+                            json!({
+                                "task_name":"child",
+                                "from":{"kind":"prompt","name":null},
+                                "task":{
+                                    "clauses":["answer child task"],"acceptance":["child answer"],
+                                    "owned":[],"must_not":[],"introduces":[],"consumes":[],"boundaries":[]
+                                }
+                            }),
+                        );
+                        call.0["async"] = json!(true);
+                        call
+                    }],
                     vec![function_call("wait-1", "wait_agent", json!({}))],
                     vec![function_call("wait-2", "wait_agent", json!({}))],
                     vec![final_answer("root-result")],

@@ -4729,7 +4729,9 @@ mod tests {
         let turn = engine
             .run(
                 None,
-                vec![Item(json!({"role":"user","content":"hello"}))],
+                vec![Item(
+                    json!({"type":"message","role":"user","content":"hello"}),
+                )],
                 cancel_rx,
                 tokio::sync::mpsc::unbounded_channel().1,
             )

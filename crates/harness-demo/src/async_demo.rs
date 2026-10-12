@@ -881,7 +881,7 @@ mod tests {
                 .into_iter()
                 .map(|name| {
                     json!({
-                        "type":"function","name":name,"async":true,"parameters":{"type":"object","properties":{}}
+                        "type":"function","name":name,"async":true,"strict":true,"parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}
                     })
                 })
                 .collect()
@@ -919,7 +919,7 @@ mod tests {
             },
         );
         let (cancel_tx, cancel_rx) = watch::channel(false);
-        let run = tokio::spawn(async move {
+        let mut run = tokio::spawn(async move {
             engine
                 .run(
                     None,
@@ -931,9 +931,11 @@ mod tests {
                 )
                 .await
         });
-        tokio::time::timeout(std::time::Duration::from_secs(2), third_request.notified())
-            .await
-            .expect("Engine did not issue third request");
+        tokio::select! {
+            _ = third_request.notified() => {},
+            result = &mut run => panic!("Engine ended before third request: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => panic!("Engine did not issue third request"),
+        }
         {
             let observed = inputs.lock().unwrap_or_else(|e| e.into_inner());
             assert!(

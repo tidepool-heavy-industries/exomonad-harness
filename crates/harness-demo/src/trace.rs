@@ -758,7 +758,7 @@ mod tests {
             tools_allowed: None,
             model: "safe-model".into(),
             pinned_effort: harness::model::Effort::Low,
-            session_id: String::new(),
+            session_id: "trace-disabled-fixture".into(),
         };
         assert!(
             transport
