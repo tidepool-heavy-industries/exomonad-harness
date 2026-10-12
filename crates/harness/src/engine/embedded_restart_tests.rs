@@ -101,7 +101,7 @@ fn engine(
     });
     (engine, inputs)
 }
-fn authorize_restart(
+pub(super) fn authorize_restart(
     store: &Store,
     identity: &HostIdentity,
     mode: crate::embedding::RecoveryMode,

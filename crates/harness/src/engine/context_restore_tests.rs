@@ -502,6 +502,37 @@ async fn embedded_compaction_retains_terminal_claims_before_fresh_recovery() {
             )
             .with_origin(origin);
             let (_cancel, cancel) = watch::channel(false);
+            if interrupted {
+                let receipt = super::embedded_restart_tests::authorize_restart(
+                    &store,
+                    &identity,
+                    crate::embedding::RecoveryMode::Exact,
+                );
+                assert!(matches!(
+                    receipt.outcome,
+                    crate::server::CommandReceiptOutcome::Refused { .. }
+                ));
+                assert!(requests.lock().unwrap().is_empty());
+                assert!(matches!(
+                    store.embedded_inference_state(&identity).unwrap(),
+                    crate::embedding::HostInferenceState::Blocked { block }
+                        if block.request == boundary
+                ));
+                for (operation, _, state) in &expected {
+                    assert_eq!(
+                        store
+                            .claims_on(&boundary)
+                            .unwrap()
+                            .iter()
+                            .find(|claim| &claim.operation == operation)
+                            .unwrap()
+                            .state,
+                        *state,
+                    );
+                }
+                histories += 1;
+                continue;
+            }
             super::embedded_restart_tests::authorize_exact_restart(&store, &identity);
             let completion = engine
                 .run_recovering_embedded(
