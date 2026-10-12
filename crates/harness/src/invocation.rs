@@ -425,6 +425,11 @@ struct BudgetTransport<C> {
 }
 #[async_trait]
 impl<C: ResponsesTransport> ResponsesTransport for BudgetTransport<C> {
+    fn prepare_submission(
+        &self,
+    ) -> Result<crate::transport::PreparedTransportSelection, TransportError> {
+        self.inner.prepare_submission()
+    }
     fn response_contract(
         &self,
     ) -> Result<

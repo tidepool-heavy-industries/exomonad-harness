@@ -400,6 +400,9 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
     prepared: super::PreparedProviderRequest,
     sink: Option<tokio::sync::mpsc::Sender<StreamEvent>>,
 ) -> Result<ResponsesTurn, TransportError> {
+    if !prepared.selection().is_native() {
+        return Err(TransportError::PreparedSelectionMismatch);
+    }
     let (request, body, (route, protocol)) = prepared.into_dispatch_parts();
     let credentials = tokio::task::spawn_blocking(move || auth.credentials())
         .await
@@ -524,7 +527,7 @@ mod tests {
         }
         let calls = Arc::new(AtomicUsize::new(0));
         let client = super::super::ResponsesClient::new(ChangingAuth(calls.clone()));
-        let contract = crate::engine::ResponsesTransport::response_contract(&client).unwrap();
+        let contract = crate::engine::ResponsesTransport::prepare_submission(&client).unwrap();
         let store = crate::store::Store::memory().unwrap();
         let head = crate::model::RequestId("route-change".into());
         store.create_request(&head, None, "/root").unwrap();

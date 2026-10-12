@@ -4,7 +4,10 @@ use crate::{
     context::{ContextError, ContextReplayRejection, Occurrence},
     item::ItemHash,
     model::RequestId,
-    transport::{ResponsesProtocol, ResponsesRequest, ResponsesRoute, TransportError, client},
+    transport::{
+        PreparedTransportSelection, ResponsesProtocol, ResponsesRequest, ResponsesRoute,
+        TransportError, client,
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +41,7 @@ impl From<PrepareProviderError> for StoreError {
 pub struct PreparedProviderRequest {
     request: ResponsesRequest,
     body: client::NormalizedProviderBody,
-    contract: (ResponsesRoute, ResponsesProtocol),
+    selection: PreparedTransportSelection,
     issued: IssuedProviderRequest,
 }
 
@@ -50,13 +53,16 @@ impl PreparedProviderRequest {
         &self.issued.request
     }
     pub fn response_contract(&self) -> (ResponsesRoute, ResponsesProtocol) {
-        self.contract
+        self.selection.response_contract()
     }
     pub fn wire_body(&self) -> &[u8] {
         self.body.bytes()
     }
     pub(crate) fn issuer(&self) -> &IssuedProviderRequest {
         &self.issued
+    }
+    pub(crate) fn selection(&self) -> &PreparedTransportSelection {
+        &self.selection
     }
     pub(crate) fn into_dispatch_parts(
         self,
@@ -65,7 +71,11 @@ impl PreparedProviderRequest {
         Vec<u8>,
         (ResponsesRoute, ResponsesProtocol),
     ) {
-        (self.request, self.body.into_bytes(), self.contract)
+        (
+            self.request,
+            self.body.into_bytes(),
+            self.selection.response_contract(),
+        )
     }
 }
 
@@ -77,12 +87,13 @@ impl Store {
         request: ResponsesRequest,
         occurrences: &[Option<Occurrence>],
         instructions: Option<&ItemHash>,
-        contract: (ResponsesRoute, ResponsesProtocol),
+        selection: PreparedTransportSelection,
         purpose: ProviderRequestPurpose,
     ) -> Result<PreparedProviderRequest, PrepareProviderError> {
         if request.input.len() != occurrences.len() {
             return Err(StoreError::InvalidProviderEvidence(local.clone()).into());
         }
+        let contract = selection.response_contract();
         let canonical = occurrences.iter().flatten().cloned().collect::<Vec<_>>();
         {
             let c = self.lock()?;
@@ -166,7 +177,7 @@ impl Store {
         Ok(PreparedProviderRequest {
             request,
             body,
-            contract,
+            selection,
             issued,
         })
     }
@@ -212,7 +223,7 @@ mod tests {
                 dto.clone(),
                 &[None],
                 None,
-                contract,
+                PreparedTransportSelection::native(contract),
                 ProviderRequestPurpose::Inference,
             )
             .unwrap();
@@ -237,7 +248,10 @@ mod tests {
                 request(),
                 &[None],
                 None,
-                (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Lite),
+                PreparedTransportSelection::native((
+                    ResponsesRoute::ChatGptPlan,
+                    ResponsesProtocol::Lite
+                )),
                 ProviderRequestPurpose::Inference
             ),
             Err(PrepareProviderError::Transport(_))
@@ -262,7 +276,10 @@ mod tests {
                     dto,
                     &[None],
                     None,
-                    (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+                    PreparedTransportSelection::native((
+                        ResponsesRoute::Codex,
+                        ResponsesProtocol::Standard
+                    )),
                     ProviderRequestPurpose::Inference
                 ),
                 Err(PrepareProviderError::Store(_))
@@ -282,7 +299,10 @@ mod tests {
                 request(),
                 &[None],
                 None,
-                (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+                PreparedTransportSelection::native((
+                    ResponsesRoute::Codex,
+                    ResponsesProtocol::Standard
+                )),
                 ProviderRequestPurpose::Inference
             ),
             Err(PrepareProviderError::Store(_))

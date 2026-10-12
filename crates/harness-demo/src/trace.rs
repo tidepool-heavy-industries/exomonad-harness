@@ -180,6 +180,11 @@ impl<T> TraceTransport<T> {
 
 #[async_trait]
 impl<T: ResponsesTransport + 'static> ResponsesTransport for TraceTransport<T> {
+    fn prepare_submission(
+        &self,
+    ) -> Result<harness::transport::PreparedTransportSelection, TransportError> {
+        self.inner.prepare_submission()
+    }
     fn response_contract(
         &self,
     ) -> Result<

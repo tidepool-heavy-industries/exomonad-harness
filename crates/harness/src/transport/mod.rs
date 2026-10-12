@@ -127,6 +127,41 @@ pub struct ResponsesRequest {
     pub session_id: String,
 }
 
+/// The selected native contract or an exact step issued by the replay owner.
+/// This capability is never reconstructed from recorded JSON.
+#[derive(Clone)]
+pub struct PreparedTransportSelection(PreparedTransportEvidence);
+
+#[derive(Clone)]
+enum PreparedTransportEvidence {
+    Native(ResponsesRoute, ResponsesProtocol),
+    Replay(crate::replay::PreparedReplayStep),
+}
+
+impl PreparedTransportSelection {
+    pub(crate) fn native(contract: (ResponsesRoute, ResponsesProtocol)) -> Self {
+        Self(PreparedTransportEvidence::Native(contract.0, contract.1))
+    }
+    pub(crate) fn replay(step: crate::replay::PreparedReplayStep) -> Self {
+        Self(PreparedTransportEvidence::Replay(step))
+    }
+    pub fn response_contract(&self) -> (ResponsesRoute, ResponsesProtocol) {
+        match &self.0 {
+            PreparedTransportEvidence::Native(route, protocol) => (*route, *protocol),
+            PreparedTransportEvidence::Replay(step) => step.response_contract(),
+        }
+    }
+    pub(crate) fn replay_step(&self) -> Option<&crate::replay::PreparedReplayStep> {
+        match &self.0 {
+            PreparedTransportEvidence::Replay(step) => Some(step),
+            PreparedTransportEvidence::Native(..) => None,
+        }
+    }
+    pub(crate) fn is_native(&self) -> bool {
+        matches!(self.0, PreparedTransportEvidence::Native(..))
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Usage {
     /// True only when both input and output counters were reported.
@@ -147,6 +182,8 @@ pub struct ResponsesTurn {
 
 #[derive(Debug, Error)]
 pub enum TransportError {
+    #[error("prepared provider selection does not match its owning transport or step")]
+    PreparedSelectionMismatch,
     #[error("prepared transport contract does not match the selected replay turn")]
     ReplayContractMismatch,
     #[error("provider request has no retained transport contract")]

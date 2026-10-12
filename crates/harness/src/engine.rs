@@ -19,8 +19,8 @@ use crate::{
     provider::{Provider, ToolScheduling},
     store::{ServerCompactionResponse, Store, StoreError, Usage as StoredUsage},
     transport::{
-        Auth, PreparedProviderRequest, ResponsesClient, ResponsesRequest, ResponsesTurn,
-        TransportError, Usage,
+        Auth, PreparedProviderRequest, PreparedTransportSelection, ResponsesClient,
+        ResponsesRequest, ResponsesTurn, TransportError, Usage,
         sse::{OutputChannel, StreamEvent},
     },
     turn::{
@@ -48,10 +48,7 @@ struct HistoryWindow {
     provenance: Vec<(RequestId, ItemHash)>,
     occurrences: Vec<Option<crate::context::Occurrence>>,
     model: Option<String>,
-    contract: (
-        crate::transport::ResponsesRoute,
-        crate::transport::ResponsesProtocol,
-    ),
+    contract: PreparedTransportSelection,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -288,6 +285,11 @@ pub struct EngineCompletion {
 /// recorded turns without credentials or live network access.
 #[async_trait::async_trait]
 pub trait ResponsesTransport: Send + Sync {
+    fn prepare_submission(&self) -> Result<PreparedTransportSelection, TransportError> {
+        Ok(PreparedTransportSelection::native(
+            self.response_contract()?,
+        ))
+    }
     /// Exact transport selection, frozen before durable issuance and network dispatch.
     fn response_contract(
         &self,
@@ -1189,7 +1191,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         .map(|name| (name.to_owned(), request_provider.tool_scheduling(name)))
                 })
                 .collect::<HashMap<_, _>>();
-            let contract = history.contract;
+            let contract = history.contract.clone();
             let continuing_model = history
                 .model
                 .clone()
@@ -3430,9 +3432,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let store = self.store.clone();
         let request = id.clone();
         let identity = self.origin.clone();
-        let contract = self.client.response_contract()?;
+        let contract = self.client.prepare_submission()?;
         blocking(move || {
-            let state = store.context_request_state_for_transport(&request, &identity, contract)?;
+            let state = store.context_request_state_for_transport(
+                &request,
+                &identity,
+                contract.response_contract(),
+            )?;
             tracing::Span::current().record("output_items", state.history.len());
             let mut items = Vec::with_capacity(state.history.len());
             let mut provenance = Vec::with_capacity(state.history.len());
@@ -3742,7 +3748,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         occurrences: Vec<Option<crate::context::Occurrence>>,
         purpose: crate::store::ProviderRequestPurpose,
     ) -> Result<PreparedProviderRequest, EngineError> {
-        let contract = self.client.response_contract()?;
+        let contract = self.client.prepare_submission()?;
         let local = RequestId(uuid::Uuid::new_v4().to_string());
         let source = source.clone();
         let branch = self.config.agent.0.clone();

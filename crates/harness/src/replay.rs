@@ -10,7 +10,8 @@ use crate::{
     },
     store::{RecordedReplayTurn, Store, StoreError, TerminalOutcome},
     transport::{
-        PreparedProviderRequest, ResponsesRequest, ResponsesTurn, TransportError, sse::StreamEvent,
+        PreparedProviderRequest, PreparedTransportSelection, ResponsesRequest, ResponsesTurn,
+        TransportError, sse::StreamEvent,
     },
     turn::JobOutput,
 };
@@ -47,6 +48,29 @@ struct ReplayProgress {
     cursor: Mutex<usize>,
     local_requests: Mutex<HashMap<RequestId, LocalReplayRequest>>,
     changed: Notify,
+}
+
+/// Only this replay owner can select a step from its immutable turn sequence.
+#[derive(Clone)]
+pub(crate) struct PreparedReplayStep {
+    progress: Arc<ReplayProgress>,
+    index: usize,
+    request: RequestId,
+    contract: (
+        crate::transport::ResponsesRoute,
+        crate::transport::ResponsesProtocol,
+    ),
+}
+
+impl PreparedReplayStep {
+    pub(crate) fn response_contract(
+        &self,
+    ) -> (
+        crate::transport::ResponsesRoute,
+        crate::transport::ResponsesProtocol,
+    ) {
+        self.contract
+    }
 }
 
 struct LocalReplayRequest {
@@ -529,6 +553,16 @@ impl ReplayProvider {
                 "replay provider has no recorded model turns remaining".into(),
             ));
         };
+        let selected = request
+            .selection()
+            .replay_step()
+            .ok_or(TransportError::PreparedSelectionMismatch)?;
+        if !Arc::ptr_eq(&selected.progress, &self.progress)
+            || selected.index != *cursor
+            || selected.request != next.request
+        {
+            return Err(TransportError::PreparedSelectionMismatch);
+        }
         if next.provider_contract != Some(request.response_contract()) {
             return Err(TransportError::ReplayContractMismatch);
         }
@@ -558,6 +592,22 @@ impl ReplayProvider {
 
 #[async_trait]
 impl ResponsesTransport for ReplayProvider {
+    fn prepare_submission(&self) -> Result<PreparedTransportSelection, TransportError> {
+        let index = *lock(&self.progress.cursor);
+        let turn = self
+            .turns
+            .get(index)
+            .ok_or(TransportError::UnprovenResponseContract)?;
+        let contract = turn
+            .provider_contract
+            .ok_or(TransportError::UnprovenResponseContract)?;
+        Ok(PreparedTransportSelection::replay(PreparedReplayStep {
+            progress: self.progress.clone(),
+            index,
+            request: turn.request.clone(),
+            contract,
+        }))
+    }
     fn response_contract(
         &self,
     ) -> Result<
@@ -597,6 +647,9 @@ impl ResponsesTransport for ReplayProvider {
 
 #[async_trait]
 impl ResponsesTransport for Arc<ReplayProvider> {
+    fn prepare_submission(&self) -> Result<PreparedTransportSelection, TransportError> {
+        self.as_ref().prepare_submission()
+    }
     fn response_contract(
         &self,
     ) -> Result<
@@ -880,7 +933,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[tokio::test]
-    async fn prepared_contract_refusal_leaves_replay_cursor_and_mapping_unchanged() {
+    async fn prepared_replay_steps_refuse_stale_and_foreign_owner_without_advancing() {
         use crate::transport::{ResponsesProtocol, ResponsesRoute};
         let source = Arc::new(Store::memory().unwrap());
         let first = RequestId("prepared-source-first".into());
@@ -917,11 +970,12 @@ mod tests {
                 &second,
                 &dto,
                 &turn("second"),
-                ResponsesRoute::ChatGptPlan,
+                ResponsesRoute::Codex,
                 ResponsesProtocol::Standard,
             )
             .unwrap();
-        let replay = ReplayProvider::new(source, &second).unwrap();
+        let replay = ReplayProvider::new(source.clone(), &second).unwrap();
+        let foreign = ReplayProvider::new(source, &second).unwrap();
         let local = Store::memory().unwrap();
         let prepare = |id: &str, contract| {
             let id = RequestId(id.into());
@@ -938,25 +992,26 @@ mod tests {
                 )
                 .unwrap()
         };
-        let first = prepare(
-            "first",
-            (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+        let wrong_owner = prepare("wrong-owner", foreign.prepare_submission().unwrap());
+        assert!(matches!(
+            replay.create(wrong_owner).await,
+            Err(TransportError::PreparedSelectionMismatch)
+        ));
+        assert_eq!(replay.turns_remaining(), 2);
+        assert!(
+            !lock(&replay.progress.local_requests).contains_key(&RequestId("wrong-owner".into()))
         );
-        let stale = prepare(
-            "stale",
-            (ResponsesRoute::Codex, ResponsesProtocol::Standard),
-        );
+        let first = prepare("first", replay.prepare_submission().unwrap());
+        let stale = prepare("stale", replay.prepare_submission().unwrap());
+        assert_eq!(first.wire_body(), stale.wire_body());
         assert_eq!(replay.create(first).await.unwrap().response_id, "first");
         assert!(matches!(
             replay.create(stale).await,
-            Err(TransportError::ReplayContractMismatch)
+            Err(TransportError::PreparedSelectionMismatch)
         ));
         assert_eq!(replay.turns_remaining(), 1);
         assert!(!lock(&replay.progress.local_requests).contains_key(&RequestId("stale".into())));
-        let second = prepare(
-            "second",
-            (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
-        );
+        let second = prepare("second", replay.prepare_submission().unwrap());
         assert_eq!(replay.create(second).await.unwrap().response_id, "second");
     }
 
