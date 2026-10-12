@@ -5,7 +5,12 @@ The server publishes the closed `StateEvent` enum and typed snapshots directly.
 Store and Engine records remain native; their browser conversions expose only
 fields needed by the operator. Actor-output history and committed events use the
 same `ActorOutputProjection`. Provider bodies remain opaque only inside the
-history-item and tool-result fields.
+history-item and tool-result fields. Chat pages retain exact publication and
+invocation references, including an optional owner-issued tool association. Form
+observations reuse the native presentation schema and project their journal and
+execution counters as decimal strings. Recovery commands project the exact block
+generation before native admission; persistent native records retain their own
+serialization.
 
 `WireU64` and `WireI64` serialize native integers as canonical decimal strings.
 Their Serde parsers and schemas reject JSON numbers, overflow, leading zeroes,

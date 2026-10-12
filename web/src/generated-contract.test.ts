@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   isServerFrame, isClientFrame, isActorOutputHistoryPage, isActorDisplayExpansion,
-  isHistoryPage, isEmbeddedCommandRecord, isServerEvent,
+  isHistoryPage, isEmbeddedCommandRecord, isServerEvent, isStoredActorForm, isChatPage, isClientCommand, isActorFormSubmit, isActorFormDismiss,
 } from './generated/validators.mjs';
 import samples from './generated/wire-samples.json';
 import type { HistoryPage } from './generated/history';
@@ -17,6 +17,11 @@ describe('Rust-owned browser wire contracts', () => {
     for (const page of samples.actorOutputHistory) expect(isActorOutputHistoryPage(page)).toBe(true);
     for (const input of samples.actorDisplayExpansion) expect(isActorDisplayExpansion(input)).toBe(true);
     for (const page of samples.history) expect(isHistoryPage(page)).toBe(true);
+    for (const form of samples.actorForm) expect(isStoredActorForm(form)).toBe(true);
+    for (const page of samples.chat) expect(isChatPage(page)).toBe(true);
+    for (const command of samples.clientCommand) expect(isClientCommand(command)).toBe(true);
+    for (const input of samples.actorFormSubmit) expect(isActorFormSubmit(input)).toBe(true);
+    for (const input of samples.actorFormDismiss) expect(isActorFormDismiss(input)).toBe(true);
     for (const record of samples.embeddedCommand) expect(isEmbeddedCommandRecord(record)).toBe(true);
   });
 
@@ -38,6 +43,19 @@ describe('Rust-owned browser wire contracts', () => {
       expect(isServerFrame({ ...frame, snapshot: { ...frame!.snapshot, seq } })).toBe(false);
     }
     expect(isServerFrame({ type: 'event', event: { seq: '1', event: { kind: 'unknown', value: {} } } })).toBe(false);
+  });
+
+  it('preserves form revisions and recovery generation above the JavaScript integer range', () => {
+    const form = samples.actorForm[0]!;
+    expect(form.sequence).toBe('9007199254740993');
+    expect(form.opening.origin.nativeActor).toBe('18446744073709551615');
+    expect(isStoredActorForm({ ...form, revisionSequence: 9007199254740992 })).toBe(false);
+    const commands: unknown[] = samples.clientCommand;
+    const recovery = commands.filter(isClientCommand).find(command => command.type === 'host');
+    if (recovery?.type !== 'host' || recovery.command.action !== 'recover') throw new Error('Missing recovery sample');
+    expect(recovery.command.expected_block.generation).toBe('18446744073709551615');
+    expect(isClientCommand({ ...recovery, command: { ...recovery.command, expected_block: { ...recovery.command.expected_block, generation: 9007199254740992 } } })).toBe(false);
+    expect(isChatPage({ ...samples.chat[0], nextAfter: 9007199254740992 })).toBe(false);
   });
 
   it('keeps actor output history and live event bodies identical', () => {

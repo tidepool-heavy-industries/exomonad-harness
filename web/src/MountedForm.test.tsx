@@ -10,10 +10,10 @@ function prepared(name: string) {
   return entry.descriptor
 }
 
-const origin = { run: 'run', nativeActor: 4, incarnation: 2 }
+const origin = { run: 'run', nativeActor: '4', incarnation: '2' }
 const view = { kind: 'text' as const, text: 'Option details' }
 const openForm: StoredActorForm = {
-  sequence: 9, revisionSequence: 10, opening: { origin, mountId: 'mount-1', execution: { kind: 'actor_program' }, conversation: null, form: { version: 1, root: { kind: 'group', children: [
+  sequence: '9', revisionSequence: '10', opening: { origin, mountId: 'mount-1', execution: { kind: 'actor_program' }, conversation: null, form: { version: 1, root: { kind: 'group', children: [
     { kind: 'text', id: 'name', label: 'Name', initial: null },
     { kind: 'choice', id: 'choice', label: 'Pick one', initial: null, options: [
       { id: 'first', label: 'Same label', presentation: view }, { id: 'second', label: 'Same label', presentation: view },
@@ -83,12 +83,12 @@ describe('mounted actor forms', () => {
   })
 
   it('accepts newer validation snapshots while ignoring stale or equal revision downgrades', async () => {
-    const mounted = render(<MountedForm form={{ ...openForm, state: 'submitted', revisionSequence: 20, draft: { name: 'sent' } }} ready active />)
-    mounted.rerender(<MountedForm form={{ ...openForm, state: 'open', revisionSequence: 19, draft: { name: 'stale' } }} ready active />)
+    const mounted = render(<MountedForm form={{ ...openForm, state: 'submitted', revisionSequence: '20', draft: { name: 'sent' } }} ready active />)
+    mounted.rerender(<MountedForm form={{ ...openForm, state: 'open', revisionSequence: '19', draft: { name: 'stale' } }} ready active />)
     expect(screen.queryByRole('button', { name: 'Submit' })).toBeNull()
-    mounted.rerender(<MountedForm form={{ ...openForm, state: 'open', revisionSequence: 20, draft: { name: 'equal stale' } }} ready active />)
+    mounted.rerender(<MountedForm form={{ ...openForm, state: 'open', revisionSequence: '20', draft: { name: 'equal stale' } }} ready active />)
     expect(screen.queryByRole('button', { name: 'Submit' })).toBeNull()
-    mounted.rerender(<MountedForm form={{ ...openForm, state: 'open', revisionSequence: 21, draft: { name: 'retry draft' } }} ready active />)
+    mounted.rerender(<MountedForm form={{ ...openForm, state: 'open', revisionSequence: '21', draft: { name: 'retry draft' } }} ready active />)
     await screen.findByRole('button', { name: 'Submit' })
     expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('retry draft')
   })
@@ -109,7 +109,7 @@ describe('mounted actor forms', () => {
     const mounted = render(<MountedForm form={openForm} ready active />)
     const card = screen.getByRole('region', { name: /^Actor form / })
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'older local edit' } })
-    mounted.rerender(<MountedForm form={{ ...openForm, revisionSequence: 12, state: 'answered', draft: { name: 'durable response' }, answer: { kind: 'text', text: 'Accepted' } }} ready active />)
+    mounted.rerender(<MountedForm form={{ ...openForm, revisionSequence: '12', state: 'answered', draft: { name: 'durable response' }, answer: { kind: 'text', text: 'Accepted' } }} ready active />)
     expect(screen.getByRole('region', { name: /^Actor form / })).toBe(card)
     expect(screen.getByText('durable response')).toBeTruthy()
     expect(screen.queryByDisplayValue('older local edit')).toBeNull()
@@ -119,7 +119,7 @@ describe('mounted actor forms', () => {
   })
 
   it('uses the posted durable result for the card status before the next conversation refresh', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ ...openForm, revisionSequence: 11, state: 'submitted', attemptId: 'attempt', draft: { name: 'posted' } }))))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ ...openForm, revisionSequence: '11', state: 'submitted', attemptId: 'attempt', draft: { name: 'posted' } }))))
     render(<MountedForm form={openForm} ready active />)
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'posted' } })
     fireEvent.click(screen.getByRole('button', { name: 'Submit' }))

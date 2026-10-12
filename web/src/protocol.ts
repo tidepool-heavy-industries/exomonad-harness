@@ -218,7 +218,30 @@ export function sameHostCommand(left: HostCommand, right: HostCommand): boolean 
       && canonicalOperationId(left.expected_round) === canonicalOperationId(right.expected_round)))
     && (left.action !== 'recover' || (right.action === 'recover' && left.mode === right.mode
       && left.expected_block.request === right.expected_block.request && left.expected_block.generation === right.expected_block.generation
-      && JSON.stringify(left.expected_block.reason) === JSON.stringify(right.expected_block.reason)));
+      && sameInferenceBlock(left.expected_block, right.expected_block)));
+}
+export function sameInferenceBlock(left: InferenceBlock, right: InferenceBlock): boolean {
+  if (left.request !== right.request || left.generation !== right.generation || left.reason.kind !== right.reason.kind) return false;
+  const a = left.reason, b = right.reason;
+  switch (a.kind) {
+    case 'stream_interrupted': return b.kind === a.kind && a.cause === b.cause;
+    case 'provider_stream_failure': return b.kind === a.kind && a.event === b.event;
+    case 'request_rejected': {
+      if (b.kind !== a.kind || a.failure.kind !== b.failure.kind) return false;
+      if (a.failure.kind === 'authentication') return true;
+      if (b.failure.kind !== 'http' || a.failure.status !== b.failure.status) return false;
+      const x = a.failure.diagnostic, y = b.failure.diagnostic;
+      if (x === null || y === null) return x === y;
+      return (['code', 'error_type', 'param', 'message'] as const).every(key => x[key] === y[key]);
+    }
+    case 'continuity_unproven': case 'host_interrupted': return true;
+  }
+}
+export function isInferenceBlock(value: unknown): value is InferenceBlock {
+  return isHostCommand({ action:'recover', target:validationTarget, expected_block:value, mode:'exact' });
+}
+export function isHostInferenceState(value: unknown): value is HostInferenceState {
+  return isServerFrame({ type:'event', event:{ seq:'0', event:{ kind:'actor.upsert', value:{ identity:validationTarget, parent:null, kind:'model', lifecycle:'waiting', modelConversation:null, inference:value } } } });
 }
 export function isCommandState(value: unknown): value is EmbeddedCommandRecord['state'] {
   return isCommandRecordShape({ operationId: validationOperation,
