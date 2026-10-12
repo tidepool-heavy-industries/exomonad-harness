@@ -1518,7 +1518,7 @@ mod tests {
         use crate::{
             engine::{Engine, EngineConfig, ResponsesTransport},
             provider::{CallContext, Provider, ProviderError},
-            transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, Usage},
+            transport::{Auth, ResponsesTurn, TransportError, Usage},
             turn::JobScheduler,
         };
         use async_trait::async_trait;
