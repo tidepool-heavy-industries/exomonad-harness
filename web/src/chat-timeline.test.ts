@@ -1,20 +1,27 @@
 import { describe, expect, it } from 'vitest'
 import { boundEntries, mergeEntries, operationKey, projectTimeline, type ChatTool, type MessageEntry } from './chat-timeline'
 import type { LiveOutput } from './live-output'
-const origin = { run: 'r', nativeActor: 1, incarnation: 2 }
+const origin = { run: 'r', nativeActor: '1', incarnation: '2' }
 const modelOrigin = { kind: 'embedded' as const, run: 'r', actor: '/worker', incarnation: 'two' }
 const hash = 'a'.repeat(64)
-const tool = (request: string, incarnation = 'two'): ChatTool => ({ operation: { origin: { ...modelOrigin, incarnation }, request, call: 'reused-call' }, invocation: { request, position: 0, hash } })
-const message = (sequence: number, requestId: string, item: unknown, ownership?: ChatTool): MessageEntry => ({ kind: 'message', sequence, requestId, position: 0, hash, item, tool: ownership })
+const tool = (request: string, incarnation = 'two'): ChatTool => ({ operation: { origin: { ...modelOrigin, incarnation }, request, call: 'reused-call' }, invocation: { request, position: '0', hash } })
+const message = (sequence: number, requestId: string, item: MessageEntry['item'], ownership?: ChatTool): MessageEntry => ({ kind: 'message', sequence: String(sequence), requestId, position: '0', hash, item, tool: ownership ?? null, inputOperation: null })
 const call = (sequence: number, requestId: string, ownership?: ChatTool) => message(sequence, requestId, { type: 'custom_tool_call', name: 'run', call_id: 'reused-call', input: 'exact input' }, ownership)
 const result = (sequence: number, requestId: string, ownership?: ChatTool) => message(sequence, requestId, { type: 'custom_tool_call_output', call_id: 'reused-call', output: 'exact result' }, ownership)
-const live: LiveOutput = { origin: modelOrigin, requestId: 'request', itemId: 'provider-item', channel: 'assistant', index: 0, text: 'partial', overflow: false, streaming: true, version: 1 }
+const live: LiveOutput = { origin: modelOrigin, requestId: 'request', itemId: 'provider-item', channel: 'assistant', index: '0', text: 'partial', overflow: false, streaming: true, version: '1', committedHash: null }
 
 describe('timeline projection evidence', () => {
+  it('orders exact decimal publication references above the JavaScript safe integer boundary', () => {
+    const a = { ...message(1, 'request', { type: 'message' }), sequence: '9007199254740993' }
+    const b = { ...a, sequence: '9007199254740994' }
+    const earlier = { ...a, sequence: '9007199254740992' }
+    expect(mergeEntries([b, a], [earlier]).map(entry => entry.sequence)).toEqual([earlier.sequence, a.sequence, b.sequence])
+    expect(new Set(projectTimeline(origin, [earlier, a, b], []).map(row => row.key)).size).toBe(3)
+  })
   it('bounds both rendered entries and retained encoded bytes without changing publication order', () => {
     const many = Array.from({ length: 800 }, (_, index) => message(index + 1, 'request', { type: 'message', content: 'same' }))
-    expect(boundEntries(many, 'latest').entries.map(entry => entry.sequence)).toEqual(Array.from({ length: 400 }, (_, index) => index + 401))
-    expect(boundEntries(many, 'oldest').entries.map(entry => entry.sequence)).toEqual(Array.from({ length: 400 }, (_, index) => index + 1))
+    expect(boundEntries(many, 'latest').entries.map(entry => entry.sequence)).toEqual(Array.from({ length: 400 }, (_, index) => String(index + 401)))
+    expect(boundEntries(many, 'oldest').entries.map(entry => entry.sequence)).toEqual(Array.from({ length: 400 }, (_, index) => String(index + 1)))
     const large = many.slice(0, 20).map(entry => ({ ...entry, item: { content: 'x'.repeat(250_000) } }))
     const bounded = boundEntries(large, 'latest')
     expect(bounded.trimmed).toBe(true)
@@ -28,7 +35,7 @@ describe('timeline projection evidence', () => {
     expect(rows.map(row => row.kind)).toEqual(['activity', 'entry', 'result'])
     expect(rows[0]).toMatchObject({ results: [entries[2]] })
     expect(rows[2]).toMatchObject({ invocationKey: rows[0]!.key })
-    expect(rows.map(row => 'entry' in row ? row.entry.sequence : null)).toEqual([1, 2, 3])
+    expect(rows.map(row => 'entry' in row ? row.entry.sequence : null)).toEqual(['1', '2', '3'])
   })
   it('does not attach an unloaded or historical unbound result by wire call ID or hash', () => {
     const rows = projectTimeline(origin, [call(1, 'first', tool('first')), result(2, 'second', tool('second')), result(3, 'legacy')], [])
@@ -50,7 +57,7 @@ describe('timeline projection evidence', () => {
     expect(projectTimeline(origin, [final], [{ ...live, committedHash: hash }], modelOrigin)).toHaveLength(2)
     const withId = { ...final, item: { type: 'message', id: 'provider-item' } }
     expect(projectTimeline(origin, [withId], [live])).toHaveLength(2)
-    expect(projectTimeline(origin, [withId, { ...withId, sequence: 5, position: 1 }], [live], modelOrigin)).toHaveLength(3)
+    expect(projectTimeline(origin, [withId, { ...withId, sequence: '5', position: '1' }], [live], modelOrigin)).toHaveLength(3)
     expect(projectTimeline(origin, [withId], [{ ...live, origin: { ...modelOrigin, incarnation: 'old' } }], modelOrigin)).toHaveLength(1)
   })
   it('exhaustively separates equal bytes across issuances, incarnations and page histories', () => {
@@ -63,7 +70,7 @@ describe('timeline projection evidence', () => {
         const rows = projectTimeline(origin, merged, [])
         const activity = rows.find(row => row.kind === 'activity')!
         expect(activity.kind === 'activity' ? activity.results.length : -1).toBe(operationKey(a.operation) === operationKey(b.operation) ? 1 : 0)
-        expect(merged.map(entry => entry.sequence)).toEqual([1, 2, 4])
+        expect(merged.map(entry => entry.sequence)).toEqual(['1', '2', '4'])
         expect(new Set(rows.map(row => row.key)).size).toBe(rows.length)
       }
     }
