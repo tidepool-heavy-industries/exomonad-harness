@@ -28,6 +28,16 @@ fn window(items: Vec<Item>) -> Vec<Item> {
 }
 
 fn record_response(store: &Store, source: &RequestId, raw: &[Item]) -> ServerCompactionResponse {
+    store
+        .initialize_context_target(
+            &store.standalone_identity(crate::model::AgentPath("/root".into())),
+            &crate::context::ContextProjectionTarget {
+                model: "actual-model".into(),
+                route: ResponsesRoute::Codex,
+                protocol: ResponsesProtocol::Standard,
+            },
+        )
+        .unwrap();
     let provider = RequestId("server-response".into());
     store
         .create_request(&provider, Some(source), "harness:server-compaction-request")
@@ -271,6 +281,16 @@ fn equal_bytes_and_duplicate_raw_occurrences_keep_distinct_exact_provenance() {
 #[test]
 fn legacy_boundary_does_not_infer_the_selected_model() {
     let store = Store::memory().unwrap();
+    store
+        .initialize_context_target(
+            &store.standalone_identity(crate::model::AgentPath("/root".into())),
+            &crate::context::ContextProjectionTarget {
+                model: "actual-model".into(),
+                route: ResponsesRoute::Codex,
+                protocol: ResponsesProtocol::Standard,
+            },
+        )
+        .unwrap();
     let source = RequestId("source".into());
     let target = RequestId("legacy".into());
     store
