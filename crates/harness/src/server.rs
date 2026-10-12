@@ -83,7 +83,7 @@ impl PeerAuthError {
     }
 }
 
-/// Stable command envelope accepted by `POST /api/commands`.
+/// Native command delivered to the owning scheduler after browser decoding.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientCommand {
@@ -1124,10 +1124,10 @@ async fn submit_command(
     State(state): State<AppState>,
     headers: HeaderMap,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
-    command: Result<Json<ClientCommand>, axum::extract::rejection::JsonRejection>,
+    command: Result<Json<browser_contract::ClientCommand>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
-    let command = match command {
-        Ok(Json(command)) => command,
+    let command: ClientCommand = match command {
+        Ok(Json(command)) => command.into(),
         Err(_) => {
             return refusal(
                 CommandRefusal::InvalidCommand,
@@ -3210,7 +3210,7 @@ mod tests {
             &mut socket,
             &serde_json::to_string(&WsClientFrame::HostCommand {
                 operation_id: ClientOperationId(uuid::Uuid::new_v4()),
-                command: input.clone(),
+                command: (&input).into(),
             })
             .unwrap(),
         );
