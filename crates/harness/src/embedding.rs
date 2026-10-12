@@ -939,6 +939,63 @@ mod tests {
         }))
     }
 
+    struct PendingAdmissionHost {
+        identity: HostIdentity,
+        started: tokio::sync::Notify,
+        live_guards: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    struct CountedGuard(Arc<std::sync::atomic::AtomicUsize>);
+    impl AdmissionGuard for CountedGuard {}
+    impl Drop for CountedGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    #[async_trait]
+    impl HostActor for PendingAdmissionHost {
+        fn identity(&self) -> &HostIdentity {
+            &self.identity
+        }
+        async fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+            self.live_guards
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _guard = CountedGuard(self.live_guards.clone());
+            self.started.notify_one();
+            std::future::pending().await
+        }
+        async fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+            panic!("attachment must not capture tools")
+        }
+        async fn wake(&self, _: i64) -> Result<(), String> {
+            panic!("attachment must not wake")
+        }
+        async fn control(&self, _: HostControl) -> Result<Value, HostControlError> {
+            panic!("attachment must not control")
+        }
+    }
+    #[tokio::test]
+    async fn cancelled_attachment_releases_pending_admission_without_binding() {
+        let store = Arc::new(Store::memory().unwrap());
+        let host = Arc::new(PendingAdmissionHost {
+            identity: seed_host().identity().clone(),
+            started: tokio::sync::Notify::new(),
+            live_guards: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let attachment = tokio::spawn(Conversation::attach(store.clone(), host.clone(), None));
+        host.started.notified().await;
+        assert_eq!(
+            host.live_guards.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        attachment.abort();
+        assert!(matches!(attachment.await, Err(error) if error.is_cancelled()));
+        assert_eq!(
+            host.live_guards.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(!store.embedded_binding_matches(host.identity()).unwrap());
+    }
+
     #[tokio::test]
     async fn initial_context_empty_and_absent_preserve_caller_and_do_not_wake() {
         for authored in [None, Some("")] {
