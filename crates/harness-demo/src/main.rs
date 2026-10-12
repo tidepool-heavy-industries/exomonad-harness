@@ -4166,7 +4166,8 @@ mod tests {
             run_deterministic_child_message(store.clone(), scheduler, "child-id", "hello")
                 .await
                 .unwrap();
-        assert!(child.0.starts_with("/root/demo_child_"));
+        let registered = store.agent(&child).unwrap().unwrap();
+        assert_eq!(registered.parent, Some(AgentPath(ROOT_PATH.into())));
         assert_eq!(reply, "Child received and replied: hello");
         let stored = store.inbox(ROOT_PATH).unwrap();
         let committed = stored
