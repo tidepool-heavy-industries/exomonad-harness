@@ -3526,6 +3526,7 @@ mod tests {
                     (1, issued[1].clone()),
                     (2, issued[2].clone()),
                 ],
+                &[],
                 &issued.into_iter().map(Some).collect::<Vec<_>>(),
                 &[first_op.clone(), second_op.clone(), spawn_op.clone()],
                 None,
