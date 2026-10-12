@@ -9,14 +9,6 @@ fn temp_store_path(label: &str) -> std::path::PathBuf {
     ))
 }
 
-fn request_id(s: &str) -> RequestId {
-    RequestId(s.to_owned())
-}
-
-fn recovery_item(value: serde_json::Value) -> Item {
-    Item(value)
-}
-
 fn admit_pair(store: &Store) -> (AgentPath, AgentPath) {
     let root = AgentPath("/root".into());
     let child = AgentPath("/root/child".into());
@@ -46,8 +38,8 @@ fn durable_completion_is_discovered_once_after_reopen() {
     let path = temp_store_path("completion-recovery");
     let root = AgentPath("/root".into());
     let child = AgentPath("/root/child".into());
-    let current = request_id("durable-final");
-    let answer = recovery_item(serde_json::json!({
+    let current = RequestId("durable-final".into());
+    let answer = Item(serde_json::json!({
         "type": "message",
         "role": "assistant",
         "content": [{"type":"output_text","text":"typed answer"}],
@@ -105,15 +97,15 @@ fn durable_completion_is_discovered_once_after_reopen() {
 #[test]
 fn restart_recovers_pending_claim_but_classifies_interrupted_claim_explicitly() {
     let path = temp_store_path("claim-recovery");
-    let request = request_id("request");
+    let request = RequestId("request".into());
     let pending = CallId("pending-call".into());
     let interrupted = CallId("interrupted-call".into());
     {
         let store = Store::open(&path).unwrap();
         store.create_request(&request, None, "/root").unwrap();
         store.append_items(&request, &[
-            recovery_item(serde_json::json!({"type":"custom_tool_call","call_id":pending.0,"name":"cell","input":"pending"})),
-            recovery_item(serde_json::json!({"type":"custom_tool_call","call_id":interrupted.0,"name":"cell","input":"interrupted"})),
+            Item(serde_json::json!({"type":"custom_tool_call","call_id":pending.0,"name":"cell","input":"pending"})),
+            Item(serde_json::json!({"type":"custom_tool_call","call_id":interrupted.0,"name":"cell","input":"interrupted"})),
         ]).unwrap();
         store.claim(&pending, &request).unwrap();
         store.claim(&interrupted, &request).unwrap();
@@ -146,11 +138,11 @@ fn restart_recovers_pending_claim_but_classifies_interrupted_claim_explicitly() 
 #[test]
 fn custom_replay_output_and_claim_identity_survive_reopen() {
     let path = temp_store_path("custom-replay");
-    let request = request_id("custom-replay-request");
+    let request = RequestId("custom-replay-request".into());
     let custom_call = CallId("custom-replay-call".into());
     let mismatch_call = CallId("custom-mismatch-call".into());
     let custom_input = "line one\nquotes: \" \\\\ snowman: ☃";
-    let custom_output = recovery_item(serde_json::json!({
+    let custom_output = Item(serde_json::json!({
         "type": "custom_tool_call_output",
         "call_id": custom_call.0,
         "output": "original raw result\nwith \"quotes\" and \\\\ and ☃"
@@ -162,13 +154,13 @@ fn custom_replay_output_and_claim_identity_survive_reopen() {
             .append_items(
                 &request,
                 &[
-                    recovery_item(serde_json::json!({
+                    Item(serde_json::json!({
                         "type": "custom_tool_call",
                         "call_id": custom_call.0,
                         "name": "cell",
                         "input": custom_input
                     })),
-                    recovery_item(serde_json::json!({
+                    Item(serde_json::json!({
                         "type": "custom_tool_call",
                         "call_id": mismatch_call.0,
                         "name": "cell",
@@ -179,6 +171,7 @@ fn custom_replay_output_and_claim_identity_survive_reopen() {
             .unwrap();
         store.claim(&custom_call, &request).unwrap();
         store.claim(&mismatch_call, &request).unwrap();
+        assert_eq!(store.replay_output(&custom_call).unwrap(), None);
         store
             .write_output(
                 &store.claims(&custom_call).unwrap()[0].operation,
@@ -186,19 +179,27 @@ fn custom_replay_output_and_claim_identity_survive_reopen() {
                 crate::store::TerminalOutcome::Success,
             )
             .unwrap();
-        assert!(
-            store
-                .write_output(
+        for output in [
+            serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": mismatch_call.0,
+                    "output": "{}"
+            }),
+            serde_json::json!({
+                "type": "custom_tool_call_output",
+                "call_id": "another-call",
+                "output": "mismatched output"
+            }),
+        ] {
+            assert!(matches!(
+                store.write_output(
                     &store.claims(&mismatch_call).unwrap()[0].operation,
-                    &recovery_item(serde_json::json!({
-                        "type": "function_call_output",
-                        "call_id": mismatch_call.0,
-                        "output": "{}"
-                    })),
+                    &Item(output),
                     crate::store::TerminalOutcome::Success,
-                )
-                .is_err()
-        );
+                ),
+                Err(StoreError::ReplayOutputKindMismatch { .. })
+            ));
+        }
     }
     {
         let store = Store::open(&path).unwrap();
@@ -237,10 +238,10 @@ fn custom_replay_output_and_claim_identity_survive_reopen() {
 #[test]
 fn replay_uses_the_child_operation_for_a_repeated_call_id() {
     let path = temp_store_path("replay-lineage");
-    let root = request_id("lineage-root");
-    let child = request_id("lineage-child");
+    let root = RequestId("lineage-root".into());
+    let child = RequestId("lineage-child".into());
     let call = CallId("lineage-call".into());
-    let output = recovery_item(serde_json::json!({
+    let output = Item(serde_json::json!({
         "type": "custom_tool_call_output",
         "call_id": call.0,
         "output": "settled on child claim"
@@ -254,7 +255,7 @@ fn replay_uses_the_child_operation_for_a_repeated_call_id() {
         store
             .append_items(
                 &root,
-                &[recovery_item(serde_json::json!({
+                &[Item(serde_json::json!({
                     "type": "custom_tool_call",
                     "call_id": call.0,
                     "name": "cell",
@@ -262,7 +263,7 @@ fn replay_uses_the_child_operation_for_a_repeated_call_id() {
                 }))],
             )
             .unwrap();
-        store.append_items(&child, &[recovery_item(serde_json::json!({
+        store.append_items(&child, &[Item(serde_json::json!({
             "type":"custom_tool_call","call_id":call.0,"name":"cell","input":"child invocation"
         }))]).unwrap();
         // The child's call Item and operation identity are independent from
@@ -289,17 +290,17 @@ fn replay_uses_the_child_operation_for_a_repeated_call_id() {
 #[test]
 fn replay_rejects_duplicate_call_items_in_claim_request() {
     let store = Store::memory().unwrap();
-    let request = request_id("duplicate-call-request");
+    let request = RequestId("duplicate-call-request".into());
     let call = CallId("duplicate-call".into());
     store.create_request(&request, None, "/root").unwrap();
     store
         .append_items(
             &request,
             &[
-                recovery_item(serde_json::json!({
+                Item(serde_json::json!({
                     "type":"custom_tool_call","call_id":call.0,"name":"cell","input":"first"
                 })),
-                recovery_item(serde_json::json!({
+                Item(serde_json::json!({
                     "type":"custom_tool_call","call_id":call.0,"name":"cell","input":"second"
                 })),
             ],
@@ -309,7 +310,7 @@ fn replay_rejects_duplicate_call_items_in_claim_request() {
     assert!(matches!(
         store.write_output(
             &store.claims(&call).unwrap()[0].operation,
-            &recovery_item(serde_json::json!({
+            &Item(serde_json::json!({
                 "type":"custom_tool_call_output","call_id":call.0,"output":"ambiguous"
             })),
             crate::store::TerminalOutcome::Success,
@@ -321,9 +322,9 @@ fn replay_rejects_duplicate_call_items_in_claim_request() {
 #[test]
 fn replay_rejects_ambiguous_claims_across_agent_branches() {
     let store = Store::memory().unwrap();
-    let root = request_id("branch-root");
-    let left = request_id("branch-left");
-    let right = request_id("branch-right");
+    let root = RequestId("branch-root".into());
+    let left = RequestId("branch-left".into());
+    let right = RequestId("branch-right".into());
     let call = CallId("same-call-id".into());
     store.create_request(&root, None, "/root").unwrap();
     store
@@ -336,7 +337,7 @@ fn replay_rejects_ambiguous_claims_across_agent_branches() {
         store
             .append_items(
                 request,
-                &[recovery_item(serde_json::json!({
+                &[Item(serde_json::json!({
                     "type":"custom_tool_call","call_id":call.0,"name":"cell","input":input
                 }))],
             )
@@ -346,7 +347,7 @@ fn replay_rejects_ambiguous_claims_across_agent_branches() {
     store
         .write_output(
             &store.claims(&call).unwrap()[0].operation,
-            &recovery_item(serde_json::json!({
+            &Item(serde_json::json!({
                 "type":"custom_tool_call_output","call_id":call.0,"output":"result"
             })),
             crate::store::TerminalOutcome::Success,
@@ -374,9 +375,9 @@ fn replay_rejects_ambiguous_claims_across_agent_branches() {
 #[test]
 fn wave18_reopen_interrupts_pending_call_once() {
     let path = temp_store_path("orphaned-claim");
-    let request = request_id("orphaned-request");
+    let request = RequestId("orphaned-request".into());
     let call = CallId("orphaned-call".into());
-    let output = recovery_item(serde_json::json!({
+    let output = Item(serde_json::json!({
         "type":"custom_tool_call_output",
         "call_id":"orphaned-call",
         "output":"must not be successful"
@@ -387,7 +388,7 @@ fn wave18_reopen_interrupts_pending_call_once() {
         store
             .append_items(
                 &request,
-                &[recovery_item(serde_json::json!({
+                &[Item(serde_json::json!({
                     "type":"custom_tool_call","call_id":call.0,"name":"cell","input":"orphaned"
                 }))],
             )

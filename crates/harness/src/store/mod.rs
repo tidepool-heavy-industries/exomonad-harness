@@ -2655,10 +2655,10 @@ mod tests {
         let fork = id("replay-fork");
         let call = CallId("replay-call".into());
         let call_item = item(serde_json::json!({
-            "type":"function_call","call_id":call.0,"name":"cell","arguments":"{}"
+            "type":"function_call","call_id":call.0,"name":"cell","arguments":{"query":"☃"}
         }));
         let output = item(serde_json::json!({
-            "type":"function_call_output","call_id":call.0,"output":"{\"value\":\"done\"}"
+            "type":"function_call_output","call_id":call.0,"output":"{\"result\":\"snowman ☃\"}"
         }));
         let model_request = ResponsesRequest {
             input: vec![item(
@@ -2720,75 +2720,6 @@ mod tests {
             assert_eq!(turns[0].model_response.response_id, "recorded-call");
             assert_eq!(turns[0].model_response.items, vec![call_item]);
             assert_eq!(s.replay_output(&call).unwrap(), Some(output));
-        }
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("db-wal"));
-        let _ = std::fs::remove_file(path.with_extension("db-shm"));
-    }
-
-    #[test]
-    fn custom_replay_preserves_wire_output_and_rejects_kind_mismatch_after_reopen() {
-        let path =
-            std::env::temp_dir().join(format!("harness-custom-replay-{}.db", uuid::Uuid::new_v4()));
-        let request = id("custom-replay-request");
-        let custom_call = CallId("custom-replay-call".into());
-        let mismatch_call = CallId("mismatch-replay-call".into());
-        let call_items = [
-            item(serde_json::json!({
-                "type":"custom_tool_call","call_id":custom_call.0,"name":"cell",
-                "input":"line one\nquotes: \" \\\\ snowman: ☃"
-            })),
-            item(serde_json::json!({
-                "type":"custom_tool_call","call_id":mismatch_call.0,"name":"cell",
-                "input":"raw custom input"
-            })),
-        ];
-        let custom_output = item(serde_json::json!({
-            "type":"custom_tool_call_output","call_id":custom_call.0,
-            "output":"original raw result\nwith \"quotes\" and \\\\ and ☃"
-        }));
-        let wrong_output = item(serde_json::json!({
-            "type":"function_call_output","call_id":mismatch_call.0,"output":"{}"
-        }));
-        {
-            let store = Store::open(&path).unwrap();
-            store
-                .write_request(&request, None, "/root", &call_items, Usage::default())
-                .unwrap();
-            store.claim(&custom_call, &request).unwrap();
-            store.claim(&mismatch_call, &request).unwrap();
-            store
-                .write_output(
-                    &store.claims(&custom_call).unwrap()[0].operation,
-                    &custom_output,
-                    crate::store::TerminalOutcome::Success,
-                )
-                .unwrap();
-            assert!(matches!(
-                store.write_output(
-                    &store.claims(&mismatch_call).unwrap()[0].operation,
-                    &wrong_output,
-                    crate::store::TerminalOutcome::Success
-                ),
-                Err(StoreError::ReplayOutputKindMismatch { .. })
-            ));
-        }
-        {
-            let store = Store::open(&path).unwrap();
-            let retained_claim = store.claims(&custom_call).unwrap();
-            assert_eq!(retained_claim.len(), 1);
-            assert_eq!(retained_claim[0].request, request);
-            assert_eq!(retained_claim[0].state, ClaimState::Settled);
-            assert_eq!(
-                store.replay_output(&custom_call).unwrap(),
-                Some(custom_output),
-                "custom output bytes must remain the original persisted item"
-            );
-            assert_eq!(store.replay_output(&mismatch_call).unwrap(), None);
-            assert_eq!(
-                store.claims(&mismatch_call).unwrap()[0].state,
-                ClaimState::Pending
-            );
         }
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
