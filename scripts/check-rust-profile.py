@@ -17,6 +17,9 @@ def inspect(arguments, profile, kind, rustc, linker):
             levels.append(arguments[index + 1].split("=", 1)[1])
     if levels != [expected]:
         raise ValueError(f"expected exactly one O{expected} option, observed {levels}")
+    if any(argument.startswith("--crate-name=profile_probe_") for argument in arguments):
+        if '--cfg=profile_probe_mode="' + profile + '"' not in arguments:
+            raise ValueError("profile probe marker does not match the requested root profile")
     if rustc not in arguments:
         raise ValueError("declared compiler is absent from effective action arguments")
     if "-Cforce-frame-pointers=yes" not in arguments:

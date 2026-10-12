@@ -57,6 +57,11 @@ class Profiles(unittest.TestCase):
         namespace, _ = rules("unknown")
         with self.assertRaises(ValueError):
             namespace["rust_test"](name="case")
+    def test_native_probe_marker_refuses_wrong_root_profile(self):
+        fixed = ["/pinned/rustc", "-Cforce-frame-pointers=yes", "-Clinker=/pinned/cc", "-Copt-level=0", "--crate-name=profile_probe_tests"]
+        with self.assertRaises(ValueError):
+            CHECK.inspect(fixed + ['--cfg=profile_probe_mode="fast-dev"'], "debug", "first-party", "/pinned/rustc", "/pinned/cc")
+        CHECK.inspect(fixed + ['--cfg=profile_probe_mode="debug"'], "debug", "first-party", "/pinned/rustc", "/pinned/cc")
     def test_target_override_cannot_bypass_profile_owner(self):
         namespace, _ = rules("fast-dev")
         with self.assertRaises(ValueError):

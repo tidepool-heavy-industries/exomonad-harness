@@ -1,9 +1,11 @@
 load("@prelude//:rules.bzl", "export_file")
-load("//build/rust:profiles.bzl", "rust_binary", "rust_library", "rust_test")
+load("//build/rust:profiles.bzl", "rust_binary", "rust_library", "rust_test", "selected_profile")
 
 # Small native targets expose the effective rule/toolchain argv for each kind.
-rust_library(name = "profile_probe_library", crate = "profile_probe_library", crate_root = "profile_probe.rs", srcs = ["profile_probe.rs"], edition = "2024")
-rust_binary(name = "profile_probe_binary", crate = "profile_probe_binary", crate_root = "profile_probe.rs", srcs = ["profile_probe.rs"], deps = [":profile_probe_library"], edition = "2024")
-rust_test(name = "profile_probe_tests", crate = "profile_probe_tests", crate_root = "profile_probe.rs", srcs = ["profile_probe.rs"], deps = [":profile_probe_library"], edition = "2024")
+# A profile marker forces each mode to issue its own concrete compiler action.
+PROBE_FLAGS = ['--cfg=profile_probe_mode="%s"' % selected_profile()]
+rust_library(name = "profile_probe_library", crate = "profile_probe_library", crate_root = "profile_probe.rs", srcs = ["profile_probe.rs"], rustc_flags = PROBE_FLAGS, edition = "2024")
+rust_binary(name = "profile_probe_binary", crate = "profile_probe_binary", crate_root = "profile_probe.rs", srcs = ["profile_probe.rs"], rustc_flags = PROBE_FLAGS, deps = [":profile_probe_library"], edition = "2024")
+rust_test(name = "profile_probe_tests", crate = "profile_probe_tests", crate_root = "profile_probe.rs", srcs = ["profile_probe.rs"], rustc_flags = PROBE_FLAGS, deps = [":profile_probe_library"], edition = "2024")
 
 export_file(name = "profile_policy_source", src = "profiles.bzl", visibility = ["PUBLIC"])
