@@ -104,10 +104,7 @@ impl ResponsesTransport for Script {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(
-        &self,
-        _: PreparedProviderRequest,
-    ) -> Result<ResponsesTurn, TransportError> {
+    async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
         let index = self.turns.fetch_add(1, Ordering::SeqCst);
         let items = match index {
             0 => vec![invocation(self.names[0])],
@@ -166,10 +163,7 @@ impl ResponsesTransport for Finish {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(
-        &self,
-        _: PreparedProviderRequest,
-    ) -> Result<ResponsesTurn, TransportError> {
+    async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
         Ok(ResponsesTurn {
             response_id: "recovered".into(),
             usage: Usage::default(),

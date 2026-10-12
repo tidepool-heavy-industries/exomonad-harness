@@ -356,10 +356,7 @@ impl ResponsesTransport for StreamCustomThenWait {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(
-        &self,
-        _: PreparedProviderRequest,
-    ) -> Result<ResponsesTurn, TransportError> {
+    async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
         unreachable!("streaming path expected")
     }
 

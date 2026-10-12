@@ -106,10 +106,7 @@ impl ResponsesTransport for Streaming {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(
-        &self,
-        _: PreparedProviderRequest,
-    ) -> Result<ResponsesTurn, TransportError> {
+    async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
         unreachable!()
     }
     async fn create_streaming(
@@ -1071,10 +1068,7 @@ impl ResponsesTransport for PolicyStream {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(
-        &self,
-        _: PreparedProviderRequest,
-    ) -> Result<ResponsesTurn, TransportError> {
+    async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
         unreachable!()
     }
     async fn create_streaming(
