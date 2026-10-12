@@ -78,9 +78,9 @@ impl ResponsesTransport for Replay {
     }
     async fn create(
         &self,
-        request: ResponsesRequest,
+        request: crate::transport::PreparedProviderRequest,
     ) -> std::result::Result<ResponsesTurn, TransportError> {
-        self.sent.lock().unwrap().push(request);
+        self.sent.lock().unwrap().push(request.request().clone());
         self.turns
             .lock()
             .unwrap()
@@ -374,7 +374,7 @@ impl ResponsesTransport for StalledTransport {
     }
     async fn create(
         &self,
-        _request: ResponsesRequest,
+        _request: crate::transport::PreparedProviderRequest,
     ) -> std::result::Result<ResponsesTurn, TransportError> {
         self.started
             .lock()
@@ -410,11 +410,11 @@ impl ResponsesTransport for ParentTransport {
     }
     async fn create(
         &self,
-        request: ResponsesRequest,
+        request: crate::transport::PreparedProviderRequest,
     ) -> std::result::Result<ResponsesTurn, TransportError> {
         let first = {
             let mut sent = self.sent.lock().unwrap();
-            sent.push(request);
+            sent.push(request.request().clone());
             sent.len() == 1
         };
         let items = if first {

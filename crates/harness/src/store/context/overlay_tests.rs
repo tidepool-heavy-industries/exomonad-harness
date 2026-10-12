@@ -356,6 +356,7 @@ fn overlay_compaction_retains_canonical_outputs_and_projection() {
                 .map(|(_, _, item)| item.clone())
                 .collect::<Vec<_>>(),
             &[],
+            &[],
             &projected.occurrences,
             std::slice::from_ref(&fixture.pending),
             None,
@@ -657,6 +658,7 @@ fn projected_compaction_preserves_distinct_equal_original_occurrences() {
                 .enumerate()
                 .filter_map(|(position, source)| source.clone().map(|source| (position, source)))
                 .collect::<Vec<_>>(),
+            &[],
             &projected.occurrences,
             &[],
             None,
@@ -732,6 +734,7 @@ fn ambiguous_ordinary_compaction_authors_bytes_without_inventing_provenance() {
                 &receipt.head,
                 "/root",
                 &items,
+                &[],
                 &[],
                 &projected.occurrences,
                 &[],

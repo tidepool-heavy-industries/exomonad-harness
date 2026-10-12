@@ -37,10 +37,13 @@ impl ResponsesTransport for FinalResponse {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: crate::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         let mut requests = self.0.lock().unwrap();
         assert!(requests.is_empty(), "one recovery continuation");
-        requests.push(request);
+        requests.push(request.request().clone());
         Ok(ResponsesTurn {
             response_id: "restored-final".into(),
             items: vec![Item(
@@ -458,6 +461,7 @@ async fn embedded_compaction_retains_terminal_claims_before_fresh_recovery() {
                     &source,
                     &identity.actor.0,
                     &items,
+                    &[],
                     &[],
                     &issued.occurrences,
                     &[],

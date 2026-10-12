@@ -1130,9 +1130,9 @@ mod tests {
             }
             async fn create(
                 &self,
-                request: ResponsesRequest,
+                request: crate::transport::PreparedProviderRequest,
             ) -> std::result::Result<ResponsesTurn, TransportError> {
-                self.sent.lock().unwrap().push(request);
+                self.sent.lock().unwrap().push(request.request().clone());
                 self.turns
                     .lock()
                     .unwrap()
@@ -1331,9 +1331,9 @@ mod tests {
             }
             async fn create(
                 &self,
-                request: ResponsesRequest,
+                request: crate::transport::PreparedProviderRequest,
             ) -> std::result::Result<ResponsesTurn, TransportError> {
-                self.sent.lock().unwrap().push(request);
+                self.sent.lock().unwrap().push(request.request().clone());
                 Ok(ResponsesTurn {
                     response_id: "final".into(),
                     items: vec![item(json!({
@@ -1553,7 +1553,7 @@ mod tests {
             }
             async fn create(
                 &self,
-                _request: ResponsesRequest,
+                _request: crate::transport::PreparedProviderRequest,
             ) -> std::result::Result<ResponsesTurn, TransportError> {
                 self.turns
                     .lock()
