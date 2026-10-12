@@ -109,6 +109,122 @@ fn pruning_requires_the_exact_durable_operation_and_preserves_native_ownership()
         Some(occurrence.item.clone())
     );
 
+    let canonical = history(&store.lock().unwrap(), &operation.request, true).unwrap();
+    let mut selected = canonical.clone();
+    *selected
+        .iter_mut()
+        .find(|item| item.output_operation.as_ref() == Some(operation))
+        .unwrap() = qualified.clone();
+    let aligned = selected.iter().cloned().map(Some).collect::<Vec<_>>();
+    let request = crate::transport::ResponsesRequest {
+        input: selected
+            .iter()
+            .map(project_context_note)
+            .collect::<Result<Vec<_>>>()
+            .unwrap(),
+        instructions: "fixed".into(),
+        tools: vec![].into(),
+        tools_allowed: None,
+        model: "offline".into(),
+        pinned_effort: crate::model::Effort::Low,
+        session_id: "test".into(),
+    };
+    let hashes = vec![None; request.input.len()];
+    // The raw owner cannot admit an unpersisted overlay, even when its bytes are plausible.
+    assert!(matches!(
+        store.seal_replay_request_with_occurrences(
+            &operation.request,
+            &request,
+            &hashes,
+            None,
+            &aligned
+        ),
+        Err(StoreError::OperationOriginMismatch)
+    ));
+    let make_projection = || {
+        checked_projection(
+            &store.lock().unwrap(),
+            &operation.request,
+            &selected,
+            Some(&request.model),
+            None,
+            Some((
+                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesProtocol::Standard,
+            )),
+        )
+        .unwrap()
+    };
+    store
+        .seal_replay_request_with_checked_projection(
+            &operation.request,
+            &request,
+            &hashes,
+            None,
+            &aligned,
+            make_projection(),
+        )
+        .unwrap();
+    let foreign_store = Store::memory().unwrap();
+    assert!(matches!(
+        foreign_store.seal_replay_request_with_checked_projection(
+            &operation.request,
+            &request,
+            &hashes,
+            None,
+            &aligned,
+            make_projection()
+        ),
+        Err(StoreError::OperationOriginMismatch)
+    ));
+    assert!(matches!(
+        store.seal_replay_request_with_checked_projection(
+            &originals[1].0.request,
+            &request,
+            &hashes,
+            None,
+            &aligned,
+            make_projection()
+        ),
+        Err(StoreError::OperationOriginMismatch)
+    ));
+    let mut unrelated = aligned.clone();
+    unrelated
+        .iter_mut()
+        .flatten()
+        .find(|item| item.output_operation.as_ref() == Some(operation))
+        .unwrap()
+        .origin = originals[1].1.origin.clone();
+    assert!(
+        store
+            .seal_replay_request_with_checked_projection(
+                &operation.request,
+                &request,
+                &hashes,
+                None,
+                &unrelated,
+                make_projection()
+            )
+            .is_err()
+    );
+    let unchanged = crate::transport::ResponsesRequest {
+        input: canonical
+            .iter()
+            .map(project_context_note)
+            .collect::<Result<Vec<_>>>()
+            .unwrap(),
+        ..request.clone()
+    };
+    store
+        .seal_replay_request_with_occurrences(
+            &operation.request,
+            &unchanged,
+            &hashes,
+            None,
+            &canonical.iter().cloned().map(Some).collect::<Vec<_>>(),
+        )
+        .unwrap();
+
     // An exact selected pair cannot borrow an older valid same-byte annotation.
     let wrong_result = store
         .record_event(

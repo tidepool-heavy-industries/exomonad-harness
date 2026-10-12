@@ -241,11 +241,25 @@ fn read_item(tx: &Connection, hash: &ItemHash) -> Result<Item> {
     Ok(serde_json::from_str(&json)?)
 }
 
+enum SealProvenance<'a> {
+    None,
+    Raw {
+        head: &'a RequestId,
+        occurrences: &'a [Option<Occurrence>],
+    },
+    Checked {
+        head: &'a RequestId,
+        occurrences: &'a [Option<Occurrence>],
+        projection: &'a super::context::CheckedContextProjection,
+    },
+}
+
 fn seal_output_references(
     c: &Connection,
     head: &RequestId,
     input: &[Item],
     occurrences: &[Option<Occurrence>],
+    projection: Option<&super::context::CheckedContextProjection>,
 ) -> Result<Vec<Option<IssuedOutputReference>>> {
     if input.len() != occurrences.len() {
         return Err(StoreError::OperationOriginMismatch);
@@ -284,7 +298,20 @@ fn seal_output_references(
                 return Ok(None);
             };
             let key = (occurrence.request.clone(), occurrence.position);
-            if !visible.contains(&key) || persisted.get(&key) != Some(occurrence) {
+            let Some(stored) = persisted.get(&key) else {
+                return Err(StoreError::OperationOriginMismatch);
+            };
+            if !visible.contains(&key) {
+                return Err(StoreError::OperationOriginMismatch);
+            }
+            if let Some(projection) = projection {
+                // The checked owner may change visible text, never original membership.
+                let mut selected = stored.clone();
+                selected.overlays = occurrence.overlays.clone();
+                if &selected != occurrence || !projection.admits(item, occurrence) {
+                    return Err(StoreError::OperationOriginMismatch);
+                }
+            } else if stored != occurrence {
                 return Err(StoreError::OperationOriginMismatch);
             }
             // Model projection may turn a native output into a readable message.
@@ -371,7 +398,7 @@ impl Store {
         hashes: &[Option<ItemHash>],
         instructions: Option<&ItemHash>,
     ) -> Result<IssuedReplayRequest> {
-        self.seal_replay_request_inner(request, hashes, instructions, None)
+        self.seal_replay_request_inner(request, hashes, instructions, SealProvenance::None)
     }
 
     pub(crate) fn seal_replay_request_with_occurrences(
@@ -382,7 +409,36 @@ impl Store {
         instructions: Option<&ItemHash>,
         occurrences: &[Option<Occurrence>],
     ) -> Result<IssuedReplayRequest> {
-        self.seal_replay_request_inner(request, hashes, instructions, Some((head, occurrences)))
+        self.seal_replay_request_inner(
+            request,
+            hashes,
+            instructions,
+            SealProvenance::Raw { head, occurrences },
+        )
+    }
+
+    pub(super) fn seal_replay_request_with_checked_projection(
+        &self,
+        head: &RequestId,
+        request: &ResponsesRequest,
+        hashes: &[Option<ItemHash>],
+        instructions: Option<&ItemHash>,
+        occurrences: &[Option<Occurrence>],
+        projection: super::context::CheckedContextProjection,
+    ) -> Result<IssuedReplayRequest> {
+        if !projection.is_bound_to(&self.store_id, head, &request.model) {
+            return Err(StoreError::OperationOriginMismatch);
+        }
+        self.seal_replay_request_inner(
+            request,
+            hashes,
+            instructions,
+            SealProvenance::Checked {
+                head,
+                occurrences,
+                projection: &projection,
+            },
+        )
     }
 
     fn seal_replay_request_inner(
@@ -390,7 +446,7 @@ impl Store {
         request: &ResponsesRequest,
         hashes: &[Option<ItemHash>],
         instructions: Option<&ItemHash>,
-        occurrences: Option<(&RequestId, &[Option<Occurrence>])>,
+        provenance: SealProvenance<'_>,
     ) -> Result<IssuedReplayRequest> {
         let _seal = tracing::debug_span!(target: "harness::runtime_cost", "seal_replay_request_with_hashes",
             session_id = %request.session_id, input_items = request.input.len(),
@@ -402,11 +458,27 @@ impl Store {
         );
         let mut connection = self.lock()?;
         connection.write_transaction(|tx| {
-            let outputs = occurrences
-                .map(|(head, occurrences)| {
-                    seal_output_references(&tx, head, &request.input, occurrences)
-                })
-                .transpose()?;
+            let outputs = match provenance {
+                SealProvenance::None => None,
+                SealProvenance::Raw { head, occurrences } => Some(seal_output_references(
+                    &tx,
+                    head,
+                    &request.input,
+                    occurrences,
+                    None,
+                )?),
+                SealProvenance::Checked {
+                    head,
+                    occurrences,
+                    projection,
+                } => Some(seal_output_references(
+                    &tx,
+                    head,
+                    &request.input,
+                    occurrences,
+                    Some(projection),
+                )?),
+            };
             #[cfg(test)]
             let mut input_reencodings = 0;
             let input = request

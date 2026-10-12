@@ -98,7 +98,7 @@ impl Store {
         }
         let contract = selection.response_contract();
         let canonical = occurrences.iter().flatten().cloned().collect::<Vec<_>>();
-        {
+        let projection = {
             let c = self.lock()?;
             let projected = context::checked_projection(
                 &c,
@@ -107,9 +107,9 @@ impl Store {
                 Some(&request.model),
                 None,
                 Some(contract),
-            )?
-            .into_items();
+            )?;
             let expected = projected
+                .items()
                 .iter()
                 .filter_map(|(_, _, item, occurrence)| {
                     occurrence
@@ -151,7 +151,8 @@ impl Store {
                     return Err(StoreError::InvalidProviderEvidence(local.clone()).into());
                 }
             }
-        }
+            projected
+        };
         let body = client::normalize_for_dispatch(&request, contract)?;
         let hashes = request
             .input
@@ -168,12 +169,13 @@ impl Store {
                     .map(|occurrence| occurrence.hash.clone())
             })
             .collect::<Vec<_>>();
-        let mut sealed = self.seal_replay_request_with_occurrences(
+        let mut sealed = self.seal_replay_request_with_checked_projection(
             source,
             &request,
             &hashes,
             instructions,
             occurrences,
+            projection,
         )?;
         sealed.record.purpose = Some(purpose);
         let issued = self.issue_provider_request(local, sealed, contract)?;

@@ -993,13 +993,31 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
 /// Construct the only provider-facing projection. Stored history, native
 /// references, claims and receipts continue to refer to the original bytes.
 /// Store owns the checked input. Callers may consume it but cannot construct it.
-pub(super) struct CheckedContextProjection(
-    Vec<(RequestId, Option<ItemHash>, Item, Option<Occurrence>)>,
-);
+pub(super) struct CheckedContextProjection {
+    store: String,
+    consumer: RequestId,
+    model: Option<String>,
+    items: Vec<(RequestId, Option<ItemHash>, Item, Option<Occurrence>)>,
+    output_items: HashMap<(RequestId, i64), usize>,
+}
 
 impl CheckedContextProjection {
+    pub(super) fn items(&self) -> &[(RequestId, Option<ItemHash>, Item, Option<Occurrence>)] {
+        &self.items
+    }
     pub(super) fn into_items(self) -> Vec<(RequestId, Option<ItemHash>, Item, Option<Occurrence>)> {
-        self.0
+        self.items
+    }
+    pub(super) fn is_bound_to(&self, store: &str, consumer: &RequestId, model: &str) -> bool {
+        self.store == store && self.consumer == *consumer && self.model.as_deref() == Some(model)
+    }
+    pub(super) fn admits(&self, item: &Item, occurrence: &Occurrence) -> bool {
+        self.output_items
+            .get(&(occurrence.request.clone(), occurrence.position))
+            .is_some_and(|index| {
+                let (_, _, projected, selected) = &self.items[*index];
+                projected == item && selected.as_ref() == Some(occurrence)
+            })
     }
 }
 
@@ -1228,7 +1246,26 @@ pub(super) fn checked_projection(
             ));
         }
     }
-    Ok(CheckedContextProjection(projected))
+    let output_items = projected
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, _, _, selected))| {
+            let occurrence = selected.as_ref()?;
+            occurrence.output_operation.as_ref()?;
+            Some(((occurrence.request.clone(), occurrence.position), index))
+        })
+        .collect();
+    Ok(CheckedContextProjection {
+        output_items,
+        store: c.query_row(
+            "SELECT state FROM session_state WHERE session_id='harness:store-id'",
+            [],
+            |row| row.get(0),
+        )?,
+        consumer: consumer.clone(),
+        model: model.map(str::to_owned),
+        items: projected,
+    })
 }
 
 /// A retained output closes its original invocation only when Store owns that
