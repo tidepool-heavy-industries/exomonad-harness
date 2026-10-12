@@ -15,7 +15,8 @@ export type SequencedEvent = Extract<ServerFrame, { type: 'event' }>['event'];
 export type StateEvent = SequencedEvent['event'];
 export type HostActorProjection = NonNullable<Snapshot['actors']>[number];
 export type HostInferenceState = NonNullable<HostActorProjection['inference']>;
-export type InferenceBlock = Extract<HostInferenceState, { state: 'blocked' }>['block'];
+export type InferenceBlock = Extract<HostCommand, { action: 'recover' }>['expected_block'];
+type RecoveryRequestFailure = Extract<InferenceBlock['reason'], { kind:'request_rejected' }>['failure'];
 export type RecoveryMode = Extract<HostCommand, { action: 'recover' }>['mode'];
 export type HostActorIdentity = HostActorProjection['identity'];
 export type HostCommand = Extract<ClientFrame, { type: 'host_command' }>['command'];
@@ -84,7 +85,6 @@ export function applyStateEvent(state: NormalizedState, message: SequencedEvent)
   }
   const next = { ...state, seq: message.seq };
   switch (message.event.kind) {
-    case "actor.form.changed": return { kind: 'applied', state: { ...next, actorOutputRevisions: retainActorOutput(next.actorOutputRevisions, {origin:message.event.value.opening.origin,sequence:message.event.value.revisionSequence ?? message.event.value.sequence}) } };
     case "actor.form.changed": return { kind: 'applied', state: { ...next, actorOutputRevisions: retainActorOutput(next.actorOutputRevisions, {origin:message.event.value.opening.origin, sequence:message.event.value.revisionSequence}) } };
     case "actor.output.committed": return { kind: 'applied', state: { ...next,
       actorOutputRevisions: retainActorOutput(next.actorOutputRevisions, message.event.value.reference) } };
@@ -233,8 +233,8 @@ export function sameInferenceBlock(left: InferenceBlock, right: InferenceBlock):
       if (a.failure.kind === 'authentication') return true;
       if (b.failure.kind !== 'http' || a.failure.status !== b.failure.status) return false;
       const x = a.failure.diagnostic, y = b.failure.diagnostic;
-      if (x === null || y === null) return x === y;
-      return (['code', 'error_type', 'param', 'message'] as const).every(key => x[key] === y[key]);
+      if (x == null || y == null) return x == null && y == null;
+      return (['code', 'error_type', 'param', 'message'] as const).every(key => (x[key] ?? null) === (y[key] ?? null));
     }
     case 'continuity_unproven': case 'host_interrupted': return true;
   }
@@ -339,8 +339,8 @@ function validOutputScope({ origin, requestId }: OutputScope): boolean {
     && (origin.kind === 'embedded' ? origin.run.length > 0 && origin.incarnation.length > 0 : origin.store.length > 0);
 }
 
-function withinDiagnosticBounds(failure: RequestFailure | null): boolean {
-  if (failure?.kind !== 'http' || failure.diagnostic === null) return true;
+function withinDiagnosticBounds(failure: RequestFailure | RecoveryRequestFailure | null): boolean {
+  if (failure?.kind !== 'http' || failure.diagnostic == null) return true;
   const diagnostic = failure.diagnostic;
   const within = (text: string | null | undefined, limit: number) => text == null || Array.from(text).length <= limit;
   return within(diagnostic.code, 256) && within(diagnostic.error_type, 256)
