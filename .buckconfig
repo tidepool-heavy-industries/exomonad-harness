@@ -21,3 +21,6 @@ target_platform_detector_spec = target:root//...->prelude//platforms:default \
 
 [build]
 execution_platforms = root//platforms:platforms
+
+[tidepool]
+profile = fast-dev

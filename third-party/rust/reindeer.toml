@@ -7,7 +7,5 @@ vendor = false
 buildscript_genrule = "tidepool_buildscript_run"
 buckfile_imports = """
 load(\"//build/rust:buildscript.bzl\", \"tidepool_buildscript_run\")
-load(\"@prelude//rust:cargo_package.bzl\", \"cargo\")
-rust_library = cargo.rust_library
-rust_binary = cargo.rust_binary
+load(\"//build/rust:profiles.bzl\", rust_library = \"dependency_rust_library\", rust_binary = \"dependency_rust_binary\")
 """
