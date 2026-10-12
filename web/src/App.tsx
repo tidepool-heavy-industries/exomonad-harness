@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from 'react';
 import NodeWindow from './NodeWindow';
 import WorkerChat from './WorkerChat';
 import ActiveWorkerTree from './ActiveWorkerTree';
@@ -256,9 +256,22 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
     setRenderedInputs(previous => previous.length === references.length
       && previous.every((reference, index) => inputPublicationKey(reference) === inputPublicationKey(references[index]!)) ? previous : references);
   }, []);
-  const renderedInputKeys = useMemo(() => new Set(renderedInputs.flatMap(reference => {
+  const currentRenderedInputKeys = useMemo(() => new Set(renderedInputs.flatMap(reference => {
     const key = inputPublicationKey(reference); return key === undefined ? [] : [key];
   })), [renderedInputs]);
+  const retainedInputKeys = useMemo(() => new Set(pendingCommands.flatMap(record => {
+    if (record.submission.command.action !== 'input' || record.envelopeId == null) return [];
+    const key = inputPublicationKey({target:record.submission.command.target, operationId:record.submission.operation_id, envelopeId:record.envelopeId});
+    return key === undefined ? [] : [key];
+  })), [pendingCommands]);
+  const [acknowledgedInputKeys, setAcknowledgedInputKeys] = useState<ReadonlySet<string>>(new Set());
+  useLayoutEffect(() => {
+    setAcknowledgedInputKeys(previous => {
+      const next = new Set([...previous, ...currentRenderedInputKeys].filter(key => retainedInputKeys.has(key)));
+      return next.size === previous.size && [...next].every(key => previous.has(key)) ? previous : next;
+    });
+  }, [currentRenderedInputKeys, retainedInputKeys]);
+  const renderedInputKeys = useMemo(() => new Set([...currentRenderedInputKeys, ...acknowledgedInputKeys]), [currentRenderedInputKeys, acknowledgedInputKeys]);
   const [now, setNow] = useState(() => Date.now());
   const demo = useDraft(demoDraftKey);
   const [demoLocalFeedback, setDemoLocalFeedback] = useState('');

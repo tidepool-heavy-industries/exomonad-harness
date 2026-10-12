@@ -77,7 +77,7 @@ function decodeRecord(value: unknown, legacy: boolean): BrowserCommandRecord | u
   if (value.envelopeId !== undefined && value.envelopeId !== null
     && !signedDecimal(value.envelopeId)) return
   if (value.inputObservation != null && (!['status', 'receipt'].includes(value.authority as string)
-    || !isEmbeddedCommandRecord({ operationId:value.submission.operation_id, command:value.submission.command,
+    || !isEmbeddedCommandRecord({ operationId:canonicalOperationId(value.submission.operation_id), command:value.submission.command,
       state:value.state, envelopeId:value.envelopeId ?? null, receipt:value.receipt ?? null, inputObservation:value.inputObservation }))) return
   if (value.accepted !== undefined && typeof value.accepted !== 'boolean') return
   if (value.send !== undefined && !['sent', 'not_sent', 'unknown'].includes(value.send as string)) return

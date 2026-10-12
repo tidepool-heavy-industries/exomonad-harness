@@ -274,3 +274,42 @@ it('retains before sending and leaves host effects untouched when tab storage fa
   expect(await screen.findByRole('alert')).toHaveTextContent('could not retain the operation before sending')
   expect(socket.send).not.toHaveBeenCalled()
 })
+
+it('sends recovery only explicitly, retains its exact ID on retry, and invalidates stale blocks', async () => {
+  const target = { run: 'run-1', actor: '/root', incarnation: 'one' }
+  const block = { request: 'head', generation: '3', reason: { kind: 'continuity_unproven' } }
+  const actor = { identity: target, parent: null, kind: 'model', lifecycle: 'waiting', modelConversation: null,
+    modelHeadRequest: 'head', inference: { state: 'blocked', block } }
+  fetchMock.mockImplementation(async input => String(input) === '/api/session'
+    ? response(200, { authenticated: true }) : response(404))
+  render(<Operator />)
+  await waitFor(() => expect(sockets).toHaveLength(1))
+  const socket = sockets[0]!
+  socket.readyState = FakeSocket.OPEN
+  const snapshot = (seq: string, projected = actor) => socket.listeners.get('message')?.forEach(listener => listener(new MessageEvent('message', {
+    data: JSON.stringify({ type: 'snapshot', snapshot: { seq, hostRun: 'run-1', actors: [projected], conversations: [], requests: [], jobs: [], envelopes: [] } }),
+  })))
+  snapshot('1')
+  fireEvent.click(await screen.findByRole('link', { name: 'Chat' }))
+  fireEvent.click(within(screen.getByRole('complementary', { name: 'Workers' })).getByRole('link', { name: '/root' }))
+  expect(socket.send).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByText('Actor controls', { selector: 'summary' }))
+  expect(screen.getByRole('button', { name: 'Retire' })).toBeEnabled()
+  fireEvent.click(screen.getAllByRole('radio')[1]!)
+  snapshot('2')
+  expect(socket.send).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Authorize recovery' }))
+  expect(socket.send).toHaveBeenCalledOnce()
+  const first = JSON.parse(socket.send.mock.calls[0]![0])
+  expect(first).toMatchObject({ type: 'host_command', command: { action: 'recover', target, expected_block: block, mode: 'visible_history' } })
+  const original = readPendingCommands()[0]!.submission
+  expect(first.operation_id).toBe(original.operation_id)
+  expect(original.command).toEqual(first.command)
+  fireEvent.click(screen.getByText('Host operations', { selector: 'summary' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Retry same operation' }))
+  expect(socket.send.mock.calls[1]![0]).toBe(socket.send.mock.calls[0]![0])
+  snapshot('3', { ...actor, inference: { state: 'blocked', block: { ...block, generation: '4' } } })
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Retry same operation' })).toBeDisabled())
+  expect(screen.getByRole('button', { name: 'Authorize recovery' })).toBeDisabled()
+  expect(socket.send).toHaveBeenCalledTimes(2)
+})
