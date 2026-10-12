@@ -6,11 +6,16 @@ This brief records the operator's choices for the usability pass based on
 
 - Audience: the daily technical operator. The conversation is the primary working
   surface; code and execution are first-class content, not hidden debug metadata.
-- Visual system: Catppuccin Mocha, selected by the operator on 2026-10-12.
-  Named upstream colors map to semantic surface, text, action, warning and error
-  roles. Solarized remains a historical comparison, not a binding constraint. Prose is 16px with a
-  comfortable measure; code uses the existing monospace stack. No new fonts,
-  animation libraries, or runtime dependencies.
+- Visual system: Live Patina — High Current, approved by the operator on
+  2026-10-12 and implemented with petrol surfaces, verdigris primary actions,
+  ivory text, sage metadata, and brass attention cues. Solarized and Catppuccin
+  remain historical comparisons. [DESIGN.md](../DESIGN.md) records current roles;
+  the [style bible](gui-style-bible.md) retains broader proposals. Chat prose is
+  16px with a comfortable measure; code is 14px in the existing monospace stack.
+  The existing IBM Plex Mono choice is now self-hosted as regular and semibold
+  WOFF2, with upstream source and license retained; no new typeface choice,
+  animation libraries, or runtime dependencies. Palette contrast
+  and browser acceptance need evidence for this implementation.
 - Reading: full prose, bounded code/results, full-source copy. Reasoning and
   technical identifiers remain available through disclosures. Streaming and
   retained versions preserve row identity and disclosure choices. An active text

@@ -37,12 +37,16 @@ or coordinator dependency, not something the GUI may invent.
 
 ## Brand Commitments
 
-Use Catppuccin Mocha, selected by the operator after comparing palette directions.
-Solarized was an initial idea, not a permanent brand constraint. Existing fonts
-remain for this pass to keep the palette comparison focused, not because an
-agent-written brief pins them. The
-existing chat brief in docs/gui-usability-brief.md takes precedence over the
-older non-chatbot direction in docs/web.md.
+Use Live Patina — High Current, selected by the operator after reviewing the
+[GUI style bible](docs/gui-style-bible.md). Petrol surfaces, verdigris actions,
+warm ivory reading text, and restrained brass attention cues now define the
+implemented palette; Solarized and Catppuccin are historical comparisons. The
+existing font choices remain, with 16px chat prose and 14px plain-source code.
+IBM Plex Mono regular and semibold are now self-hosted, so code does not rely on
+the operator’s installed fonts. Root
+[DESIGN.md](DESIGN.md) records actual tokens; the bible also contains aspirations
+that are not implemented. The existing chat brief in docs/gui-usability-brief.md
+takes precedence over the older non-chatbot direction in docs/web.md.
 
 ## Evidence on Hand
 

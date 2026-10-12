@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-12T22:47:53.300521+00:00",
+  "title": "Design System: Harness Live Patina",
+  "extensions": {
+    "shadows": [
+      {
+        "name": "worker-tree",
+        "value": "0 2px 5px rgb(0 0 0 / 10%)",
+        "purpose": "Existing worker tree nodes only; not a general transcript elevation."
+      }
+    ],
+    "motion": [
+      {
+        "name": "reduced-motion-duration",
+        "value": ".01ms",
+        "purpose": "Existing reduced-motion override for animation and transition duration."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "general-narrow",
+        "value": "600px"
+      },
+      {
+        "name": "chat-narrow",
+        "value": "700px"
+      },
+      {
+        "name": "actor-details-wide",
+        "value": "1000px"
+      },
+      {
+        "name": "short-viewport",
+        "value": "600px",
+        "axis": "height"
+      }
+    ],
+    "focus": {
+      "outline": "2px solid var(--focus, var(--accent))",
+      "outlineOffset": "2px"
+    },
+    "sourceFiles": [
+      "web/src/tokens.css",
+      "web/src/WorkerChat.css",
+      "web/src/MountedForm.css",
+      "web/src/MessagePresentation.css",
+      "web/src/ActiveWorkerTree.css"
+    ],
+    "status": "Current CSS extraction; no new contrast or browser acceptance claimed. No synthetic tonal ramps are application tokens.",
+    "fontDelivery": {
+      "family": "IBM Plex Mono",
+      "weights": [
+        400,
+        600
+      ],
+      "format": "woff2",
+      "fontDisplay": "swap",
+      "delivery": "Self-hosted via tokens.css @font-face; existing typeface choice.",
+      "provenance": "web/src/fonts/README.md",
+      "license": "web/src/fonts/OFL.txt",
+      "verification": "Font-loaded and equal-glyph-width browser checks passed on 2026-10-12. See docs/live-patina-validation.md."
+    }
+  },
+  "components": [
+    {
+      "name": "Primary action",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Primary action from the current CSS; palette fallbacks make the isolated preview readable.",
+      "html": "<button class=\"ds-primary\">Send</button>",
+      "css": ".ds-primary{font-family:var(--font-family, Inter, ui-sans-serif, system-ui, sans-serif);font-size:13px;background:var(--accent, #44d6c0);color:var(--action-ink, #001f22);border:1px solid var(--accent, #44d6c0);border-radius:6px;padding:7px 10px;font-weight:600;cursor:pointer}.ds-primary:hover:not(:disabled){background:var(--action-hover, #87e4d2);border-color:var(--action-hover, #87e4d2)}.ds-primary:active:not(:disabled){background:var(--selection, #86fae3)}.ds-primary:focus-visible{outline:2px solid var(--focus, #86fae3);outline-offset:2px;}.ds-primary:disabled{opacity:.6;cursor:default}"
+    },
+    {
+      "name": "Secondary action",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Secondary action from the current CSS; palette fallbacks make the isolated preview readable.",
+      "html": "<button class=\"ds-secondary\">Details</button>",
+      "css": ".ds-secondary{font-family:var(--font-family, Inter, ui-sans-serif, system-ui, sans-serif);font-size:13px;background:var(--panel, #094044);color:var(--ink, #f4ebd6);border:1px solid var(--control-border, #7eaaa0);border-radius:6px;padding:7px 10px;cursor:pointer}.ds-secondary:hover{border-color:var(--accent, #44d6c0)}.ds-secondary:active{background:var(--selection, #86fae3)}.ds-secondary:focus-visible{outline:2px solid var(--focus, #86fae3);outline-offset:2px;}"
+    },
+    {
+      "name": "Text field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Text field from the current CSS; palette fallbacks make the isolated preview readable.",
+      "html": "<input class=\"ds-field\" aria-label=\"Message\" placeholder=\"Write a message\">",
+      "css": ".ds-field{font-family:var(--font-family, Inter, ui-sans-serif, system-ui, sans-serif);font-size:13px;background:var(--panel, #094044);color:var(--ink, #f4ebd6);border:1px solid var(--control-border, #7eaaa0);border-radius:6px;padding:8px}.ds-field:focus-visible{outline:2px solid var(--focus, #86fae3);outline-offset:2px;}"
+    },
+    {
+      "name": "Open inline form",
+      "kind": "card",
+      "refersTo": "mounted-form",
+      "description": "Open inline form from the current CSS; palette fallbacks make the isolated preview readable.",
+      "html": "<section class=\"ds-form\"><h3>Your response</h3><p>Choose how to continue.</p></section>",
+      "css": ".ds-form{font-family:var(--font-family, Inter, ui-sans-serif, system-ui, sans-serif);font-size:13px;padding:16px 20px;border:1px solid var(--pending, #da9d40);border-radius:6px;background:var(--panel, #094044);color:var(--ink, #f4ebd6)}.ds-form h3{font-size:16px;margin:0 0 12px}.ds-form p{margin:0}"
+    },
+    {
+      "name": "Current navigation tab",
+      "kind": "nav",
+      "description": "Current navigation tab from the current CSS; palette fallbacks make the isolated preview readable.",
+      "html": "<nav><a class=\"ds-tab\" aria-current=\"page\" href=\"#conversation\">Conversation</a></nav>",
+      "css": ".ds-tab{font-family:var(--font-family, Inter, ui-sans-serif, system-ui, sans-serif);font-size:13px;display:inline-block;padding:7px 10px;text-decoration:none;color:var(--link, #87e4d2);background:transparent;border-bottom:2px solid var(--accent, #44d6c0);font-weight:600}.ds-tab:hover{color:var(--ink, #f4ebd6)}.ds-tab:focus-visible{outline:2px solid var(--focus, #86fae3);outline-offset:2px;}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Live Patina \u2014 High Current",
+    "overview": "Cool petrol depth, warm human presence, and precise electrical energy frame a daily agent workspace. The conversation is the working surface; technical content remains readable and controls remain clearly actionable. Material character comes from color relationships and stable planes rather than texture behind text.\n\nThis document captures the current CSS implementation based on integration revision `9f64c05`, including the Live Patina edits. The [style bible](docs/gui-style-bible.md) holds the approved broader direction; its proposed syntax palette and other unimplemented details are not current tokens. CSS in `web/src/tokens.css`, `WorkerChat.css`, `MountedForm.css`, and message presentation is the implementation source. Fixture validation passed on 2026-10-12; see docs/live-patina-validation.md for evidence and scope.",
+    "keyCharacteristics": [
+      "Continuous petrol surfaces and warm ivory reading text.",
+      "Verdigris filled primary actions with deep ink labels.",
+      "Brass attention cues and bright mint focus and selection.",
+      "Flat reading surfaces, restrained rounded controls, and readable code."
+    ],
+    "rules": [
+      {
+        "name": "The Current Rule",
+        "body": "Reserve filled verdigris for primary actions; keep evidence disclosures and navigation quiet.",
+        "section": "colors"
+      }
+    ],
+    "dos": [
+      "**Do** use semantic CSS roles rather than copying seed swatches into components.",
+      "**Do** retain deep ink text on bright primary actions and selection.",
+      "**Do** preserve quiet evidence controls and readable prose and source.",
+      "**Do** verify contrast and browser behavior after palette changes before claiming acceptance."
+    ],
+    "donts": [
+      "**Don't** treat the style bible's proposed syntax colors as implemented highlighting.",
+      "**Don't** place textures, blur, glowing text, or decorative machinery behind conversation content.",
+      "**Don't** infer completion or activity from a color or a retained result."
+    ]
+  }
+}

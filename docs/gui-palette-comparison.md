@@ -1,5 +1,11 @@
 # Chat utility and palette
 
+> Historical record: the Mocha comparison and verification results below describe
+> the earlier palette pass, not Live Patina acceptance. The current default is
+> Live Patina — High Current; [DESIGN.md](../DESIGN.md) records its implemented
+> roles. Solarized remains the fixture-only attribute comparison. New contrast
+> and browser evidence is required before carrying these results forward.
+
 The operator selected Catppuccin Mocha on 2026-10-12. Solarized was an initial
 idea, not a permanent brand constraint; agent-written guidance cannot make it
 one. Existing fonts remain unchanged for this focused comparison.
