@@ -635,6 +635,18 @@ fn output_editable(c: &Connection, call: Option<&Occurrence>, output: &Occurrenc
     }
 }
 
+/// Issue references from the existing provenance owner, under the publisher's
+/// transaction. Text bodies and labels never participate in target resolution.
+pub(super) fn request_references(
+    c: &Connection,
+    request: &RequestId,
+) -> Result<Vec<ContextReference>> {
+    Ok(request_occurrences(c, request)?
+        .iter()
+        .map(|occurrence| reference(std::slice::from_ref(occurrence)))
+        .collect())
+}
+
 fn reference(items: &[Occurrence]) -> ContextReference {
     ContextReference(
         serde_json::to_string(&items.iter().map(|i| &i.origin).collect::<Vec<_>>())

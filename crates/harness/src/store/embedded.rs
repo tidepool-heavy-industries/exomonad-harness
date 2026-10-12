@@ -25,6 +25,60 @@ pub(super) fn matches_binding(c: &Connection, identity: &HostIdentity) -> rusqli
     .is_some_and(|(run, incarnation)| run == identity.run && incarnation == identity.incarnation))
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InitialContextSeedManifest {
+    #[serde(rename = "type")]
+    _kind: InitialContextSeedKind,
+    version: u32,
+    caller_seed: Option<String>,
+    authored_seed: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+enum InitialContextSeedKind {
+    #[serde(rename = "initial_context_seed")]
+    InitialContextSeed,
+}
+
+fn initial_context_receipt(
+    issuer: &HostIdentity,
+    operation_id: &str,
+    request: RequestId,
+    caller_seed: Option<String>,
+    authored_seed: Option<String>,
+    references: Vec<crate::context::ContextReference>,
+) -> std::result::Result<crate::embedding::InitialContextPublication, EmbeddedError> {
+    let caller_reference = if caller_seed.is_some() {
+        Some(references.first().cloned().ok_or_else(|| {
+            EmbeddedError::Binding("caller seed occurrence is unavailable".into())
+        })?)
+    } else {
+        None
+    };
+    let authored_reference = if authored_seed.as_ref().is_some_and(|text| !text.is_empty()) {
+        Some(
+            references
+                .get(usize::from(caller_seed.is_some()))
+                .cloned()
+                .ok_or_else(|| {
+                    EmbeddedError::Binding("authored seed occurrence is unavailable".into())
+                })?,
+        )
+    } else {
+        None
+    };
+    Ok(crate::embedding::InitialContextPublication {
+        issuer: issuer.clone(),
+        operation_id: operation_id.into(),
+        request,
+        caller_seed,
+        authored_seed,
+        caller_reference,
+        authored_reference,
+    })
+}
+
 impl Store {
     pub(crate) fn seed_embedded_context(
         &self,
@@ -32,6 +86,18 @@ impl Store {
         operation_id: &str,
         item: &Item,
     ) -> std::result::Result<RequestId, EmbeddedError> {
+        self.seed_embedded_context_items(identity, operation_id, item, &[(item.clone(), false)])
+            .map(|(request, _)| request)
+    }
+
+    fn seed_embedded_context_items(
+        &self,
+        identity: &HostIdentity,
+        operation_id: &str,
+        manifest: &Item,
+        items: &[(Item, bool)],
+    ) -> std::result::Result<(RequestId, Vec<crate::context::ContextReference>), EmbeddedError>
+    {
         if operation_id.is_empty() {
             return Err(EmbeddedError::Binding(
                 "empty context seed operation ID".into(),
@@ -44,7 +110,7 @@ impl Store {
                     "context seed target is not bound to this host".into(),
                 ));
             }
-            let hash = Self::put_item_tx(tx, item)?;
+            let hash = Self::put_item_tx(tx, manifest)?;
             let existing: Option<(String, String)> = tx
                 .query_row(
                     "SELECT request_id,item_hash FROM embedded_context_seeds \
@@ -62,7 +128,9 @@ impl Store {
                 if hash.0 != previous_hash {
                     return Err(EmbeddedError::ConflictingSeed);
                 }
-                return Ok(RequestId(request));
+                let request = RequestId(request);
+                let references = super::context::request_references(tx, &request)?;
+                return Ok((request, references));
             }
             let started: bool = tx.query_row(
                 "SELECT head_request IS NOT NULL \
@@ -76,16 +144,21 @@ impl Store {
                 return Err(EmbeddedError::SeedRequiresFreshConversation);
             }
             let request = RequestId(uuid::Uuid::new_v4().to_string());
-            output_publication::require_ordinary(item, &request, 0)?;
+            for (position, (item, _)) in items.iter().enumerate() {
+                output_publication::require_ordinary(item, &request, position as i64)?;
+            }
             // Synthetic settled history is not an admitted model round.
             tx.execute(
                 "INSERT INTO requests(id,parent_id,branch,created_at) VALUES (?1,NULL,?2,?3)",
                 params![request.0, identity.actor.0, utc_millis()],
             )?;
-            tx.execute(
-                "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,0,?2)",
-                params![request.0, hash.0],
-            )?;
+            for (position, (item, authored)) in items.iter().enumerate() {
+                let item_hash = Self::put_item_tx(tx, item)?;
+                tx.execute(
+                    "INSERT INTO request_items(request_id,position,item_hash,context_note) VALUES (?1,?2,?3,?4)",
+                    params![request.0, position as i64, item_hash.0, authored],
+                )?;
+            }
             tx.execute(
                 "UPDATE agents SET head_request=?2 WHERE path=?1 AND head_request IS NULL",
                 params![identity.actor.0, request.0],
@@ -95,7 +168,71 @@ impl Store {
                  VALUES (?1,?2,?3,?4,?5,?6)",
                 params![identity.run, identity.actor.0, identity.incarnation, operation_id, request.0, hash.0],
             )?;
-            Ok(request)
+            let references = super::context::request_references(tx, &request)?;
+            Ok((request, references))
+        })
+    }
+
+    pub(crate) fn seed_initial_context(
+        &self,
+        identity: &HostIdentity,
+        operation_id: &str,
+        caller_seed: Option<&str>,
+        authored_seed: Option<&str>,
+    ) -> std::result::Result<crate::embedding::InitialContextPublication, EmbeddedError> {
+        let manifest = Item(serde_json::json!({
+            "type": "initial_context_seed", "version": 1, "caller_seed": caller_seed, "authored_seed": authored_seed,
+        }));
+        let mut items = Vec::new();
+        if let Some(text) = caller_seed {
+            items.push((
+                Item(serde_json::json!({"type":"message","role":"user","content":text})),
+                false,
+            ));
+        }
+        if let Some(text) = authored_seed.filter(|text| !text.is_empty()) {
+            items.push((
+                Item(serde_json::json!({"type":"message","role":"user","content":text})),
+                true,
+            ));
+        }
+        let (request, references) =
+            self.seed_embedded_context_items(identity, operation_id, &manifest, &items)?;
+        initial_context_receipt(
+            identity,
+            operation_id,
+            request,
+            caller_seed.map(str::to_owned),
+            authored_seed.map(str::to_owned),
+            references,
+        )
+    }
+
+    pub(crate) fn initial_context_publication(
+        &self,
+        receiver: &HostIdentity,
+        issuer: &HostIdentity,
+        operation_id: &str,
+    ) -> std::result::Result<Option<crate::embedding::InitialContextPublication>, EmbeddedError>
+    {
+        let mut connection = self.lock()?;
+        connection.read_transaction(|tx| {
+            if receiver.run != issuer.run || receiver.actor != issuer.actor || !matches_binding(tx, receiver)? {
+                return Err(EmbeddedError::Binding("initial context receipt belongs to another conversation".into()));
+            }
+            let retained: Option<(String, String)> = tx.query_row(
+                "SELECT s.request_id,i.json FROM embedded_context_seeds s JOIN items i ON i.hash=s.item_hash WHERE s.run_id=?1 AND s.agent_path=?2 AND s.incarnation=?3 AND s.operation_id=?4",
+                params![issuer.run, issuer.actor.0, issuer.incarnation, operation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional()?;
+            let Some((request, manifest)) = retained else { return Ok(None); };
+            let manifest: InitialContextSeedManifest = serde_json::from_str(&manifest).map_err(StoreError::from)?;
+            if manifest.version != 1 {
+                return Err(EmbeddedError::Binding("unsupported initial context publication format".into()));
+            }
+            let request = RequestId(request);
+            let references = super::context::request_references(tx, &request)?;
+            initial_context_receipt(issuer, operation_id, request, manifest.caller_seed, manifest.authored_seed, references).map(Some)
         })
     }
 

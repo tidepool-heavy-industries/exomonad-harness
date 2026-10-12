@@ -75,6 +75,20 @@ pub struct HostIdentity {
     pub incarnation: String,
 }
 
+/// Historical evidence of one atomic startup publication. References identify
+/// original occurrences; later context edits preserve their identities and do
+/// not change this receipt's recorded text. Possession grants no edit authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InitialContextPublication {
+    pub issuer: HostIdentity,
+    pub operation_id: String,
+    pub request: RequestId,
+    pub caller_seed: Option<String>,
+    pub authored_seed: Option<String>,
+    pub caller_reference: Option<crate::context::ContextReference>,
+    pub authored_reference: Option<crate::context::ContextReference>,
+}
+
 /// A durable interruption is independent of the host actor's lifetime.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -509,6 +523,31 @@ impl Conversation {
             .seed_embedded_context(self.identity(), operation_id, &item)
     }
 
+    /// Publish caller context followed by one editable authored context block
+    /// without waking inference. An empty authored result has no block. Exact
+    /// retries return historical evidence and never restore previously edited text.
+    pub fn seed_initial_context(
+        &self,
+        operation_id: &str,
+        caller_seed: Option<&str>,
+        authored_seed: Option<&str>,
+    ) -> Result<InitialContextPublication, EmbeddedError> {
+        let _admission = self.host.admit()?;
+        self.store
+            .seed_initial_context(self.identity(), operation_id, caller_seed, authored_seed)
+    }
+
+    /// Observe the issuing operation after reattachment, including an earlier
+    /// incarnation of this same conversation. This never republishes context.
+    pub fn initial_context_publication(
+        &self,
+        issuer: &HostIdentity,
+        operation_id: &str,
+    ) -> Result<Option<InitialContextPublication>, EmbeddedError> {
+        self.store
+            .initial_context_publication(self.identity(), issuer, operation_id)
+    }
+
     pub async fn input(
         &self,
         operation_id: &str,
@@ -892,6 +931,195 @@ mod tests {
             actor: AgentPath("/root".into()),
             incarnation: "seed-incarnation".into(),
         }))
+    }
+
+    #[test]
+    fn initial_context_empty_and_absent_preserve_caller_and_do_not_wake() {
+        for authored in [None, Some("")] {
+            let store = Arc::new(Store::memory().unwrap());
+            let host = seed_host();
+            let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+            let receipt = conversation
+                .seed_initial_context("startup", Some("caller"), authored)
+                .unwrap();
+            assert_eq!(receipt.authored_seed.as_deref(), authored);
+            assert!(receipt.authored_reference.is_none());
+            let document = store.read_context(&receipt.request).unwrap();
+            assert!(
+                matches!(&document.blocks[..], [crate::context::ContextBlock::Text { reference, text, .. }]
+                if reference == &receipt.caller_reference && text == "caller")
+            );
+            assert_eq!(
+                conversation
+                    .seed_initial_context("startup", Some("caller"), authored)
+                    .unwrap(),
+                receipt
+            );
+            assert!(matches!(
+                conversation.seed_initial_context(
+                    "startup",
+                    Some("caller"),
+                    if authored.is_some() { None } else { Some("") }
+                ),
+                Err(EmbeddedError::ConflictingSeed)
+            ));
+            assert!(store.inbox("/root").unwrap().is_empty());
+            assert!(store.model_request_outcomes(128).unwrap().is_empty());
+        }
+        let store = Arc::new(Store::memory().unwrap());
+        let conversation = Conversation::attach(store.clone(), seed_host(), None).unwrap();
+        let receipt = conversation
+            .seed_initial_context("empty", None, Some(""))
+            .unwrap();
+        assert!(
+            store
+                .read_context(&receipt.request)
+                .unwrap()
+                .blocks
+                .is_empty()
+        );
+        assert!(receipt.caller_reference.is_none());
+        assert!(receipt.authored_reference.is_none());
+    }
+
+    fn refresh_initial_context(
+        store: &Store,
+        receipt: &InitialContextPublication,
+        reference: &crate::context::ContextReference,
+        index: usize,
+        text: &str,
+    ) -> Result<crate::context::ContextCommitReceipt, StoreError> {
+        let head = store.embedded_agent_head(&receipt.issuer)?.unwrap();
+        let call = crate::model::CallId(format!("edit-{index}"));
+        store.append_items(
+            &head,
+            &[Item(json!({"type":"custom_tool_call", "call_id":call.0,
+            "name":"haskell_sync", "input":"refresh"}))],
+        )?;
+        let operation = store.claim(&call, &head)?;
+        store.initialize_context_target(
+            &operation.origin,
+            &crate::context::ContextProjectionTarget {
+                model: "luna".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )?;
+        let snapshot = store.begin_context(&operation, &head)?;
+        let mut draft = crate::context::ContextDraft {
+            document: snapshot.document.clone(),
+            next_model: None,
+            next_effort: None,
+        };
+        // A caller can provide a foreign reference, but cannot turn it into authority.
+        let authored = draft.document.blocks.iter_mut().find(|block| matches!(block,
+            crate::context::ContextBlock::Text { reference: Some(r), .. } if Some(r) == receipt.authored_reference.as_ref())).unwrap();
+        if let crate::context::ContextBlock::Text {
+            reference: target,
+            text: body,
+            ..
+        } = authored
+        {
+            *target = Some(reference.clone());
+            *body = text.into();
+        }
+        store.commit_context(crate::context::ContextCommit {
+            snapshot: &snapshot,
+            draft: &draft,
+            output: &crate::turn::JobOutput::Completed(Ok(json!({"value":"done"}))),
+            pending: &[],
+        })
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(32))]
+        #[test]
+        fn initial_context_history_keeps_receipt_after_edits_retries_and_reopen(
+            caller in "[a-z λ]{0,24}", initial in "[a-z λ]{1,24}",
+            edits in proptest::collection::vec("[a-z λ]{0,24}", 1..5),
+        ) {
+            let directory = std::env::temp_dir().join(format!("harness-initial-history-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&directory).unwrap();
+            let path = directory.join("store.sqlite");
+            let host = seed_host();
+            let receipt;
+            {
+                let store = Arc::new(Store::open(&path).unwrap());
+                let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+                receipt = conversation.seed_initial_context("startup", Some(&caller), Some(&initial)).unwrap();
+                let reference = receipt.authored_reference.as_ref().unwrap();
+                proptest::prop_assert_ne!(receipt.caller_reference.as_ref().unwrap(), reference);
+                for (index, replacement) in edits.iter().enumerate() {
+                    let committed = refresh_initial_context(&store, &receipt, reference, index, replacement).unwrap();
+                    let active = store.read_context(&committed.head).unwrap();
+                    let authored = active.blocks.iter().find(|block| matches!(block,
+                        crate::context::ContextBlock::Text { reference: Some(r), .. } if r == reference)).unwrap();
+                    proptest::prop_assert!(matches!(authored, crate::context::ContextBlock::Text { text, .. } if text == replacement));
+                    proptest::prop_assert!(active.blocks.iter().any(|block| matches!(block,
+                        crate::context::ContextBlock::Text { reference: Some(r), text, .. } if Some(r) == receipt.caller_reference.as_ref() && text == &caller)));
+                    proptest::prop_assert_eq!(conversation.seed_initial_context("startup", Some(&caller), Some(&initial)).unwrap(), receipt.clone());
+                    proptest::prop_assert_eq!(store.embedded_agent_head(host.identity()).unwrap(), Some(committed.head));
+                }
+            }
+            {
+                let store = Arc::new(Store::open(&path).unwrap());
+                let conversation = Conversation::attach(store.clone(), host.clone(), None).unwrap();
+                proptest::prop_assert_eq!(conversation.initial_context_publication(&receipt.issuer, "startup").unwrap(), Some(receipt.clone()));
+                proptest::prop_assert_eq!(conversation.seed_initial_context("startup", Some(&caller), Some(&initial)).unwrap(), receipt.clone());
+                let head = store.embedded_agent_head(host.identity()).unwrap().unwrap();
+                let active = store.read_context(&head).unwrap();
+                proptest::prop_assert!(active.blocks.iter().any(|block| matches!(block,
+                    crate::context::ContextBlock::Text { reference: Some(r), text, .. } if Some(r) == receipt.authored_reference.as_ref() && text == edits.last().unwrap())));
+            }
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn initial_context_foreign_reference_and_receipt_are_refused() {
+        let store = Arc::new(Store::memory().unwrap());
+        let first = Conversation::attach(store.clone(), seed_host(), None).unwrap();
+        let receipt = first
+            .seed_initial_context("startup", Some("caller"), Some("memory"))
+            .unwrap();
+        let foreign = Conversation::attach(
+            store.clone(),
+            Arc::new(SeedHost(HostIdentity {
+                actor: AgentPath("/foreign".into()),
+                ..first.identity().clone()
+            })),
+            None,
+        )
+        .unwrap();
+        let other = foreign
+            .seed_initial_context("startup", None, Some("foreign memory"))
+            .unwrap();
+        assert!(matches!(
+            first.initial_context_publication(&other.issuer, "startup"),
+            Err(EmbeddedError::Binding(_))
+        ));
+        assert!(matches!(
+            refresh_initial_context(
+                &store,
+                &receipt,
+                other.authored_reference.as_ref().unwrap(),
+                0,
+                "replacement"
+            ),
+            Err(StoreError::Context(
+                crate::context::ContextError::InvalidReference
+            ))
+        ));
+        assert_eq!(
+            first
+                .initial_context_publication(&receipt.issuer, "startup")
+                .unwrap(),
+            Some(receipt.clone())
+        );
+        let document = store.read_context(&receipt.request).unwrap();
+        assert!(document.blocks.iter().any(|block| matches!(block,
+            crate::context::ContextBlock::Text { reference: Some(r), text, .. }
+                if Some(r) == receipt.authored_reference.as_ref() && text == "memory")));
     }
 
     #[test]
