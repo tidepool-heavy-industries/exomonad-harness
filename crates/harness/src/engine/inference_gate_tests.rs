@@ -126,7 +126,7 @@ impl ResponsesTransport for Script {
             // Observe a real admitted scheduler job without claiming it or releasing it.
             tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
-                    if let Some(claim) = self.effects.store.claims(id).unwrap().first() {
+                    if let Some(claim) = self.effects.store.claims_on(id).unwrap().first() {
                         if matches!(self.scheduler.output(&claim.operation).await, Ok(None)) {
                             break;
                         }
@@ -267,7 +267,7 @@ async fn run_history(
         let expected_effects = usize::from(!queued);
         prop_assert_eq!(effects.calls.load(Ordering::SeqCst), expected_effects);
         prop_assert_eq!(requests.lock().unwrap().len(), 1);
-        let claims = store.claims(&head_request).unwrap();
+        let claims = store.claims_on(&head_request).unwrap();
         prop_assert_eq!(claims.len(), 1);
         let original = claims[0].operation.clone();
         let expected_operations = if queued {
