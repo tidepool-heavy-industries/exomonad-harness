@@ -58,7 +58,12 @@ fn setup(store: &Store) -> (RequestId, OperationId) {
         Item(json!({"type":"custom_tool_call","call_id":"edit","name":"haskell_sync","input":"modifyContext"})),
     ],Usage::default()).unwrap();
     store.set_effort(&head, Effort::Low).unwrap();
-    let operation = store.claim(&CallId("edit".into()), &head).unwrap();
+    let operation = claim_edit(store, &head);
+    (head, operation)
+}
+
+fn claim_edit(store: &Store, head: &RequestId) -> OperationId {
+    let operation = store.claim(&CallId("edit".into()), head).unwrap();
     store
         .initialize_context_target(
             &operation.origin,
@@ -69,7 +74,7 @@ fn setup(store: &Store) -> (RequestId, OperationId) {
             },
         )
         .unwrap();
-    (head, operation)
+    operation
 }
 
 fn edited(snapshot: &ContextSnapshot) -> ContextDraft {
@@ -664,7 +669,15 @@ fn deferred_child_inherits_committed_context_and_terminal_before_call_stays_froz
             },
         )
         .unwrap();
-    store.lock().unwrap().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)",[&head.0]).unwrap();
+    store
+        .admit_agent(
+            &AgentPath("/root".into()),
+            None,
+            Some(&head),
+            &json!({}),
+            &json!({}),
+        )
+        .unwrap();
     let cuts = store
         .capture_checkpoint_cuts(&operation, &json!({}), Arc::new(()))
         .unwrap();
@@ -1103,26 +1116,16 @@ fn model_switch_refuses_opaque_protected_suffix_without_settling_output() {
 #[test]
 fn replay_keeps_duplicate_item_occurrences_distinct_for_later_edit() {
     fn duplicate_setup(store: &Store) -> (RequestId, OperationId) {
-        let (head, operation) = setup(store);
-        store
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE request_items SET position=-position-10 WHERE request_id=?1",
-                [&head.0],
-            )
-            .unwrap();
-        store
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE request_items SET position=-position-8 WHERE request_id=?1",
-                [&head.0],
-            )
-            .unwrap();
+        let head = RequestId("root".into());
         let item = Item(json!({"type":"message","role":"user","content":"same"}));
-        let hash = store.put_item(&item).unwrap();
-        store.lock().unwrap().execute("INSERT INTO request_items(request_id,position,item_hash) VALUES(?1,0,?2),(?1,1,?2)",params![head.0,hash.0]).unwrap();
+        store.write_request(&head, None, "/root", &[
+            item.clone(),
+            item,
+            Item(json!({"type":"message","role":"user","content":"old context","unknown":{"retain":true}})),
+            Item(json!({"type":"custom_tool_call","call_id":"edit","name":"haskell_sync","input":"modifyContext"})),
+        ], Usage::default()).unwrap();
+        store.set_effort(&head, Effort::Low).unwrap();
+        let operation = claim_edit(store, &head);
         (head, operation)
     }
     let original = Store::memory().unwrap();
@@ -1221,17 +1224,24 @@ fn guarded_commit_cancellation_rolls_back_every_publication_write() {
 fn second_sync_capture_uses_current_edited_context_and_original_call() {
     use std::sync::Arc;
     let store = Store::memory().unwrap();
-    let (head, operation) = setup(&store);
-    store.lock().unwrap().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)",[&head.0]).unwrap();
+    let head = RequestId("root".into());
+    store.create_request(&head, None, "/root").unwrap();
+    store.set_effort(&head, Effort::Low).unwrap();
+    store.append_items(&head, &[
+        Item(json!({"type":"message","role":"user","content":"old context","unknown":{"retain":true}})),
+        Item(json!({"type":"custom_tool_call","call_id":"edit","name":"haskell_sync","input":"modifyContext"})),
+        Item(json!({"type":"custom_tool_call","call_id":"second","name":"haskell_sync","input":"second"})),
+    ]).unwrap();
+    let operation = claim_edit(&store, &head);
     store
-        .lock()
-        .unwrap()
-        .execute(
-            "UPDATE request_items SET position=-1 WHERE request_id=?1 AND position=2",
-            [&head.0],
+        .admit_agent(
+            &AgentPath("/root".into()),
+            None,
+            Some(&head),
+            &json!({}),
+            &json!({}),
         )
         .unwrap();
-    store.append_items(&head,&[Item(json!({"type":"custom_tool_call","call_id":"second","name":"haskell_sync","input":"second"}))]).unwrap();
     let second = store.claim(&CallId("second".into()), &head).unwrap();
     let snapshot = store.begin_context(&operation, &head).unwrap();
     let receipt = store

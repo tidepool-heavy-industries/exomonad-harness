@@ -829,7 +829,15 @@ fn try_cut_fixture_with_reasoning(
         .write_request(&source, Some(&initial), "/root", &[], Usage::default())
         .unwrap();
     record(&store, &source, items, "model-a");
-    store.lock().unwrap().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)", [&source.0]).unwrap();
+    store
+        .admit_agent(
+            &AgentPath("/root".into()),
+            None,
+            Some(&source),
+            &json!({}),
+            &json!({}),
+        )
+        .unwrap();
     if earlier_pending {
         store.claim(&CallId("earlier".into()), &source).unwrap();
     }

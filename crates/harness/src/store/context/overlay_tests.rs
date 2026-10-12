@@ -686,7 +686,15 @@ fn canonical_checkpoint_copy_preserves_projection_collision_without_ambiguity() 
         )
         .unwrap();
     let operation = store.claim(&CallId("checkpoint".into()), &next).unwrap();
-    store.lock().unwrap().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)",[&next.0]).unwrap();
+    store
+        .admit_agent(
+            &AgentPath("/root".into()),
+            None,
+            Some(&next),
+            &json!({}),
+            &json!({}),
+        )
+        .unwrap();
     let cuts = store
         .capture_checkpoint_cuts_at_head(&operation, &next, &json!({}), std::sync::Arc::new(()))
         .unwrap();
