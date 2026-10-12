@@ -2561,9 +2561,9 @@ fn legacy_candidate_matches(
 }
 
 fn receipt(c: &Connection, operation: &OperationId) -> Result<Option<ReceiptRecord>> {
-    let mut q=c.prepare("SELECT payload FROM events WHERE kind='context_commit' AND json_extract(payload,'$.operation')=?1 ORDER BY id DESC LIMIT 2")?;
+    let mut q=c.prepare("SELECT payload FROM events WHERE kind='context_commit' AND json_extract(payload,'$.operation.request')=?1 AND json_extract(payload,'$.operation.call')=?2 ORDER BY id DESC LIMIT 2")?;
     let rows = q
-        .query_map([serde_json::to_string(operation)?], |r| {
+        .query_map(params![operation.request.0, operation.call.0], |r| {
             r.get::<_, String>(0)
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;

@@ -597,16 +597,34 @@ fn deferred_child_inherits_committed_context_and_terminal_before_call_stays_froz
     use crate::checkpoint::{CheckpointChild, CheckpointCut};
     use std::sync::Arc;
     let store = Store::memory().unwrap();
-    let (head, operation) = setup(&store);
-    store.lock().unwrap().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)",[&head.0]).unwrap();
+    let head = RequestId("checked-capture".into());
+    store.create_request(&head, None, "/root").unwrap();
+    store.set_effort(&head, Effort::Low).unwrap();
+    issued_response(
+        &store,
+        &head,
+        vec![
+            Item(
+                json!({"type":"message","role":"user","content":"old context","unknown":{"retain":true}}),
+            ),
+            Item(
+                json!({"type":"custom_tool_call","call_id":"edit","name":"haskell_sync","input":"modifyContext"}),
+            ),
+        ],
+        "luna",
+    );
+    let operation = store.claim(&CallId("edit".into()), &head).unwrap();
     store
-        .lock()
-        .unwrap()
-        .execute(
-            "UPDATE request_items SET position=-1 WHERE request_id=?1 AND position=2",
-            [&head.0],
+        .initialize_context_target(
+            &operation.origin,
+            &crate::context::ContextProjectionTarget {
+                model: "luna".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
         )
         .unwrap();
+    store.lock().unwrap().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)",[&head.0]).unwrap();
     let cuts = store
         .capture_checkpoint_cuts(&operation, &json!({}), Arc::new(()))
         .unwrap();
@@ -1027,7 +1045,9 @@ fn model_switch_refuses_opaque_protected_suffix_without_settling_output() {
             output: &output(),
             pending: &[]
         }),
-        Err(StoreError::Context(ContextError::OpaqueModel))
+        Err(StoreError::Context(ContextError::Replay(
+            ContextReplayRejection::MissingProvenance { .. }
+        )))
     ));
     assert_eq!(
         store.context_model(&operation.origin).unwrap().as_deref(),

@@ -1192,7 +1192,7 @@ fn genuine_saved_reference_from_unrelated_checkpoint_cannot_authorize_model_swit
                     crate::transport::ResponsesProtocol::Standard
                 ))
             ),
-            Err(StoreError::Context(ContextError::OpaqueModel))
+            Err(StoreError::Context(ContextError::Replay(_)))
         ));
     }
     let operation = store.claim(&CallId("edit".into()), &head).unwrap();
