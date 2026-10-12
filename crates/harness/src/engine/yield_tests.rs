@@ -697,11 +697,17 @@ async fn yield_pinned_embedded_surface_allows_intrinsic_without_host_authority()
             surface,
         }),
         None,
-    ).await
+    )
+    .await
     .unwrap();
     // PinnedProvider validates solely against the immutable host manifest.
     // The engine adds and interprets its intrinsic without granting host tools.
-    let snapshot = conversation.provider().request_snapshot().await.unwrap().unwrap();
+    let snapshot = conversation
+        .provider()
+        .request_snapshot()
+        .await
+        .unwrap()
+        .unwrap();
     assert!(snapshot.validate_call("yield", ToolKind::Function).is_err());
     let requests = Arc::new(Mutex::new(vec![]));
     let engine = conversation

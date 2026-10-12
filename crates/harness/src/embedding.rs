@@ -788,10 +788,14 @@ impl Provider for BoundProvider {
     }
 
     async fn request_snapshot(&self) -> Result<Option<Arc<dyn Provider>>, ProviderError> {
-        let surface = self.host.tool_surface().await.map_err(|error| match error {
-            EmbeddedError::AdmissionClosed => ProviderError::RequestAdmissionClosed,
-            error => ProviderError::Tool(error.to_string().into()),
-        })?;
+        let surface = self
+            .host
+            .tool_surface()
+            .await
+            .map_err(|error| match error {
+                EmbeddedError::AdmissionClosed => ProviderError::RequestAdmissionClosed,
+                error => ProviderError::Tool(error.to_string().into()),
+            })?;
         Ok(Some(Arc::new(PinnedProvider {
             store: self.store.clone(),
             host: self.host.clone(),
@@ -879,7 +883,8 @@ impl Provider for PinnedProvider {
         args: Value,
         context: CallContext,
     ) -> Result<Value, ProviderError> {
-        self.validate(name, &ToolInput::Function(args.clone()), &context).await?;
+        self.validate(name, &ToolInput::Function(args.clone()), &context)
+            .await?;
         self.surface
             .dispatcher
             .call_with_context(name, args, context)
@@ -891,7 +896,8 @@ impl Provider for PinnedProvider {
         input: String,
         context: CallContext,
     ) -> Result<Value, ProviderError> {
-        self.validate(name, &ToolInput::Custom(input.clone()), &context).await?;
+        self.validate(name, &ToolInput::Custom(input.clone()), &context)
+            .await?;
         self.surface
             .dispatcher
             .call_custom_with_context(name, input, context)
@@ -938,9 +944,12 @@ mod tests {
         for authored in [None, Some("")] {
             let store = Arc::new(Store::memory().unwrap());
             let host = seed_host();
-            let conversation = Conversation::attach(store.clone(), host.clone(), None).await.unwrap();
+            let conversation = Conversation::attach(store.clone(), host.clone(), None)
+                .await
+                .unwrap();
             let receipt = conversation
-                .seed_initial_context("startup", Some("caller"), authored).await
+                .seed_initial_context("startup", Some("caller"), authored)
+                .await
                 .unwrap();
             assert_eq!(receipt.authored_seed.as_deref(), authored);
             assert!(receipt.authored_reference.is_none());
@@ -951,25 +960,31 @@ mod tests {
             );
             assert_eq!(
                 conversation
-                    .seed_initial_context("startup", Some("caller"), authored).await
+                    .seed_initial_context("startup", Some("caller"), authored)
+                    .await
                     .unwrap(),
                 receipt
             );
             assert!(matches!(
-                conversation.seed_initial_context(
-                    "startup",
-                    Some("caller"),
-                    if authored.is_some() { None } else { Some("") }
-                ).await,
+                conversation
+                    .seed_initial_context(
+                        "startup",
+                        Some("caller"),
+                        if authored.is_some() { None } else { Some("") }
+                    )
+                    .await,
                 Err(EmbeddedError::ConflictingSeed)
             ));
             assert!(store.inbox("/root").unwrap().is_empty());
             assert!(store.model_request_outcomes(128).unwrap().is_empty());
         }
         let store = Arc::new(Store::memory().unwrap());
-        let conversation = Conversation::attach(store.clone(), seed_host(), None).await.unwrap();
+        let conversation = Conversation::attach(store.clone(), seed_host(), None)
+            .await
+            .unwrap();
         let receipt = conversation
-            .seed_initial_context("empty", None, Some("")).await
+            .seed_initial_context("empty", None, Some(""))
+            .await
             .unwrap();
         assert!(
             store
@@ -1072,9 +1087,12 @@ mod tests {
     #[tokio::test]
     async fn initial_context_equal_bodies_have_distinct_editable_references() {
         let store = Arc::new(Store::memory().unwrap());
-        let conversation = Conversation::attach(store.clone(), seed_host(), None).await.unwrap();
+        let conversation = Conversation::attach(store.clone(), seed_host(), None)
+            .await
+            .unwrap();
         let receipt = conversation
-            .seed_initial_context("startup", Some("same"), Some("same")).await
+            .seed_initial_context("startup", Some("same"), Some("same"))
+            .await
             .unwrap();
         assert_ne!(receipt.caller_reference, receipt.authored_reference);
         let committed = refresh_initial_context(
@@ -1099,9 +1117,12 @@ mod tests {
     #[tokio::test]
     async fn initial_context_failed_invocation_and_stale_edit_preserve_active_memory() {
         let store = Arc::new(Store::memory().unwrap());
-        let conversation = Conversation::attach(store.clone(), seed_host(), None).await.unwrap();
+        let conversation = Conversation::attach(store.clone(), seed_host(), None)
+            .await
+            .unwrap();
         let receipt = conversation
-            .seed_initial_context("startup", None, Some("memory")).await
+            .seed_initial_context("startup", None, Some("memory"))
+            .await
             .unwrap();
         let reference = receipt.authored_reference.as_ref().unwrap();
         let (failed_snapshot, failed_draft) =
@@ -1215,9 +1236,12 @@ mod tests {
     #[tokio::test]
     async fn initial_context_foreign_reference_and_receipt_are_refused() {
         let store = Arc::new(Store::memory().unwrap());
-        let first = Conversation::attach(store.clone(), seed_host(), None).await.unwrap();
+        let first = Conversation::attach(store.clone(), seed_host(), None)
+            .await
+            .unwrap();
         let receipt = first
-            .seed_initial_context("startup", Some("caller"), Some("memory")).await
+            .seed_initial_context("startup", Some("caller"), Some("memory"))
+            .await
             .unwrap();
         let foreign = Conversation::attach(
             store.clone(),
@@ -1226,10 +1250,12 @@ mod tests {
                 ..first.identity().clone()
             })),
             Some(&first.identity().actor),
-        ).await
+        )
+        .await
         .unwrap();
         let other = foreign
-            .seed_initial_context("startup", None, Some("foreign memory")).await
+            .seed_initial_context("startup", None, Some("foreign memory"))
+            .await
             .unwrap();
         let first_head = store.embedded_agent_head(first.identity()).unwrap();
         let foreign_head = store.embedded_agent_head(foreign.identity()).unwrap();
@@ -1291,7 +1317,9 @@ mod tests {
         let prompt = "  Initial context\nλ\n\n";
         let request = {
             let store = Arc::new(Store::open(&path).unwrap());
-            let conversation = Conversation::attach(store.clone(), host.clone(), None).await.unwrap();
+            let conversation = Conversation::attach(store.clone(), host.clone(), None)
+                .await
+                .unwrap();
             let request = conversation.seed_context("spawn-op", prompt).await.unwrap();
             assert!(store.inbox("/root").unwrap().is_empty());
             assert!(store.events(None).unwrap().is_empty());
@@ -1307,7 +1335,9 @@ mod tests {
         };
         {
             let store = Arc::new(Store::open(&path).unwrap());
-            let conversation = Conversation::attach(store.clone(), host.clone(), None).await.unwrap();
+            let conversation = Conversation::attach(store.clone(), host.clone(), None)
+                .await
+                .unwrap();
             assert_eq!(
                 conversation.seed_context("spawn-op", prompt).await.unwrap(),
                 request
@@ -1358,7 +1388,9 @@ mod tests {
         for started_with_input in [false, true] {
             let store = Arc::new(Store::memory().unwrap());
             let host = seed_host();
-            let conversation = Conversation::attach(store.clone(), host.clone(), None).await.unwrap();
+            let conversation = Conversation::attach(store.clone(), host.clone(), None)
+                .await
+                .unwrap();
             if started_with_input {
                 store
                     .admit_embedded_input(

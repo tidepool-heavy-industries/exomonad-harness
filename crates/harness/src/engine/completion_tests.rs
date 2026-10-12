@@ -791,7 +791,9 @@ async fn closed_next_request_preserves_settlement_and_cleanup_without_transport_
             acknowledgments: AtomicUsize::new(0),
         });
         let conversation =
-            crate::embedding::Conversation::attach(store.clone(), host.clone(), None).await.unwrap();
+            crate::embedding::Conversation::attach(store.clone(), host.clone(), None)
+                .await
+                .unwrap();
         let transport_calls = Arc::new(AtomicUsize::new(0));
         let runtime = conversation
             .engine::<TestAuth, _>(
