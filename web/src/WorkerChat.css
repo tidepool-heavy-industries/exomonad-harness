@@ -83,3 +83,21 @@
   .worker-chat button, .worker-chat summary, .session-bar button { min-height: 44px; }
   .worker-chat summary { align-content: center; }
 }
+
+/* Reading mode is deliberate; the textarea stays mounted so selection and drafts survive. */
+.composer-compact-bar, .composer-collapse { display: none; }
+.composer-connection { margin-block: 0 6px; font-size: var(--diagnostic-size); color: var(--pending-text); }
+@media (max-width: 700px) {
+  .composer-collapse { display: inline-block; margin-inline-start: auto; }
+  .worker-chat-composer.is-compact .composer-body { display: none; }
+  .worker-chat-composer.is-compact .composer-compact-bar { display: flex; align-items: center; gap: 8px; }
+  .composer-compact-bar > button:first-child { flex: 1; text-align: start; min-width: 0; overflow-wrap: anywhere; }
+
+  .composer-heading { align-items: center; }
+  .composer-collapse { padding: 4px 8px; font-size: var(--diagnostic-size); }
+  .worker-chat-composer.is-compact form { display: flex; align-items: center; gap: 8px; }
+  .worker-chat-composer.is-compact .composer-compact-bar { flex: 1; min-width: 0; }
+  .worker-chat-composer.is-compact .composer-toolbar { flex-shrink: 0; }
+  .worker-chat-composer.is-compact .host-actions { margin: 0; }
+  .worker-chat-composer.is-compact .composer-send, .worker-chat-composer.is-compact .composer-toolbar > .hint { display: none; }
+}

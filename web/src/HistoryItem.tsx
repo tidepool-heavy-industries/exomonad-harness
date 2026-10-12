@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { usePresentationChoice } from './presentation-state'
+import { PresentationDetails, usePresentationChoice } from './presentation-state'
 import type { HistoryEntry } from './history-client'
 import { MessageContent, MessagePresentation, type MessageKind } from './MessagePresentation'
 
@@ -113,7 +113,10 @@ export default function HistoryItem({ entry, listItem = true, diagnostics = true
   const rawVisible = showRaw || !view
   const raw = useMemo(() => rawVisible ? JSON.stringify(entry.item, null, 2) : undefined, [entry.item, rawVisible])
   // Empty or opaque-only reasoning adds no chat content; unfamiliar blocks remain inspectable.
-  if (object(entry.item) && entry.item.type === 'reasoning' && view?.texts.length === 0 && !view.unknownBlocks) return null
+  if (object(entry.item) && entry.item.type === 'reasoning' && view?.texts.length === 0 && !view.unknownBlocks) return publication
+    ? <PresentationDetails memoryKey="evidence" className="chat-message-details" summary="Publication details">
+      <p>Sequence {publication.sequence} · exchange {publication.requestId} · position {entry.position}</p>
+    </PresentationDetails> : null
   const texts = view?.texts.map((part, index, parts) => <div key={index} className={`history-${part.kind}`}>
     <MessageContent text={part.text} copyText={part.copyText} format={part.format} bounded={part.kind === 'code'} memoryKey={`part:${index}`} label={`${part.label} item ${entry.position}${parts.length > 1 ? ` block ${index + 1}` : ''}`} />
   </div>)

@@ -85,7 +85,7 @@ function UnifiedChatView({ viewportRef, origin, requestId, revision, ready, acti
       <PresentationMemory><TimelineContent onRevealActivity={viewport.revealRow} row={row} streamingActive={ready && active} requests={requests} jobs={jobs} modelOrigin={modelOrigin} /></PresentationMemory>
       {row.kind === 'entry' && row.entry.kind === 'output' && <UnifiedOutput entry={row.entry} origin={origin} ready={ready} active={active} onAuthExpired={onAuthExpired} onExpanded={refresh} />}
       {row.kind === 'entry' && row.entry.kind === 'form' && <MountedForm form={row.entry.form} ready={ready} active={active} onAuthExpired={onAuthExpired} onStateChange={updateForm} />}
-      {'entry' in row && row.entry.kind !== 'message' && <details className="timeline-metadata"><summary>Publication details</summary><p>Sequence {row.entry.sequence}</p>{(row.entry.kind === 'message' || row.entry.kind === 'oversized') && <p>Exchange {row.entry.requestId} · position {row.entry.position}</p>}</details>}
+      {'entry' in row && row.entry.kind !== 'message' && <details className="timeline-metadata"><summary>Publication details</summary><p>Sequence {row.entry.sequence}</p>{row.entry.kind === 'oversized' && <p>Exchange {row.entry.requestId} · position {row.entry.position}</p>}</details>}
     </div>)}</div>
     {newActivity && <button type="button" className="new-activity" onClick={returnToLatest}>New activity ↓</button>}
     {windowed && <div className="history-controls"><p className="meta">Showing a bounded history window. Additional messages remain in retained history.</p><button type="button" disabled={!ready} onClick={returnToLatest}>Return to latest messages</button></div>}

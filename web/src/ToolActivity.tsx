@@ -79,7 +79,7 @@ export function resultExcerpt(item: unknown): string | undefined {
     ? output.flatMap(block => block && typeof block === 'object' && ['text', 'output_text'].includes(block.type) && typeof block.text === 'string' ? [block.text] : []) : []
   for (const text of texts) {
     // Scan without allocating an array for every line of a large retained result.
-    const line = /[^\r\n]*\S[^\r\n]*/.exec(text)?.[0]?.trim()
+    const line = /\S[^\r\n]*/.exec(text)?.[0]?.trim()
     if (line) return line.length > 180 ? `${line.slice(0, 180).replace(/[\uD800-\uDBFF]$/, '')}…` : line
   }
   return undefined

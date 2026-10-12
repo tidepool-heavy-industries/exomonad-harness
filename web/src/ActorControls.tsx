@@ -1,4 +1,4 @@
-import { forwardRef, useImperativeHandle, useRef, useState, type FormEvent } from 'react'
+import { forwardRef, useImperativeHandle, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
 import RecoveryControls from './RecoveryControls'
 import { currentRecoveryBlock } from './recovery'
 import { MessageContent, MessagePresentation } from './MessagePresentation'
@@ -40,6 +40,17 @@ export function ActorComposer({ data, route, unavailable, ready, onHostCommand, 
   const { actor, target, enabled } = actorControls(data, route, unavailable, ready, onHostCommand);
   const draft = useDraft(target ? actorDraftKey(target) : undefined);
   const composing = useRef(false);
+  const [compact, setCompact] = useState(false);
+  const compactChanged = useRef(false);
+  const messageInput = useRef<HTMLTextAreaElement>(null);
+  const reopen = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    if (compactChanged.current) (compact ? reopen.current : messageInput.current)?.focus({ preventScroll: true });
+  }, [compact]);
+  function setReadingMode(value: boolean) { compactChanged.current = true; setCompact(value); }
+  const interrupt = () => {
+    if (target && actor?.activeRound) send({ action: 'interrupt', target, expected_round: actor.activeRound });
+  };
   const [feedback, setFeedback] = useState('');
   const latestInput = target ? operations.filter(record => record.submission.command.action === 'input'
     && actorIdentityKey(record.submission.command.target) === actorIdentityKey(target)).at(-1) : undefined;
@@ -53,7 +64,7 @@ export function ActorComposer({ data, route, unavailable, ready, onHostCommand, 
     if (result.kind === 'retained' && command.action === 'input') draft.submitted();
   };
   const sendInput = () => { if (target && enabled && draft.text.trim()) send({ action: 'input', target, text: draft.text }); };
-  return <section className={`host-controls worker-chat-composer${draft.text ? ' has-draft' : ''}`} aria-label="Message composer">
+  return <section className={`host-controls worker-chat-composer${draft.text ? ' has-draft' : ''}${compact ? ' is-compact' : ''}`} aria-label="Message composer">
     {actor?.inference && <div className="composer-state">
       <p role="status">{!['running', 'waiting'].includes(actor.lifecycle) ? `Read-only · ${actor.lifecycle}`
         : actor.inference.state === 'blocked' ? 'Agent paused · messages can queue'
@@ -61,14 +72,21 @@ export function ActorComposer({ data, route, unavailable, ready, onHostCommand, 
         : actor.inference.state === 'running' ? 'Working' : 'Ready for input'}</p>
       {currentRecoveryBlock(actor) && onReviewRecovery && <button type="button" onClick={onReviewRecovery}>Review recovery options</button>}
     </div>}
-    {!ready && <p role="status">Host controls await a fresh connected snapshot.</p>}
+    {!ready && <p className="composer-connection" role="status">Disconnected · draft kept; reconnect to send.</p>}
     {!onHostCommand && <p role="status">Host command channel is unavailable; this view is read-only.</p>}
     <form onSubmit={(event: FormEvent) => { event.preventDefault(); sendInput(); }} aria-label="Send actor message">
+    <div className="composer-compact-bar">
+      <button ref={reopen} type="button" aria-expanded={!compact} aria-controls="actor-composer-body" onClick={() => setReadingMode(false)}>
+        {draft.text ? 'Resume draft' : 'Write message'}{target && <span className="mono"> · {target.actor}</span>}
+      </button>
+    </div>
+    <div className="composer-body" id="actor-composer-body">
       <div className="composer-heading">
         <label id="actor-message-label" htmlFor="actor-message">Message {target ? <span className="mono">{target.actor}</span> : 'to selected actor'}</label>
+        <button className="composer-collapse" type="button" aria-expanded={!compact} aria-controls="actor-composer-body" onClick={() => setReadingMode(true)}>Read conversation</button>
         {target && <details className="composer-identity"><summary>Identity</summary><p>Run {target.run} · incarnation {target.incarnation}</p></details>}
       </div>
-      <textarea id="actor-message" rows={1} value={draft.text} onChange={event => draft.setText(event.target.value)}
+      <textarea ref={messageInput} id="actor-message" rows={1} value={draft.text} onChange={event => draft.setText(event.target.value)}
         disabled={!target || !actor || unavailable || !['running', 'waiting'].includes(actor.lifecycle)}
         aria-describedby="actor-message-hint" onCompositionStart={() => { composing.current = true; }}
         onCompositionEnd={() => { composing.current = false; }} onKeyDown={event => {
@@ -77,13 +95,12 @@ export function ActorComposer({ data, route, unavailable, ready, onHostCommand, 
             event.preventDefault(); sendInput();
           }
         }} />
+    </div>
       <div className="composer-toolbar">
         <span className="hint" id="actor-message-hint">Enter for a new line · Ctrl/Cmd+Enter to send</span>
         <div className="host-actions">
-          <button disabled={!enabled || !draft.text.trim()}>Send input</button>
-          <button type="button" aria-describedby="actor-message-label" disabled={!enabled || !actor?.activeRound} onClick={() => {
-            if (target && actor?.activeRound) send({ action: 'interrupt', target, expected_round: actor.activeRound });
-          }}>Interrupt</button>
+          <button className="composer-send" disabled={!enabled || !draft.text.trim()}>Send input</button>
+          <button type="button" aria-describedby="actor-message-label" disabled={!enabled || !actor?.activeRound} onClick={interrupt}>Interrupt</button>
         </div>
       </div>
     </form>

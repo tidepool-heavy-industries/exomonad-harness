@@ -37,7 +37,10 @@ or coordinator dependency, not something the GUI may invent.
 
 ## Brand Commitments
 
-Retain the established Solarized Dark identity and current font stacks. The
+Use Catppuccin Mocha, selected by the operator after comparing palette directions.
+Solarized was an initial idea, not a permanent brand constraint. Existing fonts
+remain for this pass to keep the palette comparison focused, not because an
+agent-written brief pins them. The
 existing chat brief in docs/gui-usability-brief.md takes precedence over the
 older non-chatbot direction in docs/web.md.
 
