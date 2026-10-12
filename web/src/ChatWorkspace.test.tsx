@@ -69,7 +69,7 @@ it('preserves exact multiline drafts and ignores composition Enter before explic
   vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})))
   const submit = vi.fn(() => ({ kind: 'retained' as const, operationId, send: 'sent' as const }))
   render(<App data={data} onHostCommand={submit} />)
-  const textarea = screen.getByLabelText('Message to selected actor')
+  const textarea = screen.getByRole('textbox', { name: /^Message / })
   const text = 'First line\n  Unicode 🐚 and spaces  '
   fireEvent.change(textarea, { target: { value: text } })
   fireEvent.keyDown(textarea, { key: 'Enter' })

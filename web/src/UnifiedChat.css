@@ -1,15 +1,18 @@
 .unified-chat { min-width: 0; min-height: 0; margin-block: 12px; padding-bottom: 1rem; }
 .unified-entries { display: flex; flex-direction: column; gap: .8rem; }
-.timeline-row { min-width: 0; scroll-margin-top: var(--attention-scroll-clearance); border-bottom: 1px solid var(--line); padding-block: 8px; }
-.timeline-metadata { margin: .15rem .5rem; color: var(--muted); font-size: .75rem; }
+.timeline-row { min-width: 0; scroll-margin-top: calc(var(--chat-attention-height, 0px) + 12px); border-bottom: 1px solid var(--line); padding-block: 8px; }
+.timeline-metadata { margin: 0; color: var(--muted); font-size: var(--diagnostic-size); }
 .timeline-metadata summary { cursor: pointer; width: fit-content; }
 .timeline-metadata p { margin: .25rem 0; overflow-wrap: anywhere; }
 
-.tool-result-marker { display: flex; flex-wrap: wrap; gap: .7rem; align-items: center; padding: .4rem .8rem; font-size: .85rem; color: var(--muted); }
+.tool-result-marker { display: flex; flex-wrap: wrap; gap: .7rem; align-items: center; padding: .4rem .8rem; font-size: var(--diagnostic-size); color: var(--muted); }
 .tool-result-marker button { font-size: inherit; }
 .load-older { display: block; margin: .8rem auto; }
 .new-activity { position: sticky; bottom: .5rem; display: block; margin: .5rem auto; z-index: 2; background: var(--panel); border-color: var(--accent); }
 
-.chat-attention { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; padding: 12px; background: var(--panel); border: 1px solid var(--pending); margin-bottom: 16px; }
-.chat-attention small { display: block; color: var(--muted); }
+.chat-attention { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 12px; padding: 8px 10px; background: var(--panel); border: 1px solid var(--pending); margin-bottom: 16px; }
+.chat-attention small { display: block; font-size: var(--diagnostic-size); color: var(--muted); }
 .chat-attention button { border-color: var(--pending); }
+
+.chat-attention button { flex-shrink: 0; }
+.timeline-metadata summary { padding-block: 4px; }

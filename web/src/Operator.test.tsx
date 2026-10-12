@@ -182,7 +182,7 @@ describe('optional browser session', () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
     expect(fetchMock.mock.calls[1]?.[0]).toBe(`/api/commands/${submission.operation_id}`)
-    expect(await screen.findByText('Session authenticated · ready')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Tree' })).toBeInTheDocument()
     expect(socket.send).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('link', { name: 'Chat' }))
     const operations = screen.getByRole('region', { name: 'Retained browser operations' })
@@ -268,7 +268,7 @@ it('retains before sending and leaves host effects untouched when tab storage fa
   socket.listeners.get('message')?.forEach((listener) => listener(new MessageEvent('message', { data: JSON.stringify({ type: 'snapshot', snapshot: { seq: '1', hostRun: 'run-1', actors: [{ identity: { run: 'run-1', actor: '/root', incarnation: 'one' }, parent: null, kind: 'model', lifecycle: 'waiting', modelConversation: '/root' }], conversations: [], requests: [], jobs: [], envelopes: [] } }) })))
   fireEvent.click(await screen.findByRole('link', { name: 'Chat' }))
   fireEvent.click(within(screen.getByRole('complementary', { name: 'Workers' })).getByRole('link', { name: '/root' }))
-  fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: '  λ preserved  ' } })
+  fireEvent.change(screen.getByRole('textbox', { name: /^Message / }), { target: { value: '  λ preserved  ' } })
   vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('storage unavailable') })
   fireEvent.click(screen.getByRole('button', { name: 'Send input' }))
   expect(await screen.findByRole('alert')).toHaveTextContent('could not retain the operation before sending')

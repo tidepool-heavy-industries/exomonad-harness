@@ -1,5 +1,5 @@
 import type { ChatInputOperation } from './generated/chat'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { belongsTo } from './live-output'
 import ChatHistory, { clearChatHistoryRetention } from './ChatHistory'
 import { actorOutputKey, type ActorOutputOrigin } from './actor-output'
@@ -55,6 +55,9 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
   transportPhase: TransportPhase; issue?: string; onAuthExpired?: () => void; children?: ReactNode; composer?: ReactNode; outgoing?: ReactNode; onRenderedInputs?: (references: readonly ChatInputOperation[]) => void
 }) {
   const viewportRef = useRef<HTMLDivElement>(null)
+  const workerSwitcher = useRef<HTMLButtonElement>(null)
+  const workerPickerId = useId()
+  const [workersOpen, setWorkersOpen] = useState(false)
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
   const resolved = resolveSelection(data, route.selection)
@@ -101,10 +104,17 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
       onClick={event => {
         if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
         event.preventDefault(); navigate(next)
+        setWorkersOpen(false)
+        if (workerSwitcher.current?.getClientRects().length) workerSwitcher.current.focus({ preventScroll: true })
       }}>{label}</a>
   }
   return <div className="worker-chat">
     <aside className="worker-chat-list" aria-label="Workers">
+      <button ref={workerSwitcher} className="worker-switcher" type="button" aria-expanded={workersOpen} aria-controls={workerPickerId}
+        onClick={() => setWorkersOpen(!workersOpen)}>Worker: <span className="mono">{identity?.actor ?? 'Choose worker'}</span><span>{workersOpen ? 'Close' : 'Change'}</span></button>
+      <div id={workerPickerId} className={`worker-picker${workersOpen ? ' is-open' : ''}`} onKeyDown={event => {
+        if (event.key === 'Escape') { setWorkersOpen(false); workerSwitcher.current?.focus() }
+      }}>
       <h2>Workers</h2>
       <label>Find worker<input type="search" value={search} onChange={event => { setSearch(event.target.value); setPage(0) }} /></label>
       {identity && resolved.actor && <button type="button" onClick={jumpToSelectedWorker}>Jump to selected worker</button>}
@@ -119,6 +129,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
         <span>Page {shown.page + 1} of {shown.pageCount}</span>
         <button disabled={shown.page + 1 === shown.pageCount} onClick={() => setPage(shown.page + 1)}>Next workers</button>
       </div>}
+      </div>
     </aside>
     <section className="worker-chat-conversation" aria-label="Selected worker Chat">
       <div ref={viewportRef} className="worker-chat-scroll" role="region" aria-label="Worker conversation" tabIndex={0}>

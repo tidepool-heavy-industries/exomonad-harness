@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test'
 import { snapshot, target } from './fixtures.mjs'
 import { control, openFixture, view, chooseWorker, observations } from './support'
 
-const composer=(page:any)=>page.getByLabel('Message to selected actor',{exact:true})
+const composer=(page:any)=>page.getByRole('textbox', { name: /^Message / })
 const send=(page:any)=>page.getByRole('button',{name:'Send input',exact:true})
 
 test('URL Back/reload preserves exact selection and per-tab draft; shortcuts respect typing and move heading focus',async({page,request})=>{

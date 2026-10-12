@@ -26,6 +26,7 @@ function UnifiedChatView({ viewportRef, origin, requestId, revision, ready, acti
   const viewport = useConversationViewport(viewportRef)
   const { section, pinned, newActivity } = viewport
   const { page, entries, older, issue, loadingOlder, windowed, updateForm, loadOlder, returnToLatest, refresh } = useConversationHistory({ origin, requestId, revision, ready, active, onAuthExpired }, viewport)
+  const attention = useRef<HTMLElement>(null)
   const lastFormJump = useRef<string>()
   const observedFinals = useRef<ReadonlySet<string>>(new Set())
   const scopedOutput = modelOrigin ? liveOutput.filter(item => originKey(item.origin) === originKey(modelOrigin)) : []
@@ -36,6 +37,14 @@ function UnifiedChatView({ viewportRef, origin, requestId, revision, ready, acti
   const knownFinals = new Set([...observedFinals.current].filter(key => residentPreviewKeys.has(key)))
   const rows = projected.filter(row => row.kind !== 'live' || !knownFinals.has(row.key))
   const openForms = entries.filter((entry): entry is Extract<UnifiedEntry, { kind: 'form' }> => entry.kind === 'form' && entry.form.state === 'open')
+  useLayoutEffect(() => {
+    const element = attention.current
+    const update = () => section.current?.style.setProperty('--chat-attention-height', `${element?.getBoundingClientRect().height ?? 0}px`)
+    update()
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(update)
+    if (element) observer?.observe(element)
+    return () => observer?.disconnect()
+  }, [active, openForms.length, ready])
   function jumpToForm() {
     const index = openForms.findIndex(entry => entry.form.opening.mountId === lastFormJump.current)
     const next = openForms[(index + 1) % openForms.length]
@@ -44,7 +53,7 @@ function UnifiedChatView({ viewportRef, origin, requestId, revision, ready, acti
     const form = [...(section.current?.querySelectorAll<HTMLElement>('[data-mount-id]') ?? [])].find(element => element.dataset.mountId === next.form.opening.mountId)
     pinned.current = false
     const target = form?.querySelector<HTMLElement>('input:not(:disabled), textarea:not(:disabled), select:not(:disabled)') ?? form
-    target?.scrollIntoView({ block: 'center' })
+    form?.scrollIntoView({ block: 'start' })
     target?.focus({ preventScroll: true })
   }
   const renderedInputs = rows.flatMap(row => 'entry' in row && row.entry.kind === 'message' && row.entry.inputOperation ? [row.entry.inputOperation] : [])
@@ -61,8 +70,8 @@ function UnifiedChatView({ viewportRef, origin, requestId, revision, ready, acti
   const failedRequests = [...(requests?.values() ?? [])].filter(item => item.state === 'failed'
     && entries.some(entry => entry.kind === 'message' && entry.requestId === item.id))
   return <section ref={section} className="unified-chat" aria-label="Conversation" aria-busy={ready && !page}>
-    {active && openForms.length > 0 && <nav className="chat-attention" aria-label="Pending responses">
-      <span role="status">{openForms.length} {openForms.length === 1 ? 'form needs' : 'forms need'} your response <small>in loaded history{!ready ? ' · reconnect to respond' : ''}</small></span>
+    {active && openForms.length > 0 && <nav ref={attention} className="chat-attention" aria-label="Pending responses">
+      <span role="status">{openForms.length} {openForms.length === 1 ? 'response' : 'responses'} needed <small>in loaded history{!ready ? ' · reconnect to respond' : ''}</small></span>
       <button type="button" onClick={jumpToForm}>{openForms.length === 1 ? 'Jump to form' : 'Jump to next form'}</button>
     </nav>}
     <div className="toolbar"><h2>Conversation</h2><button type="button" disabled={!ready} onClick={refresh}>Refresh conversation</button></div>

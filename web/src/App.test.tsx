@@ -105,7 +105,7 @@ describe('linked operator views', () => {
     render(<App data={{ ...data, inbox: [...data.inbox, { id: 'workflow-reply', sender: '/workflow', recipient: '/operator', message: 'Workflow progress', state: 'MESSAGE' }] }} onHostCommand={submit} />);
     expect(screen.queryByRole('link', { name: 'Host' })).toBeNull();
     expect(screen.getByRole('list', { name: 'Workflow messages' })).toHaveTextContent('Workflow progress');
-    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'Continue workflow' } });
+    fireEvent.change(screen.getByRole('textbox', { name: /^Message / }), { target: { value: 'Continue workflow' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send input' }));
     const target = { run: workflow.run, actor: workflow.name, incarnation: workflow.incarnation };
     expect(submit).toHaveBeenLastCalledWith({ action: 'input', target, text: 'Continue workflow' });
@@ -179,10 +179,10 @@ describe('linked operator views', () => {
     const callback = vi.fn();
     const mounted = render(<App data={data} onHostCommand={callback} />);
     choose();
-    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'draft' } });
+    fireEvent.change(screen.getByRole('textbox', { name: /^Message / }), { target: { value: 'draft' } });
     mounted.rerender(<App data={data} onHostCommand={callback} transportPhase="disconnected" />);
     expect(screen.getByRole('button', { name: 'Send input' })).toBeDisabled();
-    expect(screen.getByLabelText('Message to selected actor')).toHaveValue('draft');
+    expect(screen.getByRole('textbox', { name: /^Message / })).toHaveValue('draft');
     mounted.rerender(<App data={data} />);
     expect(screen.getByRole('button', { name: 'Retire' })).toBeDisabled();
   });
@@ -191,7 +191,7 @@ describe('linked operator views', () => {
     const callback = vi.fn().mockReturnValueOnce({ kind: 'blocked', reason: 'storage refused' }).mockReturnValueOnce({ kind: 'retained', operationId: 'op', send: 'unknown' });
     render(<App data={data} onHostCommand={callback} />);
     choose();
-    const input = screen.getByLabelText('Message to selected actor');
+    const input = screen.getByRole('textbox', { name: /^Message / });
     fireEvent.change(input, { target: { value: ' exact\n text ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send input' }));
     expect(input).toHaveValue(' exact\n text ');
@@ -199,22 +199,22 @@ describe('linked operator views', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send input' }));
     expect(input).toHaveValue('');
     expect(callback).toHaveBeenLastCalledWith({ action: 'input', target, text: ' exact\n text ' });
-    expect(screen.getByText(/socket send unknown/)).toBeVisible();
+    expect(screen.getByText(/Initial delivery to the host was uncertain/)).toBeVisible();
   });
   it('keeps actor drafts separate across views and clears mounted drafts only on explicit logout', () => {
     route('?view=host');
     render(<App data={data} />);
     choose();
-    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'actor draft' } });
+    fireEvent.change(screen.getByRole('textbox', { name: /^Message / }), { target: { value: 'actor draft' } });
     tab('Timeline');
     tab('Chat');
-    expect(screen.getByLabelText('Message to selected actor')).toHaveValue('actor draft');
+    expect(screen.getByRole('textbox', { name: /^Message / })).toHaveValue('actor draft');
     fireEvent.click(within(screen.getByRole('complementary', { name: 'Workers' })).getByRole('link', { name: '/workflow' }));
-    expect(screen.getByLabelText('Message to selected actor')).toHaveValue('');
+    expect(screen.getByRole('textbox', { name: /^Message / })).toHaveValue('');
     choose();
-    expect(screen.getByLabelText('Message to selected actor')).toHaveValue('actor draft');
+    expect(screen.getByRole('textbox', { name: /^Message / })).toHaveValue('actor draft');
     act(() => clearDrafts());
-    expect(screen.getByLabelText('Message to selected actor')).toHaveValue('');
+    expect(screen.getByRole('textbox', { name: /^Message / })).toHaveValue('');
   });
   it('preserves live drafts and reports persistence failures inline', () => {
     vi.useFakeTimers();
@@ -222,10 +222,10 @@ describe('linked operator views', () => {
     route('?view=host');
     render(<App data={data} />);
     choose();
-    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'still here' } });
+    fireEvent.change(screen.getByRole('textbox', { name: /^Message / }), { target: { value: 'still here' } });
     act(() => vi.advanceTimersByTime(200));
     expect(screen.getByText(/Draft could not be saved/)).toBeVisible();
-    expect(screen.getByLabelText('Message to selected actor')).toHaveValue('still here');
+    expect(screen.getByRole('textbox', { name: /^Message / })).toHaveValue('still here');
   });
   it('keeps demo blocked text and restores exact last sent text beside server refusal', () => {
     route('?view=command');
@@ -249,7 +249,7 @@ describe('linked operator views', () => {
     route('?view=host');
     render(<App data={data} />);
     choose();
-    const input = screen.getByLabelText('Message to selected actor');
+    const input = screen.getByRole('textbox', { name: /^Message / });
     fireEvent.keyDown(input, { key: 'g' });
     fireEvent.keyDown(input, { key: 'l' });
     expect(screen.getByRole('heading', { name: 'Chat', level: 1 })).toBeVisible();
@@ -348,14 +348,14 @@ describe('linked operator views', () => {
   it('immediately persists successful draft clearing without keeping host text as a demo restoration', () => {
     route('?view=host'); const callback = vi.fn(() => ({ kind: 'retained' as const, operationId: 'op', send: 'unknown' as const }));
     render(<App data={data} onHostCommand={callback} />); choose();
-    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: 'sent host text' } });
+    fireEvent.change(screen.getByRole('textbox', { name: /^Message / }), { target: { value: 'sent host text' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send input' }));
     expect(JSON.parse(sessionStorage.getItem('harness.draft.v1:' + JSON.stringify(['run', '/worker', 'old']))!)).toEqual({ key: JSON.stringify(['run', '/worker', 'old']), text: '', lastSubmitted: '' });
   });
 
   it('flushes pending drafts on pagehide before a fast reload', () => {
     route('?view=host'); render(<App data={data} />); choose();
-    fireEvent.change(screen.getByLabelText('Message to selected actor'), { target: { value: ' last typed characters ' } });
+    fireEvent.change(screen.getByRole('textbox', { name: /^Message / }), { target: { value: ' last typed characters ' } });
     act(() => window.dispatchEvent(new Event('pagehide')));
     const stored = JSON.parse(sessionStorage.getItem('harness.draft.v1:' + JSON.stringify(['run', '/worker', 'old']))!);
     expect(stored.text).toBe(' last typed characters ');
