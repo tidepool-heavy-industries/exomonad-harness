@@ -105,6 +105,7 @@ pub enum ChatEntry {
         item: Value,
         tool: Option<ChatTool>,
         input_operation: Option<ChatInputOperation>,
+        provider_item_id: Option<String>,
     },
     Output {
         sequence: i64,
@@ -271,6 +272,7 @@ impl Store {
                             hash,
                             item: serde_json::from_str(&raw)?,
                             tool: None,
+                            provider_item_id: None,
                         }
                     }
                 }
@@ -304,6 +306,7 @@ impl Store {
         if matches!(cursor, Cursor::Before(_)) {
             page.entries.reverse();
         }
+        project_provider_items(&c, &mut page.entries)?;
         project_tools(&c, &mut page.entries)?;
         while serde_json::to_vec(&page)?.len() > MAX_HISTORY_BYTES {
             match cursor {
@@ -394,6 +397,71 @@ fn set_cursor(page: &mut ChatPage, cursor: Cursor) {
         Cursor::After(_) => page.next_after = sequence,
         Cursor::Before(_) => page.previous_before = sequence,
     }
+}
+
+// Only retained provider issuance facts authorize a live-to-published identity.
+// The selected-page join uses the existing request/occurrence index and is bounded
+// by MAX_HISTORY_ITEMS; raw item IDs never establish provider ownership.
+fn project_provider_items(c: &Connection, entries: &mut [ChatEntry]) -> Result<()> {
+    let selected: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ChatEntry::Message {
+                request_id,
+                position,
+                hash,
+                ..
+            } => Some((request_id, position, hash)),
+            _ => None,
+        })
+        .collect();
+    if selected.is_empty() {
+        return Ok(());
+    }
+    let values = vec!["(?,?,?)"; selected.len()].join(",");
+    let sql = format!(
+        "WITH selected(request_id,position,hash) AS (VALUES {values}) SELECT p.request_id,p.occurrence_position,p.item_hash FROM selected s JOIN provider_items p ON p.request_id=s.request_id AND p.occurrence_position=s.position AND p.item_hash=s.hash"
+    );
+    let parameters: Vec<rusqlite::types::Value> = selected
+        .iter()
+        .flat_map(|(request, position, hash)| {
+            [
+                rusqlite::types::Value::Text((*request).clone()),
+                rusqlite::types::Value::Integer(**position),
+                rusqlite::types::Value::Text((*hash).clone()),
+            ]
+        })
+        .collect();
+    let mut query = c.prepare(&sql)?;
+    let issued = query
+        .query_map(rusqlite::params_from_iter(parameters), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<HashSet<_>, _>>()?;
+    for entry in entries {
+        if let ChatEntry::Message {
+            request_id,
+            position,
+            hash,
+            item,
+            provider_item_id,
+            ..
+        } = entry
+        {
+            if issued.contains(&(request_id.clone(), *position, hash.clone())) {
+                *provider_item_id = item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn project_tools(c: &Connection, entries: &mut [ChatEntry]) -> Result<()> {
@@ -508,6 +576,93 @@ mod tests {
             Ok(identity == &self.0)
         }
     }
+    #[test]
+    fn provider_identity_requires_exact_issued_occurrence_not_raw_id_or_hash() {
+        use crate::{
+            model::Effort,
+            transport::{
+                ResponsesProtocol, ResponsesRequest, ResponsesRoute,
+                sse::{ResponseAssembly, StreamEvent},
+            },
+        };
+        let store = Store::memory().unwrap();
+        let request = RequestId("provider-request".into());
+        let input =
+            Item(json!({"type":"message","role":"user","id":"same-id","content":"submitted"}));
+        let finalized =
+            Item(json!({"type":"message","role":"assistant","id":"same-id","content":"final"}));
+        store
+            .write_request(
+                &request,
+                None,
+                "/root",
+                &[input, finalized.clone()],
+                Usage::default(),
+            )
+            .unwrap();
+        let sealed = store
+            .seal_replay_request(&ResponsesRequest {
+                input: vec![],
+                instructions: "instructions".into(),
+                tools: vec![].into(),
+                tools_allowed: None,
+                model: "model".into(),
+                pinned_effort: Effort::Low,
+                session_id: "session".into(),
+            })
+            .unwrap();
+        let issued = store
+            .issue_provider_request(
+                &request,
+                sealed,
+                (ResponsesRoute::Codex, ResponsesProtocol::Lite),
+            )
+            .unwrap();
+        let packet =
+            json!({"type":"response.output_item.done","output_index":0,"item":finalized.0});
+        let StreamEvent::CompletedItem(done) = ResponseAssembly::default()
+            .accept(&packet.to_string())
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("expected completed item")
+        };
+        assert!(store.append_provider_done(&issued, &done).unwrap());
+        let page = store
+            .chat_page_before(&origin(), Some(&request), None, 100)
+            .unwrap();
+        let identities: Vec<_> = page
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ChatEntry::Message {
+                    position,
+                    provider_item_id,
+                    ..
+                } => Some((*position, provider_item_id.as_deref())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(identities, vec![(0, None), (1, None), (2, Some("same-id"))]);
+        let latest = store
+            .chat_page_before(&origin(), Some(&request), None, 1)
+            .unwrap();
+        assert!(
+            matches!(&latest.entries[0], ChatEntry::Message { position: 2, provider_item_id: Some(id), .. } if id == "same-id")
+        );
+        let older = store
+            .chat_page_before(&origin(), Some(&request), latest.previous_before, 1)
+            .unwrap();
+        assert!(matches!(
+            &older.entries[0],
+            ChatEntry::Message {
+                position: 1,
+                provider_item_id: None,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn equal_inputs_retain_exact_envelope_operation_and_publication_position() {
         let store = Store::memory().unwrap();
