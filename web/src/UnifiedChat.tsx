@@ -33,6 +33,7 @@ export function decodeUnifiedPage(value: unknown, origin: ActorOutputOrigin, cur
     last = sequence
     if (entry.kind === 'message' || entry.kind === 'oversized') {
       if (!entry.requestId || BigInt(entry.position) < 0n || !/^[0-9a-f]{64}$/.test(entry.hash)) throw new Error('Unified conversation contains an invalid message.')
+      if (entry.kind === 'message' && entry.providerItemId !== null && (!entry.providerItemId || !object(entry.item) || entry.item.id !== entry.providerItemId)) throw new Error('Unified conversation contains invalid provider identity.')
       if (entry.kind === 'message' && entry.tool != null) {
         const { operation, invocation } = entry.tool
         if (!operation.request || !operation.call || invocation.request !== operation.request || BigInt(invocation.position) < 0n
@@ -100,15 +101,25 @@ function UnifiedChatView({ origin, requestId, revision, ready, active, onAuthExp
   const replaceLatest = useRef(false)
   const latestSequence = useRef('0')
   const previousLive = useRef('')
+  const observedFinals = useRef<ReadonlySet<string>>(new Set())
   const identity = actorOutputKey(origin)
   const scopedOutput = modelOrigin ? liveOutput.filter(item => originKey(item.origin) === originKey(modelOrigin)) : []
-  const rows = projectTimeline(origin, entries, scopedOutput, modelOrigin)
+  const projected = projectTimeline(origin, entries, scopedOutput, modelOrigin)
+  // Retain only exact keys still present in the already bounded live preview set.
+  // Window eviction cannot revoke a final publication already rendered here.
+  const residentPreviewKeys = new Set(projectTimeline(origin, [], scopedOutput, modelOrigin).map(row => row.key))
+  const knownFinals = new Set([...observedFinals.current].filter(key => residentPreviewKeys.has(key)))
+  const rows = projected.filter(row => row.kind !== 'live' || !knownFinals.has(row.key))
   const renderedInputs = rows.flatMap(row => 'entry' in row && row.entry.kind === 'message' && row.entry.inputOperation ? [row.entry.inputOperation] : [])
   const inputVersion = JSON.stringify(renderedInputs)
   const inputCallback = useRef(onRenderedInputs)
   inputCallback.current = onRenderedInputs
   useLayoutEffect(() => { inputCallback.current?.(renderedInputs) }, [inputVersion])
   const liveVersion = JSON.stringify(scopedOutput.map(item => [outputKey(item), item.version, item.streaming]))
+  useLayoutEffect(() => {
+    for (const row of projected) if (row.kind !== 'live' && residentPreviewKeys.has(row.key)) knownFinals.add(row.key)
+    observedFinals.current = knownFinals
+  }, [entries, liveVersion])
   function revealLatest() {
     const element = section.current?.closest<HTMLElement>('.worker-chat-scroll')
     if (element) element.scrollTop = element.scrollHeight
