@@ -321,20 +321,18 @@ fn intervening_compaction_conflicts_and_preserves_call_occurrence() {
 #[test]
 fn pending_and_standing_groups_are_protected() {
     let store = Store::memory().unwrap();
-    let (head, operation) = setup(&store);
     let prefix = RequestId("prefix".into());
     store.write_request(&prefix,None,"/root",&[
         Item(json!({"type":"message","role":"developer","content":"standing"})),
         Item(json!({"type":"function_call","call_id":"pending","name":"work","arguments":"{}"})),
     ],Usage::default()).unwrap();
-    store
-        .lock()
-        .unwrap()
-        .execute(
-            "UPDATE requests SET parent_id=?2 WHERE id=?1",
-            params![head.0, prefix.0],
-        )
-        .unwrap();
+    let head = RequestId("root".into());
+    store.write_request(&head, Some(&prefix), "/root", &[
+        Item(json!({"type":"message","role":"user","content":"old context","unknown":{"retain":true}})),
+        Item(json!({"type":"custom_tool_call","call_id":"edit","name":"haskell_sync","input":"modifyContext"})),
+    ], Usage::default()).unwrap();
+    store.set_effort(&head, Effort::Low).unwrap();
+    let operation = claim_edit(&store, &head);
     let snapshot = store.begin_context(&operation, &head).unwrap();
     let draft = ContextDraft {
         next_effort: None,
@@ -894,7 +892,6 @@ fn saved_context_restores_owned_prior_text_and_native_group_preserving_suffix() 
 fn saved_native_restore_refuses_missing_or_forged_original_claim() {
     for forged in [false, true] {
         let store = Store::memory().unwrap();
-        let (head, first) = setup(&store);
         let parent = RequestId("completed".into());
         let invocation =
             Item(json!({"type":"function_call","call_id":"done","name":"read","arguments":"{}"}));
@@ -910,14 +907,13 @@ fn saved_native_restore_refuses_missing_or_forged_original_claim() {
         store
             .append_operation_output(&completed, &parent, &parent)
             .unwrap();
-        store
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE requests SET parent_id=?2 WHERE id=?1",
-                params![head.0, parent.0],
-            )
-            .unwrap();
+        let head = RequestId("root".into());
+        store.write_request(&head, Some(&parent), "/root", &[
+            Item(json!({"type":"message","role":"user","content":"old context","unknown":{"retain":true}})),
+            Item(json!({"type":"custom_tool_call","call_id":"edit","name":"haskell_sync","input":"modifyContext"})),
+        ], Usage::default()).unwrap();
+        store.set_effort(&head, Effort::Low).unwrap();
+        let first = claim_edit(&store, &head);
         store.append_items(&head, &[Item(json!({"type":"custom_tool_call","call_id":"restore","name":"haskell_sync","input":"restore"}))]).unwrap();
         let second = store.claim(&CallId("restore".into()), &head).unwrap();
         let snapshot = store.begin_context(&first, &head).unwrap();
