@@ -36,7 +36,7 @@ class Profiles(unittest.TestCase):
                 with self.subTest(profile=profile, rule=name):
                     namespace, calls = rules(profile)
                     namespace[name](name="case", rustc_flags=["--cfg=fixture"])
-                    kind = "dependency-library" if name == "dependency_rust_library" else "first-party"
+                    kind = "dependency-library" if name == "dependency_rust_library" else "dependency-binary" if name == "dependency_rust_binary" else "first-party"
                     flags = calls[0]["rustc_flags"]
                     self.assertIn("--cfg=fixture", flags)
                     CHECK.inspect(["/pinned/rustc", "-Cforce-frame-pointers=yes", "-Clinker=/pinned/cc", *flags],

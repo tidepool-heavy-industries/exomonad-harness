@@ -13,12 +13,12 @@ def selected_profile():
 def dependency_library_optimization_level():
     return "0" if selected_profile() == "debug" else "2"
 
-def _flags(dependency_library, flags):
+def _flags(dependency, flags):
     profile = selected_profile()
     for flag in flags:
         if flag.startswith("-Copt-level=") or flag.startswith("opt-level="):
             fail("optimization belongs to tidepool.profile, not per-target rustc_flags")
-    level = "2" if profile == "production" or (profile == "fast-dev" and dependency_library) else "0"
+    level = "2" if profile == "production" or (profile == "fast-dev" and dependency) else "0"
     return list(flags) + ["-Copt-level=" + level]
 
 def rust_library(rustc_flags = [], **kwargs):
@@ -34,4 +34,4 @@ def dependency_rust_library(rustc_flags = [], **kwargs):
     cargo.rust_library(rustc_flags = _flags(True, rustc_flags), **kwargs)
 
 def dependency_rust_binary(rustc_flags = [], **kwargs):
-    cargo.rust_binary(rustc_flags = _flags(False, rustc_flags), **kwargs)
+    cargo.rust_binary(rustc_flags = _flags(True, rustc_flags), **kwargs)

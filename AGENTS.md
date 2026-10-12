@@ -5,7 +5,7 @@ Build through the pinned Nix/Buck toolchain described in README.md. The shared
 It also applies when Harness is an external cell in a Tidepool workspace.
 
 `fast-dev` compiles first-party libraries, binaries and tests at O0 while retaining
-O2 dependency libraries. This bounds feedback work without repeatedly optimizing
+O2 dependency libraries and build-script binaries. This bounds feedback work without repeatedly optimizing
 the monolithic unit executable. `debug` compiles every Rust target at O0.
 `production` preserves Harness's existing O2 policy. Optimization belongs to
 `build/rust/profiles.bzl`; toolchains retain compiler identity, frame pointers and

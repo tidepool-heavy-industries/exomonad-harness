@@ -8,7 +8,7 @@ import subprocess
 
 
 def inspect(arguments, profile, kind, rustc, linker):
-    expected = "2" if profile == "production" or (profile == "fast-dev" and kind == "dependency-library") else "0"
+    expected = "2" if profile == "production" or (profile == "fast-dev" and kind.startswith("dependency-")) else "0"
     levels = []
     for index, argument in enumerate(arguments):
         if argument.startswith("-Copt-level="):
