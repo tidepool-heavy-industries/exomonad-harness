@@ -370,7 +370,7 @@ async fn failed_auxiliary_issuance_does_not_pollute_embedded_frontier() {
     let store = Arc::new(Store::memory().unwrap());
     let identity = crate::embedding::HostIdentity {
         run: "run".into(),
-        actor: AgentPath("/test".into()),
+        actor: AgentPath("/root".into()),
         incarnation: "issuer".into(),
     };
     store.bind_embedded_actor(&identity, None).unwrap();
@@ -387,13 +387,14 @@ async fn failed_auxiliary_issuance_does_not_pollute_embedded_frontier() {
         cancel: None,
         request: Arc::new(Mutex::new(None)),
     };
-    let engine = engine(store.clone(), script, effects.clone()).with_origin(
+    let mut engine = engine(store.clone(), script, effects.clone()).with_origin(
         ConversationIdentity::Embedded {
             run: identity.run.clone(),
             actor: identity.actor.clone(),
             incarnation: identity.incarnation.clone(),
         },
     );
+    engine.config.agent = identity.actor.clone();
     store.lock().unwrap().execute_batch("CREATE TEMP TRIGGER refuse_auxiliary_issuance BEFORE INSERT ON provider_requests BEGIN SELECT RAISE(ABORT,'injected issuance refusal'); END;").unwrap();
     assert!(
         engine
