@@ -71,3 +71,44 @@
   .worker-chat-composer { padding: 8px; }
   .worker-chat-composer textarea { min-height: 64px; }
 }
+
+.worker-chat { grid-template-columns: minmax(13rem, 17rem) minmax(0, 1fr); gap: 24px; }
+.worker-chat-list li:has(a[aria-current="page"]) { background: var(--panel); }
+.actor-heading { margin-bottom: 24px; }
+.actor-state { color: var(--muted); }
+.mounted-form { padding: 16px 20px; border: 1px solid var(--line); background: var(--panel); border-radius: 6px; scroll-margin-block: 7rem; }
+.mounted-form[data-state="open"] { border-color: var(--pending); }
+.mounted-form h3 { margin: 0 0 12px; font-size: 16px; }
+.mounted-form[data-state="open"] h3 { color: var(--ink); }
+.mounted-form fieldset { border: 0; padding-inline: 0; }
+.mounted-form legend { font-weight: 600; padding: 0; margin-bottom: 6px; }
+.mounted-form input[aria-invalid="true"] { border-color: var(--failed); }
+.mounted-form .form-field { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin-block: 12px; }
+.mounted-form .form-field input { grid-column: 1; width: 100%; }
+.form-option { padding: 8px; border: 1px solid transparent; border-radius: 4px; }
+.form-option:has(input:checked) { background: var(--paper); border-color: var(--accent); }
+.form-option:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.form-actions button:first-child { border-color: var(--accent); }
+.form-fixed-field { grid-template-columns: minmax(6rem, 10rem) minmax(0, 1fr); }
+.form-fixed-field dt { color: var(--muted); }
+.form-response-summary { margin-block: 12px; }
+.mounted-form > details { margin-top: 12px; color: var(--muted); }
+.worker-chat-scroll { scroll-padding-block: 7rem 1rem; }
+@media (max-width: 700px) { .worker-chat { grid-template-columns: minmax(0, 1fr); gap: 8px; } .mounted-form { padding: 12px; } }
+.rich-view-truncated { color: var(--pending-text); }
+/* A short or zoomed viewport must allow page scrolling instead of squeezing
+   the transcript to zero height behind its composer. */
+@media (max-height: 600px) {
+  #root:has(.harness.is-chat) { height: auto; }
+  .harness.is-chat, .harness.is-chat main, .worker-chat { flex: none; }
+  .worker-chat-conversation { grid-template-rows: auto auto; overflow: visible; }
+  .worker-chat-scroll { overflow: visible; }
+  .worker-chat-list { max-height: 18rem; }
+}
+@media (max-width: 700px) {
+  #root > .session-bar { gap: 6px; padding: 6px 8px; font-size: 11px; }
+  #root > .session-bar button { min-height: 30px; padding: 4px 8px; }
+  .harness.is-chat .brand { width: auto; }
+  .harness.is-chat .top { gap: 8px; }
+  .harness.is-chat .tab { padding: 6px; }
+}

@@ -30,7 +30,15 @@ function storedMessageKey(origin: ActorOutputOrigin, entry: MessageEntry): strin
 }
 export function mergeEntries(current: readonly UnifiedEntry[], incoming: readonly UnifiedEntry[]): UnifiedEntry[] {
   const bySequence = new Map(current.map(entry => [entry.sequence, entry]))
-  for (const entry of incoming) bySequence.set(entry.sequence, entry)
+  for (const entry of incoming) {
+    const retained = bySequence.get(entry.sequence)
+    // A form's HTTP response may be newer than an in-flight history snapshot.
+    if (retained?.kind === 'form' && entry.kind === 'form') {
+      const order = compareDecimal(retained.form.revisionSequence, entry.form.revisionSequence)
+      if (order > 0 || order === 0 && retained.form.state !== 'open' && entry.form.state === 'open') continue
+    }
+    bySequence.set(entry.sequence, entry)
+  }
   return [...bySequence.values()].sort((a, b) => compareDecimal(a.sequence, b.sequence))
 }
 // Presentation budget: eight 50-entry pages and at most eight 256-KiB responses.

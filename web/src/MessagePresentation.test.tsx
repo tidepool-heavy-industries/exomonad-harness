@@ -21,6 +21,15 @@ function overflowingViewport() {
 }
 
 describe('message presentation', () => {
+  it('keeps long prose open while allowing a long embedded code block to expand', () => {
+    overflowingViewport()
+    render(<MessageContent text={'First paragraph.\n\n```haskell\n' + 'observe value\n'.repeat(90) + '```\n\nLast paragraph.'} label="Answer" format="markdown" />)
+    expect(screen.queryByRole('button', { name: 'Expand Answer' })).toBeNull()
+    expect(screen.getByText('Last paragraph.')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand code' }))
+    expect(screen.getByRole('button', { name: 'Collapse code' })).toHaveAttribute('aria-expanded', 'true')
+  })
+
   it('renders Markdown paragraphs, lists, emphasis and code with safe links and no raw HTML', () => {
     const text = '# Result\n\nFirst **strong** paragraph with `inline`.\n\nSecond paragraph.\n\n- one\n- two\n\n[safe](https://example.com) [unsafe](javascript:alert%281%29)\n\n<script>alert(1)</script>\n\n<iframe src="https://example.com"></iframe>'
     const { container } = render(<MessageContent text={text} label="Answer" format="markdown" />)
@@ -96,7 +105,7 @@ describe('message presentation', () => {
     const writeText = clipboard()
     const code = `${'x'.repeat(1999)}🐈\n${'next(λ)\n'.repeat(100)}`
     const text = `\`\`\`text\n${code}\`\`\`\n\n[Retained tail](https://example.com).`
-    const { container } = render(<MessageContent text={text} label="Long answer" format="markdown" />)
+    const { container } = render(<MessageContent text={text} label="Long answer" format="markdown" bounded />)
     expect(screen.getByRole('button', { name: 'Expand Long answer' })).toHaveAttribute('aria-expanded', 'false')
     expect(container.querySelector('pre code')?.textContent).toBe(code)
     fireEvent.click(screen.getByRole('button', { name: 'Expand Long answer' }))

@@ -123,7 +123,16 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
       <div className="worker-chat-scroll" role="region" aria-label="Worker conversation" tabIndex={0}>
       {identity && <header className="actor-heading">
         <h2>{identity.actor}</h2>
-        {resolved.actor && <p className="actor-state">{resolved.actor.kind} · {resolved.actor.lifecycle}{resolved.actor.inference && ` · inference ${resolved.actor.inference.state}`}</p>}
+        {resolved.actor && <p className="actor-state" role="status">
+          {transportPhase !== 'ready' ? 'Connection unavailable · showing retained activity'
+            : !['running', 'waiting'].includes(resolved.actor.lifecycle) ? `Read-only · ${resolved.actor.lifecycle}`
+            : resolved.actor.inference?.state === 'blocked' ? 'Recovery needed · inference is paused'
+            : resolved.actor.inference?.state === 'recovering' ? 'Recovery in progress'
+            : resolved.actor.inference?.state === 'running' ? 'Working'
+            : resolved.actor.lifecycle === 'waiting' ? 'Waiting'
+            : resolved.actor.inference?.state === 'idle' ? 'Ready for input'
+            : resolved.actor.lifecycle}
+        </p>}
         <details className="actor-technical-details"><summary>Actor details</summary>
         <p className="meta">run {identity.run} · incarnation {identity.incarnation}</p>
         {resolved.actor && <dl className="actor-details">
@@ -146,6 +155,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
             revision={(data.actorOutputRevisions ?? []).find(reference => actorOutputKey(reference.origin) === actorOutputKey(outputOrigin))?.sequence}
             ready={transportPhase === 'ready'} active={!!resolved.actor && ['running', 'waiting'].includes(resolved.actor.lifecycle)} onAuthExpired={onAuthExpired}
             liveOutput={liveOutput} requests={new Map(data.timeline.filter(item => item.kind === 'request').map(item => [item.id, item]))}
+            jobs={!ambiguousConversation && resolved.conversationId ? data.timeline.filter(item => item.kind === 'job' && item.nodeId === resolved.conversationId) : []}
             legacy={resolved.actor?.kind === 'workflow' ? undefined : (conversationId || exactHead) && head ? <ChatHistory key={JSON.stringify([context, conversationId])}
             cacheKey={JSON.stringify([context, conversationId])} requestId={head.id}
             requests={new Map(data.timeline.filter(item => item.kind === 'request').map(item => [item.id, item]))}

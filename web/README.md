@@ -1,5 +1,13 @@
 # Operator web view
 
+The chat uses Solarized Dark with full prose, expandable code/results, inline
+forms, and execution observations attached to tool calls. The
+[chat brief](../docs/gui-usability-brief.md) records the current design decisions;
+the [telemetry PRD](../docs/gui-execution-telemetry-prd.md) requests compiler/effect
+observations that are not yet available. Pending-form indicators cover loaded
+history only. Browser checks exercise both OS color preferences; the selected
+application palette remains Solarized Dark.
+
 The production entry point always checks `/api/session`, then connects to the
 same-origin `/api/ws` after authentication. It waits for an authoritative snapshot.
 Serving the asset directory alone does not provide a working operator session.

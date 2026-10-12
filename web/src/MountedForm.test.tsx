@@ -102,6 +102,17 @@ describe('mounted actor forms', () => {
     expect((screen.getAllByLabelText('Same label')[1] as HTMLInputElement).checked).toBe(true)
   })
 
+  it('focuses the invalid field and describes its server validation error without losing the draft', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ ...openForm, revisionSequence: '12', errors: [{ field: 'name', message: 'Enter a project name' }] }))))
+    render(<MountedForm form={openForm} ready active />)
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'typed draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    await waitFor(() => expect(screen.getByLabelText('Name')).toHaveFocus())
+    expect(screen.getByLabelText('Name')).toHaveValue('typed draft')
+    expect(screen.getByLabelText('Name')).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByLabelText('Name')).toHaveAccessibleDescription(/Enter a project name/)
+  })
+
   it('renders terminal form answers and submitted values read-only', () => {
     const terminal: StoredActorForm = { ...openForm, state: 'answered', draft: { name: 'final' }, answer: { kind: 'markdown', text: '**done**' } }
     render(<MountedForm form={terminal} ready active />)

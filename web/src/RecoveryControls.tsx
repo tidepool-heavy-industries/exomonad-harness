@@ -15,8 +15,9 @@ export default function RecoveryControls({ target, block, ready, submit, onResul
   const mode = decision && sameInferenceBlock(decision.block, block) ? decision.mode : undefined
   return <section className="inference-recovery" aria-label="Inference recovery">
     <h3>Recover inference</h3>
-    <p>Inference is blocked at request {block.request}, generation {block.generation}. New input can be admitted to the queue; admission does not establish execution.</p>
-    <p className="meta">Reason: {block.reason.kind.replaceAll('_', ' ')} · actor {target.actor} · run {target.run} · incarnation {target.incarnation}</p>
+    <p>Inference is paused. Choose how to recover before the agent can continue. New messages can still queue.</p>
+    <p>Reason: {block.reason.kind.replaceAll('_', ' ')}</p>
+    <details><summary>Recovery details</summary><p className="meta">Request {block.request} · generation {block.generation} · actor {target.actor} · run {target.run} · incarnation {target.incarnation}</p></details>
     <fieldset disabled={!ready || !submit || submitted}>
       <legend>Choose recovery evidence</legend>
       <label><input type="radio" name="recovery-mode" checked={mode === 'exact'} onChange={() => setDecision({ block, mode: 'exact' })} />Exact retained prefix</label>

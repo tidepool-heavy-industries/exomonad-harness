@@ -7,6 +7,51 @@ afterEach(() => { vi.unstubAllGlobals(); clearMountedFormDrafts() })
 
 describe('unified conversation pages', () => {
   const origin = { run: 'r', nativeActor: '3', incarnation: '1' }
+  it('clears the pending form indicator from the HTTP response and does not regress on a stale history refresh', async () => {
+    const form = { sequence: '1', revisionSequence: '1', opening: { origin, mountId: 'response', execution: { kind: 'actor_program' }, conversation: null,
+      form: { version: 1, root: { kind: 'text', id: 'name', label: 'Project', initial: null } } }, state: 'open', attemptId: null, draft: null, errors: [], answer: null }
+    const page = { origin, entries: [{ sequence: '1', kind: 'form', form }], cutoverSequence: '0', legacyHistory: false, nextAfter: null, previousBefore: null }
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => new Response(JSON.stringify(url.includes('/submit')
+      ? { ...form, revisionSequence: '2', state: 'submitted', draft: { name: 'Harness' } } : page))))
+    render(<UnifiedChat origin={origin} ready active />)
+    await screen.findByRole('navigation', { name: 'Pending responses' })
+    fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'Harness' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    await waitFor(() => expect(screen.queryByRole('navigation', { name: 'Pending responses' })).toBeNull())
+    expect(screen.getByText('Harness')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh conversation' }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3))
+    expect(screen.queryByRole('button', { name: 'Submit' })).toBeNull()
+    expect(screen.queryByRole('navigation', { name: 'Pending responses' })).toBeNull()
+  })
+
+  it('keeps tool input visible and execution disclosure open when a preview becomes retained history', async () => {
+    const modelOrigin = { kind: 'embedded' as const, run: 'r', actor: '/worker', incarnation: 'one' }
+    const live = { origin: modelOrigin, requestId: 'req', itemId: 'cell', channel: 'tool_input' as const, index: '0', text: 'observe value', streaming: true, version: '1', overflow: false, committedHash: null }
+    let entries: unknown[] = []
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ origin, entries, cutoverSequence: '0', legacyHistory: false, nextAfter: null, previousBefore: null }))))
+    const mounted = render(<UnifiedChat origin={origin} modelOrigin={modelOrigin} ready active={false} liveOutput={[live]} />)
+    expect(await screen.findByText('observe value')).toBeVisible()
+    const disclosure = screen.getByText('Execution log').closest('details')!
+    disclosure.open = true; fireEvent(disclosure, new Event('toggle'))
+    const hash = 'a'.repeat(64)
+    entries = [{ sequence: '2', kind: 'message', requestId: 'req', position: '0', hash, providerItemId: 'cell', inputOperation: null,
+      tool: { operation: { origin: modelOrigin, request: 'req', call: 'call' }, invocation: { request: 'req', position: '0', hash } },
+      item: { type: 'custom_tool_call', id: 'cell', name: 'haskell', call_id: 'call', input: 'observe value' } }]
+    mounted.rerender(<UnifiedChat origin={origin} revision="2" modelOrigin={modelOrigin} ready active={false} liveOutput={[live]} />)
+    await screen.findByRole('heading', { name: 'haskell' })
+    expect(screen.getByText('observe value')).toBeVisible()
+    expect(screen.getByText('Execution log').closest('details')).toHaveAttribute('open')
+    expect(screen.getByText('No loaded result')).toBeVisible()
+    expect(screen.queryByText('Running')).toBeNull()
+    const jobs = [
+      { id: 'unrelated', nodeId: 'worker', kind: 'job' as const, label: 'job', state: 'running', requestId: 'other-request', callId: 'call' },
+      { id: 'owned', nodeId: 'worker', kind: 'job' as const, label: 'job', state: 'settled', requestId: 'req', callId: 'call', startedAtMs: 1000, endedAtMs: 2500 },
+    ]
+    mounted.rerender(<UnifiedChat origin={origin} revision="2" modelOrigin={modelOrigin} ready active={false} liveOutput={[live]} jobs={jobs} />)
+    expect(screen.getByText(/Host duration: 1.5 s/)).toBeVisible()
+    expect(screen.queryByText(/Tool running/)).toBeNull()
+  })
   it('preserves server sequence order and rejects timestamp shaped alternatives', () => {
     const page = { origin, cutoverSequence: '4', legacyHistory: true, entries: [
       { sequence: '4', kind: 'message', requestId: 'req', position: '0', hash: 'a'.repeat(64), tool: null, providerItemId: null, inputOperation: null, item: { type: 'message' } },

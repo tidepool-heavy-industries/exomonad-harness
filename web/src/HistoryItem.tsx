@@ -62,7 +62,7 @@ function blocks(value: unknown, types: readonly string[]): { texts: string[]; un
   return { texts, unknownBlocks }
 }
 
-function readable(value: unknown): ReadableItem | undefined {
+export function readable(value: unknown): ReadableItem | undefined {
   if (!object(value) || typeof value.type !== 'string') return undefined
   if (value.type === 'message' && typeof value.role === 'string') {
     const content = blocks(value.content, ['input_text', 'output_text', 'refusal'])
@@ -114,7 +114,7 @@ export default function HistoryItem({ entry, listItem = true }: { readonly entry
   // Empty or opaque-only reasoning adds no chat content; unfamiliar blocks remain inspectable.
   if (object(entry.item) && entry.item.type === 'reasoning' && view?.texts.length === 0 && !view.unknownBlocks) return null
   const texts = view?.texts.map((part, index, parts) => <div key={index} className={`history-${part.kind}`}>
-    <MessageContent text={part.text} copyText={part.copyText} format={part.format} label={`${part.label} item ${entry.position}${parts.length > 1 ? ` block ${index + 1}` : ''}`} />
+    <MessageContent text={part.text} copyText={part.copyText} format={part.format} bounded={part.kind === 'code'} memoryKey={`part:${index}`} label={`${part.label} item ${entry.position}${parts.length > 1 ? ` block ${index + 1}` : ''}`} />
   </div>)
   const rawContent = rawVisible && <MessageContent key="raw" text={raw ?? 'Raw data could not be represented as JSON.'} label={`Raw item ${entry.position}`} />
   return <MessagePresentation listItem={listItem} kind={view?.kind ?? 'activity'} title={view?.label ?? 'Unrecognized item · Raw data'} collapsed={view?.kind === 'reasoning' && view.texts.length > 0}

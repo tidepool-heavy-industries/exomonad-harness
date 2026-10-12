@@ -11,7 +11,9 @@ import { isChatPage } from './generated/validators.mjs'
 import type { ChatPage, ChatEntry, ChatInputOperation } from './generated/chat'
 import './UnifiedChat.css'
 import { RichViewRenderer } from './rich-view'
-import type { HarnessViewModel } from './view-model'
+import ToolActivity, { type ExchangeObservation, type ToolJobObservation } from './ToolActivity'
+import { PresentationMemory } from './presentation-state'
+import { hasChatSelection, useChatSelection } from './chat-selection'
 
 export type UnifiedEntry = ChatEntry
 export type UnifiedPage = ChatPage
@@ -78,11 +80,12 @@ function restoreAnchor(section: HTMLElement | null, anchor: ScrollAnchor | undef
 }
 
 export interface UnifiedChatProps {
+  jobs?: readonly ToolJobObservation[]
   origin: ActorOutputOrigin; requestId?: string; revision?: string; ready: boolean; active: boolean; onAuthExpired?: () => void; legacy?: ReactNode
-  liveOutput?: readonly LiveOutput[]; modelOrigin?: OutputOrigin; onRenderedInputs?: (references: readonly ChatInputOperation[]) => void; requests?: ReadonlyMap<string, Pick<HarnessViewModel['timeline'][number], 'id' | 'state' | 'detail' | 'failure'>>
+  liveOutput?: readonly LiveOutput[]; modelOrigin?: OutputOrigin; onRenderedInputs?: (references: readonly ChatInputOperation[]) => void; requests?: ReadonlyMap<string, ExchangeObservation>
 }
 export default function UnifiedChat(props: UnifiedChatProps) { return <UnifiedChatView key={actorOutputKey(props.origin)} {...props} /> }
-function UnifiedChatView({ origin, requestId, revision, ready, active, onAuthExpired, legacy, liveOutput = [], requests, modelOrigin, onRenderedInputs }: UnifiedChatProps) {
+function UnifiedChatView({ origin, requestId, revision, ready, active, onAuthExpired, legacy, liveOutput = [], requests, jobs = [], modelOrigin, onRenderedInputs }: UnifiedChatProps) {
   const [page, setPage] = useState<UnifiedPage>()
   const [entries, setEntries] = useState<readonly UnifiedEntry[]>([])
   const entriesRef = useRef(entries)
@@ -94,6 +97,7 @@ function UnifiedChatView({ origin, requestId, revision, ready, active, onAuthExp
   const [newActivity, setNewActivity] = useState(false)
   const [windowed, setWindowed] = useState(false)
   const section = useRef<HTMLElement>(null)
+  const lastFormJump = useRef<string>()
   const pinned = useRef(true)
   const anchor = useRef<ScrollAnchor>()
   const controllerOlder = useRef<AbortController>()
@@ -110,12 +114,27 @@ function UnifiedChatView({ origin, requestId, revision, ready, active, onAuthExp
   const residentPreviewKeys = new Set(projectTimeline(origin, [], scopedOutput, modelOrigin).map(row => row.key))
   const knownFinals = new Set([...observedFinals.current].filter(key => residentPreviewKeys.has(key)))
   const rows = projected.filter(row => row.kind !== 'live' || !knownFinals.has(row.key))
+  const openForms = entries.filter((entry): entry is Extract<UnifiedEntry, { kind: 'form' }> => entry.kind === 'form' && entry.form.state === 'open')
+  function updateForm(form: StoredActorForm) {
+    setEntries(current => mergeEntries(current, [{ kind: 'form', sequence: form.sequence, form }]))
+  }
+  function jumpToForm() {
+    const index = openForms.findIndex(entry => entry.form.opening.mountId === lastFormJump.current)
+    const next = openForms[(index + 1) % openForms.length]
+    if (!next) return
+    lastFormJump.current = next.form.opening.mountId
+    const form = [...(section.current?.querySelectorAll<HTMLElement>('[data-mount-id]') ?? [])].find(element => element.dataset.mountId === next.form.opening.mountId)
+    pinned.current = false
+    form?.scrollIntoView({ block: 'center' })
+    ;(form?.querySelector<HTMLElement>('input:not(:disabled), textarea:not(:disabled), select:not(:disabled)') ?? form)?.focus({ preventScroll: true })
+  }
   const renderedInputs = rows.flatMap(row => 'entry' in row && row.entry.kind === 'message' && row.entry.inputOperation ? [row.entry.inputOperation] : [])
   const inputVersion = JSON.stringify(renderedInputs)
   const inputCallback = useRef(onRenderedInputs)
   inputCallback.current = onRenderedInputs
   useLayoutEffect(() => { inputCallback.current?.(renderedInputs) }, [inputVersion])
   const liveVersion = JSON.stringify(scopedOutput.map(item => [outputKey(item), item.version, item.streaming]))
+  useChatSelection(section, entries, liveVersion)
   useLayoutEffect(() => {
     for (const row of projected) if (row.kind !== 'live' && residentPreviewKeys.has(row.key)) knownFinals.add(row.key)
     observedFinals.current = knownFinals
@@ -135,10 +154,10 @@ function UnifiedChatView({ origin, requestId, revision, ready, active, onAuthExp
   }, [identity])
   useLayoutEffect(() => {
     if (anchor.current) { restoreAnchor(section.current, anchor.current); anchor.current = undefined }
-    else if (pinned.current) revealLatest()
+    else if (pinned.current && !hasChatSelection(section.current)) revealLatest()
   }, [entries, liveVersion])
   useEffect(() => {
-    if (previousLive.current && previousLive.current !== liveVersion && !pinned.current) setNewActivity(true)
+    if (previousLive.current && previousLive.current !== liveVersion && (!pinned.current || hasChatSelection(section.current))) setNewActivity(true)
     previousLive.current = liveVersion
   }, [liveVersion])
   useEffect(() => {
@@ -160,7 +179,7 @@ function UnifiedChatView({ origin, requestId, revision, ready, active, onAuthExp
           const current = entriesRef.current
           const overlap = next.entries.some(entry => current.some(old => old.sequence === entry.sequence))
           const newerWindow = current.length > 0 && next.entries.length > 0 && !overlap && BigInt(next.entries[0]!.sequence) > BigInt(current.at(-1)!.sequence)
-          if (replaceLatest.current) { replaceLatest.current = false; setEntries(next.entries); setOlder(next.previousBefore ?? null); setWindowed(false) }
+          if (replaceLatest.current) { replaceLatest.current = false; setEntries(mergeEntries(current.filter(entry => next.entries.some(nextEntry => nextEntry.sequence === entry.sequence)), next.entries)); setOlder(next.previousBefore ?? null); setWindowed(false) }
           else if (newerWindow && !pinned.current) { setWindowed(true); setNewActivity(true) }
           else if (newerWindow) { setEntries(next.entries); setOlder(next.previousBefore ?? null); setWindowed(false) }
           else {
@@ -203,6 +222,10 @@ function UnifiedChatView({ origin, requestId, revision, ready, active, onAuthExp
   const failedRequests = [...(requests?.values() ?? [])].filter(item => item.state === 'failed'
     && entries.some(entry => entry.kind === 'message' && entry.requestId === item.id))
   return <section ref={section} className="unified-chat" aria-label="Conversation" aria-busy={ready && !page}>
+    {active && openForms.length > 0 && <nav className="chat-attention" aria-label="Pending responses">
+      <span role="status">{openForms.length} {openForms.length === 1 ? 'form needs' : 'forms need'} your response <small>in loaded history{!ready ? ' · reconnect to respond' : ''}</small></span>
+      <button type="button" onClick={jumpToForm}>{openForms.length === 1 ? 'Jump to form' : 'Jump to next form'}</button>
+    </nav>}
     <div className="toolbar"><h2>Conversation</h2><button type="button" disabled={!ready} onClick={() => setAttempt(value => value + 1)}>Refresh conversation</button></div>
     {!ready && <p role="status">Host unavailable; retained conversation entries remain visible.</p>}
     {!modelOrigin && liveOutput.length > 0 && <p role="status">Live output is unavailable for this actor.</p>}
@@ -211,9 +234,9 @@ function UnifiedChatView({ origin, requestId, revision, ready, active, onAuthExp
     {page?.legacyHistory && older === null && <details><summary>Legacy message history</summary><p className="meta">Older messages use retained request order. Their order relative to displays and forms is unavailable before sequence {page.cutoverSequence}.</p>{legacy}</details>}
     {failedRequests.map(item => <div className="error" role="alert" key={item.id}><strong>Exchange failed</strong><p>{item.detail ?? 'The model request failed.'}</p><details><summary>Exchange details</summary>{item.id}</details></div>)}
     <div className="unified-entries" role="list" aria-label="Conversation entries">{rows.map(row => <div role="listitem" className="timeline-row" key={row.key} data-timeline-key={row.key} data-sequence={'entry' in row ? row.entry.sequence : undefined}>
-      <TimelineContent row={row} streamingActive={ready && active} />
+      <PresentationMemory><TimelineContent row={row} streamingActive={ready && active} requests={requests} jobs={jobs} modelOrigin={modelOrigin} /></PresentationMemory>
       {row.kind === 'entry' && row.entry.kind === 'output' && <UnifiedOutput entry={row.entry} origin={origin} ready={ready} active={active} onAuthExpired={onAuthExpired} onExpanded={() => setAttempt(value => value + 1)} />}
-      {row.kind === 'entry' && row.entry.kind === 'form' && <MountedFormEntry form={row.entry.form} ready={ready} active={active} onAuthExpired={onAuthExpired} />}
+      {row.kind === 'entry' && row.entry.kind === 'form' && <MountedForm form={row.entry.form} ready={ready} active={active} onAuthExpired={onAuthExpired} onStateChange={updateForm} />}
       {'entry' in row && <details className="timeline-metadata"><summary>Publication details</summary><p>Sequence {row.entry.sequence}</p>{(row.entry.kind === 'message' || row.entry.kind === 'oversized') && <p>Exchange {row.entry.requestId} · position {row.entry.position}</p>}</details>}
     </div>)}</div>
     {newActivity && <button type="button" className="new-activity" onClick={returnToLatest}>New activity ↓</button>}
@@ -222,22 +245,26 @@ function UnifiedChatView({ origin, requestId, revision, ready, active, onAuthExp
   </section>
 }
 
-function TimelineContent({ row, streamingActive }: { row: TimelineRow; streamingActive: boolean }) {
+function TimelineContent({ row, streamingActive, requests, jobs, modelOrigin }: { row: TimelineRow; streamingActive: boolean; requests?: ReadonlyMap<string, ExchangeObservation>; jobs: readonly ToolJobObservation[]; modelOrigin?: OutputOrigin }) {
+  if (row.kind === 'activity' || row.kind === 'live' && row.live.every(item => item.channel === 'tool_input' || item.channel === 'tool_arguments')) {
+    const operation = row.kind === 'activity' ? row.entry.tool?.operation : undefined
+    const matchedJobs = operation && modelOrigin && originKey(operation.origin) === originKey(modelOrigin)
+      ? jobs.filter(job => job.kind === 'job' && job.requestId === operation.request && job.callId === operation.call) : []
+    return <ToolActivity row={row} streamingActive={streamingActive} exchange={requests?.get(row.kind === 'activity' ? row.entry.requestId : row.live[0]!.requestId)} jobs={matchedJobs} />
+  }
   if (row.kind === 'live') return <div className="live-message">{row.live.map(item => <MessagePresentation key={outputKey(item)} listItem={false}
     kind={item.channel === 'reasoning' || item.channel === 'reasoning_summary' ? 'reasoning' : item.channel === 'tool_input' || item.channel === 'tool_arguments' ? 'activity' : 'assistant'}
     title={outputLabels[item.channel]} collapsed={item.channel === 'reasoning' || item.channel === 'reasoning_summary'}
     status={item.committedHash ? 'Retained preview' : item.streaming && streamingActive ? 'Streaming' : 'Incomplete'}>
-    <MessageContent text={item.text} label={`${outputLabels[item.channel]} output`} format={item.channel === 'assistant' || item.channel === 'refusal' ? 'markdown' : 'plain'} />
+    <MessageContent text={item.text} label={`${outputLabels[item.channel]} output`} memoryKey={`part:${row.live.indexOf(item)}`} bounded={item.channel === 'tool_input' || item.channel === 'tool_arguments'} format={item.channel === 'assistant' || item.channel === 'refusal' ? 'markdown' : 'plain'} />
     {item.overflow && <p role="status">Live preview is partial. Completed content remains available in retained history.</p>}
   </MessagePresentation>)}</div>
-  if (row.kind === 'activity') return <div className="tool-activity"><MessagePresentation listItem={false} kind="activity" title={toolName(row.entry)} status={row.results.length ? 'Result retained' : row.entry.tool ? 'No loaded result' : 'Operation ownership unavailable'}><details><summary>Tool activity</summary><HistoryItem listItem={false} entry={historyEntry(row.entry)} />{row.results.map(result => <div key={result.sequence}><p className="meta">Result published at sequence {result.sequence}</p><HistoryItem listItem={false} entry={historyEntry(result)} /></div>)}</details></MessagePresentation></div>
   if (row.kind === 'result') return row.invocationKey ? <div className="tool-result-marker"><span>Tool result retained</span><button type="button" onClick={event => { const section = event.currentTarget.closest('.unified-chat'); const card = [...(section?.querySelectorAll<HTMLElement>('[data-timeline-key]') ?? [])].find(item => item.dataset.timelineKey === row.invocationKey); const detail = card?.querySelector('details'); if (detail) detail.open = true; card?.scrollIntoView({ block: 'nearest' }) }}>Show tool activity</button></div> : <div className="message tool-activity"><h3>Tool result</h3><p className="meta">{row.entry.tool ? 'The exact invocation is outside the loaded window.' : 'Operation ownership is unavailable for this historical result.'}</p><HistoryItem listItem={false} entry={historyEntry(row.entry)} /></div>
   if (row.entry.kind === 'message') return <HistoryItem listItem={false} entry={historyEntry(row.entry)} />
   if (row.entry.kind === 'oversized') return <p role="status">Message {row.entry.position} is too large to display ({row.entry.byteLen} bytes).</p>
   return null
 }
 function historyEntry(entry: Extract<UnifiedEntry, { kind: 'message' }>): HistoryEntry { return { position: entry.position, hash: entry.hash, byteLen: String(new TextEncoder().encode(JSON.stringify(entry.item)).length), item: entry.item } }
-function toolName(entry: Extract<UnifiedEntry, { kind: 'message' }>): string { return object(entry.item) && typeof entry.item.name === 'string' ? entry.item.name : 'Tool activity' }
 
 function UnifiedOutput({ entry, origin, ready, active, onAuthExpired, onExpanded }: {
   entry: Extract<UnifiedEntry, { kind: 'output' }>; origin: ActorOutputOrigin; ready: boolean; active: boolean
@@ -263,10 +290,5 @@ function UnifiedOutput({ entry, origin, ready, active, onAuthExpired, onExpanded
     {output.page.unavailable && <p>Some detail is unavailable from this renderer.</p>}
     {output.page.expansions.map(([key, label]) => <button key={key} disabled={!active || !ready || busyKey !== undefined}
       onClick={() => void expand(key)}>{busyKey === key ? 'Loading…' : `Show ${label}`}</button>)}
-  </>
-}
-
-function MountedFormEntry({ form, ready, active, onAuthExpired }: { form: StoredActorForm; ready: boolean; active: boolean; onAuthExpired?: () => void }) {
-  return <><MountedForm form={form} ready={ready} active={active} onAuthExpired={onAuthExpired} />
   </>
 }
