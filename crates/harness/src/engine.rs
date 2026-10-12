@@ -5,6 +5,9 @@
 //! model request; asynchronous calls keep their original identities until settled.
 
 mod output;
+#[cfg(test)]
+#[path = "engine/prepared_provider_tests.rs"]
+mod prepared_provider_tests;
 pub use output::{ModelOutput, ModelOutputObserver, ModelOutputUpdate};
 
 use crate::{
