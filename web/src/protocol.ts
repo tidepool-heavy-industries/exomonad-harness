@@ -41,6 +41,7 @@ export function actorIdentityKey(identity: HostActorIdentity): string {
 }
 
 export interface NormalizedState {
+  readonly actorFormRevisions?: ReadonlyMap<string, ActorOutputReference>;
   readonly actorOutputRevisions?: ReadonlyMap<string, ActorOutputReference>;
   readonly liveOutput?: ReadonlyMap<string, LiveOutput>;
   readonly historyRevisions?: ReadonlyMap<string, HistoryRevision>;
@@ -61,6 +62,7 @@ export type ApplyResult =
 export function normalizeSnapshot(snapshot: Snapshot): NormalizedState {
   return {
     seq: snapshot.seq,
+    actorFormRevisions: new Map((snapshot.actorFormRevisions ?? []).map(item => [actorOutputKey(item.origin), item])),
     actorOutputRevisions: new Map((snapshot.actorOutputRevisions ?? []).map(item => [actorOutputKey(item.origin), item])),
     liveOutput: new Map((snapshot.liveOutput ?? []).map(item => [outputKey(item), item])),
     historyRevisions: new Map((snapshot.historyRevisions ?? []).map(item => [revisionKey(item), item])),
@@ -85,7 +87,7 @@ export function applyStateEvent(state: NormalizedState, message: SequencedEvent)
   }
   const next = { ...state, seq: message.seq };
   switch (message.event.kind) {
-    case "actor.form.changed": return { kind: 'applied', state: { ...next, actorOutputRevisions: retainActorOutput(next.actorOutputRevisions, {origin:message.event.value.opening.origin, sequence:message.event.value.revisionSequence}) } };
+    case "actor.form.changed": return { kind: 'applied', state: { ...next, actorFormRevisions: retainActorOutput(next.actorFormRevisions, {origin:message.event.value.opening.origin, sequence:message.event.value.revisionSequence}), actorOutputRevisions: retainActorOutput(next.actorOutputRevisions, {origin:message.event.value.opening.origin, sequence:message.event.value.revisionSequence}) } };
     case "actor.output.committed": return { kind: 'applied', state: { ...next,
       actorOutputRevisions: retainActorOutput(next.actorOutputRevisions, message.event.value.reference) } };
     case "model.output.stopped": {

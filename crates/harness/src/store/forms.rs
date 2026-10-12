@@ -57,6 +57,39 @@ pub struct StoredActorForm {
     pub errors: Vec<FormError>,
     pub answer: Option<View>,
 }
+
+/// Compact discovery evidence. Form contents and drafts stay with their mount.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingActorForm {
+    pub mount_id: String,
+    pub sequence: i64,
+    pub revision_sequence: i64,
+    pub execution: ActorOutputExecution,
+    pub conversation: Option<ConversationIdentity>,
+    pub state: PendingActorFormState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingActorFormState {
+    Open,
+    Submitted,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingActorFormsPage {
+    pub origin: ActorOutputOrigin,
+    /// Durable form revision at this read, including mounts that have settled.
+    pub revision_sequence: i64,
+    pub forms: Vec<PendingActorForm>,
+    pub next_after: Option<i64>,
+}
+
+/// Discovery has a separate compact payload budget from rich presentation.
+pub const MAX_PENDING_FORM_ITEMS: usize = 64;
+pub const MAX_PENDING_FORM_BYTES: usize = 64 * 1024;
 impl StoredActorForm {
     pub(super) fn decode(raw: &str) -> Result<Self> {
         let row: Self = serde_json::from_str(raw)?;
@@ -64,6 +97,9 @@ impl StoredActorForm {
         Ok(row)
     }
     fn validate(&self) -> Result<()> {
+        key(&self.opening.origin, &self.opening.mount_id)?;
+        super::actor_output::validate_execution(&self.opening.execution)
+            .map_err(|_| StoreError::InvalidForm)?;
         let submission = self.attempt_id.is_some() && self.draft.is_some();
         let no_submission = self.attempt_id.is_none() && self.draft.is_none();
         let valid = match self.state {
@@ -460,6 +496,63 @@ impl Store {
         let c = self.lock()?;
         load(&c, &identity)
     }
+
+    /// Exact-incarnation pending mounts, independent of loaded chat history.
+    /// Pages are current observations, not a frozen multi-page snapshot. A
+    /// changed revision requires callers to restart pagination and reconcile.
+    pub fn pending_actor_forms(
+        &self,
+        origin: &ActorOutputOrigin,
+        after: i64,
+        limit: usize,
+    ) -> Result<PendingActorFormsPage> {
+        validate_origin(origin)?;
+        if after < 0 || limit == 0 || limit > MAX_PENDING_FORM_ITEMS {
+            return Err(StoreError::InvalidHistoryOffset);
+        }
+        let mut c = self.lock()?;
+        c.read_transaction(|tx| {
+            let selection = "json_extract(presentation,'$.opening.origin.run')=?1 AND json_extract(presentation,'$.opening.origin.nativeActor')=?2 AND json_extract(presentation,'$.opening.origin.incarnation')=?3";
+            let revision_sequence = tx.query_row(
+                &format!("SELECT COALESCE(MAX(json_extract(presentation,'$.revisionSequence')),0) FROM actor_forms WHERE {selection}"),
+                params![origin.run, origin.native_actor, origin.incarnation],
+                |row| row.get(0),
+            )?;
+            let mut query = tx.prepare(&format!(
+                "SELECT presentation FROM actor_forms WHERE {selection} AND opening_sequence>?4 AND json_extract(presentation,'$.state') IN ('open','submitted') ORDER BY opening_sequence LIMIT ?5"
+            ))?;
+            let mut rows = query.query(params![origin.run, origin.native_actor, origin.incarnation, after, limit + 1])?;
+            let mut page = PendingActorFormsPage {
+                origin: origin.clone(), revision_sequence, forms: vec![], next_after: None,
+            };
+            let mut bytes = serde_json::to_vec(&page)?.len();
+            while let Some(raw) = rows.next()? {
+                let row = StoredActorForm::decode(&raw.get::<_, String>(0)?)?;
+                if row.opening.origin != *origin {
+                    return Err(StoreError::InvalidForm);
+                }
+                let state = match row.state {
+                    ActorFormState::Open => PendingActorFormState::Open,
+                    ActorFormState::Submitted => PendingActorFormState::Submitted,
+                    _ => return Err(StoreError::InvalidForm),
+                };
+                let form = PendingActorForm {
+                    mount_id: row.opening.mount_id, sequence: row.sequence,
+                    revision_sequence: row.revision_sequence, execution: row.opening.execution,
+                    conversation: row.opening.conversation, state,
+                };
+                // Reserve room for the cursor and array separators.
+                let size = serde_json::to_vec(&form)?.len() + 64;
+                if page.forms.len() == limit || bytes + size > MAX_PENDING_FORM_BYTES {
+                    page.next_after = Some(page.forms.last().ok_or(StoreError::InvalidForm)?.sequence);
+                    break;
+                }
+                bytes += size;
+                page.forms.push(form);
+            }
+            Ok(page)
+        })
+    }
 }
 fn interrupt_pending(c: &mut super::StoreConnection<'_>) -> Result<usize> {
     c.write_transaction(|tx| {
@@ -503,6 +596,75 @@ mod tests {
                 json!({"version":1,"root":{"kind":"text","id":"f0","label":"Name","initial":null}}),
             )
             .unwrap(),
+        }
+    }
+    #[test]
+    fn pending_index_is_bounded_exact_and_retains_submission_until_settlement() {
+        let store = Store::memory().unwrap();
+        let origin = opening("a").origin;
+        let mut expected = Vec::new();
+        for index in 0..70 {
+            let row = store
+                .open_actor_form(&Authority(true), &opening(&format!("mount-{index}")))
+                .unwrap();
+            expected.push(row);
+        }
+        let mut other = opening("same-mount");
+        other.origin.incarnation = 2;
+        store.open_actor_form(&Authority(true), &other).unwrap();
+        let submitted = store
+            .submit_actor_form(
+                &origin,
+                "mount-0",
+                "submission",
+                &json!({"f0":"private draft"}),
+            )
+            .unwrap();
+        let page = store.pending_actor_forms(&origin, 0, 64).unwrap();
+        assert_eq!(page.forms.len(), 64);
+        assert_eq!(page.forms[0].state, PendingActorFormState::Submitted);
+        assert_eq!(page.revision_sequence, submitted.revision_sequence);
+        assert_eq!(page.forms[0].sequence, expected[0].sequence);
+        assert!(
+            !serde_json::to_string(&page)
+                .unwrap()
+                .contains("private draft")
+        );
+        assert!(serde_json::to_vec(&page).unwrap().len() <= MAX_PENDING_FORM_BYTES);
+        let tail = store
+            .pending_actor_forms(&origin, page.next_after.unwrap(), 64)
+            .unwrap();
+        assert_eq!(tail.forms.len(), 6);
+        assert_eq!(tail.revision_sequence, page.revision_sequence);
+        assert!(tail.next_after.is_none());
+        store
+            .commit_actor_form(
+                &origin,
+                "mount-0",
+                "submission",
+                &json!({"kind":"text","text":"answer"}),
+            )
+            .unwrap();
+        let settled = store.pending_actor_forms(&origin, 0, 64).unwrap();
+        assert!(settled.revision_sequence > page.revision_sequence);
+        assert!(settled.forms.iter().all(|form| form.mount_id != "mount-0"));
+        assert_eq!(
+            store.actor_form(&origin, "mount-0").unwrap().state,
+            ActorFormState::Answered
+        );
+        assert_eq!(
+            store
+                .pending_actor_forms(&other.origin, 0, 64)
+                .unwrap()
+                .forms
+                .len(),
+            1
+        );
+        for (after, limit) in [(-1, 1), (0, 0), (0, 65)] {
+            assert!(matches!(
+                store.pending_actor_forms(&origin, after, limit),
+                Err(StoreError::InvalidHistoryOffset)
+            ));
         }
     }
     #[test]
@@ -1114,6 +1276,20 @@ mod history_model_tests {
                         assert_eq!(actual, expected, "operation {op:?} in {history:?}");
                         let row = store.actor_form(&opening.origin, "mount").unwrap();
                         assert_eq!(row.state, oracle.state, "{history:?}");
+                        let pending = store.pending_actor_forms(&opening.origin, 0, 64).unwrap();
+                        assert_eq!(pending.revision_sequence, first.sequence + oracle.changes);
+                        let expected_pending = match oracle.state {
+                            ActorFormState::Open => Some(PendingActorFormState::Open),
+                            ActorFormState::Submitted => Some(PendingActorFormState::Submitted),
+                            _ => None,
+                        };
+                        assert_eq!(
+                            pending.forms.first().map(|form| form.state),
+                            expected_pending,
+                            "{history:?}"
+                        );
+                        assert_eq!(pending.forms.len(), usize::from(expected_pending.is_some()));
+                        assert!(pending.next_after.is_none());
                         assert_eq!(row.sequence, first.sequence);
                         assert_eq!(
                             row.revision_sequence,

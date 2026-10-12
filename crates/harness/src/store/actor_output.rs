@@ -139,19 +139,26 @@ pub(super) fn validate_origin(origin: &ActorOutputOrigin) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn validate_execution(execution: &ActorOutputExecution) -> Result<()> {
+    match execution {
+        ActorOutputExecution::ActorProgram => Ok(()),
+        ActorOutputExecution::Notebook { execution, .. }
+            if !execution.is_empty() && execution.len() <= 256 =>
+        {
+            Ok(())
+        }
+        _ => Err(StoreError::InvalidActorOutput),
+    }
+}
+
 fn validate(emission: &ActorOutputEmission) -> Result<()> {
     validate_origin(&emission.origin)?;
+    validate_execution(&emission.execution)?;
     if let Some(view) = &emission.page.view {
         view.validate()?;
     }
     let page = &emission.page;
     let mut keys = std::collections::HashSet::new();
-    let valid_execution = match &emission.execution {
-        ActorOutputExecution::ActorProgram => true,
-        ActorOutputExecution::Notebook { execution, .. } => {
-            !execution.is_empty() && execution.len() <= 256
-        }
-    };
     let metadata = serde_json::json!({
         "identity": [emission.origin.native_actor, emission.origin.incarnation, emission.id.display_slot],
         "expansions": page.expansions, "unavailable": page.unavailable,
@@ -159,7 +166,6 @@ fn validate(emission: &ActorOutputEmission) -> Result<()> {
     if emission.origin.run.is_empty()
         || emission.origin.run.len() > 1024
         || emission.id.display_slot == 0
-        || !valid_execution
         || [
             emission.origin.native_actor,
             emission.origin.incarnation,

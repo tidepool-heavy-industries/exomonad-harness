@@ -36,7 +36,7 @@ pub(super) async fn chat(State(state): State<AppState>, Query(q): Query<ChatQuer
     {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let Some(store) = state.history_store else {
+    let Some(store) = state.history_store.clone() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let origin = ActorOutputOrigin {
@@ -72,38 +72,106 @@ pub(super) async fn chat(State(state): State<AppState>, Query(q): Query<ChatQuer
 }
 type FormSubmission = super::browser_contract::ActorFormSubmit;
 type FormDismissal = super::browser_contract::ActorFormDismiss;
+
+#[derive(Deserialize)]
+pub(super) struct PendingFormsQuery {
+    run: String,
+    actor: u64,
+    incarnation: u64,
+    after: Option<i64>,
+    limit: Option<usize>,
+}
+pub(super) async fn pending_forms(
+    State(state): State<AppState>,
+    Query(query): Query<PendingFormsQuery>,
+) -> Response {
+    let Some(store) = state.history_store.clone() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let origin = ActorOutputOrigin {
+        run: query.run,
+        native_actor: query.actor,
+        incarnation: query.incarnation,
+    };
+    match tokio::task::spawn_blocking(move || {
+        store.pending_actor_forms(&origin, query.after.unwrap_or(0), query.limit.unwrap_or(32))
+    })
+    .await
+    {
+        Ok(Ok(page)) => (
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(super::browser_contract::PendingActorFormsPage::from(&page)),
+        )
+            .into_response(),
+        Ok(Err(StoreError::InvalidHistoryOffset | StoreError::InvalidActorOutput)) => {
+            StatusCode::BAD_REQUEST.into_response()
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct FormQuery {
+    run: String,
+    actor: u64,
+    incarnation: u64,
+    mount: String,
+}
+pub(super) async fn form(
+    State(state): State<AppState>,
+    Query(query): Query<FormQuery>,
+) -> Response {
+    let Some(store) = state.history_store.clone() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let origin = ActorOutputOrigin {
+        run: query.run,
+        native_actor: query.actor,
+        incarnation: query.incarnation,
+    };
+    match tokio::task::spawn_blocking(move || store.actor_form(&origin, &query.mount)).await {
+        Ok(Err(StoreError::FormUnavailable)) => StatusCode::NOT_FOUND.into_response(),
+        result => response(result),
+    }
+}
 pub(super) async fn submit(
     State(state): State<AppState>,
     Json(input): Json<FormSubmission>,
 ) -> Response {
-    let Some(store) = state.history_store else {
+    let Some(store) = state.history_store.clone() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    response(
-        tokio::task::spawn_blocking(move || {
-            store.submit_actor_form(
-                &input.origin.into(),
-                &input.mount_id,
-                &input.operation_id,
-                &serde_json::to_value(&input.draft).expect("form draft serializes"),
-            )
-        })
-        .await,
-    )
+    let control = super::ServerControl::for_app(&state);
+    let result = tokio::task::spawn_blocking(move || {
+        store.submit_actor_form(
+            &input.origin.into(),
+            &input.mount_id,
+            &input.operation_id,
+            &serde_json::to_value(&input.draft).expect("form draft serializes"),
+        )
+    })
+    .await;
+    if let Ok(Ok(form)) = &result {
+        control.publish_actor_form(form);
+    }
+    response(result)
 }
 pub(super) async fn dismiss(
     State(state): State<AppState>,
     Json(input): Json<FormDismissal>,
 ) -> Response {
-    let Some(store) = state.history_store else {
+    let Some(store) = state.history_store.clone() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    response(
-        tokio::task::spawn_blocking(move || {
-            store.dismiss_actor_form(&input.origin.into(), &input.mount_id, &input.operation_id)
-        })
-        .await,
-    )
+    let control = super::ServerControl::for_app(&state);
+    let result = tokio::task::spawn_blocking(move || {
+        store.dismiss_actor_form(&input.origin.into(), &input.mount_id, &input.operation_id)
+    })
+    .await;
+    if let Ok(Ok(form)) = &result {
+        control.publish_actor_form(form);
+    }
+    response(result)
 }
 fn response(
     result: std::result::Result<
@@ -127,7 +195,7 @@ fn response(
     }
 }
 pub(super) async fn media(State(state): State<AppState>, Path(hash): Path<String>) -> Response {
-    let Some(store) = state.history_store else {
+    let Some(store) = state.history_store.clone() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     match tokio::task::spawn_blocking(move || store.actor_media(&hash)).await {
@@ -199,11 +267,12 @@ mod tests {
             .retain_actor_media("image/png", b"\x89PNG\r\n\x1a\nretained")
             .unwrap();
         let secret = "chat-route-secret-with-enough-bytes";
-        let (router, _control, _commands) = server_with_config(
+        let (router, control, _commands) = server_with_config(
             ServerConfig::new(PathBuf::new())
                 .with_bearer_secret(BearerSecret::new(secret).unwrap())
                 .with_history_store(store.clone()),
         );
+        let mut events = control.events.subscribe();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -274,6 +343,72 @@ mod tests {
         assert_eq!(submitted.status(), StatusCode::OK);
         let submitted: serde_json::Value = submitted.json().await.unwrap();
         assert_eq!(submitted["state"], "submitted");
+        let event = events.try_recv().expect("submission publishes immediately");
+        let super::super::browser_contract::StateEvent::ActorFormChanged(form) = event.event else {
+            panic!("exact form event")
+        };
+        assert_eq!(form.state, ActorFormState::Submitted);
+        let snapshot = control.snapshot.read().unwrap().clone();
+        assert_eq!(snapshot.seq, event.sequence);
+        assert_eq!(
+            snapshot.actor_form_revisions[0].sequence,
+            form.revision_sequence
+        );
+        for route in ["actor-form/pending", "actor-form"] {
+            assert_eq!(
+                client
+                    .get(format!(
+                        "{base}/{route}?run=run&actor=1&incarnation=1&mount=mount"
+                    ))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        let pending: serde_json::Value = client
+            .get(format!(
+                "{base}/actor-form/pending?run=run&actor=1&incarnation=1"
+            ))
+            .bearer_auth(secret)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(pending["forms"][0]["mountId"], "mount");
+        assert_eq!(pending["forms"][0]["state"], "submitted");
+        assert_eq!(pending["revisionSequence"], submitted["revisionSequence"]);
+        assert!(pending["forms"][0].get("draft").is_none());
+        store.close_actor_form(&origin, "mount").unwrap();
+        let closed = store.actor_form(&origin, "mount").unwrap();
+        control.publish_actor_form(&closed);
+        let pending: serde_json::Value = client
+            .get(format!(
+                "{base}/actor-form/pending?run=run&actor=1&incarnation=1"
+            ))
+            .bearer_auth(secret)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(pending["forms"].as_array().unwrap().is_empty());
+        let retained: serde_json::Value = client
+            .get(format!(
+                "{base}/actor-form?run=run&actor=1&incarnation=1&mount=mount"
+            ))
+            .bearer_auth(secret)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(retained["state"], "cancelled");
         assert_eq!(
             client
                 .post(format!("{base}/actor-form/submit"))

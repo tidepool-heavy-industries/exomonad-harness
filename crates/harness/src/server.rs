@@ -397,6 +397,7 @@ struct AppState {
     actor_display_expander: Arc<std::sync::OnceLock<actor_output::ActorDisplayExpander>>,
     commands: mpsc::Sender<QueuedCommand>,
     events: broadcast::Sender<ServerEvent>,
+    next_sequence: Arc<std::sync::Mutex<u64>>,
     asset_root: Arc<PathBuf>,
     browser_bundle: Option<Arc<VerifiedBrowserBundle>>,
     snapshot: Arc<std::sync::RwLock<Snapshot>>,
@@ -461,6 +462,22 @@ struct WebSocketTestHooks {
 }
 
 impl ServerControl {
+    fn for_app(state: &AppState) -> Self {
+        Self {
+            #[cfg(test)]
+            websocket_test_hooks: state.websocket_test_hooks.clone(),
+            actor_display_expander: state.actor_display_expander.clone(),
+            events: state.events.clone(),
+            next_sequence: state.next_sequence.clone(),
+            snapshot: state.snapshot.clone(),
+        }
+    }
+
+    /// Form revisions share the live stream's snapshot cutover. The durable
+    /// pending index remains authoritative if this bounded watermark is evicted.
+    pub fn publish_actor_form(&self, form: &crate::store::forms::StoredActorForm) {
+        self.publish(browser_contract::StateEvent::ActorFormChanged(form.into()));
+    }
     /// Publish an event to current SSE subscribers. Events are deliberately live
     /// only; the durable store remains the source of truth for replay/query APIs.
     pub fn publish(&self, event: browser_contract::StateEvent) -> ServerEvent {
@@ -473,7 +490,31 @@ impl ServerControl {
             sequence: sequence.into(),
             event,
         };
-        self.snapshot.write().expect("snapshot lock poisoned").seq = sequence.into();
+        let mut snapshot = self.snapshot.write().expect("snapshot lock poisoned");
+        if let browser_contract::StateEvent::ActorFormChanged(form) = &event.event {
+            let revision = browser_contract::ActorOutputReference {
+                origin: form.opening.origin.clone(),
+                sequence: form.revision_sequence,
+            };
+            if let Some(previous) = snapshot
+                .actor_form_revisions
+                .iter_mut()
+                .find(|previous| previous.origin == revision.origin)
+            {
+                previous.sequence = previous.sequence.max(revision.sequence);
+            } else {
+                snapshot.actor_form_revisions.push(revision);
+            }
+            while snapshot.actor_form_revisions.len() > output::OUTPUT_ITEMS
+                || serde_json::to_vec(&snapshot.actor_form_revisions)
+                    .expect("form references serialize")
+                    .len()
+                    > output::OUTPUT_BYTES
+            {
+                snapshot.actor_form_revisions.remove(0);
+            }
+        }
+        snapshot.seq = sequence.into();
         let _ = self.events.send(event.clone());
         drop(next_sequence);
         event
@@ -601,6 +642,7 @@ impl ServerControl {
         snapshot.live_output = std::mem::take(&mut current.live_output);
         snapshot.history_revisions = std::mem::take(&mut current.history_revisions);
         snapshot.actor_output_revisions = std::mem::take(&mut current.actor_output_revisions);
+        snapshot.actor_form_revisions = std::mem::take(&mut current.actor_form_revisions);
         *current = snapshot;
     }
 
@@ -725,6 +767,7 @@ pub fn server_with_config(
         actor_display_expander: Arc::new(std::sync::OnceLock::new()),
         commands,
         events: events.clone(),
+        next_sequence: Arc::new(std::sync::Mutex::new(1)),
         asset_root: Arc::new(asset_root),
         browser_bundle,
         snapshot: Arc::new(std::sync::RwLock::new(Snapshot::default())),
@@ -742,7 +785,7 @@ pub fn server_with_config(
         websocket_test_hooks: Arc::clone(&state.websocket_test_hooks),
         actor_display_expander: Arc::clone(&state.actor_display_expander),
         events,
-        next_sequence: Arc::new(std::sync::Mutex::new(1)),
+        next_sequence: state.next_sequence.clone(),
         snapshot,
     };
     let auth = ApiAuth {
@@ -757,6 +800,8 @@ pub fn server_with_config(
         .route("/history/{request_id}", get(history::request_history))
         .route("/chat", get(chat::chat))
         .route("/actor-form/submit", post(chat::submit))
+        .route("/actor-form", get(chat::form))
+        .route("/actor-form/pending", get(chat::pending_forms))
         .route("/actor-form/dismiss", post(chat::dismiss))
         .route("/actor-media/{hash}", get(chat::media))
         .route("/actor-output", get(history::actor_output_history))
@@ -1753,6 +1798,8 @@ mod tests {
 
     fn projected_actor(run: &str, actor: &str, incarnation: &str) -> HostActorProjection {
         HostActorProjection {
+            workbench: None,
+            form_waits: None,
             output_origin: None,
             identity: HostActorIdentity {
                 run: run.into(),
@@ -1879,6 +1926,7 @@ mod tests {
             live_output: Vec::new(),
             history_revisions: Vec::new(),
             actor_output_revisions: Vec::new(),
+            actor_form_revisions: Vec::new(),
             host_run: Some("run-old".into()),
             command_receipts: vec![],
             actors: vec![old_actor.clone()],

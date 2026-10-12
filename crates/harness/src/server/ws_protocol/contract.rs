@@ -248,6 +248,60 @@ pub struct HostActorProjection {
     pub active_round: Option<EmbeddedRoundId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference: Option<HostInferenceState>,
+    /// A last sampled posture, not an enumeration of concurrent executions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workbench: Option<HostWorkbenchObservation>,
+    /// None means this host does not instrument form waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form_waits: Option<HostFormWaits>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum HostWorkbenchObservation {
+    Idle,
+    RunningUnit {
+        input_unit_index: WireU64,
+        total: WireU64,
+    },
+    AwaitingEffect {
+        input_unit_index: WireU64,
+        total: WireU64,
+        operation: String,
+    },
+    TerminalTransfer {
+        transfer: HostWorkbenchTransfer,
+    },
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HostWorkbenchTransfer {
+    Reply,
+    CancellationAcknowledgement,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostFormWaits {
+    pub waits: Vec<HostFormWait>,
+    /// Concurrent waits omitted from this bounded sample, never completed waits.
+    pub omitted: WireU64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostFormWait {
+    pub mount_id: String,
+    pub execution: ActorOutputExecution,
+    /// UTC Unix milliseconds; elapsed estimates use this retained start.
+    pub since_unix_ms: WireU64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -528,6 +582,8 @@ pub struct Snapshot {
     pub history_revisions: Vec<HistoryRevision>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actor_output_revisions: Vec<ActorOutputReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actor_form_revisions: Vec<ActorOutputReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_run: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -608,6 +664,7 @@ pub fn schemas() -> serde_json::Value {
         "actorDisplayExpansion": SchemaSettings::draft07().for_deserialize().into_generator().into_root_schema_for::<ActorDisplayExpansion>(),
         "embeddedCommand": SchemaSettings::draft07().for_serialize().into_generator().into_root_schema_for::<EmbeddedCommandRecord>(),
         "actorForm": SchemaSettings::draft07().for_serialize().into_generator().into_root_schema_for::<StoredActorForm>(),
+        "pendingActorForms": SchemaSettings::draft07().for_serialize().into_generator().into_root_schema_for::<PendingActorFormsPage>(),
         "actorFormSubmit": SchemaSettings::draft07().for_deserialize().into_generator().into_root_schema_for::<ActorFormSubmit>(),
         "actorFormDismiss": SchemaSettings::draft07().for_deserialize().into_generator().into_root_schema_for::<ActorFormDismiss>(),
         "chat": SchemaSettings::draft07().for_serialize().into_generator().into_root_schema_for::<ChatPage>(),
@@ -674,6 +731,8 @@ pub fn wire_samples() -> serde_json::Value {
         incarnation: "incarnation".into(),
     };
     let actor = HostActorProjection {
+        workbench: None,
+        form_waits: None,
         identity: identity.clone(),
         output_origin: Some(origin.clone()),
         parent: None,

@@ -314,6 +314,48 @@ impl From<&crate::store::forms::StoredActorForm> for StoredActorForm {
         }
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PendingActorForm {
+    pub mount_id: String,
+    /// Opening journal position, usable as the exact chat locator.
+    pub sequence: WireI64,
+    pub revision_sequence: WireI64,
+    pub execution: ActorOutputExecution,
+    pub conversation: Option<ConversationIdentity>,
+    pub state: crate::store::forms::PendingActorFormState,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PendingActorFormsPage {
+    pub origin: ActorOutputOrigin,
+    pub revision_sequence: WireI64,
+    pub forms: Vec<PendingActorForm>,
+    pub next_after: Option<WireI64>,
+}
+impl From<&crate::store::forms::PendingActorFormsPage> for PendingActorFormsPage {
+    fn from(page: &crate::store::forms::PendingActorFormsPage) -> Self {
+        Self {
+            origin: (&page.origin).into(),
+            revision_sequence: page.revision_sequence.into(),
+            forms: page
+                .forms
+                .iter()
+                .map(|form| PendingActorForm {
+                    mount_id: form.mount_id.clone(),
+                    sequence: form.sequence.into(),
+                    revision_sequence: form.revision_sequence.into(),
+                    execution: (&form.execution).into(),
+                    conversation: form.conversation.clone(),
+                    state: form.state,
+                })
+                .collect(),
+            next_after: page.next_after.map(Into::into),
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ActorFormSubmit {
@@ -539,7 +581,14 @@ pub(super) fn extension_samples() -> serde_json::Value {
         next_after: Some(i64::MAX.into()),
         previous_before: Some(form.sequence),
     };
-    serde_json::json!({ "actorForm": [form.clone()], "chat": [page], "actorFormSubmit": [ActorFormSubmit { origin: form.opening.origin.clone(), mount_id: form.opening.mount_id.clone(), operation_id: "operation".into(), draft: Default::default() }], "actorFormDismiss": [ActorFormDismiss { origin: form.opening.origin, mount_id: form.opening.mount_id, operation_id: "operation".into() }] })
+    serde_json::json!({ "pendingActorForms": [PendingActorFormsPage {
+        origin: form.opening.origin.clone(), revision_sequence: form.revision_sequence,
+        forms: vec![PendingActorForm {
+            mount_id: form.opening.mount_id.clone(), sequence: form.sequence,
+            revision_sequence: form.revision_sequence, execution: form.opening.execution.clone(),
+            conversation: form.opening.conversation.clone(), state: crate::store::forms::PendingActorFormState::Open,
+        }], next_after: None,
+    }], "actorForm": [form.clone()], "chat": [page], "actorFormSubmit": [ActorFormSubmit { origin: form.opening.origin.clone(), mount_id: form.opening.mount_id.clone(), operation_id: "operation".into(), draft: Default::default() }], "actorFormDismiss": [ActorFormDismiss { origin: form.opening.origin, mount_id: form.opening.mount_id, operation_id: "operation".into() }] })
 }
 
 #[cfg(test)]

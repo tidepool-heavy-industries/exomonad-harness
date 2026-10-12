@@ -21,6 +21,7 @@ const roots = [
   ['actorDisplayExpansion', 'actor-display-expansion', 'ActorDisplayExpansion', 'isActorDisplayExpansion'],
   ['history', 'history', 'HistoryPage', 'isHistoryPage'],
   ['actorForm', 'actor-form', 'StoredActorForm', 'isStoredActorForm'],
+  ['pendingActorForms', 'pending-actor-forms', 'PendingActorFormsPage', 'isPendingActorFormsPage'],
   ['actorFormSubmit', 'actor-form-submit', 'ActorFormSubmit', 'isActorFormSubmit'],
   ['actorFormDismiss', 'actor-form-dismiss', 'ActorFormDismiss', 'isActorFormDismiss'],
   ['chat', 'chat', 'ChatPage', 'isChatPage'],

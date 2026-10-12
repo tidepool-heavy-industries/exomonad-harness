@@ -257,6 +257,8 @@ mod tests {
     #[test]
     fn model_actor_projection_roundtrips_optional_exact_head() {
         let mut actor = HostActorProjection {
+            workbench: None,
+            form_waits: None,
             output_origin: None,
             identity: HostActorIdentity {
                 run: "run".into(),
@@ -294,6 +296,8 @@ mod tests {
             incarnation: "first".into(),
         };
         let child = HostActorProjection {
+            workbench: None,
+            form_waits: None,
             output_origin: None,
             identity: HostActorIdentity {
                 run: "run-1".into(),
