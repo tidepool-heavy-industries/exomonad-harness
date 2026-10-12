@@ -1195,23 +1195,49 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .unwrap_or_else(|| self.config.model.clone());
             let mut input_hashes = Vec::with_capacity(history.items.len());
             let mut input_occurrences = history.occurrences;
-            let model_input = history
+            let mut model_input = Vec::with_capacity(history.items.len());
+            for (index, (item, (request, hash))) in history
                 .items
                 .into_iter()
                 .zip(history.provenance)
-                .map(|(item, (request, hash))| {
-                    if self.bounded_invocation {
-                        if let Some(projected) =
-                            request_provider.model_visible_item(&request, &item)
-                        {
-                            input_hashes.push(None);
-                            return projected;
-                        }
+                .enumerate()
+            {
+                if self.bounded_invocation {
+                    if let Some(candidate) = request_provider.model_visible_item(&request, &item) {
+                        let Some(occurrence) = input_occurrences
+                            .get(index)
+                            .and_then(Option::as_ref)
+                            .cloned()
+                        else {
+                            return Err(self
+                                .cleanup_pending(
+                                    StoreError::Context(crate::context::ContextError::Replay(
+                                        crate::context::ContextReplayRejection::InvalidMembership,
+                                    ))
+                                    .into(),
+                                    &pending,
+                                )
+                                .await);
+                        };
+                        let store = self.store.clone();
+                        let projected = blocking(move || {
+                            store.qualify_model_visible_item(&occurrence, &candidate)
+                        })
+                        .await;
+                        let projected = match projected {
+                            Ok(projected) => projected,
+                            Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                        };
+                        let (item, occurrence) = projected.into_parts();
+                        input_occurrences[index] = Some(occurrence);
+                        input_hashes.push(None);
+                        model_input.push(item);
+                        continue;
                     }
-                    input_hashes.push(Some(hash));
-                    item
-                })
-                .collect();
+                }
+                input_hashes.push(Some(hash));
+                model_input.push(item);
+            }
             let mut req = ResponsesRequest {
                 input: model_input,
                 instructions: self.config.instructions.clone(),
