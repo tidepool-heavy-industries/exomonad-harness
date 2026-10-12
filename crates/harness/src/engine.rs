@@ -3839,7 +3839,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
                 event = rx.recv(), if stream_open => match event {
                     Some(StreamEvent::CompletedItem(done)) => {
-                        self.retain_provider_item(&issued, done).await?;
+                        if let Err(error) = self.retain_provider_item(&issued, done).await {
+                            break Err(error);
+                        }
                     }
                     Some(StreamEvent::Delta { .. }) => {}
                     None => stream_open = false,
