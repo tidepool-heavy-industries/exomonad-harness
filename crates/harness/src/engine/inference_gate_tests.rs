@@ -14,6 +14,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
+use std::time::Duration;
 use tokio::sync::Notify;
 
 #[derive(Clone)]
@@ -276,7 +277,7 @@ async fn run_history(
             vec![original.clone()]
         };
         prop_assert_eq!(
-            *effects.operations.lock().unwrap(),
+            effects.operations.lock().unwrap().clone(),
             expected_operations.clone()
         );
         let cleanup = store.operation_cleanup_evidence(&original).unwrap();
@@ -493,7 +494,10 @@ async fn run_history(
                 .unwrap(),
             retained
         );
-        prop_assert_eq!(*effects.operations.lock().unwrap(), expected_operations);
+        prop_assert_eq!(
+            effects.operations.lock().unwrap().clone(),
+            expected_operations
+        );
         if queued {
             match scheduler.output(&original).await {
                 Ok(Some(crate::turn::JobOutput::Cancelled)) => {
