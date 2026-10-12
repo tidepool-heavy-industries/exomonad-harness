@@ -25,6 +25,13 @@ pub struct ChatInvocation {
     pub position: i64,
     pub hash: String,
 }
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatInputOperation {
+    pub envelope_id: i64,
+    pub operation_id: String,
+    pub target: crate::embedding::HostIdentity,
+}
 pub(super) fn initialize_cutover(tx: &Transaction<'_>, legacy: bool) -> Result<()> {
     let sequence: i64 = if legacy {
         tx.query_row("SELECT COALESCE(MAX(id),0) FROM events", [], |r| r.get(0))?
@@ -41,6 +48,33 @@ pub(super) fn publish(
     hash: &ItemHash,
     item: &Item,
 ) -> Result<()> {
+    publish_item(tx, request, position, hash, item, None)
+}
+pub(super) fn publish_envelope(
+    tx: &Transaction<'_>,
+    request: &RequestId,
+    position: i64,
+    hash: &ItemHash,
+    item: &Item,
+    envelope_id: i64,
+) -> Result<()> {
+    if envelope_id <= 0 {
+        return Err(StoreError::InvalidActorOutput);
+    }
+    let exact: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM envelopes e JOIN requests r ON r.id=?2 JOIN request_items ri ON ri.request_id=r.id AND ri.position=?3 WHERE e.id=?1 AND e.recipient=r.branch AND e.item_hash=?4 AND ri.item_hash=e.item_hash AND e.delivered_request IS NULL AND NOT EXISTS(SELECT 1 FROM events p WHERE p.kind='chat_message' AND json_extract(p.payload,'$.envelopeId')=e.id))", params![envelope_id, request.0, position, hash.0], |row| row.get(0))?;
+    if !exact {
+        return Err(StoreError::InvalidActorOutput);
+    }
+    publish_item(tx, request, position, hash, item, Some(envelope_id))
+}
+fn publish_item(
+    tx: &Transaction<'_>,
+    request: &RequestId,
+    position: i64,
+    hash: &ItemHash,
+    item: &Item,
+    envelope_id: Option<i64>,
+) -> Result<()> {
     if item.is_configuration_update() {
         return Ok(());
     }
@@ -48,7 +82,9 @@ pub(super) fn publish(
         "INSERT INTO events(request_id,kind,payload,created_at) VALUES(?1,'chat_message',?2,?3)",
         params![
             request.0,
-            serde_json::to_string(&json!({"position":position,"hash":hash.0}))?,
+            serde_json::to_string(
+                &json!({"position":position,"hash":hash.0,"envelopeId":envelope_id})
+            )?,
             super::utc_millis()
         ],
     )?;
@@ -68,6 +104,7 @@ pub enum ChatEntry {
         hash: String,
         item: Value,
         tool: Option<ChatTool>,
+        input_operation: Option<ChatInputOperation>,
     },
     Output {
         sequence: i64,
@@ -228,6 +265,7 @@ impl Store {
                     } else {
                         ChatEntry::Message {
                             sequence,
+                            input_operation: project_input(&c, &reference, &request_id, &hash)?,
                             request_id,
                             position,
                             hash,
@@ -287,6 +325,66 @@ impl Store {
             }
         }
         Ok(page)
+    }
+}
+
+fn project_input(
+    c: &Connection,
+    reference: &Value,
+    request: &str,
+    hash: &str,
+) -> Result<Option<ChatInputOperation>> {
+    let Some(envelope_id) = reference.get("envelopeId").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let envelope_id = envelope_id
+        .as_i64()
+        .filter(|value| *value > 0)
+        .ok_or(StoreError::InvalidActorOutput)?;
+    let envelope: Option<(String, String, Option<String>)> = c
+        .query_row(
+            "SELECT recipient,item_hash,delivered_request FROM envelopes WHERE id=?1",
+            [envelope_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((recipient, envelope_hash, delivered)) = envelope else {
+        return Err(StoreError::InvalidActorOutput);
+    };
+    if envelope_hash != hash || delivered.as_deref() != Some(request) {
+        return Err(StoreError::InvalidActorOutput);
+    }
+    let mut q = c.prepare("SELECT run_id,agent_path,incarnation,operation_id FROM embedded_inputs WHERE envelope_id=?1")?;
+    let owners = q
+        .query_map([envelope_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    match owners.as_slice() {
+        [] => Ok(None),
+        [(run, actor, incarnation, operation_id)]
+            if actor == &recipient
+                && !run.is_empty()
+                && !actor.is_empty()
+                && !incarnation.is_empty()
+                && !operation_id.is_empty() =>
+        {
+            Ok(Some(ChatInputOperation {
+                envelope_id,
+                operation_id: operation_id.clone(),
+                target: crate::embedding::HostIdentity {
+                    run: run.clone(),
+                    actor: crate::model::AgentPath(actor.clone()),
+                    incarnation: incarnation.clone(),
+                },
+            }))
+        }
+        _ => Err(StoreError::InvalidActorOutput),
     }
 }
 
@@ -400,6 +498,94 @@ mod tests {
             native_actor: 1,
             incarnation: 1,
         }
+    }
+    struct InputAuthority(crate::embedding::HostIdentity);
+    impl crate::embedding::BindingInitialAuthority for InputAuthority {
+        fn validate_initial_binding(
+            &self,
+            identity: &crate::embedding::HostIdentity,
+        ) -> std::result::Result<bool, String> {
+            Ok(identity == &self.0)
+        }
+    }
+    #[test]
+    fn equal_inputs_retain_exact_envelope_operation_and_publication_position() {
+        let store = Store::memory().unwrap();
+        let target = crate::embedding::HostIdentity {
+            run: "run".into(),
+            actor: crate::model::AgentPath("/root".into()),
+            incarnation: "1".into(),
+        };
+        store
+            .bind_initial_embedded_binding(&target, None, &InputAuthority(target.clone()))
+            .unwrap();
+        let request = RequestId("inputs".into());
+        let item = Item(json!({"type":"message","role":"user","content":"equal submitted input"}));
+        store
+            .write_request(&request, None, "/root", &[item.clone()], Usage::default())
+            .unwrap();
+        let first = store
+            .admit_embedded_input(&target, "first", "operator", &item)
+            .unwrap();
+        let second = store
+            .admit_embedded_input(&target, "second", "operator", &item)
+            .unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            store
+                .admit_embedded_input(&target, "first", "operator", &item)
+                .unwrap(),
+            first
+        );
+        store
+            .append_unread_envelopes(&target.actor, &request)
+            .unwrap();
+        let page = store
+            .chat_page_before(&origin(), Some(&request), None, 100)
+            .unwrap();
+        let messages = page
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ChatEntry::Message {
+                    position,
+                    input_operation,
+                    ..
+                } => Some((*position, input_operation)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(messages.len(), 3);
+        assert!(messages[0].1.is_none());
+        for ((position, actual), (envelope, operation)) in messages[1..]
+            .iter()
+            .zip([(first, "first"), (second, "second")])
+        {
+            let actual = actual.as_ref().unwrap();
+            assert_eq!(*position, if envelope == first { 1 } else { 2 });
+            assert_eq!(actual.envelope_id, envelope);
+            assert_eq!(actual.operation_id, operation);
+            assert_eq!(actual.target, target);
+        }
+        assert!(
+            store
+                .append_unread_envelopes(&target.actor, &request)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .chat_page_before(&origin(), Some(&request), None, 100)
+                .unwrap()
+                .entries
+                .len(),
+            3
+        );
+        store.lock().unwrap().execute("UPDATE events SET payload=json_set(payload,'$.envelopeId',?2) WHERE kind='chat_message' AND json_extract(payload,'$.position')=?1", params![1, second + 100]).unwrap();
+        assert!(matches!(
+            store.chat_page_before(&origin(), Some(&request), None, 100),
+            Err(StoreError::InvalidActorOutput)
+        ));
     }
     #[test]
     fn backward_pages_start_at_latest_and_follow_exact_publication_boundaries() {
