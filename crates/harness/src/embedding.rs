@@ -1152,9 +1152,9 @@ mod tests {
                     let active = store.read_context(&committed.head).unwrap();
                     let authored = active.blocks.iter().find(|block| matches!(block,
                         crate::context::ContextBlock::Text { reference: Some(r), .. } if r == reference)).unwrap();
-                    proptest::prop_assert!(matches!(authored, crate::context::ContextBlock::Text { text, .. } if text == replacement));
+                    proptest::prop_assert!(matches!(authored, crate::context::ContextBlock::Text { text, .. } if text == replacement), "the referenced authored block retains the replacement");
                     proptest::prop_assert!(active.blocks.iter().any(|block| matches!(block,
-                        crate::context::ContextBlock::Text { reference: Some(r), text, .. } if Some(r) == receipt.caller_reference.as_ref() && text == &caller)));
+                        crate::context::ContextBlock::Text { reference: Some(r), text, .. } if Some(r) == receipt.caller_reference.as_ref() && text == &caller)), "the caller block retains its original body");
                     proptest::prop_assert_eq!(conversation.seed_initial_context("startup", Some(&caller), Some(&initial)).unwrap(), receipt.clone());
                     proptest::prop_assert_eq!(store.embedded_agent_head(host.identity()).unwrap(), Some(committed.head));
                 }
@@ -1167,7 +1167,7 @@ mod tests {
                 let head = store.embedded_agent_head(host.identity()).unwrap().unwrap();
                 let active = store.read_context(&head).unwrap();
                 proptest::prop_assert!(active.blocks.iter().any(|block| matches!(block,
-                    crate::context::ContextBlock::Text { reference: Some(r), text, .. } if Some(r) == receipt.authored_reference.as_ref() && text == edits.last().unwrap())));
+                    crate::context::ContextBlock::Text { reference: Some(r), text, .. } if Some(r) == receipt.authored_reference.as_ref() && text == edits.last().unwrap())), "reopen retains the last accepted replacement");
             }
             std::fs::remove_dir_all(directory).unwrap();
         }
