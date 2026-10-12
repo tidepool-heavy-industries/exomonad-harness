@@ -36,11 +36,21 @@ fn prepare(provenance: Provenance<'_>, selected: &str) -> Restoration {
             .write_request(&source, None, "/root", &[], Usage::default())
             .unwrap();
         store
-            .write_compaction_request(&parent, &source, "/root", &items)
+            .write_compaction_request(&parent, &source, "/root", &[])
             .unwrap();
     } else {
         store
-            .write_request(&parent, None, "/root", &items, Usage::default())
+            .write_request(
+                &parent,
+                None,
+                "/root",
+                if matches!(provenance, Provenance::Issued(_)) {
+                    &[]
+                } else {
+                    &items
+                },
+                Usage::default(),
+            )
             .unwrap();
     }
     {
@@ -48,25 +58,52 @@ fn prepare(provenance: Provenance<'_>, selected: &str) -> Restoration {
             Provenance::Issued(model) | Provenance::CompactionIssued(model) => model,
             _ => "model-a",
         };
-        store
-            .record_replay_turn(
-                &parent,
-                &ResponsesRequest {
-                    input: vec![],
-                    instructions: "test".into(),
-                    tools: vec![].into(),
-                    tools_allowed: None,
-                    model: model.into(),
-                    pinned_effort: Effort::Low,
-                    session_id: "test".into(),
-                },
-                &ResponsesTurn {
-                    response_id: "response".into(),
-                    items: items.clone(),
-                    usage: Default::default(),
-                },
-            )
-            .unwrap();
+        if matches!(
+            provenance,
+            Provenance::Issued(_) | Provenance::CompactionIssued(_)
+        ) {
+            store
+                .record_replay_turn_for_target(
+                    &parent,
+                    &ResponsesRequest {
+                        input: vec![],
+                        instructions: "test".into(),
+                        tools: vec![].into(),
+                        tools_allowed: None,
+                        model: model.into(),
+                        pinned_effort: Effort::Low,
+                        session_id: "test".into(),
+                    },
+                    &ResponsesTurn {
+                        response_id: "response".into(),
+                        items: items.clone(),
+                        usage: Default::default(),
+                    },
+                    crate::transport::ResponsesRoute::Codex,
+                    crate::transport::ResponsesProtocol::Standard,
+                )
+                .unwrap();
+        } else {
+            store
+                .record_replay_turn(
+                    &parent,
+                    &ResponsesRequest {
+                        input: vec![],
+                        instructions: "test".into(),
+                        tools: vec![].into(),
+                        tools_allowed: None,
+                        model: model.into(),
+                        pinned_effort: Effort::Low,
+                        session_id: "test".into(),
+                    },
+                    &ResponsesTurn {
+                        response_id: "response".into(),
+                        items: items.clone(),
+                        usage: Default::default(),
+                    },
+                )
+                .unwrap();
+        }
     }
     let head = RequestId("edit".into());
     store.write_request(&head, Some(&parent), "/root", &[
@@ -81,7 +118,14 @@ fn prepare(provenance: Provenance<'_>, selected: &str) -> Restoration {
         _ => "model-a",
     };
     store
-        .initialize_context_model(&first.origin, initial)
+        .initialize_context_target(
+            &first.origin,
+            &crate::context::ContextProjectionTarget {
+                model: initial.into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
         .unwrap();
     let snapshot = store.begin_context(&first, &head).unwrap();
     let mut saved = snapshot.document.clone();
@@ -210,7 +254,7 @@ fn refused(
         matches!(
             result,
             Err(StoreError::Context(
-                ContextError::OpaqueModel | ContextError::ProtectedGroup
+                ContextError::OpaqueModel | ContextError::ProtectedGroup | ContextError::Replay(_)
             ))
         ),
         "{result:?}"
@@ -389,13 +433,22 @@ fn historical_compaction_without_issuing_evidence_stays_protected() {
         .write_request(&source, None, "/root", &[], Usage::default())
         .unwrap();
     store
-        .write_compaction_request(
+        .write_request(
             &compact,
-            &source,
+            Some(&source),
             "/root",
             &[Item(
                 json!({"type":"compaction","encrypted_content":"opaque-compaction"}),
             )],
+            Usage::default(),
+        )
+        .unwrap();
+    store
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO session_state(session_id,state,updated_at) VALUES(?1,'true',0)",
+            [format!("harness:compaction:{}", compact.0)],
         )
         .unwrap();
     let mut saved = store.read_context(&compact).unwrap();
@@ -414,7 +467,14 @@ fn historical_compaction_without_issuing_evidence_stays_protected() {
     ], Usage::default()).unwrap();
     let operation = store.claim(&CallId("restore".into()), &head).unwrap();
     store
-        .initialize_context_model(&operation.origin, "model-a")
+        .initialize_context_target(
+            &operation.origin,
+            &crate::context::ContextProjectionTarget {
+                model: "model-a".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
         .unwrap();
     let snapshot = store.begin_context(&operation, &head).unwrap();
     saved.blocks.extend(snapshot.document.blocks.clone());
@@ -435,12 +495,11 @@ fn identical_current_opaque_bytes_keep_distinct_origin_model_evidence() {
     let head = RequestId("model-b-equal-bytes".into());
     let opaque = Item(json!({"type":"reasoning","encrypted_content":"same-opaque-bytes"}));
     fixture.store.write_request(&head, Some(&fixture.snapshot.head), "/root", &[
-        opaque.clone(),
         Item(json!({"type":"custom_tool_call","call_id":"restore-again","name":"haskell_sync","input":"restore"})),
     ], Usage::default()).unwrap();
     fixture
         .store
-        .record_replay_turn(
+        .record_replay_turn_for_target(
             &head,
             &ResponsesRequest {
                 input: vec![],
@@ -456,6 +515,8 @@ fn identical_current_opaque_bytes_keep_distinct_origin_model_evidence() {
                 items: vec![opaque],
                 usage: Default::default(),
             },
+            crate::transport::ResponsesRoute::Codex,
+            crate::transport::ResponsesProtocol::Standard,
         )
         .unwrap();
     let operation = fixture
@@ -507,7 +568,14 @@ fn current_opaque_retention_refuses_unknown_issuing_provenance() {
     ], Usage::default()).unwrap();
     let operation = store.claim(&CallId("retain".into()), &head).unwrap();
     store
-        .initialize_context_model(&operation.origin, "model-a")
+        .initialize_context_target(
+            &operation.origin,
+            &crate::context::ContextProjectionTarget {
+                model: "model-a".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
         .unwrap();
     let snapshot = store.begin_context(&operation, &head).unwrap();
     let result = store.commit_context(ContextCommit {
@@ -522,7 +590,9 @@ fn current_opaque_retention_refuses_unknown_issuing_provenance() {
     });
     assert!(matches!(
         result,
-        Err(StoreError::Context(ContextError::OpaqueModel))
+        Err(StoreError::Context(ContextError::Replay(
+            ContextReplayRejection::MissingProvenance { .. }
+        )))
     ));
     assert!(store.context_receipt(&operation).unwrap().is_none());
     assert_eq!(
