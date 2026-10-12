@@ -64,14 +64,18 @@ class Profiles(unittest.TestCase):
         CHECK.inspect(fixed + ['--cfg=profile_probe_mode="debug"'], "debug", "first-party", "/pinned/rustc", "/pinned/cc")
     def test_target_override_cannot_bypass_profile_owner(self):
         namespace, _ = rules("fast-dev")
-        with self.assertRaises(ValueError):
-            namespace["rust_test"](name="case", rustc_flags=["-Copt-level=2"])
+        for flags in (["-Copt-level=2"], ["--codegen=opt-level=2"], ["--codegen", "opt-level=2"]):
+            with self.assertRaises(ValueError):
+                namespace["rust_test"](name="case", rustc_flags=flags)
     def test_effective_argv_rejects_conflicting_or_missing_policy(self):
         fixed = ["/pinned/rustc", "-Cforce-frame-pointers=yes", "-Clinker=/pinned/cc"]
         for extra in ([], ["-Copt-level=2"], ["-Copt-level=2", "-Copt-level=0"]):
             with self.assertRaises(ValueError):
                 CHECK.inspect(fixed + extra, "fast-dev", "first-party", "/pinned/rustc", "/pinned/cc")
-        CHECK.inspect(fixed + ["-C", "opt-level=0"], "fast-dev", "first-party", "/pinned/rustc", "/pinned/cc")
+        for flags in (["-C", "opt-level=0"], ["--codegen=opt-level=0"], ["--codegen", "opt-level=0"]):
+            CHECK.inspect(fixed + flags, "fast-dev", "first-party", "/pinned/rustc", "/pinned/cc")
+        with self.assertRaises(ValueError):
+            CHECK.inspect(fixed + ["--codegen=opt-level=2", "-Copt-level=0"], "fast-dev", "first-party", "/pinned/rustc", "/pinned/cc")
 
 
 if __name__ == "__main__":

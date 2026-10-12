@@ -16,7 +16,7 @@ def dependency_library_optimization_level():
 def _flags(dependency, flags):
     profile = selected_profile()
     for flag in flags:
-        if flag.startswith("-Copt-level=") or flag.startswith("opt-level="):
+        if flag.startswith("-Copt-level=") or flag.startswith("--codegen=opt-level=") or flag.startswith("opt-level="):
             fail("optimization belongs to tidepool.profile, not per-target rustc_flags")
     level = "2" if profile == "production" or (profile == "fast-dev" and dependency) else "0"
     return list(flags) + ["-Copt-level=" + level]

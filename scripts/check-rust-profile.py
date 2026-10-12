@@ -13,7 +13,9 @@ def inspect(arguments, profile, kind, rustc, linker):
     for index, argument in enumerate(arguments):
         if argument.startswith("-Copt-level="):
             levels.append(argument.split("=", 1)[1])
-        elif argument == "-C" and index + 1 < len(arguments) and arguments[index + 1].startswith("opt-level="):
+        elif argument.startswith("--codegen=opt-level="):
+            levels.append(argument.split("=", 2)[2])
+        elif argument in ("-C", "--codegen") and index + 1 < len(arguments) and arguments[index + 1].startswith("opt-level="):
             levels.append(arguments[index + 1].split("=", 1)[1])
     if levels != [expected]:
         raise ValueError(f"expected exactly one O{expected} option, observed {levels}")
