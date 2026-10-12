@@ -89,7 +89,7 @@ test('visual review: actual 200 percent zoom', async ({ request }, info) => {
     await chooseWorker(page)
     await page.getByRole('button', { name: 'Jump to form', exact: true }).click()
     await capture(page, info, 'zoom-form')
-    await page.getByRole('textbox', { name: 'Message to selected actor', exact: true }).scrollIntoViewIfNeeded()
+    await page.getByRole('textbox', { name: /^Message / }).scrollIntoViewIfNeeded()
     await capture(page, info, 'zoom-composer')
   } finally { await context.close() }
 })

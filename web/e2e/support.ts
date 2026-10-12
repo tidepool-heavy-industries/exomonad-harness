@@ -24,8 +24,10 @@ export async function view(page: Page, name: string) {
 }
 export async function chooseWorker(page: Page) {
   await view(page, 'Chat')
+  const switcher = page.getByRole('button', { name: /^Worker:/ })
+  if (await switcher.isVisible()) await switcher.click()
   await page.getByRole('complementary', { name: 'Workers' }).getByRole('link', { name: target.actor, exact: true }).click()
-  await expect(page.getByLabel('Message to selected actor', {exact:true})).toBeEnabled()
+  await expect(page.getByRole('textbox', { name: /^Message / })).toBeEnabled()
 }
 export async function noOverflow(page: Page) {
   const dimensions = await page.evaluate(() => ({width:innerWidth,documentWidth:document.documentElement.scrollWidth}))

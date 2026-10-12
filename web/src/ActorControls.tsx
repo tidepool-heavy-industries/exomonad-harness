@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent } from 'react'
+import { forwardRef, useImperativeHandle, useRef, useState, type FormEvent } from 'react'
 import RecoveryControls from './RecoveryControls'
 import { currentRecoveryBlock } from './recovery'
 import { MessageContent, MessagePresentation } from './MessagePresentation'
@@ -33,9 +33,9 @@ export function OutgoingInputs({ records, rendered }: { records: readonly Browse
     </div>)}
   </div></section> : null;
 }
-export function ActorComposer({ data, route, unavailable, ready, onHostCommand, operations }: {
+export function ActorComposer({ data, route, unavailable, ready, onHostCommand, operations, onReviewRecovery }: {
   data: HarnessViewModel; route: RouteState; unavailable: boolean; ready: boolean;
-  onHostCommand?: SubmitHostCommand; operations: readonly BrowserCommandRecord[];
+  onHostCommand?: SubmitHostCommand; operations: readonly BrowserCommandRecord[]; onReviewRecovery?: () => void;
 }) {
   const { actor, target, enabled } = actorControls(data, route, unavailable, ready, onHostCommand);
   const draft = useDraft(target ? actorDraftKey(target) : undefined);
@@ -46,18 +46,29 @@ export function ActorComposer({ data, route, unavailable, ready, onHostCommand, 
   const send = (command: HostCommand) => {
     const result = onHostCommand?.(command);
     if (!result) return;
-    setFeedback(result.kind === 'blocked' ? result.reason : `Operation retained; socket send ${result.send}. Input admission remains a separate host observation.`);
+    setFeedback(result.kind === 'blocked' ? result.reason : command.action !== 'input'
+      ? 'Interrupt request saved locally. Its host outcome is available in Host operations.' : result.send === 'unknown'
+      ? 'Saved locally. Initial delivery to the host was uncertain; check the message status before retrying.'
+      : result.send === 'sent' ? 'Sent to the host. Admission is shown in the message status.' : 'Saved locally. Delivery and admission are shown in the message status.');
     if (result.kind === 'retained' && command.action === 'input') draft.submitted();
   };
   const sendInput = () => { if (target && enabled && draft.text.trim()) send({ action: 'input', target, text: draft.text }); };
-  return <section className="host-controls worker-chat-composer" aria-label="Message composer">
-    {actor?.inference && <p className="composer-state" role="status">Inference: {actor.inference.state}{actor.inference.state === 'blocked'
-      ? ' · input can queue; recovery requires an explicit decision in Actor controls.' : actor.inference.state === 'recovering' ? ' · recovery authorized; execution unobserved' : ''}</p>}
+  return <section className={`host-controls worker-chat-composer${draft.text ? ' has-draft' : ''}`} aria-label="Message composer">
+    {actor?.inference && <div className="composer-state">
+      <p role="status">{!['running', 'waiting'].includes(actor.lifecycle) ? `Read-only · ${actor.lifecycle}`
+        : actor.inference.state === 'blocked' ? 'Agent paused · messages can queue'
+        : actor.inference.state === 'recovering' ? 'Recovery authorized · execution not yet observed'
+        : actor.inference.state === 'running' ? 'Working' : 'Ready for input'}</p>
+      {currentRecoveryBlock(actor) && onReviewRecovery && <button type="button" onClick={onReviewRecovery}>Review recovery options</button>}
+    </div>}
     {!ready && <p role="status">Host controls await a fresh connected snapshot.</p>}
     {!onHostCommand && <p role="status">Host command channel is unavailable; this view is read-only.</p>}
     <form onSubmit={(event: FormEvent) => { event.preventDefault(); sendInput(); }} aria-label="Send actor message">
-      <label htmlFor="actor-message">Message to selected actor</label>
-      <textarea id="actor-message" rows={3} value={draft.text} onChange={event => draft.setText(event.target.value)}
+      <div className="composer-heading">
+        <label id="actor-message-label" htmlFor="actor-message">Message {target ? <span className="mono">{target.actor}</span> : 'to selected actor'}</label>
+        {target && <details className="composer-identity"><summary>Identity</summary><p>Run {target.run} · incarnation {target.incarnation}</p></details>}
+      </div>
+      <textarea id="actor-message" rows={1} value={draft.text} onChange={event => draft.setText(event.target.value)}
         disabled={!target || !actor || unavailable || !['running', 'waiting'].includes(actor.lifecycle)}
         aria-describedby="actor-message-hint" onCompositionStart={() => { composing.current = true; }}
         onCompositionEnd={() => { composing.current = false; }} onKeyDown={event => {
@@ -70,7 +81,7 @@ export function ActorComposer({ data, route, unavailable, ready, onHostCommand, 
         <span className="hint" id="actor-message-hint">Enter for a new line · Ctrl/Cmd+Enter to send</span>
         <div className="host-actions">
           <button disabled={!enabled || !draft.text.trim()}>Send input</button>
-          <button type="button" disabled={!enabled || !actor?.activeRound} onClick={() => {
+          <button type="button" aria-describedby="actor-message-label" disabled={!enabled || !actor?.activeRound} onClick={() => {
             if (target && actor?.activeRound) send({ action: 'interrupt', target, expected_round: actor.activeRound });
           }}>Interrupt</button>
         </div>
@@ -81,21 +92,30 @@ export function ActorComposer({ data, route, unavailable, ready, onHostCommand, 
     {feedback && <p className="composer-feedback" role="status">{feedback}</p>}
   </section>;
 }
-export function ActorControlPanel({ data, route, unavailable, ready, onHostCommand, operations }: {
+export interface ActorControlPanelHandle { reviewRecovery: () => void }
+export const ActorControlPanel = forwardRef<ActorControlPanelHandle, {
   data: HarnessViewModel; route: RouteState; unavailable: boolean; ready: boolean;
   onHostCommand?: SubmitHostCommand; operations: readonly BrowserCommandRecord[];
-}) {
+}>(({ data, route, unavailable, ready, onHostCommand, operations }, ref) => {
+  const panel = useRef<HTMLDetailsElement>(null);
+  const recovery = useRef<HTMLElement>(null);
   const { actor, target, enabled } = actorControls(data, route, unavailable, ready, onHostCommand);
   const block = actor ? currentRecoveryBlock(actor) : undefined;
+  useImperativeHandle(ref, () => ({ reviewRecovery() {
+    if (!panel.current || !recovery.current || !block) return;
+    panel.current.open = true;
+    recovery.current.scrollIntoView({ block: 'start' });
+    recovery.current.focus({ preventScroll: true });
+  } }), [block]);
   const [feedback, setFeedback] = useState('');
   const report = (result: import('./client-contract').LocalSubmissionResult) =>
     setFeedback(result.kind === 'blocked' ? result.reason : `Operation ${result.operationId} retained; socket send ${result.send}. Host outcome remains separate.`);
-  return <details className="actor-controls"><summary>Actor controls</summary>
-    {target && block && <RecoveryControls target={target} block={block} ready={enabled} submit={onHostCommand} onResult={report} operations={operations} />}
+  return <details ref={panel} className="actor-controls"><summary>Actor controls</summary>
+    {target && block && <RecoveryControls sectionRef={recovery} target={target} block={block} ready={enabled} submit={onHostCommand} onResult={report} operations={operations} />}
     <section className="actor-retire" aria-label="Retire actor">
       <h3>Retire this actor</h3><p>Close this exact actor. Retained history remains readable.</p>
       <button type="button" disabled={!enabled} onClick={() => { if (target && onHostCommand) report(onHostCommand({ action: 'retire', target })); }}>Retire</button>
     </section>
     {feedback && <p role="status">{feedback}</p>}
   </details>;
-}
+})

@@ -1,4 +1,4 @@
-import type { FormEvent } from 'react'
+import { useId, useState, type FormEvent } from 'react'
 import type { AuthenticationMode } from './session-api'
 import type { TransportPhase } from './client-contract'
 import './SessionView.css'
@@ -32,11 +32,16 @@ export function SessionScreen({ authentication, authenticationAvailable, authent
 }
 
 export function SessionBar({ authentication, transportPhase, checking, signOut, checkSession, failure }: { authentication?: AuthenticationMode; transportPhase: TransportPhase; checking: boolean; signOut: () => Promise<void>; checkSession: () => Promise<void>; failure: string }) {
+  const [optionsOpen, setOptionsOpen] = useState(false)
+  const optionsId = useId()
   return <>
     <section className="session-bar" aria-label="Browser session">
-      <span role="status">Session authenticated{authentication === 'tailscale' ? ' · Tailscale' : authentication === 'disabled' ? ' · No browser authentication' : ''} · {transportPhase}</span>
+      <span role="status"><span className="session-authentication">Session authenticated{authentication === 'tailscale' ? ' · Tailscale' : authentication === 'disabled' ? ' · No browser authentication' : ''} · </span>{transportPhase === 'ready' ? 'Connected' : transportPhase}</span>
+      <button className="session-toggle" type="button" aria-expanded={optionsOpen} aria-controls={optionsId} onClick={() => setOptionsOpen(!optionsOpen)}>Session options</button>
+      <div id={optionsId} className={`session-actions${optionsOpen ? ' is-open' : ''}`}>
       {authentication === 'secret' && <button type="button" onClick={() => void signOut()} disabled={checking}>Sign out</button>}
       <button type="button" onClick={() => void checkSession()} disabled={checking}>Recheck session</button>
+      </div>
     </section>
     {failure && <p className="session-error" role="alert">{failure}</p>}
   </>

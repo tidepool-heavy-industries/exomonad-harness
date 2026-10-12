@@ -8,7 +8,7 @@ for (const width of [1280, 390]) {
     await page.setViewportSize({ width, height: 844 })
     await openFixture(page, request, { snapshot: actorSnapshot(), chatEntries: Array.from({ length: 50 }, (_, n) => message(String(n + 1), null, `History ${n + 1}`)) })
     await chooseWorker(page)
-    const input = page.getByLabel('Message to selected actor', { exact: true })
+    const input = page.getByRole('textbox', { name: /^Message / })
     await expect(page.getByRole('list', { name: 'Conversation entries' })).toBeVisible()
     const initial = await input.boundingBox()
     expect(initial).not.toBeNull()
@@ -31,7 +31,7 @@ for (const width of [1280, 390]) {
 test('multiline composer keyboard submission is IME-safe and preserves the exact operation payload', async ({ page, request }) => {
   await openFixture(page, request, { receipt: 'none', snapshot: actorSnapshot() })
   await chooseWorker(page)
-  const input = page.getByLabel('Message to selected actor', { exact: true })
+  const input = page.getByRole('textbox', { name: /^Message / })
   await input.fill('First line')
   await input.press('End')
   await input.press('Enter')
@@ -64,7 +64,7 @@ test('multiline composer keyboard submission is IME-safe and preserves the exact
 test('exact operation inclusion reconciles one outgoing message and leaves equal-text siblings queued', async ({ page, request }) => {
   await openFixture(page, request, { receipt: 'admitted', snapshot: actorSnapshot() })
   await chooseWorker(page)
-  const input = page.getByLabel('Message to selected actor', { exact: true })
+  const input = page.getByRole('textbox', { name: /^Message / })
   for (let index = 0; index < 2; index++) {
     await input.fill('Equal text')
     await page.getByRole('button', { name: 'Send input', exact: true }).click()

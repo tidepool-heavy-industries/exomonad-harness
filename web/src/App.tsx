@@ -1,7 +1,7 @@
 import CommandView from './CommandView'
 import { Empty } from './view-controls'
 import { inputPublicationKey } from './command-presentation'
-import { ActorComposer, ActorControlPanel, OutgoingInputs } from './ActorControls'
+import { ActorComposer, ActorControlPanel, OutgoingInputs, type ActorControlPanelHandle } from './ActorControls'
 import HostOperations from './HostOperations'
 import TimelineView from './TimelineView'
 import ConversationTreeView from './ConversationTreeView'
@@ -41,6 +41,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
   const embedded = data.hostRun !== undefined;
   const screens = useMemo<Screen[]>(() => embedded ? ['tree', 'chat', 'timeline', 'inbox'] : ['tree', 'timeline', 'inbox', 'command'], [embedded]);
   const heading = useRef<HTMLHeadingElement>(null);
+  const actorControlPanel = useRef<ActorControlPanelHandle>(null);
   const previousScreen = useRef(route.screen);
   const inspectionTrigger = useRef<HTMLElement | null>(null);
   const previousInspection = useRef(route.requestId);
@@ -259,8 +260,8 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
         {route.screen === 'inbox' && inboxScreen}
         {route.screen === 'chat' && <WorkerChat data={data} route={route} navigate={navigate} transportPhase={transportPhase} issue={issue} onAuthExpired={onAuthExpired} onRenderedInputs={onRenderedInputs}
           outgoing={<OutgoingInputs records={chatCommands.filter(record => selectedIdentity !== undefined && actorIdentityKey(record.submission.command.target) === selectedIdentity)} rendered={renderedInputKeys} />}
-          composer={<ActorComposer key={route.selection.kind === 'actor' ? actorIdentityKey(route.selection.identity) : 'none'} data={data} route={route} unavailable={Boolean(issue || resolved.missing)} ready={transportPhase === 'ready'} onHostCommand={onHostCommand} operations={pendingCommands} />} >
-          <ActorControlPanel key={selectedIdentity ?? 'none'} data={data} route={route} unavailable={Boolean(issue || resolved.missing)} ready={transportPhase === 'ready'} onHostCommand={onHostCommand} operations={pendingCommands} />
+          composer={<ActorComposer onReviewRecovery={() => actorControlPanel.current?.reviewRecovery()} key={route.selection.kind === 'actor' ? actorIdentityKey(route.selection.identity) : 'none'} data={data} route={route} unavailable={Boolean(issue || resolved.missing)} ready={transportPhase === 'ready'} onHostCommand={onHostCommand} operations={pendingCommands} />} >
+          <ActorControlPanel ref={actorControlPanel} key={selectedIdentity ?? 'none'} data={data} route={route} unavailable={Boolean(issue || resolved.missing)} ready={transportPhase === 'ready'} onHostCommand={onHostCommand} operations={pendingCommands} />
           <details className="actor-operation-details"><summary>Host operations</summary>
           <section className="actor-operations" aria-label="Host operations">
             <div className="toolbar"><h2>Host operations</h2>

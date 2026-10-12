@@ -11,6 +11,8 @@
   --ink: #eee8d5;
   --muted: #93a1a1;
   --line: #586e75;
+  --control-border: #839496;
+  --diagnostic-size: 12px;
   --accent: #2aa198;
   --link: #59b8ae;
   --pending: #b58900;
@@ -47,7 +49,7 @@ a { color: var(--link); overflow-wrap: anywhere; }
 button, select { font: inherit; }
 button { padding: 7px 10px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; }
 button:disabled { cursor: default; opacity: .6; }
-input, textarea, select { background: var(--panel); color: var(--ink); border: 1px solid var(--line); padding: 8px; max-width: 100%; }
+input, textarea, select { background: var(--panel); color: var(--ink); border: 1px solid var(--control-border); padding: 8px; max-width: 100%; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .harness { display: flex; flex-direction: column; min-width: 0; }
 body > #root { min-height: 100dvh; }
