@@ -4,6 +4,7 @@ import { RichViewRenderer, isRichView, type RichView } from './rich-view'
 import { isStoredActorForm as isFormShape } from './generated/validators.mjs'
 import type { StoredActorForm as WireForm } from './generated/actor-form'
 import { compareDecimal } from './decimal'
+import { allocateOperationId } from './pending-commands'
 export type StoredActorForm = WireForm
 export type FormSpec = StoredActorForm['opening']['form']
 export type FormNode = FormSpec['root']
@@ -157,7 +158,7 @@ export default function MountedForm({ form, ready, active, onAuthExpired }: { fo
       const { origin, mountId } = latest.opening
       const response = await fetch(`/api/actor-form/${dismiss ? 'dismiss' : 'submit'}`, {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ origin, mountId, operationId: crypto.randomUUID(), ...(dismiss ? {} : { draft: activeDraft(latest.opening.form.root, draft) }) }),
+        body: JSON.stringify({ origin, mountId, operationId: allocateOperationId(), ...(dismiss ? {} : { draft: activeDraft(latest.opening.form.root, draft) }) }),
       })
       if (response.status === 401 || response.status === 403) onAuthExpired?.()
       if (!response.ok) throw new Error(response.status === 409 ? 'This form is no longer open. Refresh the conversation.' : 'The form response was rejected. Your draft is still here.')

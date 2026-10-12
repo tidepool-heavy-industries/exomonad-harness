@@ -74,6 +74,26 @@ it('allocates an HTTP-compatible UUID without crypto.randomUUID', () => {
   } finally { vi.unstubAllGlobals() }
 })
 
+it.each([
+  [0x00, '00000000-0000-4000-8000-000000000000'],
+  [0xff, 'ffffffff-ffff-4fff-bfff-ffffffffffff'],
+])('sets UUID version and variant bits in secure byte pattern %i', (byte, expected) => {
+  const getRandomValues = vi.fn((bytes: Uint8Array) => bytes.fill(byte as number))
+  vi.stubGlobal('crypto', { getRandomValues })
+  try {
+    expect(allocateOperationId()).toBe(expected)
+    expect(getRandomValues).toHaveBeenCalledOnce()
+    expect(getRandomValues.mock.calls[0]?.[0]).toHaveLength(16)
+  } finally { vi.unstubAllGlobals() }
+})
+
+it('refuses operation identity allocation without secure randomness', () => {
+  vi.stubGlobal('crypto', undefined)
+  try {
+    expect(() => allocateOperationId()).toThrow('Secure browser randomness is unavailable.')
+  } finally { vi.unstubAllGlobals() }
+})
+
 const operation_id = 'ABCDEF01-1111-4111-8111-111111111111'
 const admittedReceipt = { commandId: operation_id.toLowerCase(), outcome: 'admitted' as const, target: command.target, envelopeId: '42' }
 

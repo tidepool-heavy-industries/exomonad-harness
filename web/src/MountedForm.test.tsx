@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import MountedForm, { clearMountedFormDrafts, isFormSpec, isStoredActorForm, type StoredActorForm } from './MountedForm'
 
@@ -37,8 +37,45 @@ function radioForm(mountId: string): StoredActorForm {
 }
 
 beforeEach(() => { clearMountedFormDrafts(); vi.restoreAllMocks() })
+afterEach(() => vi.unstubAllGlobals())
 
 describe('mounted actor forms', () => {
+  it.each(['Submit', 'Dismiss'] as const)('sends %s with secure browser randomness when randomUUID is absent', async button => {
+    vi.stubGlobal('crypto', { getRandomValues: crypto.getRandomValues.bind(crypto) })
+    const dismiss = button === 'Dismiss'
+    const response: StoredActorForm = { ...openForm, revisionSequence: '11', state: dismiss ? 'dismissed' : 'submitted', draft: dismiss ? null : { name: 'HTTP draft' } }
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(response)))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<MountedForm form={openForm} ready active />)
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'HTTP draft' } })
+    fireEvent.click(screen.getByRole('button', { name: button }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`/api/actor-form/${dismiss ? 'dismiss' : 'submit'}`)
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: 'POST', credentials: 'same-origin' })
+    const payload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(payload).toEqual({ origin, mountId: openForm.opening.mountId,
+      operationId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
+      ...(dismiss ? {} : { draft: { name: 'HTTP draft', mode: 'a', onlyA: 'a value' } }),
+    })
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Submit' })).toBeNull())
+    expect(screen.queryByRole('alert')).toBeNull()
+    if (dismiss) expect(screen.queryByRole('button', { name: 'Dismiss' })).toBeNull()
+    else expect(screen.getByRole('status')).toHaveTextContent('Response submitted')
+  })
+
+  it.each(['Submit', 'Dismiss'] as const)('refuses %s without secure randomness and preserves the draft', async button => {
+    vi.stubGlobal('crypto', undefined)
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    render(<MountedForm form={openForm} ready active />)
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'retained draft' } })
+    fireEvent.click(screen.getByRole('button', { name: button }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Secure browser randomness is unavailable.')
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(screen.getByLabelText('Name')).toHaveValue('retained draft')
+    expect(screen.getByRole('button', { name: button })).toBeEnabled()
+  })
+
   it('retains edits across rerenders and rejected requests, distinguishing option ids and omitting inactive alternatives', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('rejected', { status: 409 }))
     vi.stubGlobal('fetch', fetchMock)
