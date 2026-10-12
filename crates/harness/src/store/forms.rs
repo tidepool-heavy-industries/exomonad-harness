@@ -667,6 +667,49 @@ mod tests {
             ));
         }
     }
+
+    #[test]
+    fn form_publication_uses_output_owner_execution_identity_constraints() {
+        let store = Store::memory().unwrap();
+        for execution in [String::new(), "x".repeat(257)] {
+            let mut form = opening("invalid");
+            form.execution = ActorOutputExecution::Notebook {
+                execution,
+                input_unit_index: 0,
+                effect_ordinal: 0,
+            };
+            assert!(matches!(
+                store.open_actor_form(&Authority(true), &form),
+                Err(StoreError::InvalidForm)
+            ));
+            assert!(matches!(
+                store.actor_form(&form.origin, "invalid"),
+                Err(StoreError::FormUnavailable)
+            ));
+            assert!(
+                store
+                    .pending_actor_forms(&form.origin, 0, 64)
+                    .unwrap()
+                    .forms
+                    .is_empty()
+            );
+        }
+        let mut form = opening("valid");
+        form.execution = ActorOutputExecution::Notebook {
+            execution: "x".repeat(256),
+            input_unit_index: 0,
+            effect_ordinal: 0,
+        };
+        store.open_actor_form(&Authority(true), &form).unwrap();
+        assert_eq!(
+            store
+                .pending_actor_forms(&form.origin, 0, 64)
+                .unwrap()
+                .forms[0]
+                .execution,
+            form.execution
+        );
+    }
     #[test]
     fn attempts_retain_drafts_fence_stale_settlement_and_do_not_move_cards() {
         let store = Store::memory().unwrap();

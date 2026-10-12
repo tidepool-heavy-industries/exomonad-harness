@@ -382,9 +382,18 @@ mod tests {
         assert_eq!(pending["forms"][0]["state"], "submitted");
         assert_eq!(pending["revisionSequence"], submitted["revisionSequence"]);
         assert!(pending["forms"][0].get("draft").is_none());
+        let old_submission = store.actor_form(&origin, "mount").unwrap();
         store.close_actor_form(&origin, "mount").unwrap();
         let closed = store.actor_form(&origin, "mount").unwrap();
         control.publish_actor_form(&closed);
+        control.publish_actor_form(&old_submission);
+        assert_eq!(
+            control.snapshot.read().unwrap().actor_form_revisions[0]
+                .sequence
+                .get(),
+            closed.revision_sequence
+        );
+
         let pending: serde_json::Value = client
             .get(format!(
                 "{base}/actor-form/pending?run=run&actor=1&incarnation=1"

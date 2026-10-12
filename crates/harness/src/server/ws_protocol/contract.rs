@@ -731,8 +731,23 @@ pub fn wire_samples() -> serde_json::Value {
         incarnation: "incarnation".into(),
     };
     let actor = HostActorProjection {
-        workbench: None,
-        form_waits: None,
+        workbench: Some(HostWorkbenchObservation::AwaitingEffect {
+            input_unit_index: 9_007_199_254_740_993u64.into(),
+            total: u64::MAX.into(),
+            operation: "FormAwaitWith".into(),
+        }),
+        form_waits: Some(HostFormWaits {
+            waits: vec![HostFormWait {
+                mount_id: "form".into(),
+                execution: ActorOutputExecution::Notebook {
+                    execution: "execution".into(),
+                    input_unit_index: 9_007_199_254_740_993u64.into(),
+                    effect_ordinal: u64::MAX.into(),
+                },
+                since_unix_ms: 9_007_199_254_740_993u64.into(),
+            }],
+            omitted: 1u64.into(),
+        }),
         identity: identity.clone(),
         output_origin: Some(origin.clone()),
         parent: None,

@@ -34,6 +34,8 @@ export function decodeActorOutputPage(value: unknown, origin: ActorOutputOrigin,
   return value
 }
 export function retainActorOutput(current: ReadonlyMap<string, ActorOutputReference> | undefined, reference: ActorOutputReference) {
+  const previous = current?.get(actorOutputKey(reference.origin))
+  if (previous && BigInt(previous.sequence) >= BigInt(reference.sequence)) return current!
   const next = new Map(current)
   next.delete(actorOutputKey(reference.origin))
   next.set(actorOutputKey(reference.origin), reference)

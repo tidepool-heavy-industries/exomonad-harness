@@ -100,3 +100,30 @@ describe('generated browser state projection', () => {
     expect(isSequencedEvent({ seq: '1', event: { kind: 'tokens.observed', value: null } })).toBe(false)
   })
 })
+
+describe('form revision snapshot cutover', () => {
+  it('preserves newer durable revisions across delayed events and exact incarnations', () => {
+    const first = {run:'r',nativeActor:'9007199254740993',incarnation:'1'}
+    const second = {...first,incarnation:'2'}
+    const reference = (origin: typeof first, sequence: string) => ({origin,sequence})
+    const snapshot: Snapshot = {...fixtureSnapshot, actorFormRevisions:[reference(first,'20'),reference(second,'3')]}
+    let state = normalizeSnapshot(snapshot)
+    const form = (origin: typeof first, revisionSequence: string) => ({
+      sequence:'1',revisionSequence,opening:{origin,mountId:'same',execution:{kind:'actor_program' as const},
+        conversation:null,form:{version:1 as const,root:{kind:'empty' as const}}},
+      state:'submitted' as const,attemptId:'attempt',draft:{},errors:[],answer:null,
+    })
+    for (const [origin,revision] of [[first,'19'],[second,'4'],[first,'21']] as const) {
+      const result = applyStateEvent(state,{seq:nextCounter(state.seq),
+        event:{kind:'actor.form.changed',value:form(origin,revision)}})
+      if(result.kind!=='applied') throw new Error('consecutive stream must apply')
+      state=result.state
+    }
+    const revisions=[...state.actorFormRevisions!.values()]
+    expect(revisions.find(row=>row.origin.incarnation==='1')?.sequence).toBe('21')
+    expect(revisions.find(row=>row.origin.incarnation==='2')?.sequence).toBe('4')
+    const reconnected=normalizeSnapshot({...snapshot,seq:state.seq,actorFormRevisions:revisions})
+    expect([...reconnected.actorFormRevisions!.values()]).toEqual(revisions)
+    expect([...normalizeSnapshot(snapshot).actorFormRevisions!.values()]).toEqual(snapshot.actorFormRevisions)
+  })
+})
