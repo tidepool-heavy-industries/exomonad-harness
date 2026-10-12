@@ -346,6 +346,13 @@ pub struct ChatInvocation {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChatInputOperation {
+    pub envelope_id: WireI64,
+    pub operation_id: String,
+    pub target: HostActorIdentity,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChatTool {
     pub operation: ChatOperation,
     pub invocation: ChatInvocation,
@@ -365,6 +372,7 @@ pub enum ChatEntry {
         hash: String,
         item: JsonValue,
         tool: Option<ChatTool>,
+        input_operation: Option<ChatInputOperation>,
     },
     Output {
         sequence: WireI64,
@@ -406,12 +414,18 @@ impl From<&crate::store::chat::ChatPage> for ChatPage {
                     hash,
                     item,
                     tool,
+                    input_operation,
                 } => ChatEntry::Message {
                     sequence: (*sequence).into(),
                     request_id: request_id.clone(),
                     position: (*position).into(),
                     hash: hash.clone(),
                     item: item.clone().into(),
+                    input_operation: input_operation.as_ref().map(|input| ChatInputOperation {
+                        envelope_id: input.envelope_id.into(),
+                        operation_id: input.operation_id.clone(),
+                        target: input.target.clone(),
+                    }),
                     tool: tool.as_ref().map(|tool| ChatTool {
                         operation: ChatOperation {
                             origin: tool.operation.origin.clone(),
@@ -507,6 +521,7 @@ pub(super) fn extension_samples() -> serde_json::Value {
                 hash: "a".repeat(64),
                 item: serde_json::json!([null, "opaque"]).into(),
                 tool: None,
+                input_operation: None,
             },
         ],
         next_after: Some(i64::MAX.into()),
@@ -580,5 +595,75 @@ impl From<ClientCommand> for crate::server::ClientCommand {
                 command: command.into(),
             },
         }
+    }
+}
+
+impl ChatEntry {
+    fn sequence(&self) -> WireI64 {
+        match self {
+            Self::Message { sequence, .. }
+            | Self::Output { sequence, .. }
+            | Self::Form { sequence, .. }
+            | Self::Oversized { sequence, .. } => *sequence,
+        }
+    }
+}
+impl ChatPage {
+    /// Decimal metadata changes the encoded size. Retain the query's near edge
+    /// and issue the cursor from the actual retained entries after projection.
+    pub fn bounded(mut self, backward: bool) -> crate::store::Result<Self> {
+        while serde_json::to_vec(&self)?.len() > crate::store::history::MAX_HISTORY_BYTES {
+            if self.entries.len() <= 1 {
+                return Err(crate::store::StoreError::InvalidActorOutput);
+            }
+            if backward {
+                self.entries.remove(0);
+                self.previous_before = self.entries.first().map(ChatEntry::sequence);
+            } else {
+                self.entries.pop();
+                self.next_after = self.entries.last().map(ChatEntry::sequence);
+            }
+        }
+        Ok(self)
+    }
+}
+
+#[cfg(test)]
+mod chat_bounds_tests {
+    use super::*;
+    #[test]
+    fn encoded_page_bound_retains_the_query_edge_and_issues_its_exact_cursor() {
+        let mut page: ChatPage =
+            serde_json::from_value(extension_samples()["chat"][0].clone()).unwrap();
+        let message = |sequence: i64| ChatEntry::Message {
+            sequence: sequence.into(),
+            request_id: "request".into(),
+            position: i64::MAX.into(),
+            hash: "a".repeat(64),
+            item: serde_json::json!("x".repeat(crate::store::history::MAX_HISTORY_BYTES / 2))
+                .into(),
+            tool: None,
+            input_operation: None,
+        };
+        page.entries = vec![
+            message(9_007_199_254_740_993),
+            message(9_007_199_254_740_994),
+        ];
+        let forward = page.clone().bounded(false).unwrap();
+        assert_eq!(forward.entries.len(), 1);
+        assert_eq!(forward.next_after.unwrap().get(), 9_007_199_254_740_993);
+        assert!(
+            serde_json::to_vec(&forward).unwrap().len() <= crate::store::history::MAX_HISTORY_BYTES
+        );
+        let backward = page.bounded(true).unwrap();
+        assert_eq!(backward.entries.len(), 1);
+        assert_eq!(
+            backward.previous_before.unwrap().get(),
+            9_007_199_254_740_994
+        );
+        assert!(
+            serde_json::to_vec(&backward).unwrap().len()
+                <= crate::store::history::MAX_HISTORY_BYTES
+        );
     }
 }

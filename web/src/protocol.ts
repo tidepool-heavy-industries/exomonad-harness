@@ -209,7 +209,9 @@ export function sameHostIdentity(left: HostActorIdentity, right: HostActorIdenti
 }
 export function isHostCommand(value: unknown): value is HostCommand {
   const frame = { type: 'host_command', operation_id: validationOperation, command: value };
-  return isClientFrame(frame) && frame.type === 'host_command' && isHostIdentity(frame.command.target);
+  return isClientFrame(frame) && frame.type === 'host_command' && isHostIdentity(frame.command.target)
+    && (frame.command.action !== 'recover' || (frame.command.expected_block.request.length > 0
+      && (frame.command.expected_block.reason.kind !== 'request_rejected' || withinDiagnosticBounds(frame.command.expected_block.reason.failure))));
 }
 export function sameHostCommand(left: HostCommand, right: HostCommand): boolean {
   return sameHostIdentity(left.target, right.target) && left.action === right.action
@@ -241,7 +243,10 @@ export function isInferenceBlock(value: unknown): value is InferenceBlock {
   return isHostCommand({ action:'recover', target:validationTarget, expected_block:value, mode:'exact' });
 }
 export function isHostInferenceState(value: unknown): value is HostInferenceState {
-  return isServerFrame({ type:'event', event:{ seq:'0', event:{ kind:'actor.upsert', value:{ identity:validationTarget, parent:null, kind:'model', lifecycle:'waiting', modelConversation:null, inference:value } } } });
+  const frame = { type:'event', event:{ seq:'0', event:{ kind:'actor.upsert', value:{ identity:validationTarget, parent:null, kind:'model', lifecycle:'waiting', modelConversation:null, inference:value } } } };
+  if (!isServerFrame(frame) || frame.type !== 'event' || frame.event.event.kind !== 'actor.upsert') return false;
+  const inference = frame.event.event.value.inference;
+  return inference != null && (inference.state === 'idle' || inference.state === 'running' || isInferenceBlock(inference.block));
 }
 export function isCommandState(value: unknown): value is EmbeddedCommandRecord['state'] {
   return isCommandRecordShape({ operationId: validationOperation,
@@ -252,14 +257,15 @@ export function isCommandReceipt(value: unknown): value is CommandReceipt {
   const frame = { type: 'event', event: { seq: '0', event: { kind: 'command.receipt', value } } };
   if (!isServerFrame(frame) || frame.type !== 'event' || frame.event.event.kind !== 'command.receipt') return false;
   const receipt = frame.event.event.value;
-  return receipt.commandId.length > 0 && (receipt.target == null || isHostIdentity(receipt.target));
+  return receipt.commandId.length > 0 && (receipt.target == null || isHostIdentity(receipt.target))
+    && (receipt.outcome !== 'recovery_authorized' || isInferenceBlock(receipt.block));
 }
 export function isCommandRefusal(value: unknown): value is HostCommandRefusal {
   return isObject(value) && isServerFrame({ ...value, type: 'command.refused' });
 }
 /** Shape is generated; operation/target/receipt association is client policy. */
 export function isEmbeddedCommandRecord(value: unknown): value is EmbeddedCommandRecord {
-  if (!isCommandRecordShape(value)) return false;
+  if (!isCommandRecordShape(value) || !isHostCommand(value.command)) return false;
   if (value.state === 'input_admitted' && value.command.action !== 'input') return false;
   if (value.state === 'control_requested' && value.command.action === 'input') return false;
   if (value.inputObservation != null && (value.state !== 'input_admitted' || value.command.action !== 'input' || value.envelopeId === null
@@ -289,6 +295,7 @@ export function isSnapshot(value: unknown): value is Snapshot {
     && (snapshot.actorOutputRevisions?.length ?? 0) <= 128
     && new TextEncoder().encode(JSON.stringify(snapshot.actorOutputRevisions ?? [])).length <= 65536
     && (snapshot.actorOutputRevisions ?? []).every(validActorOutputReference)
+    && (snapshot.commandReceipts ?? []).every(isCommandReceipt)
     && (snapshot.actors ?? []).every(value => validStateEvent({ kind: 'actor.upsert', value }))
     && snapshot.conversations.every(value => validStateEvent({ kind: 'conversation.upsert', value }))
     && snapshot.requests.every(value => validStateEvent({ kind: 'request.upsert', value }))
@@ -314,14 +321,15 @@ function validStateEvent(event: StateEvent): boolean {
     }
     case 'actor.upsert': return isHostIdentity(event.value.identity)
       && (event.value.parent === null || isHostIdentity(event.value.parent))
-      && nullableIdentity(event.value.modelConversation) && nullableIdentity(event.value.modelHeadRequest);
+      && nullableIdentity(event.value.modelConversation) && nullableIdentity(event.value.modelHeadRequest)
+      && (event.value.inference == null || isHostInferenceState(event.value.inference));
     case 'conversation.upsert': return event.value.id.length > 0
       && nullableIdentity(event.value.parentId) && nullableIdentity(event.value.forkSourceRequestId);
     case 'request.upsert': return event.value.id.length > 0 && nullableIdentity(event.value.parentId)
       && withinDiagnosticBounds(event.value.failure);
     case 'job.upsert': case 'envelope.upsert': case 'entity.remove': return event.value.id.length > 0;
     case 'host_run.upsert': return event.value.run.length > 0;
-    case 'command.receipt': return event.value.commandId.length > 0;
+    case 'command.receipt': return isCommandReceipt(event.value);
   }
 }
 

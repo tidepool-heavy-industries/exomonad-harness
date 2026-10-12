@@ -45,6 +45,7 @@ pub(super) async fn chat(State(state): State<AppState>, Query(q): Query<ChatQuer
         incarnation: q.incarnation,
     };
     let request = q.request.map(RequestId);
+    let backward = matches!(q.direction, ChatDirection::Backward);
     match tokio::task::spawn_blocking(move || match q.direction {
         ChatDirection::Forward => store.chat_page(
             &origin,
@@ -58,11 +59,10 @@ pub(super) async fn chat(State(state): State<AppState>, Query(q): Query<ChatQuer
     })
     .await
     {
-        Ok(Ok(page)) => (
-            [(header::CACHE_CONTROL, "no-store")],
-            Json(super::browser_contract::ChatPage::from(&page)),
-        )
-            .into_response(),
+        Ok(Ok(page)) => match super::browser_contract::ChatPage::from(&page).bounded(backward) {
+            Ok(page) => ([(header::CACHE_CONTROL, "no-store")], Json(page)).into_response(),
+            Err(_) => StatusCode::BAD_REQUEST.into_response(),
+        },
         Ok(Err(StoreError::MissingRequest(_))) => StatusCode::NOT_FOUND.into_response(),
         Ok(Err(StoreError::InvalidHistoryOffset | StoreError::InvalidActorOutput)) => {
             StatusCode::BAD_REQUEST.into_response()
@@ -230,7 +230,11 @@ mod tests {
         assert_eq!(page["entries"][0]["kind"], "form");
         assert_eq!(page["entries"][0]["form"]["opening"]["mountId"], "mount");
         assert_eq!(page["previousBefore"], serde_json::Value::Null);
-        let sequence = page["entries"][0]["sequence"].as_i64().unwrap();
+        let sequence = page["entries"][0]["sequence"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap();
         let older: serde_json::Value = client
             .get(format!(
                 "{base}/chat?run=run&actor=1&incarnation=1&direction=backward&before={sequence}"

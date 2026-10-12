@@ -98,12 +98,6 @@ pub enum CommandReceiptOutcome {
         mode: crate::embedding::RecoveryMode,
         projection: crate::context::RecoveryProjectionReceipt,
     },
-    RecoveryAuthorized {
-        target: HostActorIdentity,
-        block: crate::embedding::InferenceBlock,
-        mode: crate::embedding::RecoveryMode,
-        projection: crate::context::RecoveryProjectionReceipt,
-    },
     Admitted {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<HostActorIdentity>,
