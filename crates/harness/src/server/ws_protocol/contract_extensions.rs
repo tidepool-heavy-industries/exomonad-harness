@@ -521,7 +521,15 @@ pub(super) fn extension_samples() -> serde_json::Value {
                 hash: "a".repeat(64),
                 item: serde_json::json!([null, "opaque"]).into(),
                 tool: None,
-                input_operation: None,
+                input_operation: Some(ChatInputOperation {
+                    envelope_id: i64::MAX.into(),
+                    operation_id: uuid::Uuid::nil().to_string(),
+                    target: HostActorIdentity {
+                        run: "run".into(),
+                        actor: crate::model::AgentPath("/root".into()),
+                        incarnation: "incarnation".into(),
+                    },
+                }),
             },
         ],
         next_after: Some(i64::MAX.into()),
@@ -567,6 +575,13 @@ mod tests {
         let mut lossy = form.clone();
         lossy["revisionSequence"] = serde_json::json!(i64::MAX);
         assert!(serde_json::from_value::<StoredActorForm>(lossy).is_err());
+        assert_eq!(
+            samples["chat"][0]["entries"][1]["inputOperation"]["envelopeId"],
+            i64::MAX.to_string()
+        );
+        let mut lossy_page = samples["chat"][0].clone();
+        lossy_page["entries"][1]["inputOperation"]["envelopeId"] = serde_json::json!(i64::MAX);
+        assert!(serde_json::from_value::<ChatPage>(lossy_page).is_err());
         let page: ChatPage = serde_json::from_value(samples["chat"][0].clone()).unwrap();
         assert_eq!(serde_json::to_value(page).unwrap(), samples["chat"][0]);
     }
