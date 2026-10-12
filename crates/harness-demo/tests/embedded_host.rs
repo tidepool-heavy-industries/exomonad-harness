@@ -11,7 +11,9 @@ use harness::{
     model::{AgentPath, CallId, Effort, RequestId},
     provider::{CallContext, Provider, ProviderError},
     store::Store,
-    transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError},
+    transport::{
+        Auth, ResponsesProtocol, ResponsesRequest, ResponsesRoute, ResponsesTurn, TransportError,
+    },
     turn::{JobOutput, JobScheduler},
 };
 use serde_json::{Value, json};
@@ -19,6 +21,14 @@ use std::sync::{
     Arc, Mutex, RwLock,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+
+fn projection_target() -> harness::context::ContextProjectionTarget {
+    harness::context::ContextProjectionTarget {
+        model: "offline".into(),
+        route: ResponsesRoute::Codex,
+        protocol: ResponsesProtocol::Standard,
+    }
+}
 
 struct Permit;
 impl AdmissionGuard for Permit {}
@@ -130,6 +140,9 @@ struct ReloadDuringRequest {
 }
 #[async_trait]
 impl ResponsesTransport for ReloadDuringRequest {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         assert_eq!(
             request.tools.len(),
@@ -338,6 +351,9 @@ struct ResumeAfterInput {
 
 #[async_trait]
 impl ResponsesTransport for ResumeAfterInput {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         assert_eq!(
             request.tools.len(),
@@ -537,6 +553,9 @@ struct FinalOnly(Arc<Mutex<Vec<ResponsesRequest>>>);
 
 #[async_trait]
 impl ResponsesTransport for FinalOnly {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         self.0.lock().unwrap().push(request);
         Ok(ResponsesTurn {
@@ -674,6 +693,9 @@ struct NativeWaitAttempt(Arc<Mutex<Vec<ResponsesRequest>>>);
 
 #[async_trait]
 impl ResponsesTransport for NativeWaitAttempt {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         assert_eq!(request.tools.len(), 1);
         assert_eq!(request.tools[0]["name"], "haskell");
@@ -1134,6 +1156,9 @@ async fn checkpoint_conversations_keep_independent_children_after_origin_failure
     struct Finished;
     #[async_trait]
     impl ResponsesTransport for Finished {
+        fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+            Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        }
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             Ok(ResponsesTurn {
                 response_id: "source".into(),
@@ -1209,6 +1234,7 @@ async fn checkpoint_conversations_keep_independent_children_after_origin_failure
         &checkpoint,
         &json!({"task":"first"}),
         &json!({"revision":"checkout-a"}),
+        &projection_target(),
     )
     .unwrap();
     let child_a_record = store.agent(&child_a.identity().actor).unwrap().unwrap();
@@ -1221,6 +1247,7 @@ async fn checkpoint_conversations_keep_independent_children_after_origin_failure
         &checkpoint,
         &json!({"task":"second"}),
         &json!({"revision":"checkout-b"}),
+        &projection_target(),
     )
     .unwrap();
     let child_b_record = store.agent(&child_b.identity().actor).unwrap().unwrap();
@@ -1266,7 +1293,8 @@ async fn checkpoint_conversations_keep_independent_children_after_origin_failure
             &root.identity.actor,
             &checkpoint,
             &json!({}),
-            &json!({"revision":"retired"})
+            &json!({"revision":"retired"}),
+            &projection_target(),
         )
         .is_err(),
         "a released child host rejects a new checkpoint admission"
@@ -1373,6 +1401,9 @@ async fn checkpoint_attachment_uses_host_admission_and_commits_binding_atomicall
     struct Finished;
     #[async_trait]
     impl ResponsesTransport for Finished {
+        fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+            Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        }
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             Ok(ResponsesTurn {
                 response_id: "source".into(),
@@ -1438,7 +1469,8 @@ async fn checkpoint_attachment_uses_host_admission_and_commits_binding_atomicall
             &root.identity.actor,
             &checkpoint,
             &json!({}),
-            &json!({"revision":"abc"})
+            &json!({"revision":"abc"}),
+            &projection_target(),
         )
         .is_err()
     );
@@ -1455,6 +1487,7 @@ async fn checkpoint_attachment_uses_host_admission_and_commits_binding_atomicall
         &checkpoint,
         &json!({}),
         &json!({"revision":"abc"}),
+        &projection_target(),
     )
     .unwrap();
     assert_eq!(child.identity().incarnation, "child-one");
