@@ -49,6 +49,8 @@ class Profiles(unittest.TestCase):
             exec(source, namespace)
             namespace["tidepool_buildscript_run"](name="case")
             self.assertEqual(calls[0]["env"]["OPT_LEVEL"], expected)
+            self.assertEqual(calls[0]["env"]["PROFILE"], "release" if profile == "production" else "dev")
+            self.assertEqual(calls[0]["env"]["DEBUG"], "false")
     def test_default_and_unknown_profile(self):
         namespace, _ = rules(None)
         self.assertEqual(namespace["selected_profile"](), "fast-dev")

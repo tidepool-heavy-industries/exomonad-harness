@@ -9,7 +9,9 @@ O2 dependency libraries and build-script binaries. This bounds feedback work wit
 the monolithic unit executable. `debug` compiles every Rust target at O0.
 `production` preserves Harness's existing O2 policy. Optimization belongs to
 `build/rust/profiles.bzl`; toolchains retain compiler identity, frame pointers and
-linker selection. Dependency projection comes from Reindeer configuration; do not
+linker selection. Dependency build scripts receive the matching optimization
+level and `PROFILE=release` for production (`dev` otherwise); `DEBUG=false`
+reflects the absence of debug-info flags. Dependency projection comes from Reindeer configuration; do not
 hand-edit generated third-party targets.
 
 Use `-c tidepool.profile=PROFILE`, alongside `--local-only -c remote.enabled=false`
