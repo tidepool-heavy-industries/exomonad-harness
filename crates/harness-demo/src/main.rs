@@ -757,14 +757,14 @@ impl harness::engine::ResponsesTransport for DeterministicServerTransport {
         &self,
     ) -> Result<
         (
-            harness::auth::ResponsesRoute,
-            harness::auth::ResponsesProtocol,
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
         ),
         TransportError,
     > {
         Ok((
-            harness::auth::ResponsesRoute::Codex,
-            harness::auth::ResponsesProtocol::Standard,
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
         ))
     }
 
