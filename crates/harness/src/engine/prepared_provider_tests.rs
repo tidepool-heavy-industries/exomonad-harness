@@ -31,6 +31,7 @@ impl Provider for NoEffects {
 struct Script {
     items: Vec<Item>,
     streaming: bool,
+    stall: bool,
     cancel: Option<watch::Sender<bool>>,
     request: Arc<Mutex<Option<RequestId>>>,
 }
@@ -66,6 +67,9 @@ impl ResponsesTransport for Script {
         }
         if let Some(cancel) = &self.cancel {
             cancel.send(true).unwrap();
+            std::future::pending::<()>().await;
+        }
+        if self.stall {
             std::future::pending::<()>().await;
         }
         assembly.accept(
@@ -121,6 +125,7 @@ async fn completed_compaction(streaming: bool) {
     let script = Script {
         items: items.clone(),
         streaming,
+        stall: false,
         cancel: None,
         request,
     };
@@ -205,6 +210,7 @@ async fn cancelled_compaction_prefix_is_interrupted_after_reopen() {
     let script = Script {
         items: items.clone(),
         streaming: true,
+        stall: false,
         cancel: Some(cancel),
         request: Arc::new(Mutex::new(None)),
     };
@@ -269,6 +275,7 @@ async fn cancelled_inference_retains_buffered_prefix_after_reopen() {
         Script {
             items: items.clone(),
             streaming: true,
+            stall: false,
             cancel: Some(cancel),
             request: request.clone(),
         },
@@ -301,4 +308,59 @@ async fn cancelled_inference_retains_buffered_prefix_after_reopen() {
     assert!(reopened.replay_turns(&head).unwrap().is_empty());
     drop(reopened);
     std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn compaction_live_retention_failure_settles_failed_response() {
+    let store = Arc::new(Store::memory().unwrap());
+    let source = RequestId("source".into());
+    let child = RequestId("compactor".into());
+    store.create_request(&source, None, "/test").unwrap();
+    store
+        .create_request(&child, Some(&source), "/test")
+        .unwrap();
+    let effects = Arc::new(NoEffects(AtomicUsize::new(0)));
+    let script = Script {
+        items: raw_items(),
+        streaming: true,
+        stall: true,
+        cancel: None,
+        request: Arc::new(Mutex::new(None)),
+    };
+    let selection = script.prepare_submission().unwrap();
+    let prepared = store
+        .prepare_provider_request(
+            &source,
+            &child,
+            ResponsesRequest {
+                input: vec![],
+                instructions: "fixed".into(),
+                tools: vec![].into(),
+                tools_allowed: None,
+                model: "model".into(),
+                pinned_effort: Effort::Low,
+                session_id: "session".into(),
+            },
+            &[],
+            None,
+            selection,
+            ProviderRequestPurpose::ServerCompaction,
+        )
+        .unwrap();
+    store.lock().unwrap().execute_batch("CREATE TEMP TRIGGER refuse_first_provider_item BEFORE INSERT ON provider_items WHEN NEW.output_index=0 BEGIN SELECT RAISE(ABORT,'injected retention refusal'); END;").unwrap();
+    let engine = engine(store.clone(), script, effects.clone());
+    let (_cancel, receiver) = watch::channel(false);
+    assert!(matches!(
+        engine
+            .execute_compaction_submission(prepared, receiver, &source)
+            .await,
+        Err(EngineError::Store(_))
+    ));
+    assert_eq!(
+        store.provider_response_state(&child).unwrap(),
+        Some(ProviderResponseState::Failed)
+    );
+    assert!(store.replay_turns(&source).unwrap().is_empty());
+    assert!(store.claims_on(&child).unwrap().is_empty());
+    assert_eq!(effects.0.load(Ordering::SeqCst), 0);
 }

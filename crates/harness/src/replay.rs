@@ -934,6 +934,10 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 #[cfg(test)]
+#[path = "replay/prepared_tests.rs"]
+mod prepared_tests;
+
+#[cfg(test)]
 #[path = "replay/context_tests.rs"]
 mod context_tests;
 
