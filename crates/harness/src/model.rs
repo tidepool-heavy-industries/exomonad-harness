@@ -6,7 +6,7 @@ pub struct AgentPath(pub String);
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct CallId(pub String);
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RequestId(pub String);
 
 /// The conversation authorized to originate a provider operation.

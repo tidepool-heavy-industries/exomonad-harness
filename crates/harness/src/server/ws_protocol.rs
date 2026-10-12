@@ -3,6 +3,7 @@ use crate::item::ToolKind;
 use serde::{Deserialize, Serialize};
 
 pub mod contract;
+mod contract_extensions;
 mod decimal;
 pub use decimal::{WireI64, WireU64};
 
@@ -76,7 +77,7 @@ pub enum CommandControl {
 
 /// Bounded observation of a command handoff. It records admission or routing
 /// receipts only; durable input and completion remain owned elsewhere.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandReceipt {
     pub command_id: String,
@@ -84,13 +85,19 @@ pub struct CommandReceipt {
     pub outcome: CommandReceiptOutcome,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "outcome",
     rename_all = "snake_case",
     rename_all_fields = "camelCase"
 )]
 pub enum CommandReceiptOutcome {
+    RecoveryAuthorized {
+        target: HostActorIdentity,
+        block: crate::embedding::InferenceBlock,
+        mode: crate::embedding::RecoveryMode,
+        projection: crate::context::RecoveryProjectionReceipt,
+    },
     RecoveryAuthorized {
         target: HostActorIdentity,
         block: crate::embedding::InferenceBlock,
@@ -404,7 +411,7 @@ mod host_wire_tests {
         };
         let frame = WsClientFrame::HostCommand {
             operation_id: operation,
-            command: command.clone(),
+            command: (&command).into(),
         };
         let mut value = serde_json::to_value(&frame).unwrap();
         assert_eq!(value["operation_id"], operation.to_string());

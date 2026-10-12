@@ -84,7 +84,7 @@ pub struct InferenceBlock {
     pub reason: InferenceBlockReason,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InferenceBlockReason {
     StreamInterrupted {
@@ -100,7 +100,7 @@ pub enum InferenceBlockReason {
     HostInterrupted,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryMode {
     Exact,
@@ -359,7 +359,7 @@ pub struct InputReceipt {
     /// Delivery failure does not revoke the durable admission.
     pub wake_error: Option<String>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "state", content = "request", rename_all = "snake_case")]
 pub enum InputObservation {
     Admitted,

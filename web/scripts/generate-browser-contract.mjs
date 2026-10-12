@@ -16,9 +16,14 @@ const roots = [
   ['server', 'server', 'ServerFrame', 'isServerFrame'],
   ['serverEvent', 'server-event', 'ServerEvent', 'isServerEvent'],
   ['client', 'client', 'ClientFrame', 'isClientFrame'],
+  ['clientCommand', 'client-command', 'ClientCommand', 'isClientCommand'],
   ['actorOutputHistory', 'actor-output-history', 'ActorOutputHistoryPage', 'isActorOutputHistoryPage'],
   ['actorDisplayExpansion', 'actor-display-expansion', 'ActorDisplayExpansion', 'isActorDisplayExpansion'],
   ['history', 'history', 'HistoryPage', 'isHistoryPage'],
+  ['actorForm', 'actor-form', 'StoredActorForm', 'isStoredActorForm'],
+  ['actorFormSubmit', 'actor-form-submit', 'ActorFormSubmit', 'isActorFormSubmit'],
+  ['actorFormDismiss', 'actor-form-dismiss', 'ActorFormDismiss', 'isActorFormDismiss'],
+  ['chat', 'chat', 'ChatPage', 'isChatPage'],
   ['embeddedCommand', 'embedded-command', 'EmbeddedCommandRecord', 'isEmbeddedCommandRecord'],
 ];
 const ajv = new Ajv({ strict: true, allErrors: true, code: { source: true, esm: true } });

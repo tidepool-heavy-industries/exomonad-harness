@@ -58,7 +58,11 @@ pub(super) async fn chat(State(state): State<AppState>, Query(q): Query<ChatQuer
     })
     .await
     {
-        Ok(Ok(page)) => ([(header::CACHE_CONTROL, "no-store")], Json(page)).into_response(),
+        Ok(Ok(page)) => (
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(super::browser_contract::ChatPage::from(&page)),
+        )
+            .into_response(),
         Ok(Err(StoreError::MissingRequest(_))) => StatusCode::NOT_FOUND.into_response(),
         Ok(Err(StoreError::InvalidHistoryOffset | StoreError::InvalidActorOutput)) => {
             StatusCode::BAD_REQUEST.into_response()
@@ -66,21 +70,8 @@ pub(super) async fn chat(State(state): State<AppState>, Query(q): Query<ChatQuer
         _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct FormSubmission {
-    origin: ActorOutputOrigin,
-    mount_id: String,
-    operation_id: String,
-    draft: serde_json::Value,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct FormDismissal {
-    origin: ActorOutputOrigin,
-    mount_id: String,
-    operation_id: String,
-}
+type FormSubmission = super::browser_contract::ActorFormSubmit;
+type FormDismissal = super::browser_contract::ActorFormDismiss;
 pub(super) async fn submit(
     State(state): State<AppState>,
     Json(input): Json<FormSubmission>,
@@ -91,10 +82,10 @@ pub(super) async fn submit(
     response(
         tokio::task::spawn_blocking(move || {
             store.submit_actor_form(
-                &input.origin,
+                &input.origin.into(),
                 &input.mount_id,
                 &input.operation_id,
-                &input.draft,
+                &serde_json::to_value(&input.draft).expect("form draft serializes"),
             )
         })
         .await,
@@ -109,7 +100,7 @@ pub(super) async fn dismiss(
     };
     response(
         tokio::task::spawn_blocking(move || {
-            store.dismiss_actor_form(&input.origin, &input.mount_id, &input.operation_id)
+            store.dismiss_actor_form(&input.origin.into(), &input.mount_id, &input.operation_id)
         })
         .await,
     )
@@ -121,7 +112,11 @@ fn response(
     >,
 ) -> Response {
     match result {
-        Ok(Ok(form)) => ([(header::CACHE_CONTROL, "no-store")], Json(form)).into_response(),
+        Ok(Ok(form)) => (
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(super::browser_contract::StoredActorForm::from(&form)),
+        )
+            .into_response(),
         Ok(Err(StoreError::InvalidForm | StoreError::InvalidActorOutput)) => {
             StatusCode::BAD_REQUEST.into_response()
         }
@@ -263,7 +258,8 @@ mod tests {
                 StatusCode::BAD_REQUEST
             );
         }
-        let body = json!({"origin":origin,"mountId":"mount","operationId":"submit","draft":{"f0":"answer"}});
+        let wire_origin = super::super::browser_contract::ActorOutputOrigin::from(&origin);
+        let body = json!({"origin":wire_origin,"mountId":"mount","operationId":"submit","draft":{"f0":"answer"}});
         let submitted = client
             .post(format!("{base}/actor-form/submit"))
             .bearer_auth(secret)
@@ -285,7 +281,7 @@ mod tests {
                 .status(),
             StatusCode::OK
         );
-        let changed = json!({"origin":origin,"mountId":"mount","operationId":"submit","draft":{"f0":"changed"}});
+        let changed = json!({"origin":wire_origin,"mountId":"mount","operationId":"submit","draft":{"f0":"changed"}});
         assert_eq!(
             client
                 .post(format!("{base}/actor-form/submit"))

@@ -2,6 +2,7 @@ import { appendOutput, commitOutput, setRevision, outputKey, revisionKey,
   type LiveOutput, type HistoryRevision, type OutputScope } from './live-output';
 import { actorOutputKey, retainActorOutput, isStoredActorOutput, validActorOutputReference, type ActorOutputReference } from './actor-output';
 import { isServerFrame, isClientFrame, isEmbeddedCommandRecord as isCommandRecordShape } from './generated/validators.mjs';
+import { isStoredActorForm } from './MountedForm';
 import type { ServerFrame } from './generated/server';
 import type { ClientFrame } from './generated/client';
 export type { EmbeddedCommandRecord } from './generated/embedded-command';
@@ -13,6 +14,9 @@ export type Snapshot = Extract<ServerFrame, { type: 'snapshot' }>['snapshot'];
 export type SequencedEvent = Extract<ServerFrame, { type: 'event' }>['event'];
 export type StateEvent = SequencedEvent['event'];
 export type HostActorProjection = NonNullable<Snapshot['actors']>[number];
+export type HostInferenceState = NonNullable<HostActorProjection['inference']>;
+export type InferenceBlock = Extract<HostInferenceState, { state: 'blocked' }>['block'];
+export type RecoveryMode = Extract<HostCommand, { action: 'recover' }>['mode'];
 export type HostActorIdentity = HostActorProjection['identity'];
 export type HostCommand = Extract<ClientFrame, { type: 'host_command' }>['command'];
 export type HostCommandSubmission = Omit<Extract<ClientFrame, { type: 'host_command' }>, 'type'>;
@@ -81,6 +85,7 @@ export function applyStateEvent(state: NormalizedState, message: SequencedEvent)
   const next = { ...state, seq: message.seq };
   switch (message.event.kind) {
     case "actor.form.changed": return { kind: 'applied', state: { ...next, actorOutputRevisions: retainActorOutput(next.actorOutputRevisions, {origin:message.event.value.opening.origin,sequence:message.event.value.revisionSequence ?? message.event.value.sequence}) } };
+    case "actor.form.changed": return { kind: 'applied', state: { ...next, actorOutputRevisions: retainActorOutput(next.actorOutputRevisions, {origin:message.event.value.opening.origin, sequence:message.event.value.revisionSequence}) } };
     case "actor.output.committed": return { kind: 'applied', state: { ...next,
       actorOutputRevisions: retainActorOutput(next.actorOutputRevisions, message.event.value.reference) } };
     case "model.output.stopped": {
@@ -210,7 +215,10 @@ export function sameHostCommand(left: HostCommand, right: HostCommand): boolean 
   return sameHostIdentity(left.target, right.target) && left.action === right.action
     && (left.action !== 'input' || (right.action === 'input' && left.text === right.text))
     && (left.action !== 'interrupt' || (right.action === 'interrupt'
-      && canonicalOperationId(left.expected_round) === canonicalOperationId(right.expected_round)));
+      && canonicalOperationId(left.expected_round) === canonicalOperationId(right.expected_round)))
+    && (left.action !== 'recover' || (right.action === 'recover' && left.mode === right.mode
+      && left.expected_block.request === right.expected_block.request && left.expected_block.generation === right.expected_block.generation
+      && JSON.stringify(left.expected_block.reason) === JSON.stringify(right.expected_block.reason)));
 }
 export function isCommandState(value: unknown): value is EmbeddedCommandRecord['state'] {
   return isCommandRecordShape({ operationId: validationOperation,
@@ -231,11 +239,15 @@ export function isEmbeddedCommandRecord(value: unknown): value is EmbeddedComman
   if (!isCommandRecordShape(value)) return false;
   if (value.state === 'input_admitted' && value.command.action !== 'input') return false;
   if (value.state === 'control_requested' && value.command.action === 'input') return false;
+  if (value.inputObservation != null && (value.state !== 'input_admitted' || value.command.action !== 'input' || value.envelopeId === null
+    || (value.inputObservation.state === 'included' && value.inputObservation.request.length === 0))) return false;
   const receipt = value.receipt;
   if (receipt === null) return true;
   if (!isOperationId(receipt.commandId) || canonicalOperationId(receipt.commandId) !== canonicalOperationId(value.operationId)
     || (receipt.target != null && !sameHostIdentity(receipt.target, value.command.target))) return false;
   switch (receipt.outcome) {
+    case 'recovery_authorized': return value.state === 'recovery_authorized' && value.command.action === 'recover'
+      && sameHostCommand(value.command, {action:'recover', target:receipt.target, expected_block:receipt.block, mode:receipt.mode});
     case 'admitted': return value.state === 'input_admitted' && value.command.action === 'input'
       && (value.envelopeId === null || value.envelopeId === receipt.envelopeId);
     case 'control_requested': return value.state === 'control_requested' && value.command.action === receipt.control;
@@ -270,6 +282,7 @@ export function isSequencedEvent(value: unknown): value is SequencedEvent {
 function validStateEvent(event: StateEvent): boolean {
   const nullableIdentity = (value: string | null | undefined) => value == null || value.length > 0;
   switch (event.kind) {
+    case 'actor.form.changed': return isStoredActorForm(event.value);
     case 'actor.output.committed': return isStoredActorOutput(event.value);
     case 'model.output.started': case 'model.output.stopped': case 'model.output.delta':
     case 'model.output.committed': case 'model.output.remove': {

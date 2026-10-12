@@ -1,3 +1,4 @@
+import { isRichView } from './rich-view'
 import { isActorOutputHistoryPage, isServerFrame } from './generated/validators.mjs'
 import type { ActorOutputHistoryPage } from './generated/actor-output-history'
 export type ActorOutputOrigin = ActorOutputHistoryPage['origin']
@@ -17,6 +18,7 @@ export function isStoredActorOutput(value: unknown): value is StoredActorOutput 
   const page = emission.page
   return validActorOutputReference(reference) && BigInt(emission.id.displaySlot) > 0n
     && actorOutputKey(emission.origin) === actorOutputKey(reference.origin)
+    && (page.view == null || isRichView(page.view))
     && bytes(page.text) <= 32768
     && page.expansions.every(([key]) => BigInt(key) > 0n)
     && new Set(page.expansions.map(([key]) => key)).size === page.expansions.length

@@ -176,7 +176,7 @@ pub enum TransportError {
 
 /// An explicit provider failure event, distinct from local framing or schema
 /// errors. It gives no proof that escaped tool work did not execute.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Error, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderStreamFailureEvent {
     #[error("response.failed")]
@@ -187,7 +187,7 @@ pub enum ProviderStreamFailureEvent {
 
 /// The response ended without completion proof. This does not establish whether
 /// completed tool items escaped the stream or their external calls ran.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Error, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamInterruption {
     #[error("missing response.completed")]

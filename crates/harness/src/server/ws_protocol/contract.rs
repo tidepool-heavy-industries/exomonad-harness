@@ -1,13 +1,11 @@
 //! Browser projections own their wire shapes; Store records remain internal.
-use super::{
-    CommandReceipt, HostActorIdentity, HostActorKind, HostActorLifecycle, ToolJobState, WireI64,
-    WireU64,
-};
+pub use super::contract_extensions::*;
+use super::{HostActorIdentity, HostActorKind, HostActorLifecycle, ToolJobState, WireI64, WireU64};
 use crate::{
     embedding::{ClientOperationId, EmbeddedRoundId},
     item::ToolKind,
     model::ConversationIdentity,
-    server::{CommandRefusal, HostCommand},
+    server::CommandRefusal,
     store::actor_output as stored,
     transport::{RequestFailure, sse::OutputChannel},
 };
@@ -95,6 +93,8 @@ pub struct ActorDisplayPage {
     pub text: String,
     pub expansions: Vec<(WireU64, String)>,
     pub unavailable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<crate::store::presentation::View>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -102,6 +102,8 @@ pub struct ActorDisplayPage {
 pub struct ActorOutputEmission {
     pub origin: ActorOutputOrigin,
     pub id: ActorOutputId,
+    pub execution: ActorOutputExecution,
+    pub conversation: Option<ConversationIdentity>,
     pub page: ActorDisplayPage,
 }
 
@@ -119,6 +121,8 @@ impl From<&stored::StoredActorOutput> for ActorOutputProjection {
         Self {
             reference: output.reference().into(),
             emission: ActorOutputEmission {
+                execution: (&emission.execution).into(),
+                conversation: emission.conversation.clone(),
                 origin: (&emission.origin).into(),
                 id: ActorOutputId {
                     display_slot: emission.id.display_slot.into(),
@@ -133,6 +137,7 @@ impl From<&stored::StoredActorOutput> for ActorOutputProjection {
                         .map(|(key, label)| ((*key).into(), label.clone()))
                         .collect(),
                     unavailable: emission.page.unavailable,
+                    view: emission.page.view.clone(),
                 },
             },
         }
@@ -241,6 +246,8 @@ pub struct HostActorProjection {
     pub model_head_request: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_round: Option<EmbeddedRoundId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference: Option<HostInferenceState>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -452,6 +459,8 @@ pub struct HostRun {
 pub enum StateEvent {
     #[serde(rename = "actor.output.committed")]
     ActorOutputCommitted(ActorOutputProjection),
+    #[serde(rename = "actor.form.changed")]
+    ActorFormChanged(StoredActorForm),
     #[serde(rename = "model.output.started")]
     ModelOutputStarted(OutputScope),
     #[serde(rename = "model.output.stopped")]
@@ -483,6 +492,7 @@ pub enum StateEvent {
 impl StateEvent {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::ActorFormChanged(_) => "actor.form.changed",
             Self::ActorOutputCommitted(_) => "actor.output.committed",
             Self::ModelOutputStarted(_) => "model.output.started",
             Self::ModelOutputStopped(_) => "model.output.stopped",
@@ -569,15 +579,18 @@ pub struct EmbeddedCommandRecord {
     pub state: crate::store::EmbeddedCommandState,
     pub envelope_id: Option<WireI64>,
     pub receipt: Option<CommandReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_observation: Option<crate::embedding::InputObservation>,
 }
 impl From<&crate::store::EmbeddedCommandRecord> for EmbeddedCommandRecord {
     fn from(record: &crate::store::EmbeddedCommandRecord) -> Self {
         Self {
             operation_id: record.operation_id,
-            command: record.command.clone(),
+            command: (&record.command).into(),
             state: record.state,
             envelope_id: record.envelope_id.map(Into::into),
-            receipt: record.receipt.clone(),
+            receipt: record.receipt.as_ref().map(Into::into),
+            input_observation: record.input_observation.clone(),
         }
     }
 }
@@ -589,10 +602,15 @@ pub fn schemas() -> serde_json::Value {
     serde_json::json!({
         "serverEvent": SchemaSettings::draft07().for_serialize().into_generator().into_root_schema_for::<crate::server::ServerEvent>(),
         "server": SchemaSettings::draft07().for_serialize().into_generator().into_root_schema_for::<ServerFrame>(),
+        "clientCommand": SchemaSettings::draft07().for_deserialize().into_generator().into_root_schema_for::<ClientCommand>(),
         "client": SchemaSettings::draft07().for_deserialize().into_generator().into_root_schema_for::<ClientFrame>(),
         "actorOutputHistory": SchemaSettings::draft07().for_serialize().into_generator().into_root_schema_for::<ActorOutputHistoryPage>(),
         "actorDisplayExpansion": SchemaSettings::draft07().for_deserialize().into_generator().into_root_schema_for::<ActorDisplayExpansion>(),
         "embeddedCommand": SchemaSettings::draft07().for_serialize().into_generator().into_root_schema_for::<EmbeddedCommandRecord>(),
+        "actorForm": SchemaSettings::draft07().for_serialize().into_generator().into_root_schema_for::<StoredActorForm>(),
+        "actorFormSubmit": SchemaSettings::draft07().for_deserialize().into_generator().into_root_schema_for::<ActorFormSubmit>(),
+        "actorFormDismiss": SchemaSettings::draft07().for_deserialize().into_generator().into_root_schema_for::<ActorFormDismiss>(),
+        "chat": SchemaSettings::draft07().for_serialize().into_generator().into_root_schema_for::<ChatPage>(),
         "history": SchemaSettings::draft07().for_serialize().into_generator().into_root_schema_for::<HistoryPage>(),
     })
 }
@@ -635,6 +653,8 @@ pub fn wire_samples() -> serde_json::Value {
             sequence: i64::MAX.into(),
         },
         emission: ActorOutputEmission {
+            execution: ActorOutputExecution::ActorProgram,
+            conversation: None,
             origin: origin.clone(),
             id: ActorOutputId {
                 display_slot: 9_007_199_254_740_993u64.into(),
@@ -644,6 +664,7 @@ pub fn wire_samples() -> serde_json::Value {
                 text: "A retained value".into(),
                 expansions: vec![(9_007_199_254_740_993u64.into(), "field".into())],
                 unavailable: false,
+                view: None,
             },
         },
     };
@@ -661,6 +682,7 @@ pub fn wire_samples() -> serde_json::Value {
         model_conversation: Some(conversation.id.clone()),
         model_head_request: Some("request/root".into()),
         active_round: Some(EmbeddedRoundId(uuid::Uuid::nil())),
+        inference: None,
     };
     let request = RequestProjection {
         id: "request/root".into(),
@@ -684,7 +706,7 @@ pub fn wire_samples() -> serde_json::Value {
     };
     let receipt = CommandReceipt {
         command_id: uuid::Uuid::nil().to_string(),
-        outcome: super::CommandReceiptOutcome::Admitted {
+        outcome: CommandReceiptOutcome::Admitted {
             target: Some(identity.clone()),
             envelope_id: i64::MAX.into(),
             wake_error: None,
@@ -835,15 +857,49 @@ pub fn wire_samples() -> serde_json::Value {
         code: CommandRefusal::Conflict,
         reason: "Owner has changed".into(),
     });
-    serde_json::json!({
+    let recovery_block = InferenceBlock {
+        request: "request/root".into(),
+        generation: u64::MAX.into(),
+        reason: crate::embedding::InferenceBlockReason::ContinuityUnproven,
+    };
+    frames.push(ServerFrame::Event {
+        event: SequencedEvent {
+            seq: u64::MAX.into(),
+            event: StateEvent::CommandReceipt(CommandReceipt {
+                command_id: uuid::Uuid::nil().to_string(),
+                outcome: CommandReceiptOutcome::RecoveryAuthorized {
+                    target: HostActorIdentity {
+                        run: "run".into(),
+                        actor: crate::model::AgentPath("/root".into()),
+                        incarnation: "incarnation".into(),
+                    },
+                    block: recovery_block.clone(),
+                    mode: crate::embedding::RecoveryMode::VisibleHistory,
+                    projection: RecoveryProjectionReceipt {
+                        omitted: vec!["opaque-reference".into()],
+                        unknown_response_completeness: vec!["request/root".into()],
+                    },
+                },
+            }),
+        },
+    });
+    let mut samples = serde_json::json!({
         "serverEvent": frames.iter().filter_map(|frame| match frame { ServerFrame::Event { event } => Some(crate::server::ServerEvent { sequence: event.seq, event: event.event.clone() }), _ => None }).collect::<Vec<_>>(),
         "server": frames,
+        "clientCommand": [ClientCommand::Submit { command: "start".into() }, ClientCommand::Host { operation_id: ClientOperationId(uuid::Uuid::nil()), command: HostCommand::Recover { target: HostActorIdentity { run: "run".into(), actor: crate::model::AgentPath("/root".into()), incarnation: "incarnation".into() }, expected_block: recovery_block, mode: crate::embedding::RecoveryMode::Exact } }],
         "client": [ClientFrame::Command { command: "start".into() }, ClientFrame::SnapshotRequest, ClientFrame::HostCommand { operation_id: ClientOperationId(uuid::Uuid::nil()), command: HostCommand::Interrupt { target: identity, expected_round: EmbeddedRoundId(uuid::Uuid::nil()) } }],
         "actorOutputHistory": [ActorOutputHistoryPage { origin: origin.clone(), outputs: vec![output.clone()], next_after: Some(i64::MAX.into()) }],
         "actorDisplayExpansion": [ActorDisplayExpansion { origin, display_slot: output.emission.id.display_slot, key: output.emission.page.expansions[0].0 }],
-        "embeddedCommand": [EmbeddedCommandRecord { operation_id: ClientOperationId(uuid::Uuid::nil()), command: HostCommand::Input { target: HostActorIdentity { run: "run".into(), actor: crate::model::AgentPath("/root".into()), incarnation: "incarnation".into() }, text: "start".into() }, state: crate::store::EmbeddedCommandState::InputAdmitted, envelope_id: Some(i64::MAX.into()), receipt: Some(receipt) }, EmbeddedCommandRecord { operation_id: ClientOperationId(uuid::Uuid::nil()), command: HostCommand::Input { target: HostActorIdentity { run: "run".into(), actor: crate::model::AgentPath("/root".into()), incarnation: "incarnation".into() }, text: "start".into() }, state: crate::store::EmbeddedCommandState::Queued, envelope_id: None, receipt: None }],
+        "embeddedCommand": [EmbeddedCommandRecord { operation_id: ClientOperationId(uuid::Uuid::nil()), command: HostCommand::Input { target: HostActorIdentity { run: "run".into(), actor: crate::model::AgentPath("/root".into()), incarnation: "incarnation".into() }, text: "start".into() }, state: crate::store::EmbeddedCommandState::InputAdmitted, envelope_id: Some(i64::MAX.into()), receipt: Some(receipt), input_observation: Some(crate::embedding::InputObservation::Admitted) }, EmbeddedCommandRecord { operation_id: ClientOperationId(uuid::Uuid::nil()), command: HostCommand::Input { target: HostActorIdentity { run: "run".into(), actor: crate::model::AgentPath("/root".into()), incarnation: "incarnation".into() }, text: "start".into() }, state: crate::store::EmbeddedCommandState::Queued, envelope_id: None, receipt: None, input_observation: None }],
         "history": opaque_history,
-    })
+    });
+    samples.as_object_mut().unwrap().extend(
+        super::contract_extensions::extension_samples()
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    samples
 }
 
 #[cfg(test)]

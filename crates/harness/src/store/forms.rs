@@ -35,7 +35,7 @@ pub enum ActorFormUnavailableCause {
     Cancelled,
     Closed,
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ActorFormState {
     Open,

@@ -1,37 +1,18 @@
 import { useEffect, useState } from 'react'
 import { RichViewRenderer, isRichView, type RichView } from './rich-view'
 
-export interface FormOption { readonly id: string; readonly label: string; readonly presentation: RichView }
-export type FormNode =
-  | { readonly kind: 'pure' }
-  | { readonly kind: 'empty' }
-  | { readonly kind: 'group'; readonly children: readonly FormNode[] }
-  | { readonly kind: 'section'; readonly title: string; readonly child: FormNode }
-  | { readonly kind: 'view'; readonly presentation: RichView }
-  | { readonly kind: 'text'; readonly id: string; readonly label: string; readonly initial: string | null }
-  | { readonly kind: 'int'; readonly id: string; readonly label: string; readonly initial: string | null }
-  | { readonly kind: 'number'; readonly id: string; readonly label: string; readonly initial: number | null }
-  | { readonly kind: 'bool'; readonly id: string; readonly label: string; readonly initial: boolean | null }
-  | { readonly kind: 'choice'; readonly id: string; readonly label: string; readonly options: readonly FormOption[]; readonly initial: string | null }
-  | { readonly kind: 'many'; readonly id: string; readonly label: string; readonly options: readonly FormOption[]; readonly initial: readonly string[] | null }
-  | { readonly kind: 'alternatives'; readonly id: string; readonly label: string; readonly options: readonly (FormOption & { readonly form: FormNode })[]; readonly initial: string | null }
-export interface FormSpec { readonly version: 1; readonly root: FormNode }
-export interface FormOrigin { readonly run: string; readonly nativeActor: number; readonly incarnation: number }
-export type FormExecution = { readonly kind: 'actor_program' }
-  | { readonly kind: 'notebook'; readonly execution: string; readonly inputUnitIndex: number; readonly effectOrdinal: number }
-export type FormConversation = { readonly kind: 'standalone'; readonly store: string; readonly actor: string }
-  | { readonly kind: 'embedded'; readonly run: string; readonly actor: string; readonly incarnation: string }
-export interface StoredActorForm {
-  readonly sequence: number; readonly revisionSequence: number
-  readonly opening: { readonly origin: FormOrigin; readonly mountId: string; readonly execution: FormExecution; readonly conversation: FormConversation | null; readonly form: FormSpec }
-  readonly state: 'open' | 'submitted' | 'answered' | 'dismissed' | 'cancelled' | 'interrupted'
-  readonly attemptId: string | null
-  readonly draft: Readonly<FormDraft> | null
-  readonly errors: readonly { readonly field: string | null; readonly message: string }[]
-  readonly answer: RichView | null
-}
-export type DraftValue = string | number | boolean | string[] | null
-export type FormDraft = Record<string, DraftValue>
+import { isStoredActorForm as isFormShape } from './generated/validators.mjs'
+import type { StoredActorForm as WireForm } from './generated/actor-form'
+import { compareDecimal } from './decimal'
+export type StoredActorForm = WireForm
+export type FormSpec = StoredActorForm['opening']['form']
+export type FormNode = FormSpec['root']
+export type FormOption = Extract<FormNode, { kind: 'choice' }>['options'][number]
+export type FormOrigin = StoredActorForm['opening']['origin']
+export type FormExecution = StoredActorForm['opening']['execution']
+export type FormConversation = NonNullable<StoredActorForm['opening']['conversation']>
+export type FormDraft = NonNullable<StoredActorForm['draft']>
+export type DraftValue = FormDraft[string]
 type Obj = Record<string, unknown>
 const obj = (value: unknown): value is Obj => typeof value === 'object' && value !== null && !Array.isArray(value)
 const text = (value: unknown, max = 128 * 1024): value is string => typeof value === 'string' && new TextEncoder().encode(value).length <= max
@@ -72,16 +53,11 @@ export function isFormSpec(value: unknown): value is FormSpec {
   return obj(value) && value.version === 1 && formNode(value.root)
 }
 export function isStoredActorForm(value: unknown): value is StoredActorForm {
-  if (!obj(value) || !Number.isSafeInteger(value.sequence) || (value.sequence as number) <= 0 || !obj(value.opening)
-    || !Number.isSafeInteger(value.revisionSequence) || (value.revisionSequence as number) < 0
-    || !obj(value.opening.origin) || !text(value.opening.origin.run, 1024) || !isCounter(value.opening.origin.nativeActor)
-    || !isCounter(value.opening.origin.incarnation) || !text(value.opening.mountId, 256) || !isFormExecution(value.opening.execution)
-    || !(value.opening.conversation === null || isFormConversation(value.opening.conversation)) || !isFormSpec(value.opening.form)
-    || !['open', 'submitted', 'answered', 'dismissed', 'cancelled', 'interrupted'].includes(String(value.state))
-    || !(value.attemptId === null || text(value.attemptId, 256)) || !(value.draft === null || isFormDraft(value.draft))
-    || !isFormErrors(value.errors)
-    || !(value.answer === null || isRichView(value.answer))) return false
-  return true
+  return isFormShape(value) && BigInt(value.sequence) > 0n
+    && compareDecimal(value.revisionSequence, value.sequence) >= 0
+    && value.opening.origin.run.length > 0 && value.opening.mountId.length > 0
+    && isFormSpec(value.opening.form) && isFormErrors(value.errors)
+    && (value.answer === null || isRichView(value.answer))
 }
 function isFormErrors(value: unknown): value is StoredActorForm['errors'] {
   if (!Array.isArray(value) || value.length > 1024) return false
@@ -99,18 +75,6 @@ function isFormDraft(value: unknown): value is FormDraft {
       || typeof item === 'number' && Number.isFinite(item)
       || Array.isArray(item) && item.length <= 1024 && item.every(entry => typeof entry === 'string')))
 }
-function isCounter(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) >= 0 }
-function isFormExecution(value: unknown): value is FormExecution {
-  if (!obj(value)) return false
-  return value.kind === 'actor_program' || value.kind === 'notebook' && text(value.execution, 256)
-    && isCounter(value.inputUnitIndex) && isCounter(value.effectOrdinal)
-}
-function isFormConversation(value: unknown): value is FormConversation {
-  if (!obj(value)) return false
-  return value.kind === 'standalone' && text(value.store, 1024) && text(value.actor, 1024)
-    || value.kind === 'embedded' && text(value.run, 1024) && text(value.actor, 1024) && text(value.incarnation, 1024)
-}
-
 const retainedDrafts = new Map<string, FormDraft>()
 const MAX_DRAFTS = 32
 const keyOf = (form: StoredActorForm) => JSON.stringify([form.opening.origin.run, form.opening.origin.nativeActor, form.opening.origin.incarnation, form.opening.mountId])
@@ -165,7 +129,7 @@ export default function MountedForm({ form, ready, active, onAuthExpired }: { fo
   const displayedDraft = latest.state === 'open' ? draft : hydratedDraft(latest)
   const dismissible = (latest.state === 'open' || latest.state === 'submitted') && active && ready
   useEffect(() => {
-    const stale = form.revisionSequence < latest.revisionSequence
+    const stale = compareDecimal(form.revisionSequence, latest.revisionSequence) < 0
       || (form.revisionSequence === latest.revisionSequence && latest.state !== 'open' && form.state === 'open')
     if (stale) return
     if (latest !== form) setLatest(form)
@@ -190,7 +154,7 @@ export default function MountedForm({ form, ready, active, onAuthExpired }: { fo
       if (!response.ok) throw new Error(response.status === 409 ? 'This form is no longer open. Refresh the conversation.' : 'The form response was rejected. Your draft is still here.')
       const value: unknown = await response.json()
       if (!isStoredActorForm(value) || keyOf(value) !== key) throw new Error('The server returned an invalid form response. Your draft is still here.')
-      setLatest(current => value.revisionSequence < current.revisionSequence
+      setLatest(current => compareDecimal(value.revisionSequence, current.revisionSequence) < 0
         || (value.revisionSequence === current.revisionSequence && current.state !== 'open' && value.state === 'open') ? current : value)
       if (value.state !== 'open') retainedDrafts.delete(key)
       else keepDraft(key, draft)
