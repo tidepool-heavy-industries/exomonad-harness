@@ -11,17 +11,31 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ChatDirection {
+    #[default]
+    Forward,
+    Backward,
+}
 #[derive(Deserialize)]
 pub(super) struct ChatQuery {
     run: String,
     actor: u64,
     incarnation: u64,
     request: Option<String>,
+    after: Option<i64>,
+    before: Option<i64>,
     #[serde(default)]
-    after: i64,
+    direction: ChatDirection,
     limit: Option<usize>,
 }
 pub(super) async fn chat(State(state): State<AppState>, Query(q): Query<ChatQuery>) -> Response {
+    if matches!(q.direction, ChatDirection::Forward) && q.before.is_some()
+        || matches!(q.direction, ChatDirection::Backward) && q.after.is_some()
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     let Some(store) = state.history_store else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
@@ -31,8 +45,16 @@ pub(super) async fn chat(State(state): State<AppState>, Query(q): Query<ChatQuer
         incarnation: q.incarnation,
     };
     let request = q.request.map(RequestId);
-    match tokio::task::spawn_blocking(move || {
-        store.chat_page(&origin, request.as_ref(), q.after, q.limit.unwrap_or(50))
+    match tokio::task::spawn_blocking(move || match q.direction {
+        ChatDirection::Forward => store.chat_page(
+            &origin,
+            request.as_ref(),
+            q.after.unwrap_or(0),
+            q.limit.unwrap_or(50),
+        ),
+        ChatDirection::Backward => {
+            store.chat_page_before(&origin, request.as_ref(), q.before, q.limit.unwrap_or(50))
+        }
     })
     .await
     {
@@ -212,6 +234,35 @@ mod tests {
             .unwrap();
         assert_eq!(page["entries"][0]["kind"], "form");
         assert_eq!(page["entries"][0]["form"]["opening"]["mountId"], "mount");
+        assert_eq!(page["previousBefore"], serde_json::Value::Null);
+        let sequence = page["entries"][0]["sequence"].as_i64().unwrap();
+        let older: serde_json::Value = client
+            .get(format!(
+                "{base}/chat?run=run&actor=1&incarnation=1&direction=backward&before={sequence}"
+            ))
+            .bearer_auth(secret)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(older["entries"].as_array().unwrap().is_empty());
+        for query in [
+            format!("after=0&direction=backward&before={sequence}"),
+            "direction=backward&before=-1".into(),
+        ] {
+            assert_eq!(
+                client
+                    .get(format!("{base}/chat?run=run&actor=1&incarnation=1&{query}"))
+                    .bearer_auth(secret)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
         let body = json!({"origin":origin,"mountId":"mount","operationId":"submit","draft":{"f0":"answer"}});
         let submitted = client
             .post(format!("{base}/actor-form/submit"))

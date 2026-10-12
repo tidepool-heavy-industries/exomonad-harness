@@ -1,17 +1,30 @@
 //! Journal publication order. Body bytes stay in Items, never in reference events.
 use super::{
     Result, Store, StoreError,
-    actor_output::{ActorOutputEmission, ActorOutputOrigin, validate_origin},
+    actor_output::{self, ActorOutputOrigin, StoredActorOutput, validate_origin},
     forms::StoredActorForm,
     history::{MAX_HISTORY_BYTES, MAX_HISTORY_ITEMS},
 };
 use crate::{
     item::{Item, ItemHash},
-    model::RequestId,
+    model::{CallId, OperationId, RequestId},
 };
-use rusqlite::{Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::collections::HashSet;
+
+#[derive(Debug, Serialize)]
+pub struct ChatTool {
+    pub operation: OperationId,
+    pub invocation: ChatInvocation,
+}
+#[derive(Debug, Serialize)]
+pub struct ChatInvocation {
+    pub request: String,
+    pub position: i64,
+    pub hash: String,
+}
 pub(super) fn initialize_cutover(tx: &Transaction<'_>, legacy: bool) -> Result<()> {
     let sequence: i64 = if legacy {
         tx.query_row("SELECT COALESCE(MAX(id),0) FROM events", [], |r| r.get(0))?
@@ -54,10 +67,11 @@ pub enum ChatEntry {
         position: i64,
         hash: String,
         item: Value,
+        tool: Option<ChatTool>,
     },
     Output {
         sequence: i64,
-        output: Value,
+        output: StoredActorOutput,
     },
     Form {
         sequence: i64,
@@ -89,6 +103,12 @@ pub struct ChatPage {
     pub legacy_history: bool,
     pub entries: Vec<ChatEntry>,
     pub next_after: Option<i64>,
+    pub previous_before: Option<i64>,
+}
+#[derive(Clone, Copy)]
+enum Cursor {
+    After(i64),
+    Before(Option<i64>),
 }
 impl Store {
     pub fn chat_page(
@@ -98,8 +118,31 @@ impl Store {
         after: i64,
         limit: usize,
     ) -> Result<ChatPage> {
+        self.chat_page_at(origin, head, Cursor::After(after), limit)
+    }
+    /// Latest or strictly older publications, returned in publication order.
+    pub fn chat_page_before(
+        &self,
+        origin: &ActorOutputOrigin,
+        head: Option<&RequestId>,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<ChatPage> {
+        self.chat_page_at(origin, head, Cursor::Before(before), limit)
+    }
+    fn chat_page_at(
+        &self,
+        origin: &ActorOutputOrigin,
+        head: Option<&RequestId>,
+        cursor: Cursor,
+        limit: usize,
+    ) -> Result<ChatPage> {
         validate_origin(origin)?;
-        if after < 0 || limit == 0 || limit > MAX_HISTORY_ITEMS {
+        let boundary = match cursor {
+            Cursor::After(value) => Some(value),
+            Cursor::Before(value) => value,
+        };
+        if boundary.is_some_and(|value| value < 0) || limit == 0 || limit > MAX_HISTORY_ITEMS {
             return Err(StoreError::InvalidHistoryOffset);
         }
         let c = self.lock()?;
@@ -117,15 +160,19 @@ impl Store {
         // Source occurrence edges are proven by the context owner, not content equality.
         let lineage = "WITH RECURSIVE lineage(id) AS (SELECT id FROM requests WHERE id=?1 UNION SELECT r.parent_id FROM requests r JOIN lineage l ON r.id=l.id WHERE r.parent_id IS NOT NULL UNION SELECT ri.source_request FROM request_items ri JOIN lineage l ON ri.request_id=l.id WHERE ri.source_request IS NOT NULL)";
         let legacy:bool=c.query_row(&format!("{lineage} SELECT EXISTS(SELECT 1 FROM request_items ri JOIN lineage l ON l.id=ri.request_id JOIN items i ON i.hash=ri.item_hash WHERE json_extract(i.json,'$.type')!='configuration_update' AND NOT EXISTS(SELECT 1 FROM events e WHERE e.kind='chat_message' AND e.request_id=COALESCE(ri.source_request,ri.request_id) AND json_extract(e.payload,'$.position')=COALESCE(ri.source_position,ri.position) AND json_extract(e.payload,'$.hash')=ri.item_hash))"),[head.map(|h|h.0.as_str())],|r|r.get(0))?;
+        let (selection, order) = match cursor {
+            Cursor::After(_) => ("e.id>?2", "ASC"),
+            Cursor::Before(_) => ("(?2 IS NULL OR e.id<?2)", "DESC"),
+        };
         let sql = format!(
-            "{lineage} SELECT e.id,e.kind,e.request_id,e.payload,e.created_at FROM events e WHERE e.id>?2 AND ((e.kind='chat_message' AND e.request_id IN (SELECT id FROM lineage)) OR (e.kind IN ('actor_output','actor_form_open') AND json_extract(e.payload,'$.origin.run')=?3 AND json_extract(e.payload,'$.origin.nativeActor')=?4 AND json_extract(e.payload,'$.origin.incarnation')=?5)) ORDER BY e.id LIMIT ?6"
+            "{lineage} SELECT e.id,e.kind,e.request_id,e.payload,e.created_at FROM events e WHERE {selection} AND ((e.kind='chat_message' AND e.request_id IN (SELECT id FROM lineage)) OR (e.kind IN ('actor_output','actor_form_open') AND json_extract(e.payload,'$.origin.run')=?3 AND json_extract(e.payload,'$.origin.nativeActor')=?4 AND json_extract(e.payload,'$.origin.incarnation')=?5)) ORDER BY e.id {order} LIMIT ?6"
         );
         let mut q = c.prepare(&sql)?;
         let candidates = q
             .query_map(
                 params![
                     head.map(|h| h.0.as_str()),
-                    after,
+                    boundary,
                     origin.run,
                     origin.native_actor,
                     origin.incarnation,
@@ -148,10 +195,11 @@ impl Store {
             legacy_history: legacy,
             entries: vec![],
             next_after: None,
+            previous_before: None,
         };
         for (sequence, kind, request, payload, created_at) in candidates {
             if page.entries.len() == limit {
-                page.next_after = page.entries.last().map(ChatEntry::sequence);
+                set_cursor(&mut page, cursor);
                 break;
             }
             let entry = match kind.as_str() {
@@ -184,16 +232,14 @@ impl Store {
                             position,
                             hash,
                             item: serde_json::from_str(&raw)?,
+                            tool: None,
                         }
                     }
                 }
-                "actor_output" => {
-                    let emission: ActorOutputEmission = serde_json::from_str(&payload)?;
-                    ChatEntry::Output {
-                        sequence,
-                        output: json!({"reference":{"origin":emission.origin,"sequence":sequence},"emission":emission,"createdAt":created_at}),
-                    }
-                }
+                "actor_output" => ChatEntry::Output {
+                    sequence,
+                    output: actor_output::row(sequence, payload, created_at)?,
+                },
                 "actor_form_open" => {
                     let raw: String = c.query_row(
                         "SELECT presentation FROM actor_forms WHERE opening_sequence=?1",
@@ -210,15 +256,132 @@ impl Store {
             page.entries.push(entry);
             if serde_json::to_vec(&page)?.len() > MAX_HISTORY_BYTES {
                 page.entries.pop();
-                page.next_after = page.entries.last().map(ChatEntry::sequence);
+                set_cursor(&mut page, cursor);
                 if page.entries.is_empty() {
                     return Err(StoreError::InvalidActorOutput);
                 }
                 break;
             }
         }
+        if matches!(cursor, Cursor::Before(_)) {
+            page.entries.reverse();
+        }
+        project_tools(&c, &mut page.entries)?;
+        while serde_json::to_vec(&page)?.len() > MAX_HISTORY_BYTES {
+            match cursor {
+                Cursor::After(_) => {
+                    page.entries.pop();
+                }
+                Cursor::Before(_) => {
+                    page.entries.remove(0);
+                }
+            }
+            if page.entries.is_empty() {
+                return Err(StoreError::InvalidActorOutput);
+            }
+            match cursor {
+                Cursor::After(_) => page.next_after = page.entries.last().map(ChatEntry::sequence),
+                Cursor::Before(_) => {
+                    page.previous_before = page.entries.first().map(ChatEntry::sequence)
+                }
+            }
+        }
         Ok(page)
     }
+}
+
+fn set_cursor(page: &mut ChatPage, cursor: Cursor) {
+    let sequence = page.entries.last().map(ChatEntry::sequence);
+    match cursor {
+        Cursor::After(_) => page.next_after = sequence,
+        Cursor::Before(_) => page.previous_before = sequence,
+    }
+}
+
+fn project_tools(c: &Connection, entries: &mut [ChatEntry]) -> Result<()> {
+    let mut operations = Vec::with_capacity(entries.len());
+    for entry in entries.iter() {
+        let operation = if let ChatEntry::Message {
+            request_id,
+            position,
+            hash,
+            item,
+            ..
+        } = entry
+        {
+            match item["type"].as_str() {
+                Some("function_call_output" | "custom_tool_call_output") => {
+                    let raw: Option<String> = c.query_row("SELECT output_operation FROM request_items WHERE request_id=?1 AND position=?2 AND item_hash=?3", params![request_id, position, hash], |r| r.get(0)).optional()?.flatten();
+                    raw.map(|raw| serde_json::from_str(&raw)).transpose()?
+                }
+                Some("function_call" | "custom_tool_call") => {
+                    if let Some(call) = item["call_id"].as_str() {
+                        let mut q = c.prepare("SELECT origin FROM claims WHERE origin_request_id=?1 AND request_id=?1 AND call_id=?2")?;
+                        let origins = q
+                            .query_map(params![request_id, call], |r| r.get::<_, String>(0))?
+                            .collect::<std::result::Result<Vec<_>, _>>()?;
+                        match origins.as_slice() {
+                            [origin] => Some(OperationId {
+                                origin: serde_json::from_str(origin)?,
+                                request: RequestId(request_id.clone()),
+                                call: CallId(call.to_owned()),
+                            }),
+                            [] => None,
+                            _ => {
+                                return Err(StoreError::AmbiguousReplayCall {
+                                    call_id: call.to_owned(),
+                                });
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        operations.push(operation);
+    }
+    let selected: HashSet<_> = operations.iter().flatten().cloned().collect();
+    let ledger = super::validation::invocations_for_operations(c, &selected)?;
+    for (entry, operation) in entries.iter_mut().zip(operations) {
+        if let (
+            ChatEntry::Message {
+                request_id,
+                position,
+                hash,
+                item,
+                tool,
+                ..
+            },
+            Some(operation),
+        ) = (entry, operation)
+        {
+            let Some(issued) = ledger.get(&operation) else {
+                return Err(StoreError::InvalidActorOutput);
+            };
+            if matches!(
+                item["type"].as_str(),
+                Some("function_call" | "custom_tool_call")
+            ) && (issued.occurrence.request.0 != *request_id
+                || issued.occurrence.position != *position
+                || issued.occurrence.hash.0 != *hash)
+            {
+                return Err(StoreError::InvalidActorOutput);
+            }
+            *tool = Some(ChatTool {
+                operation,
+                invocation: ChatInvocation {
+                    request: issued.occurrence.request.0.clone(),
+                    position: issued.occurrence.position,
+                    hash: issued.occurrence.hash.0.clone(),
+                },
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -237,6 +400,115 @@ mod tests {
             native_actor: 1,
             incarnation: 1,
         }
+    }
+    #[test]
+    fn backward_pages_start_at_latest_and_follow_exact_publication_boundaries() {
+        let store = Store::memory().unwrap();
+        let request = RequestId("history".into());
+        store.create_request(&request, None, "/root").unwrap();
+        for n in 0..7 {
+            store
+                .append_items(
+                    &request,
+                    &[Item(
+                        json!({"type":"message","role":"user","content":format!("message {n}")}),
+                    )],
+                )
+                .unwrap();
+            store
+                .record_event(Some(&request), "not_chat", &json!({}))
+                .unwrap();
+        }
+        let all = store.chat_page(&origin(), Some(&request), 0, 100).unwrap();
+        let mut before = None;
+        let mut restored = vec![];
+        loop {
+            let page = store
+                .chat_page_before(&origin(), Some(&request), before, 2)
+                .unwrap();
+            assert!(page.next_after.is_none());
+            assert!(
+                page.entries
+                    .windows(2)
+                    .all(|pair| pair[0].sequence() < pair[1].sequence())
+            );
+            assert!(
+                page.entries
+                    .iter()
+                    .all(|entry| before.is_none_or(|boundary| entry.sequence() < boundary))
+            );
+            if let Some(cursor) = page.previous_before {
+                assert_eq!(cursor, page.entries[0].sequence());
+            }
+            restored.splice(0..0, page.entries.iter().map(ChatEntry::sequence));
+            before = page.previous_before;
+            if before.is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            restored,
+            all.entries
+                .iter()
+                .map(ChatEntry::sequence)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            store
+                .chat_page_before(&origin(), Some(&request), Some(-1), 2)
+                .is_err()
+        );
+        let empty = store.chat_page_before(&origin(), None, None, 2).unwrap();
+        assert!(empty.entries.is_empty());
+        assert!(empty.previous_before.is_none());
+    }
+    #[test]
+    fn chat_projects_output_issuance_without_joining_reused_wire_ids() {
+        let store = Store::memory().unwrap();
+        let first = RequestId("first".into());
+        let second = RequestId("second".into());
+        let call = CallId("reused".into());
+        let item =
+            Item(json!({"type":"function_call","name":"run","call_id":call.0,"arguments":"{}"}));
+        store
+            .write_request(&first, None, "/root", &[item.clone()], Usage::default())
+            .unwrap();
+        let operation_a = store.claim(&call, &first).unwrap();
+        store
+            .write_request(&second, Some(&first), "/root", &[item], Usage::default())
+            .unwrap();
+        let operation_b = store.claim(&call, &second).unwrap();
+        assert_ne!(operation_a, operation_b);
+        store
+            .write_job_output(
+                &operation_b,
+                crate::item::ToolKind::Function,
+                &crate::turn::JobOutput::Completed(Ok(json!({"answer":42}))),
+            )
+            .unwrap();
+        store
+            .append_operation_output(&operation_b, &second, &second)
+            .unwrap();
+        let page = store
+            .chat_page_before(&origin(), Some(&second), None, 100)
+            .unwrap();
+        let owners = page
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ChatEntry::Message {
+                    tool: Some(tool), ..
+                } => Some(&tool.operation),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(owners, vec![&operation_a, &operation_b, &operation_b]);
+        let result = store
+            .chat_page_before(&origin(), Some(&second), None, 1)
+            .unwrap();
+        assert!(
+            matches!(&result.entries[0], ChatEntry::Message { tool: Some(tool), .. } if tool.operation == operation_b && tool.invocation.request == second.0)
+        );
     }
     #[test]
     fn publication_interleaves_exact_occurrences_and_pages_without_hash_dedup() {

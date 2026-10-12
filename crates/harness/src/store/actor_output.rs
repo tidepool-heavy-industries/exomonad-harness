@@ -97,6 +97,9 @@ impl StoredActorOutput {
     pub fn emission(&self) -> &ActorOutputEmission {
         &self.emission
     }
+    pub fn created_at(&self) -> i64 {
+        self.created_at
+    }
 }
 
 pub enum ActorOutputCommit {
@@ -186,7 +189,7 @@ fn validate(emission: &ActorOutputEmission) -> Result<()> {
     Ok(())
 }
 
-fn row(sequence: i64, payload: String, created_at: i64) -> Result<StoredActorOutput> {
+pub(super) fn row(sequence: i64, payload: String, created_at: i64) -> Result<StoredActorOutput> {
     let emission: ActorOutputEmission = serde_json::from_str(&payload)?;
     validate(&emission)?;
     Ok(StoredActorOutput {
