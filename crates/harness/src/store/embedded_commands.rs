@@ -24,6 +24,9 @@ pub struct EmbeddedCommandRecord {
     pub state: EmbeddedCommandState,
     pub envelope_id: Option<i64>,
     pub receipt: Option<CommandReceipt>,
+    /// Exact durable delivery observation; inclusion does not prove execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_observation: Option<crate::embedding::InputObservation>,
 }
 
 pub(super) fn read(
@@ -31,18 +34,30 @@ pub(super) fn read(
     run: &str,
     operation: ClientOperationId,
 ) -> Result<Option<EmbeddedCommandRecord>> {
-    let row: Option<(String,String,Option<i64>,Option<String>)> = c.query_row(
-        "SELECT command,state,envelope_id,outcome FROM embedded_commands WHERE run_id=?1 AND operation_id=?2",
-        params![run,operation.to_string()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-    row.map(|(command, state, envelope_id, outcome)| {
-        Ok(EmbeddedCommandRecord {
-            operation_id: operation,
-            command: serde_json::from_str(&command)?,
-            state: serde_json::from_str(&format!("\"{state}\""))?,
-            envelope_id,
-            receipt: outcome.map(|v| serde_json::from_str(&v)).transpose()?,
-        })
-    })
+    let row: Option<(String,String,Option<i64>,Option<String>,Option<i64>,Option<String>)> = c.query_row(
+        "SELECT c.command,c.state,c.envelope_id,c.outcome,e.id,e.delivered_request FROM embedded_commands c \
+         LEFT JOIN envelopes e ON e.id=c.envelope_id WHERE c.run_id=?1 AND c.operation_id=?2",
+        params![run,operation.to_string()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
+    row.map(
+        |(command, state, envelope_id, outcome, observed_envelope, delivered_request)| {
+            if envelope_id != observed_envelope {
+                return Err(StoreError::InvalidCommandState);
+            }
+            Ok(EmbeddedCommandRecord {
+                operation_id: operation,
+                command: serde_json::from_str(&command)?,
+                state: serde_json::from_str(&format!("\"{state}\""))?,
+                envelope_id,
+                receipt: outcome.map(|v| serde_json::from_str(&v)).transpose()?,
+                input_observation: envelope_id.map(|_| {
+                    delivered_request
+                        .map_or(crate::embedding::InputObservation::Admitted, |request| {
+                            crate::embedding::InputObservation::Included(RequestId(request))
+                        })
+                }),
+            })
+        },
+    )
     .transpose()
 }
 
@@ -371,6 +386,29 @@ mod tests {
         assert_eq!(record.state, EmbeddedCommandState::InputAdmitted);
         assert_eq!(record.receipt, Some(first));
         assert!(record.envelope_id.is_some());
+        assert_eq!(
+            record.input_observation,
+            Some(crate::embedding::InputObservation::Admitted)
+        );
+        let included = RequestId("input-included".into());
+        store
+            .write_embedded_request(&identity(), &included, None, &[], Usage::default())
+            .unwrap();
+        store
+            .append_unread_envelopes(&identity().actor, &included)
+            .unwrap();
+        let delivered = store.embedded_command("run", id).unwrap().unwrap();
+        assert_eq!(delivered.receipt, record.receipt);
+        assert_eq!(
+            delivered.input_observation,
+            Some(crate::embedding::InputObservation::Included(
+                included.clone()
+            ))
+        );
+        assert_eq!(
+            serde_json::to_value(&delivered).unwrap()["inputObservation"],
+            serde_json::json!({"state":"included","request":included.0})
+        );
         assert!(
             store
                 .admit_embedded_command_input(&identity(), id, "changed")

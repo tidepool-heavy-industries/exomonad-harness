@@ -323,7 +323,8 @@ pub struct InputReceipt {
     /// Delivery failure does not revoke the durable admission.
     pub wake_error: Option<String>,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", content = "request", rename_all = "snake_case")]
 pub enum InputObservation {
     Admitted,
     Included(RequestId),
