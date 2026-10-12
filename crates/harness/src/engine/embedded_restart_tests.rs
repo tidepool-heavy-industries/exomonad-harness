@@ -667,7 +667,7 @@ async fn embedded_restart_preserves_committed_model_for_retained_opaque_history(
         panic!("{migration:?}");
     };
     assert_eq!(projection.omitted.len(), 1);
-    engine
+    let completion = engine
         .run_recovering_embedded(Some(opaque_head.clone()), vec![], cancel, incoming())
         .await
         .unwrap();
@@ -676,8 +676,21 @@ async fn embedded_restart_preserves_committed_model_for_retained_opaque_history(
     assert!(!requests[0].input.contains(&opaque));
     assert!(store.items(&opaque_head).unwrap().contains(&opaque));
     assert_eq!(requests[0].model, "model-b");
+    assert!(
+        store
+            .context_request_state_for_transport(
+                &opaque_head,
+                &next_origin,
+                (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+            )
+            .is_err()
+    );
     let state = store
-        .context_request_state(&opaque_head, &next_origin)
+        .context_request_state_for_transport(
+            &completion.head_request,
+            &next_origin,
+            (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+        )
         .unwrap();
     assert_eq!(state.model.as_deref(), Some("model-b"));
     assert!(state.generation > receipt.generation);

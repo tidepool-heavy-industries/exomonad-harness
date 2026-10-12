@@ -145,11 +145,14 @@ impl ResponsesTransport for ReloadDuringRequest {
     }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         assert_eq!(
-            request.tools.len(),
-            1,
-            "only the host tool surface is exposed"
+            request
+                .tools
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["haskell", "yield"],
+            "the host surface and Engine-owned yield are exposed"
         );
-        assert_eq!(request.tools[0]["name"], "haskell");
         let round = self.requests.fetch_add(1, Ordering::SeqCst);
         let items = if round == 0 {
             *self.host.surface.write().unwrap() = surface("new", self.seen.clone());
@@ -356,11 +359,14 @@ impl ResponsesTransport for ResumeAfterInput {
     }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         assert_eq!(
-            request.tools.len(),
-            1,
-            "only the host tool surface is exposed"
+            request
+                .tools
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["haskell", "yield"],
+            "the host surface and Engine-owned yield are exposed"
         );
-        assert_eq!(request.tools[0]["name"], "haskell");
         let mut requests = self.requests.lock().unwrap();
         requests.push(request);
         let round = requests.len();
@@ -697,8 +703,14 @@ impl ResponsesTransport for NativeWaitAttempt {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
-        assert_eq!(request.tools.len(), 1);
-        assert_eq!(request.tools[0]["name"], "haskell");
+        assert_eq!(
+            request
+                .tools
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["haskell", "yield"]
+        );
         self.0.lock().unwrap().push(request);
         Ok(ResponsesTurn {
             response_id: "native-wait-attempt".into(),
