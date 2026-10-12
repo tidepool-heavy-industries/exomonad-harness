@@ -1328,6 +1328,11 @@ mod tests {
         })
         .unwrap();
         let receipt = finish(&mut invocation).await;
+        assert!(
+            matches!(&receipt.outcome, Outcome::Text(_)),
+            "pruned continuation outcome: {:?}",
+            receipt.outcome
+        );
         let inputs = inputs.lock().unwrap();
         let projected = inputs[1]
             .input
