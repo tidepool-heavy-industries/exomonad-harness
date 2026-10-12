@@ -47,6 +47,8 @@ BROWSER_SOURCE_INPUTS.update({
     "workspace/flake.nix": "//:workspace_flake",
     "workspace/flake.lock": "//:workspace_flake_lock",
     "workspace/.buckconfig": "//:workspace_buckconfig",
+    "presentation-source-identity.json": "//crates/harness-presentation:browser_source_identity",
+    "schema-source-identity.json": "//crates/harness-schema:browser_source_identity",
     "BUCK": "BUCK",
     "browser-source-identity.json": "//web:browser_source_identity",
     "browser-source-identity.py": "//scripts:browser_source_identity_issuer",
