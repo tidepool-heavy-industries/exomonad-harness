@@ -357,38 +357,30 @@ pub(crate) fn server_keeps(item: &Item) -> bool {
 mod tests {
     use super::*;
     fn source_occurrences(items: &[Item]) -> Vec<Option<Occurrence>> {
+        let store = crate::store::Store::memory().unwrap();
+        let request = crate::model::RequestId("strategy-source".into());
+        store.create_request(&request, None, "/root").unwrap();
         items
             .iter()
-            .enumerate()
-            .map(|(position, item)| {
-                let hash = crate::item::ItemHash(
-                    blake3::hash(&serde_json::to_vec(item).unwrap())
-                        .to_hex()
-                        .to_string(),
-                );
-                let request = crate::model::RequestId("strategy-source".into());
-                Some(Occurrence {
-                    request: request.clone(),
-                    position: position as i64,
-                    hash: hash.clone(),
-                    item: item.clone(),
-                    output_operation: None,
-                    origin: crate::context::Origin {
-                        request,
-                        position: position as i64,
-                        hash,
-                    },
-                    sources: vec![],
-                    note: false,
-                    overlays: vec![],
-                })
+            .map(|item| {
+                if is_setting(item) {
+                    return None;
+                }
+                store
+                    .append_items(&request, std::slice::from_ref(item))
+                    .unwrap();
+                if let Some(call) = item.tool_call().unwrap() {
+                    store.claim(&call.call_id, &request).unwrap();
+                }
+                Some(store.history_occurrences(&request).unwrap().pop().unwrap())
             })
             .collect()
     }
 
     #[tokio::test]
     async fn pending_function_call_is_carried_verbatim() {
-        let call = Item(json!({"type":"function_call","call_id":"call-7","name":"work"}));
+        let call =
+            Item(json!({"type":"function_call","call_id":"call-7","name":"work","arguments":"{}"}));
         let source = vec![
             call.clone(),
             Item(json!({"type":"configuration_update","reasoning_effort":"low"})),
@@ -396,9 +388,9 @@ mod tests {
             Item(json!({"type":"compaction_trigger"})),
         ];
         let usage = Usage::default();
-        let compact = |input: Vec<Item>| -> ServerCompactFuture<'_> {
-            assert_eq!(input.last().unwrap().0["type"], "compaction_trigger");
-            assert!(!input[..input.len() - 1].iter().any(is_setting));
+        let compact = |input: CompactionInput| -> ServerCompactFuture<'_> {
+            assert_eq!(input.items.last().unwrap().0["type"], "compaction_trigger");
+            assert!(!input.items[..input.items.len() - 1].iter().any(is_setting));
             Box::pin(async {
                 Ok(vec![
                     Item(json!({"type":"message","role":"user","content":"later"})),
@@ -488,7 +480,7 @@ mod tests {
         let items = [];
         let usage = Usage::default();
         let compact =
-            |_input: Vec<Item>| -> ServerCompactFuture<'_> { Box::pin(async { Ok(vec![]) }) };
+            |_input: CompactionInput| -> ServerCompactFuture<'_> { Box::pin(async { Ok(vec![]) }) };
         let typed_turn = |instructions: String, tool: ToolName, schema: serde_json::Value| {
             Box::pin(async move {
                 assert_eq!(instructions, "handoff");
@@ -534,15 +526,16 @@ mod tests {
             Item(json!({"type":"message","role":"user","content":"recent"})),
         ];
         let usage = Usage::default();
-        let server =
-            |_input: Vec<Item>| -> ServerCompactFuture<'_> { Box::pin(async { unreachable!() }) };
+        let server = |_input: CompactionInput| -> ServerCompactFuture<'_> {
+            Box::pin(async { unreachable!() })
+        };
         let typed = |_instructions: String,
                      _tool: ToolName,
                      _schema: serde_json::Value|
          -> TypedTurnFuture<'_> { Box::pin(async { unreachable!() }) };
-        let text = |input: Vec<Item>| -> ServerCompactFuture<'_> {
-            assert!(!input.contains(&function));
-            assert!(!input.contains(&custom));
+        let text = |input: CompactionInput| -> ServerCompactFuture<'_> {
+            assert!(!input.items.contains(&function));
+            assert!(!input.items.contains(&custom));
             Box::pin(async {
                 Ok(vec![Item(
                     json!({"type":"message","role":"assistant","content":"summary"}),
