@@ -982,13 +982,19 @@ mod tests {
         assert!(receipt.authored_reference.is_none());
     }
 
-    fn refresh_initial_context(
+    fn initial_context_edit(
         store: &Store,
         receipt: &InitialContextPublication,
         reference: &crate::context::ContextReference,
         index: usize,
         text: &str,
-    ) -> Result<crate::context::ContextCommitReceipt, StoreError> {
+    ) -> Result<
+        (
+            crate::context::ContextSnapshot,
+            crate::context::ContextDraft,
+        ),
+        StoreError,
+    > {
         let head = store.embedded_agent_head(&receipt.issuer)?.unwrap();
         let call = crate::model::CallId(format!("edit-{index}"));
         store.append_items(
@@ -1023,12 +1029,104 @@ mod tests {
             *target = Some(reference.clone());
             *body = text.into();
         }
+        Ok((snapshot, draft))
+    }
+
+    fn refresh_initial_context(
+        store: &Store,
+        receipt: &InitialContextPublication,
+        reference: &crate::context::ContextReference,
+        index: usize,
+        text: &str,
+    ) -> Result<crate::context::ContextCommitReceipt, StoreError> {
+        let (snapshot, draft) = initial_context_edit(store, receipt, reference, index, text)?;
         store.commit_context(crate::context::ContextCommit {
             snapshot: &snapshot,
             draft: &draft,
             output: &crate::turn::JobOutput::Completed(Ok(json!({"value":"done"}))),
             pending: &[],
         })
+    }
+
+    #[test]
+    fn initial_context_equal_bodies_have_distinct_editable_references() {
+        let store = Arc::new(Store::memory().unwrap());
+        let conversation = Conversation::attach(store.clone(), seed_host(), None).unwrap();
+        let receipt = conversation
+            .seed_initial_context("startup", Some("same"), Some("same"))
+            .unwrap();
+        assert_ne!(receipt.caller_reference, receipt.authored_reference);
+        let committed = refresh_initial_context(
+            &store,
+            &receipt,
+            receipt.authored_reference.as_ref().unwrap(),
+            0,
+            "replacement",
+        )
+        .unwrap();
+        let active = store.read_context(&committed.head).unwrap();
+        assert!(
+            matches!(&active.blocks[0], crate::context::ContextBlock::Text { reference, text, .. }
+            if reference == &receipt.caller_reference && text == "same")
+        );
+        assert!(
+            matches!(&active.blocks[1], crate::context::ContextBlock::Text { reference, text, .. }
+            if reference == &receipt.authored_reference && text == "replacement")
+        );
+    }
+
+    #[test]
+    fn initial_context_failed_invocation_and_stale_edit_preserve_active_memory() {
+        let store = Arc::new(Store::memory().unwrap());
+        let conversation = Conversation::attach(store.clone(), seed_host(), None).unwrap();
+        let receipt = conversation
+            .seed_initial_context("startup", None, Some("memory"))
+            .unwrap();
+        let reference = receipt.authored_reference.as_ref().unwrap();
+        let (failed_snapshot, failed_draft) =
+            initial_context_edit(&store, &receipt, reference, 0, "failed edit").unwrap();
+        assert!(matches!(
+            store.commit_context(crate::context::ContextCommit {
+                snapshot: &failed_snapshot,
+                draft: &failed_draft,
+                output: &crate::turn::JobOutput::Completed(Err("authored failure".into())),
+                pending: &[],
+            }),
+            Err(StoreError::Context(
+                crate::context::ContextError::Ineligible
+            ))
+        ));
+        assert_eq!(
+            store.embedded_agent_head(conversation.identity()).unwrap(),
+            Some(receipt.request.clone())
+        );
+        let (stale_snapshot, stale_draft) =
+            initial_context_edit(&store, &receipt, reference, 1, "stale edit").unwrap();
+        let committed =
+            refresh_initial_context(&store, &receipt, reference, 2, "accepted edit").unwrap();
+        assert!(matches!(
+            store.commit_context(crate::context::ContextCommit {
+                snapshot: &stale_snapshot,
+                draft: &stale_draft,
+                output: &crate::turn::JobOutput::Completed(Ok(json!({"value":"done"}))),
+                pending: &[],
+            }),
+            Err(StoreError::Context(crate::context::ContextError::Conflict))
+        ));
+        assert_eq!(
+            store.embedded_agent_head(conversation.identity()).unwrap(),
+            Some(committed.head.clone())
+        );
+        let active = store.read_context(&committed.head).unwrap();
+        assert!(active.blocks.iter().any(|block| matches!(block,
+            crate::context::ContextBlock::Text { reference: Some(r), text, .. }
+                if r == reference && text == "accepted edit")));
+        assert_eq!(
+            conversation
+                .initial_context_publication(&receipt.issuer, "startup")
+                .unwrap(),
+            Some(receipt)
+        );
     }
 
     proptest::proptest! {
@@ -1094,6 +1192,8 @@ mod tests {
         let other = foreign
             .seed_initial_context("startup", None, Some("foreign memory"))
             .unwrap();
+        let first_head = store.embedded_agent_head(first.identity()).unwrap();
+        let foreign_head = store.embedded_agent_head(foreign.identity()).unwrap();
         assert!(matches!(
             first.initial_context_publication(&other.issuer, "startup"),
             Err(EmbeddedError::Binding(_))
@@ -1116,7 +1216,19 @@ mod tests {
                 .unwrap(),
             Some(receipt.clone())
         );
-        let document = store.read_context(&receipt.request).unwrap();
+        assert_eq!(
+            store.embedded_agent_head(first.identity()).unwrap(),
+            first_head
+        );
+        assert_eq!(
+            store.embedded_agent_head(foreign.identity()).unwrap(),
+            foreign_head
+        );
+        let foreign_document = store.read_context(&foreign_head.unwrap()).unwrap();
+        assert!(foreign_document.blocks.iter().any(|block| matches!(block,
+            crate::context::ContextBlock::Text { reference: Some(r), text, .. }
+                if Some(r) == other.authored_reference.as_ref() && text == "foreign memory")));
+        let document = store.read_context(&first_head.unwrap()).unwrap();
         assert!(document.blocks.iter().any(|block| matches!(block,
             crate::context::ContextBlock::Text { reference: Some(r), text, .. }
                 if Some(r) == receipt.authored_reference.as_ref() && text == "memory")));

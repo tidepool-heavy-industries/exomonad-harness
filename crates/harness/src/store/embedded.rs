@@ -1543,6 +1543,51 @@ mod tests {
     }
 
     #[test]
+    fn initial_context_receipt_survives_authorized_successor_without_republication() {
+        let store = Store::memory().unwrap();
+        let old = HostIdentity {
+            run: "run".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "old".into(),
+        };
+        store.bind_embedded_actor(&old, None).unwrap();
+        let original = store
+            .seed_initial_context(&old, "startup", Some("caller"), Some("memory"))
+            .unwrap();
+        let new = HostIdentity {
+            incarnation: "new".into(),
+            ..old.clone()
+        };
+        store
+            .transfer_embedded_binding(&old, &new, &TransferAuthority(true))
+            .unwrap();
+        assert_eq!(
+            store
+                .initial_context_publication(&new, &old, "startup")
+                .unwrap(),
+            Some(original.clone())
+        );
+        assert_eq!(
+            store.embedded_agent_head(&new).unwrap(),
+            Some(original.request.clone())
+        );
+        assert!(matches!(
+            store.seed_initial_context(&new, "startup", Some("caller"), Some("memory")),
+            Err(EmbeddedError::SeedRequiresFreshConversation)
+        ));
+        assert!(matches!(
+            store.initial_context_publication(&old, &old, "startup"),
+            Err(EmbeddedError::Binding(_))
+        ));
+        assert_eq!(
+            store
+                .initial_context_publication(&new, &old, "startup")
+                .unwrap(),
+            Some(original)
+        );
+    }
+
+    #[test]
     fn successor_context_transfer_rolls_back_with_binding_failure() {
         let store = Store::memory().unwrap();
         let old = root_identity();
