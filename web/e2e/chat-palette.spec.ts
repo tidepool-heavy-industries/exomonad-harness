@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { createHash } from 'node:crypto'
 import { actorSnapshot, entries } from './chat-fixtures'
 import { audit, captureViewport, chooseWorker, control, observations, openFixture } from './support'
 
@@ -7,6 +8,9 @@ for (const palette of ['live-patina', 'solarized']) {
     test(`${palette} chat reading and response at ${width}px`, async ({ page, request }, info) => {
       await page.setViewportSize({ width, height: 844 })
       await openFixture(page, request, { snapshot: actorSnapshot(), chatEntries: entries })
+      const license = await request.get('/licenses/IBM-Plex-Mono-OFL.txt')
+      expect(license.ok()).toBe(true)
+      expect(createHash('sha256').update(await license.body()).digest('hex')).toBe('7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da')
       // Live Patina uses the actual default; Solarized is a review-only comparison.
       if (palette === 'solarized') await page.evaluate(() => { document.documentElement.dataset.palette = 'solarized' })
       await chooseWorker(page)
