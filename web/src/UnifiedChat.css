@@ -1,0 +1,13 @@
+.unified-chat { min-width: 0; padding-bottom: 1rem; }
+.unified-entries { display: flex; flex-direction: column; gap: .8rem; }
+.timeline-row { min-width: 0; scroll-margin-top: 1rem; }
+.timeline-metadata { margin: .15rem .5rem; color: var(--text-muted, #64748b); font-size: .75rem; }
+.timeline-metadata summary { cursor: pointer; width: fit-content; }
+.timeline-metadata p { margin: .25rem 0; overflow-wrap: anywhere; }
+.tool-activity { border-inline-start: 3px solid var(--border, #cbd5e1); }
+.tool-activity h3 { display: flex; flex-wrap: wrap; gap: .5rem; align-items: baseline; }
+.tool-activity > details > summary { cursor: pointer; }
+.tool-result-marker { display: flex; flex-wrap: wrap; gap: .7rem; align-items: center; padding: .4rem .8rem; font-size: .85rem; color: var(--text-muted, #64748b); }
+.tool-result-marker button { font-size: inherit; }
+.load-older { display: block; margin: .8rem auto; }
+.new-activity { position: sticky; bottom: .5rem; display: block; margin: .5rem auto; z-index: 2; box-shadow: 0 2px 8px #0003; }

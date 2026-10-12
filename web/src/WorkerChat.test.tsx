@@ -158,7 +158,7 @@ describe('exact worker Chat', () => {
       id: { displaySlot: 1, pageOrdinal: 1 }, execution: { kind: 'actor_program' }, conversation: null,
       page: { text: 'Workflow output', expansions: [], unavailable: false } } }
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ origin: outputOrigin, cutoverSequence: 0,
-      legacyHistory: false, entries: [{ sequence: 3, kind: 'output', output }], nextAfter: null }), { status: 200 }))
+      legacyHistory: false, entries: [{ sequence: 3, kind: 'output', output }], nextAfter: null, previousBefore: null }), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
     const workflow = { ...actor, kind: 'workflow' as const, outputOrigin }
     render(chat({ ...data, actors: [workflow] }))

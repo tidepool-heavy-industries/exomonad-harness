@@ -12,7 +12,7 @@ let config, observations, statuses;
 function reset(value = {}) {
   for (const socket of sockets) socket.terminate();
   config = { authenticated: true, snapshot: snapshot(), receipt: 'refused', historyUnavailable: false, historyOversized: false, holdSnapshot: false, ...value };
-  observations = { commands: [], snapshotRequests: 0, connections: 0, historyReads: [], statusReads: [] };
+  observations = { commands: [], snapshotRequests: 0, connections: 0, historyReads: [], chatReads: [], statusReads: [] };
   statuses = new Map();
 }
 reset();
@@ -82,6 +82,17 @@ const server = createServer(async (request, response) => {
       const result = history(id, offset);
       if (config.historyOversized && offset === 50) { result.items = []; result.nextOffset = '50'; result.oversizedItem = {position:'50',hash:createHash('sha256').update('oversized-fixture').digest('hex'),byteLen:'3000000',skipOffset:'51'}; }
       return json(response, result, result.oversizedItem ? 413 : 200);
+    }
+    if (url.pathname === '/api/chat') {
+      const before = url.searchParams.has('before') ? Number(url.searchParams.get('before')) : null;
+      const origin = {run:url.searchParams.get('run'),nativeActor:Number(url.searchParams.get('actor')),incarnation:Number(url.searchParams.get('incarnation'))};
+      observations.chatReads.push({before,request:url.searchParams.get('request'),origin});
+      if (config.chatDelay) await new Promise(r => setTimeout(r, config.chatDelay));
+      if (config.chatStatus) return json(response, {}, config.chatStatus);
+      const all = (config.chatEntries ?? []).filter(entry => before === null || entry.sequence < before);
+      const limit = Math.min(100,Number(url.searchParams.get('limit') ?? 50));
+      const entries = all.slice(-limit);
+      return json(response,{origin,cutoverSequence:0,legacyHistory:false,entries,nextAfter:null,previousBefore:all.length>entries.length ? entries[0].sequence : null});
     }
     if (url.pathname.startsWith('/api/')) return json(response, {error:'Fixture route not found'}, 404);
     const file = resolve(root, `.${url.pathname}`);
