@@ -26,7 +26,7 @@
 .form-option { padding: 8px; border: 1px solid transparent; border-radius: 4px; }
 .form-option:has(input:checked) { background: var(--paper); border-color: var(--accent); }
 .form-option:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
-.form-actions button:first-child { border-color: var(--accent); }
+.form-actions button[type="submit"] { border-color: var(--accent); }
 .form-fixed-field dt { color: var(--muted); }
 .form-response-summary { margin-block: 12px; }
 .mounted-form > details { margin-top: 12px; color: var(--muted); }

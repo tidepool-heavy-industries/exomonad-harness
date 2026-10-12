@@ -101,3 +101,17 @@
   .worker-chat-composer.is-compact .host-actions { margin: 0; }
   .worker-chat-composer.is-compact .composer-send, .worker-chat-composer.is-compact .composer-toolbar > .hint { display: none; }
 }
+
+/* Primary actions carry the current; evidence and navigation stay quiet. */
+:root:not([data-palette="solarized"]) :is(.composer-send, .form-actions button[type="submit"]) {
+  background: var(--accent); border-color: var(--accent); color: var(--action-ink); font-weight: 600;
+}
+@media (hover: hover) {
+  :root:not([data-palette="solarized"]) :is(.composer-send, .form-actions button[type="submit"]):hover:not(:disabled) {
+    background: var(--action-hover); border-color: var(--action-hover); color: var(--action-ink);
+  }
+}
+:root:not([data-palette="solarized"]) :is(.composer-send, .form-actions button[type="submit"]):active:not(:disabled) {
+  background: var(--selection); color: var(--action-ink);
+}
+.worker-chat-composer textarea { background: var(--paper); }
