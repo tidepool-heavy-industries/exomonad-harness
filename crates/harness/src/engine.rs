@@ -1108,23 +1108,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }));
             if did_compact {
                 let compact_model = history.model.as_deref().unwrap_or(&self.config.model);
-                let compact = self.compact_window(
-                    &parent,
-                    &history,
-                    &pending,
-                    &previous_usage,
-                    compact_model,
-                );
-                let successor = match tokio::select! {
-                    result = compact => result,
-                    changed = cancellation.changed() => {
-                        if changed.is_err() || *cancellation.borrow() {
-                            Err(EngineError::Cancelled { head_request: Some(parent.clone()) })
-                        } else {
-                            continue;
-                        }
-                    }
-                } {
+                let successor = match self
+                    .compact_window(
+                        &parent,
+                        &history,
+                        &pending,
+                        &previous_usage,
+                        compact_model,
+                        cancellation.clone(),
+                    )
+                    .await
+                {
                     Ok(request) => request,
                     Err(error) => return Err(self.cleanup_pending(error, &pending).await),
                 };
@@ -3562,6 +3556,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         pending: &[PendingCall],
         usage: &Usage,
         model: &str,
+        cancellation: watch::Receiver<bool>,
     ) -> Result<Option<RequestId>, EngineError> {
         let issued_occurrences = window.occurrences.clone();
         let history = &window.items;
@@ -3592,6 +3587,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let server_response = std::sync::Mutex::new(None::<ServerCompactionResponse>);
         let server_compact = |input: CompactionInput| -> ServerCompactFuture<'_> {
             let server_response = &server_response;
+            let cancellation = cancellation.clone();
             Box::pin(async move {
                 let request = ResponsesRequest {
                     input: input.items,
@@ -3615,7 +3611,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     .map_err(|error| CompactError::Failed(error.to_string()))?;
                 let provider_request = prepared.request_id().clone();
                 let turn = self
-                    .execute_compaction_submission(prepared)
+                    .execute_compaction_submission(prepared, cancellation, source)
                     .await
                     .map_err(|error| CompactError::Failed(error.to_string()))?;
                 if !turn.items.iter().any(|item| item.0["type"] == "compaction") {
@@ -3633,6 +3629,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let summary_response = std::sync::Mutex::new(None::<(String, Usage)>);
         let text_turn = |input: CompactionInput| -> ServerCompactFuture<'_> {
             let summary_response = &summary_response;
+            let cancellation = cancellation.clone();
             Box::pin(async move {
                 let prepared = self
                     .prepare_compaction_submission(
@@ -3652,7 +3649,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     .await
                     .map_err(|error| CompactError::Failed(error.to_string()))?;
                 let turn = self
-                    .execute_compaction_submission(prepared)
+                    .execute_compaction_submission(prepared, cancellation, source)
                     .await
                     .map_err(|error| CompactError::Failed(error.to_string()))?;
                 *summary_response
@@ -3686,9 +3683,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             typed_turn: &typed_turn,
             text_turn: &text_turn,
         };
+        let result = match self.compaction_strategy {
+            CompactionStrategy::Server => Server.compact(context).await,
+            CompactionStrategy::PlainText => PlainText.compact(context).await,
+        };
+        if *cancellation.borrow() || cancellation.has_changed().is_err() {
+            return Err(EngineError::Cancelled {
+                head_request: Some(source.clone()),
+            });
+        }
         let window = match self.compaction_strategy {
-            CompactionStrategy::Server => Server.compact(context).await?,
-            CompactionStrategy::PlainText => match PlainText.compact(context).await {
+            CompactionStrategy::Server => result?,
+            CompactionStrategy::PlainText => match result {
                 Ok(window) => window,
                 Err(error) => {
                     let detail: String = error.to_string().chars().take(256).collect();
@@ -3806,6 +3812,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     async fn execute_compaction_submission(
         &self,
         prepared: PreparedProviderRequest,
+        mut cancellation: watch::Receiver<bool>,
+        cancellation_head: &RequestId,
     ) -> Result<ResponsesTurn, EngineError> {
         let issued = prepared.issuer().clone();
         let request = prepared.request_id().clone();
@@ -3814,8 +3822,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         tokio::pin!(create);
         let mut stream_open = true;
         let result = loop {
+            if *cancellation.borrow() || cancellation.has_changed().is_err() {
+                break Err(EngineError::Cancelled {
+                    head_request: Some(cancellation_head.clone()),
+                });
+            }
             tokio::select! {
-                result = &mut create => break result,
+                result = &mut create => break result.map_err(EngineError::from),
+                changed = cancellation.changed() => {
+                    if changed.is_err() || *cancellation.borrow() {
+                        break Err(EngineError::Cancelled { head_request: Some(cancellation_head.clone()) });
+                    }
+                }
                 event = rx.recv(), if stream_open => match event {
                     Some(StreamEvent::CompletedItem(done)) => {
                         self.retain_provider_item(&issued, done).await?;
@@ -3835,9 +3853,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 Ok(turn)
             }
             Err(error) => {
-                let state = if matches!(error, TransportError::IncompleteResponse(_)) {
+                let state = if matches!(
+                    error,
+                    EngineError::Cancelled { .. }
+                        | EngineError::Transport(TransportError::IncompleteResponse(_))
+                ) {
                     crate::store::ProviderResponseState::Interrupted
-                } else if error.request_failure().is_some() {
+                } else if matches!(&error, EngineError::Transport(error) if error.request_failure().is_some())
+                {
                     crate::store::ProviderResponseState::Rejected
                 } else {
                     crate::store::ProviderResponseState::Failed
@@ -3845,7 +3868,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 let store = self.store.clone();
                 blocking(move || store.stop_provider_response(&request, state)).await?;
                 retained_tail?;
-                Err(error.into())
+                Err(error)
             }
         }
     }
