@@ -1911,8 +1911,9 @@ impl Store {
         self.record_issued_replay_turn(request, issued, model_response)
     }
 
-    /// Completed model turns on this request's branch, from `root` forward.
-    /// Fork branches are excluded even when they inherit `root` as an ancestor.
+    /// Completed turns from `root` forward on its conversation branch, plus
+    /// auxiliary children with an authenticated issued purpose and exact parent.
+    /// Unrelated fork branches do not join the replay sequence.
     pub fn replay_turns(&self, root: &RequestId) -> Result<Vec<RecordedReplayTurn>> {
         let records = {
             let c = self.lock()?;
@@ -1924,8 +1925,15 @@ impl Store {
                 JOIN chain parent ON child.parent_id=parent.id AND child.branch=parent.branch
             )
             SELECT e.id,e.payload FROM events e
-            JOIN chain ON chain.id=e.request_id
-            WHERE e.kind='model_turn' ORDER BY e.id",
+            WHERE e.kind='model_turn' AND (
+                e.request_id IN (SELECT id FROM chain) OR e.request_id IN (
+                    SELECT child.id FROM requests child
+                    JOIN chain parent ON child.parent_id=parent.id
+                    JOIN provider_requests issued ON issued.request_id=child.id
+                    WHERE issued.state='completed'
+                    AND json_extract(issued.issued_json,'$.purpose') IN ('server_compaction','text_summary')
+                )
+            ) ORDER BY e.id",
             )?;
             q.query_map([&root.0], |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))

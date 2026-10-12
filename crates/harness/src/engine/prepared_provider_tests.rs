@@ -364,3 +364,61 @@ async fn compaction_live_retention_failure_settles_failed_response() {
     assert!(store.claims_on(&child).unwrap().is_empty());
     assert_eq!(effects.0.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn failed_auxiliary_issuance_does_not_pollute_embedded_frontier() {
+    let store = Arc::new(Store::memory().unwrap());
+    let identity = crate::embedding::HostIdentity {
+        run: "run".into(),
+        actor: AgentPath("/test".into()),
+        incarnation: "issuer".into(),
+    };
+    store.bind_embedded_actor(&identity, None).unwrap();
+    let source = RequestId("source".into());
+    store
+        .write_embedded_request(&identity, &source, None, &[], StoredUsage::default())
+        .unwrap();
+    let before = store.embedded_round_frontier(&identity).unwrap();
+    let effects = Arc::new(NoEffects(AtomicUsize::new(0)));
+    let script = Script {
+        items: vec![],
+        streaming: false,
+        stall: false,
+        cancel: None,
+        request: Arc::new(Mutex::new(None)),
+    };
+    let engine = engine(store.clone(), script, effects.clone()).with_origin(
+        ConversationIdentity::Embedded {
+            run: identity.run.clone(),
+            actor: identity.actor.clone(),
+            incarnation: identity.incarnation.clone(),
+        },
+    );
+    store.lock().unwrap().execute_batch("CREATE TEMP TRIGGER refuse_auxiliary_issuance BEFORE INSERT ON provider_requests BEGIN SELECT RAISE(ABORT,'injected issuance refusal'); END;").unwrap();
+    assert!(
+        engine
+            .prepare_compaction_submission(
+                &source,
+                ResponsesRequest {
+                    input: vec![],
+                    instructions: "fixed".into(),
+                    tools: vec![].into(),
+                    tools_allowed: None,
+                    model: "model".into(),
+                    pinned_effort: Effort::Low,
+                    session_id: "session".into(),
+                },
+                vec![],
+                ProviderRequestPurpose::TextSummary
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(store.embedded_round_frontier(&identity).unwrap(), before);
+    assert!(store.replay_turns(&source).unwrap().is_empty());
+    assert_eq!(effects.0.load(Ordering::SeqCst), 0);
+    let c = store.lock().unwrap();
+    let (children, issued): (u64, u64) = c.query_row("SELECT (SELECT COUNT(*) FROM requests WHERE parent_id=?1),(SELECT COUNT(*) FROM provider_requests)", [&source.0], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    assert_eq!(children, 1);
+    assert_eq!(issued, 0);
+}

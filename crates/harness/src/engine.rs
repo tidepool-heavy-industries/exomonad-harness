@@ -3792,7 +3792,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let contract = self.client.prepare_submission()?;
         let local = RequestId(uuid::Uuid::new_v4().to_string());
         let source = source.clone();
-        let branch = self.config.agent.0.clone();
+        // Auxiliary attempts have their own storage slot. The actor branch is
+        // reserved for the next conversation window; issuance owns the role.
+        let branch = format!("harness:provider:{}", local.0);
         let store = self.store.clone();
         blocking(move || {
             store.create_request(&local, Some(&source), &branch)?;

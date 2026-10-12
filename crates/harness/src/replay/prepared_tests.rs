@@ -34,17 +34,27 @@ async fn replay_keeps_compaction_turns_but_only_inference_calls_require_claims()
     let summary = RequestId("summary".into());
     let compact = RequestId("compact".into());
     let normal = RequestId("normal".into());
-    source.create_request(&summary, None, "/source").unwrap();
+    let start = RequestId("start".into());
+    source.create_request(&start, None, "/source").unwrap();
     source
-        .create_request(&compact, Some(&summary), "/source")
+        .create_request(&summary, Some(&start), "summary-storage")
         .unwrap();
     source
-        .create_request(&normal, Some(&compact), "/source")
+        .create_request(&compact, Some(&start), "compact-storage")
+        .unwrap();
+    source
+        .create_request(&normal, Some(&start), "/source")
         .unwrap();
     let tools = vec![
         json!({"type":"function","name":"work","description":"work","strict":true,"parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}),
     ];
     let records = [
+        (
+            &start,
+            ProviderRequestPurpose::Inference,
+            dto(tools.clone()),
+            vec![],
+        ),
         (
             &summary,
             ProviderRequestPurpose::TextSummary,
@@ -98,14 +108,44 @@ async fn replay_keeps_compaction_turns_but_only_inference_calls_require_claims()
             )
             .unwrap();
     }
+    // Neither ordinary forks nor auxiliary descendants are actor-chain leaves.
+    for (id, parent, branch, purpose) in [
+        (
+            "unrelated-inference",
+            &start,
+            "other-actor",
+            ProviderRequestPurpose::Inference,
+        ),
+        (
+            "auxiliary-descendant",
+            &summary,
+            "summary-storage",
+            ProviderRequestPurpose::TextSummary,
+        ),
+    ] {
+        let id = RequestId(id.into());
+        source.create_request(&id, Some(parent), branch).unwrap();
+        let prepared = source
+            .prepare_provider_request(
+                &id,
+                &id,
+                dto(vec![]),
+                &[],
+                None,
+                Native.prepare_submission().unwrap(),
+                purpose,
+            )
+            .unwrap();
+        source.record_provider_turn(prepared.issuer(), &ResponsesTurn { response_id: id.0.clone(), items: vec![Item(json!({"type":"function_call","call_id":"unrelated-unclaimed","name":"ignored","arguments":"{}"}))], usage: Usage::default() }).unwrap();
+    }
     assert!(
-        matches!(ReplayProvider::new(source.clone(), &summary), Err(ReplayError::MissingInvocation(ref id)) if id == "normal-call")
+        matches!(ReplayProvider::new(source.clone(), &start), Err(ReplayError::MissingInvocation(ref id)) if id == "normal-call")
     );
     let operation = source
         .claim(&crate::model::CallId("normal-call".into()), &normal)
         .unwrap();
-    let replay = ReplayProvider::new(source.clone(), &summary).unwrap();
-    assert_eq!(replay.turns_remaining(), 3);
+    let replay = ReplayProvider::new(source.clone(), &start).unwrap();
+    assert_eq!(replay.turns_remaining(), 4);
     assert_eq!(replay.calls.len(), 1);
     assert!(replay.calls.contains_key(&operation));
     assert_eq!(replay.tool_schemas, tools.into());
@@ -120,14 +160,14 @@ async fn replay_keeps_compaction_turns_but_only_inference_calls_require_claims()
             &[],
             None,
             replay.prepare_submission().unwrap(),
-            ProviderRequestPurpose::Inference,
+            ProviderRequestPurpose::TextSummary,
         )
         .unwrap();
     assert!(matches!(
         replay.create(wrong).await,
         Err(TransportError::PreparedSelectionMismatch)
     ));
-    assert_eq!(replay.turns_remaining(), 3);
+    assert_eq!(replay.turns_remaining(), 4);
     for (id, purpose, request, items) in records {
         let local_id = RequestId(format!("local-{}", id.0));
         local.create_request(&local_id, None, "/local").unwrap();
