@@ -440,7 +440,8 @@ impl Store {
                         o.presentation = store.retain_view_media(&o.presentation)?;
                     }
                 }
-                FormNode::Alternatives { options, .. } => {
+                FormNode::Alternatives { options, .. }
+                | FormNode::AlternativesMany { options, .. } => {
                     for o in options {
                         o.presentation = store.retain_view_media(&o.presentation)?;
                         node(store, &mut o.form)?;
