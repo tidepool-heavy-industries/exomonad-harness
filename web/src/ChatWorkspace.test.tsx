@@ -22,7 +22,7 @@ const response = (entries: ChatEntry[]): Response => ({ ok: true, status: 200,
   text: async () => JSON.stringify({ origin, cutoverSequence: '0', legacyHistory: false, nextAfter: null, previousBefore: null, entries } satisfies ChatPage),
 }) as Response
 const entry = (sequence: string, reference: NonNullable<Extract<ChatEntry, { kind: 'message' }>['inputOperation']>): ChatEntry => ({
-  kind: 'message', sequence, requestId: 'head', position: sequence, hash: 'a'.repeat(64), tool: null, inputOperation: reference,
+  kind: 'message', sequence, requestId: 'head', position: sequence, hash: 'a'.repeat(64), tool: null, providerItemId: null, inputOperation: reference,
   item: { type: 'message', role: 'user', content: 'Equal text' },
 })
 

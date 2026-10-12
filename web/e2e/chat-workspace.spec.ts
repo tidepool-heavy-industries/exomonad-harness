@@ -97,6 +97,6 @@ function actorSnapshot() {
   return data
 }
 function message(sequence: string, inputOperation: Extract<ChatEntry, { kind: 'message' }>['inputOperation'], text = 'Equal text'): ChatEntry {
-  return { sequence, kind: 'message', requestId: 'request-worker-1', position: sequence, hash: 'a'.repeat(64), tool: null, inputOperation,
+  return { sequence, kind: 'message', requestId: 'request-worker-1', position: sequence, hash: 'a'.repeat(64), tool: null, providerItemId: null, inputOperation,
     item: { type: 'message', role: 'user', content: text } }
 }
