@@ -11,6 +11,7 @@ pub enum EmbeddedCommandState {
     Dispatching,
     InputAdmitted,
     ControlRequested,
+    RecoveryAuthorized,
     Refused,
     Unconfirmed,
 }
@@ -23,25 +24,40 @@ pub struct EmbeddedCommandRecord {
     pub state: EmbeddedCommandState,
     pub envelope_id: Option<i64>,
     pub receipt: Option<CommandReceipt>,
+    /// Exact durable delivery observation; inclusion does not prove execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_observation: Option<crate::embedding::InputObservation>,
 }
 
-fn read(
+pub(super) fn read(
     c: &Connection,
     run: &str,
     operation: ClientOperationId,
 ) -> Result<Option<EmbeddedCommandRecord>> {
-    let row: Option<(String,String,Option<i64>,Option<String>)> = c.query_row(
-        "SELECT command,state,envelope_id,outcome FROM embedded_commands WHERE run_id=?1 AND operation_id=?2",
-        params![run,operation.to_string()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-    row.map(|(command, state, envelope_id, outcome)| {
-        Ok(EmbeddedCommandRecord {
-            operation_id: operation,
-            command: serde_json::from_str(&command)?,
-            state: serde_json::from_str(&format!("\"{state}\""))?,
-            envelope_id,
-            receipt: outcome.map(|v| serde_json::from_str(&v)).transpose()?,
-        })
-    })
+    let row: Option<(String,String,Option<i64>,Option<String>,Option<i64>,Option<String>)> = c.query_row(
+        "SELECT c.command,c.state,c.envelope_id,c.outcome,e.id,e.delivered_request FROM embedded_commands c \
+         LEFT JOIN envelopes e ON e.id=c.envelope_id WHERE c.run_id=?1 AND c.operation_id=?2",
+        params![run,operation.to_string()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
+    row.map(
+        |(command, state, envelope_id, outcome, observed_envelope, delivered_request)| {
+            if envelope_id != observed_envelope {
+                return Err(StoreError::InvalidCommandState);
+            }
+            Ok(EmbeddedCommandRecord {
+                operation_id: operation,
+                command: serde_json::from_str(&command)?,
+                state: serde_json::from_str(&format!("\"{state}\""))?,
+                envelope_id,
+                receipt: outcome.map(|v| serde_json::from_str(&v)).transpose()?,
+                input_observation: envelope_id.map(|_| {
+                    delivered_request
+                        .map_or(crate::embedding::InputObservation::Admitted, |request| {
+                            crate::embedding::InputObservation::Included(RequestId(request))
+                        })
+                }),
+            })
+        },
+    )
     .transpose()
 }
 
@@ -50,35 +66,36 @@ impl Store {
     /// exclusive run/process lease and call this before admitting actors or
     /// dispatching commands. Ordinary Store opening never takes over claims.
     pub fn recover_embedded_command_claims(&self, run: &str) -> Result<usize> {
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        let claimed = {
-            let mut stmt = tx.prepare(
-            "SELECT run_id,operation_id FROM embedded_commands WHERE run_id=?1 AND state='dispatching'",
-        )?;
-            stmt.query_map([run], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        let count = claimed.len();
-        for (run, id) in claimed {
-            let operation: ClientOperationId =
-                serde_json::from_value(serde_json::Value::String(id))?;
-            let record = read(&tx, &run, operation)?.ok_or(StoreError::InvalidCommandState)?;
-            let receipt = CommandReceipt {
-                command_id: operation.to_string(),
-                outcome: CommandReceiptOutcome::Unconfirmed {
-                    target: record.command.target().clone(),
-                    reason: "Host process lost after command claim; dispatch outcome is unknown."
-                        .into(),
-                },
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let claimed = {
+                let mut stmt = tx.prepare(
+                "SELECT run_id,operation_id FROM embedded_commands WHERE run_id=?1 AND state='dispatching'",
+            )?;
+                stmt.query_map([run], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?
             };
-            tx.execute("UPDATE embedded_commands SET state='unconfirmed',outcome=?3 WHERE run_id=?1 AND operation_id=?2 AND state='dispatching'",
-            params![run,operation.to_string(),serde_json::to_string(&receipt)?])?;
-        }
-        tx.commit()?;
-        Ok(count)
+            let count = claimed.len();
+            for (run, id) in claimed {
+                let operation: ClientOperationId =
+                    serde_json::from_value(serde_json::Value::String(id))?;
+                let record = read(&tx, &run, operation)?.ok_or(StoreError::InvalidCommandState)?;
+                let receipt = CommandReceipt {
+                    command_id: operation.to_string(),
+                    outcome: CommandReceiptOutcome::Unconfirmed {
+                        target: record.command.target().clone(),
+                        reason: "Host process lost after command claim; dispatch outcome is unknown."
+                            .into(),
+                    },
+                };
+                tx.execute("UPDATE embedded_commands SET state='unconfirmed',outcome=?3 WHERE run_id=?1 AND operation_id=?2 AND state='dispatching'",
+                params![run,operation.to_string(),serde_json::to_string(&receipt)?])?;
+            }
+
+            Ok(count)
+        })
     }
 }
 
@@ -89,8 +106,10 @@ impl Store {
         operation: ClientOperationId,
         error: String,
     ) -> Result<CommandReceipt> {
-        let c = self.lock();
-        let mut record = read(&c, run, operation)?.ok_or(StoreError::InvalidCommandState)?;
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+
+        let mut record = read(tx, run, operation)?.ok_or(StoreError::InvalidCommandState)?;
         if record.state != EmbeddedCommandState::InputAdmitted {
             return Err(StoreError::InvalidCommandState);
         }
@@ -102,8 +121,9 @@ impl Store {
             return Err(StoreError::InvalidCommandState);
         };
         *wake_error = Some(error);
-        c.execute("UPDATE embedded_commands SET outcome=?3 WHERE run_id=?1 AND operation_id=?2 AND state='input_admitted'",params![run,operation.to_string(),serde_json::to_string(&receipt)?])?;
+        tx.execute("UPDATE embedded_commands SET outcome=?3 WHERE run_id=?1 AND operation_id=?2 AND state='input_admitted'",params![run,operation.to_string(),serde_json::to_string(&receipt)?])?;
         Ok(receipt)
+        })
     }
 
     /// Retain exact command contents before transport acceptance. Duplicate IDs
@@ -113,27 +133,29 @@ impl Store {
         operation: ClientOperationId,
         command: &HostCommand,
     ) -> Result<EmbeddedCommandRecord> {
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        let run = &command.target().run;
-        if let Some(existing) = read(&tx, run, operation)? {
-            if existing.command != *command {
-                return Err(StoreError::ConflictingCommand);
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let run = &command.target().run;
+            if let Some(existing) = read(&tx, run, operation)? {
+                if existing.command != *command {
+                    return Err(StoreError::ConflictingCommand);
+                }
+                return Ok(existing);
             }
-            return Ok(existing);
-        }
-        let (action, payload, round) = match command {
-            HostCommand::Input { text, .. } => ("input", text.as_str(), None),
-            HostCommand::Interrupt { expected_round, .. } => {
-                ("interrupt", "", Some(expected_round.to_string()))
-            }
-            HostCommand::Retire { .. } => ("retire", "", None),
-        };
-        tx.execute("INSERT INTO embedded_commands(run_id,operation_id,target,action,payload,expected_round,command,state,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,'queued',?8)",
-            params![run,operation.to_string(),serde_json::to_string(command.target())?,action,payload,round,serde_json::to_string(command)?,utc_millis()])?;
-        let record = read(&tx, run, operation)?.ok_or(StoreError::InvalidCommandState)?;
-        tx.commit()?;
-        Ok(record)
+            let (action, payload, round) = match command {
+                HostCommand::Input { text, .. } => ("input", text.as_str(), None),
+                HostCommand::Interrupt { expected_round, .. } => {
+                    ("interrupt", "", Some(expected_round.to_string()))
+                }
+                HostCommand::Retire { .. } => ("retire", "", None),
+                HostCommand::Recover { .. } => ("recover", "", None),
+            };
+            tx.execute("INSERT INTO embedded_commands(run_id,operation_id,target,action,payload,expected_round,command,state,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,'queued',?8)",
+                params![run,operation.to_string(),serde_json::to_string(command.target())?,action,payload,round,serde_json::to_string(command)?,utc_millis()])?;
+            let record = read(&tx, run, operation)?.ok_or(StoreError::InvalidCommandState)?;
+
+            Ok(record)
+        })
     }
 
     pub fn embedded_command(
@@ -141,13 +163,13 @@ impl Store {
         run: &str,
         operation: ClientOperationId,
     ) -> Result<Option<EmbeddedCommandRecord>> {
-        read(&self.lock(), run, operation)
+        read(&*self.lock()?, run, operation)
     }
 
     /// The existing host command loop drains this list at startup and after a
     /// wake. Channel notifications are hints; durable queued rows are the work.
     pub fn queued_embedded_commands(&self, run: &str) -> Result<Vec<EmbeddedCommandRecord>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let mut stmt = c.prepare("SELECT operation_id FROM embedded_commands WHERE run_id=?1 AND state='queued' ORDER BY rowid")?;
         let ids = stmt
             .query_map([run], |r| r.get::<_, String>(0))?
@@ -166,14 +188,15 @@ impl Store {
         run: &str,
         operation: ClientOperationId,
     ) -> Result<Option<EmbeddedCommandRecord>> {
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        if tx.execute("UPDATE embedded_commands SET state='dispatching' WHERE run_id=?1 AND operation_id=?2 AND state='queued'",params![run,operation.to_string()])? == 0 {
-            return Ok(None);
-        }
-        let record = read(&tx, run, operation)?.ok_or(StoreError::InvalidCommandState)?;
-        tx.commit()?;
-        Ok(Some(record))
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            if tx.execute("UPDATE embedded_commands SET state='dispatching' WHERE run_id=?1 AND operation_id=?2 AND state='queued'",params![run,operation.to_string()])? == 0 {
+                return Ok(None);
+            }
+            let record = read(&tx, run, operation)?.ok_or(StoreError::InvalidCommandState)?;
+
+            Ok(Some(record))
+        })
     }
 
     /// Retain a host control/refusal/uncertainty observation. Input admission
@@ -188,14 +211,19 @@ impl Store {
             CommandReceiptOutcome::ControlRequested { .. } => "control_requested",
             CommandReceiptOutcome::Refused { .. } => "refused",
             CommandReceiptOutcome::Unconfirmed { .. } => "unconfirmed",
-            CommandReceiptOutcome::Admitted { .. } => return Err(StoreError::InvalidCommandState),
+            CommandReceiptOutcome::Admitted { .. }
+            | CommandReceiptOutcome::RecoveryAuthorized { .. } => {
+                return Err(StoreError::InvalidCommandState);
+            }
         };
         let receipt = CommandReceipt {
             command_id: operation.to_string(),
             outcome,
         };
-        let c = self.lock();
-        let record = read(&c, run, operation)?.ok_or(StoreError::InvalidCommandState)?;
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+
+        let record = read(tx, run, operation)?.ok_or(StoreError::InvalidCommandState)?;
         if let Some(previous) = record.receipt {
             return if previous == receipt {
                 Ok(previous)
@@ -226,8 +254,9 @@ impl Store {
         if !valid || record.state != EmbeddedCommandState::Dispatching {
             return Err(StoreError::InvalidCommandState);
         }
-        if c.execute("UPDATE embedded_commands SET state=?3,outcome=?4 WHERE run_id=?1 AND operation_id=?2 AND state='dispatching'",params![run,operation.to_string(),state,serde_json::to_string(&receipt)?])? != 1 { return Err(StoreError::InvalidCommandState); }
+        if tx.execute("UPDATE embedded_commands SET state=?3,outcome=?4 WHERE run_id=?1 AND operation_id=?2 AND state='dispatching'",params![run,operation.to_string(),state,serde_json::to_string(&receipt)?])? != 1 { return Err(StoreError::InvalidCommandState); }
         Ok(receipt)
+        })
     }
 }
 
@@ -357,6 +386,29 @@ mod tests {
         assert_eq!(record.state, EmbeddedCommandState::InputAdmitted);
         assert_eq!(record.receipt, Some(first));
         assert!(record.envelope_id.is_some());
+        assert_eq!(
+            record.input_observation,
+            Some(crate::embedding::InputObservation::Admitted)
+        );
+        let included = RequestId("input-included".into());
+        store
+            .write_embedded_request(&identity(), &included, None, &[], Usage::default())
+            .unwrap();
+        store
+            .append_unread_envelopes(&identity().actor, &included)
+            .unwrap();
+        let delivered = store.embedded_command("run", id).unwrap().unwrap();
+        assert_eq!(delivered.receipt, record.receipt);
+        assert_eq!(
+            delivered.input_observation,
+            Some(crate::embedding::InputObservation::Included(
+                included.clone()
+            ))
+        );
+        assert_eq!(
+            serde_json::to_value(&delivered).unwrap()["inputObservation"],
+            serde_json::json!({"state":"included","request":included.0})
+        );
         assert!(
             store
                 .admit_embedded_command_input(&identity(), id, "changed")
@@ -503,6 +555,7 @@ mod tests {
         }
         store
             .lock()
+            .unwrap()
             .execute("UPDATE embedded_commands SET created_at=17", [])
             .unwrap();
         assert_eq!(
@@ -516,6 +569,7 @@ mod tests {
         );
         store
             .lock()
+            .unwrap()
             .execute(
                 "UPDATE embedded_commands SET created_at=0 WHERE operation_id=?1",
                 [third.to_string()],
@@ -542,7 +596,7 @@ mod tests {
             c.query_row("SELECT version FROM schema_version", [], |r| r
                 .get::<_, u32>(0))
                 .unwrap(),
-            7
+            schema::VERSION
         );
         assert_eq!(
             c.query_row("SELECT created_at FROM requests WHERE id='old'", [], |r| {

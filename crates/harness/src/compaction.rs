@@ -1,4 +1,5 @@
 use crate::{
+    context::Occurrence,
     item::Item,
     model::{CallId, Effort},
     transport::Usage,
@@ -19,6 +20,7 @@ pub struct NewWindow {
     pub items: Vec<Item>,
     pub effort: Effort,
     pub carried: Vec<CallId>,
+    pub(crate) retained: Vec<(usize, Occurrence)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,6 +30,9 @@ pub struct CompactContext<'a> {
     pub items: &'a [Item],
     pub usage: &'a Usage,
     pub pending_calls: &'a [Item],
+    pub(crate) pending_positions: &'a [usize],
+    pub(crate) pending_occurrences: &'a [Occurrence],
+    pub(crate) occurrences: &'a [Option<Occurrence>],
     pub effort: Effort,
     /// Calls the configured server compaction endpoint without constructing a
     /// second transport request at the strategy boundary.
@@ -100,8 +105,9 @@ impl Compactor for PlainText {
         let mut prompt: Vec<Item> = cx
             .items()
             .iter()
-            .filter(|item| !cx.pending_calls().contains(item))
-            .cloned()
+            .enumerate()
+            .filter(|(index, _)| !cx.pending_positions.contains(index))
+            .map(|(_, item)| item.clone())
             .collect();
         prompt.push(Item(json!({
             "type":"message", "role":"user",
@@ -133,24 +139,32 @@ impl Compactor for PlainText {
                 "summary response had no assistant text".into(),
             ));
         }
-        let mut items: Vec<Item> = cx
-            .items()
-            .iter()
-            .filter(|item| {
-                standing_instruction(item)
-                    && !item.0["content"]
-                        .as_str()
-                        .is_some_and(|text| text.starts_with(HANDOFF_MARKER))
-            })
-            .cloned()
-            .collect();
+        let mut retained = Vec::new();
+        let mut items = Vec::new();
+        for (index, item) in cx.items().iter().enumerate().filter(|(_, item)| {
+            standing_instruction(item)
+                && !item.0["content"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with(HANDOFF_MARKER))
+        }) {
+            if let Some(source) = &cx.occurrences[index] {
+                retained.push((items.len(), source.clone()));
+            }
+            items.push(item.clone());
+        }
         items.push(Item(json!({
             "type":"message", "role":"developer",
             "content":format!("{HANDOFF_MARKER} Earlier conversation summary:\n{summary}")
         })));
         let mut recent = Vec::new();
         let mut bytes = 0;
-        for item in cx.items().iter().rev().filter(|item| is_user_message(item)) {
+        for (index, item) in cx
+            .items()
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, item)| is_user_message(item))
+        {
             let size = serde_json::to_vec(item)
                 .expect("Item serialization is infallible")
                 .len();
@@ -158,10 +172,18 @@ impl Compactor for PlainText {
                 break;
             }
             bytes += size;
-            recent.push(item.clone());
+            recent.push((index, item.clone()));
         }
-        items.extend(recent.into_iter().rev());
-        items.extend(cx.pending_calls().iter().cloned());
+        for (index, item) in recent.into_iter().rev() {
+            if let Some(source) = &cx.occurrences[index] {
+                retained.push((items.len(), source.clone()));
+            }
+            items.push(item);
+        }
+        for occurrence in cx.pending_occurrences {
+            retained.push((items.len(), occurrence.clone()));
+            items.push(occurrence.item.clone());
+        }
         let mut carried = Vec::new();
         for item in cx.pending_calls() {
             if let Some(id) = item.0["call_id"].as_str() {
@@ -176,6 +198,7 @@ impl Compactor for PlainText {
             items,
             effort: cx.effort,
             carried,
+            retained,
         })
     }
 }
@@ -218,27 +241,28 @@ impl Compactor for Server {
             .collect();
         input.push(Item(json!({"type":"compaction_trigger"})));
         let server_items = cx.server_compact(input).await?;
-        let pending_ids: Vec<&str> = cx.pending_calls().iter().filter_map(tool_call_id).collect();
+        // External Items do not select pending operations by their wire ID.
+        // Store reconciles these raw results before installing the successor.
         let mut items: Vec<Item> = server_items
             .into_iter()
-            .filter(|item| {
-                !is_setting(item)
-                    && !is_user_message(item)
-                    && tool_call_id(item).is_none_or(|id| !pending_ids.contains(&id))
-            })
+            .filter(|item| !is_setting(item) && !is_user_message(item))
             .collect();
-        // Replace endpoint user messages with the original sequence. This
-        // preserves duplicates, byte-faithful values, and source ordering even
-        // if server compaction omitted or reordered them.
-        items.extend(
-            cx.items()
-                .iter()
-                .filter(|item| is_user_message(item))
-                .cloned(),
-        );
-        // Pending function calls must remain valid for late call_id outputs,
-        // independent of whether the endpoint omits or rewrites them.
-        items.extend(cx.pending_calls().iter().cloned());
+        let mut retained = Vec::new();
+        for (index, item) in cx
+            .items()
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| is_user_message(item))
+        {
+            if let Some(source) = &cx.occurrences[index] {
+                retained.push((items.len(), source.clone()));
+            }
+            items.push(item.clone());
+        }
+        for occurrence in cx.pending_occurrences {
+            retained.push((items.len(), occurrence.clone()));
+            items.push(occurrence.item.clone());
+        }
         let mut carried = Vec::new();
         for item in cx.pending_calls() {
             if let Some(id) = item.0.get("call_id").and_then(|v| v.as_str()) {
@@ -247,6 +271,9 @@ impl Compactor for Server {
                     carried.push(id);
                 }
             }
+        }
+        for (position, _) in &mut retained {
+            *position += 1;
         }
         items.insert(
             0,
@@ -257,6 +284,7 @@ impl Compactor for Server {
             items,
             effort: cx.effort,
             carried,
+            retained,
         })
     }
 }
@@ -285,6 +313,35 @@ fn is_setting(item: &Item) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn source_occurrences(items: &[Item]) -> Vec<Option<Occurrence>> {
+        items
+            .iter()
+            .enumerate()
+            .map(|(position, item)| {
+                let hash = crate::item::ItemHash(
+                    blake3::hash(&serde_json::to_vec(item).unwrap())
+                        .to_hex()
+                        .to_string(),
+                );
+                let request = crate::model::RequestId("strategy-source".into());
+                Some(Occurrence {
+                    request: request.clone(),
+                    position: position as i64,
+                    hash: hash.clone(),
+                    item: item.clone(),
+                    output_operation: None,
+                    origin: crate::context::Origin {
+                        request,
+                        position: position as i64,
+                        hash,
+                    },
+                    sources: vec![],
+                    note: false,
+                    overlays: vec![],
+                })
+            })
+            .collect()
+    }
 
     #[tokio::test]
     async fn pending_function_call_is_carried_verbatim() {
@@ -317,8 +374,13 @@ mod tests {
         let user = Item(json!({"type":"message","role":"user","content":"keep me"}));
         let user_later = Item(json!({"type":"message","role":"user","content":"later"}));
         let source = [source, vec![user.clone(), user.clone(), user_later.clone()]].concat();
+        let occurrences = source_occurrences(&source);
+        let selected = [occurrences[0].clone().unwrap()];
         let cx = CompactContext {
             items: &source,
+            occurrences: &occurrences,
+            pending_positions: &[0],
+            pending_occurrences: &selected,
             usage: &usage,
             pending_calls: std::slice::from_ref(&call),
             effort: Effort::Medium,
@@ -332,7 +394,15 @@ mod tests {
             .iter()
             .filter(|item| item.0.get("type").and_then(|v| v.as_str()) == Some("function_call"))
             .collect();
-        assert_eq!(calls, vec![&call]);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0["name"], "changed");
+        assert_eq!(calls[1], &call);
+        assert!(
+            window
+                .retained
+                .iter()
+                .any(|(_, source)| source.origin == selected[0].origin && source.item == call)
+        );
         let users: Vec<_> = window
             .items
             .iter()
@@ -386,6 +456,9 @@ mod tests {
         };
         let cx = CompactContext {
             items: &items,
+            occurrences: &[],
+            pending_positions: &[],
+            pending_occurrences: &[],
             usage: &usage,
             pending_calls: &[],
             effort: Effort::Low,
@@ -434,9 +507,17 @@ mod tests {
             })
         };
         let pending = [function.clone(), custom.clone()];
+        let occurrences = source_occurrences(&history);
+        let selected = [
+            occurrences[1].clone().unwrap(),
+            occurrences[2].clone().unwrap(),
+        ];
         let window = PlainText
             .compact(CompactContext {
                 items: &history,
+                occurrences: &occurrences,
+                pending_positions: &[1, 2],
+                pending_occurrences: &selected,
                 usage: &usage,
                 pending_calls: &pending,
                 effort: Effort::High,

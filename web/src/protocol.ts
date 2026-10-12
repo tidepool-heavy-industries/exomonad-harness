@@ -80,6 +80,7 @@ export function applyStateEvent(state: NormalizedState, message: SequencedEvent)
   }
   const next = { ...state, seq: message.seq };
   switch (message.event.kind) {
+    case "actor.form.changed": return { kind: 'applied', state: { ...next, actorOutputRevisions: retainActorOutput(next.actorOutputRevisions, {origin:message.event.value.opening.origin,sequence:message.event.value.revisionSequence ?? message.event.value.sequence}) } };
     case "actor.output.committed": return { kind: 'applied', state: { ...next,
       actorOutputRevisions: retainActorOutput(next.actorOutputRevisions, message.event.value.reference) } };
     case "model.output.stopped": {

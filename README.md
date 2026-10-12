@@ -26,6 +26,38 @@ Produced by the run: `docs/findings.md` (API facts measured live), `docs/questio
 
 Companion on the consumer side: `~/dev/tidepool/plans/harness-adoption.md`.
 
+Persistent stores use WAL with `synchronous=FULL` on every writer connection.
+Schema 16 records this durability contract. Opening an older store first confirms its
+inherited WAL with a FULL checkpoint; a blocked checkpoint refuses admission
+before retained bindings can authorize attachment. Matching current writers
+reopen without that barrier. Stop older writers before migration: a version
+marker cannot change an already-open connection's mode. Older bundles refuse
+newer schemas, so preserve the matching bundle for unmigrated runs. Schema 17
+records provider issuance, indexed output ownership and explicit inference
+recovery grants. Legacy response records retain unknown transport provenance;
+opening a store never certifies it from the current provider configuration.
+
+A successful binding COMMIT is durable acknowledgement. Checkpoint maintenance
+does not revoke it. Any explicit Store COMMIT error or failed transaction
+completion closes its serialized connection, fences sibling handles and notifies supervision. The first
+failure retains its SQLite cause as `StoreError::RecoveryRequired` (or
+`EmbeddedError::RecoveryRequired`); later access returns `StoreError::AdmissionFenced`.
+The embedding must discard admission handles and reopen with retained authority
+before another operation. Binding readback alone grants no attachment authority.
+
+The bundled SQLite is 3.53.2 through exact rusqlite 0.40.2 and libsqlite3-sys
+0.38.2. This includes the WAL-reset fix absent from the older 3.46.0 bundle;
+the focused store controls verify the library linked by Buck at runtime.
+
+Embedded inference uses a durable Store gate independently of actor lifetime.
+Messages can queue while blocked. An explicit `Recover` command names the exact
+run, incarnation, request and block generation; its checked projection, once-only
+authorization and receipt commit together in the existing command journal.
+Recovery refuses uncertain affected work and never reexecutes effects. Visible
+history recovery records exact omissions while preserving canonical history and
+operation identities. Exclusive host startup fences earlier attempts and unused
+grants; passive Store reopen, input and wake notifications grant no inference.
+
 ## Focused tests
 
 ### Native Buck2 on x86_64 Linux

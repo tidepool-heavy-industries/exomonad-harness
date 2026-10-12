@@ -1,10 +1,10 @@
 //! Exact issued windows reference immutable Store bytes, never later history.
 use super::{RecordedReplayTurn, Result, Store, StoreError, utc_millis};
 use crate::{
-    context::Origin,
+    context::{Occurrence, Origin},
     finalize::{FINALIZE_TOOL_NAME, ValidatedFinalize},
     item::{Item, ItemHash},
-    model::{Effort, RequestId},
+    model::{Effort, OperationId, RequestId},
     transport::{ResponsesRequest, ResponsesTurn, Usage},
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -14,28 +14,48 @@ use serde::{Deserialize, Serialize};
 const FORMAT: u32 = 1;
 
 /// Sealed before transport starts; later output cannot change these references.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct IssuedReplayRequest {
-    input: Vec<ItemHash>,
-    instructions: ItemHash,
-    tools: ItemHash,
-    tools_allowed: Option<Vec<String>>,
-    model: String,
-    pinned_effort: Effort,
-    session_id: String,
+    #[serde(flatten)]
+    pub(super) record: IssuedRequestRecord,
     #[cfg(test)]
     #[serde(skip)]
     input_reencodings: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct IssuedRequestRecord {
+    input: Vec<ItemHash>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    outputs: Option<Vec<Option<IssuedOutputReference>>>,
+    instructions: ItemHash,
+    tools: ItemHash,
+    tools_allowed: Option<Vec<String>>,
+    pub(super) model: String,
+    pinned_effort: Effort,
+    session_id: String,
+}
+
+/// Issued position owns its immutable source independently of content equality.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct IssuedOutputReference {
+    pub(crate) origin: Origin,
+    pub(crate) operation: OperationId,
 }
 
 #[derive(Serialize, Deserialize)]
 struct ReplayRecord {
     format: u32,
     request: RequestId,
-    issued: IssuedReplayRequest,
+    issued: IssuedRequestRecord,
     response: ReplayResponse,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     completion: Option<CompletionMarker>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_contract: Option<(
+        crate::transport::ResponsesRoute,
+        crate::transport::ResponsesProtocol,
+    )>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -62,6 +82,51 @@ pub(super) struct ResponseEnvelope {
     pub(super) model: String,
     pub(super) origins: Vec<Origin>,
     pub(super) kind: ResponseEnvelopeKind,
+    pub(super) completeness: ResponseCompleteness,
+    pub(super) route: Option<crate::transport::ResponsesRoute>,
+    pub(super) protocol: Option<crate::transport::ResponsesProtocol>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ResponseCompleteness {
+    Completed,
+    ObservedPrefix,
+}
+
+/// Presence of a completed record is independent of provider identity availability.
+pub(super) struct RecordedResponseIdentity {
+    pub(super) response_id: Option<String>,
+}
+
+pub(super) fn recorded_response_identity(
+    c: &Connection,
+    request: &RequestId,
+) -> Result<Option<RecordedResponseIdentity>> {
+    let mut query = c.prepare(
+        "SELECT id,payload FROM events WHERE request_id=?1 AND kind='model_turn' ORDER BY id LIMIT 2",
+    )?;
+    let records = query
+        .query_map([&request.0], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if records.len() > 1 {
+        return Err(StoreError::InvalidEmbeddedFrontier);
+    }
+    let Some((event, payload)) = records.into_iter().next() else {
+        return Ok(None);
+    };
+    let record: ReplayRecord = serde_json::from_str(&payload)?;
+    if record.format != FORMAT {
+        return Err(StoreError::UnsupportedReplayFormat { event });
+    }
+    if record.request != *request {
+        return Err(StoreError::InvalidEmbeddedFrontier);
+    }
+    Ok(Some(RecordedResponseIdentity {
+        response_id: (!record.response.response_id.is_empty())
+            .then_some(record.response.response_id),
+    }))
 }
 
 /// Group membership and the issuing model share one evidence reader. Hashes
@@ -71,6 +136,9 @@ pub(super) fn response_envelopes(
     c: &Connection,
     request: &RequestId,
 ) -> Result<std::collections::HashMap<Origin, std::sync::Arc<ResponseEnvelope>>> {
+    if let Some(envelopes) = super::provider_response::response_envelopes(c, request)? {
+        return Ok(envelopes);
+    }
     use std::collections::{HashMap, HashSet};
     let mut query =
         c.prepare("SELECT payload FROM events WHERE request_id=?1 AND kind='model_turn'")?;
@@ -113,6 +181,9 @@ pub(super) fn response_envelopes(
             model: record.issued.model,
             origins,
             kind: ResponseEnvelopeKind::ModelTurn,
+            completeness: ResponseCompleteness::Completed,
+            route: None,
+            protocol: None,
         });
     }
     envelopes.extend(super::compaction::response_envelopes(c, request)?);
@@ -168,8 +239,122 @@ fn read_item(tx: &Connection, hash: &ItemHash) -> Result<Item> {
     Ok(serde_json::from_str(&json)?)
 }
 
+fn seal_output_references(
+    c: &Connection,
+    head: &RequestId,
+    input: &[Item],
+    occurrences: &[Option<Occurrence>],
+) -> Result<Vec<Option<IssuedOutputReference>>> {
+    if input.len() != occurrences.len() {
+        return Err(StoreError::OperationOriginMismatch);
+    }
+    let selected = occurrences
+        .iter()
+        .flatten()
+        .filter(|occurrence| occurrence.output_operation.is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    let requests = selected
+        .iter()
+        .map(|occurrence| occurrence.request.clone())
+        .collect();
+    let persisted = super::context::occurrences_for_requests(c, &requests)?
+        .into_iter()
+        .map(|occurrence| {
+            (
+                (occurrence.request.clone(), occurrence.position),
+                occurrence,
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let visible = super::context::history(c, head, true)?
+        .into_iter()
+        .map(|occurrence| (occurrence.request, occurrence.position))
+        .collect::<std::collections::HashSet<_>>();
+    super::context::validate_canonical_history(c, &selected)?;
+    let mut seen = std::collections::HashSet::new();
+    input
+        .iter()
+        .zip(occurrences)
+        .map(|(item, occurrence)| {
+            let Some(occurrence) = occurrence.as_ref().filter(|o| o.output_operation.is_some())
+            else {
+                return Ok(None);
+            };
+            let key = (occurrence.request.clone(), occurrence.position);
+            if !visible.contains(&key) || persisted.get(&key) != Some(occurrence) {
+                return Err(StoreError::OperationOriginMismatch);
+            }
+            // Model projection may turn a native output into a readable message.
+            // That message carries no output publication authority.
+            if !super::output_publication::is_tool_output(item) {
+                return Ok(None);
+            }
+            let operation = occurrence.output_operation.as_ref().unwrap();
+            if item.0["type"] != occurrence.item.0["type"]
+                || item.0["call_id"] != operation.call.0
+                || !seen.insert(occurrence.origin.clone())
+            {
+                return Err(StoreError::OperationOriginMismatch);
+            }
+            Ok(Some(IssuedOutputReference {
+                origin: occurrence.origin.clone(),
+                operation: operation.clone(),
+            }))
+        })
+        .collect()
+}
+
+fn validate_output_references(
+    c: &Connection,
+    event: i64,
+    input: &[Item],
+    outputs: &[Option<IssuedOutputReference>],
+) -> Result<()> {
+    let invalid = || StoreError::InvalidReplayOwnership { event };
+    if outputs.len() != input.len() {
+        return Err(invalid());
+    }
+    let requests = outputs
+        .iter()
+        .flatten()
+        .map(|owner| owner.origin.request.clone())
+        .collect();
+    let sources = super::context::occurrences_for_requests(c, &requests)?
+        .into_iter()
+        .map(|occurrence| {
+            (
+                (occurrence.request.clone(), occurrence.position),
+                occurrence,
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut selected = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (item, owner) in input.iter().zip(outputs) {
+        let Some(owner) = owner else {
+            continue;
+        };
+        let source = sources
+            .get(&(owner.origin.request.clone(), owner.origin.position))
+            .ok_or_else(invalid)?;
+        if source.origin != owner.origin
+            || source.output_operation.as_ref() != Some(&owner.operation)
+            || item.0["type"] != source.item.0["type"]
+            || item.0["call_id"] != owner.operation.call.0
+            || !seen.insert(&owner.origin)
+        {
+            return Err(invalid());
+        }
+        selected.push(source.clone());
+    }
+    super::context::validate_canonical_history(c, &selected)?;
+    Ok(())
+}
+
 impl Store {
-    /// Intern an exact attempt, including transient hook or projection Items.
+    /// Intern exact bytes without output occurrence authority. Engine seals its
+    /// aligned occurrence cut through `seal_replay_request_with_occurrences`.
     pub fn seal_replay_request(&self, request: &ResponsesRequest) -> Result<IssuedReplayRequest> {
         self.seal_replay_request_with_hashes(request, &vec![None; request.input.len()], None)
     }
@@ -184,64 +369,108 @@ impl Store {
         hashes: &[Option<ItemHash>],
         instructions: Option<&ItemHash>,
     ) -> Result<IssuedReplayRequest> {
+        self.seal_replay_request_inner(request, hashes, instructions, None)
+    }
+
+    pub(crate) fn seal_replay_request_with_occurrences(
+        &self,
+        head: &RequestId,
+        request: &ResponsesRequest,
+        hashes: &[Option<ItemHash>],
+        instructions: Option<&ItemHash>,
+        occurrences: &[Option<Occurrence>],
+    ) -> Result<IssuedReplayRequest> {
+        self.seal_replay_request_inner(request, hashes, instructions, Some((head, occurrences)))
+    }
+
+    fn seal_replay_request_inner(
+        &self,
+        request: &ResponsesRequest,
+        hashes: &[Option<ItemHash>],
+        instructions: Option<&ItemHash>,
+        occurrences: Option<(&RequestId, &[Option<Occurrence>])>,
+    ) -> Result<IssuedReplayRequest> {
+        let _seal = tracing::debug_span!(target: "harness::runtime_cost", "seal_replay_request_with_hashes",
+            session_id = %request.session_id, input_items = request.input.len(),
+            tool_count = request.tools.len()).entered();
         assert_eq!(
             hashes.len(),
             request.input.len(),
             "Engine input provenance must align"
         );
-        let mut connection = self.lock();
-        let tx = connection.transaction()?;
-        #[cfg(test)]
-        let mut input_reencodings = 0;
-        let input = request
-            .input
-            .iter()
-            .zip(hashes)
-            .map(|(item, hash)| {
-                hash.clone().map_or_else(
-                    || {
-                        #[cfg(test)]
-                        {
-                            input_reencodings += 1;
-                        }
-                        Self::put_item_tx(&tx, item)
-                    },
-                    Ok,
-                )
-            })
-            .collect::<Result<_>>()?;
-        let instructions = match instructions {
-            Some(hash) => hash.clone(),
-            None => Self::put_item_tx(
-                &tx,
-                &Item(serde_json::Value::String(request.instructions.clone())),
-            )?,
-        };
-        let (tools, json) = request.tools.encoded();
-        let present: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM items WHERE hash=?1)",
-            [&tools.0],
-            |row| row.get(0),
-        )?;
-        if !present {
-            tx.execute(
-                "INSERT INTO items(hash,json) VALUES (?1,?2)",
-                params![tools.0, json],
-            )?;
-        }
-        let issued = IssuedReplayRequest {
-            input,
-            instructions,
-            tools: tools.clone(),
-            tools_allowed: request.tools_allowed.clone(),
-            model: request.model.clone(),
-            pinned_effort: request.pinned_effort,
-            session_id: request.session_id.clone(),
+        let mut connection = self.lock()?;
+        connection.write_transaction(|tx| {
+            let outputs = occurrences
+                .map(|(head, occurrences)| {
+                    seal_output_references(&tx, head, &request.input, occurrences)
+                })
+                .transpose()?;
             #[cfg(test)]
-            input_reencodings,
-        };
-        tx.commit()?;
-        Ok(issued)
+            let mut input_reencodings = 0;
+            let input = request
+                .input
+                .iter()
+                .zip(hashes)
+                .enumerate()
+                .map(|(position, (item, hash))| {
+                    if outputs
+                        .as_ref()
+                        .is_some_and(|owners| owners[position].is_some())
+                    {
+                        if let Some(hash) = hash {
+                            if Self::put_item_tx_hash(item)? != *hash {
+                                return Err(StoreError::OperationOriginMismatch);
+                            }
+                        }
+                    }
+                    hash.clone().map_or_else(
+                        || {
+                            #[cfg(test)]
+                            {
+                                input_reencodings += 1;
+                            }
+                            Self::put_item_tx(&tx, item)
+                        },
+                        Ok,
+                    )
+                })
+                .collect::<Result<_>>()?;
+            let instructions = match instructions {
+                Some(hash) => hash.clone(),
+                None => Self::put_item_tx(
+                    &tx,
+                    &Item(serde_json::Value::String(request.instructions.clone())),
+                )?,
+            };
+            let (tools, json) = request.tools.encoded();
+            let present: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM items WHERE hash=?1)",
+                [&tools.0],
+                |row| row.get(0),
+            )?;
+            if !present {
+                tx.execute(
+                    "INSERT INTO items(hash,json) VALUES (?1,?2)",
+                    params![tools.0, json],
+                )?;
+            }
+            let issued = IssuedReplayRequest {
+                record: IssuedRequestRecord {
+                    input,
+                    outputs,
+                    instructions,
+                    tools: tools.clone(),
+                    tools_allowed: request.tools_allowed.clone(),
+                    model: request.model.clone(),
+                    pinned_effort: request.pinned_effort,
+                    session_id: request.session_id.clone(),
+                },
+                #[cfg(test)]
+                input_reencodings,
+            };
+
+            Ok(issued)
+        })
     }
 
     /// Completion and references commit atomically; no request payload is copied.
@@ -251,32 +480,92 @@ impl Store {
         issued: IssuedReplayRequest,
         response: &ResponsesTurn,
     ) -> Result<i64> {
-        let mut connection = self.lock();
-        let tx = connection.transaction()?;
-        let items = response
-            .items
-            .iter()
-            .map(|item| Self::put_item_tx(&tx, item))
-            .collect::<Result<_>>()?;
-        let record = ReplayRecord {
-            format: FORMAT,
-            request: request.clone(),
-            issued,
-            completion: None,
-            response: ReplayResponse {
-                response_id: response.response_id.clone(),
-                items,
-                usage: response.usage.clone(),
-            },
-        };
-        let payload = serde_json::to_string(&record)?;
-        tx.execute(
+        let mut connection = self.lock()?;
+        connection.write_transaction(|tx| {
+            let items = response
+                .items
+                .iter()
+                .map(|item| Self::put_item_tx(&tx, item))
+                .collect::<Result<_>>()?;
+            let record = ReplayRecord {
+                format: FORMAT,
+                request: request.clone(),
+                issued: issued.record,
+                completion: None,
+                provider_contract: None,
+                response: ReplayResponse {
+                    response_id: response.response_id.clone(),
+                    items,
+                    usage: response.usage.clone(),
+                },
+            };
+            let payload = serde_json::to_string(&record)?;
+            tx.execute(
             "INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,'model_turn',?2,?3)",
             params![request.0, payload, utc_millis()],
         )?;
-        let sequence = tx.last_insert_rowid();
-        tx.commit()?;
-        Ok(sequence)
+            let sequence = tx.last_insert_rowid();
+
+            Ok(sequence)
+        })
+    }
+
+    /// Record an exact response through the same issuance and occurrence owner
+    /// used by streaming. The response owns its output positions, rather than
+    /// selecting equal bytes already present in request history.
+    pub fn record_replay_turn_for_target(
+        &self,
+        request: &RequestId,
+        model_request: &ResponsesRequest,
+        response: &ResponsesTurn,
+        route: crate::transport::ResponsesRoute,
+        protocol: crate::transport::ResponsesProtocol,
+    ) -> Result<i64> {
+        let sealed = self.seal_replay_request(model_request)?;
+        let issued = self.issue_provider_request(request, sealed, (route, protocol))?;
+        self.record_provider_turn(&issued, response)
+    }
+
+    pub(crate) fn record_provider_turn(
+        &self,
+        issued: &super::provider_response::IssuedProviderRequest,
+        response: &ResponsesTurn,
+    ) -> Result<i64> {
+        let request = &issued.request;
+        let mut connection = self.lock()?;
+        connection.write_transaction(|tx| {
+            self.validate_provider_issuer(tx, issued)?;
+            let state: String = tx.query_row("SELECT state FROM provider_requests WHERE request_id=?1", [&request.0], |r| r.get(0))?;
+            if !matches!(state.as_str(), "streaming" | "completed") {
+                return Err(StoreError::InvalidProviderEvidence(request.clone()));
+            }
+            let mut items = Vec::with_capacity(response.items.len());
+            for (index, item) in response.items.iter().enumerate() {
+                super::provider_response::append_item(tx, request, index as u64, item)?;
+                items.push(Self::put_item_tx(tx, item)?);
+            }
+            let count: u64 = tx.query_row("SELECT COUNT(*) FROM provider_items WHERE request_id=?1", [&request.0], |r| r.get(0))?;
+            if count != response.items.len() as u64 {
+                return Err(StoreError::InvalidProviderEvidence(request.clone()));
+            }
+            let record = ReplayRecord {
+                format: FORMAT, request: request.clone(), issued: issued.issued.record.clone(),
+                completion: None,
+                provider_contract: Some(self.provider_contract_tx(tx, request)?),
+                response: ReplayResponse { response_id: response.response_id.clone(), items, usage: response.usage.clone() },
+            };
+            let payload = serde_json::to_string(&record)?;
+            let prior: Option<i64> = tx.query_row("SELECT completion_event FROM provider_requests WHERE request_id=?1", [&request.0], |r| r.get(0))?;
+            if let Some(event) = prior {
+                let previous: String = tx.query_row("SELECT payload FROM events WHERE id=?1", [event], |r| r.get(0))?;
+                if previous != payload { return Err(StoreError::InvalidProviderEvidence(request.clone())); }
+                return Ok(event);
+            }
+            tx.execute("INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,'model_turn',?2,?3)", params![request.0,payload,utc_millis()])?;
+            let event = tx.last_insert_rowid();
+            tx.execute("UPDATE provider_requests SET state='completed',response_id=?2,completion_event=?3 WHERE request_id=?1", params![request.0,response.response_id,event])?;
+            Ok(event)
+        })
     }
 
     /// Bind parser-validated Engine completion to the exact persisted response
@@ -287,46 +576,47 @@ impl Store {
         request: &RequestId,
         completion: &ValidatedFinalize,
     ) -> Result<()> {
-        let mut connection = self.lock();
-        let tx = connection.transaction()?;
-        let payload: Option<String> = tx
-            .query_row(
-                "SELECT payload FROM events WHERE id=?1 AND request_id=?2 AND kind='model_turn'",
-                params![event, request.0],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let mut record: ReplayRecord =
-            serde_json::from_str(&payload.ok_or(StoreError::InvalidCompletionMarker { event })?)?;
-        let hash = Self::put_item_tx(&tx, completion.item())?;
-        let mut query = tx.prepare(
-            "SELECT position FROM request_items WHERE request_id=?1 AND item_hash=?2 AND (source_request IS NULL OR (source_request=request_id AND source_position=position))",
-        )?;
-        let positions = query
-            .query_map(params![request.0, hash.0], |row| row.get::<_, i64>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let [position] = positions.as_slice() else {
-            return Err(StoreError::InvalidCompletionMarker { event });
-        };
-        let origin = Origin {
-            request: request.clone(),
-            position: *position,
-            hash,
-        };
-        let schema = Self::put_item_tx(&tx, &Item(completion.schema().clone()))?;
-        let marker = CompletionMarker::Finalize { origin, schema };
-        if record.completion.as_ref().is_some_and(|old| old != &marker) {
-            return Err(StoreError::InvalidCompletionMarker { event });
-        }
-        record.completion = Some(marker);
-        validate_completion_record(&tx, event, &record)?;
-        tx.execute(
-            "UPDATE events SET payload=?2 WHERE id=?1",
-            params![event, serde_json::to_string(&record)?],
-        )?;
-        drop(query);
-        tx.commit()?;
-        Ok(())
+        let mut connection = self.lock()?;
+        connection.write_transaction(|tx| {
+            let payload: Option<String> = tx
+                .query_row(
+                    "SELECT payload FROM events WHERE id=?1 AND request_id=?2 AND kind='model_turn'",
+                    params![event, request.0],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let mut record: ReplayRecord =
+                serde_json::from_str(&payload.ok_or(StoreError::InvalidCompletionMarker { event })?)?;
+            let hash = Self::put_item_tx(&tx, completion.item())?;
+            let mut query = tx.prepare(
+                "SELECT position FROM request_items WHERE request_id=?1 AND item_hash=?2 AND (source_request IS NULL OR (source_request=request_id AND source_position=position))",
+            )?;
+            let positions = query
+                .query_map(params![request.0, hash.0], |row| row.get::<_, i64>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let [position] = positions.as_slice() else {
+                return Err(StoreError::InvalidCompletionMarker { event });
+            };
+            let origin = Origin {
+                request: request.clone(),
+                position: *position,
+                hash,
+            };
+            let schema = Self::put_item_tx(&tx, &Item(completion.schema().clone()))?;
+            let marker = CompletionMarker::Finalize { origin, schema };
+            if record.completion.as_ref().is_some_and(|old| old != &marker) {
+                return Err(StoreError::InvalidCompletionMarker { event });
+            }
+            record.completion = Some(marker);
+            validate_completion_record(&tx, event, &record)?;
+            tx.execute(
+                "UPDATE events SET payload=?2 WHERE id=?1",
+                params![event, serde_json::to_string(&record)?],
+            )?;
+            drop(query);
+
+            Ok(())
+        })
     }
 
     pub(super) fn decode_replay_record(
@@ -339,39 +629,45 @@ impl Store {
             return Err(StoreError::UnsupportedReplayFormat { event });
         }
         let record: ReplayRecord = serde_json::from_value(value)?;
-        let mut connection = self.lock();
-        let tx = connection.transaction()?;
-        let instructions = read_item(&tx, &record.issued.instructions)?;
-        let tools = read_item(&tx, &record.issued.tools)?;
-        let request = ResponsesRequest {
-            input: record
-                .issued
-                .input
-                .iter()
-                .map(|hash| read_item(&tx, hash))
-                .collect::<Result<_>>()?,
-            instructions: serde_json::from_value(instructions.0)?,
-            tools: serde_json::from_value(tools.0)?,
-            tools_allowed: record.issued.tools_allowed,
-            model: record.issued.model,
-            pinned_effort: record.issued.pinned_effort,
-            session_id: record.issued.session_id,
-        };
-        let response = ResponsesTurn {
-            response_id: record.response.response_id,
-            items: record
-                .response
-                .items
-                .iter()
-                .map(|hash| read_item(&tx, hash))
-                .collect::<Result<_>>()?,
-            usage: record.response.usage,
-        };
-        tx.commit()?;
-        Ok(RecordedReplayTurn {
-            request: record.request,
-            model_request: request,
-            model_response: response,
+        let mut connection = self.lock()?;
+        connection.read_transaction(|tx| {
+            let instructions = read_item(tx, &record.issued.instructions)?;
+            let tools = read_item(tx, &record.issued.tools)?;
+            let request = ResponsesRequest {
+                input: record
+                    .issued
+                    .input
+                    .iter()
+                    .map(|hash| read_item(tx, hash))
+                    .collect::<Result<_>>()?,
+                instructions: serde_json::from_value(instructions.0)?,
+                tools: serde_json::from_value(tools.0)?,
+                tools_allowed: record.issued.tools_allowed,
+                model: record.issued.model,
+                pinned_effort: record.issued.pinned_effort,
+                session_id: record.issued.session_id,
+            };
+            if let Some(outputs) = &record.issued.outputs {
+                validate_output_references(tx, event, &request.input, outputs)?;
+            }
+            let response = ResponsesTurn {
+                response_id: record.response.response_id,
+                items: record
+                    .response
+                    .items
+                    .iter()
+                    .map(|hash| read_item(tx, hash))
+                    .collect::<Result<_>>()?,
+                usage: record.response.usage,
+            };
+            Ok(RecordedReplayTurn {
+                request: record.request,
+                model_request: request,
+                model_response: response,
+                provider_contract: record.provider_contract,
+                issued_outputs: record.issued.outputs,
+                replay_event: Some(event),
+            })
         })
     }
 }
@@ -516,7 +812,14 @@ mod tests {
             store.create_request(&root, None, "/root").unwrap();
             store.append_items(&root, &[original]).unwrap();
             let sealed = store.seal_replay_request(&input).unwrap();
-            store.append_items(&root,&[Item(json!({"type":"custom_tool_call_output","call_id":"same-id","output":"late actual output"}))]).unwrap();
+            store
+                .append_items(
+                    &root,
+                    &[Item(
+                        json!({"type":"message","role":"user","content":"late actual input"}),
+                    )],
+                )
+                .unwrap();
             store
                 .record_issued_replay_turn(&root, sealed, &done)
                 .unwrap();
@@ -543,6 +846,9 @@ mod tests {
             request: root.clone(),
             model_request: request(vec![]),
             model_response: response(vec![]),
+            provider_contract: None,
+            issued_outputs: None,
+            replay_event: None,
         };
         let sequence = store
             .record_event(
@@ -564,7 +870,7 @@ mod tests {
         let root = RequestId("root".into());
         store.create_request(&root, None, "/root").unwrap();
         let sealed = store.seal_replay_request(&request(vec![])).unwrap();
-        store.lock().execute_batch("CREATE TRIGGER reject_replay BEFORE INSERT ON events WHEN NEW.kind='model_turn' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+        store.lock().unwrap().execute_batch("CREATE TRIGGER reject_replay BEFORE INSERT ON events WHEN NEW.kind='model_turn' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
         let output = Item(json!({"type":"message","role":"assistant","content":"new output"}));
         let hash = ItemHash(
             blake3::hash(&serde_json::to_vec(&output).unwrap())
@@ -613,6 +919,9 @@ mod tests {
                 request: root.clone(),
                 model_request: issued.clone(),
                 model_response: response(vec![]),
+                provider_contract: None,
+                issued_outputs: None,
+                replay_event: None,
             })
             .unwrap()
             .len()
@@ -626,6 +935,7 @@ mod tests {
             assert_eq!(store.replay_turns(&root).unwrap().len(), 4);
             let stored_items: usize = store
                 .lock()
+                .unwrap()
                 .query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))
                 .unwrap();
             assert_eq!(stored_items, count + 2);
@@ -637,3 +947,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "replay/ownership_tests.rs"]
+mod ownership_tests;

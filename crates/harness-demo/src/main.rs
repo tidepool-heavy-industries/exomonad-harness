@@ -2580,7 +2580,10 @@ fn safe_transport_error(error: &TransportError) -> String {
         harness::transport::TransportError::Http { status, .. } => {
             format!("API returned HTTP status {status}")
         }
-        harness::transport::TransportError::Stream(_) => "API request or response failed".into(),
+        harness::transport::TransportError::Stream(_)
+        | harness::transport::TransportError::ProviderStreamFailure { .. } => {
+            "API request or response failed".into()
+        }
         harness::transport::TransportError::IncompleteResponse(cause) => {
             format!("API response interrupted: {cause}")
         }

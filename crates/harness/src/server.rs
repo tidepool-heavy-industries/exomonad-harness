@@ -6,6 +6,7 @@
 mod actor_output;
 mod assets;
 mod bundle;
+mod chat;
 pub use actor_output::{ActorDisplayExpander, ActorDisplayExpansion};
 pub use bundle::{
     BrowserBundleError, BrowserBundleIdentity, BrowserBundleManifest, VerifiedBrowserBundle,
@@ -24,6 +25,9 @@ pub use ws_protocol::{
 pub use ws_protocol::{WireI64, WireU64, contract as browser_contract};
 
 pub use crate::embedding::{ClientOperationId, EmbeddedRoundId};
+pub use crate::embedding::{
+    HostInferenceState, InferenceBlock, InferenceBlockReason, RecoveryMode,
+};
 use crate::store::Store;
 use axum::extract::ws::{Message, WebSocket};
 use axum::{
@@ -108,6 +112,11 @@ pub enum HostCommand {
     Retire {
         target: HostActorIdentity,
     },
+    Recover {
+        target: HostActorIdentity,
+        expected_block: InferenceBlock,
+        mode: RecoveryMode,
+    },
 }
 
 impl HostCommand {
@@ -115,7 +124,8 @@ impl HostCommand {
         match self {
             Self::Input { target, .. }
             | Self::Interrupt { target, .. }
-            | Self::Retire { target } => target,
+            | Self::Retire { target }
+            | Self::Recover { target, .. } => target,
         }
     }
 }
@@ -382,6 +392,8 @@ impl ServerConfig {
 
 #[derive(Clone)]
 struct AppState {
+    #[cfg(test)]
+    websocket_test_hooks: Arc<std::sync::OnceLock<Arc<WebSocketTestHooks>>>,
     actor_display_expander: Arc<std::sync::OnceLock<actor_output::ActorDisplayExpander>>,
     commands: mpsc::Sender<QueuedCommand>,
     events: broadcast::Sender<ServerEvent>,
@@ -428,10 +440,24 @@ pub struct QueuedCommand {
 /// Producer-side API given to the scheduler.
 #[derive(Clone)]
 pub struct ServerControl {
+    #[cfg(test)]
+    websocket_test_hooks: Arc<std::sync::OnceLock<Arc<WebSocketTestHooks>>>,
     actor_display_expander: Arc<std::sync::OnceLock<actor_output::ActorDisplayExpander>>,
     events: broadcast::Sender<ServerEvent>,
     next_sequence: Arc<std::sync::Mutex<u64>>,
     snapshot: Arc<std::sync::RwLock<Snapshot>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct WebSocketTestHooks {
+    before_receive: tokio::sync::Notify,
+    resume_receive: tokio::sync::Notify,
+    covered_events_drained: tokio::sync::Notify,
+    snapshot_captured: tokio::sync::Notify,
+    resume_snapshot: tokio::sync::Notify,
+    snapshots: std::sync::atomic::AtomicUsize,
+    lagged: std::sync::atomic::AtomicUsize,
 }
 
 impl ServerControl {
@@ -693,6 +719,8 @@ pub fn server_with_config(
     let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (events, _) = broadcast::channel(EVENT_CAPACITY);
     let state = AppState {
+        #[cfg(test)]
+        websocket_test_hooks: Arc::new(std::sync::OnceLock::new()),
         actor_display_expander: Arc::new(std::sync::OnceLock::new()),
         commands,
         events: events.clone(),
@@ -709,6 +737,8 @@ pub fn server_with_config(
     };
     let snapshot = state.snapshot.clone();
     let control = ServerControl {
+        #[cfg(test)]
+        websocket_test_hooks: Arc::clone(&state.websocket_test_hooks),
         actor_display_expander: Arc::clone(&state.actor_display_expander),
         events,
         next_sequence: Arc::new(std::sync::Mutex::new(1)),
@@ -724,6 +754,10 @@ pub fn server_with_config(
         .route("/commands/{operation_id}", get(command_status))
         .route("/events", get(event_stream))
         .route("/history/{request_id}", get(history::request_history))
+        .route("/chat", get(chat::chat))
+        .route("/actor-form/submit", post(chat::submit))
+        .route("/actor-form/dismiss", post(chat::dismiss))
+        .route("/actor-media/{hash}", get(chat::media))
         .route("/actor-output", get(history::actor_output_history))
         .route("/actor-output/expand", post(actor_output::expand))
         .route("/ws", get(websocket))
@@ -775,7 +809,10 @@ async fn authorize(State(auth): State<ApiAuth>, request: Request, next: Next) ->
     let ambient = matches!(auth.policy.browser_auth, BrowserAuthentication::Peer(_))
         || valid_session_from_headers(request.headers(), &auth.policy).is_some();
     let submitting = request.method() == axum::http::Method::POST
-        && matches!(request.uri().path(), "/commands" | "/actor-output/expand");
+        && matches!(
+            request.uri().path(),
+            "/commands" | "/actor-output/expand" | "/actor-form/submit" | "/actor-form/dismiss"
+        );
     let command_lookup_with_origin = request.method() == axum::http::Method::GET
         && request.uri().path().starts_with("/commands/")
         && request.headers().contains_key(header::ORIGIN);
@@ -944,6 +981,11 @@ async fn websocket_session(
     let mut revalidation = tokio::time::interval(PEER_REVALIDATION_INTERVAL);
     revalidation.tick().await;
     let mut last_sent = send_snapshot(&mut socket, &state).await.unwrap_or(0);
+    #[cfg(test)]
+    if let Some(hooks) = state.websocket_test_hooks.get() {
+        hooks.before_receive.notify_one();
+        hooks.resume_receive.notified().await;
+    }
     loop {
         tokio::select! {
             _ = revalidation.tick(), if matches!(state.auth.browser_auth, BrowserAuthentication::Peer(_)) => {
@@ -1002,8 +1044,19 @@ async fn websocket_session(
                         }
                         last_sent = event.sequence.get();
                     }
-                    Ok(_) => {}
+                    Ok(_event) => {
+                        #[cfg(test)]
+                        if let Some(hooks) = state.websocket_test_hooks.get() {
+                            if _event.sequence == last_sent {
+                                hooks.covered_events_drained.notify_one();
+                            }
+                        }
+                    }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
+                        #[cfg(test)]
+                        if let Some(hooks) = state.websocket_test_hooks.get() {
+                            hooks.lagged.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
                         if authenticate_request(&headers, peer, &state.auth).await.is_err() { break; }
                         match send_snapshot(&mut socket, &state).await {
                             Ok(seq) => last_sent = seq,
@@ -1021,6 +1074,17 @@ async fn websocket_session(
 async fn send_snapshot(socket: &mut WebSocket, state: &AppState) -> Result<u64, ()> {
     let snapshot = state.snapshot.read().map_err(|_| ())?.clone();
     let seq = snapshot.seq.get();
+    #[cfg(test)]
+    if let Some(hooks) = state.websocket_test_hooks.get() {
+        if hooks
+            .snapshots
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            >= 1
+        {
+            hooks.snapshot_captured.notify_one();
+            hooks.resume_snapshot.notified().await;
+        }
+    }
     send_ws_frame(socket, &WsServerFrame::Snapshot { snapshot }).await?;
     Ok(seq)
 }
@@ -1466,11 +1530,12 @@ mod tests {
                 .unwrap();
             store
                 .lock()
+                .unwrap()
                 .execute_batch("DROP INDEX events_model_turn_recent")
                 .unwrap();
         }
         let store = Store::open(&path).unwrap();
-        let index: bool = store.lock().query_row(
+        let index: bool = store.lock().unwrap().query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='events_model_turn_recent')",
             [], |row| row.get(0),
         ).unwrap();
@@ -1481,7 +1546,7 @@ mod tests {
         let (_, control, _) = server(PathBuf::from("."));
         control.refresh_completed_model_requests(&store).unwrap();
         assert_eq!(control.snapshot.read().unwrap().requests[0].id, "retained");
-        let conn = store.lock();
+        let conn = store.lock().unwrap();
         let mut query = conn.prepare(
             "EXPLAIN QUERY PLAN SELECT id,request_id FROM events WHERE kind='model_turn' ORDER BY id DESC LIMIT 128",
         ).unwrap();
@@ -1698,6 +1763,7 @@ mod tests {
             model_conversation: None,
             model_head_request: None,
             active_round: None,
+            inference: None,
         }
     }
 
@@ -2928,6 +2994,134 @@ mod tests {
         assert_eq!(unknown_api.status(), StatusCode::NOT_FOUND);
         server_task.abort();
         tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn websocket_actual_lag_recovers_snapshot_watermark_without_replaying_covered_events() {
+        use crate::engine::{ModelOutput, ModelOutputObserver, ModelOutputUpdate};
+        use crate::model::{AgentPath, ConversationIdentity, RequestId};
+        use crate::transport::sse::OutputChannel;
+        use std::sync::atomic::Ordering;
+
+        let (app, control, _commands) = authorized_server(PathBuf::from("."));
+        let hooks = Arc::new(WebSocketTestHooks::default());
+        control.websocket_test_hooks.set(hooks.clone()).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (mut socket, handshake) = websocket(
+            address,
+            Some(&format!("http://{address}")),
+            Some(TEST_SECRET),
+        );
+        assert!(handshake.starts_with("HTTP/1.1 101"), "{handshake}");
+        assert_eq!(read_ws_text(&mut socket)["snapshot"]["seq"], 0);
+        tokio::time::timeout(Duration::from_secs(2), hooks.before_receive.notified())
+            .await
+            .unwrap();
+
+        let origin = ConversationIdentity::Embedded {
+            run: "lag-run".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "issuer".into(),
+        };
+        let output = |request: &str, update| ModelOutput {
+            origin: origin.clone(),
+            request_id: RequestId(request.into()),
+            update,
+        };
+        let publisher = control.clone();
+        let issuing_origin = origin.clone();
+        let producer = tokio::spawn(async move {
+            let emit = |update| {
+                publisher.observe(ModelOutput {
+                    origin: issuing_origin.clone(),
+                    request_id: RequestId("covered".into()),
+                    update,
+                })
+            };
+            emit(ModelOutputUpdate::Started);
+            for _ in 0..=EVENT_CAPACITY {
+                emit(ModelOutputUpdate::Delta {
+                    item_id: "assistant".into(),
+                    channel: OutputChannel::Assistant,
+                    index: 0,
+                    text: "λ".into(),
+                });
+            }
+            emit(ModelOutputUpdate::Stopped);
+            publisher.snapshot.read().unwrap().seq
+        });
+        // Completion must not depend on the paused subscriber. The receive gate
+        // guarantees true broadcast overflow rather than relying on TCP buffers.
+        let watermark = tokio::time::timeout(Duration::from_secs(2), producer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(watermark, (EVENT_CAPACITY + 3) as u64);
+        hooks.resume_receive.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), hooks.snapshot_captured.notified())
+            .await
+            .unwrap();
+        assert_eq!(hooks.lagged.load(Ordering::SeqCst), 1);
+
+        hooks.resume_snapshot.notify_one();
+        let recovered = read_ws_text(&mut socket);
+        assert_eq!(recovered["type"], "snapshot");
+        assert_eq!(recovered["snapshot"]["seq"], watermark);
+        let retained = &recovered["snapshot"]["liveOutput"];
+        assert_eq!(retained.as_array().unwrap().len(), 1);
+        assert_eq!(retained[0]["requestId"], "covered");
+        assert_eq!(retained[0]["text"], "λ".repeat(EVENT_CAPACITY + 1));
+        assert_eq!(retained[0]["streaming"], false);
+        // Once covered events are drained, isolate the clone/send race from a
+        // second legitimate broadcast overflow. An explicit snapshot uses the
+        // same watermark issuer as lag recovery.
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            hooks.covered_events_drained.notified(),
+        )
+        .await
+        .unwrap();
+        write_ws_text(&mut socket, r#"{"type":"snapshot.request"}"#);
+        tokio::time::timeout(Duration::from_secs(2), hooks.snapshot_captured.notified())
+            .await
+            .unwrap();
+        control.observe(output("later", ModelOutputUpdate::Started));
+        control.observe(output(
+            "later",
+            ModelOutputUpdate::Delta {
+                item_id: "assistant".into(),
+                channel: OutputChannel::Assistant,
+                index: 0,
+                text: "after".into(),
+            },
+        ));
+        control.observe(output("later", ModelOutputUpdate::Stopped));
+        hooks.resume_snapshot.notify_one();
+        let captured_before_send = read_ws_text(&mut socket);
+        assert_eq!(captured_before_send, recovered);
+        for (offset, kind) in [
+            "model.output.started",
+            "model.output.delta",
+            "model.output.stopped",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let event = read_ws_text(&mut socket);
+            assert_eq!(event["type"], "event");
+            assert_eq!(event["event"]["seq"], watermark + offset as u64 + 1);
+            assert_eq!(event["event"]["event"]["kind"], kind);
+            assert_eq!(event["event"]["event"]["value"]["requestId"], "later");
+        }
+        let authoritative = control.snapshot.read().unwrap().clone();
+        assert_eq!(authoritative.seq, watermark + 3);
+        assert_eq!(hooks.lagged.load(Ordering::SeqCst), 1);
+        assert_eq!(authoritative.live_output[1].text, "after");
+        assert!(!authoritative.live_output[1].streaming);
+        drop(socket);
+        server_task.abort();
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -146,7 +146,7 @@ async fn active_cell_survives_three_boundary_envelopes_and_finalizes_durably() {
     // a fresh model request, where that envelope must be visible. The fifth
     // response also waits so the resident cell can be released only after its
     // third envelope-bearing request was captured.
-    let replay = Arc::new(ReplayTransport::gated([
+    let replay = Arc::new(ReplayTransport::scripted_codex_standard_gated([
         turn("cell-admitted", vec![cell_call]),
         turn("wait-for-first", vec![wait_call("wait-one")]),
         turn("wait-for-second", vec![wait_call("wait-two")]),
@@ -373,7 +373,7 @@ async fn cancelling_pending_cell_releases_execution_without_success_output() {
         "name":"cell",
         "arguments":"{\"source\":\"blocked source\"}"
     }));
-    let replay = Arc::new(ReplayTransport::gated([
+    let replay = Arc::new(ReplayTransport::scripted_codex_standard_gated([
         turn("cell-admitted", vec![call_item]),
         turn("await-cell", vec![wait_call("await-cancel")]),
     ]));

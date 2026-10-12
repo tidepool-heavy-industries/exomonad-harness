@@ -54,6 +54,8 @@ pub enum FinalizeError {
     SerializeResult(String),
     #[error("unsupported JSON schema at {path}: {keyword}")]
     UnsupportedSchema { path: String, keyword: String },
+    #[error("JSON schema constraints exclude every type variant at {path}")]
+    UnsatisfiableSchema { path: String },
     #[error("function arguments have ambiguous optional-null semantics at {0}")]
     AmbiguousArguments(String),
     #[error("finalize result does not match schema at {0}")]
@@ -141,9 +143,7 @@ impl ArgumentProjection {
         }
         if let Some(types) = schema["type"].as_array() {
             let mut variants = Vec::new();
-            for kind in types {
-                let mut variant = schema.clone();
-                variant["type"] = kind.clone();
+            for variant in type_union_variants(schema.as_object().unwrap(), types, "$")? {
                 variants.push((
                     normalize_schema(variant.clone(), "$")?,
                     Self::new(&variant)?,
@@ -225,6 +225,107 @@ impl ArgumentProjection {
 enum SchemaMode {
     HostProjection,
     StrictWire,
+}
+
+// Document metadata does not constrain the admitted value set.
+const SCHEMA_METADATA: &[&str] = &[
+    "$schema",
+    "$defs",
+    "definitions",
+    "title",
+    "description",
+    "default",
+    "examples",
+    "deprecated",
+    "readOnly",
+    "writeOnly",
+];
+
+fn schema_keywords(kind: &str, path: &str) -> Result<&'static [&'static str], FinalizeError> {
+    Ok(match kind {
+        "object" => &["type", "properties", "required", "additionalProperties"],
+        "array" => &["type", "items", "minItems", "maxItems"],
+        // Refuse constraints that ReplayTransport cannot enforce locally.
+        "string" => &["type", "minLength", "maxLength", "enum", "const"],
+        "boolean" => &["type", "enum", "const"],
+        "null" => &["type"],
+        "integer" | "number" => &[
+            "type",
+            "minimum",
+            "maximum",
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+            "enum",
+            "const",
+            "format",
+        ],
+        other => return Err(unsupported(path, format!("unsupported type {other}"))),
+    })
+}
+
+/// JSON Schema's numeric, string and container keywords apply only to values
+/// of that type. Enum and const constrain every branch, including null.
+fn type_union_variants(
+    object: &Map<String, Value>,
+    types: &[Value],
+    path: &str,
+) -> Result<Vec<Value>, FinalizeError> {
+    if types.is_empty() {
+        return Err(unsupported(path, "empty type union"));
+    }
+    let mut kinds = std::collections::HashSet::new();
+    let mut supported = Vec::new();
+    for kind in types {
+        let kind = kind
+            .as_str()
+            .filter(|kind| kinds.insert(*kind))
+            .ok_or_else(|| unsupported(path, "type union requires distinct string kinds"))?;
+        supported.push((kind, schema_keywords(kind, path)?));
+    }
+    for key in object.keys() {
+        if !SCHEMA_METADATA.contains(&key.as_str())
+            && !supported
+                .iter()
+                .any(|(_, allowed)| allowed.contains(&key.as_str()))
+        {
+            return Err(unsupported(path, key));
+        }
+    }
+    if object
+        .get("enum")
+        .is_some_and(|value| value.as_array().is_none_or(|values| values.is_empty()))
+    {
+        return Err(unsupported(path, "enum requires a nonempty array"));
+    }
+    let mut variants = Vec::new();
+    for (kind, allowed) in supported {
+        let mut child = object.clone();
+        child.retain(|key, _| {
+            SCHEMA_METADATA.contains(&key.as_str())
+                || allowed.contains(&key.as_str())
+                || matches!(key.as_str(), "enum" | "const")
+        });
+        child.insert("type".into(), json!(kind));
+        if kind == "null" {
+            if child.get("const").is_some_and(|value| !value.is_null())
+                || child
+                    .get("enum")
+                    .and_then(Value::as_array)
+                    .is_some_and(|values| !values.contains(&Value::Null))
+            {
+                continue;
+            }
+            // Once null is admitted these global constraints are redundant;
+            // null enum/const are outside the provider keyword subset.
+            child.remove("enum");
+            child.remove("const");
+        }
+        variants.push(Value::Object(child));
+    }
+    if variants.is_empty() {
+        return Err(FinalizeError::UnsatisfiableSchema { path: path.into() });
+    }
+    Ok(variants)
 }
 
 /// Convert schemars' schema to the conservative subset accepted by strict
@@ -341,67 +442,43 @@ fn normalize_schema_mode(
         );
     }
     if let Some(types) = object.get("type").and_then(Value::as_array) {
-        let mut kinds = std::collections::HashSet::new();
-        if types
-            .iter()
-            .any(|kind| kind.as_str().is_none_or(|kind| !kinds.insert(kind)))
-        {
-            return Err(unsupported(
-                path,
-                "type union requires distinct string kinds",
-            ));
-        }
         let mut variants = Vec::new();
-        for variant in types {
-            let mut child = object.clone();
-            child.insert("type".into(), variant.clone());
-            variants.push(normalize_schema_mode(Value::Object(child), path, mode)?);
+        for child in type_union_variants(object, types, path)? {
+            // Validate each branch before pruning, so impossible constants
+            // cannot conceal malformed or unsupported constraints.
+            let mut normalized = normalize_schema_mode(child, path, mode)?;
+            if normalized
+                .get("const")
+                .is_some_and(|value| validate_result(value, &normalized, path).is_err())
+            {
+                continue;
+            }
+            if let Some(choices) = normalized["enum"].as_array() {
+                let viable = choices
+                    .iter()
+                    .filter(|value| validate_result(value, &normalized, path).is_ok())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if viable.is_empty() {
+                    continue;
+                }
+                normalized["enum"] = json!(viable);
+            }
+            variants.push(normalized);
         }
         if variants.is_empty() {
-            return Err(unsupported(path, "empty type union"));
+            return Err(FinalizeError::UnsatisfiableSchema { path: path.into() });
         }
-        return Ok(json!({"anyOf": variants}));
+        return Ok(json!({"anyOf":variants}));
     }
     let schema_type = object
         .get("type")
         .and_then(Value::as_str)
         .ok_or_else(|| unsupported(path, "missing or non-string type"))?;
 
-    // These are descriptive or document-container metadata, not constraints.
-    const METADATA: &[&str] = &[
-        "$schema",
-        "$defs",
-        "definitions",
-        "title",
-        "description",
-        "default",
-        "examples",
-        "deprecated",
-        "readOnly",
-        "writeOnly",
-    ];
-    let allowed: &[&str] = match schema_type {
-        "object" => &["type", "properties", "required", "additionalProperties"],
-        "array" => &["type", "items", "minItems", "maxItems"],
-        // A pattern would require local regex validation for ReplayTransport.
-        // Refuse it rather than advertise a constraint the harness can bypass.
-        "string" => &["type", "minLength", "maxLength", "enum", "const"],
-        "boolean" => &["type", "enum", "const"],
-        "null" => &["type"],
-        "integer" | "number" => &[
-            "type",
-            "minimum",
-            "maximum",
-            "exclusiveMinimum",
-            "exclusiveMaximum",
-            "enum",
-            "const",
-            "format",
-        ],
-        other => return Err(unsupported(path, format!("unsupported type {other}"))),
-    };
+    let allowed = schema_keywords(schema_type, path)?;
     for key in object.keys() {
-        if METADATA.contains(&key.as_str()) {
+        if SCHEMA_METADATA.contains(&key.as_str()) {
             continue;
         }
         if !allowed.contains(&key.as_str()) {
@@ -802,6 +879,10 @@ pub(crate) fn validate_result(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "finalize/properties_tests.rs"]
+mod properties;
 
 #[cfg(test)]
 mod tests {

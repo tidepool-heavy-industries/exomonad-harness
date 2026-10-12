@@ -190,6 +190,9 @@ pub(super) fn response_envelopes(
         model: evidence.model,
         origins: evidence.origins,
         kind: ResponseEnvelopeKind::ServerCompaction,
+        completeness: super::replay::ResponseCompleteness::Completed,
+        route: None,
+        protocol: None,
     }])
 }
 

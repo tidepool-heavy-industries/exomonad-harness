@@ -1,5 +1,6 @@
 use super::*;
 use crate::provider::{CallContext, ProviderError};
+use crate::transport::{ResponsesProtocol, ResponsesRoute};
 use std::sync::Mutex;
 use tokio::sync::{Notify, mpsc};
 
@@ -101,6 +102,10 @@ struct Streaming {
 }
 #[async_trait::async_trait]
 impl ResponsesTransport for Streaming {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         unreachable!()
     }
@@ -119,12 +124,36 @@ impl ResponsesTransport for Streaming {
         }
         let first = call("first", "sync_first");
         let asynchronous = call("async", "async_work");
-        sink.send(StreamEvent::ItemDone(first.clone()))
-            .await
-            .unwrap();
-        sink.send(StreamEvent::ItemDone(asynchronous.clone()))
-            .await
-            .unwrap();
+        sink.send(
+            crate::transport::sse::ResponseAssembly::default()
+                .accept(
+                    &serde_json::json!({
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": (first.clone()).0,
+                    })
+                    .to_string(),
+                )
+                .expect("authored indexed done event is valid")
+                .expect("done event publishes a completed item"),
+        )
+        .await
+        .unwrap();
+        sink.send(
+            crate::transport::sse::ResponseAssembly::default()
+                .accept(
+                    &serde_json::json!({
+                        "type": "response.output_item.done",
+                        "output_index": 1,
+                        "item": (asynchronous.clone()).0,
+                    })
+                    .to_string(),
+                )
+                .expect("authored indexed done event is valid")
+                .expect("done event publishes a completed item"),
+        )
+        .await
+        .unwrap();
         self.emitted.notify_one();
         self.finish.notified().await;
         if self.fail {
@@ -680,6 +709,10 @@ async fn completed_owner_without_required_context_metadata_aborts_publication_pr
 }
 #[async_trait::async_trait]
 impl ResponsesTransport for ContextScript {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         let index = {
             let mut requests = self.requests.lock().unwrap();
@@ -1026,6 +1059,10 @@ struct PolicyStream {
 }
 #[async_trait::async_trait]
 impl ResponsesTransport for PolicyStream {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         unreachable!()
     }
@@ -1048,9 +1085,21 @@ impl ResponsesTransport for PolicyStream {
         self.asynchronous
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let item = call("pinned-call", "pinned");
-        sink.send(StreamEvent::ItemDone(item.clone()))
-            .await
-            .unwrap();
+        sink.send(
+            crate::transport::sse::ResponseAssembly::default()
+                .accept(
+                    &serde_json::json!({
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": (item.clone()).0,
+                    })
+                    .to_string(),
+                )
+                .expect("authored indexed done event is valid")
+                .expect("done event publishes a completed item"),
+        )
+        .await
+        .unwrap();
         self.emitted.notify_one();
         self.finish.notified().await;
         Ok(turn(vec![item]))
@@ -1216,7 +1265,7 @@ async fn round_cancellation_while_store_is_locked_refuses_context_publication() 
     };
     let (cancel, cancelled) = watch::channel(false);
     let (entered, ready) = tokio::sync::oneshot::channel();
-    let lock = engine.store.lock();
+    let lock = engine.store.lock().unwrap();
     let store = engine.store.clone();
     let publication = tokio::task::spawn_blocking(move || {
         entered.send(()).unwrap();
@@ -1361,6 +1410,10 @@ struct FinalOnly {
 }
 #[async_trait::async_trait]
 impl ResponsesTransport for FinalOnly {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         self.requests.lock().unwrap().push(request);
         Ok(final_turn())
@@ -1587,6 +1640,10 @@ struct ContextNotesScript {
 }
 #[async_trait::async_trait]
 impl ResponsesTransport for ContextNotesScript {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         let index = {
             let mut requests = self.requests.lock().unwrap();

@@ -23,6 +23,10 @@ type ReplayObserver = dyn Fn(&ResponsesRequest, &mut ResponsesTurn, usize) + Sen
 /// turn is removed from the queue, including requests whose queue is exhausted.
 pub struct ReplayTransport {
     turns: Mutex<VecDeque<ResponsesTurn>>,
+    contract: (
+        harness::transport::ResponsesRoute,
+        harness::transport::ResponsesProtocol,
+    ),
     requests: Mutex<Vec<ResponsesRequest>>,
     request_count: Mutex<usize>,
     observer: Option<Arc<ReplayObserver>>,
@@ -32,20 +36,24 @@ pub struct ReplayTransport {
 }
 
 impl ReplayTransport {
-    pub fn new(turns: impl IntoIterator<Item = ResponsesTurn>) -> Self {
+    pub fn scripted_codex_standard(turns: impl IntoIterator<Item = ResponsesTurn>) -> Self {
         Self::with_gate(turns, false)
     }
 
     /// Create a replay transport which pauses before returning each queued
     /// turn. Tests coordinate boundaries using `wait_requested` and
     /// `release_next`, without sleeps or polling.
-    pub fn gated(turns: impl IntoIterator<Item = ResponsesTurn>) -> Self {
+    pub fn scripted_codex_standard_gated(turns: impl IntoIterator<Item = ResponsesTurn>) -> Self {
         Self::with_gate(turns, true)
     }
 
     fn with_gate(turns: impl IntoIterator<Item = ResponsesTurn>, gated: bool) -> Self {
         Self {
             turns: Mutex::new(turns.into_iter().collect()),
+            contract: (
+                harness::transport::ResponsesRoute::Codex,
+                harness::transport::ResponsesProtocol::Standard,
+            ),
             requests: Mutex::new(Vec::new()),
             request_count: Mutex::new(0),
             observer: None,
@@ -111,6 +119,17 @@ impl ReplayTransport {
 
 #[async_trait]
 impl ResponsesTransport for ReplayTransport {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        TransportError,
+    > {
+        Ok(self.contract)
+    }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         lock(&self.requests).push(request.clone());
         let mut turn = lock(&self.turns)
@@ -135,8 +154,12 @@ impl ResponsesTransport for ReplayTransport {
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         let turn = self.create(request).await?;
-        for item in &turn.items {
-            let _ = sink.send(StreamEvent::ItemDone(item.clone())).await;
+        for (index, item) in turn.items.iter().enumerate() {
+            let wire = serde_json::json!({"type":"response.output_item.done", "output_index":index, "item":item.0});
+            let done = harness::transport::sse::ResponseAssembly::default()
+                .accept(&wire.to_string())?
+                .ok_or_else(|| TransportError::Stream("scripted item produced no event".into()))?;
+            let _ = sink.send(done).await;
         }
         Ok(turn)
     }

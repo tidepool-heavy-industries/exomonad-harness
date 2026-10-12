@@ -3,9 +3,10 @@ use super::{Result, Store, StoreError, TerminalOutcome, embedded_round, terminal
 use crate::{
     context::{
         ContextBlock, ContextCommit, ContextCommitEvidence, ContextCommitReceipt, ContextDocument,
-        ContextDraft, ContextError, ContextNativeKind, ContextReference, ContextRequestState,
-        ContextRole, ContextSnapshot, ContextTextOverlay, ContextTextSelector, ContextVisibleText,
-        Occurrence, Origin, SnapshotSeal, StoredBlock,
+        ContextDraft, ContextError, ContextNativeKind, ContextProjectionTarget, ContextReference,
+        ContextReplayRejection, ContextRequestState, ContextRole, ContextSnapshot,
+        ContextTextOverlay, ContextTextSelector, ContextVisibleText, Occurrence, Origin,
+        RecoveryProjectionReceipt, SnapshotSeal, StoredBlock,
     },
     item::{Item, ItemHash},
     model::{AgentPath, ConversationIdentity, OperationId, RequestId},
@@ -16,12 +17,38 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
+mod compaction_reconciliation;
 mod portability_note;
+pub(super) use compaction_reconciliation::{CompactionItem, reconcile as reconcile_compaction};
+
+/// A request's recorded model-response state, independent of timestamp availability.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EmbeddedModelResponseState {
+    InProgress,
+    Completed {
+        response_id: Option<String>,
+    },
+    Interrupted,
+    /// Retained or synthetic context without an original model-response observation.
+    Unknown,
+}
+
+/// Effective history and response observations from one exact binding and SQLite snapshot.
+#[derive(Clone, Debug)]
+pub struct EmbeddedConversationHistory {
+    pub head: Option<RequestId>,
+    pub history: Vec<(RequestId, ItemHash, Item)>,
+    pub responses: HashMap<RequestId, EmbeddedModelResponseState>,
+}
 
 #[derive(Default, Serialize, Deserialize)]
 struct InferenceState {
     generation: u64,
     model: Option<String>,
+    #[serde(default)]
+    route: Option<crate::transport::ResponsesRoute>,
+    #[serde(default)]
+    protocol: Option<crate::transport::ResponsesProtocol>,
 }
 
 fn state_key(identity: &ConversationIdentity) -> Result<String> {
@@ -43,7 +70,7 @@ fn state(c: &Connection, identity: &ConversationIdentity) -> Result<InferenceSta
         None => Ok(InferenceState::default()),
         Some(raw) => {
             let value: serde_json::Value = serde_json::from_str(&raw)?;
-            if value["version"] != 1 {
+            if value["version"] != 1 && value["version"] != 2 {
                 return Err(ContextError::UnsupportedState.into());
             }
             Ok(serde_json::from_value(value["state"].clone())?)
@@ -56,7 +83,7 @@ fn save_state(
     identity: &ConversationIdentity,
     state: &InferenceState,
 ) -> Result<()> {
-    tx.execute("INSERT INTO session_state(session_id,state,updated_at) VALUES(?1,?2,?3) ON CONFLICT(session_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at", params![state_key(identity)?, json!({"version":1,"state":state}).to_string(),utc_millis()])?;
+    tx.execute("INSERT INTO session_state(session_id,state,updated_at) VALUES(?1,?2,?3) ON CONFLICT(session_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at", params![state_key(identity)?, json!({"version":2,"state":state}).to_string(),utc_millis()])?;
     Ok(())
 }
 
@@ -82,7 +109,7 @@ pub(super) fn transfer_embedded_state(
     Ok(())
 }
 
-pub(super) fn identity_for_branch(
+pub(crate) fn identity_for_branch(
     c: &Connection,
     store_id: &str,
     branch: &str,
@@ -118,7 +145,16 @@ fn validate_identity(
     Ok(())
 }
 
-pub(super) fn history(
+pub(crate) fn history(
+    c: &Connection,
+    head: &RequestId,
+    boundaries: bool,
+) -> Result<Vec<Occurrence>> {
+    ordered_occurrences(c, &retained_history(c, head, boundaries)?)
+}
+
+/// Original occurrence positions remain durable journal identities.
+pub(crate) fn retained_history(
     c: &Connection,
     head: &RequestId,
     boundaries: bool,
@@ -127,13 +163,95 @@ pub(super) fn history(
         SELECT id,parent_id,0 FROM requests WHERE id=?1
         UNION ALL SELECT r.id,r.parent_id,l.depth+1 FROM requests r JOIN lineage l ON r.id=l.parent_id
         WHERE ?2=0 OR NOT EXISTS(SELECT 1 FROM session_state s WHERE s.session_id='harness:compaction:'||l.id)
-    ) SELECT l.id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note,ri.context_overlays
+    ) SELECT l.id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note,ri.context_overlays,ri.output_operation
     FROM lineage l JOIN request_items ri ON ri.request_id=l.id JOIN items i ON i.hash=ri.item_hash ORDER BY l.depth DESC,ri.position", params![head.0, boundaries])
 }
 
-pub(super) fn request_occurrences(c: &Connection, request: &RequestId) -> Result<Vec<Occurrence>> {
-    query_occurrences(c, "SELECT ri.request_id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note,ri.context_overlays
+/// Provider order is issued independently of arrival order. Interleaved terminal
+/// publications follow their observed provider group; already-late outputs stay late.
+fn ordered_occurrences(c: &Connection, retained: &[Occurrence]) -> Result<Vec<Occurrence>> {
+    let requests = retained
+        .iter()
+        .map(|occurrence| occurrence.origin.request.clone())
+        .collect();
+    let indices = super::provider_response::output_order(c, &requests)?;
+    let mut slots = HashMap::<RequestId, Vec<usize>>::new();
+    for (position, occurrence) in retained.iter().enumerate() {
+        if indices.contains_key(&occurrence.origin) {
+            slots
+                .entry(occurrence.origin.request.clone())
+                .or_default()
+                .push(position);
+        }
+    }
+    let mut ordered = retained.to_vec();
+    let mut ends = HashMap::new();
+    for (request, positions) in slots {
+        let mut members = positions
+            .iter()
+            .map(|position| retained[*position].clone())
+            .collect::<Vec<_>>();
+        members.sort_by_key(|occurrence| indices[&occurrence.origin]);
+        ends.insert(request, *positions.last().expect("nonempty provider group"));
+        for (position, occurrence) in positions.into_iter().zip(members) {
+            ordered[position] = occurrence;
+        }
+    }
+    let mut delayed = HashMap::<usize, Vec<Occurrence>>::new();
+    let mut removed = HashSet::new();
+    for (position, occurrence) in ordered.iter().enumerate() {
+        if let Some(operation) = &occurrence.output_operation
+            && let Some(end) = ends.get(&operation.request)
+            && position < *end
+        {
+            delayed.entry(*end).or_default().push(occurrence.clone());
+            removed.insert(position);
+        }
+    }
+    let mut result = Vec::with_capacity(ordered.len());
+    for (position, occurrence) in ordered.into_iter().enumerate() {
+        if !removed.contains(&position) {
+            result.push(occurrence);
+        }
+        if let Some(outputs) = delayed.remove(&position) {
+            result.extend(outputs);
+        }
+    }
+    Ok(result)
+}
+
+pub(crate) fn request_occurrences(c: &Connection, request: &RequestId) -> Result<Vec<Occurrence>> {
+    query_occurrences(c, "SELECT ri.request_id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note,ri.context_overlays,ri.output_operation
         FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 ORDER BY ri.position", [&request.0])
+}
+
+pub(crate) fn validate_canonical_history(c: &Connection, history: &[Occurrence]) -> Result<()> {
+    super::output_publication::validate_history(c, history).map(drop)
+}
+
+pub(super) fn occurrences_for_requests(
+    c: &Connection,
+    requests: &HashSet<RequestId>,
+) -> Result<Vec<Occurrence>> {
+    let requests = requests
+        .iter()
+        .map(|request| request.0.as_str())
+        .collect::<Vec<_>>();
+    let mut occurrences = Vec::new();
+    for batch in requests.chunks(250) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT ri.request_id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note,ri.context_overlays,ri.output_operation FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id IN ({placeholders}) ORDER BY ri.request_id,ri.position"
+        );
+        occurrences.extend(query_occurrences(
+            c,
+            &sql,
+            rusqlite::params_from_iter(batch.iter()),
+        )?);
+    }
+    Ok(occurrences)
 }
 
 fn query_occurrences(
@@ -153,6 +271,7 @@ fn query_occurrences(
             r.get::<_, Option<String>>(6)?,
             r.get::<_, bool>(7)?,
             r.get::<_, Option<String>>(8)?,
+            r.get::<_, Option<String>>(9)?,
         ))
     })?;
     rows.map(|row| {
@@ -166,12 +285,16 @@ fn query_occurrences(
             sources,
             note,
             overlays,
+            output_operation,
         ) = row?;
-        Ok(Occurrence {
+        let occurrence = Occurrence {
             request: RequestId(request),
             position,
             hash: ItemHash(hash.clone()),
             item: serde_json::from_str(&raw)?,
+            output_operation: output_operation
+                .map(|raw| serde_json::from_str(&raw))
+                .transpose()?,
             origin: Origin {
                 request: RequestId(origin_request),
                 position: origin_position,
@@ -186,14 +309,16 @@ fn query_occurrences(
                 .map(|raw| serde_json::from_str(&raw))
                 .transpose()?
                 .unwrap_or_default(),
-        })
+        };
+        super::output_publication::validate_occurrence(&occurrence)?;
+        Ok(occurrence)
     })
     .collect()
 }
 
 /// Attribution is a request projection; canonical retained bytes and origin
 /// references remain unchanged in the Store.
-fn project_context_note(occurrence: &Occurrence) -> Result<Item> {
+pub(super) fn project_context_note(occurrence: &Occurrence) -> Result<Item> {
     let mut item = project_bodies(occurrence)?;
     if !occurrence.note {
         return Ok(item);
@@ -528,30 +653,82 @@ fn response_evidence(
     Ok(evidence)
 }
 
+pub(crate) fn capture_response_prefix(
+    c: &Connection,
+    prefix: &[Occurrence],
+    boundary: &Origin,
+) -> Result<Option<Vec<Origin>>> {
+    let owned: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM provider_requests WHERE request_id=?1)",
+        [&boundary.request.0],
+        |row| row.get(0),
+    )?;
+    if owned {
+        return super::provider_response::captured_prefix(
+            c,
+            &boundary.request,
+            boundary,
+            &prefix
+                .iter()
+                .map(|occurrence| occurrence.origin.clone())
+                .collect::<Vec<_>>(),
+        );
+    }
+    let evidence = super::replay::response_envelopes(c, &boundary.request)?;
+    let Some(envelope) = evidence.get(boundary) else {
+        return Ok(None);
+    };
+    let Some(cut) = envelope
+        .origins
+        .iter()
+        .position(|origin| origin == boundary)
+    else {
+        return Ok(None);
+    };
+    let membership = envelope.origins.iter().collect::<HashSet<_>>();
+    let selected = prefix
+        .iter()
+        .filter(|occurrence| membership.contains(&occurrence.origin))
+        .map(|occurrence| occurrence.origin.clone())
+        .collect::<Vec<_>>();
+    Ok((selected == envelope.origins[..cut]).then_some(selected))
+}
+
 fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBlock>> {
-    // Index the immutable history once for the grouping pass. Calls still pair
-    // with the first matching output after their own position, including when
-    // duplicate call IDs appear in the same history.
-    let mut outputs = HashMap::<String, Vec<usize>>::new();
-    let mut last_calls = HashMap::<&str, &Occurrence>::new();
+    let publication_ledger = super::output_publication::validate_history(c, all)?;
+    // Group by the issuing occurrence. Wire call IDs can repeat, and an older
+    // operation's output can arrive after a newer invocation.
+    let mut outputs = HashMap::<Origin, Vec<usize>>::new();
+    let calls = all
+        .iter()
+        .filter(|occurrence| {
+            matches!(
+                occurrence.item.0["type"].as_str(),
+                Some("function_call" | "custom_tool_call")
+            )
+        })
+        .map(|occurrence| (occurrence.origin.clone(), occurrence))
+        .collect::<HashMap<_, _>>();
     let mut output_owners = HashMap::<Origin, &Occurrence>::new();
     for (index, occurrence) in all.iter().enumerate() {
         if matches!(
             occurrence.item.0["type"].as_str(),
-            Some("function_call" | "custom_tool_call")
-        ) && let Some(id) = occurrence.item.0["call_id"].as_str()
-        {
-            last_calls.insert(id, occurrence);
-        }
-        if matches!(
-            occurrence.item.0["type"].as_str(),
             Some("function_call_output" | "custom_tool_call_output")
-        ) && let Some(call_id) = occurrence.item.0["call_id"].as_str()
-        {
-            outputs.entry(call_id.into()).or_default().push(index);
-            if let Some(call) = last_calls.get(call_id) {
-                output_owners.insert(occurrence.origin.clone(), call);
+        ) {
+            let operation = occurrence.output_operation.as_ref().ok_or_else(|| {
+                StoreError::UnboundOutputPublication {
+                    request: occurrence.request.clone(),
+                    position: occurrence.position,
+                }
+            })?;
+            let owner = publication_ledger
+                .issuing_call(operation)
+                .ok_or(ContextError::InvalidReference)?
+                .clone();
+            if let Some(call) = calls.get(&owner) {
+                output_owners.insert(occurrence.origin.clone(), *call);
             }
+            outputs.entry(owner).or_default().push(index);
         }
     }
 
@@ -610,7 +787,7 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
     }
 
     let mut ranges = Vec::<(usize, usize, bool, bool)>::new();
-    let mut prior_calls = HashSet::<String>::new();
+    let mut prior_calls = HashSet::<Origin>::new();
     for (index, occurrence) in all.iter().enumerate().take(cut) {
         let item = &occurrence.item;
         if item.is_configuration_update()
@@ -623,9 +800,9 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
         let call = item
             .tool_call()
             .map_err(|_| ContextError::InvalidReference)?;
-        if let Some(call) = &call {
+        if call.is_some() {
             let completion = super::replay::is_validated_completion(c, &occurrence.origin)?;
-            let result = outputs.get(&call.call_id.0).and_then(|positions| {
+            let result = outputs.get(&occurrence.origin).and_then(|positions| {
                 let next = positions.partition_point(|position| *position <= index);
                 positions.get(next).copied()
             });
@@ -640,13 +817,16 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
             let orphan = matches!(
                 item.0["type"].as_str(),
                 Some("function_call_output" | "custom_tool_call_output")
-            ) && !item.0["call_id"]
-                .as_str()
-                .is_some_and(|call_id| prior_calls.contains(call_id));
+            ) && !occurrence
+                .output_operation
+                .as_ref()
+                .map(|operation| original_call(c, operation))
+                .transpose()?
+                .is_some_and(|origin| prior_calls.contains(&origin));
             ranges.push((index, index + 1, opaque_items[index], orphan));
         }
-        if let Some(call) = call {
-            prior_calls.insert(call.call_id.0);
+        if call.is_some() {
+            prior_calls.insert(occurrence.origin.clone());
         }
         if opaque_items[index] {
             if let Some((start, end, complete)) = opaque_bounds.get(&occurrence.origin) {
@@ -722,30 +902,80 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
 
 /// Construct the only provider-facing projection. Stored history, native
 /// references, claims and receipts continue to refer to the original bytes.
-fn portable_request(
+/// Store owns the checked input. Callers may consume it but cannot construct it.
+pub(super) struct CheckedContextProjection(
+    Vec<(RequestId, Option<ItemHash>, Item, Option<Occurrence>)>,
+);
+
+impl CheckedContextProjection {
+    pub(super) fn into_items(self) -> Vec<(RequestId, Option<ItemHash>, Item, Option<Occurrence>)> {
+        self.0
+    }
+}
+
+pub(super) fn checked_projection(
     c: &Connection,
+    consumer: &RequestId,
     all: &[Occurrence],
     model: Option<&str>,
     completing: Option<&OperationId>,
-) -> Result<Vec<(RequestId, Option<ItemHash>, Item)>> {
+    transport: Option<(
+        crate::transport::ResponsesRoute,
+        crate::transport::ResponsesProtocol,
+    )>,
+) -> Result<CheckedContextProjection> {
+    let ordered = ordered_occurrences(c, all)?;
+    let all = ordered.as_slice();
+    validate_canonical_history(c, all)?;
+    for occurrence in all {
+        if occurrence
+            .item
+            .tool_call()
+            .map_err(|_| ContextError::UnsupportedState)?
+            .is_some()
+            && super::validation::operation_for_occurrence(c, occurrence)?.is_none()
+            && !super::replay::is_validated_completion(c, &occurrence.origin)?
+        {
+            return Err(
+                ContextError::Replay(ContextReplayRejection::UnownedInvocation {
+                    request: occurrence.origin.request.clone(),
+                    position: occurrence.origin.position,
+                })
+                .into(),
+            );
+        }
+    }
     let evidence = response_evidence(c, all)?;
     let positions = occurrence_positions(all);
-    let mut outputs = HashMap::<String, Vec<usize>>::new();
-    let mut calls = HashMap::<String, Vec<usize>>::new();
-    for (index, occurrence) in all.iter().enumerate() {
-        match occurrence.item.0["type"].as_str() {
-            Some("function_call_output" | "custom_tool_call_output") => {
-                if let Some(id) = occurrence.item.0["call_id"].as_str() {
-                    outputs.entry(id.into()).or_default().push(index);
-                }
+    let operations = all
+        .iter()
+        .filter_map(|occurrence| occurrence.output_operation.clone())
+        .collect::<HashSet<_>>();
+    let invocations = super::validation::invocations_for_operations(c, &operations)?;
+    let mut outputs = HashMap::<Origin, Vec<usize>>::new();
+    for (index, occurrence) in all
+        .iter()
+        .enumerate()
+        .filter(|(_, occurrence)| super::output_publication::is_tool_output(&occurrence.item))
+    {
+        let operation = occurrence.output_operation.as_ref().ok_or_else(|| {
+            StoreError::UnboundOutputPublication {
+                request: occurrence.request.clone(),
+                position: occurrence.position,
             }
-            Some("function_call" | "custom_tool_call") => {
-                if let Some(id) = occurrence.item.0["call_id"].as_str() {
-                    calls.entry(id.into()).or_default().push(index);
-                }
-            }
-            _ => {}
-        }
+        })?;
+        let invocation = invocations
+            .get(operation)
+            .ok_or(ContextError::OpaqueModel)?;
+        super::validate_replay_output(
+            &operation.call,
+            invocation.call.input.kind(),
+            &occurrence.item,
+        )?;
+        outputs
+            .entry(invocation.occurrence.clone())
+            .or_default()
+            .push(index);
     }
     let mut seen = HashSet::new();
     let mut removed = HashSet::new();
@@ -760,33 +990,70 @@ fn portable_request(
         {
             continue;
         }
-        let envelope = evidence
-            .get(&occurrence.origin)
-            .ok_or(ContextError::OpaqueModel)?;
-        let selected = model.ok_or(ContextError::OpaqueModel)?;
-        if envelope.model == selected || !seen.insert(envelope.origins[0].clone()) {
+        let envelope = evidence.get(&occurrence.origin).ok_or_else(|| {
+            ContextError::Replay(ContextReplayRejection::MissingProvenance {
+                request: occurrence.origin.request.clone(),
+            })
+        })?;
+        let selected = model.ok_or(ContextError::InvalidModel)?;
+        if !seen.insert(envelope.origins[0].clone()) {
             continue;
         }
-        // A visible edit preserves opaque continuity; changing models must not
-        // silently discard that continuity through the portability renderer.
-        if all.iter().any(|occurrence| !occurrence.overlays.is_empty()) {
-            return Err(ContextError::OpaqueModel.into());
-        }
-        if envelope.kind == super::replay::ResponseEnvelopeKind::ServerCompaction {
-            return Err(ContextError::OpaqueModel.into());
-        }
-        let mut members = Vec::with_capacity(envelope.origins.len());
-        for origin in &envelope.origins {
+        let complete = envelope
+            .origins
+            .iter()
+            .all(|origin| positions.contains_key(origin));
+        let prefix;
+        let origins = if complete {
+            envelope.origins.as_slice()
+        } else {
+            let cut = envelope
+                .origins
+                .iter()
+                .position(|origin| !positions.contains_key(origin))
+                .unwrap();
+            if cut == 0
+                || envelope.origins[cut..]
+                    .iter()
+                    .any(|origin| positions.contains_key(origin))
+            {
+                return Err(ContextError::Replay(ContextReplayRejection::InvalidMembership).into());
+            }
+            prefix = crate::checkpoint::before_call_response_prefix(
+                c,
+                consumer,
+                &envelope.origins,
+                &envelope.origins[..cut],
+            )?
+            .ok_or(ContextError::Replay(ContextReplayRejection::InvalidPrefix))?;
+            &prefix
+        };
+        let mut members = Vec::with_capacity(origins.len());
+        for origin in origins {
             let Some(indices) = positions.get(origin) else {
-                return Err(ContextError::OpaqueModel.into());
+                return Err(ContextError::Replay(ContextReplayRejection::InvalidMembership).into());
             };
             let [index] = indices.as_slice() else {
-                return Err(ContextError::OpaqueModel.into());
+                return Err(ContextError::Replay(ContextReplayRejection::InvalidMembership).into());
             };
             if members.last().is_some_and(|previous| previous >= index) {
-                return Err(ContextError::OpaqueModel.into());
+                return Err(ContextError::Replay(ContextReplayRejection::InvalidMembership).into());
             }
             members.push(*index);
+        }
+        if envelope.model == selected {
+            if envelope.route.zip(envelope.protocol) != transport || transport.is_none() {
+                return Err(
+                    ContextError::Replay(ContextReplayRejection::IncompatibleTransport).into(),
+                );
+            }
+            continue;
+        }
+        // Editing visible native fields does not authorize losing their opaque continuity.
+        if all.iter().any(|occurrence| !occurrence.overlays.is_empty())
+            || envelope.kind == super::replay::ResponseEnvelopeKind::ServerCompaction
+        {
+            return Err(ContextError::OpaqueModel.into());
         }
         let mut paired_outputs = HashSet::new();
         let mut membership = members.iter().copied().collect::<HashSet<_>>();
@@ -806,17 +1073,11 @@ fn portable_request(
                 crate::item::ToolKind::Function => "function_call_output",
                 crate::item::ToolKind::Custom => "custom_tool_call_output",
             };
-            let later_calls = calls
-                .get(&call.call_id.0)
-                .ok_or(ContextError::OpaqueModel)?;
-            let next = later_calls.partition_point(|position| *position <= index);
-            let end = later_calls.get(next).copied().unwrap_or(all.len());
             let results = outputs
-                .get(&call.call_id.0)
+                .get(&occurrence.origin)
                 .ok_or(ContextError::OpaqueModel)?;
             let first = results.partition_point(|position| *position <= index);
-            let last = results.partition_point(|position| *position < end);
-            let [output_index] = &results[first..last] else {
+            let [output_index] = &results[first..] else {
                 return Err(ContextError::OpaqueModel.into());
             };
             let output = &all[*output_index];
@@ -845,22 +1106,39 @@ fn portable_request(
             .iter()
             .map(|index| all[*index].clone())
             .collect::<Vec<_>>();
-        notes.insert(members[0], portability_note::render(&items)?);
+        match portability_note::render(&items) {
+            Ok(note) => {
+                notes.insert(members[0], note);
+            }
+            Err(StoreError::Context(ContextError::Portability(
+                crate::context::ContextPortabilityRejection::NoVisibleContent,
+            ))) if !complete
+                && items
+                    .iter()
+                    .all(|occurrence| occurrence.item.0["type"] == "reasoning") =>
+            {
+                // The authenticated cut excludes its pending invocation.
+                // Validated reasoning metadata alone contributes no visible
+                // input, while its canonical Store occurrences stay exact.
+            }
+            Err(error) => return Err(error),
+        }
     }
     let mut projected = Vec::with_capacity(all.len());
     for (index, occurrence) in all.iter().enumerate() {
         if let Some(note) = notes.remove(&index) {
-            projected.push((occurrence.request.clone(), None, note));
+            projected.push((occurrence.request.clone(), None, note, None));
         } else if !removed.contains(&index) {
             projected.push((
                 occurrence.request.clone(),
                 (!occurrence.note && occurrence.overlays.is_empty())
                     .then(|| occurrence.hash.clone()),
                 project_context_note(occurrence)?,
+                Some(occurrence.clone()),
             ));
         }
     }
-    Ok(projected)
+    Ok(CheckedContextProjection(projected))
 }
 
 /// A retained output closes its original invocation only when Store owns that
@@ -873,26 +1151,21 @@ fn validate_portable_output(
     call: &crate::model::CallId,
     completing: Option<&OperationId>,
 ) -> Result<()> {
-    let mut query = c.prepare(
-        "SELECT origin FROM claims WHERE request_id=?1 AND origin_request_id=?1 AND call_id=?2",
-    )?;
-    let owners = query
-        .query_map(params![occurrence.origin.request.0, call.0], |row| {
-            row.get::<_, String>(0)
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let [owner] = owners.as_slice() else {
+    let operation =
+        output
+            .output_operation
+            .as_ref()
+            .ok_or_else(|| StoreError::UnboundOutputPublication {
+                request: output.request.clone(),
+                position: output.position,
+            })?;
+    if operation.call != *call {
         return Err(ContextError::OpaqueModel.into());
-    };
-    let operation = OperationId {
-        origin: serde_json::from_str(owner)?,
-        request: occurrence.origin.request.clone(),
-        call: call.clone(),
-    };
+    }
     if original_call(c, &operation)? != occurrence.origin {
         return Err(ContextError::OpaqueModel.into());
     }
-    if Some(&operation) != completing
+    if Some(operation) != completing
         && terminal::exact_terminal(c, &operation)?.is_none_or(|(hash, _)| hash != output.hash)
     {
         return Err(ContextError::OpaqueModel.into());
@@ -900,17 +1173,26 @@ fn validate_portable_output(
     Ok(())
 }
 
-pub(super) fn insert_occurrence(
+pub(crate) fn insert_occurrence(
     tx: &Transaction<'_>,
     request: &RequestId,
     position: i64,
     occurrence: &Occurrence,
 ) -> Result<()> {
-    tx.execute("INSERT INTO request_items(request_id,position,item_hash,source_request,source_position,context_sources,context_note,context_overlays) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![request.0,position,occurrence.hash.0,occurrence.origin.request.0,occurrence.origin.position,serde_json::to_string(&occurrence.sources)?,occurrence.note,serde_json::to_string(&occurrence.overlays)?])?;
+    super::output_publication::validate_occurrence(occurrence)?;
+    if super::output_publication::is_tool_output(&occurrence.item)
+        && occurrence.output_operation.is_none()
+    {
+        return Err(StoreError::UnboundOutputPublication {
+            request: occurrence.request.clone(),
+            position: occurrence.position,
+        });
+    }
+    tx.execute("INSERT INTO request_items(request_id,position,item_hash,source_request,source_position,context_sources,context_note,context_overlays,output_operation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![request.0,position,occurrence.hash.0,occurrence.origin.request.0,occurrence.origin.position,serde_json::to_string(&occurrence.sources)?,occurrence.note,serde_json::to_string(&occurrence.overlays)?,occurrence.output_operation.as_ref().map(serde_json::to_string).transpose()?])?;
     Ok(())
 }
 
-fn original_call(c: &Connection, operation: &OperationId) -> Result<Origin> {
+pub(crate) fn original_call(c: &Connection, operation: &OperationId) -> Result<Origin> {
     super::validation::invocation_item(c, &operation.request, &operation.call)?
         .ok_or(ContextError::MissingCall)?;
     let(position,hash):(i64,String)=c.query_row("SELECT ri.position,ri.item_hash FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 AND json_extract(i.json,'$.call_id')=?2 AND json_extract(i.json,'$.type') IN ('function_call','custom_tool_call')",params![operation.request.0,operation.call.0],|r|Ok((r.get(0)?,r.get(1)?)))?;
@@ -929,7 +1211,280 @@ fn branch(c: &Connection, head: &RequestId) -> Result<String> {
     .ok_or_else(|| StoreError::MissingRequest(head.0.clone()))
 }
 
+fn context_request_state_tx(
+    tx: &Transaction<'_>,
+    head: &RequestId,
+    identity: &ConversationIdentity,
+    transport: Option<(
+        crate::transport::ResponsesRoute,
+        crate::transport::ResponsesProtocol,
+    )>,
+) -> Result<ContextRequestState> {
+    let current = state(tx, identity)?;
+    let canonical = {
+        let _read =
+            tracing::debug_span!(target: "harness::runtime_cost", "lineage_query_and_decode")
+                .entered();
+        history(tx, head, true)?
+    };
+    validate_canonical_history(tx, &canonical)?;
+    let projected = {
+        let _projection = tracing::debug_span!(target: "harness::runtime_cost", "portable_history_projection", input_items = canonical.len()).entered();
+        checked_projection(
+            tx,
+            head,
+            &canonical,
+            current.model.as_deref(),
+            None,
+            transport.or_else(|| current.route.zip(current.protocol)),
+        )?
+        .into_items()
+    };
+    drop(canonical);
+    let mut history = Vec::with_capacity(projected.len());
+    let mut occurrences = Vec::with_capacity(projected.len());
+    for (request, hash, item, occurrence) in projected {
+        let hash = match hash {
+            Some(hash) => hash,
+            None => Store::put_item_tx(tx, &item)?,
+        };
+        history.push((request, hash, item));
+        occurrences.push(occurrence);
+    }
+    Ok(ContextRequestState {
+        history,
+        occurrences,
+        model: current.model,
+        generation: current.generation,
+    })
+}
+
+pub(crate) fn preflight_target(
+    c: &Connection,
+    head: &RequestId,
+    target: &ContextProjectionTarget,
+) -> Result<()> {
+    if target.model.trim().is_empty() {
+        return Err(ContextError::InvalidModel.into());
+    }
+    checked_projection(
+        c,
+        head,
+        &history(c, head, true)?,
+        Some(&target.model),
+        None,
+        Some((target.route, target.protocol)),
+    )
+    .map(drop)
+}
+
+pub(super) fn current_projection_target(
+    c: &Connection,
+    identity: &ConversationIdentity,
+) -> Result<ContextProjectionTarget> {
+    let current = state(c, identity)?;
+    Ok(ContextProjectionTarget {
+        model: current.model.ok_or(ContextError::InvalidModel)?,
+        route: current.route.ok_or(ContextError::Replay(
+            ContextReplayRejection::IncompatibleTransport,
+        ))?,
+        protocol: current.protocol.ok_or(ContextError::Replay(
+            ContextReplayRejection::IncompatibleTransport,
+        ))?,
+    })
+}
+
+pub(super) fn preflight_current(
+    c: &Connection,
+    head: &RequestId,
+    identity: &ConversationIdentity,
+) -> Result<()> {
+    let current = state(c, identity)?;
+    checked_projection(
+        c,
+        head,
+        &history(c, head, true)?,
+        current.model.as_deref(),
+        None,
+        current.route.zip(current.protocol),
+    )
+    .map(drop)
+}
+
+pub(crate) fn save_target(
+    tx: &Transaction<'_>,
+    identity: &ConversationIdentity,
+    target: &ContextProjectionTarget,
+) -> Result<()> {
+    if target.model.trim().is_empty() {
+        return Err(ContextError::InvalidModel.into());
+    }
+    let mut current = state(tx, identity)?;
+    if current.model.is_none() {
+        current.model = Some(target.model.clone());
+    }
+    current.route = Some(target.route);
+    current.protocol = Some(target.protocol);
+    save_state(tx, identity, &current)
+}
+
+/// Publish an explicit recovery cut through the existing occurrence owner.
+/// Retained calls and outputs keep their exact issuing operations; this does no dispatch.
+pub(super) fn publish_recovery_projection(
+    tx: &Transaction<'_>,
+    identity: &crate::embedding::HostIdentity,
+    head: &RequestId,
+    mode: crate::embedding::RecoveryMode,
+    store_id: &str,
+) -> Result<(RequestId, RecoveryProjectionReceipt)> {
+    let conversation = ConversationIdentity::Embedded {
+        run: identity.run.clone(),
+        actor: identity.actor.clone(),
+        incarnation: identity.incarnation.clone(),
+    };
+    validate_identity(tx, store_id, &conversation)?;
+    let target = current_projection_target(tx, &conversation)?;
+    if mode == crate::embedding::RecoveryMode::Exact {
+        preflight_target(tx, head, &target)?;
+        return Ok((head.clone(), RecoveryProjectionReceipt::default()));
+    }
+    let canonical = history(tx, head, true)?;
+    let replacement = RequestId(uuid::Uuid::new_v4().to_string());
+    let mut retained = Vec::with_capacity(canonical.len());
+    let mut receipt = RecoveryProjectionReceipt::default();
+    let mut unknown = HashSet::new();
+    for occurrence in canonical {
+        let unbound_output = super::output_publication::is_tool_output(&occurrence.item)
+            && occurrence.output_operation.is_none();
+        let call = occurrence
+            .item
+            .tool_call()
+            .map_err(|_| ContextError::UnsupportedState)?;
+        let operation_owned = occurrence.output_operation.is_some()
+            || (call.is_some()
+                && (super::validation::operation_for_occurrence(tx, &occurrence)?.is_some()
+                    || super::replay::is_validated_completion(tx, &occurrence.origin)?));
+        let unbound_call = call.is_some() && !operation_owned;
+        if operation_owned
+            || (!opaque(&occurrence.item) && !unbound_output && !unbound_call)
+
+            || occurrence.item.is_configuration_update()
+            || (occurrence.item.0["type"] == "message"
+                && matches!(
+                    occurrence.item.0["role"].as_str(),
+                    Some("system" | "developer")
+                ))
+        {
+            retained.push(occurrence);
+            continue;
+        }
+        let note = match portability_note::render(std::slice::from_ref(&occurrence)) {
+            Ok(note) => Some(note),
+            Err(StoreError::Context(ContextError::Portability(
+                crate::context::ContextPortabilityRejection::NoVisibleContent,
+            ))) if occurrence.item.0["type"] == "reasoning" => None,
+            Err(error) => return Err(error),
+        };
+        receipt
+            .omitted
+            .push(reference(std::slice::from_ref(&occurrence)));
+        if super::replay::recorded_response_identity(tx, &occurrence.origin.request)?.is_none()
+            && unknown.insert(occurrence.origin.request.clone())
+        {
+            receipt
+                .unknown_response_completeness
+                .push(occurrence.origin.request.clone());
+        }
+        if let Some(mut item) = note {
+            let attribution = if unbound_call {
+                "[Visible-history recovery: invocation ownership and execution outcome are unproven.]"
+            } else if unbound_output {
+                "[Visible-history recovery: output has no bound operation or established terminal outcome.]"
+            } else {
+                "[Visible-history recovery: opaque provider continuity was omitted.]"
+            };
+            let text = item.0["content"]
+                .as_str()
+                .ok_or(ContextError::UnsupportedState)?;
+            item.0["content"] = json!(format!("{attribution}\n{text}"));
+            let hash = Store::put_item_tx(tx, &item)?;
+            let position = retained.len() as i64;
+            retained.push(Occurrence {
+                request: replacement.clone(),
+                position,
+                hash: hash.clone(),
+                item,
+                output_operation: None,
+                origin: Origin {
+                    request: replacement.clone(),
+                    position,
+                    hash,
+                },
+                sources: vec![reference(std::slice::from_ref(&occurrence))],
+                note: false,
+                overlays: Vec::new(),
+            });
+        }
+    }
+    checked_projection(
+        tx,
+        head,
+        &retained,
+        Some(&target.model),
+        None,
+        Some((target.route, target.protocol)),
+    )?;
+    insert_snapshot_request(tx, &replacement, Some(head), &identity.actor.0)?;
+    tx.execute("UPDATE requests SET embedded_run=?2,embedded_incarnation=?3,round_phase='pending' WHERE id=?1",
+        params![replacement.0, identity.run, identity.incarnation])?;
+    for (position, occurrence) in retained.iter().enumerate() {
+        insert_occurrence(tx, &replacement, position as i64, occurrence)?;
+    }
+    carry_native_claims(
+        tx,
+        &retained,
+        head,
+        &replacement,
+        store_id,
+        NativeClaimTransfer::Current,
+    )?;
+    compaction_generation(tx, store_id, head, &replacement, &identity.actor.0)?;
+    Ok((replacement, receipt))
+}
+
 impl Store {
+    /// Bind the next provider projection to the actual transport selection.
+    pub fn initialize_context_target(
+        &self,
+        identity: &ConversationIdentity,
+        target: &ContextProjectionTarget,
+    ) -> Result<()> {
+        if target.model.trim().is_empty() {
+            return Err(ContextError::InvalidModel.into());
+        }
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            validate_identity(tx, &self.store_id, identity)?;
+            save_target(tx, identity, target)
+        })
+    }
+
+    /// Preflight an exact retained context for its resolved destination.
+    pub fn preflight_context_target(
+        &self,
+        head: &RequestId,
+        identity: &ConversationIdentity,
+        target: &ContextProjectionTarget,
+    ) -> Result<()> {
+        let mut c = self.lock()?;
+        c.read_transaction(|tx| {
+            validate_identity(tx, &self.store_id, identity)?;
+            if branch(tx, head)? != identity.actor().0 {
+                return Err(StoreError::OperationOriginMismatch);
+            }
+            preflight_target(tx, head, target).map(drop)
+        })
+    }
     pub(crate) fn context_call_cut_tx(
         tx: &Transaction<'_>,
         operation: &OperationId,
@@ -955,14 +1510,6 @@ impl Store {
         Ok(receipt(tx, operation)?.map(|r| r.deferred_head))
     }
 
-    pub(crate) fn preserve_context_origins_tx(
-        tx: &Transaction<'_>,
-        source: &RequestId,
-        target: &RequestId,
-    ) -> Result<()> {
-        preserve_origins(tx, source, target, CopyRepresentation::Canonical)
-    }
-
     pub fn initialize_context_model(
         &self,
         identity: &ConversationIdentity,
@@ -971,20 +1518,21 @@ impl Store {
         if model.trim().is_empty() {
             return Err(ContextError::InvalidModel.into());
         }
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        validate_identity(&tx, &self.store_id, identity)?;
-        let mut current = state(&tx, identity)?;
-        if current.model.is_none() {
-            current.model = Some(model.into());
-            save_state(&tx, identity, &current)?;
-        }
-        tx.commit()?;
-        Ok(())
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            validate_identity(&tx, &self.store_id, identity)?;
+            let mut current = state(&tx, identity)?;
+            if current.model.is_none() {
+                current.model = Some(model.into());
+                save_state(&tx, identity, &current)?;
+            }
+
+            Ok(())
+        })
     }
 
     pub fn context_model(&self, identity: &ConversationIdentity) -> Result<Option<String>> {
-        let c = self.lock();
+        let c = self.lock()?;
         validate_identity(&c, &self.store_id, identity)?;
         Ok(state(&c, identity)?.model)
     }
@@ -994,38 +1542,132 @@ impl Store {
         head: &RequestId,
         identity: &ConversationIdentity,
     ) -> Result<ContextRequestState> {
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        validate_identity(&tx, &self.store_id, identity)?;
-        if branch(&tx, head)? != identity.actor().0 {
-            return Err(StoreError::OperationOriginMismatch);
-        }
-        let current = state(&tx, identity)?;
-        let history = portable_request(
-            &tx,
-            &history(&tx, head, true)?,
-            current.model.as_deref(),
-            None,
-        )?
-        .into_iter()
-        .map(|(request, hash, item)| {
-            let hash = match hash {
-                Some(hash) => hash,
-                None => Self::put_item_tx(&tx, &item)?,
+        self.context_request_state_with_transport(head, identity, None)
+    }
+
+    /// Use the current staged model and the actual per-request transport contract.
+    pub fn context_request_state_for_transport(
+        &self,
+        head: &RequestId,
+        identity: &ConversationIdentity,
+        transport: (
+            crate::transport::ResponsesRoute,
+            crate::transport::ResponsesProtocol,
+        ),
+    ) -> Result<ContextRequestState> {
+        self.context_request_state_with_transport(head, identity, Some(transport))
+    }
+
+    fn context_request_state_with_transport(
+        &self,
+        head: &RequestId,
+        identity: &ConversationIdentity,
+        transport: Option<(
+            crate::transport::ResponsesRoute,
+            crate::transport::ResponsesProtocol,
+        )>,
+    ) -> Result<ContextRequestState> {
+        let _projection =
+            tracing::debug_span!(target: "harness::runtime_cost", "context_request_state",
+            request_id = %head.0, actor = %identity.actor().0)
+            .entered();
+        let mut c = {
+            let _wait = tracing::debug_span!(target: "harness::runtime_cost", "sqlite_mutex_wait")
+                .entered();
+            self.lock()?
+        };
+        let transaction_span = tracing::debug_span!(target: "harness::runtime_cost", "projected_history_transaction", output_items = tracing::field::Empty, completed = false);
+        let _transaction = transaction_span.enter();
+        let result: Result<_> = c.write_transaction(|tx| {
+            validate_identity(&tx, &self.store_id, identity)?;
+            if branch(&tx, head)? != identity.actor().0 {
+                return Err(StoreError::OperationOriginMismatch);
+            }
+            let result = context_request_state_tx(&tx, head, identity, transport)?;
+
+            Ok(result)
+        });
+        let result = result?;
+        transaction_span.record("output_items", result.history.len());
+        transaction_span.record("completed", true);
+        Ok(result)
+    }
+
+    /// Include the current pending request without widening the actor's exact binding.
+    /// Frontier, retained context and model-response observations share one transaction.
+    pub fn embedded_conversation_history(
+        &self,
+        host: &crate::embedding::HostIdentity,
+    ) -> Result<EmbeddedConversationHistory> {
+        let mut connection = self.lock()?;
+        connection.write_transaction(|tx| {
+        let frontier = embedded_round::frontier(&tx, host)?;
+        let head = frontier
+            .pending_head
+            .as_ref()
+            .or(frontier.settled_head.as_ref())
+            .cloned();
+        let history = match &head {
+            Some(head) => {
+                let retained = history(tx, head, true)?;
+                retained.iter().map(|occurrence| {
+                    let item = project_context_note(occurrence)?;
+                    let hash = if occurrence.note || !occurrence.overlays.is_empty() {
+                        Store::put_item_tx(tx, &item)?
+                    } else {
+                        occurrence.hash.clone()
+                    };
+                    Ok((occurrence.request.clone(), hash, item))
+                }).collect::<Result<Vec<_>>>()?
+            },
+            None => Vec::new(),
+        };
+        let requests: HashSet<_> = history
+            .iter()
+            .map(|(request, _, _)| request.clone())
+            .chain(head.iter().cloned())
+            .collect();
+        let mut responses = HashMap::new();
+        for request in requests {
+            let response = match super::replay::recorded_response_identity(&tx, &request)? {
+                Some(response) => EmbeddedModelResponseState::Completed {
+                    response_id: response.response_id,
+                },
+                None => {
+                    let interrupted: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM events WHERE request_id=?1 AND kind='model_interrupted')",
+                        [&request.0], |row| row.get(0),
+                    )?;
+                    let synthetic: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM session_state WHERE session_id='harness:compaction:' || ?1)",
+                        [&request.0], |row| row.get(0),
+                    )?;
+                    if interrupted {
+                        EmbeddedModelResponseState::Interrupted
+                    } else if frontier.pending_head.as_ref() == Some(&request) && !synthetic {
+                        EmbeddedModelResponseState::InProgress
+                    } else {
+                        EmbeddedModelResponseState::Unknown
+                    }
+                }
             };
-            Ok((request, hash, item))
-        })
-        .collect::<Result<Vec<_>>>()?;
-        tx.commit()?;
-        Ok(ContextRequestState {
+            responses.insert(request, response);
+        }
+
+        Ok(EmbeddedConversationHistory {
+            head,
             history,
-            model: current.model,
-            generation: current.generation,
+            responses,
+        })
         })
     }
 
+    pub(crate) fn history_occurrences(&self, head: &RequestId) -> Result<Vec<Occurrence>> {
+        history(&*self.lock()?, head, true)
+    }
+
     pub fn context_history(&self, head: &RequestId) -> Result<Vec<(RequestId, ItemHash, Item)>> {
-        let c = self.lock();
+        let c = self.lock()?;
         Ok(history(&c, head, true)?
             .into_iter()
             .map(|i| (i.request, i.hash, i.item))
@@ -1033,17 +1675,17 @@ impl Store {
     }
 
     pub fn read_context(&self, head: &RequestId) -> Result<ContextDocument> {
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        let all = history(&tx, head, true)?;
-        let document = ContextDocument {
-            blocks: blocks(&tx, &all, all.len())?
-                .into_iter()
-                .map(|b| b.block)
-                .collect(),
-        };
-        tx.commit()?;
-        Ok(document)
+        let mut c = self.lock()?;
+        c.read_transaction(|tx| {
+            let all = history(tx, head, true)?;
+            let document = ContextDocument {
+                blocks: blocks(tx, &all, all.len())?
+                    .into_iter()
+                    .map(|b| b.block)
+                    .collect(),
+            };
+            Ok(document)
+        })
     }
 
     pub fn begin_context(
@@ -1051,52 +1693,52 @@ impl Store {
         operation: &OperationId,
         head: &RequestId,
     ) -> Result<ContextSnapshot> {
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        validate_identity(&tx, &self.store_id, &operation.origin)?;
-        if branch(&tx, head)? != operation.origin.actor().0 {
-            return Err(StoreError::OperationOriginMismatch);
-        }
-        let claim:Option<String>=tx.query_row("SELECT state FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?2",params![serde_json::to_string(&operation.origin)?,operation.request.0,operation.call.0],|r|r.get(0)).optional()?;
-        if claim.as_deref() != Some("pending") {
-            return Err(StoreError::CheckpointBoundaryNotPending(operation.clone()));
-        }
-        let origin = original_call(&tx, operation)?;
-        let all = history(&tx, head, true)?;
-        let matches = all
-            .iter()
-            .enumerate()
-            .filter(|(_, i)| i.origin == origin)
-            .map(|(n, _)| n)
-            .collect::<Vec<_>>();
-        let [cut] = matches.as_slice() else {
-            return Err(ContextError::MissingCall.into());
-        };
-        let stored = blocks(&tx, &all, *cut)?;
-        let document = ContextDocument {
-            blocks: stored.iter().map(|b| b.block.clone()).collect(),
-        };
-        let generation = state(&tx, &operation.origin)?.generation;
-        let snapshot = ContextSnapshot {
-            document,
-            generation,
-            head: head.clone(),
-            operation: operation.clone(),
-            prefix: all[..*cut].to_vec(),
-            blocks: stored,
-            store_id: self.store_id.clone(),
-            seal: SnapshotSeal {
-                operation: operation.clone(),
-                head: head.clone(),
+        let mut c = self.lock()?;
+        c.read_transaction(|tx| {
+            validate_identity(tx, &self.store_id, &operation.origin)?;
+            if branch(tx, head)? != operation.origin.actor().0 {
+                return Err(StoreError::OperationOriginMismatch);
+            }
+            let claim:Option<String>=tx.query_row("SELECT state FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?2",params![serde_json::to_string(&operation.origin)?,operation.request.0,operation.call.0],|r|r.get(0)).optional()?;
+            if claim.as_deref() != Some("pending") {
+                return Err(StoreError::CheckpointBoundaryNotPending(operation.clone()));
+            }
+            let origin = original_call(tx, operation)?;
+            let all = history(tx, head, true)?;
+            let matches = all
+                .iter()
+                .enumerate()
+                .filter(|(_, i)| i.origin == origin)
+                .map(|(n, _)| n)
+                .collect::<Vec<_>>();
+            let [cut] = matches.as_slice() else {
+                return Err(ContextError::MissingCall.into());
+            };
+            let stored = blocks(tx, &all, *cut)?;
+            let document = ContextDocument {
+                blocks: stored.iter().map(|b| b.block.clone()).collect(),
+            };
+            let generation = state(tx, &operation.origin)?.generation;
+            let snapshot = ContextSnapshot {
+                document,
                 generation,
-            },
-        };
-        tx.commit()?;
-        Ok(snapshot)
+                head: head.clone(),
+                operation: operation.clone(),
+                prefix: all[..*cut].to_vec(),
+                blocks: stored,
+                store_id: self.store_id.clone(),
+                seal: SnapshotSeal {
+                    operation: operation.clone(),
+                    head: head.clone(),
+                    generation,
+                },
+            };
+            Ok(snapshot)
+        })
     }
 
     pub fn context_receipt(&self, operation: &OperationId) -> Result<Option<ContextCommitReceipt>> {
-        receipt(&self.lock(), operation).map(|r| r.map(|r| r.receipt))
+        receipt(&*self.lock()?, operation).map(|r| r.map(|r| r.receipt))
     }
 
     pub fn commit_context(&self, commit: ContextCommit<'_>) -> Result<ContextCommitReceipt> {
@@ -1164,11 +1806,11 @@ impl Store {
         &self,
         operation: &OperationId,
     ) -> Result<Option<ContextCommitEvidence>> {
-        let c = self.lock();
+        let c = self.lock()?;
         let Some(record) = receipt(&c, operation)? else {
             return Ok(None);
         };
-        if !matches!(record.version, 2 | 3)
+        if !matches!(record.version, 2 | 3 | 4)
             || terminal::exact_terminal(&c, operation)?
                 != Some((record.output.clone(), TerminalOutcome::Success))
         {
@@ -1194,6 +1836,23 @@ impl Store {
         if output.0["call_id"].as_str() != Some(operation.call.0.as_str()) {
             return Err(ContextError::UnsupportedState.into());
         }
+        if record.version >= 4 {
+            let frozen = history(&c, &record.deferred_head, true)?;
+            if frozen.len() < record.prefix.len()
+                || !frozen
+                    .iter()
+                    .zip(&record.prefix)
+                    .all(|(occurrence, entry)| {
+                        entry.origin.as_ref() == Some(&occurrence.origin)
+                            && entry.hash == occurrence.hash
+                            && entry.sources == occurrence.sources
+                            && entry.note == occurrence.note
+                            && entry.overlays == occurrence.overlays
+                    })
+            {
+                return Err(ContextError::UnsupportedState.into());
+            }
+        }
         let prefix = record
             .prefix
             .iter()
@@ -1210,6 +1869,15 @@ impl Store {
             version: record.version,
             original_operation: record.original_operation.unwrap_or(record.operation),
             prefix,
+            prefix_origins: (record.version >= 4)
+                .then(|| {
+                    record
+                        .prefix
+                        .iter()
+                        .map(|entry| entry.origin.clone().ok_or(ContextError::UnsupportedState))
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                })
+                .transpose()?,
             output,
             invocation: load(&original_call(&c, operation)?.hash)?,
             model: record.receipt.model,
@@ -1239,434 +1907,458 @@ impl Store {
         let JobOutput::Completed(Ok(_)) = output else {
             return Err(ContextError::Ineligible.into());
         };
-        let mut c = self.lock();
-        let tx = c.transaction()?;
-        validate_identity(&tx, &self.store_id, &snapshot.operation.origin)?;
-        let call = super::validation::invocation_item(
-            &tx,
-            &snapshot.operation.request,
-            &snapshot.operation.call,
-        )?
-        .ok_or(ContextError::MissingCall)?;
-        let output_item = Item::tool_output(&snapshot.operation.call, call.input.kind(), output);
-        let output_hash = Self::put_item_tx(&tx, &output_item)?;
-        if let Some(evidence) = replay {
-            let original = original_call(&tx, &snapshot.operation)?;
-            let raw: String = tx.query_row(
-                "SELECT json FROM items WHERE hash=?1",
-                [&original.hash.0],
-                |r| r.get(0),
-            )?;
-            let local_invocation: Item = serde_json::from_str(&raw)?;
-            let mut expected_invocation = evidence.invocation.clone();
-            expected_invocation.0["call_id"] = json!(snapshot.operation.call.0);
-            if expected_invocation != local_invocation {
-                return Err(ContextError::Ineligible.into());
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            validate_identity(&tx, &self.store_id, &snapshot.operation.origin)?;
+            let call = super::validation::invocation_item(
+                &tx,
+                &snapshot.operation.request,
+                &snapshot.operation.call,
+            )?
+            .ok_or(ContextError::MissingCall)?;
+            let output_item = Item::tool_output(&snapshot.operation.call, call.input.kind(), output);
+            let output_hash = Self::put_item_tx(&tx, &output_item)?;
+            if let Some(evidence) = replay {
+                if evidence.version >= 4 && evidence.prefix_origins.as_ref()
+                    .is_none_or(|origins| origins.len() != evidence.prefix.len())
+                {
+                    return Err(ContextError::UnsupportedState.into());
+                }
+                let original = original_call(&tx, &snapshot.operation)?;
+                let raw: String = tx.query_row(
+                    "SELECT json FROM items WHERE hash=?1",
+                    [&original.hash.0],
+                    |r| r.get(0),
+                )?;
+                let local_invocation: Item = serde_json::from_str(&raw)?;
+                let mut expected_invocation = evidence.invocation.clone();
+                expected_invocation.0["call_id"] = json!(snapshot.operation.call.0);
+                if expected_invocation != local_invocation {
+                    return Err(ContextError::Ineligible.into());
+                }
+                let mut expected = evidence.output.clone();
+                expected.0["call_id"] = json!(snapshot.operation.call.0);
+                if expected != output_item {
+                    return Err(ContextError::Ineligible.into());
+                }
             }
-            let mut expected = evidence.output.clone();
-            expected.0["call_id"] = json!(snapshot.operation.call.0);
-            if expected != output_item {
-                return Err(ContextError::Ineligible.into());
-            }
-        }
-        let candidate = if let Some(evidence) = replay {
-            serde_json::to_string(&(
-                evidence
-                    .prefix
-                    .iter()
-                    .map(|(i, s, note, overlays)| (i, s, note, overlays))
-                    .collect::<Vec<_>>(),
-                &evidence.model,
-                evidence.next_effort,
-            ))?
-        } else {
-            serde_json::to_string(draft)?
-        };
-        if let Some(record) = receipt(&tx, &snapshot.operation)? {
-            let equivalent = record.candidate == candidate
-                || (record.version == 2
-                    && legacy_candidate_matches(&record.candidate, replay, draft, snapshot)?);
-            if record.output != output_hash || !equivalent {
-                return Err(StoreError::ConflictingReplayOutcome {
-                    operation: snapshot.operation.clone(),
-                });
-            }
-            tx.commit()?;
-            return Ok(record.receipt);
-        }
-        if cancelled() {
-            return Err(ContextError::Cancelled.into());
-        }
-        let mut current = state(&tx, &snapshot.operation.origin)?;
-        if current.generation != snapshot.generation {
-            return Err(ContextError::Conflict.into());
-        }
-        if let ConversationIdentity::Embedded {
-            run,
-            actor,
-            incarnation,
-        } = &snapshot.operation.origin
-        {
-            let identity = crate::embedding::HostIdentity {
-                run: run.clone(),
-                actor: actor.clone(),
-                incarnation: incarnation.clone(),
+            let candidate = if let Some(evidence) = replay {
+                serde_json::to_string(&(
+                    evidence
+                        .prefix
+                        .iter()
+                        .map(|(i, s, note, overlays)| (i, s, note, overlays))
+                        .collect::<Vec<_>>(),
+                    &evidence.model,
+                    evidence.next_effort,
+                    &evidence.prefix_origins,
+                ))?
+            } else {
+                serde_json::to_string(draft)?
             };
-            let frontier = embedded_round::frontier(&tx, &identity)?;
-            if frontier
-                .pending_head
-                .as_ref()
-                .or(frontier.settled_head.as_ref())
-                != Some(&snapshot.head)
+            if let Some(record) = receipt(&tx, &snapshot.operation)? {
+                let equivalent = record.candidate == candidate
+                    || (record.version == 2
+                        && legacy_candidate_matches(&record.candidate, replay, draft, snapshot)?);
+                if record.output != output_hash || !equivalent {
+                    return Err(StoreError::ConflictingReplayOutcome {
+                        operation: snapshot.operation.clone(),
+                    });
+                }
+
+                return Ok(record.receipt);
+            }
+            if cancelled() {
+                return Err(ContextError::Cancelled.into());
+            }
+            let mut current = state(&tx, &snapshot.operation.origin)?;
+            if current.generation != snapshot.generation {
+                return Err(ContextError::Conflict.into());
+            }
+            if let ConversationIdentity::Embedded {
+                run,
+                actor,
+                incarnation,
+            } = &snapshot.operation.origin
+            {
+                let identity = crate::embedding::HostIdentity {
+                    run: run.clone(),
+                    actor: actor.clone(),
+                    incarnation: incarnation.clone(),
+                };
+                let frontier = embedded_round::frontier(&tx, &identity)?;
+                if frontier
+                    .pending_head
+                    .as_ref()
+                    .or(frontier.settled_head.as_ref())
+                    != Some(&snapshot.head)
+                {
+                    return Err(ContextError::Conflict.into());
+                }
+            }
+            let all = history(&tx, &snapshot.head, true)?;
+            if all.len() < snapshot.prefix.len() || all[..snapshot.prefix.len()] != snapshot.prefix {
+                return Err(ContextError::Conflict.into());
+            }
+            let origin = original_call(&tx, &snapshot.operation)?;
+            if all
+                .get(snapshot.prefix.len())
+                .is_none_or(|i| i.origin != origin)
             {
                 return Err(ContextError::Conflict.into());
             }
-        }
-        let all = history(&tx, &snapshot.head, true)?;
-        if all.len() < snapshot.prefix.len() || all[..snapshot.prefix.len()] != snapshot.prefix {
-            return Err(ContextError::Conflict.into());
-        }
-        let origin = original_call(&tx, &snapshot.operation)?;
-        if all
-            .get(snapshot.prefix.len())
-            .is_none_or(|i| i.origin != origin)
-        {
-            return Err(ContextError::Conflict.into());
-        }
-        // Saved documents can retain content dropped by an earlier rewrite.
-        // Resolve those references only from immutable ancestry before the
-        // original issuing call; post-call envelopes never become editable.
-        let current_refs = snapshot
-            .blocks
-            .iter()
-            .filter_map(|b| match &b.block {
-                ContextBlock::Text {
-                    reference: Some(r), ..
-                }
-                | ContextBlock::Native { reference: r, .. } => Some(r),
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
-        let current_sources = snapshot
-            .prefix
-            .iter()
-            .flat_map(|i| i.sources.iter())
-            .collect::<HashSet<_>>();
-        let historical_needed = if let Some(evidence) = replay {
-            // Equal current bytes cannot prove a native segment's owner.
-            // Include bounded ancestry before checking whole-group uniqueness.
-            evidence
+            // Saved documents can retain content dropped by an earlier rewrite.
+            // Resolve those references only from immutable ancestry before the
+            // original issuing call; post-call envelopes never become editable.
+            let current_refs = snapshot
+                .blocks
+                .iter()
+                .filter_map(|b| match &b.block {
+                    ContextBlock::Text {
+                        reference: Some(r), ..
+                    }
+                    | ContextBlock::Native { reference: r, .. } => Some(r),
+                    _ => None,
+                })
+                .collect::<HashSet<_>>();
+            let current_sources = snapshot
                 .prefix
                 .iter()
-                .any(|(item, _, _, _)| message(item).is_none())
-        } else {
-            draft.document.blocks.iter().any(|b| match b {
-                ContextBlock::Native { reference, .. }
-                | ContextBlock::Text {
-                    reference: Some(reference),
-                    ..
-                } => !current_refs.contains(reference),
-                ContextBlock::Text {
-                    reference: None,
-                    sources,
-                    ..
-                } => sources
+                .flat_map(|i| i.sources.iter())
+                .collect::<HashSet<_>>();
+            let historical_needed = if let Some(evidence) = replay {
+                // Equal current bytes cannot prove a native segment's owner.
+                // Include bounded ancestry before checking whole-group uniqueness.
+                evidence
+                    .prefix
                     .iter()
-                    .any(|r| !current_refs.contains(r) && !current_sources.contains(r)),
-            })
-        };
-        let mut historic_blocks = Vec::new();
-        if historical_needed {
-            let mut q = tx.prepare("WITH RECURSIVE lineage(id,parent_id,depth) AS (SELECT id,parent_id,0 FROM requests WHERE id=?1 UNION ALL SELECT r.id,r.parent_id,lineage.depth+1 FROM requests r JOIN lineage ON r.id=lineage.parent_id) SELECT id FROM lineage ORDER BY depth DESC")?;
-            let ancestors = q
-                .query_map([&snapshot.operation.request.0], |r| r.get::<_, String>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            drop(q);
-            for ancestor in ancestors {
-                let historic = history(&tx, &RequestId(ancestor), true)?;
-                let cut = historic
-                    .iter()
-                    .position(|i| i.origin == origin)
-                    .unwrap_or(historic.len());
-                historic_blocks.extend(blocks(&tx, &historic, cut)?);
-            }
-        }
-        let mut available = snapshot.blocks.clone();
-        for block in historic_blocks {
-            let identity = match &block.block {
-                ContextBlock::Text {
-                    reference: Some(r), ..
-                }
-                | ContextBlock::Native { reference: r, .. } => r,
-                _ => continue,
-            };
-            if !available.iter().any(|b| match &b.block {
-                ContextBlock::Text {
-                    reference: Some(r), ..
-                }
-                | ContextBlock::Native { reference: r, .. } => r == identity,
-                _ => false,
-            }) {
-                available.push(block)
-            }
-        }
-        let mut rewritten = Vec::<Occurrence>::new();
-        let mut seen = HashSet::new();
-        let mut last_native = None;
-        let mut last_historical_native = None;
-        if let Some(evidence) = replay {
-            let mut native = HashMap::<ItemHash, Vec<&StoredBlock>>::new();
-            let mut text = HashMap::<ItemHash, Vec<&Occurrence>>::new();
-            for stored in &available {
-                match &stored.block {
-                    ContextBlock::Native { .. } => {
-                        native
-                            .entry(stored.items[0].hash.clone())
-                            .or_default()
-                            .push(stored);
-                    }
-                    ContextBlock::Text { .. } => {
-                        text.entry(stored.items[0].hash.clone())
-                            .or_default()
-                            .push(&stored.items[0]);
-                    }
-                }
-            }
-            let mut used_origins = HashSet::new();
-            let mut cursor = 0;
-            while cursor < evidence.prefix.len() {
-                let (item, sources, note, overlays) = &evidence.prefix[cursor];
-                let hash = Self::put_item_tx(&tx, item)?;
-                let matching = native
-                    .get(&hash)
-                    .into_iter()
-                    .flatten()
-                    .filter(|stored| {
-                        let end = cursor + stored.items.len();
-                        let current = matches!(&stored.block, ContextBlock::Native {reference,..} if current_refs.contains(reference));
-                        (!stored.mandatory || current)
-                            && end <= evidence.prefix.len()
-                            && stored.items.iter().zip(&evidence.prefix[cursor..end]).all(
-                                |(local, (item, _, _, _))| {
-                                    local.item == *item && !used_origins.contains(&local.origin)
-                                },
-                            )
-                    })
-                    .copied()
-                    .collect::<Vec<_>>();
-                match matching.as_slice() {
-                    [stored] => {
-                        // A native segment has one local owner. Resolve every
-                        // occurrence together so equal result bytes cannot splice
-                        // another invocation's companion into the restored group.
-                        for occurrence in &stored.items {
-                            used_origins.insert(occurrence.origin.clone());
-                        }
-                        let mut candidate = stored.block.clone();
-                        let mut restored = stored.items.clone();
-                        for (local, (_, _, _, overlays)) in
-                            restored.iter_mut().zip(&evidence.prefix[cursor..])
-                        {
-                            local.overlays = overlays.clone();
-                            project_bodies(local)?;
-                        }
-                        if let ContextBlock::Native { texts, .. } = &mut candidate {
-                            for field in texts {
-                                let local = restored
-                                    .iter()
-                                    .find(|item| {
-                                        reference(std::slice::from_ref(item)) == field.reference
-                                    })
-                                    .ok_or(ContextError::InvalidReference)?;
-                                field.text = text_body(&project_bodies(local)?, &field.selector)
-                                    .ok_or(ContextError::InvalidReference)?
-                                    .into();
-                            }
-                        }
-                        rewritten.extend(edited_native(stored, &candidate)?);
-                        cursor += stored.items.len();
-                        continue;
-                    }
-                    [] => {}
-                    _ => return Err(ContextError::ProtectedGroup.into()),
-                }
-                if message(item).is_none() {
-                    return Err(ContextError::ProtectedGroup.into());
-                }
-                if let Some(existing) = text
-                    .get(&hash)
-                    .into_iter()
-                    .flatten()
-                    .find(|i| !used_origins.contains(&i.origin) && i.item == *item)
-                {
-                    used_origins.insert(existing.origin.clone());
-                    let mut occurrence = (*existing).clone();
-                    occurrence.sources = sources.clone();
-                    occurrence.note = *note;
-                    occurrence.overlays = overlays.clone();
-                    project_bodies(&occurrence)?;
-                    rewritten.push(occurrence);
-                } else {
-                    rewritten.push(Occurrence {
-                        request: RequestId(String::new()),
-                        position: 0,
-                        hash: hash.clone(),
-                        item: item.clone(),
-                        sources: sources.clone(),
-                        note: *note,
-                        overlays: overlays.clone(),
-                        origin: Origin {
-                            request: RequestId(String::new()),
-                            position: 0,
-                            hash,
-                        },
-                    });
-                }
-                cursor += 1;
-            }
-            // Replay must preserve every protected local envelope as an intact
-            // group; foreign evidence cannot replace local pending operations.
-            for stored in &snapshot.blocks {
-                if (stored.mandatory || (stored.opaque && evidence.version >= 3))
-                    && !rewritten.windows(stored.items.len()).any(|w| {
-                        w.iter()
-                            .map(|i| (&i.item, &i.origin))
-                            .eq(stored.items.iter().map(|i| (&i.item, &i.origin)))
-                    })
-                {
-                    return Err(ContextError::ProtectedGroup.into());
-                }
-            }
-        } else {
-            for block in &draft.document.blocks {
-                match block {
-                    ContextBlock::Native { reference, .. } => {
-                        let (index,stored)=available.iter().enumerate().find(|(_,b)|matches!(&b.block,ContextBlock::Native{reference:r,..} if r==reference)).ok_or(ContextError::InvalidReference)?;
-                        let edited = edited_native(stored, block)?;
-                        if index >= snapshot.blocks.len() && stored.mandatory {
-                            // A past pending call cannot be resurrected without
-                            // its now-completed protocol companion, nor can a
-                            // historical owner instruction replace today's spine.
-                            return Err(ContextError::ProtectedGroup.into());
-                        }
-                        if !seen.insert(reference.clone()) {
-                            return Err(ContextError::InvalidReference.into());
-                        }
-                        let ordering = if index < snapshot.blocks.len() {
-                            &mut last_native
-                        } else {
-                            &mut last_historical_native
-                        };
-                        if ordering.is_some_and(|previous| index < previous) {
-                            return Err(ContextError::NativeOrder.into());
-                        }
-                        *ordering = Some(index);
-                        rewritten.extend(edited);
-                    }
-                    ContextBlock::Text {
+                    .any(|(item, _, _, _)| message(item).is_none())
+            } else {
+                draft.document.blocks.iter().any(|b| match b {
+                    ContextBlock::Native { reference, .. }
+                    | ContextBlock::Text {
                         reference: Some(reference),
-                        role,
-                        text,
-                        sources,
-                    } => {
-                        let stored=available.iter().find(|b|matches!(&b.block,ContextBlock::Text{reference:Some(r),..} if r==reference)).ok_or(ContextError::InvalidReference)?;
-                        if !seen.insert(reference.clone()) {
-                            return Err(ContextError::InvalidReference.into());
-                        }
-                        let ContextBlock::Text {
-                            role: old_role,
-                            sources: old_sources,
-                            ..
-                        } = &stored.block
-                        else {
-                            unreachable!()
-                        };
-                        if role != old_role || sources != old_sources {
-                            return Err(ContextError::InvalidReference.into());
-                        }
-                        let mut occurrence = stored.items[0].clone();
-                        if message(&project_bodies(&occurrence)?)
-                            .is_none_or(|(_, old)| old != *text)
-                        {
-                            set_overlay(
-                                &mut occurrence,
-                                &ContextTextSelector::MessageText { part: 0 },
-                                text,
-                            )?;
-                        }
-                        rewritten.push(occurrence);
-                    }
+                        ..
+                    } => !current_refs.contains(reference),
                     ContextBlock::Text {
                         reference: None,
-                        role,
-                        text,
                         sources,
-                    } => {
-                        for source in sources {
-                            if !available.iter().any(|b| match &b.block {
-                                ContextBlock::Text {
-                                    reference: Some(r), ..
-                                }
-                                | ContextBlock::Native { reference: r, .. } => r == source,
-                                _ => false,
-                            }) && !available
-                                .iter()
-                                .any(|b| b.items.iter().any(|i| i.sources.contains(source)))
-                            {
-                                return Err(ContextError::InvalidReference.into());
-                            }
+                        ..
+                    } => sources
+                        .iter()
+                        .any(|r| !current_refs.contains(r) && !current_sources.contains(r)),
+                })
+            };
+            let mut historic_blocks = Vec::new();
+            if historical_needed {
+                let mut q = tx.prepare("WITH RECURSIVE lineage(id,parent_id,depth) AS (SELECT id,parent_id,0 FROM requests WHERE id=?1 UNION ALL SELECT r.id,r.parent_id,lineage.depth+1 FROM requests r JOIN lineage ON r.id=lineage.parent_id) SELECT id FROM lineage ORDER BY depth DESC")?;
+                let ancestors = q
+                    .query_map([&snapshot.operation.request.0], |r| r.get::<_, String>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                drop(q);
+                for ancestor in ancestors {
+                    let historic = history(&tx, &RequestId(ancestor), true)?;
+                    let cut = historic
+                        .iter()
+                        .position(|i| i.origin == origin)
+                        .unwrap_or(historic.len());
+                    historic_blocks.extend(blocks(&tx, &historic, cut)?);
+                }
+            }
+            let mut available = snapshot.blocks.clone();
+            for block in historic_blocks {
+                let identity = match &block.block {
+                    ContextBlock::Text {
+                        reference: Some(r), ..
+                    }
+                    | ContextBlock::Native { reference: r, .. } => r,
+                    _ => continue,
+                };
+                if !available.iter().any(|b| match &b.block {
+                    ContextBlock::Text {
+                        reference: Some(r), ..
+                    }
+                    | ContextBlock::Native { reference: r, .. } => r == identity,
+                    _ => false,
+                }) {
+                    available.push(block)
+                }
+            }
+            let mut rewritten = Vec::<Occurrence>::new();
+            let mut seen = HashSet::new();
+            let mut last_native = None;
+            let mut last_historical_native = None;
+            if let Some(evidence) = replay {
+                let mut native = HashMap::<ItemHash, Vec<&StoredBlock>>::new();
+                let mut text = HashMap::<ItemHash, Vec<&Occurrence>>::new();
+                for stored in &available {
+                    match &stored.block {
+                        ContextBlock::Native { .. } => {
+                            native
+                                .entry(stored.items[0].hash.clone())
+                                .or_default()
+                                .push(stored);
                         }
-                        let item =
-                            Item(json!({"type":"message","role":role.text(),"content":text}));
-                        let hash = Self::put_item_tx(&tx, &item)?;
+                        ContextBlock::Text { .. } => {
+                            text.entry(stored.items[0].hash.clone())
+                                .or_default()
+                                .push(&stored.items[0]);
+                        }
+                    }
+                }
+                let mut used_origins = HashSet::new();
+                let mut cursor = 0;
+                while cursor < evidence.prefix.len() {
+                    let (item, sources, note, overlays) = &evidence.prefix[cursor];
+                    let hash = Self::put_item_tx(&tx, item)?;
+                    let matching = native
+                        .get(&hash)
+                        .into_iter()
+                        .flatten()
+                        .filter(|stored| {
+                            let end = cursor + stored.items.len();
+                            let current = matches!(&stored.block, ContextBlock::Native {reference,..} if current_refs.contains(reference));
+                            (!stored.mandatory || current)
+                                && end <= evidence.prefix.len()
+                                && evidence.prefix_origins.as_ref().is_none_or(|origins| {
+                                    stored.items.iter().enumerate().all(|(offset, occurrence)|
+                                        origins.get(cursor + offset) == Some(&occurrence.origin))
+                                })
+                                && stored.items.iter().zip(&evidence.prefix[cursor..end]).all(
+                                    |(local, (item, _, _, _))| {
+                                        local.item == *item && !used_origins.contains(&local.origin)
+                                    },
+                                )
+                        })
+                        .copied()
+                        .collect::<Vec<_>>();
+                    match matching.as_slice() {
+                        [stored] => {
+                            // A native segment has one local owner. Resolve every
+                            // occurrence together so equal result bytes cannot splice
+                            // another invocation's companion into the restored group.
+                            for occurrence in &stored.items {
+                                used_origins.insert(occurrence.origin.clone());
+                            }
+                            let mut candidate = stored.block.clone();
+                            let mut restored = stored.items.clone();
+                            for (local, (_, _, _, overlays)) in
+                                restored.iter_mut().zip(&evidence.prefix[cursor..])
+                            {
+                                local.overlays = overlays.clone();
+                                project_bodies(local)?;
+                            }
+                            if let ContextBlock::Native { texts, .. } = &mut candidate {
+                                for field in texts {
+                                    let local = restored
+                                        .iter()
+                                        .find(|item| {
+                                            reference(std::slice::from_ref(item)) == field.reference
+                                        })
+                                        .ok_or(ContextError::InvalidReference)?;
+                                    field.text = text_body(&project_bodies(local)?, &field.selector)
+                                        .ok_or(ContextError::InvalidReference)?
+                                        .into();
+                                }
+                            }
+                            rewritten.extend(edited_native(stored, &candidate)?);
+                            cursor += stored.items.len();
+                            continue;
+                        }
+                        [] => {}
+                        _ => return Err(ContextError::ProtectedGroup.into()),
+                    }
+                    if message(item).is_none() {
+                        return Err(ContextError::ProtectedGroup.into());
+                    }
+                    if let Some(existing) = text
+                        .get(&hash)
+                        .into_iter()
+                        .flatten()
+                        .find(|i| !used_origins.contains(&i.origin) && i.item == *item
+                            && evidence.prefix_origins.as_ref().is_none_or(|origins| origins.get(cursor) == Some(&i.origin)))
+                    {
+                        used_origins.insert(existing.origin.clone());
+                        let mut occurrence = (*existing).clone();
+                        occurrence.sources = sources.clone();
+                        occurrence.note = *note;
+                        occurrence.overlays = overlays.clone();
+                        project_bodies(&occurrence)?;
+                        rewritten.push(occurrence);
+                    } else {
                         rewritten.push(Occurrence {
                             request: RequestId(String::new()),
                             position: 0,
+                            hash: hash.clone(),
+                            item: item.clone(),
+                            output_operation: None,
+                            sources: sources.clone(),
+                            note: *note,
+                            overlays: overlays.clone(),
                             origin: Origin {
                                 request: RequestId(String::new()),
                                 position: 0,
-                                hash: hash.clone(),
+                                hash,
                             },
-                            hash,
-                            item,
-                            sources: sources.clone(),
-                            note: true,
-                            overlays: Vec::new(),
                         });
+                    }
+                    cursor += 1;
+                }
+                // Replay must preserve every protected local envelope as an intact
+                // group; foreign evidence cannot replace local pending operations.
+                for stored in &snapshot.blocks {
+                    if (stored.mandatory || (stored.opaque && evidence.version >= 3))
+                        && !rewritten.windows(stored.items.len()).any(|w| {
+                            w.iter()
+                                .map(|i| (&i.item, &i.origin))
+                                .eq(stored.items.iter().map(|i| (&i.item, &i.origin)))
+                        })
+                    {
+                        return Err(ContextError::ProtectedGroup.into());
+                    }
+                }
+            } else {
+                for block in &draft.document.blocks {
+                    match block {
+                        ContextBlock::Native { reference, .. } => {
+                            let (index,stored)=available.iter().enumerate().find(|(_,b)|matches!(&b.block,ContextBlock::Native{reference:r,..} if r==reference)).ok_or(ContextError::InvalidReference)?;
+                            let edited = edited_native(stored, block)?;
+                            if index >= snapshot.blocks.len() && stored.mandatory {
+                                // A past pending call cannot be resurrected without
+                                // its now-completed protocol companion, nor can a
+                                // historical owner instruction replace today's spine.
+                                return Err(ContextError::ProtectedGroup.into());
+                            }
+                            if !seen.insert(reference.clone()) {
+                                return Err(ContextError::InvalidReference.into());
+                            }
+                            let ordering = if index < snapshot.blocks.len() {
+                                &mut last_native
+                            } else {
+                                &mut last_historical_native
+                            };
+                            if ordering.is_some_and(|previous| index < previous) {
+                                return Err(ContextError::NativeOrder.into());
+                            }
+                            *ordering = Some(index);
+                            rewritten.extend(edited);
+                        }
+                        ContextBlock::Text {
+                            reference: Some(reference),
+                            role,
+                            text,
+                            sources,
+                        } => {
+                            let stored=available.iter().find(|b|matches!(&b.block,ContextBlock::Text{reference:Some(r),..} if r==reference)).ok_or(ContextError::InvalidReference)?;
+                            if !seen.insert(reference.clone()) {
+                                return Err(ContextError::InvalidReference.into());
+                            }
+                            let ContextBlock::Text {
+                                role: old_role,
+                                sources: old_sources,
+                                ..
+                            } = &stored.block
+                            else {
+                                unreachable!()
+                            };
+                            if role != old_role || sources != old_sources {
+                                return Err(ContextError::InvalidReference.into());
+                            }
+                            let mut occurrence = stored.items[0].clone();
+                            if message(&project_bodies(&occurrence)?)
+                                .is_none_or(|(_, old)| old != *text)
+                            {
+                                set_overlay(
+                                    &mut occurrence,
+                                    &ContextTextSelector::MessageText { part: 0 },
+                                    text,
+                                )?;
+                            }
+                            rewritten.push(occurrence);
+                        }
+                        ContextBlock::Text {
+                            reference: None,
+                            role,
+                            text,
+                            sources,
+                        } => {
+                            for source in sources {
+                                if !available.iter().any(|b| match &b.block {
+                                    ContextBlock::Text {
+                                        reference: Some(r), ..
+                                    }
+                                    | ContextBlock::Native { reference: r, .. } => r == source,
+                                    _ => false,
+                                }) && !available
+                                    .iter()
+                                    .any(|b| b.items.iter().any(|i| i.sources.contains(source)))
+                                {
+                                    return Err(ContextError::InvalidReference.into());
+                                }
+                            }
+                            let item =
+                                Item(json!({"type":"message","role":role.text(),"content":text}));
+                            let hash = Self::put_item_tx(&tx, &item)?;
+                            rewritten.push(Occurrence {
+                                request: RequestId(String::new()),
+                                position: 0,
+                                origin: Origin {
+                                    request: RequestId(String::new()),
+                                    position: 0,
+                                    hash: hash.clone(),
+                                },
+                                hash,
+                                item,
+                                output_operation: None,
+                                sources: sources.clone(),
+                                note: true,
+                                overlays: Vec::new(),
+                            });
+                        }
+                    }
+                }
+                for stored in &snapshot.blocks {
+                    if (stored.mandatory || stored.opaque)
+                        && !matches!(&stored.block, ContextBlock::Native {reference, ..} if seen.contains(reference))
+                    {
+                        return Err(ContextError::ProtectedGroup.into());
                     }
                 }
             }
-            for stored in &snapshot.blocks {
-                if (stored.mandatory || stored.opaque)
-                    && !matches!(&stored.block, ContextBlock::Native {reference, ..} if seen.contains(reference))
-                {
-                    return Err(ContextError::ProtectedGroup.into());
+            if let Some(model) = &draft.next_model {
+                if model.trim().is_empty() {
+                    return Err(ContextError::InvalidModel.into());
                 }
             }
-        }
-        if let Some(model) = &draft.next_model {
-            if model.trim().is_empty() {
-                return Err(ContextError::InvalidModel.into());
-            }
-        }
-        let selected_model = draft.next_model.as_deref().or(current.model.as_deref());
-        let mut prospective = rewritten.clone();
-        prospective.extend_from_slice(&all[snapshot.prefix.len()..]);
-        prospective.push(Occurrence {
-            request: snapshot.head.clone(),
-            position: i64::MAX,
-            hash: output_hash.clone(),
-            item: output_item,
-            origin: Origin {
-                request: snapshot.head.clone(),
-                position: i64::MAX,
-                hash: output_hash.clone(),
-            },
-            sources: Vec::new(),
-            note: false,
-            overlays: Vec::new(),
-        });
-        portable_request(&tx, &prospective, selected_model, Some(&snapshot.operation))?;
+            let selected_model = draft.next_model.as_deref().or(current.model.as_deref());
+            let mut prospective = rewritten.clone();
+            prospective.extend_from_slice(&all[snapshot.prefix.len()..]);
+            // Publish through the output owner before checking the prospective
+            // view. A refusal rolls this terminal and its exact occurrence back
+            // with the rest of the context transaction.
+            settle_success(&tx, &snapshot.operation, &output_hash)?;
+            super::output_publication::append_tx(
+                &tx,
+                &snapshot.operation,
+                &snapshot.operation.request,
+                &snapshot.head,
+            )?;
+            let published = history(&tx, &snapshot.head, true)?
+                .into_iter()
+                .filter(|occurrence| occurrence.output_operation.as_ref() == Some(&snapshot.operation))
+                .collect::<Vec<_>>();
+            let [published] = published.as_slice() else {
+                return Err(ContextError::UnsupportedState.into());
+            };
+            prospective.push(published.clone());
+        checked_projection(
+            &tx,
+            &snapshot.head,
+            &prospective,
+            selected_model,
+            Some(&snapshot.operation),
+            current.route.zip(current.protocol),
+        )?;
         if cancelled() {
             return Err(ContextError::Cancelled.into());
         }
@@ -1691,16 +2383,21 @@ impl Store {
         };
         let prefix_evidence = rewritten
             .iter()
-            .map(|i| PrefixEvidence {
+            .enumerate()
+            .map(|(position, i)| PrefixEvidence {
                 hash: i.hash.clone(),
                 sources: i.sources.clone(),
                 note: i.note,
                 overlays: i.overlays.clone(),
+                origin: Some(if i.origin.request.0.is_empty() {
+                    Origin { request: head.clone(), position: position as i64, hash: i.hash.clone() }
+                } else { i.origin.clone() }),
             })
             .collect();
         if text_changed {
             tx.execute("INSERT INTO requests(id,parent_id,branch,created_at,embedded_run,embedded_incarnation,round_phase) SELECT ?1,id,branch,?2,embedded_run,embedded_incarnation,round_phase FROM requests WHERE id=?3",params![head.0,utc_millis(),snapshot.head.0])?;
             rewritten.extend_from_slice(&all[snapshot.prefix.len()..]);
+            rewritten.push(published.clone());
             for (position, occurrence) in rewritten.iter_mut().enumerate() {
                 if occurrence.origin.request.0.is_empty() {
                     occurrence.origin.request = head.clone();
@@ -1714,7 +2411,14 @@ impl Store {
             )?;
             // Saved native groups can come from ancestry hidden by a prior cut.
             // Carry authority from every retained invocation's immutable origin.
-            let carried = carry_native_claims(&tx, &rewritten, &head, &self.store_id)?;
+            let carried = carry_native_claims(
+                &tx,
+                &rewritten,
+                &snapshot.head,
+                &head,
+                &self.store_id,
+                NativeClaimTransfer::RestoreReferences,
+            )?;
             for operation in pending.iter().chain(std::iter::once(&snapshot.operation)) {
                 if !carried.contains(operation) {
                     return Err(ContextError::ProtectedGroup.into());
@@ -1731,15 +2435,11 @@ impl Store {
             current.model = Some(model.clone());
         }
         save_state(&tx, &snapshot.operation.origin, &current)?;
-        settle_success(&tx, &snapshot.operation, &output_hash)?;
-        let position: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(position)+1,0) FROM request_items WHERE request_id=?1",
-            [&head.0],
-            |r| r.get(0),
-        )?;
-        tx.execute(
-            "INSERT INTO request_items(request_id,position,item_hash) VALUES(?1,?2,?3)",
-            params![head.0, position, output_hash.0],
+        super::output_publication::append_tx(
+            &tx,
+            &snapshot.operation,
+            &snapshot.operation.request,
+            &head,
         )?;
         if let Some(effort) = draft.next_effort {
             // The successful output separates this update from every earlier
@@ -1761,7 +2461,7 @@ impl Store {
         let deferred_head = freeze_committed_context(&tx, &receipt.head, &self.store_id)?;
         let record = ReceiptRecord {
             deferred_head,
-            version: 3,
+            version: 4,
             next_effort: draft.next_effort,
             prefix: prefix_evidence,
             candidate,
@@ -1774,8 +2474,9 @@ impl Store {
         if cancelled() {
             return Err(ContextError::Cancelled.into());
         }
-        tx.commit()?;
+
         Ok(receipt)
+        })
     }
 }
 
@@ -1801,6 +2502,8 @@ struct PrefixEvidence {
     note: bool,
     #[serde(default)]
     overlays: Vec<ContextTextOverlay>,
+    #[serde(default)]
+    origin: Option<Origin>,
 }
 
 fn legacy_candidate_matches(
@@ -1868,8 +2571,15 @@ fn receipt(c: &Connection, operation: &OperationId) -> Result<Option<ReceiptReco
         [] => Ok(None),
         [raw] => {
             let record: ReceiptRecord = serde_json::from_str(raw)?;
-            if !matches!(record.version, 2 | 3)
+            if !matches!(record.version, 2 | 3 | 4)
                 || record.operation != *operation
+                || (record.version >= 4
+                    && record.prefix.iter().any(|entry| {
+                        entry
+                            .origin
+                            .as_ref()
+                            .is_none_or(|origin| origin.hash != entry.hash)
+                    }))
                 || (record.version == 2
                     && record.prefix.iter().any(|entry| !entry.overlays.is_empty()))
             {
@@ -1881,27 +2591,58 @@ fn receipt(c: &Connection, operation: &OperationId) -> Result<Option<ReceiptReco
     }
 }
 
-/// Deferred children inherit a bounded immutable cut, never the continuing
-/// request to which future arrivals can still be appended.
+/// Frozen snapshots retain selected source ancestry without reading later
+/// arrivals or inheriting claims beyond the copied cut.
+pub(crate) fn insert_snapshot_request(
+    tx: &Transaction<'_>,
+    snapshot: &RequestId,
+    source: Option<&RequestId>,
+    branch: &str,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO requests(id,parent_id,branch,created_at) VALUES(?1,?2,?3,?4)",
+        params![
+            snapshot.0,
+            source.map(|head| head.0.as_str()),
+            branch,
+            utc_millis()
+        ],
+    )?;
+    // The selected source supplies proof ancestry; history and pending claims
+    // stop at the copied snapshot, independently of future source arrivals.
+    tx.execute(
+        "INSERT INTO session_state(session_id,state,updated_at) VALUES(?1,'true',?2)",
+        params![format!("harness:compaction:{}", snapshot.0), utc_millis()],
+    )?;
+    Ok(())
+}
+
+/// Deferred children inherit a bounded immutable cut of committed context.
 fn freeze_committed_context(
     tx: &Transaction<'_>,
     head: &RequestId,
     store_id: &str,
 ) -> Result<RequestId> {
     let snapshot = RequestId(uuid::Uuid::new_v4().to_string());
-    tx.execute(
-        "INSERT INTO requests(id,parent_id,branch,created_at) VALUES(?1,NULL,?2,?3)",
-        params![
-            snapshot.0,
-            format!("harness:context-release:{}", snapshot.0),
-            utc_millis()
-        ],
+    insert_snapshot_request(
+        tx,
+        &snapshot,
+        Some(head),
+        &format!("harness:context-release:{}", snapshot.0),
     )?;
     let all = history(tx, head, true)?;
+    validate_canonical_history(tx, &all)?;
     for (position, occurrence) in all.iter().enumerate() {
         insert_occurrence(tx, &snapshot, position as i64, occurrence)?;
     }
-    carry_native_claims(tx, &all, &snapshot, store_id)?;
+    carry_native_claims(
+        tx,
+        &all,
+        head,
+        &snapshot,
+        store_id,
+        NativeClaimTransfer::Current,
+    )?;
     Ok(snapshot)
 }
 
@@ -1920,13 +2661,21 @@ fn settle_success(tx: &Transaction<'_>, operation: &OperationId, hash: &ItemHash
     Ok(())
 }
 
-/// A copied occurrence retains its original claimant, independent of today's
-/// conversation binding and of other invocations sharing a provider call ID.
-fn carry_native_claims(
+/// Issuance and current claim state are distinct. Copies resolve the exact
+/// operation on the consuming lineage before using a retained historical source.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum NativeClaimTransfer {
+    Current,
+    RestoreReferences,
+}
+
+pub(super) fn carry_native_claims(
     tx: &Transaction<'_>,
     occurrences: &[Occurrence],
+    consumer: &RequestId,
     head: &RequestId,
     store_id: &str,
+    transfer: NativeClaimTransfer,
 ) -> Result<HashSet<OperationId>> {
     let mut carried = HashSet::new();
     for occurrence in occurrences {
@@ -1987,95 +2736,97 @@ fn carry_native_claims(
             return Err(StoreError::OperationOriginMismatch);
         }
         if carried.insert(operation.clone()) {
-            carry_claim(tx, &operation, head)?;
+            let publications = occurrences
+                .iter()
+                .filter(|output| output.output_operation.as_ref() == Some(&operation))
+                .collect::<Vec<_>>();
+            let source = match publications.as_slice() {
+                [publication] => ClaimSource::Restored {
+                    consumer,
+                    historical: &publication.origin.request,
+                },
+                [] => match transfer {
+                    NativeClaimTransfer::Current => ClaimSource::Consumer(consumer),
+                    NativeClaimTransfer::RestoreReferences => ClaimSource::Restored {
+                        consumer,
+                        historical: &occurrence.request,
+                    },
+                },
+                _ => return Err(ContextError::ProtectedGroup.into()),
+            };
+            carry_claim(tx, &operation, source, head, occurrences)?;
         }
     }
     Ok(carried)
 }
 
-fn carry_claim(tx: &Transaction<'_>, operation: &OperationId, head: &RequestId) -> Result<()> {
-    let origin = serde_json::to_string(&operation.origin)?;
-    let matching:i64=tx.query_row("SELECT COUNT(*) FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.request_id=?1 AND json_extract(i.json,'$.call_id')=?2 AND json_extract(i.json,'$.type') IN ('function_call','custom_tool_call')",params![head.0,operation.call.0],|r|r.get(0))?;
-    if matching != 1 {
-        return Err(ContextError::ProtectedGroup.into());
-    }
-    let n=tx.execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash,terminal_json) SELECT origin,origin_request_id,call_id,?4,state,output_hash,terminal_json FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 ORDER BY CASE WHEN request_id=origin_request_id THEN 0 ELSE 1 END LIMIT 1",params![origin,operation.request.0,operation.call.0,head.0])?;
-    if n != 1 {
-        return Err(ContextError::ProtectedGroup.into());
-    }
-    Ok(())
+enum ClaimSource<'a> {
+    Consumer(&'a RequestId),
+    Restored {
+        consumer: &'a RequestId,
+        historical: &'a RequestId,
+    },
 }
 
-/// Replacements preserve occurrence identity whenever an exact input item is reused.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum CopyRepresentation {
-    Canonical,
-    Projected,
-}
-
-pub(super) fn preserve_origins(
+fn carry_operation_claim(
     tx: &Transaction<'_>,
-    source: &RequestId,
+    operation: &OperationId,
+    source: ClaimSource<'_>,
     target: &RequestId,
-    representation: CopyRepresentation,
 ) -> Result<()> {
-    let old = history(tx, source, true)?;
-    let target_items = history(tx, target, false)?
-        .into_iter()
-        .filter(|i| i.request == *target)
-        .collect::<Vec<_>>();
-    let mut candidates = HashMap::<String, Vec<&Occurrence>>::new();
-    for item in &old {
-        candidates
-            .entry(item.hash.0.clone())
-            .or_default()
-            .push(item);
+    let (consumer, historical) = match source {
+        ClaimSource::Consumer(consumer) => (consumer, None),
+        ClaimSource::Restored {
+            consumer,
+            historical,
+        } => (consumer, Some(historical)),
+    };
+    // Claim state belongs to the consuming lineage. A retained invocation's
+    // storage request identifies issuance, not the current claimant.
+    if copy_nearest_claim(tx, operation, consumer, target)? {
+        return Ok(());
     }
-    let mut projections = HashMap::<String, Vec<&Occurrence>>::new();
-    for item in &old {
-        if representation == CopyRepresentation::Projected && !item.overlays.is_empty() {
-            let projected = project_context_note(item)?;
-            let hash = Store::put_item_tx(tx, &projected)?;
-            projections.entry(hash.0).or_default().push(item);
+    if let Some(historical) = historical {
+        // Saved native references can restore groups outside today's lineage.
+        // This fallback is available only after exact source validation.
+        if copy_nearest_claim(tx, operation, historical, target)? {
+            return Ok(());
+        }
+        let n = tx.execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash,terminal_json) SELECT origin,origin_request_id,call_id,?4,state,output_hash,terminal_json FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=origin_request_id", params![serde_json::to_string(&operation.origin)?,operation.request.0,operation.call.0,target.0])?;
+        if n == 1 {
+            return Ok(());
         }
     }
-    let mut used_origins = HashSet::new();
-    for item in target_items {
-        let canonical = candidates.get(&item.hash.0).and_then(|items| {
-            items
-                .iter()
-                .copied()
-                .find(|candidate| !used_origins.contains(&candidate.origin))
-        });
-        let projected = projections
-            .get(&item.hash.0)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let source = if projected.is_empty() {
-            canonical
-        } else {
-            // A projected body cannot acquire another equal-byte occurrence's
-            // authority. Ambiguous compaction copies are refused atomically.
-            let [projected] = projected else {
-                return Err(ContextError::InvalidReference.into());
-            };
-            if candidates.get(&item.hash.0).is_some_and(|canonical| {
-                canonical
-                    .iter()
-                    .any(|canonical| canonical.origin != projected.origin)
-            }) {
-                return Err(ContextError::InvalidReference.into());
-            }
-            Some(*projected)
-        };
-        if let Some(source) = source {
-            if !used_origins.insert(source.origin.clone()) {
-                return Err(ContextError::InvalidReference.into());
-            }
-            tx.execute("UPDATE request_items SET source_request=?3,source_position=?4,context_sources=?5,context_note=?6,context_overlays=?7,item_hash=?8 WHERE request_id=?1 AND position=?2",params![target.0,item.position,source.origin.request.0,source.origin.position,serde_json::to_string(&source.sources)?,source.note,serde_json::to_string(&source.overlays)?,source.hash.0])?;
-        }
+    Err(ContextError::ProtectedGroup.into())
+}
+
+fn copy_nearest_claim(
+    tx: &Transaction<'_>,
+    operation: &OperationId,
+    consumer: &RequestId,
+    target: &RequestId,
+) -> Result<bool> {
+    let n = tx.execute("WITH RECURSIVE lineage(id,parent_id,branch,depth) AS (SELECT id,parent_id,branch,0 FROM requests WHERE id=?4 UNION ALL SELECT p.id,p.parent_id,p.branch,l.depth+1 FROM requests p JOIN lineage l ON p.id=l.parent_id WHERE p.branch=l.branch AND NOT EXISTS(SELECT 1 FROM session_state s WHERE s.session_id='harness:compaction:' || l.id)) INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash,terminal_json) SELECT c.origin,c.origin_request_id, c.call_id,?5,c.state,c.output_hash,c.terminal_json FROM claims c JOIN lineage l ON c.request_id=l.id WHERE c.origin=?1 AND c.origin_request_id=?2 AND c.call_id=?3 ORDER BY l.depth LIMIT 1", params![serde_json::to_string(&operation.origin)?,operation.request.0,operation.call.0,consumer.0,target.0])?;
+    Ok(n == 1)
+}
+
+fn carry_claim(
+    tx: &Transaction<'_>,
+    operation: &OperationId,
+    source: ClaimSource<'_>,
+    head: &RequestId,
+    occurrences: &[Occurrence],
+) -> Result<()> {
+    let issuing_call = original_call(tx, operation)?;
+    if occurrences
+        .iter()
+        .filter(|occurrence| occurrence.origin == issuing_call)
+        .count()
+        != 1
+    {
+        return Err(ContextError::ProtectedGroup.into());
     }
-    Ok(())
+    carry_operation_claim(tx, operation, source, head)
 }
 
 pub(super) fn compaction_generation(
@@ -2085,7 +2836,6 @@ pub(super) fn compaction_generation(
     target: &RequestId,
     branch: &str,
 ) -> Result<()> {
-    preserve_origins(tx, source, target, CopyRepresentation::Projected)?;
     let before = history(tx, source, true)?
         .into_iter()
         .map(|i| i.hash)
@@ -2113,5 +2863,7 @@ mod opaque_model_tests;
 mod overlay_tests;
 #[cfg(test)]
 mod portability_tests;
+#[cfg(test)]
+mod projection_tests;
 #[cfg(test)]
 mod tests;

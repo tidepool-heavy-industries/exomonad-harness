@@ -196,6 +196,8 @@ pub struct Callback {
     /// Exact original operation; provider call IDs may recur in later requests.
     pub operation: crate::model::OperationId,
     pub name: String,
+    /// Validated strict JSON, including explicit null carriers for omitted
+    /// optional fields. Callback hosts decode their own input contract.
     pub arguments: Value,
     pub call_id: String,
     admission: Arc<AtomicU8>,
@@ -421,6 +423,17 @@ struct BudgetTransport<C> {
 }
 #[async_trait]
 impl<C: ResponsesTransport> ResponsesTransport for BudgetTransport<C> {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            crate::transport::ResponsesRoute,
+            crate::transport::ResponsesProtocol,
+        ),
+        TransportError,
+    > {
+        self.inner.response_contract()
+    }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(TransportError::Stream("invocation closed".into()));
@@ -797,6 +810,7 @@ impl Drop for Invocation {
 mod tests {
     use super::*;
     use crate::model::Effort;
+    use crate::transport::{ResponsesProtocol, ResponsesRoute};
     use std::collections::VecDeque;
     #[derive(Clone)]
     struct TestAuth;
@@ -808,6 +822,10 @@ mod tests {
     struct Script(Mutex<VecDeque<ResponsesTurn>>);
     #[async_trait]
     impl ResponsesTransport for Script {
+        fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+            Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             self.0
                 .lock()
@@ -1225,6 +1243,12 @@ mod tests {
         }
         #[async_trait]
         impl ResponsesTransport for Inspect {
+            fn response_contract(
+                &self,
+            ) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+                Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+            }
+
             async fn create(
                 &self,
                 request: ResponsesRequest,
@@ -1332,6 +1356,12 @@ mod tests {
         }
         #[async_trait]
         impl ResponsesTransport for Pending {
+            fn response_contract(
+                &self,
+            ) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+                Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+            }
+
             async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
                 let _guard = Guard(self.dropped.clone());
                 self.entered.notify_one();
@@ -1403,6 +1433,39 @@ mod tests {
         assert!(matches!(receipt.outcome,Outcome::Typed(value) if value==result));
         assert_eq!(receipt.counts.tools, 0);
     }
+
+    #[tokio::test]
+    async fn callback_null_carriers_remain_strict_json_for_host_decoding() {
+        let mut config = config();
+        config.tools[0]["parameters"] = json!({"type":"object","properties":{
+            "optional":{"type":"string"},
+            "required":{"type":["integer","null"],"minimum":0}
+        },"required":["required"],"additionalProperties":false});
+        let arguments = json!({"optional":null,"required":null});
+        let callback = Item(
+            json!({"type":"function_call","call_id":"null-carrier","name":"echo","arguments":arguments.to_string()}),
+        );
+        let mut invocation = Invocation::start::<TestAuth, _>(
+            Script(Mutex::new(vec![turn(vec![callback]), final_turn()].into())),
+            Arc::new(Store::memory().unwrap()),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            config,
+            "cell1".into(),
+            CellBudget::new(Limits::default()),
+            vec![],
+            InvocationOptions::default(),
+        )
+        .unwrap();
+        let Step::Callback(callback) = invocation.next().await else {
+            panic!("callback expected");
+        };
+        assert_eq!(callback.arguments, arguments);
+        callback.complete(Ok(json!("decoded by host"))).unwrap();
+        assert!(matches!(
+            finish(&mut invocation).await.outcome,
+            Outcome::Text(_)
+        ));
+    }
     #[tokio::test]
     async fn bounded_callbacks_do_not_stall_provider_stream_polling() {
         struct Streaming {
@@ -1411,6 +1474,12 @@ mod tests {
         }
         #[async_trait]
         impl ResponsesTransport for Streaming {
+            fn response_contract(
+                &self,
+            ) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+                Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+            }
+
             async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
                 unreachable!()
             }
@@ -1421,10 +1490,22 @@ mod tests {
                 sink: mpsc::Sender<StreamEvent>,
             ) -> Result<ResponsesTurn, TransportError> {
                 let turn = self.turns.lock().unwrap().pop_front().unwrap();
-                for item in &turn.items {
-                    sink.send(StreamEvent::ItemDone(item.clone()))
-                        .await
-                        .unwrap();
+                for (index, item) in turn.items.iter().enumerate() {
+                    sink.send(
+                        crate::transport::sse::ResponseAssembly::default()
+                            .accept(
+                                &serde_json::json!({
+                                    "type": "response.output_item.done",
+                                    "output_index": index as u64,
+                                    "item": (item.clone()).0,
+                                })
+                                .to_string(),
+                            )
+                            .expect("authored indexed done event is valid")
+                            .expect("done event publishes a completed item"),
+                    )
+                    .await
+                    .unwrap();
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 self.completed.store(true, Ordering::Release);
@@ -1496,6 +1577,12 @@ mod tests {
         struct Conflict;
         #[async_trait]
         impl ResponsesTransport for Conflict {
+            fn response_contract(
+                &self,
+            ) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+                Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+            }
+
             async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
                 unreachable!()
             }
@@ -1505,7 +1592,21 @@ mod tests {
                 _: ResponsesRequest,
                 sink: mpsc::Sender<StreamEvent>,
             ) -> Result<ResponsesTurn, TransportError> {
-                sink.send(StreamEvent::ItemDone(call("a"))).await.unwrap();
+                sink.send(
+                    crate::transport::sse::ResponseAssembly::default()
+                        .accept(
+                            &serde_json::json!({
+                                "type": "response.output_item.done",
+                                "output_index": 0,
+                                "item": (call("a")).0,
+                            })
+                            .to_string(),
+                        )
+                        .expect("authored indexed done event is valid")
+                        .expect("done event publishes a completed item"),
+                )
+                .await
+                .unwrap();
                 let mut changed = call("a");
                 changed.0["arguments"] = json!("{\"unexpected\":true}");
                 Ok(turn(vec![changed]))

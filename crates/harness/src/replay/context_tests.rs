@@ -155,7 +155,7 @@ async fn record_with_effort(rewrite: bool, note: bool, next_effort: Option<Effor
     ));
     let store = Arc::new(Store::open(&path).unwrap());
     let operations = Arc::new(Mutex::new(vec![]));
-    let transport = ReplayTransport::new([
+    let transport = ReplayTransport::scripted_codex_standard([
         ResponsesTurn {
             response_id: "edit-call".into(),
             items: vec![Item(
@@ -393,7 +393,7 @@ async fn sealed_context_replay_restores_note_attribution_and_reuses_its_sources(
 async fn sealed_context_replay_refuses_legacy_edit_receipt() {
     let recording = record(true).await;
     let source = Store::open(&recording.path).unwrap();
-    source.lock().execute("UPDATE events SET payload=json_remove(payload,'$.version') WHERE kind='context_commit'", []).unwrap();
+    source.lock().unwrap().execute("UPDATE events SET payload=json_remove(payload,'$.version') WHERE kind='context_commit'", []).unwrap();
     assert!(replay(&recording).await.is_err());
 }
 
@@ -403,6 +403,7 @@ async fn sealed_context_replay_cannot_silently_skip_missing_edit_evidence() {
     let source = Store::open(&recording.path).unwrap();
     source
         .lock()
+        .unwrap()
         .execute("DELETE FROM events WHERE kind='context_commit'", [])
         .unwrap();
     let error = replay(&recording)

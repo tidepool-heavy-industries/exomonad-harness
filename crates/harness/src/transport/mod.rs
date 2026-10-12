@@ -146,6 +146,14 @@ pub struct ResponsesTurn {
 
 #[derive(Debug, Error)]
 pub enum TransportError {
+    #[error("provider request has no retained transport contract")]
+    UnprovenResponseContract,
+    #[error("provider completed item has no output index")]
+    MissingOutputIndex,
+    #[error("provider output index {index} has conflicting items")]
+    ConflictingOutputIndex { index: u64 },
+    #[error("completed provider response has an output index gap at {index}")]
+    IncompleteOutputIndices { index: u64 },
     #[error("authentication expired; operator action required")]
     Authentication,
     #[error("terminal HTTP status {status}{suffix}", suffix = diagnostic_suffix(.diagnostic.as_ref()))]
@@ -224,7 +232,8 @@ pub enum AuthCredentials {
 }
 
 /// The credential authority determines the fixed provider endpoint.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResponsesRoute {
     #[default]
     Codex,
@@ -250,7 +259,8 @@ pub trait Auth: Send + Sync {
 }
 
 /// Selected wire contract, independent of model-name spelling and Engine jobs.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResponsesProtocol {
     #[default]
     Standard,
@@ -273,6 +283,10 @@ impl<A: Auth + Clone + 'static> ResponsesClient<A> {
     pub fn with_protocol(mut self, protocol: ResponsesProtocol) -> Self {
         self.protocol = protocol;
         self
+    }
+
+    pub fn protocol(&self) -> ResponsesProtocol {
+        self.protocol
     }
 
     pub async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {

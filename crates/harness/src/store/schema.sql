@@ -18,11 +18,28 @@ CREATE TABLE IF NOT EXISTS request_items (
  source_request TEXT, source_position INTEGER, context_sources TEXT,
  context_note INTEGER NOT NULL DEFAULT 0,
  context_overlays TEXT,
+ output_operation TEXT,
  PRIMARY KEY(request_id, position)
 );
 CREATE TABLE IF NOT EXISTS events (
  id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT REFERENCES requests(id),
  kind TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT(CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+);
+CREATE TABLE IF NOT EXISTS provider_requests (
+ request_id TEXT PRIMARY KEY REFERENCES requests(id),
+ issued_json TEXT NOT NULL, route TEXT NOT NULL, protocol TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('streaming','completed','interrupted','failed','rejected')),
+ response_id TEXT, completion_event INTEGER REFERENCES events(id),
+ CHECK(length(route)>0 AND length(protocol)>0)
+);
+CREATE TABLE IF NOT EXISTS provider_items (
+ request_id TEXT NOT NULL REFERENCES provider_requests(request_id),
+ output_index INTEGER NOT NULL CHECK(output_index>=0),
+ occurrence_position INTEGER NOT NULL,
+ item_hash TEXT NOT NULL REFERENCES items(hash),
+ PRIMARY KEY(request_id,output_index),
+ UNIQUE(request_id,occurrence_position),
+ FOREIGN KEY(request_id,occurrence_position) REFERENCES request_items(request_id,position)
 );
 CREATE TABLE IF NOT EXISTS envelopes (
  id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL,
@@ -76,14 +93,38 @@ CREATE TABLE IF NOT EXISTS embedded_inputs (
  item_hash TEXT NOT NULL REFERENCES items(hash),
  PRIMARY KEY(run_id, agent_path, incarnation, operation_id)
 );
+CREATE TABLE IF NOT EXISTS embedded_context_seeds (
+ run_id TEXT NOT NULL, agent_path TEXT NOT NULL REFERENCES embedded_bindings(agent_path),
+ incarnation TEXT NOT NULL, operation_id TEXT NOT NULL,
+ request_id TEXT NOT NULL UNIQUE REFERENCES requests(id),
+ item_hash TEXT NOT NULL REFERENCES items(hash),
+ PRIMARY KEY(run_id, agent_path, incarnation, operation_id)
+);
 
 CREATE TABLE IF NOT EXISTS embedded_commands (
  run_id TEXT NOT NULL, operation_id TEXT NOT NULL,
  target TEXT NOT NULL, action TEXT NOT NULL, payload TEXT NOT NULL,
  expected_round TEXT, command TEXT NOT NULL,
- state TEXT NOT NULL CHECK(state IN ('queued','dispatching','input_admitted','control_requested','refused','unconfirmed')),
+ state TEXT NOT NULL CHECK(state IN ('queued','dispatching','input_admitted','control_requested','recovery_authorized','refused','unconfirmed')),
  envelope_id INTEGER REFERENCES envelopes(id), outcome TEXT,
  created_at INTEGER NOT NULL,
  PRIMARY KEY(run_id, operation_id)
 );
 CREATE INDEX IF NOT EXISTS embedded_commands_queued ON embedded_commands(run_id,state,created_at);
+CREATE TABLE IF NOT EXISTS embedded_inference (
+ run_id TEXT NOT NULL, agent_path TEXT NOT NULL REFERENCES agents(path),
+ generation INTEGER NOT NULL CHECK(generation>=0), state TEXT NOT NULL,
+ PRIMARY KEY(run_id,agent_path)
+);
+CREATE TABLE IF NOT EXISTS actor_forms (
+ identity TEXT PRIMARY KEY, opening_sequence INTEGER NOT NULL UNIQUE REFERENCES events(id), presentation TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS actor_form_operations (
+ identity TEXT NOT NULL REFERENCES actor_forms(identity), operation_id TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(identity,operation_id)
+);
+CREATE TABLE IF NOT EXISTS actor_media (
+ hash TEXT PRIMARY KEY, mime TEXT NOT NULL, bytes BLOB NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS events_chat_messages ON events(request_id,id) WHERE kind='chat_message';
+CREATE INDEX IF NOT EXISTS events_actor_form_history ON events(json_extract(payload,'$.origin.run'),json_extract(payload,'$.origin.nativeActor'),json_extract(payload,'$.origin.incarnation'),id) WHERE kind='actor_form_open';

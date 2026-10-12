@@ -62,6 +62,20 @@ impl Replay {
 }
 #[async_trait]
 impl ResponsesTransport for Replay {
+    fn response_contract(
+        &self,
+    ) -> std::result::Result<
+        (
+            crate::transport::ResponsesRoute,
+            crate::transport::ResponsesProtocol,
+        ),
+        TransportError,
+    > {
+        Ok((
+            crate::transport::ResponsesRoute::Codex,
+            crate::transport::ResponsesProtocol::Standard,
+        ))
+    }
     async fn create(
         &self,
         request: ResponsesRequest,
@@ -175,6 +189,11 @@ fn captured_cut_preserves_multicall_order_and_exact_earlier_dependencies() {
                     contract: &json!({}),
                     checkout: &json!({}),
                     task: None,
+                    target: &crate::context::ContextProjectionTarget {
+                        model: "test".into(),
+                        route: crate::transport::ResponsesRoute::Codex,
+                        protocol: crate::transport::ResponsesProtocol::Standard,
+                    },
                 },
             )
             .unwrap();
@@ -243,6 +262,7 @@ fn captured_cut_refuses_stale_incarnation_and_nonpending_original_transactionall
     ));
     let count: i64 = store
         .lock()
+        .unwrap()
         .query_row("SELECT COUNT(*) FROM checkpoints", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 0);
@@ -278,7 +298,7 @@ fn captured_metadata_migrates_schema_five_as_deferred_and_refuses_unknown_cuts()
             Arc::new(()),
         )
         .unwrap();
-    let mut conn = store.lock();
+    let mut conn = store.lock().unwrap();
     conn.execute("UPDATE schema_version SET version=5", [])
         .unwrap();
     conn.execute(
@@ -306,7 +326,7 @@ fn captured_metadata_migrates_schema_five_as_deferred_and_refuses_unknown_cuts()
             .iter()
             .all(|claim| claim.operation == operation && claim.state == ClaimState::Pending)
     );
-    let mut conn = store.lock();
+    let mut conn = store.lock().unwrap();
     for invalid in [
         json!({"version":1,"cut":"unknown","operation":null,"host":{}}),
         json!({"version":2,"cut":"deferred","operation":null,"host":{}}),
@@ -323,6 +343,20 @@ struct StalledTransport {
 }
 #[async_trait]
 impl ResponsesTransport for StalledTransport {
+    fn response_contract(
+        &self,
+    ) -> std::result::Result<
+        (
+            crate::transport::ResponsesRoute,
+            crate::transport::ResponsesProtocol,
+        ),
+        TransportError,
+    > {
+        Ok((
+            crate::transport::ResponsesRoute::Codex,
+            crate::transport::ResponsesProtocol::Standard,
+        ))
+    }
     async fn create(
         &self,
         _request: ResponsesRequest,
@@ -345,6 +379,20 @@ struct ParentTransport {
 }
 #[async_trait]
 impl ResponsesTransport for ParentTransport {
+    fn response_contract(
+        &self,
+    ) -> std::result::Result<
+        (
+            crate::transport::ResponsesRoute,
+            crate::transport::ResponsesProtocol,
+        ),
+        TransportError,
+    > {
+        Ok((
+            crate::transport::ResponsesRoute::Codex,
+            crate::transport::ResponsesProtocol::Standard,
+        ))
+    }
     async fn create(
         &self,
         request: ResponsesRequest,
@@ -355,9 +403,15 @@ impl ResponsesTransport for ParentTransport {
             sent.len() == 1
         };
         let items = if first {
-            vec![item(
-                json!({"type":"function_call","call_id":"parent-call","name":"capture","arguments":"{}"}),
-            )]
+            let call = item(
+                json!({"type":"function_call","call_id":"parent-call","name":"capture","arguments":"{}","async":true}),
+            );
+            assert_eq!(
+                call.tool_call().unwrap().unwrap().execution,
+                crate::item::ToolExecution::Asynchronous,
+                "the next model request must begin while captured parent work remains pending"
+            );
+            vec![call]
         } else {
             self.waiting
                 .lock()
@@ -485,7 +539,7 @@ async fn captured_cut_two_child_engines_finish_while_original_provider_call_is_p
     );
     let (_root_cancel, root_cancel_rx) = watch::channel(false);
     let (_root_mail, root_mail_rx) = mpsc::unbounded_channel();
-    let root_run = tokio::spawn(async move {
+    let mut root_run = tokio::spawn(async move {
         root_engine
             .run(
                 None,
@@ -497,14 +551,24 @@ async fn captured_cut_two_child_engines_finish_while_original_provider_call_is_p
             )
             .await
     });
-    let cuts = tokio::time::timeout(std::time::Duration::from_secs(2), captured_rx)
+    let cuts = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::select! {
+            biased;
+            result = &mut root_run => panic!("parent Engine ended before capture: {result:?}"),
+            captured = captured_rx => captured.expect("provider sends capture"),
+        }
+    })
+    .await
+    .expect("parent capture completes");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::select! {
+            biased;
+            result = &mut root_run => panic!("parent Engine ended before next model request: {result:?}"),
+            waiting = waiting_rx => waiting.expect("transport enters next model request"),
+        }
+    })
         .await
-        .unwrap()
-        .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(2), waiting_rx)
-        .await
-        .unwrap()
-        .unwrap();
+        .expect("parent model continues while captured call is pending");
     let operation = cuts.before_call().operation().unwrap().clone();
     let retained = cuts.before_call().clone();
     let deferred = cuts.deferred().clone();
@@ -520,6 +584,11 @@ async fn captured_cut_two_child_engines_finish_while_original_provider_call_is_p
                     contract: &json!({}),
                     checkout: &json!({}),
                     task: None,
+                    target: &crate::context::ContextProjectionTarget {
+                        model: "test".into(),
+                        route: crate::transport::ResponsesRoute::Codex,
+                        protocol: crate::transport::ResponsesProtocol::Standard,
+                    },
                 },
             )
             .unwrap();
@@ -585,6 +654,11 @@ async fn captured_cut_two_child_engines_finish_while_original_provider_call_is_p
                 contract: &json!({}),
                 checkout: &json!({}),
                 task: None,
+                target: &crate::context::ContextProjectionTarget {
+                    model: "test".into(),
+                    route: crate::transport::ResponsesRoute::Codex,
+                    protocol: crate::transport::ResponsesProtocol::Standard,
+                },
             },
         )
         .unwrap();

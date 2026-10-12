@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", content = "detail", rename_all = "snake_case")]
 pub enum TerminalOutcome {
+    /// The Engine retained the invocation but never admitted external execution.
+    NotStarted,
     Success,
     Failure(ToolFailure),
     Cancelled,
@@ -83,6 +85,47 @@ pub(super) fn exact_terminal(
     Ok(found)
 }
 
+/// Operation closure is independent of a claimant's interruption tombstone.
+/// Only the issuing claim can establish that execution never started.
+pub(crate) enum OperationCleanupEvidence {
+    NotStarted,
+    Terminal(TerminalOutcome),
+    Uncertain,
+}
+
+pub(super) fn operation_cleanup_evidence(
+    c: &Connection,
+    operation: &OperationId,
+) -> Result<OperationCleanupEvidence> {
+    if let Some((_, terminal)) = exact_terminal(c, operation)? {
+        return Ok(match terminal {
+            TerminalOutcome::Success
+            | TerminalOutcome::Failure(_)
+            | TerminalOutcome::Cancelled
+            | TerminalOutcome::CancelledWithReceipt(_) => {
+                OperationCleanupEvidence::Terminal(terminal)
+            }
+            TerminalOutcome::NotStarted
+            | TerminalOutcome::Interrupted
+            | TerminalOutcome::CancellationUnconfirmed(_) => OperationCleanupEvidence::Uncertain,
+        });
+    }
+    let terminal: Option<String> = c.query_row(
+        "SELECT terminal_json FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?2 AND state='interrupted'",
+        params![serde_json::to_string(&operation.origin)?, operation.request.0, operation.call.0],
+        |row| row.get(0),
+    ).optional()?.flatten();
+    Ok(
+        match terminal
+            .map(|raw| serde_json::from_str::<TerminalOutcome>(&raw))
+            .transpose()?
+        {
+            Some(TerminalOutcome::NotStarted) => OperationCleanupEvidence::NotStarted,
+            _ => OperationCleanupEvidence::Uncertain,
+        },
+    )
+}
+
 fn exact_claim_state(
     c: &Connection,
     operation: &OperationId,
@@ -105,6 +148,12 @@ fn exact_claim_state(
 }
 
 impl Store {
+    pub(crate) fn operation_cleanup_evidence(
+        &self,
+        operation: &OperationId,
+    ) -> Result<OperationCleanupEvidence> {
+        operation_cleanup_evidence(&*self.lock()?, operation)
+    }
     /// Exact original operation; inherited claimants must retain identical evidence.
     pub fn replay_tool_output_operation(
         &self,
@@ -119,37 +168,11 @@ impl Store {
         operation: &OperationId,
         claimant: &RequestId,
     ) -> Result<Option<RecordedToolOutput>> {
-        let c = self.lock();
-        let Some(kind) = super::invocation_kind(&c, &operation.request, &operation.call)? else {
-            return Ok(None);
-        };
-        match exact_claim_state(&c, operation, claimant)? {
-            Some(super::ClaimState::Interrupted) => {
-                return Ok(Some(RecordedToolOutput {
-                    item: Item::tool_output(&operation.call, kind, &JobOutput::Interrupted),
-                    terminal: TerminalOutcome::Interrupted,
-                }));
-            }
-            Some(super::ClaimState::Settled) => {}
-            Some(super::ClaimState::Pending) | None => return Ok(None),
-        }
-        let terminal = exact_terminal(&c, operation)?;
-        let Some((hash, terminal)) = terminal else {
-            return Ok(None);
-        };
-        let raw: Option<String> = c
-            .query_row("SELECT json FROM items WHERE hash=?1", [&hash.0], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        let raw = raw.ok_or_else(|| StoreError::MissingReplayItem(hash.0))?;
-        let item: Item = serde_json::from_str(&raw)?;
-        super::validate_replay_output(&operation.call, kind, &item)?;
-        Ok(Some(RecordedToolOutput { item, terminal }))
+        replay_claim(&*self.lock()?, operation, claimant)
     }
 
     pub(crate) fn has_completed_output(&self, operation: &OperationId) -> Result<bool> {
-        let c = self.lock();
+        let c = self.lock()?;
         if exact_claim_state(&c, operation, &operation.request)? != Some(super::ClaimState::Settled)
         {
             return Ok(false);
@@ -161,6 +184,39 @@ impl Store {
             )
         }))
     }
+}
+
+pub(super) fn replay_claim(
+    c: &Connection,
+    operation: &OperationId,
+    claimant: &RequestId,
+) -> Result<Option<RecordedToolOutput>> {
+    let Some(kind) = super::invocation_kind(c, &operation.request, &operation.call)? else {
+        return Ok(None);
+    };
+    match exact_claim_state(c, operation, claimant)? {
+        Some(super::ClaimState::Interrupted) => {
+            return Ok(Some(RecordedToolOutput {
+                item: Item::tool_output(&operation.call, kind, &JobOutput::Interrupted),
+                terminal: TerminalOutcome::Interrupted,
+            }));
+        }
+        Some(super::ClaimState::Settled) => {}
+        Some(super::ClaimState::Pending) | None => return Ok(None),
+    }
+    let terminal = exact_terminal(c, operation)?;
+    let Some((hash, terminal)) = terminal else {
+        return Ok(None);
+    };
+    let raw: Option<String> = c
+        .query_row("SELECT json FROM items WHERE hash=?1", [&hash.0], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    let raw = raw.ok_or_else(|| StoreError::MissingReplayItem(hash.0))?;
+    let item: Item = serde_json::from_str(&raw)?;
+    super::validate_replay_output(&operation.call, kind, &item)?;
+    Ok(Some(RecordedToolOutput { item, terminal }))
 }
 
 #[cfg(test)]
@@ -260,7 +316,7 @@ mod tests {
             store
                 .create_request(&child, Some(&operation.request), "/root/child")
                 .unwrap();
-            store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) SELECT origin,origin_request_id,call_id,?1,'pending' FROM claims WHERE request_id=?2", params![child.0,operation.request.0]).unwrap();
+            store.lock().unwrap().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) SELECT origin,origin_request_id,call_id,?1,'pending' FROM claims WHERE request_id=?2", params![child.0,operation.request.0]).unwrap();
             let interrupted = if interrupt_original {
                 &operation.request
             } else {
@@ -333,7 +389,7 @@ mod tests {
         store
             .create_request(&child, Some(&operation.request), "/root/child")
             .unwrap();
-        store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) SELECT origin,origin_request_id,call_id,?1,'pending' FROM claims WHERE request_id=?2", params![child.0,operation.request.0]).unwrap();
+        store.lock().unwrap().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) SELECT origin,origin_request_id,call_id,?1,'pending' FROM claims WHERE request_id=?2", params![child.0,operation.request.0]).unwrap();
         assert!(
             store
                 .replay_tool_output_claim(&operation, &child)
@@ -359,12 +415,13 @@ mod tests {
                 .unwrap();
             let before: String = store
                 .lock()
+                .unwrap()
                 .query_row("SELECT json FROM items WHERE hash=?1", [&hash.0], |row| {
                     row.get(0)
                 })
                 .unwrap();
             assert_eq!(item.0["call_id"], operation.call.0);
-            store.lock().execute_batch("ALTER TABLE claims DROP COLUMN terminal_json; UPDATE schema_version SET version=7;").unwrap();
+            store.lock().unwrap().execute_batch("ALTER TABLE claims DROP COLUMN terminal_json; UPDATE schema_version SET version=7;").unwrap();
             (operation, before, hash)
         };
         let store = Store::open(&path).unwrap();
@@ -374,6 +431,7 @@ mod tests {
         assert!(store.replay_output_operation(&operation).unwrap().is_some());
         let after: String = store
             .lock()
+            .unwrap()
             .query_row("SELECT json FROM items WHERE hash=?1", [&hash.0], |row| {
                 row.get(0)
             })
@@ -381,6 +439,7 @@ mod tests {
         assert_eq!(before, after);
         let version: u32 = store
             .lock()
+            .unwrap()
             .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, super::super::VERSION);
@@ -392,7 +451,7 @@ mod tests {
     fn terminal_settlement_failure_rolls_back_hash_state_and_outcome() {
         let store = Store::memory().unwrap();
         let operation = operation(&store, "rollback");
-        store.lock().execute_batch("CREATE TRIGGER reject_terminal BEFORE UPDATE ON claims WHEN NEW.terminal_json IS NOT NULL BEGIN SELECT RAISE(ABORT,'refuse terminal'); END;").unwrap();
+        store.lock().unwrap().execute_batch("CREATE TRIGGER reject_terminal BEFORE UPDATE ON claims WHEN NEW.terminal_json IS NOT NULL BEGIN SELECT RAISE(ABORT,'refuse terminal'); END;").unwrap();
         let output = JobOutput::Completed(Err(ToolFailure::with_metadata(
             "new failure",
             json!({"class":"offline"}),
@@ -431,7 +490,7 @@ mod tests {
         store
             .create_request(&child, Some(&operation.request), "/root/child")
             .unwrap();
-        store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash,terminal_json) SELECT origin,origin_request_id,call_id,?1,state,output_hash,terminal_json FROM claims WHERE request_id=?2",params![child.0,operation.request.0]).unwrap();
+        store.lock().unwrap().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash,terminal_json) SELECT origin,origin_request_id,call_id,?1,state,output_hash,terminal_json FROM claims WHERE request_id=?2",params![child.0,operation.request.0]).unwrap();
         assert_eq!(
             store
                 .replay_tool_output_operation(&operation)
@@ -442,6 +501,7 @@ mod tests {
         );
         store
             .lock()
+            .unwrap()
             .execute(
                 "UPDATE claims SET terminal_json=?1 WHERE request_id=?2",
                 params![
@@ -468,7 +528,7 @@ mod tests {
         store
             .create_request(&child, Some(&operation.request), "/root/child")
             .unwrap();
-        store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) SELECT origin,origin_request_id,call_id,?1,'pending' FROM claims WHERE request_id=?2",params![child.0,operation.request.0]).unwrap();
+        store.lock().unwrap().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) SELECT origin,origin_request_id,call_id,?1,'pending' FROM claims WHERE request_id=?2",params![child.0,operation.request.0]).unwrap();
         assert!(
             matches!(store.write_output(&operation,&item,TerminalOutcome::Success),Err(StoreError::ConflictingReplayOutcome {operation: conflicting}) if conflicting==operation)
         );
@@ -477,6 +537,7 @@ mod tests {
         assert!(inherited[0].output.is_none());
         let marker: Option<String> = store
             .lock()
+            .unwrap()
             .query_row(
                 "SELECT terminal_json FROM claims WHERE request_id=?1",
                 [&child.0],

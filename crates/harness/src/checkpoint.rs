@@ -7,9 +7,9 @@ mod captured_tests;
 use crate::{
     item::{Item, ToolKind},
     model::{AgentPath, CallId, ConversationIdentity, OperationId, RequestId},
-    store::{Agent, AgentState, Result, Store, StoreError, utc_millis},
+    store::{Agent, AgentState, Result, Store, StoreError, context, utc_millis},
 };
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc};
 
@@ -38,6 +38,17 @@ pub(crate) struct CheckpointMetadata {
     cut: CheckpointCut,
     operation: Option<OperationId>,
     host: Value,
+    #[serde(default)]
+    response_prefix: Option<CapturedResponsePrefix>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+enum CapturedResponsePrefix {
+    Valid {
+        origins: Vec<crate::context::Origin>,
+        boundary: crate::context::Origin,
+    },
+    Unproven,
 }
 
 impl CheckpointMetadata {
@@ -47,18 +58,84 @@ impl CheckpointMetadata {
             cut: CheckpointCut::Deferred,
             operation: None,
             host,
+            response_prefix: None,
         }
     }
 
     pub(crate) fn decode(raw: &str) -> Result<Self> {
         let value: Self = serde_json::from_str(raw)?;
-        if value.version != 1
+        if !matches!(value.version, 1 | 2)
             || (value.cut == CheckpointCut::BeforeCall && value.operation.is_none())
+            || (value.version == 2
+                && value.cut == CheckpointCut::BeforeCall
+                && value.response_prefix.is_none())
         {
             return Err(StoreError::InvalidCheckpointMetadata);
         }
         Ok(value)
     }
+}
+
+/// Authenticate the exact response cut frozen by a checkpoint on this ancestry.
+pub(crate) fn before_call_response_prefix(
+    c: &Connection,
+    consumer: &RequestId,
+    origins: &[crate::context::Origin],
+    selected: &[crate::context::Origin],
+) -> Result<Option<Vec<crate::context::Origin>>> {
+    let mut query = c.prepare(
+        "WITH RECURSIVE ancestry(id,parent_id) AS (
+             SELECT id,parent_id FROM requests WHERE id=?1
+             UNION SELECT r.id,r.parent_id FROM requests r JOIN ancestry a ON r.id=a.parent_id
+         ) SELECT k.snapshot_request,k.boundary_call,k.metadata FROM checkpoints k
+           JOIN ancestry a ON a.id=k.snapshot_request",
+    )?;
+    let rows = query
+        .query_map([&consumer.0], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let membership = origins.iter().collect::<std::collections::HashSet<_>>();
+    for (snapshot, boundary_call, raw) in rows {
+        let metadata = CheckpointMetadata::decode(&raw)?;
+        if metadata.cut != CheckpointCut::BeforeCall {
+            continue;
+        }
+        let operation = metadata
+            .operation
+            .ok_or(StoreError::InvalidCheckpointMetadata)?;
+        if operation.call.0 != boundary_call {
+            return Err(StoreError::InvalidCheckpointMetadata);
+        }
+        let boundary = context::original_call(c, &operation)?;
+        let Some(CapturedResponsePrefix::Valid {
+            origins: frozen,
+            boundary: frozen_boundary,
+        }) = metadata.response_prefix
+        else {
+            continue;
+        };
+        if boundary != frozen_boundary
+            || selected != frozen
+            || origins.get(..frozen.len()) != Some(frozen.as_slice())
+            || origins.get(frozen.len()) != Some(&boundary)
+        {
+            continue;
+        }
+        let retained = context::request_occurrences(c, &RequestId(snapshot))?
+            .into_iter()
+            .filter(|occurrence| membership.contains(&occurrence.origin))
+            .map(|occurrence| occurrence.origin)
+            .collect::<Vec<_>>();
+        if retained == frozen {
+            return Ok(Some(retained));
+        }
+    }
+    Ok(None)
 }
 
 /// Two capabilities captured atomically at one exact pending operation.
@@ -163,6 +240,8 @@ pub struct CheckpointChild<'a> {
     pub contract: &'a Value,
     pub checkout: &'a Value,
     pub task: Option<CheckpointTask<'a>>,
+    /// Resolved from the child's actual transport before admission.
+    pub target: &'a crate::context::ContextProjectionTarget,
 }
 
 struct CaptureBoundary<'a> {
@@ -185,22 +264,23 @@ impl Store {
         metadata: &Value,
         attachment: Arc<T>,
     ) -> Result<Checkpoint<T>> {
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        let checkpoint = self.capture_checkpoint_tx(
-            &tx,
-            CaptureBoundary {
-                origin,
-                source_request,
-                boundary_call,
-                cut: CheckpointCut::Deferred,
-                operation: None,
-            },
-            metadata,
-            attachment,
-        )?;
-        tx.commit()?;
-        Ok(checkpoint)
+        let mut conn = self.lock()?;
+        conn.write_transaction(|tx| {
+            let checkpoint = self.capture_checkpoint_tx(
+                &tx,
+                CaptureBoundary {
+                    origin,
+                    source_request,
+                    boundary_call,
+                    cut: CheckpointCut::Deferred,
+                    operation: None,
+                },
+                metadata,
+                attachment,
+            )?;
+
+            Ok(checkpoint)
+        })
     }
 
     /// Retain both the ordinary prefix and an independent prefix before the
@@ -224,70 +304,71 @@ impl Store {
         metadata: &Value,
         attachment: Arc<T>,
     ) -> Result<CheckpointCuts<T>> {
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        let bound: Option<(String, String)> = tx
-            .query_row(
-                "SELECT run_id,incarnation FROM embedded_bindings WHERE agent_path=?1",
-                [&operation.origin.actor().0],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let expected_origin = match bound {
-            Some((run, incarnation)) => ConversationIdentity::Embedded {
-                run,
-                actor: operation.origin.actor().clone(),
-                incarnation,
-            },
-            None => self.standalone_identity(operation.origin.actor().clone()),
-        };
-        if operation.origin != expected_origin {
-            return Err(StoreError::OperationOriginMismatch);
-        }
-        let origin = serde_json::to_string(&operation.origin)?;
-        let state: Option<String> = tx.query_row(
-            "SELECT state FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?2",
-            params![origin, operation.request.0, operation.call.0],
-            |row| row.get(0),
-        ).optional()?;
-        match state.as_deref() {
-            Some("pending") => {}
-            Some(_) => return Err(StoreError::CheckpointBoundaryNotPending(operation.clone())),
-            None => {
-                return Err(StoreError::MissingCheckpointClaim {
-                    request: operation.request.0.clone(),
-                    call_id: operation.call.0.clone(),
-                });
+        let mut conn = self.lock()?;
+        conn.write_transaction(|tx| {
+            let bound: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT run_id,incarnation FROM embedded_bindings WHERE agent_path=?1",
+                    [&operation.origin.actor().0],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let expected_origin = match bound {
+                Some((run, incarnation)) => ConversationIdentity::Embedded {
+                    run,
+                    actor: operation.origin.actor().clone(),
+                    incarnation,
+                },
+                None => self.standalone_identity(operation.origin.actor().clone()),
+            };
+            if operation.origin != expected_origin {
+                return Err(StoreError::OperationOriginMismatch);
             }
-        }
-        let deferred = self.capture_checkpoint_tx(
-            &tx,
-            CaptureBoundary {
-                origin: operation.origin.actor(),
-                source_request: head,
-                boundary_call: &operation.call,
-                cut: CheckpointCut::Deferred,
-                operation: Some(operation),
-            },
-            metadata,
-            attachment.clone(),
-        )?;
-        let before_call = self.capture_checkpoint_tx(
-            &tx,
-            CaptureBoundary {
-                origin: operation.origin.actor(),
-                source_request: head,
-                boundary_call: &operation.call,
-                cut: CheckpointCut::BeforeCall,
-                operation: Some(operation),
-            },
-            metadata,
-            attachment,
-        )?;
-        tx.commit()?;
-        Ok(CheckpointCuts {
-            deferred,
-            before_call,
+            let origin = serde_json::to_string(&operation.origin)?;
+            let state: Option<String> = tx.query_row(
+                "SELECT state FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?2",
+                params![origin, operation.request.0, operation.call.0],
+                |row| row.get(0),
+            ).optional()?;
+            match state.as_deref() {
+                Some("pending") => {}
+                Some(_) => return Err(StoreError::CheckpointBoundaryNotPending(operation.clone())),
+                None => {
+                    return Err(StoreError::MissingCheckpointClaim {
+                        request: operation.request.0.clone(),
+                        call_id: operation.call.0.clone(),
+                    });
+                }
+            }
+            let deferred = self.capture_checkpoint_tx(
+                &tx,
+                CaptureBoundary {
+                    origin: operation.origin.actor(),
+                    source_request: head,
+                    boundary_call: &operation.call,
+                    cut: CheckpointCut::Deferred,
+                    operation: Some(operation),
+                },
+                metadata,
+                attachment.clone(),
+            )?;
+            let before_call = self.capture_checkpoint_tx(
+                &tx,
+                CaptureBoundary {
+                    origin: operation.origin.actor(),
+                    source_request: head,
+                    boundary_call: &operation.call,
+                    cut: CheckpointCut::BeforeCall,
+                    operation: Some(operation),
+                },
+                metadata,
+                attachment,
+            )?;
+
+            Ok(CheckpointCuts {
+                deferred,
+                before_call,
+        })
         })
     }
 
@@ -331,34 +412,10 @@ impl Store {
             return Err(StoreError::MissingAgentParent(origin.0.clone()));
         }
 
-        let stored: Vec<(RequestId, Item)> = {
-            let mut q = tx.prepare(
-                "WITH RECURSIVE lineage(id,parent_id,depth) AS (
-                     SELECT id,parent_id,0 FROM requests WHERE id=?1
-                     UNION ALL
-                     SELECT r.id,r.parent_id,lineage.depth+1
-                     FROM requests r JOIN lineage ON r.id=lineage.parent_id
-                     WHERE NOT EXISTS(
-                         SELECT 1 FROM session_state s
-                         WHERE s.session_id='harness:compaction:' || lineage.id
-                     )
-                 )
-                 SELECT lineage.id,i.json FROM lineage
-                 JOIN request_items ri ON ri.request_id=lineage.id
-                 JOIN items i ON i.hash=ri.item_hash
-                 ORDER BY lineage.depth DESC,ri.position",
-            )?;
-            q.query_map([&source_request.0], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .map(|row| {
-                let (request, raw) = row?;
-                Ok((RequestId(request), serde_json::from_str::<Item>(&raw)?))
-            })
-            .collect::<Result<Vec<_>>>()?
-        };
-        let boundary = stored.iter().position(|(request, item)| {
-            request == source_request
+        let stored = context::history(tx, source_request, true)?;
+        let boundary = stored.iter().position(|occurrence| {
+            let item = &occurrence.item;
+            &occurrence.request == source_request
                 && matches!(
                     item.0["type"].as_str(),
                     Some("function_call" | "custom_tool_call")
@@ -378,7 +435,9 @@ impl Store {
             CheckpointCut::BeforeCall => &stored[..boundary],
         };
         let mut call_kinds = HashMap::<(RequestId, CallId), ToolKind>::new();
-        for (request, item) in prefix {
+        for occurrence in prefix {
+            let item = &occurrence.item;
+            let request = &occurrence.origin.request;
             if let Some(call) =
                 item.tool_call()
                     .map_err(|reason| StoreError::MalformedReplayCall {
@@ -395,29 +454,41 @@ impl Store {
                 }
             }
         }
+        context::validate_canonical_history(tx, prefix)?;
+        let response_prefix = if cut == CheckpointCut::BeforeCall {
+            let boundary_origin = stored[boundary].origin.clone();
+            Some(
+                match context::capture_response_prefix(tx, prefix, &boundary_origin)? {
+                    Some(origins) => CapturedResponsePrefix::Valid {
+                        origins,
+                        boundary: boundary_origin,
+                    },
+                    None => CapturedResponsePrefix::Unproven,
+                },
+            )
+        } else {
+            None
+        };
         let effort = prefix
             .iter()
             .rev()
-            .find_map(|(_, item)| item.configuration_effort())
+            .find_map(|occurrence| occurrence.item.configuration_effort())
             .ok_or_else(|| StoreError::MissingCheckpointEffort(source_request.0.clone()))?;
         let id = uuid::Uuid::new_v4().to_string();
         let snapshot_request = RequestId(uuid::Uuid::new_v4().to_string());
-        tx.execute(
-            "INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros) VALUES (?1,NULL,?2,?3,0,0,0)",
-            params![snapshot_request.0, format!("harness:checkpoint:{id}"), utc_millis()],
+        context::insert_snapshot_request(
+            tx,
+            &snapshot_request,
+            Some(source_request),
+            &format!("harness:checkpoint:{id}"),
         )?;
-        for (position, (_, item)) in prefix
+        for (position, occurrence) in prefix
             .iter()
-            .filter(|(_, item)| !item.is_configuration_update())
+            .filter(|occurrence| !occurrence.item.is_configuration_update())
             .enumerate()
         {
-            let hash = Self::put_item_tx(&tx, item)?;
-            tx.execute(
-                "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
-                params![snapshot_request.0, position as i64, hash.0],
-            )?;
+            context::insert_occurrence(tx, &snapshot_request, position as i64, occurrence)?;
         }
-        Self::preserve_context_origins_tx(&tx, source_request, &snapshot_request)?;
         let claims: Vec<(
             String,
             String,
@@ -449,13 +520,24 @@ impl Store {
         };
         let mut pending_claims = Vec::new();
         let mut copied = std::collections::HashSet::new();
-        let boundary_claimed = claims.iter().any(|(_, _, call, request, _, _, _)| {
-            call == &boundary_call.0 && request == &source_request.0
-        });
+        let boundary_claimed =
+            claims
+                .iter()
+                .any(|(owner, original_request, call, request, _, _, _)| {
+                    if let Some(operation) = operation {
+                        *owner
+                            == serde_json::to_string(&operation.origin)
+                                .expect("serializable operation identity")
+                            && *original_request == operation.request.0
+                            && *call == operation.call.0
+                    } else {
+                        call == &boundary_call.0 && request == &source_request.0
+                    }
+                });
         for (origin, original_request, call_id, claim_request, state, output_hash, outcome) in
             claims
         {
-            let key = (RequestId(claim_request.clone()), CallId(call_id.clone()));
+            let key = (RequestId(original_request.clone()), CallId(call_id.clone()));
             if let Some(kind) = call_kinds.get(&key) {
                 let terminal = match state.as_str() {
                     "settled" => {
@@ -477,31 +559,6 @@ impl Store {
                     )),
                     _ => None,
                 };
-                if let Some(terminal) = terminal {
-                    if let Some(start) = prefix.iter().position(|(request, item)| {
-                        request.0 == claim_request
-                            && item
-                                .tool_call()
-                                .ok()
-                                .flatten()
-                                .is_some_and(|call| call.call_id.0 == call_id)
-                    }) {
-                        let before_next_call =
-                            prefix[start + 1..].iter().take_while(|(_, item)| {
-                                !item
-                                    .tool_call()
-                                    .ok()
-                                    .flatten()
-                                    .is_some_and(|call| call.call_id.0 == call_id)
-                            });
-                        if before_next_call
-                            .into_iter()
-                            .any(|(_, item)| *item == terminal)
-                        {
-                            continue;
-                        }
-                    }
-                }
                 let identity: ConversationIdentity = serde_json::from_str(&origin)?;
                 let operation = OperationId {
                     origin: identity,
@@ -510,6 +567,20 @@ impl Store {
                 };
                 if !copied.insert(operation.clone()) {
                     continue;
+                }
+                let published = prefix
+                    .iter()
+                    .filter(|occurrence| occurrence.output_operation.as_ref() == Some(&operation))
+                    .collect::<Vec<_>>();
+                match published.as_slice() {
+                    [] => {}
+                    [published] if terminal.as_ref() == Some(&published.item) => continue,
+                    _ => {
+                        return Err(StoreError::InvalidOutputPublication {
+                            operation,
+                            claimant: RequestId(claim_request),
+                        });
+                    }
                 }
                 if state == "pending" {
                     pending_claims.push(CheckpointClaim {
@@ -540,7 +611,7 @@ impl Store {
         Self::set_effort_tx(&tx, &snapshot_request, effort)?;
         tx.execute(
             "INSERT INTO checkpoints(id,origin_agent,source_request,snapshot_request,boundary_call,metadata,pending_claims,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![id,origin.0,source_request.0,snapshot_request.0,boundary_call.0,serde_json::to_string(&CheckpointMetadata { version: 1, cut, operation: operation.cloned(), host: metadata.clone() })?,serde_json::to_string(&pending_claims)?,utc_millis()],
+            params![id,origin.0,source_request.0,snapshot_request.0,boundary_call.0,serde_json::to_string(&CheckpointMetadata { version: 2, cut, operation: operation.cloned(), host: metadata.clone(), response_prefix })?,serde_json::to_string(&pending_claims)?,utc_millis()],
         )?;
         Ok(Checkpoint {
             id,
@@ -592,69 +663,79 @@ impl Store {
             return Err(StoreError::ForeignCheckpoint);
         }
         Self::validate_agent_path(&child.path.0, Some(&child.parent.0))?;
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        let parent_exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM agents WHERE path=?1)",
-            [&child.parent.0],
-            |row| row.get(0),
-        )?;
-        if !parent_exists {
-            return Err(StoreError::MissingAgentParent(child.parent.0.clone()));
-        }
-        let inherited_head = if checkpoint.cut == CheckpointCut::Deferred {
-            if let Some(operation) = &checkpoint.operation {
-                Self::context_committed_head_tx(&tx, operation)?
-                    .unwrap_or_else(|| checkpoint.snapshot_request.clone())
+        let mut conn = self.lock()?;
+        conn.write_transaction(|tx| {
+            let parent_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agents WHERE path=?1)",
+                [&child.parent.0],
+                |row| row.get(0),
+            )?;
+            if !parent_exists {
+                return Err(StoreError::MissingAgentParent(child.parent.0.clone()));
+            }
+            let inherited_head = if checkpoint.cut == CheckpointCut::Deferred {
+                if let Some(operation) = &checkpoint.operation {
+                    Self::context_committed_head_tx(&tx, operation)?
+                        .unwrap_or_else(|| checkpoint.snapshot_request.clone())
+                } else {
+                    checkpoint.snapshot_request.clone()
+                }
             } else {
                 checkpoint.snapshot_request.clone()
+            };
+            if checkpoint.cut == CheckpointCut::BeforeCall {
+                let raw: String = tx.query_row("SELECT metadata FROM checkpoints WHERE id=?1",
+                    [&checkpoint.id], |row| row.get(0))?;
+                let metadata = CheckpointMetadata::decode(&raw)?;
+                if !matches!(metadata.response_prefix, Some(CapturedResponsePrefix::Valid { .. })) {
+                    return Err(crate::context::ContextError::Replay(
+                        crate::context::ContextReplayRejection::InvalidPrefix).into());
+                }
             }
-        } else {
-            checkpoint.snapshot_request.clone()
-        };
-        let snapshot_request = RequestId(uuid::Uuid::new_v4().to_string());
-        tx.execute(
-            "INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros) VALUES (?1,?2,?3,?4,0,0,0)",
-            params![snapshot_request.0,inherited_head.0,child.path.0,utc_millis()],
-        )?;
-        let inherited_claims: Vec<(
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-        )> = {
-            let mut q =
-                tx.prepare("SELECT origin,origin_request_id,call_id,state,output_hash,terminal_json FROM claims WHERE request_id=?1")?;
-            q.query_map([&inherited_head.0], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        for (origin, original_request, call_id, state, output_hash, terminal) in inherited_claims {
+            context::preflight_target(tx, &inherited_head, child.target)?;
+            let snapshot_request = RequestId(uuid::Uuid::new_v4().to_string());
             tx.execute(
-                "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash,terminal_json) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                params![origin,original_request,call_id,snapshot_request.0,state,output_hash,terminal],
+                "INSERT INTO requests(id,parent_id,branch,created_at,input_tokens,output_tokens,cost_micros) VALUES (?1,?2,?3,?4,0,0,0)",
+                params![snapshot_request.0,inherited_head.0,child.path.0,utc_millis()],
             )?;
-        }
-        let source = json!({
-            "kind":"checkpoint",
-            "checkpoint_id":checkpoint.id,
-            "origin_agent":checkpoint.origin,
-            "source_request":checkpoint.source_request,
-            "snapshot_request":inherited_head,
-            "boundary_call":checkpoint.boundary_call,
-            "cut":checkpoint.cut,
-            "operation":checkpoint.operation,
-            "checkout":child.checkout,
+            let inherited_claims: Vec<(
+                String,
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+            )> = {
+                let mut q =
+                    tx.prepare("SELECT origin,origin_request_id,call_id,state,output_hash,terminal_json FROM claims WHERE request_id=?1")?;
+                q.query_map([&inherited_head.0], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            for (origin, original_request, call_id, state, output_hash, terminal) in inherited_claims {
+                tx.execute(
+                    "INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,output_hash,terminal_json) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                    params![origin,original_request,call_id,snapshot_request.0,state,output_hash,terminal],
+                )?;
+            }
+            let source = json!({
+                "kind":"checkpoint",
+                "checkpoint_id":checkpoint.id,
+                "origin_agent":checkpoint.origin,
+                "source_request":checkpoint.source_request,
+                "snapshot_request":inherited_head,
+                "boundary_call":checkpoint.boundary_call,
+                "cut":checkpoint.cut,
+                "operation":checkpoint.operation,
+                "checkout":child.checkout,
         });
         let created_at = utc_millis();
         tx.execute(
@@ -667,6 +748,13 @@ impl Store {
                 params![binding.actor.0, binding.run, binding.incarnation],
             )?;
         }
+        let identity = match binding {
+            Some(binding) => ConversationIdentity::Embedded {
+                run: binding.run.clone(), actor: binding.actor.clone(), incarnation: binding.incarnation.clone(),
+            },
+            None => self.standalone_identity(child.path.clone()),
+        };
+        context::save_target(tx, &identity, child.target)?;
         let envelope_id = if let Some(task) = child.task {
             let hash = Self::put_item_tx(&tx, task.item)?;
             tx.execute(
@@ -677,7 +765,7 @@ impl Store {
         } else {
             None
         };
-        tx.commit()?;
+
         Ok((
             Agent {
                 path: child.path.clone(),
@@ -690,6 +778,7 @@ impl Store {
             },
             envelope_id,
         ))
+        })
     }
 }
 
@@ -725,7 +814,9 @@ mod tests {
         store
             .write_output(&first_op, &output, crate::store::TerminalOutcome::Success)
             .unwrap();
-        store.append_items(&first, &[output]).unwrap();
+        store
+            .append_operation_output(&first_op, &first, &first)
+            .unwrap();
         store
             .create_request(&second, Some(&first), &root.0)
             .unwrap();
@@ -840,6 +931,11 @@ mod tests {
                     contract: &json!({"task":"implement"}),
                     checkout: &json!({"revision":"a1"}),
                     task: None,
+                    target: &crate::context::ContextProjectionTarget {
+                        model: "test".into(),
+                        route: crate::transport::ResponsesRoute::Codex,
+                        protocol: crate::transport::ResponsesProtocol::Standard,
+                    },
                 },
             )
             .unwrap();
@@ -852,6 +948,11 @@ mod tests {
                     contract: &json!({"task":"review"}),
                     checkout: &json!({"revision":"b2"}),
                     task: None,
+                    target: &crate::context::ContextProjectionTarget {
+                        model: "test".into(),
+                        route: crate::transport::ResponsesRoute::Codex,
+                        protocol: crate::transport::ResponsesProtocol::Standard,
+                    },
                 },
             )
             .unwrap();
@@ -967,6 +1068,11 @@ mod tests {
                     contract: &json!({}),
                     checkout: &json!({}),
                     task: None,
+                    target: &crate::context::ContextProjectionTarget {
+                        model: "test".into(),
+                        route: crate::transport::ResponsesRoute::Codex,
+                        protocol: crate::transport::ResponsesProtocol::Standard
+                    },
                 }
             ),
             Err(StoreError::ForeignCheckpoint)
@@ -1008,6 +1114,20 @@ mod tests {
         }
         #[async_trait]
         impl ResponsesTransport for Replay {
+            fn response_contract(
+                &self,
+            ) -> std::result::Result<
+                (
+                    crate::transport::ResponsesRoute,
+                    crate::transport::ResponsesProtocol,
+                ),
+                TransportError,
+            > {
+                Ok((
+                    crate::transport::ResponsesRoute::Codex,
+                    crate::transport::ResponsesProtocol::Standard,
+                ))
+            }
             async fn create(
                 &self,
                 request: ResponsesRequest,
@@ -1093,6 +1213,11 @@ mod tests {
                     contract: &json!({}),
                     checkout: &json!({"revision":"exact"}),
                     task: None,
+                    target: &crate::context::ContextProjectionTarget {
+                        model: "test".into(),
+                        route: crate::transport::ResponsesRoute::Codex,
+                        protocol: crate::transport::ResponsesProtocol::Standard,
+                    },
                 },
             )
             .unwrap();
@@ -1190,6 +1315,20 @@ mod tests {
         }
         #[async_trait]
         impl ResponsesTransport for Replay {
+            fn response_contract(
+                &self,
+            ) -> std::result::Result<
+                (
+                    crate::transport::ResponsesRoute,
+                    crate::transport::ResponsesProtocol,
+                ),
+                TransportError,
+            > {
+                Ok((
+                    crate::transport::ResponsesRoute::Codex,
+                    crate::transport::ResponsesProtocol::Standard,
+                ))
+            }
             async fn create(
                 &self,
                 request: ResponsesRequest,
@@ -1307,6 +1446,11 @@ mod tests {
                     contract: &json!({}),
                     checkout: &json!({"revision":"later"}),
                     task: None,
+                    target: &crate::context::ContextProjectionTarget {
+                        model: "test".into(),
+                        route: crate::transport::ResponsesRoute::Codex,
+                        protocol: crate::transport::ResponsesProtocol::Standard,
+                    },
                 },
             )
             .unwrap();
@@ -1393,6 +1537,20 @@ mod tests {
         }
         #[async_trait]
         impl ResponsesTransport for Replay {
+            fn response_contract(
+                &self,
+            ) -> std::result::Result<
+                (
+                    crate::transport::ResponsesRoute,
+                    crate::transport::ResponsesProtocol,
+                ),
+                TransportError,
+            > {
+                Ok((
+                    crate::transport::ResponsesRoute::Codex,
+                    crate::transport::ResponsesProtocol::Standard,
+                ))
+            }
             async fn create(
                 &self,
                 _request: ResponsesRequest,

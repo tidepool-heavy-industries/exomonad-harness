@@ -232,6 +232,7 @@ mod tests {
                 model_conversation: Some("/root".into()),
                 model_head_request: Some("settled".into()),
                 active_round: None,
+                inference: None,
             }],
             vec![],
         );

@@ -7,6 +7,37 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// The resolved provider contract selected by the transport owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextProjectionTarget {
+    pub model: String,
+    pub route: crate::transport::ResponsesRoute,
+    pub protocol: crate::transport::ResponsesProtocol,
+}
+
+/// Exact continuity losses from an explicitly selected visible-history recovery.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryProjectionReceipt {
+    pub omitted: Vec<ContextReference>,
+    pub unknown_response_completeness: Vec<RequestId>,
+}
+
+/// Structural replay refusals retain identities, never provider payloads.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum ContextReplayRejection {
+    #[error("provider response provenance is unavailable for request {request:?}")]
+    MissingProvenance { request: RequestId },
+    #[error("provider response membership is not an exact ordered selection")]
+    InvalidMembership,
+    #[error("captured context is not an authenticated provider response prefix")]
+    InvalidPrefix,
+    #[error("opaque provider continuity has no established route or protocol compatibility")]
+    IncompatibleTransport,
+    #[error("native invocation has no exact owning operation at {request:?}:{position}")]
+    UnownedInvocation { request: RequestId, position: i64 },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ContextReference(pub(crate) String);
@@ -136,6 +167,7 @@ pub(crate) struct Occurrence {
     pub position: i64,
     pub hash: ItemHash,
     pub item: Item,
+    pub output_operation: Option<OperationId>,
     pub origin: Origin,
     pub sources: Vec<ContextReference>,
     pub note: bool,
@@ -179,6 +211,7 @@ pub struct ContextCommitEvidence {
     pub(crate) version: u32,
     pub(crate) original_operation: OperationId,
     pub(crate) prefix: Vec<(Item, Vec<ContextReference>, bool, Vec<ContextTextOverlay>)>,
+    pub(crate) prefix_origins: Option<Vec<Origin>>,
     pub(crate) output: Item,
     pub(crate) invocation: Item,
     pub(crate) model: Option<String>,
@@ -197,8 +230,27 @@ pub struct ContextRequestState {
     /// occurrences retain canonical request identity; editable references are
     /// resolved independently against raw Store provenance.
     pub history: Vec<(RequestId, ItemHash, Item)>,
+    pub(crate) occurrences: Vec<Option<Occurrence>>,
     pub model: Option<String>,
     pub generation: u64,
+}
+
+/// Structural portability refusals contain item/field names, never item values.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum ContextPortabilityRejection {
+    #[error("response group has no visible content")]
+    NoVisibleContent,
+    #[error("unsupported response item kind")]
+    UnsupportedItem,
+    #[error("unsupported {item} field: {field}")]
+    UnsupportedField { item: &'static str, field: String },
+    #[error("invalid {item} field: {field}")]
+    InvalidField {
+        item: &'static str,
+        field: &'static str,
+    },
+    #[error("encrypted payload outside reasoning continuity")]
+    EncryptedPayload,
 }
 
 #[derive(Debug, Error)]
@@ -217,12 +269,16 @@ pub enum ContextError {
     NativeOrder,
     #[error("opaque provider continuity has no established compatibility with the requested model")]
     OpaqueModel,
+    #[error("context replay refused: {0}")]
+    Replay(ContextReplayRejection),
     #[error("context publication requires a successful complete invocation")]
     Ineligible,
     #[error("context publication was cancelled before admission")]
     Cancelled,
     #[error("context state has an unsupported format")]
     UnsupportedState,
+    #[error("context portability refused: {0}")]
+    Portability(ContextPortabilityRejection),
     #[error("context model must be a nonempty resolved model name")]
     InvalidModel,
 }

@@ -2,13 +2,42 @@ use super::{ProviderStreamFailureEvent, ResponsesTurn, TransportError, Usage};
 use crate::item::Item;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
+
+/// A finalized item carrying its provider-issued output position. Only the
+/// transport assembly constructs this evidence; deltas cannot become items.
+#[derive(Clone, Debug)]
+pub struct CompletedOutputItem {
+    item: Item,
+    output_index: u64,
+    sequence_number: Option<u64>,
+}
+impl CompletedOutputItem {
+    pub fn item(&self) -> &Item {
+        &self.item
+    }
+    pub fn output_index(&self) -> u64 {
+        self.output_index
+    }
+    pub fn sequence_number(&self) -> Option<u64> {
+        self.sequence_number
+    }
+    pub(crate) fn from_complete_response(item: Item, output_index: u64) -> Self {
+        Self {
+            item,
+            output_index,
+            sequence_number: None,
+        }
+    }
+}
 
 /// Completed output items are carried by SSE `response.output_item.done`;
 /// this backend may leave `response.completed.response.output` empty.
 #[derive(Default)]
 pub struct ResponseAssembly {
-    items: Vec<Item>,
+    items: BTreeMap<u64, Item>,
     completed: Option<(String, Usage)>,
+    response_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -24,7 +53,7 @@ pub enum OutputChannel {
 
 #[derive(Debug)]
 pub enum StreamEvent {
-    ItemDone(Item),
+    CompletedItem(CompletedOutputItem),
     Delta {
         item_id: String,
         channel: OutputChannel,
@@ -49,13 +78,42 @@ impl ResponseAssembly {
         let event: Value = serde_json::from_str(data)
             .map_err(|_| TransportError::Stream("invalid SSE JSON".into()))?;
         match event.get("type").and_then(Value::as_str) {
+            Some("response.created") => {
+                let id = event
+                    .get("response")
+                    .and_then(|response| response.get("id"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| TransportError::Stream("created response missing id".into()))?;
+                if self.response_id.as_deref().is_some_and(|prior| prior != id) {
+                    return Err(TransportError::Stream("response identity changed".into()));
+                }
+                self.response_id = Some(id.to_owned());
+                Ok(None)
+            }
             Some("response.output_item.done") => {
                 let item = event
                     .get("item")
                     .cloned()
                     .ok_or_else(|| TransportError::Stream("missing done item".into()))?;
-                self.items.push(Item(item.clone()));
-                Ok(Some(StreamEvent::ItemDone(Item(item))))
+                let output_index = event
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .ok_or(TransportError::MissingOutputIndex)?;
+                let done = CompletedOutputItem {
+                    item: Item(item),
+                    output_index,
+                    sequence_number: event.get("sequence_number").and_then(Value::as_u64),
+                };
+                if let Some(previous) = self.items.get(&output_index) {
+                    if previous != done.item() {
+                        return Err(TransportError::ConflictingOutputIndex {
+                            index: output_index,
+                        });
+                    }
+                } else {
+                    self.items.insert(output_index, done.item.clone());
+                }
+                Ok(Some(StreamEvent::CompletedItem(done)))
             }
             Some(
                 kind @ ("response.output_text.delta"
@@ -110,6 +168,36 @@ impl ResponseAssembly {
                     .get("id")
                     .and_then(Value::as_str)
                     .ok_or_else(|| TransportError::Stream("missing response id".into()))?;
+                if self.response_id.as_deref().is_some_and(|prior| prior != id) {
+                    return Err(TransportError::Stream("response identity changed".into()));
+                }
+                // A nonempty terminal output array carries authoritative output
+                // positions, including items whose streamed events were absent.
+                // The Codex backend may omit this array's contents entirely.
+                if let Some(output) = response
+                    .get("output")
+                    .and_then(Value::as_array)
+                    .filter(|output| !output.is_empty())
+                {
+                    for (index, item) in output.iter().enumerate() {
+                        let item = Item(item.clone());
+                        if self
+                            .items
+                            .get(&(index as u64))
+                            .is_some_and(|prior| prior != &item)
+                        {
+                            return Err(TransportError::ConflictingOutputIndex {
+                                index: index as u64,
+                            });
+                        }
+                        self.items.insert(index as u64, item);
+                    }
+                    if self.items.len() != output.len() {
+                        return Err(TransportError::IncompleteOutputIndices {
+                            index: output.len() as u64,
+                        });
+                    }
+                }
                 let usage = response.get("usage").unwrap_or(&Value::Null);
                 let details = usage.get("input_tokens_details").unwrap_or(&Value::Null);
                 let output_details = usage.get("output_tokens_details").unwrap_or(&Value::Null);
@@ -157,22 +245,32 @@ impl ResponseAssembly {
                 Ok(None)
             }
             Some(kind @ ("response.failed" | "error")) => {
-                let (failure, error) = if kind == "response.failed" {
-                    (
-                        ProviderStreamFailureEvent::ResponseFailed,
-                        event
-                            .get("response")
-                            .and_then(|response| response.get("error")),
-                    )
+                let failure = if kind == "response.failed" {
+                    ProviderStreamFailureEvent::ResponseFailed
                 } else {
-                    (ProviderStreamFailureEvent::Error, Some(&event))
+                    ProviderStreamFailureEvent::Error
                 };
-                let field = |name: &str| error?.get(name)?.as_str();
+                let nested_error = match failure {
+                    ProviderStreamFailureEvent::ResponseFailed => event
+                        .get("response")
+                        .and_then(|response| response.get("error")),
+                    ProviderStreamFailureEvent::Error => {
+                        event.get("error").filter(|error| error.is_object())
+                    }
+                };
+                let field = |name: &str| {
+                    nested_error
+                        .and_then(|error| error.get(name)?.as_str())
+                        .or_else(|| match failure {
+                            ProviderStreamFailureEvent::ResponseFailed => None,
+                            ProviderStreamFailureEvent::Error => event.get(name)?.as_str(),
+                        })
+                };
                 Err(TransportError::ProviderStreamFailure {
                     event: failure,
                     diagnostic: super::http_error::diagnostic(
                         field("code"),
-                        None,
+                        nested_error.and_then(|error| error.get("type")?.as_str()),
                         field("param"),
                         field("message"),
                         token,
@@ -188,11 +286,24 @@ impl ResponseAssembly {
         let (response_id, usage) = self.completed.ok_or(TransportError::IncompleteResponse(
             super::StreamInterruption::MissingCompletion,
         ))?;
+        let mut items = Vec::with_capacity(self.items.len());
+        for (expected, (index, item)) in self.items.into_iter().enumerate() {
+            if index != expected as u64 {
+                return Err(TransportError::IncompleteOutputIndices {
+                    index: expected as u64,
+                });
+            }
+            items.push(item);
+        }
         Ok(ResponsesTurn {
             response_id,
-            items: self.items,
+            items,
             usage,
         })
+    }
+
+    pub(super) fn is_complete(&self) -> bool {
+        self.completed.is_some()
     }
 }
 
@@ -203,8 +314,11 @@ mod tests {
     #[test]
     fn item_done_supplies_phase_when_completed_output_is_empty() {
         let mut a = ResponseAssembly::default();
-        let done = r#"{"type":"response.output_item.done","item":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"ok"}]}}"#;
-        assert!(matches!(a.accept(done), Ok(Some(StreamEvent::ItemDone(_)))));
+        let done = r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"ok"}]}}"#;
+        assert!(matches!(
+            a.accept(done),
+            Ok(Some(StreamEvent::CompletedItem(_)))
+        ));
         let completed = r#"{"type":"response.completed","response":{"id":"resp_1","output":[],"usage":{"input_tokens":12,"output_tokens":2,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":4}}}}"#;
         assert!(matches!(a.accept(completed), Ok(None)));
         let turn = a.finish().expect("complete");
@@ -322,6 +436,79 @@ mod tests {
     }
 
     #[test]
+    fn nested_provider_errors_preserve_the_selected_diagnostic_envelope() {
+        // The public error event can carry the same error object as HTTP
+        // failures. Do not mistake the outer event type for an error class.
+        for error in [
+            serde_json::json!({"type":"subscription_sharing_error", "code":"subscription_sharing_unsupported_capability", "param":"tools[0]", "message":"Unsupported capability"}),
+            serde_json::json!({"type":"invalid_request_error", "code":"model_not_found", "param":"model", "message":"Model unavailable"}),
+        ] {
+            let packet = serde_json::json!({"type":"error", "error":error,
+                "code":"outer-unselected", "message":"outer-unselected",
+                "request":{"input":"private prompt"}, "unknown":"private metadata"});
+            let failure = ResponseAssembly::default()
+                .accept(&packet.to_string())
+                .unwrap_err();
+            let TransportError::ProviderStreamFailure {
+                event: ProviderStreamFailureEvent::Error,
+                diagnostic: Some(ref diagnostic),
+            } = failure
+            else {
+                panic!("nested provider diagnostic was discarded");
+            };
+            assert_eq!(diagnostic.code.as_deref(), error["code"].as_str());
+            assert_eq!(diagnostic.error_type.as_deref(), error["type"].as_str());
+            assert_eq!(diagnostic.param.as_deref(), error["param"].as_str());
+            assert_eq!(diagnostic.message.as_deref(), error["message"].as_str());
+            assert!(failure.request_failure().is_none());
+            let rendered = failure.to_string();
+            for excluded in ["outer-unselected", "private prompt", "private metadata"] {
+                assert!(!rendered.contains(excluded));
+            }
+        }
+        // Missing or malformed nested fields do not hide documented flat fields.
+        for nested in [
+            serde_json::Value::Null,
+            serde_json::json!(42),
+            serde_json::json!(["private"]),
+            serde_json::json!({}),
+            serde_json::json!({"message":42,"code":null}),
+        ] {
+            let packet =
+                serde_json::json!({"type":"error", "error":nested, "message":"Flat diagnostic"});
+            let TransportError::ProviderStreamFailure {
+                diagnostic: Some(diagnostic),
+                ..
+            } = ResponseAssembly::default()
+                .accept(&packet.to_string())
+                .unwrap_err()
+            else {
+                panic!("flat diagnostic was discarded");
+            };
+            assert_eq!(diagnostic.message.as_deref(), Some("Flat diagnostic"));
+            assert_eq!(diagnostic.error_type, None);
+        }
+    }
+    #[test]
+    fn partial_nested_error_fields_fall_back_to_valid_flat_fields() {
+        let packet = serde_json::json!({"type":"error", "code":"unselected-outer-code", "message":"Useful message", "param":"model",
+            "error":{"code":"specific-inner-code", "message":null, "param":42}});
+        let TransportError::ProviderStreamFailure {
+            diagnostic: Some(diagnostic),
+            ..
+        } = ResponseAssembly::default()
+            .accept(&packet.to_string())
+            .unwrap_err()
+        else {
+            panic!("partial nested provider diagnostic was discarded");
+        };
+        assert_eq!(diagnostic.code.as_deref(), Some("specific-inner-code"));
+        assert_eq!(diagnostic.message.as_deref(), Some("Useful message"));
+        assert_eq!(diagnostic.param.as_deref(), Some("model"));
+        assert_eq!(diagnostic.error_type, None);
+    }
+
+    #[test]
     fn provider_failure_diagnostics_share_bounds_and_credential_redaction() {
         let token = "active-request-secret";
         let account = "active-account-secret";
@@ -334,6 +521,7 @@ mod tests {
                 "code":format!("{}{}", "λ".repeat(255), token), "param":account, "message":message,
             }, "echoed_request":{"credentials":token}}}),
             serde_json::json!({"type":"error", "code":format!("{}{}", "λ".repeat(255), token), "param":account, "message":message, "authorization":token}),
+            serde_json::json!({"type":"error", "error":{"type":token,"code":format!("{}{}", "λ".repeat(255), token), "param":account, "message":message}, "authorization":token}),
         ] {
             let failure = ResponseAssembly::default()
                 .accept_with_credentials(&packet.to_string(), token, account)
@@ -406,24 +594,29 @@ mod lite_tests {
     #[test]
     fn lite_namespaced_tool_done_uses_existing_call_and_completion_contract() {
         let mut assembly = ResponseAssembly::default();
-        for (kind, name, payload) in [
+        for (index, (kind, name, payload)) in [
             (
                 "function_call",
                 "yield",
                 json!({"arguments":"{\"until\":null}"}),
             ),
             ("custom_tool_call", "cell", json!({"input":"raw Haskell λ"})),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut item = json!({"type":kind,"namespace":"functions","name":name,"call_id":format!("original-{name}"),"id":format!("item-{name}"),"encrypted_function_args":["retained"]});
             item.as_object_mut()
                 .unwrap()
                 .extend(payload.as_object().unwrap().clone());
-            let event = json!({"type":"response.output_item.done","item":item});
-            let Some(StreamEvent::ItemDone(retained)) =
+            let event =
+                json!({"type":"response.output_item.done","output_index":index,"item":item});
+            let Some(StreamEvent::CompletedItem(done)) =
                 assembly.accept(&event.to_string()).unwrap()
             else {
                 panic!("completed call expected");
             };
+            let retained = done.item();
             assert_eq!(retained.0, item);
             let call = retained.tool_call().unwrap().unwrap();
             assert_eq!(call.call_id.0, format!("original-{name}"));

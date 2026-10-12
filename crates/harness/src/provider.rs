@@ -156,6 +156,8 @@ impl CallContext {
 pub enum ProviderError {
     Tool(ToolFailure),
     NonValueTerminal(NonValueTerminal),
+    /// The owning host permanently closed admission for the next request.
+    RequestAdmissionClosed,
 }
 
 /// A value-only direct call cannot faithfully return these recorded terminals.
@@ -171,6 +173,7 @@ impl std::fmt::Display for ProviderError {
     fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Tool(failure) => failure.fmt_provider(output),
+            Self::RequestAdmissionClosed => write!(output, "host request admission closed"),
             Self::NonValueTerminal(NonValueTerminal::Cancelled) => {
                 write!(
                     output,
@@ -205,7 +208,9 @@ impl ProviderError {
     pub fn into_tool_failure(self) -> ToolFailure {
         match self {
             Self::Tool(failure) => failure.with_tool_prefix(),
-            error @ Self::NonValueTerminal(_) => error.to_string().into(),
+            error @ (Self::NonValueTerminal(_) | Self::RequestAdmissionClosed) => {
+                error.to_string().into()
+            }
         }
     }
 }
@@ -308,12 +313,28 @@ pub enum CancellationAcknowledgment {
 
 #[async_trait]
 pub trait CancellationOwner: Send + Sync {
+    /// Choose who owns the cancellation observation's lifetime. OwnerSettlement
+    /// requires an independently retained terminal or owner-loss outcome and
+    /// idempotent cancellation of the exact operation. Dropping this observer
+    /// must not stop that owner or discard its eventual cleanup evidence.
+    fn cancellation_wait(&self) -> CancellationWait {
+        CancellationWait::ProviderGrace
+    }
+
     /// Stop or reconcile the exact admitted operation. A signal alone is not Stopped.
     async fn cancel(
         &self,
         operation: &OperationId,
         handle: &JobHandle,
     ) -> CancellationAcknowledgment;
+}
+
+/// A provider observer may need a scheduler safeguard; supervised work already
+/// has a lifecycle owner whose terminal includes cleanup and owner loss.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CancellationWait {
+    ProviderGrace,
+    OwnerSettlement,
 }
 
 /// Draft disposition belongs to the complete invocation, never streamed output.
@@ -378,7 +399,8 @@ pub trait Provider: Send + Sync {
         None
     }
 
-    /// Acknowledge an exact operation after its real terminal output is durable.
+    /// Acknowledge a provider-issued operation after its real terminal output is durable.
+    /// Engine-owned waits settle without a provider completion notification.
     /// Recovery can repeat this notification; implementations must be idempotent.
     /// Failure leaves the retained output intact and never re-executes the call.
     async fn output_committed(&self, _operation: &OperationId) -> Result<(), ProviderError> {

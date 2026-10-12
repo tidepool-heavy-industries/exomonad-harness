@@ -91,6 +91,12 @@ pub struct CommandReceipt {
     rename_all_fields = "camelCase"
 )]
 pub enum CommandReceiptOutcome {
+    RecoveryAuthorized {
+        target: HostActorIdentity,
+        block: crate::embedding::InferenceBlock,
+        mode: crate::embedding::RecoveryMode,
+        projection: crate::context::RecoveryProjectionReceipt,
+    },
     Admitted {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<HostActorIdentity>,
@@ -262,6 +268,7 @@ mod tests {
             model_conversation: Some("/root/old".into()),
             model_head_request: None,
             active_round: None,
+            inference: None,
         };
         let old_wire = serde_json::to_value(&actor).unwrap();
         assert!(old_wire.get("modelHeadRequest").is_none());
@@ -298,6 +305,7 @@ mod tests {
             model_conversation: None,
             model_head_request: None,
             active_round: None,
+            inference: None,
         };
         let frame = WsServerFrame::Snapshot {
             snapshot: Snapshot {

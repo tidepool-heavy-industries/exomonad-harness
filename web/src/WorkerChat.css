@@ -17,5 +17,31 @@
 .actor-operations .toolbar h2 { margin: 0; }
 .actor-output { max-height: 45vh; overflow: auto; margin-block: 12px; }
 .actor-output pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.unified-chat, .mounted-form { margin-block: 12px; }
+.unified-chat { max-height: 65vh; overflow: auto; }
+.unified-entries > [role="listitem"] { border-bottom: 1px solid var(--line); padding-block: 8px; }
+.rich-view-text, .rich-view-markdown, .rich-view-inspection pre, .mounted-form pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.rich-view-row { display: flex; align-items: flex-start; gap: 8px; }
+.rich-view-column, .form-group { display: grid; gap: 8px; }
+.rich-view-caption { margin: 0; }
+.rich-view-caption figcaption { color: var(--muted); font-size: .9em; }
+.rich-view-truncated { border-inline-start: 2px solid var(--pending); color: var(--pending); padding-inline-start: 6px; font-size: .9em; }
+.rich-view-image { display: block; max-width: 100%; max-height: 30rem; object-fit: contain; }
+.form-section, .mounted-form fieldset { border: 1px solid var(--line); margin-block: 8px; padding: 8px; min-width: 0; }
+.form-option, .form-field { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; margin-block: 6px; }
+.form-option .rich-view { grid-column: 2; }
+.form-option input { margin-top: 4px; }
+.form-option .rich-view pre, .form-option .rich-view p { margin-block: 0 6px; }
+.form-toggle { display: flex; gap: 8px; align-items: center; margin-block: 8px; }
+.form-fixed-field { display: grid; grid-template-columns: minmax(8rem, 12rem) minmax(0, 1fr); gap: 8px; margin-block: 8px; }
+.form-fixed-field dd { margin: 0; white-space: pre-wrap; }
+.form-fixed-options { list-style: none; padding: 0; margin: 0; }
+.form-fixed-options li { display: grid; grid-template-columns: 7rem minmax(0, 1fr); gap: 8px; margin-block: 8px; }
+.form-selection { font-weight: 600; }
+.form-fixed-options pre, .form-fixed-options p { margin-block: 0 6px; }
+.form-field input { grid-column: 2; }
+.form-actions { display: flex; gap: 8px; margin-block: 8px; }
+.form-errors { color: var(--failed); }
+.form-answer { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
 @media (min-width: 1000px) { .actor-details { grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr); } }
 @media (max-width: 700px) { .worker-chat { grid-template-columns: minmax(0, 1fr); } .worker-chat-list { max-height: 16rem; border-inline-end: 0; border-bottom: 1px solid var(--line); padding-inline-end: 0; } }

@@ -25,6 +25,25 @@ use tokio::{
 
 const JOB_CANCELLATION_GRACE: Duration = Duration::from_millis(250);
 
+async fn await_owner_cancellation(
+    owner: &dyn crate::provider::CancellationOwner,
+    operation: &OperationId,
+    handle: &JobHandle,
+) -> crate::provider::CancellationAcknowledgment {
+    use crate::provider::{CancellationAcknowledgment, CancellationWait};
+
+    match owner.cancellation_wait() {
+        CancellationWait::OwnerSettlement => owner.cancel(operation, handle).await,
+        CancellationWait::ProviderGrace => {
+            tokio::time::timeout(JOB_CANCELLATION_GRACE, owner.cancel(operation, handle))
+                .await
+                .unwrap_or_else(|_| {
+                    CancellationAcknowledgment::Unconfirmed("owner acknowledgment timed out".into())
+                })
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum JobOutput {
     Completed(Result<Value, ToolFailure>),
@@ -583,11 +602,9 @@ impl JobScheduler {
             tokio::pin!(call);
             let mut result = loop {
                 tokio::select! {
-                    event = progress_rx.recv() => {
-                        if let Some(event) = event {
-                            if let Some(job) = jobs.lock().await.get_mut(&task_operation) {
-                                retain_progress(&mut job.progress, event);
-                            }
+                    Some(event) = progress_rx.recv() => {
+                        if let Some(job) = jobs.lock().await.get_mut(&task_operation) {
+                            retain_progress(&mut job.progress, event);
                         }
                     }
                     result = &mut call => break result,
@@ -918,13 +935,7 @@ impl JobScheduler {
                 }
                 job.cancel.cancel();
             }
-            let ack = tokio::time::timeout(JOB_CANCELLATION_GRACE, owner.cancel(&call_id, &handle))
-                .await
-                .unwrap_or_else(|_| {
-                    crate::provider::CancellationAcknowledgment::Unconfirmed(
-                        "owner acknowledgment timed out".into(),
-                    )
-                });
+            let ack = await_owner_cancellation(owner.as_ref(), &call_id, &handle).await;
             // The native terminal can precede the ordinary result waiter. Its
             // publication metadata must be retained before waking the Engine.
             // Projection calls the invocation owner outside the scheduler lock.
@@ -1104,13 +1115,7 @@ impl JobScheduler {
                 Some(crate::provider::CancellationAcknowledgment::Unconfirmed(_)) => {}
             }
         }
-        let ack = tokio::time::timeout(JOB_CANCELLATION_GRACE, owner.cancel(&call_id, &handle))
-            .await
-            .unwrap_or_else(|_| {
-                crate::provider::CancellationAcknowledgment::Unconfirmed(
-                    "owner acknowledgment timed out".into(),
-                )
-            });
+        let ack = await_owner_cancellation(owner.as_ref(), &call_id, &handle).await;
         let task = {
             let mut jobs = self.jobs.lock().await;
             let job = jobs.get_mut(&call_id).ok_or(JobError::UnknownCall)?;
@@ -1336,6 +1341,7 @@ pub async fn wait_agent_and_drain(
 /// Wait for the first asynchronous event without consuming its payload from
 /// model history. After it returns, callers append `outputs_in_call_order`
 /// results first and then render the returned resume status/envelope.
+/// A closed mailbox leaves independent jobs and cancellation observable.
 pub async fn wait_agent(
     envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<Envelope>,
     jobs: &JobScheduler,
@@ -1355,10 +1361,8 @@ pub async fn wait_agent(
     }
     loop {
         tokio::select! {
-            envelope = envelopes.recv() => {
-                if let Some(envelope) = envelope {
-                    return WaitResume::Envelope(envelope);
-                }
+            Some(envelope) = envelopes.recv() => {
+                return WaitResume::Envelope(envelope);
             }
             event = settlements.recv() => match event {
                 Ok(call_id) if outstanding_calls_in_order.contains(&call_id)
@@ -1672,6 +1676,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn closed_progress_does_not_repoll_pending_provider() {
+        use std::future::{Future, poll_fn};
+        use std::pin::Pin;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DroppedProgress {
+            polls: Arc<AtomicUsize>,
+            started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        }
+
+        #[async_trait]
+        impl Provider for DroppedProgress {
+            async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+                unreachable!("context-aware call expected")
+            }
+
+            async fn call_with_context(
+                &self,
+                _: &str,
+                _: Value,
+                context: CallContext,
+            ) -> Result<Value, ProviderError> {
+                context
+                    .progress
+                    .try_send(json!({"phase": "ready"}))
+                    .unwrap();
+                drop(context);
+                let mut started = self.started.lock().unwrap().take();
+                let mut release = self.release.lock().unwrap().take().unwrap();
+                poll_fn(|cx| {
+                    self.polls.fetch_add(1, Ordering::SeqCst);
+                    if let Some(started) = started.take() {
+                        started.send(()).unwrap();
+                    }
+                    Pin::new(&mut release).poll(cx)
+                })
+                .await
+                .unwrap();
+                Ok(json!({"ok": true}))
+            }
+
+            fn tools(&self) -> Vec<Value> {
+                vec![]
+            }
+        }
+
+        let scheduler = JobScheduler::new(1).unwrap();
+        let call_id = CallId("closed-progress".into());
+        let polls = Arc::new(AtomicUsize::new(0));
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        scheduler
+            .start(
+                Arc::new(DroppedProgress {
+                    polls: polls.clone(),
+                    started: std::sync::Mutex::new(Some(started)),
+                    release: std::sync::Mutex::new(Some(release_rx)),
+                }),
+                call_id.clone(),
+                "pending".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        started_rx.await.unwrap();
+        // Drain the receiver-close wake before observing the dormant call.
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+        let dormant_polls = polls.load(Ordering::SeqCst);
+        assert_eq!(scheduler.output(&call_id).await.unwrap(), None);
+        assert_eq!(
+            scheduler.progress(&call_id).await.unwrap(),
+            vec![json!({"phase": "ready"})]
+        );
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(polls.load(Ordering::SeqCst), dormant_polls);
+        release.send(()).unwrap();
+        assert_eq!(
+            scheduler.wait(&call_id).await.unwrap(),
+            JobOutput::Completed(Ok(json!({"ok": true})))
+        );
+    }
+
+    #[tokio::test]
     async fn concurrent_start_and_cancel_never_loses_provider_task_handle() {
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -1892,10 +1984,88 @@ mod tests {
             1,
         );
         tx.send(expected.clone()).unwrap();
+        drop(tx);
         assert_eq!(
             wait_agent(&mut rx, &scheduler, &mut cancel_rx, &[]).await,
             WaitResume::Envelope(expected)
         );
+    }
+
+    #[tokio::test]
+    async fn closed_mailbox_waits_without_self_waking_and_preserves_job_and_cancellation() {
+        use std::future::Future;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Poll, Wake, Waker};
+
+        #[derive(Default)]
+        struct CountWake(AtomicUsize);
+
+        impl Wake for CountWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        struct Gated(std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>);
+
+        #[async_trait]
+        impl Provider for Gated {
+            async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+                let release = self.0.lock().unwrap().take().unwrap();
+                release.await.unwrap();
+                Ok(json!({"ok": true}))
+            }
+
+            fn tools(&self) -> Vec<Value> {
+                vec![]
+            }
+        }
+
+        let scheduler = JobScheduler::new(1).unwrap();
+        let call_id = CallId("closed-mailbox-pending".into());
+        let (release, released) = tokio::sync::oneshot::channel();
+        scheduler
+            .start(
+                Arc::new(Gated(std::sync::Mutex::new(Some(released)))),
+                call_id.clone(),
+                "pending".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        let (incoming, mut envelopes) = tokio::sync::mpsc::unbounded_channel();
+        drop(incoming);
+        let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
+        let wakes = Arc::new(CountWake::default());
+        let waker = Waker::from(wakes.clone());
+        let mut cx = Context::from_waker(&waker);
+        let outstanding = [call_id.clone()];
+        let result = {
+            let waiting =
+                wait_agent_and_drain(&mut envelopes, &scheduler, &mut cancelled, &outstanding);
+            tokio::pin!(waiting);
+            assert!(matches!(waiting.as_mut().poll(&mut cx), Poll::Pending));
+            assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+            release.send(()).unwrap();
+            waiting.await.unwrap()
+        };
+        assert_eq!(result.resumed_by, WaitResume::Job(call_id.clone()));
+        assert_eq!(
+            result.call_outputs,
+            vec![(call_id, JobOutput::Completed(Ok(json!({"ok": true}))))]
+        );
+
+        wakes.0.store(0, Ordering::SeqCst);
+        let waiting = wait_agent(&mut envelopes, &scheduler, &mut cancelled, &[]);
+        tokio::pin!(waiting);
+        assert!(matches!(waiting.as_mut().poll(&mut cx), Poll::Pending));
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+        cancel.send(true).unwrap();
+        assert_eq!(waiting.await, WaitResume::Cancelled);
     }
 
     #[tokio::test]

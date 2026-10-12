@@ -16,6 +16,7 @@ axum.workspace = true
 blake3.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
+roxmltree.workspace = true
 rusqlite.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -25,3 +26,6 @@ tracing.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

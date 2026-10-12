@@ -18,7 +18,11 @@ Engine loads each history window with its existing ordered content hashes.
 Unmodified history reuses those hashes for decision evidence and replay.
 Projected and hook-injected Items are interned as their exact issued values.
 Store seals these references before transport starts, so compaction, late
-output and subsequent request history cannot rewrite an issued window.
+output and subsequent request history cannot rewrite an issued window. Each
+issued output position also retains its exact canonical origin and operation.
+Store validates this aligned ownership against the captured occurrence cut;
+provider body projections preserve the owner, while injected Items carry none.
+The live sealed request cannot be constructed by deserializing stored data.
 
 Completed `model_turn` events use replay format `1`: ordered input and response
 Item hashes, instruction and manifest hashes, and the exact request scalar
@@ -55,6 +59,42 @@ their original Item bytes rather than interpreting an `error` key as failure
 or silently treating an unknown result as success. Ordinary diagnostic Item
 reads remain available. Successful tool payloads containing `error` or
 `failure` fields remain successful.
+
+Schema `15` stores the exact request-scoped `OperationId` on each published
+function or custom tool output occurrence. Store checks retained terminal claim
+authority and publishes its canonical Item in one transaction. Copies carry
+this identity with the original occurrence; recovery pairs by this identity,
+including late asynchronous outputs after a successor reuses the wire call ID.
+Identical output bytes and hashes do not establish operation ownership.
+
+The additive migration leaves historical unbound outputs unchanged. Ordinary
+Item reads remain available; recovery and context grouping explicitly refuse
+those outputs with `UnboundOutputPublication`. Missing or inconsistent issuance
+metadata is a refusal. There is no positional reconstruction or blanket call
+ID uniqueness requirement across requests.
+
+Generic request, append, inbox and seed writers reject fresh tool outputs;
+publication requires an exact retained operation and claimant. Here snapshots,
+checkpoints and context rewrites copy the canonical occurrence metadata. Claim
+copies preserve the nearest exact claimant's current state atomically, including
+settlement that finishes before the copy transaction.
+
+The invocation's storage request identifies issuance, while the consuming
+branch determines the nearest claimant. A context rewrite uses its current
+head for claim selection. Validated restored native references can fall back
+to their historical source when that branch has no claimant. Compaction carries
+claims for every retained invocation, including completed exchanges, so a
+replacement cut retains terminal state as well as output ownership.
+
+Server compaction returns raw Items. Its Store boundary reconciles tool Items
+against the occurrence sidecar captured for the actual issued context. Internal
+retained users and pending calls carry explicit source selections. An ambiguous
+or unowned raw tool Item refuses the whole boundary; ordinary messages can be
+fresh authored content without selecting an earlier occurrence. Replay output visibility and wait continuation consume saved ownership at the
+issued position. A later operation publishing identical bytes cannot change an
+earlier cut. Historical records without this sidecar and Item-only seals remain
+readable, but they cannot grant output occurrence or wait continuation authority.
+Neither boundary uses a wire call ID to select operation ownership.
 
 Offline tests compare normalized issued requests after reopening, preserve
 projected/injected and unknown fields, reject old formats without modifying

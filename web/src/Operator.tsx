@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import App from './App'
+import { CommandCorrelations } from './command-correlations'
 import { clearDrafts } from './drafts'
 import { clearWorkerChatRetention } from './WorkerChat'
 import { createViewProjector } from './integration'
@@ -116,7 +117,7 @@ export function Operator() {
     let priorRun: string | undefined
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined
     let connectTimer: ReturnType<typeof setTimeout> | undefined
-    const sent = new Map<string, HostCommandSubmission>()
+    const sent = new CommandCorrelations()
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const socket = new WebSocket(`${protocol}//${location.host}/api/ws`)
     const phase = (next: TransportPhase) => {
@@ -208,7 +209,7 @@ export function Operator() {
           return
         }
         if (!isOperationId(commandId)) return
-        const original = sent.get(canonicalOperationId(commandId))
+        const original = sent.accepted(commandId)
         if (original) {
           updatePending(observeCommand(pendingRef.current, original.command.target.run, commandId, { accepted: true }))
           setAcceptedCommandIds((ids) => ids.includes(canonicalOperationId(commandId)) ? ids : [...ids, canonicalOperationId(commandId)].slice(-128))
@@ -222,7 +223,7 @@ export function Operator() {
       refused(refusal) {
         if (!active || disconnected) return
         setFailure(refusal.reason)
-        const original = refusal.operation_id === null ? undefined : sent.get(canonicalOperationId(refusal.operation_id))
+        const original = refusal.operation_id === null ? undefined : sent.refused(refusal.operation_id)
         if (original && refusal.operation_id) {
           updatePending(observeCommand(pendingRef.current, original.command.target.run, refusal.operation_id, { localRefusal: refusal }))
         } else setDemoFeedback(refusal.reason)
@@ -231,7 +232,7 @@ export function Operator() {
     connectionRef.current = {
       send(command) {
         const observation = connection.send(command)
-        if (typeof command !== 'string' && observation !== 'not_sent') sent.set(canonicalOperationId(command.operation_id), command)
+        if (typeof command !== 'string') sent.sent(command, observation)
         return observation
       },
       dispose: connection.dispose,

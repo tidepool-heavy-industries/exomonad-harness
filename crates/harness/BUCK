@@ -15,6 +15,7 @@ HARNESS_DEPS = [
     "//third-party/rust:blake3",
     "//third-party/rust:futures-util",
     "//third-party/rust:reqwest",
+    "//third-party/rust:roxmltree",
     "//third-party/rust:rusqlite",
     "//third-party/rust:schemars",
     "//third-party/rust:serde",
@@ -26,7 +27,7 @@ HARNESS_DEPS = [
     "//third-party/rust:uuid",
 ]
 
-HARNESS_SRCS = glob(["src/**/*.rs"]) + ["src/store/schema.sql"]
+HARNESS_SRCS = glob(["src/**/*.rs", "src/store/fixtures/*.json"]) + ["src/store/schema.sql"]
 
 # The bundle identity covers declared production inputs without forcing source
 # hashing or web actions into Rust library compilation.
@@ -68,7 +69,9 @@ rust_test(
     crate_root = "src/lib.rs",
     edition = "2024",
     srcs = HARNESS_SRCS + ["tests/support/replay.rs"],
-    deps = HARNESS_DEPS,
+    deps = HARNESS_DEPS + ["//third-party/rust:proptest"],
+    # The counted focused runner executes from this package directory.
+    env = {"HARNESS_PROPTEST_REGRESSIONS": "proptest-regressions/finalize.txt"},
 )
 
 rust_binary(

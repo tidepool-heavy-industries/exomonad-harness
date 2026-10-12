@@ -1,4 +1,5 @@
 use super::*;
+use crate::transport::{ResponsesProtocol, ResponsesRoute};
 use serde_json::Value;
 use std::{collections::VecDeque, sync::Mutex};
 
@@ -24,6 +25,10 @@ struct Script {
 }
 #[async_trait::async_trait]
 impl ResponsesTransport for Script {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         self.requests.lock().unwrap().push(request);
         self.turns
@@ -148,7 +153,7 @@ async fn rejected_request_retains_exact_head_history_and_explicit_successor() {
 #[tokio::test]
 async fn failure_persistence_error_is_fatal_and_stream_error_is_not_rejection() {
     let (engine, store, _) = engine(TransportError::Authentication);
-    store.lock().execute_batch("CREATE TRIGGER reject_failure BEFORE INSERT ON events WHEN NEW.kind='request_failed' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
+    store.lock().unwrap().execute_batch("CREATE TRIGGER reject_failure BEFORE INSERT ON events WHEN NEW.kind='request_failed' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
     let (_cancel, cancellation) = watch::channel(false);
     let error = engine
         .run(None, Vec::new(), cancellation.clone(), mailbox())
@@ -195,7 +200,11 @@ async fn rejection_cleanup_error_remains_fatal_without_failed_event() {
         completion: PendingCompletion::BlocksCompletion,
     };
     // A damaged claim owner cannot certify that cleanup settled.
-    store.lock().execute_batch("DROP TABLE claims").unwrap();
+    store
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TABLE claims")
+        .unwrap();
     let error = engine
         .reject_or_cleanup(TransportError::Authentication, None, &request, &[pending])
         .await;
@@ -364,6 +373,61 @@ async fn incomplete_response_retains_pending_frontier_and_requires_explicit_reco
                 .iter()
                 .any(|e| e.kind == "request_failed")
         );
+        assert!(matches!(
+            engine
+                .run_recovering_embedded(
+                    None,
+                    vec![],
+                    cancel.clone(),
+                    tokio::sync::mpsc::unbounded_channel().1
+                )
+                .await,
+            Err(EngineError::InferenceBlocked { .. })
+        ));
+        let queued = Item(json!({"type":"message","role":"user","content":"queued after EOF"}));
+        store
+            .admit_embedded_input(&identity, "after-eof", "human", &queued)
+            .unwrap();
+        assert!(matches!(
+            engine
+                .run_embedded(
+                    None,
+                    vec![],
+                    cancel.clone(),
+                    tokio::sync::mpsc::unbounded_channel().1
+                )
+                .await,
+            Err(EngineError::InferenceBlocked { .. })
+        ));
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert_eq!(store.unread(&identity.actor.0).unwrap().len(), 1);
+        let crate::embedding::HostInferenceState::Blocked { block } =
+            store.embedded_inference_state(&identity).unwrap()
+        else {
+            panic!("durable block");
+        };
+        let recovery = crate::embedding::ClientOperationId(uuid::Uuid::new_v4());
+        store
+            .enqueue_embedded_command(
+                recovery,
+                &crate::server::HostCommand::Recover {
+                    target: identity.clone(),
+                    expected_block: block,
+                    mode: crate::embedding::RecoveryMode::Exact,
+                },
+            )
+            .unwrap();
+        store
+            .claim_embedded_command(&identity.run, recovery)
+            .unwrap()
+            .unwrap();
+        let receipt = store
+            .authorize_embedded_recovery(&identity, recovery)
+            .unwrap();
+        assert!(matches!(
+            receipt.outcome,
+            crate::server::CommandReceiptOutcome::RecoveryAuthorized { .. }
+        ));
         let completed = engine
             .run_recovering_embedded(
                 None,
@@ -374,6 +438,13 @@ async fn incomplete_response_retains_pending_frontier_and_requires_explicit_reco
             .await
             .unwrap();
         assert_eq!(requests.lock().unwrap().len(), 2);
+        assert_eq!(
+            store
+                .authorize_embedded_recovery(&identity, recovery)
+                .unwrap(),
+            receipt
+        );
+        assert!(requests.lock().unwrap()[1].input.contains(&queued));
         assert_eq!(
             store
                 .request(&completed.head_request)
@@ -409,7 +480,11 @@ async fn incomplete_response_cleanup_uncertainty_never_publishes_resumable_outco
         queued: false,
         completion: PendingCompletion::BlocksCompletion,
     };
-    store.lock().execute_batch("DROP TABLE claims").unwrap();
+    store
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TABLE claims")
+        .unwrap();
     let error = engine
         .reject_or_cleanup(
             TransportError::IncompleteResponse(

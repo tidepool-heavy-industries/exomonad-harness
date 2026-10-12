@@ -1,11 +1,12 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import WorkerChat, { clearWorkerChatRetention } from './WorkerChat'
 import type { RouteState } from './client-contract'
 import { actorIdentityKey } from './protocol'
 import { HistoryReadError, readHistoryPage, type HistoryPage } from './history-client'
 import type { HarnessViewModel } from './view-model'
 vi.mock('./history-client', async original => ({ ...await original<typeof import('./history-client')>(), readHistoryPage: vi.fn() }))
+afterEach(() => vi.unstubAllGlobals())
 const identity = { run: 'run', actor: '/root/worker', incarnation: 'one' }
 const actor = { id: actorIdentityKey(identity), name: identity.actor, run: identity.run, incarnation: identity.incarnation,
   kind: 'model' as const, lifecycle: 'running', modelConversation: 'conversation' }
@@ -150,6 +151,20 @@ describe('exact worker Chat', () => {
     mounted.rerender(<WorkerChat data={data} route={route} navigate={navigate} transportPhase="ready" issue="Malformed exact link" />)
     expect(screen.getByRole('alert')).toHaveTextContent('Malformed exact link')
     expect(readHistoryPage).not.toHaveBeenCalled()
+  })
+  it('shows unified native output and forms for a workflow actor', async () => {
+    const outputOrigin = { run: 'run', nativeActor: 7, incarnation: 1 }
+    const output = { reference: { origin: outputOrigin, sequence: 3 }, emission: { origin: outputOrigin,
+      id: { displaySlot: 1, pageOrdinal: 1 }, execution: { kind: 'actor_program' }, conversation: null,
+      page: { text: 'Workflow output', expansions: [], unavailable: false } } }
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ origin: outputOrigin, cutoverSequence: 0,
+      legacyHistory: false, entries: [{ sequence: 3, kind: 'output', output }], nextAfter: null }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const workflow = { ...actor, kind: 'workflow' as const, outputOrigin }
+    render(chat({ ...data, actors: [workflow] }))
+    expect(await screen.findByText('Workflow output')).toBeVisible()
+    expect(screen.getByRole('heading', { name: 'Mailbox messages' })).toBeVisible()
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/chat?')
   })
   it('aborts an old selected read, ignores its late result, and reconnects to the exact new head', async () => {
     let resolveOld: ((page: HistoryPage) => void) | undefined

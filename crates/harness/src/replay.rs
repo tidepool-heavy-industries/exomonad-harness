@@ -239,7 +239,7 @@ impl ReplayProvider {
             TerminalOutcome::CancelledWithReceipt(receipt) => {
                 JobOutput::CancelledWithReceipt(receipt)
             }
-            TerminalOutcome::Interrupted => JobOutput::Interrupted,
+            TerminalOutcome::NotStarted | TerminalOutcome::Interrupted => JobOutput::Interrupted,
             TerminalOutcome::CancellationUnconfirmed(detail) => {
                 JobOutput::CancellationUnconfirmed(detail)
             }
@@ -291,67 +291,63 @@ impl ReplayProvider {
         Ok(evidence)
     }
 
-    // Find the first immutable issued input containing this output after its
-    // invocation. Count prior identical items so reused wire call ids cannot
-    // borrow visibility from an older operation.
-    fn output_cut_unchecked(
-        &self,
-        original: &OperationId,
-        output: &JobOutput,
-    ) -> Option<(usize, usize)> {
-        let call = self.calls.get(original)?;
-        let item = crate::item::Item::tool_output(&original.call, call.kind, output);
-        let prior = self.turns[call.issued]
-            .model_request
-            .input
-            .iter()
-            .filter(|saved| **saved == item)
-            .count();
-        for (index, turn) in self.turns.iter().enumerate().skip(call.issued + 1) {
-            if let Some((position, _)) = turn
-                .model_request
-                .input
-                .iter()
-                .enumerate()
-                .filter(|(_, saved)| **saved == item)
-                .nth(prior)
-            {
-                return Some((index, position));
-            }
-        }
-        None
-    }
-
+    // Visibility belongs to the sealed output occurrence at its issued position.
     fn output_cut(
         &self,
         original: &OperationId,
         output: &JobOutput,
     ) -> Result<Option<(usize, usize)>, ProviderError> {
-        let cut = self.output_cut_unchecked(original, output);
-        if let Some(cut) = cut {
-            let item =
-                crate::item::Item::tool_output(&original.call, self.calls[original].kind, output);
-            for (other, call) in &self.calls {
-                if other == original || other.call != original.call || call.issued >= cut.0 {
-                    continue;
+        let call = self.calls.get(original).ok_or_else(|| {
+            ProviderError::Tool("recorded output has no issuing invocation".into())
+        })?;
+        let item = crate::item::Item::tool_output(&original.call, call.kind, output);
+        let output_hash = crate::item::ItemHash(
+            blake3::hash(&serde_json::to_vec(&item).expect("Item serialization is infallible"))
+                .to_hex()
+                .to_string(),
+        );
+        for (index, turn) in self.turns.iter().enumerate().skip(call.issued + 1) {
+            let Some(owners) = &turn.issued_outputs else {
+                if turn.model_request.input.iter().any(|saved| {
+                    matches!(
+                        saved.0["type"].as_str(),
+                        Some("function_call_output" | "custom_tool_call_output")
+                    ) && saved.0["call_id"] == original.call.0
+                }) {
+                    return Err(ProviderError::Tool(
+                        "recorded input has no immutable output ownership".into(),
+                    ));
                 }
-                let saved = self
-                    .store
-                    .replay_tool_output_operation(other)
-                    .map_err(|error| {
-                        ProviderError::Tool(format!("validating replay occurrence: {error}").into())
-                    })?;
-                if let Some(saved) = saved {
-                    if saved.item == item && self.output_cut_unchecked(other, output) == Some(cut) {
+                continue;
+            };
+            let positions = owners
+                .iter()
+                .enumerate()
+                .filter_map(|(position, owner)| {
+                    owner
+                        .as_ref()
+                        .filter(|owner| owner.operation == *original)
+                        .map(|_| position)
+                })
+                .collect::<Vec<_>>();
+            match positions.as_slice() {
+                [] => {}
+                [position] => {
+                    if owners[*position].as_ref().unwrap().origin.hash != output_hash {
                         return Err(ProviderError::Tool(
-                            "recorded output occurrence belongs to multiple exact operations"
-                                .into(),
+                            "recorded output differs from its issued source".into(),
                         ));
                     }
+                    return Ok(Some((index, *position)));
+                }
+                _ => {
+                    return Err(ProviderError::Tool(
+                        "recorded input duplicates an exact output occurrence".into(),
+                    ));
                 }
             }
         }
-        Ok(cut)
+        Ok(None)
     }
 
     fn local_operation(&self, original: &OperationId, local: &OperationId) -> Option<OperationId> {
@@ -564,6 +560,20 @@ impl ReplayProvider {
 
 #[async_trait]
 impl ResponsesTransport for ReplayProvider {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            crate::transport::ResponsesRoute,
+            crate::transport::ResponsesProtocol,
+        ),
+        TransportError,
+    > {
+        self.turns
+            .get(*lock(&self.progress.cursor))
+            .and_then(|turn| turn.provider_contract)
+            .ok_or(TransportError::UnprovenResponseContract)
+    }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         self.next_turn(None, request)
     }
@@ -574,8 +584,12 @@ impl ResponsesTransport for ReplayProvider {
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         let turn = self.next_turn(Some(local), request)?;
-        for item in &turn.items {
-            let _ = sink.send(StreamEvent::ItemDone(item.clone())).await;
+        for (index, item) in turn.items.iter().enumerate() {
+            let done = crate::transport::sse::CompletedOutputItem::from_complete_response(
+                item.clone(),
+                index as u64,
+            );
+            let _ = sink.send(StreamEvent::CompletedItem(done)).await;
         }
         Ok(turn)
     }
@@ -583,6 +597,17 @@ impl ResponsesTransport for ReplayProvider {
 
 #[async_trait]
 impl ResponsesTransport for Arc<ReplayProvider> {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            crate::transport::ResponsesRoute,
+            crate::transport::ResponsesProtocol,
+        ),
+        TransportError,
+    > {
+        self.as_ref().response_contract()
+    }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         self.as_ref().create(request).await
     }
@@ -993,7 +1018,7 @@ mod tests {
 
     #[tokio::test]
     async fn transport_records_requests_and_consumes_turns_in_order() {
-        let replay = ReplayTransport::new([turn("r1"), turn("r2")]);
+        let replay = ReplayTransport::scripted_codex_standard([turn("r1"), turn("r2")]);
         assert_eq!(
             replay.create(request("s1")).await.unwrap().response_id,
             "r1"
@@ -1017,7 +1042,10 @@ mod tests {
 
     #[tokio::test]
     async fn gated_transport_waits_for_each_boundary_release() {
-        let replay = Arc::new(ReplayTransport::gated([turn("r1"), turn("r2")]));
+        let replay = Arc::new(ReplayTransport::scripted_codex_standard_gated([
+            turn("r1"),
+            turn("r2"),
+        ]));
         let running = {
             let replay = replay.clone();
             tokio::spawn(async move {
@@ -1059,8 +1087,10 @@ mod tests {
                 },
             )
         };
-        let replay =
-            Arc::new(ReplayTransport::gated([turn("r1"), turn("r2")]).with_observer(observer));
+        let replay = Arc::new(
+            ReplayTransport::scripted_codex_standard_gated([turn("r1"), turn("r2")])
+                .with_observer(observer),
+        );
         let running = {
             let replay = replay.clone();
             tokio::spawn(async move {
@@ -1113,7 +1143,7 @@ mod tests {
         let source_store = Arc::new(Store::open(&path).unwrap());
         let source_scheduler = Arc::new(JobScheduler::new(2).unwrap());
         let source_engine = Engine::<OfflineAuth, EchoTool, _>::with_transport(
-            ReplayTransport::new([
+            ReplayTransport::scripted_codex_standard([
                 ResponsesTurn {
                     response_id: "echo-call".into(),
                     items: vec![call.clone()],
@@ -1491,6 +1521,7 @@ mod tests {
         let changed = Item::tool_output(&operation.call, ToolKind::Custom, &JobOutput::Cancelled);
         store
             .lock()
+            .unwrap()
             .execute(
                 "UPDATE items SET json=?1 WHERE hash=?2",
                 rusqlite::params![serde_json::to_string(&changed).unwrap(), hash.0],
@@ -1585,7 +1616,7 @@ mod tests {
         let child = RequestId("terminal-child".into());
         store.create_request(&child, Some(&root), "/root").unwrap();
         let parent_op = store.operation_for_request(&root, &call).unwrap();
-        store.lock().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) SELECT origin,origin_request_id,call_id,?1,'pending' FROM claims WHERE request_id=?2", rusqlite::params![child.0, root.0]).unwrap();
+        store.lock().unwrap().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) SELECT origin,origin_request_id,call_id,?1,'pending' FROM claims WHERE request_id=?2", rusqlite::params![child.0, root.0]).unwrap();
         store
             .write_job_output(
                 &parent_op,
@@ -1674,6 +1705,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replay_wait_keeps_issued_owner_after_reused_equal_late_output() {
+        let store = Arc::new(Store::memory().unwrap());
+        let root = RequestId("wait-a".into());
+        let next = RequestId("wait-b".into());
+        let call = Item(
+            json!({"type":"function_call","name":"wait_agent","call_id":"reused","arguments":"{}"}),
+        );
+        store.create_request(&root, None, "/root").unwrap();
+        let mut first = request("wait-ownership");
+        first.input.clear();
+        let sealed = store
+            .seal_replay_request_with_occurrences(&root, &first, &[], None, &[])
+            .unwrap();
+        store.append_items(&root, &[call.clone()]).unwrap();
+        store
+            .record_issued_replay_turn(
+                &root,
+                sealed,
+                &ResponsesTurn {
+                    response_id: "a".into(),
+                    items: vec![call.clone()],
+                    usage: Usage::default(),
+                },
+            )
+            .unwrap();
+        let original = store.claim(&CallId("reused".into()), &root).unwrap();
+        let output = JobOutput::Completed(Ok(json!({"resumed_by":"user_input"})));
+        store
+            .write_job_output(&original, ToolKind::Function, &output)
+            .unwrap();
+        store
+            .append_operation_output(&original, &root, &root)
+            .unwrap();
+        let wake = Item(json!({"type":"message","role":"user","content":"wake A"}));
+        store.append_items(&root, &[wake.clone()]).unwrap();
+        let mut second = first.clone();
+        second.input = store.items(&root).unwrap();
+        let occurrences = store
+            .history_occurrences(&root)
+            .unwrap()
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
+        let sealed = store
+            .seal_replay_request_with_occurrences(
+                &root,
+                &second,
+                &vec![None; second.input.len()],
+                None,
+                &occurrences,
+            )
+            .unwrap();
+        store.create_request(&next, Some(&root), "/root").unwrap();
+        store.append_items(&next, &[call.clone()]).unwrap();
+        store
+            .record_issued_replay_turn(
+                &next,
+                sealed,
+                &ResponsesTurn {
+                    response_id: "b".into(),
+                    items: vec![call],
+                    usage: Usage::default(),
+                },
+            )
+            .unwrap();
+        let other = store.claim(&original.call, &next).unwrap();
+        store
+            .write_job_output(&other, ToolKind::Function, &output)
+            .unwrap();
+        store.append_operation_output(&other, &next, &next).unwrap();
+        let provider = ReplayProvider::new(store, &root).unwrap();
+        assert_eq!(
+            provider.output_cut(&original, &output).unwrap(),
+            Some((1, 1))
+        );
+        assert_eq!(provider.output_cut(&other, &output).unwrap(), None);
+        let local = RequestId("replay-direct".into());
+        let (sink, _stream) = tokio::sync::mpsc::channel(4);
+        provider
+            .create_streaming_for_request(&local, first, sink)
+            .await
+            .unwrap();
+        let local = call_context(original.call.clone()).operation.unwrap();
+        let retained = provider
+            .retained_output("wait_agent", &ToolInput::Function(json!({})), &local)
+            .await
+            .unwrap()
+            .unwrap();
+        let (_, continuation, _, _) = retained.into_parts(&local).unwrap();
+        let canonical = Item::tool_output(&original.call, ToolKind::Function, &output);
+        assert_eq!(
+            continuation
+                .unwrap()
+                .into_items(&local, &canonical)
+                .unwrap(),
+            vec![wake]
+        );
+    }
+
+    #[tokio::test]
     async fn replay_wait_barriers_preserve_history_order_for_every_terminal() {
         for wait_output in [
             JobOutput::Completed(Ok(json!({"wait":true}))),
@@ -1717,16 +1848,22 @@ mod tests {
             let message = Item(
                 json!({"type":"message", "role":"user", "content":[{"type":"input_text", "text":"delivered while waiting"}]}),
             );
+            for id in ["before", "wait"] {
+                let operation = store
+                    .recorded_operation_for_request(&root, &CallId(id.into()))
+                    .unwrap()
+                    .unwrap();
+                store
+                    .append_operation_output(&operation, &root, &root)
+                    .unwrap();
+            }
+            store.append_items(&root, &[message.clone()]).unwrap();
+            let operation = store
+                .recorded_operation_for_request(&root, &CallId("after".into()))
+                .unwrap()
+                .unwrap();
             store
-                .append_items(
-                    &root,
-                    &[
-                        outputs[0].clone(),
-                        outputs[1].clone(),
-                        message.clone(),
-                        outputs[2].clone(),
-                    ],
-                )
+                .append_operation_output(&operation, &root, &root)
                 .unwrap();
             store
                 .record_replay_turn(
@@ -1742,8 +1879,23 @@ mod tests {
             store.create_request(&next, Some(&root), "/root").unwrap();
             let mut second = first.clone();
             second.input = store.items(&root).unwrap();
+            let occurrences = store
+                .history_occurrences(&root)
+                .unwrap()
+                .into_iter()
+                .map(Some)
+                .collect::<Vec<_>>();
+            let issued = store
+                .seal_replay_request_with_occurrences(
+                    &root,
+                    &second,
+                    &vec![None; second.input.len()],
+                    None,
+                    &occurrences,
+                )
+                .unwrap();
             store
-                .record_replay_turn(&next, &second, &final_turn())
+                .record_issued_replay_turn(&next, issued, &final_turn())
                 .unwrap();
             let provider = ReplayProvider::new(store, &root).unwrap();
             let local = RequestId("replay-direct".into());

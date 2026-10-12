@@ -144,9 +144,14 @@ fn streamed_async_calls_retain_the_original_item_and_call_id() {
     let original = json!({"type":"custom_tool_call","id":"item-1","namespace":"functions","name":"cell","call_id":"original-call","input":"work","async":true,"provider_extension":"kept"});
     let mut assembly = ResponseAssembly::default();
     let event = assembly
-        .accept(&json!({"type":"response.output_item.done","item":original}).to_string())
+        .accept(
+            &json!({"type":"response.output_item.done","output_index":0,"item":original})
+                .to_string(),
+        )
         .unwrap();
-    assert!(matches!(event, Some(StreamEvent::ItemDone(ref item)) if item.0 == original));
+    assert!(
+        matches!(event, Some(StreamEvent::CompletedItem(ref item)) if item.item().0 == original)
+    );
     assembly
         .accept(
             &json!({"type":"response.completed","response":{"id":"response-1","output":[]}})

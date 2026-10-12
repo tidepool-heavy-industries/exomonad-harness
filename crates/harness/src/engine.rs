@@ -13,7 +13,7 @@ use crate::{
         TypedTurnFuture,
     },
     finalize::{FINALIZE_TOOL_NAME, FinalizeError, FinalizeParser},
-    item::{Item, ItemHash, ToolExecution, ToolInput, ToolKind},
+    item::{Item, ItemHash, ToolCall, ToolExecution, ToolInput, ToolKind},
     mailbox::{DurableMailboxWake, Envelope, MailboxSignal, MessageChannel},
     model::{AgentPath, CallId, ConversationIdentity, Effort, OperationId, RequestId},
     provider::{Provider, ToolScheduling},
@@ -37,6 +37,7 @@ use std::{
 };
 use thiserror::Error;
 use tokio::sync::watch;
+use tracing::Instrument;
 
 #[path = "engine/items.rs"]
 mod items;
@@ -44,7 +45,12 @@ mod items;
 struct HistoryWindow {
     items: Vec<Item>,
     provenance: Vec<(RequestId, ItemHash)>,
+    occurrences: Vec<Option<crate::context::Occurrence>>,
     model: Option<String>,
+    contract: (
+        crate::transport::ResponsesRoute,
+        crate::transport::ResponsesProtocol,
+    ),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -74,6 +80,21 @@ enum WaitKind {
     Yield {
         deadline: Option<tokio::time::Instant>,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolSettlementOwner {
+    EngineYield,
+    Provider,
+}
+
+impl ToolSettlementOwner {
+    fn for_invocation(call: &ToolCall) -> Self {
+        match call.name.as_str() {
+            "yield" => Self::EngineYield,
+            _ => Self::Provider,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -109,6 +130,9 @@ enum ReplayBarrierStage {
 }
 
 #[cfg(test)]
+#[path = "engine/inference_gate_tests.rs"]
+mod inference_gate_tests;
+#[cfg(test)]
 #[path = "engine/recovery_tests.rs"]
 mod recovery_tests;
 
@@ -132,9 +156,20 @@ mod scheduling_tests;
 #[path = "engine/native_async_boundary_tests.rs"]
 mod native_async_boundary_tests;
 
+#[cfg(all(test, target_os = "linux"))]
+mod performance_tests;
+
 #[cfg(test)]
 #[path = "engine/yield_tests.rs"]
 mod yield_tests;
+
+#[cfg(test)]
+#[path = "engine/ownership_history_tests.rs"]
+mod ownership_history_tests;
+
+#[cfg(test)]
+#[path = "engine/reused_call_recovery_tests.rs"]
+mod reused_call_recovery_tests;
 
 #[cfg(test)]
 #[path = "engine/tool_execution_tests.rs"]
@@ -142,6 +177,10 @@ mod tool_execution_tests;
 
 #[derive(Debug, Error)]
 pub enum EngineError {
+    #[error("inference is durably blocked: {block:?}")]
+    InferenceBlocked {
+        block: crate::embedding::InferenceBlock,
+    },
     #[error(transparent)]
     Transport(#[from] TransportError),
     /// Stream completion is unknown, but every locally admitted outstanding
@@ -207,6 +246,8 @@ pub enum EngineError {
     IncompleteRecordedResponse(RequestId),
     #[error("inherited settled call {0} has no durable output item")]
     MissingInheritedOutput(String),
+    #[error("completed operation {0:?} has no original invocation")]
+    MissingOperationInvocation(OperationId),
     #[error("claim {0} changed during missing-job recovery and could not be reconciled")]
     ClaimRecoveryConflict(String),
     #[error("Here child has no durable snapshot request")]
@@ -246,6 +287,17 @@ pub struct EngineCompletion {
 /// recorded turns without credentials or live network access.
 #[async_trait::async_trait]
 pub trait ResponsesTransport: Send + Sync {
+    /// Exact transport selection, frozen before durable issuance and network dispatch.
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            crate::transport::ResponsesRoute,
+            crate::transport::ResponsesProtocol,
+        ),
+        TransportError,
+    >;
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError>;
 
     async fn create_streaming(
@@ -254,8 +306,12 @@ pub trait ResponsesTransport: Send + Sync {
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         let turn = self.create(request).await?;
-        for item in &turn.items {
-            let _ = sink.send(StreamEvent::ItemDone(item.clone())).await;
+        for (index, item) in turn.items.iter().enumerate() {
+            let done = crate::transport::sse::CompletedOutputItem::from_complete_response(
+                item.clone(),
+                index as u64,
+            );
+            let _ = sink.send(StreamEvent::CompletedItem(done)).await;
         }
         Ok(turn)
     }
@@ -272,6 +328,17 @@ pub trait ResponsesTransport: Send + Sync {
 
 #[async_trait::async_trait]
 impl<A: Auth + Clone + 'static> ResponsesTransport for ResponsesClient<A> {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            crate::transport::ResponsesRoute,
+            crate::transport::ResponsesProtocol,
+        ),
+        TransportError,
+    > {
+        Ok((self.auth.route(), self.protocol()))
+    }
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         ResponsesClient::create(self, request).await
     }
@@ -433,6 +500,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .transpose()?;
         let (_cancel, cancellation) = watch::channel(false);
         let (_incoming, envelopes) = tokio::sync::mpsc::unbounded_channel();
+        let span = tracing::debug_span!(target: "harness::runtime_cost", "engine_run",
+            actor = %self.config.agent.0, recovering = false, initial_items = initial.len());
         self.run_loop(
             None,
             initial,
@@ -442,6 +511,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             schema.as_ref(),
             false,
         )
+        .instrument(span)
         .await
     }
 
@@ -505,7 +575,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     /// including foreign invocations attached by a Here snapshot. Missing
     /// in-memory jobs are durably interrupted unless settlement already won;
     /// provider calls are never replayed. Recovery also reconciles an unfinished
-    /// embedded request instead of starting a new round.
+    /// embedded request. A durable block requires a journaled recovery grant;
+    /// this entry point alone grants no authority to continue.
     pub async fn run_recovering(
         &self,
         head: Option<RequestId>,
@@ -588,6 +659,32 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         finalize_schema: Option<serde_json::Value>,
         recovering: bool,
     ) -> Result<EngineCompletion, EngineError> {
+        let (route, protocol) = self.client.response_contract()?;
+        self.store.initialize_context_target(
+            &self.origin,
+            &crate::context::ContextProjectionTarget {
+                model: self.config.model.clone(),
+                route,
+                protocol,
+            },
+        )?;
+        let inference_attempt = match self.embedded_identity() {
+            Some(identity) => match self
+                .store
+                .begin_embedded_inference(&identity, head.as_ref())
+            {
+                Ok(attempt) => Some(attempt),
+                Err(StoreError::InferenceBlocked { block }) => {
+                    return Err(EngineError::InferenceBlocked { block });
+                }
+                Err(error) => return Err(error.into()),
+            },
+            None => None,
+        };
+        let recovering = recovering
+            || inference_attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.recovering);
         let (envelope_tx, envelopes) = tokio::sync::mpsc::unbounded_channel();
         let keepalive = envelope_tx.clone();
         let forwarder = tokio::spawn(async move {
@@ -597,7 +694,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
             }
         });
-        let result = self
+        let span = tracing::debug_span!(target: "harness::runtime_cost", "engine_run",
+            actor = %self.config.agent.0, recovering, initial_items = new_items.len());
+        let mut result = self
             .run_loop(
                 head,
                 new_items,
@@ -607,9 +706,33 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 finalize_schema.as_ref(),
                 recovering,
             )
+            .instrument(span)
             .await;
         drop(keepalive);
         forwarder.abort();
+        if let Some(attempt) = &inference_attempt {
+            if result.is_ok() {
+                self.store.finish_embedded_inference(attempt)?;
+            } else if matches!(
+                result,
+                Err(EngineError::Store(
+                    StoreError::Context(_)
+                        | StoreError::IncompleteProviderPrefix { .. }
+                        | StoreError::InvalidProviderEvidence(_)
+                ))
+            ) {
+                let identity = self.embedded_identity().expect("embedded attempt");
+                let frontier = self.store.embedded_round_frontier(&identity)?;
+                if let Some(request) = frontier.pending_head.or(frontier.settled_head) {
+                    let block = self.store.block_embedded_inference(
+                        &identity,
+                        &request,
+                        crate::embedding::InferenceBlockReason::ContinuityUnproven,
+                    )?;
+                    result = Err(EngineError::InferenceBlocked { block });
+                }
+            }
+        }
         result
     }
 
@@ -665,13 +788,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         }
         self.await_here_invocation_output(&head, &mut cancellation)
             .await?;
-        let inherited_pairs = match &head {
-            Some(head) => self.read_history_pairs(head).await?,
+        let inherited_records = match &head {
+            Some(head) => self.read_recovery_history(head).await?,
             None => Vec::new(),
         };
-        let inherited_history = inherited_pairs
+        let inherited_history = inherited_records
             .iter()
-            .map(|(_, item)| item.clone())
+            .map(|record| record.item.clone())
             .collect::<Vec<_>>();
         let inherited_claims = match &head {
             Some(head) => {
@@ -696,8 +819,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             None => Vec::new(),
         };
         if resuming {
-            for (request, item) in &inherited_pairs {
-                let Some(call) = item
+            for record in &inherited_records {
+                let request = &record.source_request;
+                let Some(call) = record
+                    .item
                     .tool_call()
                     .map_err(|_| EngineError::InvalidFunctionCall)?
                 else {
@@ -711,8 +836,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     continue;
                 }
                 if !inherited_claims.iter().any(|claim| {
-                    claim.call_id == call.call_id
-                        && (&claim.request == request || &claim.operation.request == request)
+                    claim.call_id == call.call_id && &claim.operation.request == request
                 }) {
                     return Err(EngineError::UnclaimedInheritedCall {
                         request: request.clone(),
@@ -722,7 +846,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
         }
         let mut pending = Vec::<PendingCall>::new();
-        let mut replay_items = Vec::<Item>::new();
+        let mut replay_items = Vec::<(OperationId, RequestId)>::new();
         let mut replay_outputs =
             Vec::<(OperationId, crate::turn::JobOutput, ToolKind, RequestId)>::new();
         let mut attachable = Vec::new();
@@ -730,7 +854,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let invocation = self
                 .store
                 .invocation_item(&claim.operation.request, &claim.call_id)?
-                .ok_or_else(|| EngineError::MissingInheritedOutput(claim.call_id.0.clone()))?;
+                .ok_or_else(|| EngineError::MissingOperationInvocation(claim.operation.clone()))?;
             let tool_kind = invocation.input.kind();
             let execution = invocation.execution;
             let same_call = |item: &Item| {
@@ -739,41 +863,28 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     .flatten()
                     .is_some_and(|call| call.call_id == claim.call_id)
             };
-            let claimant_call_count = inherited_pairs
+            let invocation_count = inherited_records
                 .iter()
-                .filter(|(request, item)| request == &claim.request && same_call(item))
+                .filter(|record| {
+                    record.source_request == claim.operation.request && same_call(&record.item)
+                })
                 .count();
-            if claimant_call_count > 1 && claim.state != crate::store::ClaimState::Pending {
+            if invocation_count == 0 {
+                return Err(EngineError::MissingInheritedOutput(claim.call_id.0.clone()));
+            }
+            if invocation_count > 1 && claim.state != crate::store::ClaimState::Pending {
                 return Err(EngineError::MismatchedToolOutput(claim.call_id.0.clone()));
             }
-            let call_position = inherited_pairs
+            // An older async result can arrive after a newer invocation reuses
+            // its wire call ID. Only the Store-issued occurrence selects its owner.
+            let already_output = inherited_records
                 .iter()
-                .enumerate()
-                .find(|(_, (request, item))| request == &claim.request && same_call(item))
-                .map(|(position, _)| position)
-                .or_else(|| {
-                    inherited_pairs
-                        .iter()
-                        .enumerate()
-                        .find(|(_, (request, item))| {
-                            request == &claim.operation.request && same_call(item)
-                        })
-                        .map(|(position, _)| position)
-                })
-                .or_else(|| inherited_history.iter().rposition(&same_call))
-                .ok_or_else(|| EngineError::MissingInheritedOutput(claim.call_id.0.clone()))?;
-            let next_call = inherited_history[call_position + 1..]
-                .iter()
-                .position(&same_call)
-                .map_or(inherited_history.len(), |relative| {
-                    call_position + 1 + relative
-                });
-            let already_output = inherited_history[call_position + 1..next_call]
-                .iter()
-                .filter(|item| {
-                    (item.0["type"] == "function_call_output"
-                        || item.0["type"] == "custom_tool_call_output")
-                        && item.0["call_id"].as_str() == Some(&claim.call_id.0)
+                .filter_map(|record| {
+                    record
+                        .output
+                        .as_ref()
+                        .filter(|output| output.operation == claim.operation)
+                        .map(|output| &output.item)
                 })
                 .collect::<Vec<_>>();
             for item in &already_output {
@@ -806,29 +917,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 continue;
             }
             if claim.state == crate::store::ClaimState::Settled {
-                let item = self
-                    .read_settled_output(&claim.operation, &claim.request)
+                self.read_settled_output(&claim.operation, &claim.request)
                     .await?;
                 self.acknowledge_output(&claim.operation).await?;
-                replay_items.push(item);
+                replay_items.push((claim.operation, claim.request));
                 continue;
             }
             if claim.state == crate::store::ClaimState::Interrupted {
-                replay_items.push(Item::tool_output(
-                    &claim.call_id,
-                    tool_kind,
-                    &crate::turn::JobOutput::Interrupted,
-                ));
+                replay_items.push((claim.operation, claim.request));
                 continue;
             }
-            if inherited_history[call_position..next_call]
-                .iter()
-                .any(|item| {
-                    items::function_call(item).is_some_and(|(call, name, _)| {
-                        call == claim.call_id && matches!(name.as_str(), "wait_agent" | "yield")
-                    })
-                })
-            {
+            if matches!(invocation.name.as_str(), "wait_agent" | "yield") {
                 return Err(EngineError::UnresumableForkedWaitAgent);
             }
             // Validate every pending job before claiming any of them. The
@@ -841,7 +940,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 // Persist an interruption before appending its synthetic output;
                 // if settlement won the race, recover that durable output instead.
                 Err(JobError::UnknownCall) => {
-                    replay_items.push(self.recover_missing_job(&claim).await?);
+                    self.recover_missing_job(&claim).await?;
+                    replay_items.push((claim.operation, claim.request));
                     continue;
                 }
                 Err(error) => return Err(EngineError::Job(error)),
@@ -937,8 +1037,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             self.persist_output(&operation, kind, &output, &id, &claim_request)
                 .await?;
         }
-        if !replay_items.is_empty() {
-            self.append(&id, replay_items).await?;
+        for (operation, claimant) in replay_items {
+            self.publish_operation_output(&id, &operation, &claimant)
+                .await?;
         }
         if admit_inbox {
             let store = self.store.clone();
@@ -991,6 +1092,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     return Err(self.cleanup_pending(error, &pending).await);
                 }
             }
+            let request_preparation_started =
+                tracing::enabled!(target: "harness::runtime_cost", tracing::Level::DEBUG)
+                    .then(std::time::Instant::now);
             let history = match self.read_model_history_window(&parent).await {
                 Ok(history) => history,
                 Err(error) => return Err(self.cleanup_pending(error, &pending).await),
@@ -1012,7 +1116,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 let compact_model = history.model.as_deref().unwrap_or(&self.config.model);
                 let compact = self.compact_window(
                     &parent,
-                    &history.items,
+                    &history,
                     &pending,
                     &previous_usage,
                     compact_model,
@@ -1057,6 +1161,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .ok_or(EngineError::MissingEffortPin)?;
             let snapshot = match self.provider.request_snapshot() {
                 Ok(snapshot) => snapshot,
+                Err(crate::provider::ProviderError::RequestAdmissionClosed) => {
+                    return Err(self
+                        .cleanup_pending(
+                            EngineError::Cancelled {
+                                head_request: Some(parent.clone()),
+                            },
+                            &pending,
+                        )
+                        .await);
+                }
                 Err(error) => return Err(self.cleanup_pending(error.into(), &pending).await),
             };
             let request_provider: Arc<dyn Provider> =
@@ -1083,11 +1197,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         .map(|name| (name.to_owned(), request_provider.tool_scheduling(name)))
                 })
                 .collect::<HashMap<_, _>>();
+            let contract = history.contract;
             let continuing_model = history
                 .model
                 .clone()
                 .unwrap_or_else(|| self.config.model.clone());
             let mut input_hashes = Vec::with_capacity(history.items.len());
+            let mut input_occurrences = history.occurrences;
             let model_input = history
                 .items
                 .into_iter()
@@ -1242,6 +1358,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                     req.input.push(item.clone());
                     input_hashes.push(None);
+                    input_occurrences.push(None);
                     tools_allowed.clone()
                 }
             };
@@ -1266,19 +1383,30 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
             let store = self.store.clone();
             let instructions = replay_instructions.clone();
-            let (req, replay_request) = match blocking(move || {
-                let issued = store.seal_replay_request_with_hashes(
+            let seal_head = parent.clone();
+            let (req, provider_request) = match blocking(move || {
+                let issued = store.seal_replay_request_with_occurrences(
+                    &seal_head,
                     &req,
                     &input_hashes,
                     Some(&instructions),
+                    &input_occurrences,
                 )?;
-                Ok((req, issued))
+                let provider_request =
+                    store.issue_provider_request(&seal_head, issued, contract)?;
+                Ok((req, provider_request))
             })
             .await
             {
                 Ok(sealed) => sealed,
                 Err(error) => return Err(self.cleanup_pending(error, &pending).await),
             };
+            if let Some(started) = request_preparation_started {
+                tracing::debug!(target: "harness::runtime_cost", request_id = %parent.0,
+                    elapsed_ns = started.elapsed().as_nanos() as u64,
+                    input_items = req.input.len(), tool_count = req.tools.len(),
+                    did_compact, "successor request prepared");
+            }
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
             // Retain completed calls while the provider is streaming. Their
             // output enters model history after this response, without changing
@@ -1337,6 +1465,46 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         Ok(turn) => break turn,
                         Err(error) => {
                             output_lifetime.stop();
+                            // Transport may finish while finalized items remain buffered.
+                            // Retain those facts before interruption; never dispatch a
+                            // buffered invocation after observing stream failure.
+                            while let Ok(event) = event_rx.try_recv() {
+                                match event {
+                                    StreamEvent::CompletedItem(done) => {
+                                        let (item, inserted) = match self.retain_provider_item(&provider_request, done).await {
+                                            Ok(retained) => retained,
+                                            Err(retain_error) => return Err(self.cleanup_pending(retain_error, &pending).await),
+                                        };
+                                        if inserted {
+                                            let call = match parsed_call_id(&item) {
+                                                Ok(call) => call,
+                                                Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                                            };
+                                            if let Some(call) = call {
+                                                let store = self.store.clone();
+                                                let stopped_request = parent.clone();
+                                                let interrupted_claim = blocking(move || {
+                                                    match store.claim(&call, &stopped_request) {
+                                                        Ok(operation) => store.interrupt_unstarted_operation_claim(&operation, &stopped_request).map(|_| ()),
+                                                        Err(StoreError::DuplicateClaim) => Ok(()),
+                                                        Err(error) => Err(error),
+                                                    }
+                                                }).await;
+                                                if let Err(error) = interrupted_claim {
+                                                    return Err(self.cleanup_pending(error, &pending).await);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    StreamEvent::Delta {item_id, channel, index, text} => self.observe_delta(&parent, item_id, channel, index, text),
+                                }
+                            }
+                            let state = if matches!(error, TransportError::IncompleteResponse(_)) { crate::store::ProviderResponseState::Interrupted } else if error.request_failure().is_some() { crate::store::ProviderResponseState::Rejected } else { crate::store::ProviderResponseState::Failed };
+                            let store = self.store.clone();
+                            let stopped_request = parent.clone();
+                            if let Err(stop_error) = blocking(move || store.stop_provider_response(&stopped_request, state)).await {
+                                return Err(self.cleanup_pending(stop_error, &pending).await);
+                            }
                             return Err(self.reject_or_cleanup(error, settled_head.as_ref(), &parent, &pending).await);
                         }
                     },
@@ -1348,7 +1516,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                     event = event_rx.recv(), if event_stream_open => {
                         match event {
-                            Some(StreamEvent::ItemDone(item)) => {
+                            Some(StreamEvent::CompletedItem(done)) => {
+                                let (item, inserted) = match self.retain_provider_item(&provider_request, done).await {
+                                    Ok(retained) => retained,
+                                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                                };
                                 let call_id = match parsed_call_id(&item) {
                                     Ok(call_id) => call_id,
                                     Err(error) => return Err(self.cleanup_pending(error, &pending).await),
@@ -1361,10 +1533,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                         continue;
                                     }
                                 }
-                                if let Err(error) = self.append(&parent, vec![item.clone()]).await {
-                                    return Err(self.cleanup_pending(error, &pending).await);
-                                }
                                 persisted_items.push(item.clone());
+                                if !inserted { continue; }
                                 // Bounded callbacks are sequential continuations. Finish
                                 // receiving the provider round before awaiting one, so
                                 // its stream keeps progressing while items are retained.
@@ -1416,9 +1586,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             // durable even if a subsequent dispatch or output step fails.
             let (turn, replay_event) = {
                 let store = self.store.clone();
-                let request = parent.clone();
+                let provider_request = provider_request.clone();
                 match blocking(move || {
-                    let event = store.record_issued_replay_turn(&request, replay_request, &turn)?;
+                    let event = store.record_provider_turn(&provider_request, &turn)?;
                     Ok((turn, event))
                 })
                 .await
@@ -1439,7 +1609,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     self.observe_delta(&parent, item_id, channel, index, text);
                     continue;
                 }
-                if let StreamEvent::ItemDone(item) = event {
+                if let StreamEvent::CompletedItem(done) = event {
+                    let (item, _) = match self.retain_provider_item(&provider_request, done).await {
+                        Ok(retained) => retained,
+                        Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                    };
                     let call_id = match parsed_call_id(&item) {
                         Ok(call_id) => call_id,
                         Err(error) => return Err(self.cleanup_pending(error, &pending).await),
@@ -1453,9 +1627,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             }
                             continue;
                         }
-                    }
-                    if let Err(error) = self.append(&parent, vec![item.clone()]).await {
-                        return Err(self.cleanup_pending(error, &pending).await);
                     }
                     persisted_items.push(item.clone());
                     if self.bounded_invocation {
@@ -1540,11 +1711,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             .await);
                     }
                 }
-                if !remove_matching_item(&mut persisted_items, item) {
-                    if let Err(error) = self.append(&parent, vec![item.clone()]).await {
-                        return Err(self.cleanup_pending(error, &pending).await);
-                    }
-                }
+                remove_matching_item(&mut persisted_items, item);
                 if deferred_dispatch_error.is_some() {
                     continue;
                 }
@@ -1950,6 +2117,47 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         self.append_retaining_items(id, items).await.map(drop)
     }
 
+    async fn publish_operation_output(
+        &self,
+        id: &RequestId,
+        operation: &OperationId,
+        claimant: &RequestId,
+    ) -> Result<(), EngineError> {
+        let span = tracing::debug_span!(target: "harness::runtime_cost", "publish_operation_output",
+            request_id = %id.0, origin_request_id = %operation.request.0,
+            call_id = %operation.call.0, claimant_request_id = %claimant.0);
+        async {
+            let store = self.store.clone();
+            let request = id.clone();
+            let operation = operation.clone();
+            let claimant = claimant.clone();
+            let observing = self.output_observer.is_some();
+            let (output, origin) = blocking(move || {
+                let output = store.append_operation_output(&operation, &claimant, &request)?;
+                let origin = if observing && output.appended {
+                    Some(store.request_output_origin(&request)?)
+                } else {
+                    None
+                };
+                Ok((output, origin))
+            })
+            .await?;
+            if let (Some(observer), Some(origin)) = (&self.output_observer, origin) {
+                observer.observe(ModelOutput {
+                    origin,
+                    request_id: id.clone(),
+                    update: ModelOutputUpdate::Committed {
+                        item_id: output.item.0["id"].as_str().map(str::to_owned),
+                        hash: output.hash,
+                    },
+                });
+            }
+            Ok(())
+        }
+        .instrument(span)
+        .await
+    }
+
     async fn append_retaining_items(
         &self,
         id: &RequestId,
@@ -2150,6 +2358,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .tool_call()
             .map_err(|_| EngineError::InvalidFunctionCall)?
             .ok_or(EngineError::InvalidFunctionCall)?;
+        let settlement_owner = ToolSettlementOwner::for_invocation(&call);
         let call_id = call.call_id;
         let operation = OperationId {
             origin: self.origin.clone(),
@@ -2160,7 +2369,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let input = call.input;
         let tool_kind = input.kind();
         let execution = call.execution;
-        let is_yield = name == "yield";
+        let is_yield = settlement_owner == ToolSettlementOwner::EngineYield;
         let wait = if is_yield {
             if self.embedded_identity().is_none() || tool_kind != ToolKind::Function {
                 return Err(EngineError::InvalidFunctionCall);
@@ -2360,11 +2569,25 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let mut first_error = None;
         for call in pending {
             let mut persisted_terminal = false;
+            match self.store.operation_cleanup_evidence(&call.operation) {
+                Ok(
+                    crate::store::OperationCleanupEvidence::NotStarted
+                    | crate::store::OperationCleanupEvidence::Terminal(_),
+                ) => continue,
+
+                Err(error) => {
+                    first_error.get_or_insert(EngineError::Store(error));
+                }
+                _ => {}
+            }
             if call.cancel_job_on_cleanup && call.wait.is_none() {
                 if let Err(error) = self.scheduler.cancel(&call.operation).await {
-                    if !matches!(error, JobError::UnknownCall) {
-                        first_error.get_or_insert_with(|| EngineError::Job(error));
-                    }
+                    first_error.get_or_insert_with(|| match error {
+                        JobError::UnknownCall => EngineError::UnconfirmedCancellation {
+                            operation: call.operation.clone(),
+                        },
+                        other => EngineError::Job(other),
+                    });
                 }
                 match self.scheduler.unpublished_output(&call.operation).await {
                     Ok(Some(output)) => {
@@ -2402,8 +2625,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             }
                         }
                     }
-                    Err(JobError::UnknownCall) => {}
-                    Ok(None) => {}
+                    Err(JobError::UnknownCall) | Ok(None) => {
+                        first_error.get_or_insert_with(|| EngineError::UnconfirmedCancellation {
+                            operation: call.operation.clone(),
+                        });
+                    }
                     Err(error) => {
                         first_error.get_or_insert(EngineError::Job(error));
                     }
@@ -2413,8 +2639,21 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 let store = self.store.clone();
                 let operation = call.operation.clone();
                 let request = call.claim_request.clone();
-                if let Err(error) =
-                    blocking(move || store.interrupt_operation_claim(&operation, &request)).await
+                let not_started = call.wait.is_some();
+                if !not_started && call.operation.origin.actor() == self.origin.actor() {
+                    first_error.get_or_insert_with(|| EngineError::UnconfirmedCancellation {
+                        operation: call.operation.clone(),
+                    });
+                }
+
+                if let Err(error) = blocking(move || {
+                    if not_started {
+                        store.interrupt_unstarted_operation_claim(&operation, &request)
+                    } else {
+                        store.interrupt_operation_claim(&operation, &request)
+                    }
+                })
+                .await
                 {
                     first_error.get_or_insert(error);
                 }
@@ -2430,6 +2669,27 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         request: &RequestId,
         pending: &[PendingCall],
     ) -> EngineError {
+        if let TransportError::ProviderStreamFailure { event, .. } = &error {
+            let event = *event;
+            let primary = EngineError::Transport(error);
+            if let Err(cleanup) = self.cancel_pending(pending).await {
+                return EngineError::Cleanup {
+                    primary: Box::new(primary),
+                    cleanup: cleanup.to_string(),
+                };
+            }
+            if let Some(identity) = self.embedded_identity() {
+                return match self.store.block_embedded_inference(
+                    &identity,
+                    request,
+                    crate::embedding::InferenceBlockReason::ProviderStreamFailure { event },
+                ) {
+                    Ok(block) => EngineError::InferenceBlocked { block },
+                    Err(error) => error.into(),
+                };
+            }
+            return primary;
+        }
         if let TransportError::IncompleteResponse(cause) = &error {
             let cause = *cause;
             let primary = EngineError::Transport(error);
@@ -2814,7 +3074,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         {
             return Err(EngineError::ClaimRecoveryConflict(call_id.0.clone()));
         }
-        self.append(&request, vec![item]).await?;
+        self.publish_operation_output(&request, operation, claim_request)
+            .await?;
         if operation.origin == self.origin {
             match self.scheduler.mark_output_committed(operation).await {
                 Ok(()) | Err(JobError::UnknownCall) => {}
@@ -2934,17 +3195,38 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     }
 
     async fn acknowledge_output(&self, operation: &OperationId) -> Result<(), EngineError> {
-        // A fork replays its ancestor's result; only the issuing conversation
-        // can acknowledge the owner's live execution boundary.
-        if operation.origin == self.origin && self.store.has_completed_output(operation)? {
-            let required = self.retain_context_requirement(operation, false).await?;
-            if required && self.store.context_receipt(operation)?.is_none() {
-                self.provider.output_aborted(operation).await?;
-            } else {
-                self.provider.output_committed(operation).await?;
+        let span = tracing::debug_span!(target: "harness::runtime_cost", "acknowledge_output",
+            origin_request_id = %operation.request.0, call_id = %operation.call.0,
+            provider_callback = "none", callback_completed = false);
+        async {
+            // A fork replays its ancestor's result; only the issuing conversation
+            // can acknowledge the owner's live execution boundary.
+            if operation.origin == self.origin && self.store.has_completed_output(operation)? {
+                let invocation = self
+                    .store
+                    .invocation_item(&operation.request, &operation.call)?
+                    .ok_or_else(|| EngineError::MissingOperationInvocation(operation.clone()))?;
+                // The reserved Engine wait has no provider-issued operation. Read
+                // its original invocation so recovery uses the same settlement owner.
+                if ToolSettlementOwner::for_invocation(&invocation)
+                    == ToolSettlementOwner::EngineYield
+                {
+                    return Ok(());
+                }
+                let required = self.retain_context_requirement(operation, false).await?;
+                if required && self.store.context_receipt(operation)?.is_none() {
+                    tracing::Span::current().record("provider_callback", "aborted");
+                    self.provider.output_aborted(operation).await?;
+                } else {
+                    tracing::Span::current().record("provider_callback", "committed");
+                    self.provider.output_committed(operation).await?;
+                }
+                tracing::Span::current().record("callback_completed", true);
             }
+            Ok(())
         }
-        Ok(())
+        .instrument(span)
+        .await
     }
 
     async fn wait_for_resume(
@@ -3135,15 +3417,31 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         Ok(())
     }
 
+    async fn retain_provider_item(
+        &self,
+        issued: &crate::store::provider_response::IssuedProviderRequest,
+        done: crate::transport::sse::CompletedOutputItem,
+    ) -> Result<(Item, bool), EngineError> {
+        let store = self.store.clone();
+        let issued = issued.clone();
+        let item = done.item().clone();
+        let inserted = blocking(move || store.append_provider_done(&issued, &done)).await?;
+        Ok((item, inserted))
+    }
+
     async fn read_model_history_window(
         &self,
         id: &RequestId,
     ) -> Result<HistoryWindow, EngineError> {
+        let span = tracing::debug_span!(target: "harness::runtime_cost", "read_model_history_window",
+            request_id = %id.0, output_items = tracing::field::Empty);
         let store = self.store.clone();
         let request = id.clone();
         let identity = self.origin.clone();
+        let contract = self.client.response_contract()?;
         blocking(move || {
-            let state = store.context_request_state(&request, &identity)?;
+            let state = store.context_request_state_for_transport(&request, &identity, contract)?;
+            tracing::Span::current().record("output_items", state.history.len());
             let mut items = Vec::with_capacity(state.history.len());
             let mut provenance = Vec::with_capacity(state.history.len());
             for (request, hash, item) in state.history {
@@ -3153,9 +3451,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             Ok(HistoryWindow {
                 items,
                 provenance,
+                occurrences: state.occurrences,
                 model: state.model,
+                contract,
             })
         })
+        .instrument(span)
         .await
     }
 
@@ -3163,11 +3464,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         load_history(self.store.clone(), id.clone()).await
     }
 
-    async fn read_history_pairs(
+    async fn read_recovery_history(
         &self,
         id: &RequestId,
-    ) -> Result<Vec<(RequestId, Item)>, EngineError> {
-        load_history_pairs(self.store.clone(), id.clone()).await
+    ) -> Result<Vec<crate::store::RecoveryItem>, EngineError> {
+        let span = tracing::debug_span!(target: "harness::runtime_cost", "read_recovery_history", request_id = %id.0);
+        let store = self.store.clone();
+        let head = id.clone();
+        blocking(move || store.recovery_history(&head))
+            .instrument(span)
+            .await
     }
 
     /// A model-facing Here child is admitted before its spawn tool returns.
@@ -3222,31 +3528,32 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     async fn compact_window(
         &self,
         source: &RequestId,
-        history: &[Item],
+        window: &HistoryWindow,
         pending: &[PendingCall],
         usage: &Usage,
         model: &str,
     ) -> Result<Option<RequestId>, EngineError> {
-        let pending_items: Vec<Item> = pending
+        let issued_occurrences = window.occurrences.clone();
+        let history = &window.items;
+        let pending_operations = pending
             .iter()
-            .map(|call| {
-                self.store
-                    .items(&call.operation.request)
-                    .map_err(|e| CompactError::Failed(e.to_string()))?
-                    .iter()
-                    .find(|item| {
-                        item.0["call_id"].as_str() == Some(call.call_id.0.as_str())
-                            && matches!(
-                                item.0["type"].as_str(),
-                                Some("function_call" | "custom_tool_call")
-                            )
-                    })
-                    .cloned()
-                    .ok_or_else(|| {
-                        CompactError::Failed(format!("missing pending call {}", call.call_id.0))
-                    })
-            })
-            .collect::<Result<_, _>>()?;
+            .map(|call| call.operation.clone())
+            .collect::<Vec<_>>();
+        let selected = self
+            .store
+            .select_operation_occurrences(&window.occurrences, &pending_operations)?;
+        let pending_positions = selected
+            .iter()
+            .map(|(position, _)| *position)
+            .collect::<Vec<_>>();
+        let pending_occurrences = selected
+            .into_iter()
+            .map(|(_, occurrence)| occurrence)
+            .collect::<Vec<_>>();
+        let pending_items = pending_occurrences
+            .iter()
+            .map(|occurrence| occurrence.item.clone())
+            .collect::<Vec<_>>();
         let effective_effort = history
             .iter()
             .rev()
@@ -3327,6 +3634,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             items: history,
             usage,
             pending_calls: &pending_items,
+            pending_positions: &pending_positions,
+            pending_occurrences: &pending_occurrences,
+            occurrences: &window.occurrences,
             effort: effective_effort,
             server_compact: &server_compact,
             typed_turn: &typed_turn,
@@ -3396,6 +3706,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 &source_for_write,
                 &branch,
                 &window.items,
+                &window.retained,
+                &issued_occurrences,
                 &pending_operations,
                 identity.as_ref(),
                 server_response.as_ref(),
@@ -3452,58 +3764,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
 }
 
 async fn load_history(store: Arc<Store>, id: RequestId) -> Result<Vec<Item>, EngineError> {
-    Ok(load_history_window(store, id).await?.items)
-}
-
-async fn load_history_pairs(
-    store: Arc<Store>,
-    id: RequestId,
-) -> Result<Vec<(RequestId, Item)>, EngineError> {
-    let history = load_history_window(store, id).await?;
-    Ok(history
-        .provenance
-        .into_iter()
-        .zip(history.items)
-        .map(|((request, _), item)| (request, item))
-        .collect())
-}
-
-async fn load_history_window(
-    store: Arc<Store>,
-    id: RequestId,
-) -> Result<HistoryWindow, EngineError> {
+    let span =
+        tracing::debug_span!(target: "harness::runtime_cost", "load_history", request_id = %id.0);
     blocking(move || {
-        let mut cursor = Some(id);
-        let mut chain = Vec::new();
-        while let Some(request_id) = cursor {
-            let Some(request) = store.request(&request_id)? else {
-                return Err(StoreError::MissingRequest(request_id.0));
-            };
-            chain.push(
-                store
-                    .items_with_hashes(&request_id)?
-                    .into_iter()
-                    .map(|(hash, item)| (request_id.clone(), hash, item))
-                    .collect::<Vec<_>>(),
-            );
-            if store.is_compaction_boundary(&request_id)? {
-                break;
-            }
-            cursor = request.parent;
-        }
-        chain.reverse();
-        let mut items = Vec::new();
-        let mut provenance = Vec::new();
-        for (request, hash, item) in chain.into_iter().flatten() {
-            items.push(item);
-            provenance.push((request, hash));
-        }
-        Ok(HistoryWindow {
-            items,
-            provenance,
-            model: None,
-        })
+        Ok(store
+            .context_history(&id)?
+            .into_iter()
+            .map(|(_, _, item)| item)
+            .collect())
     })
+    .instrument(span)
     .await
 }
 
@@ -3573,10 +3843,25 @@ async fn await_cancellation(cancellation: &mut watch::Receiver<bool>) {
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, StoreError> + Send + 'static,
 ) -> Result<T, EngineError> {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|_| EngineError::StoreTask)?
-        .map_err(Into::into)
+    let span = tracing::Span::current();
+    let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+    let queued_at = tracing::enabled!(target: "harness::runtime_cost", tracing::Level::DEBUG)
+        .then(std::time::Instant::now);
+    tokio::task::spawn_blocking(move || {
+        tracing::dispatcher::with_default(&dispatcher, || {
+            span.in_scope(|| {
+                if let Some(queued_at) = queued_at {
+                    tracing::debug!(target: "harness::runtime_cost",
+                        blocking_pool_wait_ns = queued_at.elapsed().as_nanos() as u64,
+                        "Store worker started");
+                }
+                f()
+            })
+        })
+    })
+    .await
+    .map_err(|_| EngineError::StoreTask)?
+    .map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -3610,6 +3895,21 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for Replay {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                crate::transport::ResponsesRoute,
+                crate::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesProtocol::Standard,
+            ))
+        }
+
         async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             self.requests.lock().unwrap().push(request);
             self.turns
@@ -3626,6 +3926,21 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for EffortSettlementBarrier {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                crate::transport::ResponsesRoute,
+                crate::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesProtocol::Standard,
+            ))
+        }
+
         async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             self.replay.create(request).await
         }
@@ -3635,9 +3950,15 @@ mod tests {
             request: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_indices = 0_u64..;
             let turn = self.replay.create(request).await?;
             for item in &turn.items {
-                let _ = sink.send(StreamEvent::ItemDone(item.clone())).await;
+                let _ = sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(item.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                }).await;
             }
             let release = { self.release_first_turn.lock().await.take() };
             if let Some(release) = release {
@@ -3717,10 +4038,13 @@ mod tests {
                 .write_output(&operation, &output, crate::store::TerminalOutcome::Success)
                 .unwrap();
             if already_in_history {
-                store.append_items(&snapshot, &[output.clone()]).unwrap();
+                store
+                    .append_operation_output(&operation, &snapshot, &snapshot)
+                    .unwrap();
             }
             store
                 .lock()
+                .unwrap()
                 .execute(
                     "UPDATE claims SET terminal_json=NULL WHERE state='settled'",
                     [],
@@ -4093,6 +4417,21 @@ mod tests {
         struct MutatingCopy;
         #[async_trait]
         impl ResponsesTransport for MutatingCopy {
+            fn response_contract(
+                &self,
+            ) -> Result<
+                (
+                    crate::transport::ResponsesRoute,
+                    crate::transport::ResponsesProtocol,
+                ),
+                TransportError,
+            > {
+                Ok((
+                    crate::transport::ResponsesRoute::Codex,
+                    crate::transport::ResponsesProtocol::Standard,
+                ))
+            }
+
             async fn create(
                 &self,
                 _request: ResponsesRequest,
@@ -4104,9 +4443,15 @@ mod tests {
                 _request: ResponsesRequest,
                 sink: tokio::sync::mpsc::Sender<StreamEvent>,
             ) -> Result<ResponsesTurn, TransportError> {
-                sink.send(StreamEvent::ItemDone(Item(json!({
+                let mut response_output_indices = 0_u64..;
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(Item(json!({
                     "type":"custom_tool_call","call_id":"same-id","name":"cell","input":"first"
-                }))))
+                }))).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                })
                 .await
                 .unwrap();
                 Ok(turn(
@@ -4311,13 +4656,7 @@ mod tests {
             &crate::turn::JobOutput::Completed(Ok(Value::String("value".into()))),
         );
         store
-            .write_request(
-                &head,
-                None,
-                "/root",
-                &[invocation, output.clone(), output.clone()],
-                StoredUsage::default(),
-            )
+            .write_request(&head, None, "/root", &[invocation], StoredUsage::default())
             .unwrap();
         store.set_effort(&head, Effort::Low).unwrap();
         store.claim(&call, &head).unwrap();
@@ -4331,6 +4670,14 @@ mod tests {
                 .unwrap(),
             1
         );
+        let operation = store.claims(&call).unwrap()[0].operation.clone();
+        store
+            .append_operation_output(&operation, &head, &head)
+            .unwrap();
+        store.lock().unwrap().execute(
+            "INSERT INTO request_items(request_id,position,item_hash,output_operation) SELECT request_id,(SELECT MAX(position)+1 FROM request_items WHERE request_id=?1),item_hash,output_operation FROM request_items WHERE request_id=?1 AND output_operation IS NOT NULL",
+            [&head.0],
+        ).unwrap();
         let engine = Engine::<FakeAuth, Echo, _>::with_transport(
             Replay {
                 requests: Arc::new(Mutex::new(Vec::new())),
@@ -5568,7 +5915,11 @@ mod tests {
         );
 
         store
-            .append_items(&invocation_request, std::slice::from_ref(&output))
+            .append_operation_output(
+                &claims[0].operation,
+                &invocation_request,
+                &invocation_request,
+            )
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
             .await
@@ -5906,6 +6257,21 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for AsyncContinuation {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                crate::transport::ResponsesRoute,
+                crate::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesProtocol::Standard,
+            ))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
@@ -5915,6 +6281,7 @@ mod tests {
             request: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_indices = 0_u64..;
             let index = {
                 let mut requests = self.requests.lock().unwrap();
                 let index = requests.len();
@@ -5926,7 +6293,12 @@ mod tests {
                     let call = Item(json!({
                         "type":"function_call","call_id":"slow-call","async":true,"name":"slow","arguments":"{}"
                     }));
-                    sink.send(StreamEvent::ItemDone(call.clone()))
+                    sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(call.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                })
                         .await
                         .map_err(|_| {
                             TransportError::Stream("engine event receiver closed".into())
@@ -5944,7 +6316,12 @@ mod tests {
                     let wait = Item(json!({
                         "type":"function_call","call_id":"wait-call","name":"wait_agent","arguments":"{}"
                     }));
-                    sink.send(StreamEvent::ItemDone(wait.clone()))
+                    sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(wait.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                })
                         .await
                         .map_err(|_| {
                             TransportError::Stream("engine event receiver closed".into())
@@ -5955,7 +6332,12 @@ mod tests {
                     let final_item = Item(json!({
                         "type":"message","role":"assistant","phase":"final_answer","content":"done"
                     }));
-                    sink.send(StreamEvent::ItemDone(final_item.clone()))
+                    sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(final_item.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                })
                         .await
                         .map_err(|_| {
                             TransportError::Stream("engine event receiver closed".into())
@@ -5975,6 +6357,21 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for LateFinal {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                crate::transport::ResponsesRoute,
+                crate::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesProtocol::Standard,
+            ))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
@@ -5984,6 +6381,7 @@ mod tests {
             request: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_indices = 0_u64..;
             let index = {
                 let mut requests = self.requests.lock().unwrap();
                 let index = requests.len();
@@ -5997,10 +6395,20 @@ mod tests {
                 let final_item = Item(json!({
                     "type":"message","role":"assistant","phase":"final_answer","content":"provisional"
                 }));
-                sink.send(StreamEvent::ItemDone(call.clone()))
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(call.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                })
                     .await
                     .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
-                sink.send(StreamEvent::ItemDone(final_item.clone()))
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(final_item.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                })
                     .await
                     .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
                 tokio::time::timeout(std::time::Duration::from_secs(2), self.started.notified())
@@ -6013,7 +6421,12 @@ mod tests {
                 let final_item = Item(json!({
                     "type":"message","role":"assistant","phase":"final_answer","content":"continued"
                 }));
-                sink.send(StreamEvent::ItemDone(final_item.clone()))
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(final_item.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                })
                     .await
                     .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
                 Ok(turn("late-continued", vec![final_item]))
@@ -6028,6 +6441,21 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for WaitEnvelopeTransport {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                crate::transport::ResponsesRoute,
+                crate::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesProtocol::Standard,
+            ))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
@@ -6037,6 +6465,7 @@ mod tests {
             request: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_indices = 0_u64..;
             let index = {
                 let mut requests = self.requests.lock().unwrap();
                 let index = requests.len();
@@ -6052,7 +6481,12 @@ mod tests {
                     "type":"message","role":"assistant","phase":"final_answer","content":"resumed"
                 }))
             };
-            sink.send(StreamEvent::ItemDone(item.clone()))
+            sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(item.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                })
                 .await
                 .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
             Ok(turn(
@@ -6070,6 +6504,21 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for QueueInboxBeforeContinuation {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                crate::transport::ResponsesRoute,
+                crate::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesProtocol::Standard,
+            ))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
@@ -6079,6 +6528,7 @@ mod tests {
             request: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_indices = 0_u64..;
             let index = {
                 let mut requests = self.requests.lock().unwrap();
                 let index = requests.len();
@@ -6104,7 +6554,12 @@ mod tests {
                 }))]
             };
             for item in &items {
-                sink.send(StreamEvent::ItemDone(item.clone()))
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(item.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                })
                     .await
                     .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
             }
@@ -6149,6 +6604,21 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for ControlledStream {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                crate::transport::ResponsesRoute,
+                crate::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesProtocol::Standard,
+            ))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             Err(TransportError::Stream(
                 "controlled transport must use streaming".into(),
@@ -6160,6 +6630,7 @@ mod tests {
             request: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_indices = 0_u64..;
             let turn_index = {
                 let mut requests = self.requests.lock().unwrap();
                 let index = requests.len();
@@ -6170,7 +6641,12 @@ mod tests {
                 let call = Item(json!({
                     "type":"function_call","call_id":"gate-call","name":"echo","arguments":"{}"
                 }));
-                sink.send(StreamEvent::ItemDone(call.clone()))
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(call.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                })
                     .await
                     .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
                 tokio::time::timeout(std::time::Duration::from_secs(2), self.started.notified())
@@ -6185,7 +6661,12 @@ mod tests {
                 let final_item = Item(json!({
                     "type":"message","role":"assistant","phase":"final_answer","content":"done"
                 }));
-                sink.send(StreamEvent::ItemDone(final_item.clone()))
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(final_item.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                })
                     .await
                     .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
                 Ok(turn("gated-final", vec![final_item]))
@@ -6256,6 +6737,21 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ResponsesTransport for DeliverBWhileAPending {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                crate::transport::ResponsesRoute,
+                crate::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesProtocol::Standard,
+            ))
+        }
+
         async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             let index = {
                 let mut requests = self.requests.lock().unwrap();
@@ -6431,6 +6927,21 @@ mod tests {
     struct PartialForever;
     #[async_trait::async_trait]
     impl ResponsesTransport for PartialForever {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                crate::transport::ResponsesRoute,
+                crate::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesProtocol::Standard,
+            ))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             unreachable!()
         }
@@ -6501,6 +7012,21 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for OutputBeforeTool {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                crate::transport::ResponsesRoute,
+                crate::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesProtocol::Standard,
+            ))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             unreachable!()
         }
@@ -6509,6 +7035,7 @@ mod tests {
             _: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_indices = 0_u64..;
             let release = self.stream_release.lock().await.take();
             if let Some(release) = release {
                 sink.send(StreamEvent::Delta {
@@ -6525,10 +7052,20 @@ mod tests {
                 let call = Item(
                     json!({"id":"tool-live","type":"function_call","call_id":"slow-live","name":"slow","arguments":"{}"}),
                 );
-                sink.send(StreamEvent::ItemDone(message.clone()))
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(message.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                })
                     .await
                     .unwrap();
-                sink.send(StreamEvent::ItemDone(call.clone()))
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(call.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                })
                     .await
                     .unwrap();
                 release.await.unwrap();
@@ -7874,6 +8411,21 @@ mod tests {
     struct NeverComplete;
     #[async_trait::async_trait]
     impl ResponsesTransport for NeverComplete {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                crate::transport::ResponsesRoute,
+                crate::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesProtocol::Standard,
+            ))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             std::future::pending().await
         }
@@ -7883,10 +8435,16 @@ mod tests {
             _: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_indices = 0_u64..;
             for (call_id, name) in [("cancel-one", "one"), ("cancel-two", "two")] {
-                sink.send(StreamEvent::ItemDone(Item(json!({
+                sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(Item(json!({
                     "type":"function_call","call_id":call_id,"name":name,"arguments":"{}"
-                }))))
+                }))).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                })
                 .await
                 .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
             }
@@ -7914,6 +8472,21 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for FailAfterStart {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                crate::transport::ResponsesRoute,
+                crate::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesProtocol::Standard,
+            ))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
@@ -7923,9 +8496,15 @@ mod tests {
             _: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
-            sink.send(StreamEvent::ItemDone(Item(json!({
+            let mut response_output_indices = 0_u64..;
+            sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(Item(json!({
                 "type":"function_call","call_id":"transport-fail","name":"pending","arguments":"{}"
-            }))))
+            }))).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                })
             .await
             .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
             self.started.notified().await;
@@ -7938,6 +8517,21 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for MalformedAfterStart {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                crate::transport::ResponsesRoute,
+                crate::transport::ResponsesProtocol,
+            ),
+            TransportError,
+        > {
+            Ok((
+                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesProtocol::Standard,
+            ))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
@@ -7947,17 +8541,28 @@ mod tests {
             _: ResponsesRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let mut response_output_indices = 0_u64..;
             let first = Item(json!({
                 "type":"function_call","call_id":"before-malformed","name":"pending","arguments":"{}"
             }));
             let malformed = Item(json!({
                 "type":"function_call","call_id":"malformed-later","name":"pending","arguments":"["
             }));
-            sink.send(StreamEvent::ItemDone(first.clone()))
+            sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(first.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                })
                 .await
                 .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
             self.started.notified().await;
-            sink.send(StreamEvent::ItemDone(malformed.clone()))
+            sink.send({
+                    let event = crate::transport::sse::ResponseAssembly::default().accept(
+                        &json!({"type":"response.output_item.done", "output_index":response_output_indices.next().unwrap(), "item":(malformed.clone()).0}).to_string()
+                    ).unwrap().unwrap();
+                    event
+                })
                 .await
                 .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
             Ok(turn("malformed-after-start", vec![first, malformed]))

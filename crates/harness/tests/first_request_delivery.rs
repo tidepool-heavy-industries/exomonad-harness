@@ -138,7 +138,7 @@ async fn followup_queued_before_first_request_is_delivered_once_and_durable() {
         "name": "finalize",
         "arguments": "{\"result\":{\"answer\":\"follow-up observed\"}}"
     }));
-    let replay = Arc::new(ReplayTransport::gated([ResponsesTurn {
+    let replay = Arc::new(ReplayTransport::scripted_codex_standard_gated([ResponsesTurn {
         response_id: "first-and-final".into(),
         items: vec![final_call.clone()],
         usage: Default::default(),

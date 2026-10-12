@@ -1,4 +1,7 @@
-pub const VERSION: u32 = 12;
+// Version 16 requires fixed FULL writer durability. Earlier writers refuse it
+// instead of reopening the database with NORMAL after its admission barrier.
+pub const VERSION: u32 = 17;
+const FULL_DURABILITY_VERSION: u32 = 16;
 pub const SQL: &str = include_str!("schema.sql");
 const MODEL_REQUEST_INDEXES: &str = "
     CREATE INDEX IF NOT EXISTS events_model_turn_recent ON events(id DESC,request_id) WHERE kind='model_turn';
@@ -6,22 +9,14 @@ const MODEL_REQUEST_INDEXES: &str = "
     CREATE INDEX IF NOT EXISTS events_model_outcomes_recent ON events(id DESC,request_id) WHERE kind IN ('model_turn','request_failed','model_interrupted');
 ";
 
-pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
+fn current_version(conn: &rusqlite::Connection) -> super::Result<Option<u32>> {
     let has_version: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version')",
         [],
         |r| r.get(0),
     )?;
     if !has_version {
-        let tx = conn.transaction()?;
-        tx.execute_batch(SQL)?;
-        tx.execute_batch(MODEL_REQUEST_INDEXES)?;
-        tx.execute_batch(super::actor_output::INDEXES)?;
-        tx.execute_batch(super::validation::INDEXES)?;
-        tx.execute("INSERT INTO schema_version(version) VALUES (?1)", [VERSION])?;
-        super::schema_migration::ensure_store_id(&tx)?;
-        tx.commit()?;
-        return Ok(());
+        return Ok(None);
     }
     let versions: Vec<u32> = {
         let mut stmt = conn.prepare("SELECT version FROM schema_version")?;
@@ -41,8 +36,46 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
         ))
         .into());
     }
+    Ok(Some(version))
+}
+
+pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
+    // Refuse unknown formats before changing their persistent journal mode.
+    let version = current_version(conn)?;
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
+    )?;
+    if version.is_some_and(|version| version < FULL_DURABILITY_VERSION) {
+        // A connection's FULL setting does not sync an earlier NORMAL commit.
+        // Confirm legacy WAL before exposing any retained binding or history.
+        // The ensuing FULL schema migration publishes the new writer contract;
+        // matching writers do not checkpoint again on admission or binding.
+        let (busy, wal_frames, checkpointed_frames): (i64, i64, i64) =
+            conn.query_row("PRAGMA main.wal_checkpoint(FULL)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+        if busy != 0 || wal_frames != checkpointed_frames {
+            return Err(super::StoreError::DurabilityAdmissionBusy {
+                wal_frames,
+                checkpointed_frames,
+            });
+        }
+    }
+    let Some(version) = version else {
+        let tx = conn.transaction()?;
+        tx.execute_batch(SQL)?;
+        tx.execute_batch(MODEL_REQUEST_INDEXES)?;
+        tx.execute_batch(super::actor_output::INDEXES)?;
+        tx.execute_batch(super::validation::INDEXES)?;
+        tx.execute("INSERT INTO schema_version(version) VALUES (?1)", [VERSION])?;
+        super::schema_migration::ensure_store_id(&tx)?;
+        super::chat::initialize_cutover(&tx, false)?;
+        tx.commit().map_err(super::StoreError::RecoveryRequired)?;
+        return Ok(());
+    };
     if version == VERSION {
         super::schema_migration::validate_checkpoint_metadata(conn)?;
+        conn.execute_batch(SQL)?;
         conn.execute_batch(MODEL_REQUEST_INDEXES)?;
         conn.execute_batch(super::actor_output::INDEXES)?;
         conn.execute_batch(super::validation::INDEXES)?;
@@ -101,7 +134,19 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
     if legacy_inputs && version < 7 {
         tx.execute_batch("ALTER TABLE embedded_inputs RENAME TO legacy_embedded_inputs;")?;
     }
+    let migrate_commands = version < 17 && tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='embedded_commands')",
+        [], |r| r.get::<_, bool>(0),
+    )?;
+    if migrate_commands {
+        tx.execute_batch("ALTER TABLE embedded_commands RENAME TO legacy_embedded_commands; DROP INDEX IF EXISTS embedded_commands_queued;")?;
+    }
     tx.execute_batch(SQL)?;
+    if migrate_commands {
+        tx.execute_batch("INSERT INTO embedded_commands SELECT * FROM legacy_embedded_commands; DROP TABLE legacy_embedded_commands;")?;
+    }
+    // Historical outputs keep NULL ownership. Their source occurrence cannot
+    // be inferred from equal payload hashes or reused wire call IDs.
     let item_columns = {
         let mut statement = tx.prepare("PRAGMA table_info(request_items)")?;
         statement
@@ -114,6 +159,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
         "context_sources",
         "context_note",
         "context_overlays",
+        "output_operation",
     ] {
         if !item_columns.iter().any(|existing| existing == column) {
             let kind = if column == "context_note" {
@@ -157,6 +203,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
         tx.execute_batch("DROP TABLE legacy_claims")?;
     }
     super::schema_migration::migrate_checkpoint_metadata(&tx)?;
+    super::chat::initialize_cutover(&tx, true)?;
     tx.execute("UPDATE schema_version SET version=?1", [VERSION])?;
-    Ok(tx.commit()?)
+    Ok(tx.commit().map_err(super::StoreError::RecoveryRequired)?)
 }
