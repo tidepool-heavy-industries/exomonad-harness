@@ -41,6 +41,7 @@ BROWSER_SOURCE_INPUTS.update({
     "workspace/flake.nix": "//:workspace_flake",
     "workspace/flake.lock": "//:workspace_flake_lock",
     "workspace/.buckconfig": "//:workspace_buckconfig",
+    "build/rust/profiles.bzl": "//build/rust:profile_policy_source",
     "BUCK": "BUCK",
     "browser-source-identity.json": "//web:browser_source_identity",
     "browser-source-identity.py": "//scripts:browser_source_identity_issuer",
