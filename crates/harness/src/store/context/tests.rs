@@ -2163,3 +2163,69 @@ fn forged_finalize_marker_cannot_authenticate_a_schema_invalid_response() {
     ));
     assert!(store.context_receipt(&operation).unwrap().is_none());
 }
+
+#[test]
+fn legacy_v3_replay_retry_retains_the_exact_committed_receipt() {
+    let original = Store::memory().unwrap();
+    let (head, operation) = setup(&original);
+    let snapshot = original.begin_context(&operation, &head).unwrap();
+    original
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &edited(&snapshot),
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    let mut evidence = original
+        .context_commit_evidence(&operation)
+        .unwrap()
+        .unwrap();
+    let local = Store::memory().unwrap();
+    let (head, operation) = setup(&local);
+    let snapshot = local.begin_context(&operation, &head).unwrap();
+    let committed = local
+        .restore_context_commit(&snapshot, &evidence, &output(), &[])
+        .unwrap();
+    let c = local.lock().unwrap();
+    let (id, raw): (i64, String) = c
+        .query_row(
+            "SELECT id,payload FROM events WHERE kind='context_commit' ORDER BY id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let mut record: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    record["version"] = json!(3);
+    for prefix in record["prefix"].as_array_mut().unwrap() {
+        prefix.as_object_mut().unwrap().remove("origin");
+    }
+    let mut candidate: serde_json::Value =
+        serde_json::from_str(record["candidate"].as_str().unwrap()).unwrap();
+    candidate.as_array_mut().unwrap().pop();
+    record["candidate"] = json!(candidate.to_string());
+    c.execute(
+        "UPDATE events SET payload=?2 WHERE id=?1",
+        params![id, record.to_string()],
+    )
+    .unwrap();
+    drop(c);
+    evidence.version = 3;
+    evidence.prefix_origins = None;
+    let before = local.context_history(&committed.head).unwrap();
+    assert_eq!(
+        local
+            .restore_context_commit(&snapshot, &evidence, &output(), &[])
+            .unwrap(),
+        committed
+    );
+    assert_eq!(local.context_history(&committed.head).unwrap(), before);
+    assert_eq!(
+        local
+            .context_commit_evidence(&operation)
+            .unwrap()
+            .unwrap()
+            .version,
+        3
+    );
+}

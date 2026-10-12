@@ -1943,16 +1943,14 @@ impl Store {
                 }
             }
             let candidate = if let Some(evidence) = replay {
-                serde_json::to_string(&(
-                    evidence
-                        .prefix
-                        .iter()
-                        .map(|(i, s, note, overlays)| (i, s, note, overlays))
-                        .collect::<Vec<_>>(),
-                    &evidence.model,
-                    evidence.next_effort,
-                    &evidence.prefix_origins,
-                ))?
+                let prefix = evidence.prefix.iter()
+                    .map(|(item, sources, note, overlays)| (item, sources, note, overlays))
+                    .collect::<Vec<_>>();
+                if evidence.version >= 4 {
+                    serde_json::to_string(&(prefix, &evidence.model, evidence.next_effort, &evidence.prefix_origins))?
+                } else {
+                    serde_json::to_string(&(prefix, &evidence.model, evidence.next_effort))?
+                }
             } else {
                 serde_json::to_string(draft)?
             };
