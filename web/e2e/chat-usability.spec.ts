@@ -59,18 +59,20 @@ for (const width of [1280, 390]) {
 
 test('form submission updates attention immediately, preserves validation drafts and presents a readable response', async ({ page, request }) => {
   let attempt = 0
+  let submitted!: StoredActorForm
   await page.route('**/api/actor-form/submit', async route => {
     const payload = route.request().postDataJSON()
     attempt++
-    const result = attempt === 1 ? { ...form, revisionSequence: '6', errors: [{ field: 'project', message: 'Use the full project name' }], draft: payload.draft }
-      : { ...form, revisionSequence: '7', state: 'submitted', draft: payload.draft }
-    await route.fulfill({ json: result })
+    submitted = { ...form, revisionSequence: attempt === 1 ? '6' : '8', state: 'submitted', attemptId: payload.operationId, draft: payload.draft }
+    await route.fulfill({ json: submitted })
   })
   await openChat(page, request)
   await page.getByRole('button', { name: 'Jump to form', exact: true }).click()
   const input = page.getByRole('textbox', { name: 'Project name', exact: true })
   await input.fill('Harness')
   await page.getByRole('button', { name: 'Submit', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Form · response submitted' })).toBeVisible()
+  await control(request, 'config', { chatEntries: entries.map(entry => entry.kind === 'form' ? { ...entry, form: { ...submitted, revisionSequence: '7', state: 'open', errors: [{ field: 'project', message: 'Use the full project name' }] } } : entry) })
   await expect(input).toBeFocused()
   await expect(input).toHaveAttribute('aria-invalid', 'true')
   await expect(input).toHaveValue('Harness')
@@ -83,6 +85,33 @@ test('form submission updates attention immediately, preserves validation drafts
   await page.getByRole('button', { name: 'Refresh conversation', exact: true }).click()
   await expect(page.getByRole('navigation', { name: 'Pending responses' })).toHaveCount(0)
 })
+
+for (const stage of ['submit response', 'native validation']) {
+  test(`form response respects focus moved elsewhere before ${stage}`, async ({ page, request }) => {
+    let release!: () => void
+    let submitted!: StoredActorForm
+    const waiting = new Promise<void>(resolve => { release = resolve })
+    await page.route('**/api/actor-form/submit', async route => {
+      const payload = route.request().postDataJSON()
+      submitted = { ...form, revisionSequence: '6', state: 'submitted', attemptId: payload.operationId, draft: payload.draft }
+      await waiting
+      await route.fulfill({ json: submitted })
+    })
+    await openChat(page, request)
+    await page.getByRole('button', { name: 'Jump to form', exact: true }).click()
+    await page.getByRole('textbox', { name: 'Project name', exact: true }).fill('Harness')
+    await page.getByRole('button', { name: 'Submit', exact: true }).click()
+    const refresh = page.getByRole('button', { name: 'Refresh conversation', exact: true })
+    if (stage === 'submit response') await refresh.focus()
+    release()
+    await expect(page.getByRole('heading', { name: 'Form · response submitted' })).toBeVisible()
+    if (stage === 'native validation') await refresh.focus()
+    await expect(refresh).toBeFocused()
+    await control(request, 'config', { chatEntries: entries.map(entry => entry.kind === 'form' ? { ...entry, form: { ...submitted, revisionSequence: '7', state: 'open', errors: [{ field: 'project', message: 'Use the full project name' }] } } : entry) })
+    await expect(page.getByRole('textbox', { name: 'Project name', exact: true })).toHaveAttribute('aria-invalid', 'true')
+    await expect(refresh).toBeFocused()
+  })
+}
 
 test('streaming and retained publication preserve selected text and the reading position', async ({ page, request }) => {
   const text = 'A stable passage to select while the agent continues.'

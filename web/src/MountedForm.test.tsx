@@ -102,15 +102,61 @@ describe('mounted actor forms', () => {
     expect((screen.getAllByLabelText('Same label')[1] as HTMLInputElement).checked).toBe(true)
   })
 
-  it('focuses the invalid field and describes its server validation error without losing the draft', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ ...openForm, revisionSequence: '12', errors: [{ field: 'name', message: 'Enter a project name' }] }))))
-    render(<MountedForm form={openForm} ready active />)
+  it('focuses validation from the submitted attempt when native rejection arrives after the HTTP response', async () => {
+    let submitted!: StoredActorForm
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      const payload = JSON.parse(String(init.body)) as { operationId: string; draft: StoredActorForm['draft'] }
+      submitted = { ...openForm, revisionSequence: '11', state: 'submitted', attemptId: payload.operationId, draft: payload.draft }
+      return new Response(JSON.stringify(submitted))
+    }))
+    const mounted = render(<MountedForm form={openForm} ready active />)
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'typed draft' } })
     fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    await screen.findByRole('heading', { name: 'Form · response submitted' })
+    mounted.rerender(<MountedForm form={submitted} ready active />)
+    expect(screen.getByRole('region', { name: 'Actor form 9' })).toHaveFocus()
+    mounted.rerender(<MountedForm form={{ ...submitted, state: 'open', revisionSequence: '12', errors: [{ field: 'name', message: 'Enter a project name' }] }} ready active />)
     await waitFor(() => expect(screen.getByLabelText('Name')).toHaveFocus())
     expect(screen.getByLabelText('Name')).toHaveValue('typed draft')
     expect(screen.getByLabelText('Name')).toHaveAttribute('aria-invalid', 'true')
     expect(screen.getByLabelText('Name')).toHaveAccessibleDescription(/Enter a project name/)
+  })
+
+  it.each(['HTTP response', 'native validation'] as const)('keeps focus elsewhere after the operator moves away before %s', async stage => {
+    let respond!: (response: Response) => void
+    let submitted!: StoredActorForm
+    vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) => {
+      const payload = JSON.parse(String(init.body)) as { operationId: string; draft: StoredActorForm['draft'] }
+      submitted = { ...openForm, revisionSequence: '11', state: 'submitted', attemptId: payload.operationId, draft: payload.draft }
+      return new Promise<Response>(resolve => { respond = resolve })
+    }))
+    const content = (form: StoredActorForm) => <><button type="button">Other action</button><MountedForm form={form} ready active /></>
+    const mounted = render(content(openForm))
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'typed draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    const other = screen.getByRole('button', { name: 'Other action' })
+    if (stage === 'HTTP response') other.focus()
+    respond(new Response(JSON.stringify(submitted)))
+    await screen.findByRole('heading', { name: 'Form · response submitted' })
+    if (stage === 'native validation') other.focus()
+    expect(other).toHaveFocus()
+    mounted.rerender(content({ ...submitted, state: 'open', revisionSequence: '12', errors: [{ field: 'name', message: 'Enter a project name' }] }))
+    expect(await screen.findByLabelText('Name')).toHaveAttribute('aria-invalid', 'true')
+    expect(other).toHaveFocus()
+  })
+
+  it('does not treat a rejection for a different attempt as this submission’s focus response', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      const payload = JSON.parse(String(init.body)) as { operationId: string; draft: StoredActorForm['draft'] }
+      return new Response(JSON.stringify({ ...openForm, revisionSequence: '11', state: 'submitted', attemptId: payload.operationId, draft: payload.draft }))
+    }))
+    const mounted = render(<MountedForm form={openForm} ready active />)
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    await screen.findByRole('heading', { name: 'Form · response submitted' })
+    const card = screen.getByRole('region', { name: 'Actor form 9' })
+    mounted.rerender(<MountedForm form={{ ...openForm, revisionSequence: '12', attemptId: 'different-attempt', errors: [{ field: 'name', message: 'Different response' }] }} ready active />)
+    expect(await screen.findByLabelText('Name')).toHaveAttribute('aria-invalid', 'true')
+    expect(card).toHaveFocus()
   })
 
   it('renders terminal form answers and submitted values read-only', () => {

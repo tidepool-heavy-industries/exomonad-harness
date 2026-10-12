@@ -129,6 +129,8 @@ function activeDraft(node: FormNode, draft: FormDraft, into: FormDraft = Object.
   return into
 }
 
+interface FormFocusIntent { attemptId: string; startRevision: string; responseReceived: boolean; submissionFocused: boolean }
+
 const Validation = createContext<{ prefix: string; errors: StoredActorForm['errors'] }>({ prefix: '', errors: [] })
 
 export default function MountedForm({ form, ready, active, onAuthExpired, onStateChange }: { form: StoredActorForm; ready: boolean; active: boolean; onAuthExpired?: () => void; onStateChange?: (form: StoredActorForm) => void }) {
@@ -139,18 +141,41 @@ export default function MountedForm({ form, ready, active, onAuthExpired, onStat
   const [latest, setLatest] = useState(form)
   const [showDetails, setShowDetails] = useState(false)
   const section = useRef<HTMLElement>(null)
-  const focusResponse = useRef(false)
+  const focusIntent = useRef<FormFocusIntent>()
   const prefix = useId()
   const editable = latest.state === 'open' && active && ready
   const displayedDraft = latest.state === 'open' ? draft : hydratedDraft(latest)
   const dismissible = (latest.state === 'open' || latest.state === 'submitted') && active && ready
+  // Submission acknowledgement can precede native validation. Keep focus intent
+  // for that exact attempt until settlement or deliberate activity elsewhere.
+  useEffect(() => {
+    const abandonFocus = (event: Event) => {
+      if (focusIntent.current && event.target instanceof Node && !section.current?.contains(event.target)) focusIntent.current = undefined
+    }
+    document.addEventListener('focusin', abandonFocus)
+    document.addEventListener('pointerdown', abandonFocus)
+    return () => { document.removeEventListener('focusin', abandonFocus); document.removeEventListener('pointerdown', abandonFocus) }
+  }, [])
   useLayoutEffect(() => {
-    if (!focusResponse.current) return
-    focusResponse.current = false
-    const invalid = section.current?.querySelector<HTMLElement>('input[aria-invalid="true"], textarea[aria-invalid="true"], select[aria-invalid="true"]')
-    if (invalid) invalid.focus()
-    else if (latest.state !== 'open') section.current?.focus({ preventScroll: true })
-  }, [latest])
+    const intent = focusIntent.current
+    if (!intent || busy || !intent.responseReceived) return
+    if (latest.attemptId !== intent.attemptId) {
+      if (compareDecimal(latest.revisionSequence, intent.startRevision) > 0) focusIntent.current = undefined
+      return
+    }
+    const focused = document.activeElement
+    if (focused !== document.body && !section.current?.contains(focused)) { focusIntent.current = undefined; return }
+    if (latest.state === 'open') {
+      if (!latest.errors.length) return
+      focusIntent.current = undefined
+      const invalid = section.current?.querySelector<HTMLElement>('input[aria-invalid="true"], textarea[aria-invalid="true"], select[aria-invalid="true"]')
+      if (invalid) invalid.focus()
+      else section.current?.focus({ preventScroll: true })
+    } else {
+      if (!intent.submissionFocused) { intent.submissionFocused = true; section.current?.focus({ preventScroll: true }) }
+      if (latest.state !== 'submitted') focusIntent.current = undefined
+    }
+  }, [latest, busy])
   useEffect(() => {
     const stale = compareDecimal(form.revisionSequence, latest.revisionSequence) < 0
       || (form.revisionSequence === latest.revisionSequence && latest.state !== 'open' && form.state === 'open')
@@ -169,21 +194,23 @@ export default function MountedForm({ form, ready, active, onAuthExpired, onStat
     setBusy(true); setIssue('')
     try {
       const { origin, mountId } = latest.opening
+      const operationId = allocateOperationId()
+      focusIntent.current = dismiss ? undefined : { attemptId: operationId, startRevision: latest.revisionSequence, responseReceived: false, submissionFocused: false }
       const response = await fetch(`/api/actor-form/${dismiss ? 'dismiss' : 'submit'}`, {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ origin, mountId, operationId: allocateOperationId(), ...(dismiss ? {} : { draft: activeDraft(latest.opening.form.root, draft) }) }),
+        body: JSON.stringify({ origin, mountId, operationId, ...(dismiss ? {} : { draft: activeDraft(latest.opening.form.root, draft) }) }),
       })
       if (response.status === 401 || response.status === 403) onAuthExpired?.()
       if (!response.ok) throw new Error(response.status === 409 ? 'This form is no longer open. Refresh the conversation.' : 'The form response was rejected. Your draft is still here.')
       const value: unknown = await response.json()
       if (!isStoredActorForm(value) || keyOf(value) !== key) throw new Error('The server returned an invalid form response. Your draft is still here.')
-      focusResponse.current = !dismiss
+      if (focusIntent.current?.attemptId === operationId) focusIntent.current.responseReceived = true
       setLatest(current => compareDecimal(value.revisionSequence, current.revisionSequence) < 0
         || (value.revisionSequence === current.revisionSequence && current.state !== 'open' && value.state === 'open') ? current : value)
       onStateChange?.(value)
       if (value.state !== 'open') retainedDrafts.delete(key)
       else keepDraft(key, draft)
-    } catch (error) { setIssue(error instanceof Error ? error.message : String(error)) }
+    } catch (error) { focusIntent.current = undefined; setIssue(error instanceof Error ? error.message : String(error)) }
     finally { setBusy(false) }
   }
   return <section ref={section} tabIndex={-1} className="mounted-form" aria-label={`Actor form ${latest.sequence}`} data-state={latest.state} data-mount-id={latest.opening.mountId}>
