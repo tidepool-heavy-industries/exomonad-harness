@@ -131,12 +131,39 @@ async fn mismatched_credentials_are_refused_before_traffic() {
             ResponsesRoute::ChatGptPlan
         }
     }
+    let client = ResponsesClient::new(WrongAuthority);
+    let selection = crate::engine::ResponsesTransport::prepare_submission(&client).unwrap();
+    let store = crate::store::Store::memory().unwrap();
+    let head = crate::model::RequestId("wrong-authority".into());
+    store.create_request(&head, None, "/root").unwrap();
+    let request = ResponsesRequest {
+        input: vec![],
+        ..plan_request()
+    };
+    let prepared = store
+        .prepare_provider_request(
+            &head,
+            &head,
+            request,
+            &[],
+            None,
+            selection,
+            crate::store::ProviderRequestPurpose::Inference,
+        )
+        .unwrap();
+    assert_eq!(prepared.request_id(), &head);
+    assert_eq!(
+        prepared.response_contract(),
+        (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard)
+    );
     assert!(matches!(
-        ResponsesClient::new(WrongAuthority)
-            .create(plan_request())
-            .await,
+        client.create(prepared).await,
         Err(TransportError::Authentication)
     ));
+    assert_eq!(
+        store.provider_response_state(&head).unwrap(),
+        Some(crate::store::ProviderResponseState::Streaming)
+    );
 }
 
 #[test]

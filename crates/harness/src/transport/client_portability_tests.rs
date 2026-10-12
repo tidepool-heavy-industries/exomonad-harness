@@ -12,10 +12,45 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// The production serializer, HTTP request builder and SSE body reader run
 /// unchanged; only the built request's URL points to the fixture listener.
 async fn exchange(
+    store: &Store,
+    source: &RequestId,
+    local: &RequestId,
     request: &ResponsesRequest,
+    occurrences: &[Option<crate::context::Occurrence>],
     protocol: ResponsesProtocol,
     items: &[Item],
 ) -> (ResponsesTurn, Value) {
+    #[derive(Clone)]
+    struct FixtureAuth;
+    impl Auth for FixtureAuth {
+        fn access(&self) -> Result<(String, String), TransportError> {
+            unreachable!("fixture exchange supplies local HTTP credentials")
+        }
+    }
+    let receiver = super::super::ResponsesClient::new(FixtureAuth).with_protocol(protocol);
+    let selection = crate::engine::ResponsesTransport::prepare_submission(&receiver).unwrap();
+    let prepared = store
+        .prepare_provider_request(
+            source,
+            local,
+            request.clone(),
+            occurrences,
+            None,
+            selection,
+            crate::store::ProviderRequestPurpose::Inference,
+        )
+        .unwrap();
+    assert_eq!(prepared.request_id(), local);
+    assert_eq!(
+        prepared.response_contract(),
+        (ResponsesRoute::Codex, protocol)
+    );
+    assert_eq!(
+        store.provider_response_state(local).unwrap(),
+        Some(crate::store::ProviderResponseState::Streaming)
+    );
+    let issuer = prepared.issuer().clone();
+    let (request, body, (route, selected_protocol)) = prepared.into_dispatch_parts();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let mut events = items
@@ -61,13 +96,12 @@ async fn exchange(
         body
     });
     let http = http_client().unwrap();
-    let body = normalized_request(request, protocol, ResponsesRoute::Codex).unwrap();
     let mut built = http_request(
         &http,
-        ResponsesRoute::Codex,
-        protocol,
-        request,
-        serde_json::to_vec(&body).unwrap(),
+        route,
+        selected_protocol,
+        &request,
+        body,
         "fixture-token",
         Some("fixture-account"),
     )
@@ -78,6 +112,11 @@ async fn exchange(
     let turn = read_response(response, None, "fixture-token", "fixture-account")
         .await
         .unwrap();
+    store.record_provider_turn(&issuer, &turn).unwrap();
+    assert_eq!(
+        store.provider_response_state(local).unwrap(),
+        Some(crate::store::ProviderResponseState::Completed)
+    );
     (turn, server.await.unwrap())
 }
 
@@ -130,13 +169,6 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
             json!({"type":"custom_tool_call","id":"tool-item","status":"completed","call_id":"work-call","name":"cell","input":"original Haskell input"}),
         ),
     ];
-    let (turn, sent) = exchange(&request, ResponsesProtocol::Lite, &source_items).await;
-    assert_eq!(
-        turn.items, source_items,
-        "SSE ingest must retain original provider bytes"
-    );
-    assert!(sent.get("instructions").is_none());
-    assert_eq!(sent["model"], "gpt-6.1-sol");
     let store = Store::memory().unwrap();
     let initial_head = RequestId("input".into());
     let head = RequestId("response".into());
@@ -145,15 +177,30 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         .unwrap();
     store.set_effort(&initial_head, Effort::High).unwrap();
     store
-        .write_request(
-            &head,
-            Some(&initial_head),
-            "/root",
-            &turn.items,
-            Default::default(),
-        )
+        .create_request(&head, Some(&initial_head), "/root")
         .unwrap();
-    store.record_replay_turn(&head, &request, &turn).unwrap();
+    let occurrences = store
+        .history_occurrences(&initial_head)
+        .unwrap()
+        .into_iter()
+        .map(Some)
+        .collect::<Vec<_>>();
+    let (turn, sent) = exchange(
+        &store,
+        &initial_head,
+        &head,
+        &request,
+        &occurrences,
+        ResponsesProtocol::Lite,
+        &source_items,
+    )
+    .await;
+    assert_eq!(
+        turn.items, source_items,
+        "SSE ingest must retain original provider bytes"
+    );
+    assert!(sent.get("instructions").is_none());
+    assert_eq!(sent["model"], "gpt-6.1-sol");
     let work = store.claim(&CallId("work-call".into()), &head).unwrap();
     store.settle_claims(&work, &Item(json!({"type":"custom_tool_call_output","call_id":"work-call","output":"original completed output"})), TerminalOutcome::Success).unwrap();
     store.append_operation_output(&work, &head, &head).unwrap();
@@ -166,19 +213,20 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         ]);
     }
     spawn_items.push(Item(json!({"type":"custom_tool_call","call_id":"spawn-call","name":"cell","input":"spawn child"})));
-    let (spawn_turn, _) = exchange(&request, ResponsesProtocol::Lite, &spawn_items).await;
     store
-        .write_request(
-            &spawn_head,
-            Some(&head),
-            "/root",
-            &spawn_turn.items,
-            Default::default(),
-        )
+        .create_request(&spawn_head, Some(&head), "/root")
         .unwrap();
-    store
-        .record_replay_turn(&spawn_head, &request, &spawn_turn)
-        .unwrap();
+    let (spawn_turn, _) = exchange(
+        &store,
+        &head,
+        &spawn_head,
+        &request,
+        &occurrences,
+        ResponsesProtocol::Lite,
+        &spawn_items,
+    )
+    .await;
+    assert_eq!(spawn_turn.items, spawn_items);
     store.lock().unwrap().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)", [&spawn_head.0]).unwrap();
     let spawn = store
         .claim(&CallId("spawn-call".into()), &spawn_head)
@@ -212,6 +260,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
     let state = store
         .context_request_state(child.head_request.as_ref().unwrap(), &identity)
         .unwrap();
+    let destination_occurrences = state.occurrences.clone();
     let input = state
         .history
         .into_iter()
@@ -269,7 +318,20 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
     if descendant == Descendant::Captured {
         answer.push(Item(json!({"type":"custom_tool_call","call_id":"recursive-call","name":"cell","input":"capture recursive helper"})));
     }
-    let (turn, sent) = exchange(&destination, ResponsesProtocol::Standard, &answer).await;
+    let child_turn = RequestId("child-response".into());
+    store
+        .create_request(&child_turn, child.head_request.as_ref(), &child.path.0)
+        .unwrap();
+    let (turn, sent) = exchange(
+        &store,
+        child.head_request.as_ref().unwrap(),
+        &child_turn,
+        &destination,
+        &destination_occurrences,
+        ResponsesProtocol::Standard,
+        &answer,
+    )
+    .await;
     assert_eq!(turn.items, answer);
     assert_eq!(sent["model"], "gpt-6-luna");
     assert_eq!(
@@ -281,19 +343,6 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         return;
     }
 
-    let child_turn = RequestId("child-response".into());
-    store
-        .write_request(
-            &child_turn,
-            child.head_request.as_ref(),
-            &child.path.0,
-            &turn.items,
-            Default::default(),
-        )
-        .unwrap();
-    store
-        .record_replay_turn(&child_turn, &destination, &turn)
-        .unwrap();
     assert!(
         store
             .advance_agent_head(&child.path, child.head_request.as_ref(), Some(&child_turn))
@@ -439,6 +488,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         .context_request_state(grandchild_head, &grandchild_identity)
         .unwrap();
     assert_eq!(state.history, repeated.history);
+    let grandchild_occurrences = repeated.occurrences.clone();
     let request = ResponsesRequest {
         model: "gpt-6-luna".into(),
         input: repeated
@@ -452,8 +502,20 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
     let grandchild_answer = vec![Item(
         json!({"type":"message","role":"assistant","content":"grandchild ran"}),
     )];
-    let (completed, sent) =
-        exchange(&request, ResponsesProtocol::Standard, &grandchild_answer).await;
+    let grandchild_turn = RequestId("grandchild-response".into());
+    store
+        .create_request(&grandchild_turn, Some(grandchild_head), &grandchild.path.0)
+        .unwrap();
+    let (completed, sent) = exchange(
+        &store,
+        grandchild_head,
+        &grandchild_turn,
+        &request,
+        &grandchild_occurrences,
+        ResponsesProtocol::Standard,
+        &grandchild_answer,
+    )
+    .await;
     assert_eq!(completed.items, grandchild_answer);
     assert_eq!(sent["input"], serde_json::to_value(&request.input).unwrap());
     assert_eq!(

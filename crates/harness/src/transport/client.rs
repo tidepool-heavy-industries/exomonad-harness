@@ -708,10 +708,26 @@ mod tests {
                 "parameters":{"type":"object","properties":{"view":{"type":"string"}},"additionalProperties":false}
             })].into(),tools_allowed:None,model:"test-model".into(),pinned_effort:Effort::Low,session_id:"gate-before-auth".into()
         };
+        let client = ResponsesClient::new(NoAuth);
+        let selection = crate::engine::ResponsesTransport::prepare_submission(&client).unwrap();
+        let store = crate::store::Store::memory().unwrap();
+        let head = crate::model::RequestId("invalid-schema".into());
+        store.create_request(&head, None, "/root").unwrap();
         assert!(matches!(
-            ResponsesClient::new(NoAuth).create(request).await,
-            Err(TransportError::Stream(_))
+            store.prepare_provider_request(
+                &head,
+                &head,
+                request,
+                &[],
+                None,
+                selection,
+                crate::store::ProviderRequestPurpose::Inference,
+            ),
+            Err(crate::store::PrepareProviderError::Transport(
+                TransportError::Stream(_)
+            ))
         ));
+        assert_eq!(store.provider_response_state(&head).unwrap(), None);
     }
 
     #[test]
@@ -835,7 +851,22 @@ mod tests {
             pinned_effort: Effort::Low,
             session_id: "harness-wave0-transport-smoke".into(),
         };
-        let turn = client.create(request).await.expect("live response");
+        let selection = crate::engine::ResponsesTransport::prepare_submission(&client).unwrap();
+        let store = crate::store::Store::memory().unwrap();
+        let head = crate::model::RequestId("live-smoke".into());
+        store.create_request(&head, None, "/root").unwrap();
+        let prepared = store
+            .prepare_provider_request(
+                &head,
+                &head,
+                request,
+                &[None],
+                None,
+                selection,
+                crate::store::ProviderRequestPurpose::Inference,
+            )
+            .unwrap();
+        let turn = client.create(prepared).await.expect("live response");
         assert!(
             turn.items
                 .iter()
