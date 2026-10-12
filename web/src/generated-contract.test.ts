@@ -6,6 +6,7 @@ import {
 import samples from './generated/wire-samples.json';
 import type { HistoryPage } from './generated/history';
 import type { Snapshot } from './protocol';
+import { isEmbeddedCommandRecord as isAssociatedCommandRecord, sameInferenceBlock } from './protocol';
 const rawFrames: unknown[] = samples.server;
 const frames = rawFrames.filter(isServerFrame);
 
@@ -56,6 +57,17 @@ describe('Rust-owned browser wire contracts', () => {
     expect(recovery.command.expected_block.generation).toBe('18446744073709551615');
     expect(isClientCommand({ ...recovery, command: { ...recovery.command, expected_block: { ...recovery.command.expected_block, generation: 9007199254740992 } } })).toBe(false);
     expect(isChatPage({ ...samples.chat[0], nextAfter: 9007199254740992 })).toBe(false);
+  });
+
+  it('checks operation state and observation association after generated shape validation', () => {
+    const record = samples.embeddedCommand[0]!;
+    expect(isAssociatedCommandRecord(record)).toBe(true);
+    expect(isAssociatedCommandRecord({ ...record, command: { action:'retire', target:record.command.target }, state:'recovery_authorized', receipt:null })).toBe(false);
+    expect(isAssociatedCommandRecord({ ...record, inputObservation:{state:'included', request:''} })).toBe(false);
+    const first = { request:'request', generation:'9007199254740993', reason:{kind:'request_rejected' as const, failure:{kind:'http' as const, status:400, diagnostic:{code:'code', message:'message'}}} };
+    const reordered = { ...first, reason:{kind:'request_rejected' as const, failure:{kind:'http' as const, status:400, diagnostic:{message:'message', code:'code'}}} };
+    expect(sameInferenceBlock(first, reordered)).toBe(true);
+    expect(sameInferenceBlock(first, {...reordered, generation:'9007199254740994'})).toBe(false);
   });
 
   it('keeps actor output history and live event bodies identical', () => {

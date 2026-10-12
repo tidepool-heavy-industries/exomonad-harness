@@ -267,7 +267,8 @@ export function isCommandRefusal(value: unknown): value is HostCommandRefusal {
 export function isEmbeddedCommandRecord(value: unknown): value is EmbeddedCommandRecord {
   if (!isCommandRecordShape(value) || !isHostCommand(value.command)) return false;
   if (value.state === 'input_admitted' && value.command.action !== 'input') return false;
-  if (value.state === 'control_requested' && value.command.action === 'input') return false;
+  if (value.state === 'control_requested' && value.command.action !== 'interrupt' && value.command.action !== 'retire') return false;
+  if (value.state === 'recovery_authorized' && value.command.action !== 'recover') return false;
   if (value.inputObservation != null && (value.state !== 'input_admitted' || value.command.action !== 'input' || value.envelopeId === null
     || (value.inputObservation.state === 'included' && value.inputObservation.request.length === 0))) return false;
   const receipt = value.receipt;
