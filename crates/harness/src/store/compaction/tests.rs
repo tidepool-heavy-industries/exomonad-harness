@@ -30,7 +30,7 @@ fn window(items: Vec<Item>) -> Vec<Item> {
 fn record_response(store: &Store, source: &RequestId, raw: &[Item]) -> ServerCompactionResponse {
     let provider = RequestId("server-response".into());
     store
-        .create_request(&provider, Some(source), "/root")
+        .create_request(&provider, Some(source), "harness:server-compaction-request")
         .unwrap();
     let occurrences = store.history_occurrences(source).unwrap();
     let request = ResponsesRequest {
@@ -276,16 +276,20 @@ fn legacy_boundary_does_not_infer_the_selected_model() {
     store
         .write_request(&source, None, "/root", &[], StoredUsage::default())
         .unwrap();
-    store
-        .write_compaction_request(
+    assert!(matches!(
+        store.write_compaction_request(
             &target,
             &source,
             "/root",
             &window(vec![Item(
-                json!({"type":"compaction","encrypted_content":"legacy"}),
+                json!({"type":"compaction","encrypted_content":"legacy"})
             )]),
-        )
-        .unwrap();
+        ),
+        Err(StoreError::Context(crate::context::ContextError::Replay(
+            crate::context::ContextReplayRejection::MissingProvenance { .. }
+        )))
+    ));
+    assert!(store.request(&target).unwrap().is_none());
     assert!(
         response_envelopes(&store.lock().unwrap(), &target)
             .unwrap()
