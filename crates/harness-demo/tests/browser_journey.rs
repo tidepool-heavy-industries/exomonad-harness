@@ -635,7 +635,7 @@ async fn browser_journey_custom_call_is_retained_in_server_snapshot_and_store() 
     assert_eq!(job.tool_kind, Some(ToolKind::Custom));
     assert_eq!(job.state, ToolJobState::Settled);
     assert!(
-        !job.output.as_ref().is_none_or(Value::is_null),
+        !job.output.as_ref().is_none_or(|value| value.0.is_null()),
         "settled custom job has no retained output: {job:#?}"
     );
     let progress = restored.envelopes;
@@ -781,7 +781,7 @@ async fn browser_journey_custom_raw_input_survives_release_and_process_reopen() 
     assert_eq!(job.tool_name.as_deref(), Some("run"));
     assert_eq!(job.state, ToolJobState::Settled);
     assert_eq!(
-        job.output.as_ref().and_then(Value::as_str),
+        job.output.as_ref().and_then(|value| value.0.as_str()),
         Some(expected_output.as_str())
     );
 
@@ -859,7 +859,7 @@ async fn browser_journey_custom_cancel_is_retained_after_process_reopen() {
         .expect("custom job disappeared after cancellation");
     assert_eq!(cancelled_job.tool_kind, Some(ToolKind::Custom));
     assert_eq!(cancelled_job.state, ToolJobState::Cancelled);
-    assert!(cancelled_job.output.as_ref().is_none_or(Value::is_null));
+    assert!(cancelled_job.output.as_ref().is_none_or(|value| value.0.is_null()));
 
     Demo::close_ws(&mut ws).await;
     drop(ws);
@@ -883,7 +883,7 @@ async fn browser_journey_custom_cancel_is_retained_after_process_reopen() {
         .unwrap();
     assert_eq!(retained.tool_kind, Some(ToolKind::Custom));
     assert_eq!(retained.state, ToolJobState::Cancelled);
-    assert!(retained.output.as_ref().is_none_or(Value::is_null));
+    assert!(retained.output.as_ref().is_none_or(|value| value.0.is_null()));
     let requests = restored.requests;
     assert!(
         requests
