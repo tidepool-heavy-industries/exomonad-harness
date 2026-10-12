@@ -95,7 +95,11 @@ impl ResponsesTransport for NativeScript {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         let index = {
             let mut requests = self.requests.lock().unwrap();
             requests.push(request);

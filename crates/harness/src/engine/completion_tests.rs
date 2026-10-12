@@ -24,7 +24,10 @@ impl ResponsesTransport for FinalTransport {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        _: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         Ok(ResponsesTurn {
             response_id: "final".into(),
             items: vec![Item(json!({
@@ -362,7 +365,11 @@ impl ResponsesTransport for StalledTransport {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         self.inputs.lock().await.push(request.input);
         let round = self.round.fetch_add(1, Ordering::SeqCst);
         let items = if round == 0 {
@@ -720,7 +727,10 @@ impl ResponsesTransport for RequestBoundaryTransport {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        _: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         assert_eq!(self.calls.fetch_add(1, Ordering::SeqCst), 0);
         let mut items = vec![];
         if self.pending {

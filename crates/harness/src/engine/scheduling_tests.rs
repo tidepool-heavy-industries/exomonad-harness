@@ -106,14 +106,18 @@ impl ResponsesTransport for Streaming {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        _: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         unreachable!()
     }
     async fn create_streaming(
         &self,
-        request: ResponsesRequest,
+        request: PreparedProviderRequest,
         sink: mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         let index = {
             let mut requests = self.requests.lock().unwrap();
             requests.push(request);
@@ -713,7 +717,11 @@ impl ResponsesTransport for ContextScript {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         let index = {
             let mut requests = self.requests.lock().unwrap();
             requests.push(request);
@@ -1063,14 +1071,18 @@ impl ResponsesTransport for PolicyStream {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        _: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         unreachable!()
     }
     async fn create_streaming(
         &self,
-        request: ResponsesRequest,
+        request: PreparedProviderRequest,
         sink: mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         if self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
             return Ok(final_turn());
         }
@@ -1414,7 +1426,11 @@ impl ResponsesTransport for FinalOnly {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         self.requests.lock().unwrap().push(request);
         Ok(final_turn())
     }
@@ -1644,7 +1660,11 @@ impl ResponsesTransport for ContextNotesScript {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         let index = {
             let mut requests = self.requests.lock().unwrap();
             requests.push(request);

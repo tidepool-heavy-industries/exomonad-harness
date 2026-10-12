@@ -151,7 +151,10 @@ impl ResponsesTransport for Finish {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        _: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         Ok(ResponsesTurn {
             response_id: "finished".into(),
             items: vec![Item(json!({"type":"message", "role":"assistant",

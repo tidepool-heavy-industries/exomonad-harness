@@ -330,7 +330,11 @@ impl ResponsesTransport for Scripted {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         self.0.lock().unwrap().push(request);
         Ok(ResponsesTurn {
             response_id: uuid::Uuid::new_v4().to_string(),

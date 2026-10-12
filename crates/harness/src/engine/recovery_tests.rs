@@ -30,7 +30,11 @@ impl ResponsesTransport for Replay {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         self.requests.lock().unwrap().push(request);
         self.turn
             .lock()
@@ -352,13 +356,16 @@ impl ResponsesTransport for StreamCustomThenWait {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        _: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         unreachable!("streaming path expected")
     }
 
     async fn create_streaming(
         &self,
-        _: ResponsesRequest,
+        _: PreparedProviderRequest,
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         let call = Item(json!({

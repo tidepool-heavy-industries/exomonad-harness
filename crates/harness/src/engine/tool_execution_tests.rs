@@ -54,7 +54,11 @@ impl ResponsesTransport for Script {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         self.requests.lock().unwrap().push(request);
         self.requested.send(()).unwrap();
         self.turns
