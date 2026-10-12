@@ -153,12 +153,12 @@ describe('exact worker Chat', () => {
     expect(readHistoryPage).not.toHaveBeenCalled()
   })
   it('shows unified native output and forms for a workflow actor', async () => {
-    const outputOrigin = { run: 'run', nativeActor: 7, incarnation: 1 }
-    const output = { reference: { origin: outputOrigin, sequence: 3 }, emission: { origin: outputOrigin,
-      id: { displaySlot: 1, pageOrdinal: 1 }, execution: { kind: 'actor_program' }, conversation: null,
+    const outputOrigin = { run: 'run', nativeActor: '7', incarnation: '1' }
+    const output = { reference: { origin: outputOrigin, sequence: '3' }, createdAt: '0', emission: { origin: outputOrigin,
+      id: { displaySlot: '1', pageOrdinal: '1' }, execution: { kind: 'actor_program' }, conversation: null,
       page: { text: 'Workflow output', expansions: [], unavailable: false } } }
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ origin: outputOrigin, cutoverSequence: 0,
-      legacyHistory: false, entries: [{ sequence: 3, kind: 'output', output }], nextAfter: null, previousBefore: null }), { status: 200 }))
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ origin: outputOrigin, cutoverSequence: '0',
+      legacyHistory: false, entries: [{ sequence: '3', kind: 'output', output }], nextAfter: null, previousBefore: null }), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
     const workflow = { ...actor, kind: 'workflow' as const, outputOrigin }
     render(chat({ ...data, actors: [workflow] }))

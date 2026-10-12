@@ -1,34 +1,20 @@
 import { actorOutputKey, type ActorOutputOrigin } from './actor-output'
 import { type LiveOutput, type OutputOrigin, originKey, outputKey } from './live-output'
+import type { ChatOperation } from './generated/chat'
+import { compareDecimal } from './decimal'
 import type { UnifiedEntry } from './UnifiedChat'
+export type { ChatTool } from './generated/chat'
 
-export interface ToolOperation {
-  readonly origin: { kind: 'embedded'; run: string; actor: string; incarnation: string } | { kind: 'standalone'; store: string; actor: string }
-  readonly request: string
-  readonly call: string
-}
-export interface ChatTool { readonly operation: ToolOperation; readonly invocation: { request: string; position: number; hash: string } }
+export type ToolOperation = ChatOperation
 export type MessageEntry = Extract<UnifiedEntry, { kind: 'message' }>
 export type TimelineRow =
-  | { kind: 'entry'; key: string; entry: UnifiedEntry; live: readonly LiveOutput[] }
+  | { kind: 'entry'; key: string; entry: UnifiedEntry }
   | { kind: 'live'; key: string; live: readonly LiveOutput[] }
   | { kind: 'activity'; key: string; entry: MessageEntry; results: readonly MessageEntry[] }
   | { kind: 'result'; key: string; entry: MessageEntry; invocationKey?: string }
 
 const object = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 export function operationKey(operation: ToolOperation): string { return JSON.stringify([originKey(operation.origin), operation.request, operation.call]) }
-export function isChatTool(value: unknown): value is ChatTool {
-  if (!object(value) || !object(value.operation) || !object(value.invocation) || !object(value.operation.origin)) return false
-  const { operation, invocation } = value
-  const origin = operation.origin as Record<string, unknown>
-  return typeof operation.request === 'string' && !!operation.request && typeof operation.call === 'string' && !!operation.call
-    && typeof origin.actor === 'string' && !!origin.actor && (origin.kind === 'embedded'
-      ? typeof origin.run === 'string' && !!origin.run && typeof origin.incarnation === 'string' && !!origin.incarnation
-      : origin.kind === 'standalone' && typeof origin.store === 'string' && !!origin.store)
-    && typeof invocation.request === 'string' && invocation.request === operation.request
-    && Number.isSafeInteger(invocation.position) && (invocation.position as number) >= 0
-    && typeof invocation.hash === 'string' && /^[0-9a-f]{64}$/.test(invocation.hash)
-}
 export function toolKind(entry: MessageEntry): 'invocation' | 'result' | undefined {
   if (!object(entry.item)) return undefined
   return ['function_call', 'custom_tool_call'].includes(String(entry.item.type)) ? 'invocation'
@@ -45,7 +31,7 @@ function storedMessageKey(origin: ActorOutputOrigin, entry: MessageEntry): strin
 export function mergeEntries(current: readonly UnifiedEntry[], incoming: readonly UnifiedEntry[]): UnifiedEntry[] {
   const bySequence = new Map(current.map(entry => [entry.sequence, entry]))
   for (const entry of incoming) bySequence.set(entry.sequence, entry)
-  return [...bySequence.values()].sort((a, b) => a.sequence - b.sequence)
+  return [...bySequence.values()].sort((a, b) => compareDecimal(a.sequence, b.sequence))
 }
 // Presentation budget: eight 50-entry pages and at most eight 256-KiB responses.
 // History remains in Store; eviction never implies deletion or completion.
@@ -86,7 +72,7 @@ export function projectTimeline(origin: ActorOutputOrigin, entries: readonly Uni
   const consumed = new Set<string>()
   const rows: TimelineRow[] = entries.map(entry => {
     const occurrence = JSON.stringify(['publication', actorOutputKey(origin), entry.sequence])
-    if (entry.kind !== 'message') return { kind: 'entry', key: occurrence, entry, live: [] }
+    if (entry.kind !== 'message') return { kind: 'entry', key: occurrence, entry }
     const candidates = [...groups].filter(([, output]) => modelOrigin && originKey(output[0]!.origin) === originKey(modelOrigin) && output[0]!.requestId === entry.requestId && output[0]!.itemId === providerItemId(entry))
     const identity = storedMessageKey(origin, entry)
     const matched = identity && providerCounts.get(identity) === 1 && candidates.length === 1 ? candidates[0] : undefined
@@ -104,8 +90,8 @@ export function projectTimeline(origin: ActorOutputOrigin, entries: readonly Uni
         : JSON.stringify(['publication', actorOutputKey(origin), invocation.sequence]) : undefined
       return { kind: 'result', key, entry, invocationKey }
     }
-    return { kind: 'entry', key, entry, live: matched?.[1] ?? [] }
+    return { kind: 'entry', key, entry }
   })
-  for (const [key, output] of groups) if (!consumed.has(key)) rows.push({ kind: 'live', key, live: output.sort((a, b) => a.version - b.version || outputKey(a).localeCompare(outputKey(b))) })
+  for (const [key, output] of groups) if (!consumed.has(key)) rows.push({ kind: 'live', key, live: output.sort((a, b) => compareDecimal(a.version, b.version) || outputKey(a).localeCompare(outputKey(b))) })
   return rows
 }
