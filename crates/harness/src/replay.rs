@@ -1744,15 +1744,62 @@ mod tests {
             "harness-interrupted-replay-{}.sqlite",
             uuid::Uuid::new_v4()
         ));
-        let (store, root, call) = recorded_terminal_in(
-            Arc::new(Store::open(&path).unwrap()),
-            &JobOutput::Interrupted,
-            true,
+        let store = Arc::new(Store::open(&path).unwrap());
+        let root = RequestId("terminal-root".into());
+        let parent = AgentPath("/root".into());
+        let call = CallId("terminal-call".into());
+        let invocation = Item(json!({
+            "type":"function_call", "call_id":call.0, "name":"echo", "arguments":"{}"
+        }));
+        store.create_request(&root, None, &parent.0).unwrap();
+        store.set_effort(&root, Effort::Medium).unwrap();
+        store
+            .admit_agent(&parent, None, Some(&root), &json!({}), &json!({}))
+            .unwrap();
+        store
+            .append_items(&root, std::slice::from_ref(&invocation))
+            .unwrap();
+        let parent_op = store.claim(&call, &root).unwrap();
+        store
+            .record_replay_turn(
+                &root,
+                &request("terminal-session"),
+                &ResponsesTurn {
+                    response_id: "terminal-response".into(),
+                    items: vec![invocation],
+                    usage: Usage::default(),
+                },
+            )
+            .unwrap();
+        let cuts = store
+            .capture_checkpoint_cuts(&parent_op, &json!({}), Arc::new(()))
+            .unwrap();
+        let (child, _) = store
+            .attach_checkpoint_child(
+                cuts.deferred(),
+                crate::checkpoint::CheckpointChild {
+                    path: &AgentPath("/root/terminal-child".into()),
+                    parent: &parent,
+                    contract: &json!({}),
+                    checkout: &json!({}),
+                    task: None,
+                    target: &crate::context::ContextProjectionTarget {
+                        model: "test-model".into(),
+                        route: crate::transport::ResponsesRoute::Codex,
+                        protocol: crate::transport::ResponsesProtocol::Standard,
+                    },
+                },
+            )
+            .unwrap();
+        let child = child.head_request.unwrap();
+        let claims = store.claims_on(&child).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].operation, parent_op);
+        assert_eq!(claims[0].state, crate::store::ClaimState::Pending);
+        assert_eq!(
+            store.interrupt_operation_claim(&parent_op, &root).unwrap(),
+            1
         );
-        let child = RequestId("terminal-child".into());
-        store.create_request(&child, Some(&root), "/root").unwrap();
-        let parent_op = store.operation_for_request(&root, &call).unwrap();
-        store.lock().unwrap().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) SELECT origin,origin_request_id,call_id,?1,'pending' FROM claims WHERE request_id=?2", rusqlite::params![child.0, root.0]).unwrap();
         store
             .write_job_output(
                 &parent_op,
@@ -1786,6 +1833,14 @@ mod tests {
                 .terminal,
             TerminalOutcome::Success
         );
+        let child_output = store
+            .replay_tool_output_claim(&parent_op, &child)
+            .unwrap()
+            .unwrap();
+        let child_value: serde_json::Value =
+            serde_json::from_str(child_output.item.0["output"].as_str().unwrap()).unwrap();
+        assert_eq!(child_value, json!({"child":true}));
+        assert!(!store.has_completed_output(&parent_op).unwrap());
         let provider = ReplayProvider::new(store, &root).unwrap();
         let (sink, _stream) = tokio::sync::mpsc::channel(4);
         provider

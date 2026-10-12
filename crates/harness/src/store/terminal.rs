@@ -311,12 +311,49 @@ mod tests {
     fn interrupted_projection_is_claim_local_with_competing_settlement() {
         for interrupt_original in [true, false] {
             let store = Store::memory().unwrap();
-            let operation = operation(&store, "original");
-            let child = RequestId("child-claim".into());
+            let parent = crate::model::AgentPath("/root".into());
+            let request = RequestId("original".into());
+            store.create_request(&request, None, &parent.0).unwrap();
             store
-                .create_request(&child, Some(&operation.request), "/root/child")
+                .set_effort(&request, crate::model::Effort::Medium)
                 .unwrap();
-            store.lock().unwrap().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state) SELECT origin,origin_request_id,call_id,?1,'pending' FROM claims WHERE request_id=?2", params![child.0,operation.request.0]).unwrap();
+            let call = CallId("same-wire-id".into());
+            store.append_items(&request, &[Item(json!({"type":"function_call","call_id":call.0,"name":"probe","arguments":"{}"}))]).unwrap();
+            let operation = store.claim(&call, &request).unwrap();
+            store
+                .admit_agent(
+                    &parent,
+                    None,
+                    Some(&operation.request),
+                    &json!({}),
+                    &json!({}),
+                )
+                .unwrap();
+            let cuts = store
+                .capture_checkpoint_cuts(&operation, &json!({}), std::sync::Arc::new(()))
+                .unwrap();
+            let (child, _) = store
+                .attach_checkpoint_child(
+                    cuts.deferred(),
+                    crate::checkpoint::CheckpointChild {
+                        path: &crate::model::AgentPath("/root/child".into()),
+                        parent: &parent,
+                        contract: &json!({}),
+                        checkout: &json!({}),
+                        task: None,
+                        target: &crate::context::ContextProjectionTarget {
+                            model: "test".into(),
+                            route: crate::transport::ResponsesRoute::Codex,
+                            protocol: crate::transport::ResponsesProtocol::Standard,
+                        },
+                    },
+                )
+                .unwrap();
+            let child = child.head_request.unwrap();
+            let claims = store.claims_on(&child).unwrap();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0].operation, operation);
+            assert_eq!(claims[0].state, super::super::ClaimState::Pending);
             let interrupted = if interrupt_original {
                 &operation.request
             } else {
