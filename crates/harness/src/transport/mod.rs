@@ -147,6 +147,8 @@ pub struct ResponsesTurn {
 
 #[derive(Debug, Error)]
 pub enum TransportError {
+    #[error("prepared transport contract does not match the selected replay turn")]
+    ReplayContractMismatch,
     #[error("provider request has no retained transport contract")]
     UnprovenResponseContract,
     #[error("provider completed item has no output index")]
@@ -232,7 +234,7 @@ pub enum AuthCredentials {
     },
 }
 
-/// The credential authority determines the fixed provider endpoint.
+/// The credential authority selects the provider endpoint at preparation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponsesRoute {
@@ -241,8 +243,9 @@ pub enum ResponsesRoute {
     ChatGptPlan,
 }
 
-/// Credential source. Codex-owned files remain read-only; a native source may
-/// refresh only its own registration. A 401 is surfaced as Authentication.
+/// Credential source. Dispatch retains the prepared endpoint while credentials
+/// may rotate; their returned variant must still match the frozen endpoint.
+/// Codex-owned files remain read-only. A 401 is surfaced as Authentication.
 pub trait Auth: Send + Sync {
     fn access(&self) -> Result<(String, String), TransportError>;
 
@@ -290,17 +293,20 @@ impl<A: Auth + Clone + 'static> ResponsesClient<A> {
         self.protocol
     }
 
-    pub async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
-        client::execute(self.auth.clone(), self.protocol, request, None).await
+    pub async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        client::execute(self.auth.clone(), request, None).await
     }
 
     /// Sends completed items as they arrive; text deltas are best-effort.
     /// The returned turn remains authoritative even if the receiver closes.
     pub async fn create_streaming(
         &self,
-        request: ResponsesRequest,
+        request: PreparedProviderRequest,
         sink: tokio::sync::mpsc::Sender<sse::StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
-        client::execute(self.auth.clone(), self.protocol, request, Some(sink)).await
+        client::execute(self.auth.clone(), request, Some(sink)).await
     }
 }

@@ -359,7 +359,7 @@ fn http_request(
     route: ResponsesRoute,
     protocol: ResponsesProtocol,
     request: &ResponsesRequest,
-    body: &RequestBody<'_>,
+    body: Vec<u8>,
     token: &str,
     account: Option<&str>,
 ) -> reqwest::RequestBuilder {
@@ -371,7 +371,8 @@ fn http_request(
         .bearer_auth(token)
         .header(reqwest::header::ACCEPT, "text/event-stream")
         .headers(protocol_headers(protocol))
-        .json(body);
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body);
     if let Some(account) = account {
         call.header("chatgpt-account-id", account)
             .header("version", CODEX_VERSION)
@@ -396,12 +397,10 @@ fn http_client() -> Result<reqwest::Client, TransportError> {
 /// is included in errors, traces, stored items, or returned data.
 pub(super) async fn execute<A: Auth + Clone + 'static>(
     auth: A,
-    protocol: ResponsesProtocol,
-    request: ResponsesRequest,
+    prepared: super::PreparedProviderRequest,
     sink: Option<tokio::sync::mpsc::Sender<StreamEvent>>,
 ) -> Result<ResponsesTurn, TransportError> {
-    let route = auth.route();
-    let body = normalized_request(&request, protocol, route)?;
+    let (request, body, (route, protocol)) = prepared.into_dispatch_parts();
     let credentials = tokio::task::spawn_blocking(move || auth.credentials())
         .await
         .map_err(|_| TransportError::Authentication)??;
@@ -424,7 +423,7 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
         route,
         protocol,
         &request,
-        &body,
+        body,
         &token,
         account.as_deref(),
     );
@@ -496,6 +495,69 @@ mod tests {
         model::Effort,
         transport::{ResponsesClient, auth::CodexFileAuth},
     };
+
+    #[tokio::test]
+    async fn execute_uses_frozen_route_when_auth_selection_changes() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        #[derive(Clone)]
+        struct ChangingAuth(Arc<AtomicUsize>);
+        impl Auth for ChangingAuth {
+            fn access(&self) -> Result<(String, String), TransportError> {
+                Err(TransportError::Authentication)
+            }
+            fn route(&self) -> ResponsesRoute {
+                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponsesRoute::Codex
+                } else {
+                    ResponsesRoute::ChatGptPlan
+                }
+            }
+            fn credentials(&self) -> Result<AuthCredentials, TransportError> {
+                // Rotation changed the credential variant after preparation.
+                Ok(AuthCredentials::ChatGptPlan {
+                    access_token: "rotated-fixture".into(),
+                })
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let client = super::super::ResponsesClient::new(ChangingAuth(calls.clone()));
+        let contract = crate::engine::ResponsesTransport::response_contract(&client).unwrap();
+        let store = crate::store::Store::memory().unwrap();
+        let head = crate::model::RequestId("route-change".into());
+        store.create_request(&head, None, "/root").unwrap();
+        let request = ResponsesRequest {
+            input: vec![],
+            instructions: "fixed".into(),
+            tools: vec![].into(),
+            tools_allowed: None,
+            model: "model".into(),
+            pinned_effort: crate::model::Effort::Low,
+            session_id: "session".into(),
+        };
+        let prepared = store
+            .prepare_provider_request(
+                &head,
+                &head,
+                request,
+                &[],
+                None,
+                contract,
+                crate::store::ProviderRequestPurpose::Inference,
+            )
+            .unwrap();
+        assert!(matches!(
+            client.create(prepared).await,
+            Err(TransportError::Authentication)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.provider_response_state(&head).unwrap(),
+            Some(crate::store::ProviderResponseState::Streaming)
+        );
+    }
 
     #[test]
     fn request_is_stateless_and_pins_effort() {

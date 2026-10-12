@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use harness::{
     engine::ResponsesTransport,
-    transport::{ResponsesRequest, ResponsesTurn, TransportError, client::request_body},
+    transport::{PreparedProviderRequest, ResponsesTurn, TransportError},
 };
 use serde_json::{Value, json};
 use std::{
@@ -18,6 +18,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{mpsc, oneshot};
+
+#[cfg(test)]
+use harness::transport::{ResponsesRequest, client::request_body};
 
 const QUEUE_CAPACITY: usize = 32;
 
@@ -188,7 +191,10 @@ impl<T: ResponsesTransport + 'static> ResponsesTransport for TraceTransport<T> {
     > {
         self.inner.response_contract()
     }
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         self.record_request(&request).await?;
         let turn = self.inner.create(request).await?;
         self.record_turn(&turn).await?;
@@ -197,7 +203,7 @@ impl<T: ResponsesTransport + 'static> ResponsesTransport for TraceTransport<T> {
 
     async fn create_streaming(
         &self,
-        request: ResponsesRequest,
+        request: PreparedProviderRequest,
         sink: tokio::sync::mpsc::Sender<harness::transport::sse::StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         self.record_request(&request).await?;
@@ -209,14 +215,20 @@ impl<T: ResponsesTransport + 'static> ResponsesTransport for TraceTransport<T> {
 }
 
 impl<T> TraceTransport<T> {
-    async fn record_request(&self, request: &ResponsesRequest) -> Result<(), TransportError> {
+    async fn record_request(
+        &self,
+        request: &PreparedProviderRequest,
+    ) -> Result<(), TransportError> {
         let Some(sink) = &self.sink else {
             return Ok(());
         };
-        let body = request_body(request)?;
-        sink.send_event(request_projection(&body))
-            .await
-            .map_err(trace_transport_error)
+        let body = serde_json::from_slice(request.wire_body())
+            .map_err(|_| TransportError::Stream("prepared request trace decoding failed".into()))?;
+        let mut event = request_projection(&body);
+        event["request_id"] = json!(request.request_id().0);
+        event["route"] = json!(request.response_contract().0);
+        event["protocol"] = json!(request.response_contract().1);
+        sink.send_event(event).await.map_err(trace_transport_error)
     }
 
     async fn record_turn(&self, turn: &ResponsesTurn) -> Result<(), TransportError> {

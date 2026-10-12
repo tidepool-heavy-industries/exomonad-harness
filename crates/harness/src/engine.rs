@@ -9,8 +9,8 @@ pub use output::{ModelOutput, ModelOutputObserver, ModelOutputUpdate};
 
 use crate::{
     compaction::{
-        CompactContext, CompactError, Compactor, PlainText, Server, ServerCompactFuture, ToolName,
-        TypedTurnFuture,
+        CompactContext, CompactError, CompactionInput, Compactor, PlainText, Server,
+        ServerCompactFuture, ToolName, TypedTurnFuture,
     },
     finalize::{FINALIZE_TOOL_NAME, FinalizeError, FinalizeParser},
     item::{Item, ItemHash, ToolCall, ToolExecution, ToolInput, ToolKind},
@@ -19,7 +19,8 @@ use crate::{
     provider::{Provider, ToolScheduling},
     store::{ServerCompactionResponse, Store, StoreError, Usage as StoredUsage},
     transport::{
-        Auth, ResponsesClient, ResponsesRequest, ResponsesTurn, TransportError, Usage,
+        Auth, PreparedProviderRequest, ResponsesClient, ResponsesRequest, ResponsesTurn,
+        TransportError, Usage,
         sse::{OutputChannel, StreamEvent},
     },
     turn::{
@@ -298,11 +299,14 @@ pub trait ResponsesTransport: Send + Sync {
         TransportError,
     >;
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError>;
+    async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError>;
 
     async fn create_streaming(
         &self,
-        request: ResponsesRequest,
+        request: PreparedProviderRequest,
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         let turn = self.create(request).await?;
@@ -314,15 +318,6 @@ pub trait ResponsesTransport: Send + Sync {
             let _ = sink.send(StreamEvent::CompletedItem(done)).await;
         }
         Ok(turn)
-    }
-    /// The local durable request is out-of-band and never enters provider wire JSON.
-    async fn create_streaming_for_request(
-        &self,
-        _request_id: &RequestId,
-        request: ResponsesRequest,
-        sink: tokio::sync::mpsc::Sender<StreamEvent>,
-    ) -> Result<ResponsesTurn, TransportError> {
-        self.create_streaming(request, sink).await
     }
 }
 
@@ -339,13 +334,16 @@ impl<A: Auth + Clone + 'static> ResponsesTransport for ResponsesClient<A> {
     > {
         Ok((self.auth.route(), self.protocol()))
     }
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         ResponsesClient::create(self, request).await
     }
 
     async fn create_streaming(
         &self,
-        request: ResponsesRequest,
+        request: PreparedProviderRequest,
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         ResponsesClient::create_streaming(self, request, sink).await
@@ -1379,16 +1377,19 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let instructions = replay_instructions.clone();
             let seal_head = parent.clone();
             let (req, provider_request) = match blocking(move || {
-                let issued = store.seal_replay_request_with_occurrences(
-                    &seal_head,
-                    &req,
-                    &input_hashes,
-                    Some(&instructions),
-                    &input_occurrences,
-                )?;
-                let provider_request =
-                    store.issue_provider_request(&seal_head, issued, contract)?;
-                Ok((req, provider_request))
+                let prepared = store
+                    .prepare_provider_request(
+                        &seal_head,
+                        &seal_head,
+                        req,
+                        &input_occurrences,
+                        Some(&instructions),
+                        contract,
+                        crate::store::ProviderRequestPurpose::Inference,
+                    )
+                    .map_err(StoreError::from)?;
+                let provider_request = prepared.issuer().clone();
+                Ok((prepared, provider_request))
             })
             .await
             {
@@ -1398,7 +1399,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             if let Some(started) = request_preparation_started {
                 tracing::debug!(target: "harness::runtime_cost", request_id = %parent.0,
                     elapsed_ns = started.elapsed().as_nanos() as u64,
-                    input_items = req.input.len(), tool_count = req.tools.len(),
+                    input_items = req.request().input.len(), tool_count = req.request().tools.len(),
                     did_compact, "successor request prepared");
             }
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
@@ -1414,7 +1415,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             {
                 return Err(self.cleanup_pending(error, &pending).await);
             }
-            let model_request_id = parent.clone();
             let mut output_lifetime = output::OutputLifetime {
                 observer: self.output_observer.clone(),
                 origin: self.origin.clone(),
@@ -1427,9 +1427,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     update: ModelOutputUpdate::Started,
                 });
             }
-            let create = self
-                .client
-                .create_streaming_for_request(&model_request_id, req, event_tx);
+            let create = self.client.create_streaming(req, event_tx);
             tokio::pin!(create);
             let mut turn_call_ids = Vec::<CallId>::new();
             let mut turn_call_items = Vec::<(CallId, Item)>::new();
@@ -3554,11 +3552,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .find_map(Item::configuration_effort)
             .ok_or(EngineError::MissingEffortPin)?;
         let server_response = std::sync::Mutex::new(None::<ServerCompactionResponse>);
-        let server_compact = |items: Vec<Item>| -> ServerCompactFuture<'_> {
+        let server_compact = |input: CompactionInput| -> ServerCompactFuture<'_> {
             let server_response = &server_response;
             Box::pin(async move {
                 let request = ResponsesRequest {
-                    input: items,
+                    input: input.items,
                     instructions: self.config.instructions.clone(),
                     tools: self
                         .tools(None)
@@ -3568,10 +3566,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     pinned_effort: effective_effort,
                     session_id: self.config.session_id.clone(),
                 };
-                let issued_model = request.model.clone();
+                let prepared = self
+                    .prepare_compaction_submission(
+                        source,
+                        request,
+                        input.occurrences,
+                        crate::store::ProviderRequestPurpose::ServerCompaction,
+                    )
+                    .await
+                    .map_err(|error| CompactError::Failed(error.to_string()))?;
+                let provider_request = prepared.request_id().clone();
                 let turn = self
-                    .client
-                    .create(request)
+                    .execute_compaction_submission(prepared)
                     .await
                     .map_err(|error| CompactError::Failed(error.to_string()))?;
                 if !turn.items.iter().any(|item| item.0["type"] == "compaction") {
@@ -3581,28 +3587,34 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
                 *server_response
                     .lock()
-                    .expect("server response lock poisoned") = Some(ServerCompactionResponse {
-                    model: issued_model,
-                    items: turn.items.clone(),
-                });
+                    .expect("server response lock poisoned") =
+                    Some(ServerCompactionResponse { provider_request });
                 Ok(turn.items)
             })
         };
         let summary_response = std::sync::Mutex::new(None::<(String, Usage)>);
-        let text_turn = |items: Vec<Item>| -> ServerCompactFuture<'_> {
+        let text_turn = |input: CompactionInput| -> ServerCompactFuture<'_> {
             let summary_response = &summary_response;
             Box::pin(async move {
+                let prepared = self
+                    .prepare_compaction_submission(
+                        source,
+                        ResponsesRequest {
+                            input: input.items,
+                            instructions: self.config.instructions.clone(),
+                            tools: vec![].into(),
+                            tools_allowed: Some(vec![]),
+                            model: model.to_owned(),
+                            pinned_effort: effective_effort,
+                            session_id: self.config.session_id.clone(),
+                        },
+                        input.occurrences,
+                        crate::store::ProviderRequestPurpose::TextSummary,
+                    )
+                    .await
+                    .map_err(|error| CompactError::Failed(error.to_string()))?;
                 let turn = self
-                    .client
-                    .create(ResponsesRequest {
-                        input: items,
-                        instructions: self.config.instructions.clone(),
-                        tools: vec![].into(),
-                        tools_allowed: Some(vec![]),
-                        model: model.to_owned(),
-                        pinned_effort: effective_effort,
-                        session_id: self.config.session_id.clone(),
-                    })
+                    .execute_compaction_submission(prepared)
                     .await
                     .map_err(|error| CompactError::Failed(error.to_string()))?;
                 *summary_response
@@ -3701,6 +3713,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 &branch,
                 &window.items,
                 &window.retained,
+                &window.generated,
                 &issued_occurrences,
                 &pending_operations,
                 identity.as_ref(),
@@ -3720,6 +3733,85 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .await?;
         }
         Ok(Some(request))
+    }
+
+    async fn prepare_compaction_submission(
+        &self,
+        source: &RequestId,
+        request: ResponsesRequest,
+        occurrences: Vec<Option<crate::context::Occurrence>>,
+        purpose: crate::store::ProviderRequestPurpose,
+    ) -> Result<PreparedProviderRequest, EngineError> {
+        let contract = self.client.response_contract()?;
+        let local = RequestId(uuid::Uuid::new_v4().to_string());
+        let source = source.clone();
+        let branch = self.config.agent.0.clone();
+        let store = self.store.clone();
+        blocking(move || {
+            store.create_request(&local, Some(&source), &branch)?;
+            store
+                .prepare_provider_request(
+                    &source,
+                    &local,
+                    request,
+                    &occurrences,
+                    None,
+                    contract,
+                    purpose,
+                )
+                .map_err(StoreError::from)
+        })
+        .await
+    }
+
+    /// Compaction requests retain streamed facts but never dispatch provider effects.
+    async fn execute_compaction_submission(
+        &self,
+        prepared: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, EngineError> {
+        let issued = prepared.issuer().clone();
+        let request = prepared.request_id().clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        let create = self.client.create_streaming(prepared, tx);
+        tokio::pin!(create);
+        let mut stream_open = true;
+        let result = loop {
+            tokio::select! {
+                result = &mut create => break result,
+                event = rx.recv(), if stream_open => match event {
+                    Some(StreamEvent::CompletedItem(done)) => {
+                        self.retain_provider_item(&issued, done).await?;
+                    }
+                    Some(StreamEvent::Delta { .. }) => {}
+                    None => stream_open = false,
+                }
+            }
+        };
+        while let Ok(event) = rx.try_recv() {
+            if let StreamEvent::CompletedItem(done) = event {
+                self.retain_provider_item(&issued, done).await?;
+            }
+        }
+        match result {
+            Ok(turn) => {
+                let store = self.store.clone();
+                let recorded = turn.clone();
+                blocking(move || store.record_provider_turn(&issued, &recorded)).await?;
+                Ok(turn)
+            }
+            Err(error) => {
+                let state = if matches!(error, TransportError::IncompleteResponse(_)) {
+                    crate::store::ProviderResponseState::Interrupted
+                } else if error.request_failure().is_some() {
+                    crate::store::ProviderResponseState::Rejected
+                } else {
+                    crate::store::ProviderResponseState::Failed
+                };
+                let store = self.store.clone();
+                blocking(move || store.stop_provider_response(&request, state)).await?;
+                Err(error.into())
+            }
+        }
     }
 
     async fn record_text_compaction_attempt(

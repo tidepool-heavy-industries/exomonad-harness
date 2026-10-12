@@ -20,7 +20,7 @@ pub(crate) use output_publication::RecoveryItem;
 pub mod presentation;
 mod prepared_request;
 pub use prepared_request::PreparedProviderRequest;
-pub(crate) use prepared_request::{PrepareProviderError, ProviderRequestPurpose};
+pub(crate) use prepared_request::ProviderRequestPurpose;
 pub(crate) mod provider_response;
 mod replay;
 pub mod schema;
@@ -54,6 +54,8 @@ pub const SQL: &str = schema::SQL;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error(transparent)]
+    ProviderAdmission(crate::transport::TransportError),
     #[error("provider request issuance conflicts with its retained owner: {0:?}")]
     ConflictingProviderIssuance(RequestId),
     #[error("provider output index {index} has conflicting bytes in {request:?}")]
@@ -1188,6 +1190,7 @@ impl Store {
             branch,
             items,
             &[],
+            &[],
             &self
                 .history_occurrences(parent)?
                 .into_iter()
@@ -1205,6 +1208,7 @@ impl Store {
         branch: &str,
         items: &[Item],
         retained: &[(usize, crate::context::Occurrence)],
+        generated: &[(usize, u64)],
         issued: &[Option<crate::context::Occurrence>],
         pending: &[OperationId],
         identity: Option<&crate::embedding::HostIdentity>,
@@ -1232,8 +1236,8 @@ impl Store {
                 tx.execute("UPDATE requests SET embedded_run=?2,embedded_incarnation=?3,round_phase='pending' WHERE id=?1",
                     params![request.0,identity.run,identity.incarnation])?;
             }
-            let reconciled =
-                context::reconcile_compaction(&tx, request, parent, items, retained, issued, pending)?;
+            let generated_sources = compaction::generated_sources(&tx, request, parent, items, generated, response)?;
+            let reconciled = context::reconcile_compaction(&tx, request, parent, items, retained, &generated_sources, issued, pending)?;
             for (position, item) in reconciled.iter().enumerate() {
                 match item {
                     context::CompactionItem::Retained(occurrence) => {
@@ -1291,7 +1295,7 @@ impl Store {
                 params![key, utc_millis()],
             )?;
             context::compaction_generation(&tx, &self.store_id, parent, request, branch)?;
-            compaction::record(&tx, request, parent, response)?;
+            compaction::record(&tx, request, parent, generated, response)?;
             let selected = context::identity_for_branch(tx, &self.store_id, branch)?;
             context::preflight_current(tx, request, &selected)?;
 

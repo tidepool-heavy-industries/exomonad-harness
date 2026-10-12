@@ -67,7 +67,7 @@ async fn exchange(
         ResponsesRoute::Codex,
         protocol,
         request,
-        &body,
+        serde_json::to_vec(&body).unwrap(),
         "fixture-token",
         Some("fixture-account"),
     )

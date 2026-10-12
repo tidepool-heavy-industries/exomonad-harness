@@ -21,6 +21,13 @@ pub struct NewWindow {
     pub effort: Effort,
     pub carried: Vec<CallId>,
     pub(crate) retained: Vec<(usize, Occurrence)>,
+    pub(crate) generated: Vec<(usize, u64)>,
+}
+
+/// A strategy selects existing input by exact positions, never by item bytes.
+pub struct CompactionInput {
+    pub(crate) items: Vec<Item>,
+    pub(crate) occurrences: Vec<Option<Occurrence>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -36,14 +43,14 @@ pub struct CompactContext<'a> {
     pub effort: Effort,
     /// Calls the configured server compaction endpoint without constructing a
     /// second transport request at the strategy boundary.
-    pub server_compact: &'a (dyn Fn(Vec<Item>) -> ServerCompactFuture<'a> + Send + Sync),
+    pub server_compact: &'a (dyn Fn(CompactionInput) -> ServerCompactFuture<'a> + Send + Sync),
     /// Caller-provided typed-turn capability: the caller applies the forced
     /// tool choice and returns the decoded JSON value for that tool call.
     pub typed_turn:
         &'a (dyn Fn(String, ToolName, serde_json::Value) -> TypedTurnFuture<'a> + Send + Sync),
     /// A normal Responses request with all tools disallowed. The strategy
     /// validates its returned items before any of them enter history.
-    pub text_turn: &'a (dyn Fn(Vec<Item>) -> ServerCompactFuture<'a> + Send + Sync),
+    pub text_turn: &'a (dyn Fn(CompactionInput) -> ServerCompactFuture<'a> + Send + Sync),
 }
 
 pub type ServerCompactFuture<'a> = std::pin::Pin<
@@ -64,8 +71,30 @@ impl CompactContext<'_> {
         self.pending_calls
     }
 
-    pub async fn server_compact(&self, items: Vec<Item>) -> Result<Vec<Item>, CompactError> {
-        (self.server_compact)(items).await
+    pub fn select_input(
+        &self,
+        positions: &[usize],
+        appended: Vec<Item>,
+    ) -> Result<CompactionInput, CompactError> {
+        let mut seen = std::collections::HashSet::new();
+        let mut items = Vec::with_capacity(positions.len() + appended.len());
+        let mut occurrences = Vec::with_capacity(items.capacity());
+        for position in positions {
+            if !seen.insert(*position) || *position >= self.items.len() {
+                return Err(CompactError::Failed(
+                    "invalid compaction input selection".into(),
+                ));
+            }
+            items.push(self.items[*position].clone());
+            occurrences.push(self.occurrences[*position].clone());
+        }
+        occurrences.extend(std::iter::repeat_n(None, appended.len()));
+        items.extend(appended);
+        Ok(CompactionInput { items, occurrences })
+    }
+
+    pub async fn server_compact(&self, input: CompactionInput) -> Result<Vec<Item>, CompactError> {
+        (self.server_compact)(input).await
     }
 
     pub async fn typed_turn<T>(&self, instructions: &str, tool: ToolName) -> Result<T, CompactError>
@@ -102,17 +131,17 @@ impl Compactor for PlainText {
     type Summary = String;
 
     async fn compact(&self, cx: CompactContext<'_>) -> Result<NewWindow, CompactError> {
-        let mut prompt: Vec<Item> = cx
+        let positions: Vec<usize> = cx
             .items()
             .iter()
             .enumerate()
             .filter(|(index, _)| !cx.pending_positions.contains(index))
-            .map(|(_, item)| item.clone())
+            .map(|(index, _)| index)
             .collect();
-        prompt.push(Item(json!({
+        let prompt = cx.select_input(&positions, vec![Item(json!({
             "type":"message", "role":"user",
             "content":"Summarize the conversation so the next assistant can continue the work. Include goals, decisions, important evidence, and unresolved tasks. Write plain text only. Do not call tools."
-        })));
+        }))])?;
         let response = (cx.text_turn)(prompt).await?;
         if response.iter().any(|item| {
             matches!(
@@ -199,6 +228,7 @@ impl Compactor for PlainText {
             effort: cx.effort,
             carried,
             retained,
+            generated: vec![],
         })
     }
 }
@@ -233,19 +263,27 @@ impl Compactor for Server {
     type Summary = serde_json::Value;
 
     async fn compact(&self, cx: CompactContext<'_>) -> Result<NewWindow, CompactError> {
-        let mut input: Vec<Item> = cx
+        let positions: Vec<usize> = cx
             .items()
             .iter()
-            .filter(|item| !is_setting(item))
-            .cloned()
+            .enumerate()
+            .filter(|(_, item)| !is_setting(item))
+            .map(|(position, _)| position)
             .collect();
-        input.push(Item(json!({"type":"compaction_trigger"})));
+        let input =
+            cx.select_input(&positions, vec![Item(json!({"type":"compaction_trigger"}))])?;
         let server_items = cx.server_compact(input).await?;
         // External Items do not select pending operations by their wire ID.
         // Store reconciles these raw results before installing the successor.
+        let mut generated = Vec::new();
         let mut items: Vec<Item> = server_items
             .into_iter()
-            .filter(|item| !is_setting(item) && !is_user_message(item))
+            .enumerate()
+            .filter(|(_, item)| server_keeps(item))
+            .map(|(output_index, item)| {
+                generated.push((generated.len() + 1, output_index as u64));
+                item
+            })
             .collect();
         let mut retained = Vec::new();
         for (index, item) in cx
@@ -285,6 +323,7 @@ impl Compactor for Server {
             effort: cx.effort,
             carried,
             retained,
+            generated,
         })
     }
 }
@@ -308,6 +347,10 @@ fn is_setting(item: &Item) -> bool {
         item.0.get("type").and_then(|v| v.as_str()),
         Some("configuration_update" | "additional_tools" | "compaction_trigger")
     )
+}
+
+pub(crate) fn server_keeps(item: &Item) -> bool {
+    !is_setting(item) && !is_user_message(item)
 }
 
 #[cfg(test)]

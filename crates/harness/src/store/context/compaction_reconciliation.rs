@@ -13,6 +13,7 @@ pub(crate) fn reconcile(
     source: &RequestId,
     items: &[Item],
     retained: &[(usize, Occurrence)],
+    generated: &[(usize, Occurrence)],
     issued: &[Option<Occurrence>],
     pending: &[OperationId],
 ) -> Result<Vec<CompactionItem>> {
@@ -67,6 +68,21 @@ pub(crate) fn reconcile(
             return Err(fail(*position, CompactionOwnershipRefusal::DuplicateSource));
         }
     }
+    for (position, selected) in generated {
+        if items.get(*position) != Some(&selected.item)
+            || selections.insert(*position, selected).is_some()
+            || !forced_origins.insert(selected.origin.clone())
+        {
+            return Err(fail(*position, CompactionOwnershipRefusal::DuplicateSource));
+        }
+    }
+    validate_canonical_history(
+        c,
+        &generated
+            .iter()
+            .map(|(_, occurrence)| occurrence.clone())
+            .collect::<Vec<_>>(),
+    )?;
     let pending_invocations = super::super::validation::invocations_for_operations(
         c,
         &pending.iter().cloned().collect(),
@@ -99,6 +115,13 @@ pub(crate) fn reconcile(
     for (position, item) in items.iter().enumerate() {
         if let Some(source) = selections.get(&position) {
             reconciled.push(CompactionItem::Retained((**source).clone()));
+            continue;
+        }
+        if !generated.is_empty() {
+            if ownership_bearing(item) {
+                return Err(fail(position, CompactionOwnershipRefusal::UnownedToolItem));
+            }
+            reconciled.push(CompactionItem::Authored(item.clone()));
             continue;
         }
         let hash = Store::put_item_tx_hash(item)?;

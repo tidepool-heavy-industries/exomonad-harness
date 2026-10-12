@@ -239,6 +239,21 @@ pub(super) fn response_envelopes(
     if issued.model.trim().is_empty() {
         return Err(StoreError::InvalidProviderEvidence(request.clone()));
     }
+    if issued.purpose == Some(super::ProviderRequestPurpose::ServerCompaction) {
+        let envelope = super::compaction::source_response_envelope(c, request)?.map(Arc::new);
+        return Ok(Some(
+            envelope
+                .into_iter()
+                .flat_map(|envelope| {
+                    envelope
+                        .origins
+                        .clone()
+                        .into_iter()
+                        .map(move |origin| (origin, envelope.clone()))
+                })
+                .collect(),
+        ));
+    }
     let route = Some(serde_json::from_str(&route)?);
     let protocol = Some(serde_json::from_str(&protocol)?);
     let state = parse_state(&state, request)?;

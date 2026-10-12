@@ -5,7 +5,9 @@ use crate::{
     model::{AgentPath, RequestId},
     provider::{Provider, ProviderError, ToolFailure},
     store::Store,
-    transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError, Usage, sse::StreamEvent},
+    transport::{
+        Auth, PreparedProviderRequest, ResponsesTurn, TransportError, Usage, sse::StreamEvent,
+    },
     turn::JobScheduler,
 };
 use async_trait::async_trait;
@@ -434,7 +436,14 @@ impl<C: ResponsesTransport> ResponsesTransport for BudgetTransport<C> {
     > {
         self.inner.response_contract()
     }
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push(request.request_id().clone());
         if self.closed.load(Ordering::Acquire) {
             return Err(TransportError::Stream("invocation closed".into()));
         }
@@ -457,13 +466,15 @@ impl<C: ResponsesTransport> ResponsesTransport for BudgetTransport<C> {
         self.invocation_counts.lock().unwrap().record_usage(usage);
         result
     }
-    async fn create_streaming_for_request(
+    async fn create_streaming(
         &self,
-        id: &RequestId,
-        request: ResponsesRequest,
+        request: PreparedProviderRequest,
         sink: mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
-        self.requests.lock().unwrap().push(id.clone());
+        self.requests
+            .lock()
+            .unwrap()
+            .push(request.request_id().clone());
         if self.closed.load(Ordering::Acquire) {
             return Err(TransportError::Stream("invocation closed".into()));
         }
@@ -475,7 +486,7 @@ impl<C: ResponsesTransport> ResponsesTransport for BudgetTransport<C> {
             .map_err(|reason| TransportError::Stream(format!("budget exhausted: {reason:?}")))?;
         self.invocation_counts.lock().unwrap().requests += 1;
         let result = tokio::select! {
-            result = tokio::time::timeout_at(self.budget.deadline(), self.inner.create_streaming_for_request(id, request, sink)) => result,
+            result = tokio::time::timeout_at(self.budget.deadline(), self.inner.create_streaming(request, sink)) => result,
             _ = self.closed_signal.cancelled() => Ok(Err(TransportError::Stream("invocation closed".into()))),
             _ = self.budget.cancelled.cancelled() => Ok(Err(TransportError::Stream("shared cell budget exhausted".into()))),
         };
@@ -810,6 +821,7 @@ impl Drop for Invocation {
 mod tests {
     use super::*;
     use crate::model::Effort;
+    use crate::transport::ResponsesRequest;
     use crate::transport::{ResponsesProtocol, ResponsesRoute};
     use std::collections::VecDeque;
     #[derive(Clone)]

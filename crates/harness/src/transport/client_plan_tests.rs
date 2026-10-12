@@ -40,7 +40,7 @@ fn public_production_request_preserves_async_and_full_history() {
         ResponsesRoute::ChatGptPlan,
         ResponsesProtocol::Standard,
         &request,
-        &normalized,
+        serde_json::to_vec(&normalized).unwrap(),
         "test-bearer",
         None,
     )

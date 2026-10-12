@@ -9,7 +9,9 @@ use crate::{
         ProviderError, RetainedOutput, WaitReplayBarrier,
     },
     store::{RecordedReplayTurn, Store, StoreError, TerminalOutcome},
-    transport::{ResponsesRequest, ResponsesTurn, TransportError, sse::StreamEvent},
+    transport::{
+        PreparedProviderRequest, ResponsesRequest, ResponsesTurn, TransportError, sse::StreamEvent,
+    },
     turn::JobOutput,
 };
 use async_trait::async_trait;
@@ -513,41 +515,37 @@ impl ReplayProvider {
         ))
     }
 
-    fn next_turn(
-        &self,
-        local: Option<&RequestId>,
-        request: ResponsesRequest,
-    ) -> Result<ResponsesTurn, TransportError> {
+    fn next_turn(&self, request: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
         let mut cursor = lock(&self.progress.cursor);
         let mut mappings = lock(&self.progress.local_requests);
-        if let Some(local) = local {
-            if mappings.contains_key(local) {
-                return Err(TransportError::ReplayRequestReuse {
-                    request: local.clone(),
-                });
-            }
+        let local = request.request_id();
+        if mappings.contains_key(local) {
+            return Err(TransportError::ReplayRequestReuse {
+                request: local.clone(),
+            });
         }
         let Some(next) = self.turns.get(*cursor) else {
             return Err(TransportError::Stream(
                 "replay provider has no recorded model turns remaining".into(),
             ));
         };
-        if let Some(field) = request_mismatch(&next.model_request, &request) {
+        if next.provider_contract != Some(request.response_contract()) {
+            return Err(TransportError::ReplayContractMismatch);
+        }
+        if let Some(field) = request_mismatch(&next.model_request, request.request()) {
             return Err(TransportError::Stream(format!(
                 "replay request does not match the next recorded request ({field})"
             )));
         }
         let recorded = next;
         *cursor += 1;
-        if let Some(local) = local {
-            mappings.insert(
-                local.clone(),
-                LocalReplayRequest {
-                    original: recorded.request.clone(),
-                    committed: HashSet::new(),
-                },
-            );
-        }
+        mappings.insert(
+            local.clone(),
+            LocalReplayRequest {
+                original: recorded.request.clone(),
+                committed: HashSet::new(),
+            },
+        );
         self.progress.changed.notify_waiters();
         Ok(recorded.model_response.clone())
     }
@@ -574,16 +572,18 @@ impl ResponsesTransport for ReplayProvider {
             .and_then(|turn| turn.provider_contract)
             .ok_or(TransportError::UnprovenResponseContract)
     }
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
-        self.next_turn(None, request)
-    }
-    async fn create_streaming_for_request(
+    async fn create(
         &self,
-        local: &RequestId,
-        request: ResponsesRequest,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        self.next_turn(request)
+    }
+    async fn create_streaming(
+        &self,
+        request: PreparedProviderRequest,
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
-        let turn = self.next_turn(Some(local), request)?;
+        let turn = self.next_turn(request)?;
         for (index, item) in turn.items.iter().enumerate() {
             let done = crate::transport::sse::CompletedOutputItem::from_complete_response(
                 item.clone(),
@@ -608,18 +608,18 @@ impl ResponsesTransport for Arc<ReplayProvider> {
     > {
         self.as_ref().response_contract()
     }
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         self.as_ref().create(request).await
     }
-    async fn create_streaming_for_request(
+    async fn create_streaming(
         &self,
-        local: &RequestId,
-        request: ResponsesRequest,
+        request: PreparedProviderRequest,
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
-        self.as_ref()
-            .create_streaming_for_request(local, request, sink)
-            .await
+        self.as_ref().create_streaming(request, sink).await
     }
 }
 
@@ -878,6 +878,87 @@ mod tests {
     };
     use serde_json::json;
     use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn prepared_contract_refusal_leaves_replay_cursor_and_mapping_unchanged() {
+        use crate::transport::{ResponsesProtocol, ResponsesRoute};
+        let source = Arc::new(Store::memory().unwrap());
+        let first = RequestId("prepared-source-first".into());
+        let second = RequestId("prepared-source-second".into());
+        source.create_request(&first, None, "/source").unwrap();
+        source
+            .create_request(&second, Some(&first), "/source")
+            .unwrap();
+        let dto = ResponsesRequest {
+            input: vec![],
+            instructions: "fixed".into(),
+            tools: vec![].into(),
+            tools_allowed: None,
+            model: "model".into(),
+            pinned_effort: Effort::Low,
+            session_id: "session".into(),
+        };
+        let turn = |id: &str| ResponsesTurn {
+            response_id: id.into(),
+            items: vec![],
+            usage: Usage::default(),
+        };
+        source
+            .record_replay_turn_for_target(
+                &first,
+                &dto,
+                &turn("first"),
+                ResponsesRoute::Codex,
+                ResponsesProtocol::Standard,
+            )
+            .unwrap();
+        source
+            .record_replay_turn_for_target(
+                &second,
+                &dto,
+                &turn("second"),
+                ResponsesRoute::ChatGptPlan,
+                ResponsesProtocol::Standard,
+            )
+            .unwrap();
+        let replay = ReplayProvider::new(source, &second).unwrap();
+        let local = Store::memory().unwrap();
+        let prepare = |id: &str, contract| {
+            let id = RequestId(id.into());
+            local.create_request(&id, None, "/local").unwrap();
+            local
+                .prepare_provider_request(
+                    &id,
+                    &id,
+                    dto.clone(),
+                    &[],
+                    None,
+                    contract,
+                    crate::store::ProviderRequestPurpose::Inference,
+                )
+                .unwrap()
+        };
+        let first = prepare(
+            "first",
+            (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+        );
+        let stale = prepare(
+            "stale",
+            (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+        );
+        assert_eq!(replay.create(first).await.unwrap().response_id, "first");
+        assert!(matches!(
+            replay.create(stale).await,
+            Err(TransportError::ReplayContractMismatch)
+        ));
+        assert_eq!(replay.turns_remaining(), 1);
+        assert!(!lock(&replay.progress.local_requests).contains_key(&RequestId("stale".into())));
+        let second = prepare(
+            "second",
+            (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
+        );
+        assert_eq!(replay.create(second).await.unwrap().response_id, "second");
+    }
 
     #[derive(Clone)]
     struct OfflineAuth;

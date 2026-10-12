@@ -24,6 +24,15 @@ pub(crate) enum PrepareProviderError {
     Transport(#[from] TransportError),
 }
 
+impl From<PrepareProviderError> for StoreError {
+    fn from(error: PrepareProviderError) -> Self {
+        match error {
+            PrepareProviderError::Store(error) => error,
+            PrepareProviderError::Transport(error) => Self::ProviderAdmission(error),
+        }
+    }
+}
+
 /// Dispatch authority is created only after checked input and durable issuance.
 /// Captured request DTOs and restored JSON cannot construct this value.
 pub struct PreparedProviderRequest {
