@@ -2162,17 +2162,21 @@ fn unclaimed_provider_calls_cannot_borrow_finalize_name_or_another_occurrences_m
     // Identical newly appended bytes have a different immutable occurrence.
     store.append_items(&head, &[item]).unwrap();
     let snapshot = store.begin_context(&operation, &head).unwrap();
-    assert!(matches!(
-        store.commit_context(ContextCommit {
-            snapshot: &snapshot,
-            draft: &edited(&snapshot),
-            output: &output(),
-            pending: &[]
-        }),
-        Err(StoreError::Context(ContextError::Replay(
-            ContextReplayRejection::UnownedInvocation { .. }
-        )))
-    ));
+    let result = store.commit_context(ContextCommit {
+        snapshot: &snapshot,
+        draft: &edited(&snapshot),
+        output: &output(),
+        pending: &[],
+    });
+    assert!(
+        matches!(
+            &result,
+            Err(StoreError::Context(ContextError::Replay(
+                ContextReplayRejection::UnownedInvocation { .. }
+            )))
+        ),
+        "{result:?}"
+    );
 }
 
 #[test]

@@ -1130,7 +1130,9 @@ fn captured_prefix_keeps_prior_pending_call_and_deferred_boundary_refusals() {
     );
     assert!(matches!(
         refused,
-        Err(StoreError::Context(ContextError::OpaqueModel))
+        Err(StoreError::Context(ContextError::Replay(
+            ContextReplayRejection::InvalidPrefix
+        )))
     ));
     assert!(fixture.store.agent(&path).unwrap().is_none());
 }
