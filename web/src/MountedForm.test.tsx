@@ -248,6 +248,17 @@ describe('companion form controls', () => {
       expect(isFormSpec({ version: 1, root: { kind: 'slider', id: 's', label: 's', minimum, maximum, initial } })).toBe(false)
     }
   })
+  it('omits an untouched prototype-named field without an initial value', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const unusual: StoredActorForm = { ...form, opening: { ...form.opening, mountId: 'unseeded-prototype', form: { version: 1, root: { kind: 'text', id: '__proto__', label: 'Unseeded identity', initial: null } } } }
+    expect(isStoredActorForm(unusual)).toBe(true)
+    render(<MountedForm form={unusual} ready active />)
+    expect(screen.getByLabelText('Unseeded identity')).toHaveValue('')
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(JSON.parse(fetchMock.mock.calls[0]![1]!.body).draft).toEqual({})
+  })
   it('retains an accepted field identity named __proto__ in submitted JSON', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)

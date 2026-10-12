@@ -111,7 +111,7 @@ function activeDraft(node: FormNode, draft: FormDraft, into: FormDraft = Object.
   if (['text', 'int', 'number', 'slider', 'bool', 'choice', 'many', 'alternatives', 'alternatives_many'].includes(node.kind)) {
     const field = node as Extract<FormNode, { id: string }>
     const value = draft[field.id]
-    if (value !== undefined) into[field.id] = value
+    if (Object.hasOwn(draft, field.id) && value !== undefined) into[field.id] = value
   }
   if (node.kind === 'group') node.children.forEach(child => activeDraft(child, draft, into))
   if (node.kind === 'section') activeDraft(node.child, draft, into)
