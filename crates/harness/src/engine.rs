@@ -4002,7 +4002,11 @@ mod tests {
             ))
         }
 
-        async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            request: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
+            let request = request.request().clone();
             self.requests.lock().unwrap().push(request);
             self.turns
                 .lock()
@@ -4033,13 +4037,16 @@ mod tests {
             ))
         }
 
-        async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            request: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             self.replay.create(request).await
         }
 
         async fn create_streaming(
             &self,
-            request: ResponsesRequest,
+            request: PreparedProviderRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
             let mut response_output_indices = 0_u64..;
@@ -4526,13 +4533,13 @@ mod tests {
 
             async fn create(
                 &self,
-                _request: ResponsesRequest,
+                _request: PreparedProviderRequest,
             ) -> Result<ResponsesTurn, TransportError> {
                 unreachable!("streaming entry point is used")
             }
             async fn create_streaming(
                 &self,
-                _request: ResponsesRequest,
+                _request: PreparedProviderRequest,
                 sink: tokio::sync::mpsc::Sender<StreamEvent>,
             ) -> Result<ResponsesTurn, TransportError> {
                 let mut response_output_indices = 0_u64..;
@@ -6364,15 +6371,19 @@ mod tests {
             ))
         }
 
-        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            _: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
 
         async fn create_streaming(
             &self,
-            request: ResponsesRequest,
+            request: PreparedProviderRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let request = request.request().clone();
             let mut response_output_indices = 0_u64..;
             let index = {
                 let mut requests = self.requests.lock().unwrap();
@@ -6464,15 +6475,19 @@ mod tests {
             ))
         }
 
-        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            _: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
 
         async fn create_streaming(
             &self,
-            request: ResponsesRequest,
+            request: PreparedProviderRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let request = request.request().clone();
             let mut response_output_indices = 0_u64..;
             let index = {
                 let mut requests = self.requests.lock().unwrap();
@@ -6548,15 +6563,19 @@ mod tests {
             ))
         }
 
-        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            _: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
 
         async fn create_streaming(
             &self,
-            request: ResponsesRequest,
+            request: PreparedProviderRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let request = request.request().clone();
             let mut response_output_indices = 0_u64..;
             let index = {
                 let mut requests = self.requests.lock().unwrap();
@@ -6611,15 +6630,19 @@ mod tests {
             ))
         }
 
-        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            _: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
 
         async fn create_streaming(
             &self,
-            request: ResponsesRequest,
+            request: PreparedProviderRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let request = request.request().clone();
             let mut response_output_indices = 0_u64..;
             let index = {
                 let mut requests = self.requests.lock().unwrap();
@@ -6711,7 +6734,10 @@ mod tests {
             ))
         }
 
-        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            _: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             Err(TransportError::Stream(
                 "controlled transport must use streaming".into(),
             ))
@@ -6719,9 +6745,10 @@ mod tests {
 
         async fn create_streaming(
             &self,
-            request: ResponsesRequest,
+            request: PreparedProviderRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
+            let request = request.request().clone();
             let mut response_output_indices = 0_u64..;
             let turn_index = {
                 let mut requests = self.requests.lock().unwrap();
@@ -6844,7 +6871,11 @@ mod tests {
             ))
         }
 
-        async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            request: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
+            let request = request.request().clone();
             let index = {
                 let mut requests = self.requests.lock().unwrap();
                 let index = requests.len();
@@ -7034,12 +7065,15 @@ mod tests {
             ))
         }
 
-        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            _: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             unreachable!()
         }
         async fn create_streaming(
             &self,
-            _: ResponsesRequest,
+            _: PreparedProviderRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
             sink.send(StreamEvent::Delta {
@@ -7119,12 +7153,15 @@ mod tests {
             ))
         }
 
-        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            _: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             unreachable!()
         }
         async fn create_streaming(
             &self,
-            _: ResponsesRequest,
+            _: PreparedProviderRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
             let mut response_output_indices = 0_u64..;
@@ -8518,13 +8555,16 @@ mod tests {
             ))
         }
 
-        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            _: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             std::future::pending().await
         }
 
         async fn create_streaming(
             &self,
-            _: ResponsesRequest,
+            _: PreparedProviderRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
             let mut response_output_indices = 0_u64..;
@@ -8579,13 +8619,16 @@ mod tests {
             ))
         }
 
-        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            _: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
 
         async fn create_streaming(
             &self,
-            _: ResponsesRequest,
+            _: PreparedProviderRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
             let mut response_output_indices = 0_u64..;
@@ -8624,13 +8667,16 @@ mod tests {
             ))
         }
 
-        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            _: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             unreachable!("streaming path expected")
         }
 
         async fn create_streaming(
             &self,
-            _: ResponsesRequest,
+            _: PreparedProviderRequest,
             sink: tokio::sync::mpsc::Sender<StreamEvent>,
         ) -> Result<ResponsesTurn, TransportError> {
             let mut response_output_indices = 0_u64..;

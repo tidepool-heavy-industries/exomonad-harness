@@ -714,16 +714,18 @@ mod tests {
         let head = crate::model::RequestId("invalid-schema".into());
         store.create_request(&head, None, "/root").unwrap();
         assert!(matches!(
-            store.prepare_provider_request(
-                &head,
-                &head,
-                request,
-                &[],
-                None,
-                selection,
-                crate::store::ProviderRequestPurpose::Inference,
-            ),
-            Err(crate::store::PrepareProviderError::Transport(
+            store
+                .prepare_provider_request(
+                    &head,
+                    &head,
+                    request,
+                    &[],
+                    None,
+                    selection,
+                    crate::store::ProviderRequestPurpose::Inference,
+                )
+                .map_err(crate::store::StoreError::from),
+            Err(crate::store::StoreError::ProviderAdmission(
                 TransportError::Stream(_)
             ))
         ));
