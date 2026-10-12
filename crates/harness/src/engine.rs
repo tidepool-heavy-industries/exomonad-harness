@@ -134,6 +134,9 @@ enum ReplayBarrierStage {
 #[path = "engine/inference_gate_tests.rs"]
 mod inference_gate_tests;
 #[cfg(test)]
+#[path = "engine/cancellation_gate_tests.rs"]
+mod cancellation_gate_tests;
+#[cfg(test)]
 #[path = "engine/recovery_tests.rs"]
 mod recovery_tests;
 
@@ -714,7 +717,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         drop(keepalive);
         forwarder.abort();
         if let Some(attempt) = &inference_attempt {
-            if result.is_ok() {
+            if matches!(&result, Ok(_) | Err(EngineError::Cancelled { .. })) {
                 self.store.finish_embedded_inference(attempt)?;
             } else if matches!(&result, Err(EngineError::Store(error)) if error.is_inference_projection_refusal())
             {
