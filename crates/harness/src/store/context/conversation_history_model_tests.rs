@@ -24,7 +24,7 @@ enum Op {
 
 struct Frozen {
     cuts: CheckpointCuts<()>,
-    entries: Vec<(u64, u8)>,
+    entries: Vec<(u64, i64, u8)>,
     valid: bool,
     epoch: usize,
     observed_at_capture: Vec<(String, i64, Item)>,
@@ -114,6 +114,10 @@ fn run_history(
         assert!(store.append_provider_done(&issued, &done).unwrap());
         let operation = store.claim(&CallId("capture".into()), &head).unwrap();
         let mut accepted = BTreeMap::<u64, u8>::new();
+        // Boundary arrival occupies position 0; the first capture writes the
+        // authored effort update at position 1. Provider indices are separate.
+        let mut arrival_positions = BTreeMap::<u64, i64>::new();
+        let mut next_arrival_position = 2_i64;
         let mut terminal = None;
         let mut frozen = Vec::<Frozen>::new();
         let mut epoch = 0;
@@ -149,6 +153,8 @@ fn run_history(
                         } else {
                             coverage.borrow_mut().done_inserted += 1;
                             accepted.insert(index, class);
+                            arrival_positions.insert(index, next_arrival_position);
+                            next_arrival_position += 1;
                         }
                     } else {
                         coverage.borrow_mut().refused += 1;
@@ -177,6 +183,12 @@ fn run_history(
                     let expected = terminal != Some(false);
                     prop_assert_eq!(observed.is_ok(), expected, "operation {:?}", op);
                     if expected {
+                        for index in after.keys() {
+                            if !accepted.contains_key(index) {
+                                arrival_positions.insert(*index, next_arrival_position);
+                                next_arrival_position += 1;
+                            }
+                        }
                         accepted = after;
                         terminal = Some(true);
                     } else {
@@ -198,7 +210,7 @@ fn run_history(
                     let entries = accepted
                         .iter()
                         .filter(|(index, _)| **index < 2)
-                        .map(|(i, c)| (*i, *c))
+                        .map(|(i, c)| (*i, arrival_positions[i], *c))
                         .collect();
                     let valid = accepted.contains_key(&0) && accepted.contains_key(&1);
                     if valid {
@@ -232,7 +244,7 @@ fn run_history(
                     let expected = capture.epoch == epoch
                         && capture.valid
                         && kind != 2
-                        && (kind == 0 || capture.entries.iter().all(|(_, class)| *class != 2));
+                        && (kind == 0 || capture.entries.iter().all(|(_, _, class)| *class != 2));
                     let observed = store.attach_checkpoint_child(
                         capture.cuts.before_call(),
                         CheckpointChild {
@@ -270,7 +282,7 @@ fn run_history(
                                 capture
                                     .entries
                                     .iter()
-                                    .map(|(_, class)| payload(*class))
+                                    .map(|(_, _, class)| payload(*class))
                                     .collect::<Vec<_>>()
                             );
                         } else {
@@ -282,7 +294,7 @@ fn run_history(
                                     capture
                                         .entries
                                         .iter()
-                                        .filter(|(_, value)| *value == class)
+                                        .filter(|(_, _, value)| *value == class)
                                         .count()
                                 );
                             }
@@ -311,7 +323,7 @@ fn run_history(
                 let expected = capture
                     .entries
                     .iter()
-                    .map(|(index, class)| (head.0.clone(), *index as i64, payload(*class)))
+                    .map(|(_, position, class)| (head.0.clone(), *position, payload(*class)))
                     .collect::<Vec<_>>();
                 let provider_occurrences = actual
                     .iter()
