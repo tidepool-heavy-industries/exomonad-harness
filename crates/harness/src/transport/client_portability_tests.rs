@@ -259,7 +259,11 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         .initialize_context_model(&identity, "gpt-6-luna")
         .unwrap();
     let state = store
-        .context_request_state(child.head_request.as_ref().unwrap(), &identity)
+        .context_request_state_for_transport(
+            child.head_request.as_ref().unwrap(),
+            &identity,
+            (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+        )
         .unwrap();
     let destination_occurrences = state.occurrences.clone();
     let input = state
@@ -401,7 +405,11 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         .unwrap();
     let canonical = store.context_history(grandchild_head).unwrap();
     let state = store
-        .context_request_state(grandchild_head, &grandchild_identity)
+        .context_request_state_for_transport(
+            grandchild_head,
+            &grandchild_identity,
+            (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+        )
         .unwrap();
     let visible = serde_json::to_string(&state.history).unwrap();
     for text in [
@@ -459,9 +467,15 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         transaction.commit().unwrap();
     }
     assert!(matches!(
-        store.context_request_state(&wrong_head, &grandchild_identity),
+        store.context_request_state_for_transport(
+            &wrong_head,
+            &grandchild_identity,
+            (ResponsesRoute::Codex, ResponsesProtocol::Standard)
+        ),
         Err(crate::store::StoreError::Context(
-            crate::context::ContextError::OpaqueModel
+            crate::context::ContextError::Replay(
+                crate::context::ContextReplayRejection::InvalidPrefix
+            )
         ))
     ));
     store
@@ -486,7 +500,11 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
             .all(|claim| claim.operation.call.0 != "late-child-call")
     );
     let repeated = store
-        .context_request_state(grandchild_head, &grandchild_identity)
+        .context_request_state_for_transport(
+            grandchild_head,
+            &grandchild_identity,
+            (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+        )
         .unwrap();
     assert_eq!(state.history, repeated.history);
     let grandchild_occurrences = repeated.occurrences.clone();
