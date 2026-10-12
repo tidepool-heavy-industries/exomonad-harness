@@ -972,6 +972,8 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
     control.set_snapshot(Snapshot {
         actors: vec![
             HostActorProjection {
+                workbench: None,
+                form_waits: None,
                 output_origin: None,
                 identity: identity.clone(),
                 parent: None,
@@ -983,6 +985,8 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
                 inference: None,
             },
             HostActorProjection {
+                workbench: None,
+                form_waits: None,
                 output_origin: None,
                 identity: HostActorIdentity {
                     run: "run".into(),
