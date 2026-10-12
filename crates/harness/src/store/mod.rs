@@ -218,6 +218,20 @@ pub enum CompactionOwnershipRefusal {
 #[cfg(test)]
 #[path = "recovery_tests.rs"]
 mod recovery_tests;
+impl StoreError {
+    /// A checked projection refused retained continuity. Storage observation and
+    /// transaction failures remain distinct and cannot become recovery evidence.
+    pub(crate) fn is_inference_projection_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::Context(_)
+                | Self::IncompleteProviderPrefix { .. }
+                | Self::InvalidProviderEvidence(_)
+                | Self::ConflictingProviderItem { .. }
+        )
+    }
+}
+
 pub type Result<T> = std::result::Result<T, StoreError>;
 
 fn invocation_kind(c: &Connection, request: &RequestId, call: &CallId) -> Result<Option<ToolKind>> {

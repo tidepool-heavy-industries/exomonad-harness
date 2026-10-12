@@ -382,8 +382,8 @@ impl Store {
                     tx.execute_batch("RELEASE inference_recovery")?;
                     ("recovery_authorized", outcome)
                 },
-                Err(error @ (StoreError::StaleInferenceRecovery | StoreError::InvalidEmbeddedBinding | StoreError::InferenceRecoveryUncertain { .. }
-                    | StoreError::ConflictingReplayOutcome { .. } | StoreError::UnsupportedReplayOutcome { .. } | StoreError::Context(_))) => {
+                Err(error) if error.is_inference_projection_refusal() || matches!(&error, StoreError::StaleInferenceRecovery | StoreError::InvalidEmbeddedBinding | StoreError::InferenceRecoveryUncertain { .. }
+                    | StoreError::ConflictingReplayOutcome { .. } | StoreError::UnsupportedReplayOutcome { .. }) => {
                     tx.execute_batch("ROLLBACK TO inference_recovery; RELEASE inference_recovery")?;
                     ("refused", CommandReceiptOutcome::Refused { target: Some(identity.clone()), reason: error.to_string() })
                 },

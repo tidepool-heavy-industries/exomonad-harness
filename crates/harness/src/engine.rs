@@ -713,14 +713,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         if let Some(attempt) = &inference_attempt {
             if result.is_ok() {
                 self.store.finish_embedded_inference(attempt)?;
-            } else if matches!(
-                result,
-                Err(EngineError::Store(
-                    StoreError::Context(_)
-                        | StoreError::IncompleteProviderPrefix { .. }
-                        | StoreError::InvalidProviderEvidence(_)
-                ))
-            ) {
+            } else if matches!(&result, Err(EngineError::Store(error)) if error.is_inference_projection_refusal())
+            {
                 let identity = self.embedded_identity().expect("embedded attempt");
                 let frontier = self.store.embedded_round_frontier(&identity)?;
                 if let Some(request) = frontier.pending_head.or(frontier.settled_head) {
