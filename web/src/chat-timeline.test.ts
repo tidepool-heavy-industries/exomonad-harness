@@ -56,7 +56,7 @@ describe('timeline projection evidence', () => {
     const final = message(4, 'request', { type: 'message', role: 'assistant', content: 'partial' })
     expect(projectTimeline(origin, [final], [{ ...live, committedHash: hash }], modelOrigin)).toHaveLength(2)
     const withId = { ...final, item: { type: 'message', id: 'provider-item' } }
-    expect(projectTimeline(origin, [withId], [live])).toHaveLength(2)
+    expect(projectTimeline(origin, [withId], [live])).toHaveLength(1)
     expect(projectTimeline(origin, [withId, { ...withId, sequence: '5', position: '1' }], [live], modelOrigin)).toHaveLength(3)
     expect(projectTimeline(origin, [withId], [{ ...live, origin: { ...modelOrigin, incarnation: 'old' } }], modelOrigin)).toHaveLength(1)
   })

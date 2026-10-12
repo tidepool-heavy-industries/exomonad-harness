@@ -154,7 +154,7 @@ describe('exact worker Chat', () => {
   })
   it('shows unified native output and forms for a workflow actor', async () => {
     const outputOrigin = { run: 'run', nativeActor: '7', incarnation: '1' }
-    const output = { reference: { origin: outputOrigin, sequence: '3' }, createdAt: '0', emission: { origin: outputOrigin,
+    const output = { reference: { origin: outputOrigin, sequence: '3' }, emission: { origin: outputOrigin,
       id: { displaySlot: '1', pageOrdinal: '1' }, execution: { kind: 'actor_program' }, conversation: null,
       page: { text: 'Workflow output', expansions: [], unavailable: false } } }
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ origin: outputOrigin, cutoverSequence: '0',

@@ -53,7 +53,7 @@ export function boundEntries(entries: readonly UnifiedEntry[], keep: 'oldest' | 
 export function projectTimeline(origin: ActorOutputOrigin, entries: readonly UnifiedEntry[], live: readonly LiveOutput[], modelOrigin?: OutputOrigin): TimelineRow[] {
   const groups = new Map<string, LiveOutput[]>()
   for (const output of live) {
-    if (modelOrigin && originKey(output.origin) !== originKey(modelOrigin)) continue
+    if (!modelOrigin || originKey(output.origin) !== originKey(modelOrigin)) continue
     const key = liveMessageKey(output)
     groups.set(key, [...(groups.get(key) ?? []), output])
   }
