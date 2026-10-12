@@ -171,11 +171,13 @@ mod tool_contract_tests {
     use super::*;
 
     #[test]
-    fn raw_custom_input_and_output_survive_item_serialization() {
+    fn tool_calls_and_outputs_preserve_kind_identity_and_wire_input() {
         let raw = "line 1\n\"quoted\" \\\\ λ";
         let item = Item(json!({"type":"custom_tool_call","call_id":"c","name":"cell","input":raw}));
         let roundtrip: Item = serde_json::from_str(&serde_json::to_string(&item).unwrap()).unwrap();
         let call = roundtrip.tool_call().unwrap().unwrap();
+        assert_eq!(call.call_id, CallId("c".into()));
+        assert_eq!(call.name, "cell");
         assert_eq!(call.input, ToolInput::Custom(raw.into()));
         let output = Item::tool_output(
             &call.call_id,
@@ -183,12 +185,56 @@ mod tool_contract_tests {
             &JobOutput::Completed(Ok(Value::String(raw.into()))),
         );
         assert_eq!(output.0["type"], "custom_tool_call_output");
+        assert_eq!(output.0["call_id"], "c");
         assert_eq!(output.0["output"], raw);
-        assert!(
-            Item(json!({"type":"custom_tool_call","call_id":"bad","name":"cell","input":{}}))
-                .tool_call()
-                .is_err()
+
+        let arguments = json!({"query": raw});
+        let item = Item(
+            json!({"type":"function_call","call_id":"f","name":"lookup","arguments":arguments}),
         );
+        let roundtrip: Item = serde_json::from_str(&serde_json::to_string(&item).unwrap()).unwrap();
+        let call = roundtrip.tool_call().unwrap().unwrap();
+        assert_eq!(call.call_id, CallId("f".into()));
+        assert_eq!(call.name, "lookup");
+        assert_eq!(call.input, ToolInput::Function(arguments.clone()));
+        let output = Item::tool_output(
+            &call.call_id,
+            call.input.kind(),
+            &JobOutput::Completed(Ok(arguments.clone())),
+        );
+        assert_eq!(output.0["type"], "function_call_output");
+        assert_eq!(output.0["call_id"], "f");
+        assert_eq!(
+            serde_json::from_str::<Value>(output.0["output"].as_str().unwrap()).unwrap(),
+            arguments
+        );
+    }
+
+    #[test]
+    fn tool_call_parser_distinguishes_non_calls_from_malformed_calls() {
+        assert_eq!(
+            Item(json!({"type":"custom_tool_call","call_id":"bad","name":"cell","input":{}}))
+                .tool_call(),
+            Err("invalid custom input")
+        );
+        for (item, refusal) in [
+            (
+                json!({"type":"custom_tool_call","call_id":"bad","name":"cell","arguments":{}}),
+                "invalid custom input",
+            ),
+            (
+                json!({"type":"function_call","call_id":"bad","name":"lookup","input":"wrong field"}),
+                "missing function arguments",
+            ),
+        ] {
+            assert_eq!(Item(item).tool_call(), Err(refusal));
+        }
+        for kind in ["agent_message", "here_fork"] {
+            assert_eq!(
+                Item(json!({"type":kind,"call_id":"c","name":"cell","input":"decoy"})).tool_call(),
+                Ok(None)
+            );
+        }
     }
 
     #[test]
