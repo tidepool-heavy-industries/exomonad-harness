@@ -11,9 +11,11 @@ function showRaw() {
 }
 
 describe('retained Item presentation', () => {
-  it('omits opaque reasoning with absent or whitespace-only summaries', () => {
+  it('omits opaque reasoning with absent, empty, or whitespace-only summaries', () => {
     const item = { type: 'reasoning', encrypted_content: 'opaque' }
     const { container, rerender } = render(<HistoryItem entry={entry(item)} />)
+    expect(container.textContent).toBe('')
+    rerender(<HistoryItem entry={entry({ ...item, summary: [] })} />)
     expect(container.textContent).toBe('')
     rerender(<HistoryItem entry={entry({ ...item, summary: [{ type: 'summary_text', text: '   \n' }] })} />)
     expect(container.textContent).toBe('')

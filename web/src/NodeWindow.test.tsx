@@ -23,7 +23,7 @@ afterEach(() => vi.unstubAllGlobals())
 
 describe('retained request inspection', () => {
 
-  it('replaces each 50-item page, returns through the previous-offset stack, and rereads the same offset', async () => {
+  it('bounds the initial page, replaces it on navigation, and rereads exact return offsets', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(response(page('request-1', 0, 50, 50)))
       .mockResolvedValueOnce(response(page('request-1', 50, 1, 100)))
       .mockResolvedValueOnce(response(page('request-1', 100, 1)))
