@@ -13,3 +13,5 @@
 .execution-log p { max-width: var(--prose-measure); }
 .tool-activity > .timeline-metadata { padding: 4px 16px 8px; margin: 0; }
 @media (max-width: 700px) { .tool-heading, .tool-source, .tool-results, .execution-log { padding-inline: 12px; } }
+
+.tool-result-excerpt { margin: 12px 16px 0; max-width: var(--prose-measure); }

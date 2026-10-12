@@ -33,7 +33,7 @@ describe('unified conversation pages', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ origin, entries, cutoverSequence: '0', legacyHistory: false, nextAfter: null, previousBefore: null }))))
     const mounted = render(<UnifiedChat origin={origin} modelOrigin={modelOrigin} ready active={false} liveOutput={[live]} />)
     expect(await screen.findByText('observe value')).toBeVisible()
-    const disclosure = screen.getByText('Execution log').closest('details')!
+    const disclosure = screen.getByText('Tool evidence').closest('details')!
     disclosure.open = true; fireEvent(disclosure, new Event('toggle'))
     const hash = 'a'.repeat(64)
     entries = [{ sequence: '2', kind: 'message', requestId: 'req', position: '0', hash, providerItemId: 'cell', inputOperation: null,
@@ -42,7 +42,7 @@ describe('unified conversation pages', () => {
     mounted.rerender(<UnifiedChat origin={origin} revision="2" modelOrigin={modelOrigin} ready active={false} liveOutput={[live]} />)
     await screen.findByRole('heading', { name: 'haskell' })
     expect(screen.getByText('observe value')).toBeVisible()
-    expect(screen.getByText('Execution log').closest('details')).toHaveAttribute('open')
+    expect(screen.getByText('Tool evidence').closest('details')).toHaveAttribute('open')
     expect(screen.getByText('No loaded result')).toBeVisible()
     expect(screen.queryByText('Running')).toBeNull()
     const jobs = [

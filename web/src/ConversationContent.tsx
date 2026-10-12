@@ -23,8 +23,8 @@ export function TimelineContent({ row, streamingActive, requests, jobs, modelOri
     <MessageContent text={item.text} label={`${outputLabels[item.channel]} output`} memoryKey={`part:${row.live.indexOf(item)}`} bounded={item.channel === 'tool_input' || item.channel === 'tool_arguments'} format={item.channel === 'assistant' || item.channel === 'refusal' ? 'markdown' : 'plain'} />
     {item.overflow && <p role="status">Live preview is partial. Completed content remains available in retained history.</p>}
   </MessagePresentation>)}</div>
-  if (row.kind === 'result') return row.invocationKey ? <div className="tool-result-marker"><span>Tool result retained</span><button type="button" onClick={() => onRevealActivity(row.invocationKey!)}>Show tool activity</button></div> : <div className="message tool-activity"><h3>Tool result</h3><p className="meta">{row.entry.tool ? 'The exact invocation is outside the loaded window.' : 'Operation ownership is unavailable for this historical result.'}</p><HistoryItem listItem={false} entry={historyEntry(row.entry)} /></div>
-  if (row.entry.kind === 'message') return <HistoryItem listItem={false} entry={historyEntry(row.entry)} />
+  if (row.kind === 'result') return row.invocationKey ? <div className="tool-result-marker"><span>Tool result retained</span><button type="button" onClick={() => onRevealActivity(row.invocationKey!)}>Show tool activity</button></div> : <div className="message tool-activity"><h3>Tool result</h3><p className="meta">{row.entry.tool ? 'The exact invocation is outside the loaded window.' : 'Operation ownership is unavailable for this historical result.'}</p><HistoryItem listItem={false} publication={row.entry} entry={historyEntry(row.entry)} /></div>
+  if (row.entry.kind === 'message') return <HistoryItem listItem={false} publication={row.entry} entry={historyEntry(row.entry)} />
   if (row.entry.kind === 'oversized') return <p role="status">Message {row.entry.position} is too large to display ({row.entry.byteLen} bytes).</p>
   return null
 }
