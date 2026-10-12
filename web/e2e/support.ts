@@ -1,3 +1,4 @@
+import { writeFile } from 'node:fs/promises'
 import { expect, chromium, type Page, type APIRequestContext, type TestInfo } from '@playwright/test'
 import AxeBuilder from '@axe-core/playwright'
 import { resolve } from 'node:path'
@@ -33,7 +34,7 @@ export async function noOverflow(page: Page) {
 export async function audit(page: Page, testInfo: TestInfo, name: string) {
   const results = await new AxeBuilder({page}).analyze()
   await testInfo.attach(`${name}-axe`, {body:JSON.stringify(results),contentType:'application/json'})
-  await page.screenshot({path:testInfo.outputPath(`${name}.png`),fullPage:true})
+  await captureViewport(page, testInfo, name)
   expect(results.violations, JSON.stringify(results.violations.map(v=>({id:v.id,impact:v.impact,nodes:v.nodes.map(n=>({target:n.target,summary:n.failureSummary}))})),null,2)).toEqual([])
   await noOverflow(page)
 }
@@ -60,4 +61,18 @@ export async function zoomContext(testInfo: TestInfo) {
   expect(after.width).toBe(before.width/2)
   await testInfo.attach('actual-browser-zoom',{body:JSON.stringify({zoom,before,after,browser:context.browser()?.version()}),contentType:'application/json'})
   return {context,page}
+}
+
+/** Capture the actual compositor viewport. Playwright's CSS clipping is incorrect
+ * for persistent contexts using real tab zoom, and for oversized nested scrollers. */
+export async function captureViewport(page: Page, info: TestInfo, name: string) {
+  if (await page.evaluate(() => devicePixelRatio) === 1) {
+    await page.screenshot({ path: info.outputPath(`${name}.png`) })
+    return
+  }
+  const session = await page.context().newCDPSession(page)
+  try {
+    const { data } = await session.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
+    await writeFile(info.outputPath(`${name}.png`), Buffer.from(data, 'base64'))
+  } finally { await session.detach() }
 }

@@ -1,4 +1,4 @@
-import { isRichView } from './rich-view'
+import { isRichView } from './rich-view-model'
 import { isActorOutputHistoryPage, isServerFrame } from './generated/validators.mjs'
 import type { ActorOutputHistoryPage } from './generated/actor-output-history'
 export type ActorOutputOrigin = ActorOutputHistoryPage['origin']

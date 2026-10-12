@@ -1,18 +1,23 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from 'react';
+import CommandView from './CommandView'
+import { Empty } from './view-controls'
+import { inputPublicationKey } from './command-presentation'
+import { ActorComposer, ActorControlPanel, OutgoingInputs } from './ActorControls'
+import HostOperations from './HostOperations'
+import TimelineView from './TimelineView'
+import ConversationTreeView from './ConversationTreeView'
+import InboxView from './InboxView'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import NodeWindow from './NodeWindow';
 import WorkerChat from './WorkerChat';
 import ActiveWorkerTree from './ActiveWorkerTree';
-import RecoveryControls from './RecoveryControls';
-import { MessageContent, MessagePresentation } from './MessagePresentation';
 import type { ChatInputOperation } from './generated/chat';
-import { currentRecoveryBlock, viewCommandIsCurrent } from './recovery';
-import type { CommandReceipt, HostActorIdentity, HostCommand } from './protocol';
+import type { HostActorIdentity } from './protocol';
 import { actorIdentityKey, canonicalOperationId, isOperationId } from './protocol';
-import { isSettledCommand, operationKey, type BrowserCommandRecord } from './pending-commands';
+import type { BrowserCommandRecord } from './pending-commands';
 import type { HarnessViewModel } from './view-model';
-import type { RouteState, Screen, Selection, SubmitHostCommand, RetryHostCommand, SubmitDemoCommand, TransportPhase } from './client-contract';
-import { createViewSelector, formatActivityTime, orderConversationTree, pageRows, resolveSelection, needsActivityClock } from './selectors';
-import { actorDraftKey, demoDraftKey, useDraft } from './drafts';
+import type { Screen, Selection, SubmitHostCommand, RetryHostCommand, SubmitDemoCommand, TransportPhase } from './client-contract';
+import { createViewSelector, orderConversationTree, pageRows, resolveSelection, needsActivityClock } from './selectors';
+import { demoDraftKey, useDraft } from './drafts';
 import { routeUrl, useRoute } from './navigation';
 export type AppProps = {
   data: HarnessViewModel;
@@ -28,214 +33,6 @@ export type AppProps = {
 const screenNames: Record<Screen, string> = { tree: 'Tree', timeline: 'Timeline', inbox: 'Inbox', command: 'Command', chat: 'Chat' };
 const identityOf = (actor: NonNullable<HarnessViewModel['actors']>[number]): HostActorIdentity => ({ run: actor.run, actor: actor.name, incarnation: actor.incarnation });
 const sameSelection = (left: Selection, right: Selection) => JSON.stringify(left) === JSON.stringify(right);
-function Empty({ children }: {
-  children: React.ReactNode;
-}) {
-  return <p className="empty" role="status">
-    {children}
-  </p>;
-}
-function Pager({ page, count, total, onPage }: {
-  page: number;
-  count: number;
-  total: number;
-  onPage: (page: number) => void;
-}) {
-  return <div className="pager">
-    <span>
-      {total} rows · Page {page + 1} of {Math.max(1, count)}
-    </span>
-    <button disabled={page === 0} onClick={() => onPage(page - 1)}>Previous page</button>
-    <button disabled={page + 1 >= count} onClick={() => onPage(page + 1)}>Next page</button>
-  </div>;
-}
-function receiptText(receipt: CommandReceipt): {
-  title: string;
-  detail: string;
-} {
-  switch (receipt.outcome) {
-    case 'recovery_authorized': return { title: 'Recovery authorized', detail: `${receipt.mode} · request ${receipt.block.request} · generation ${receipt.block.generation} · omitted ${receipt.projection.omitted.length} opaque originals · response completeness unknown for ${receipt.projection.unknownResponseCompleteness.length} exchanges. Execution is not established.` };
-    case 'admitted': return { title: 'Admitted for processing', detail: `envelope ${receipt.envelopeId} · input admitted; model execution is not established${receipt.wakeError ? ` · wake issue: ${receipt.wakeError}` : ''}` };
-    case 'control_requested': return { title: receipt.control === 'interrupt' ? 'Interrupt requested' : 'Retire requested', detail: 'Host control request; actor completion is not established.' };
-    case 'refused': return { title: 'Refused', detail: receipt.reason };
-    case 'unconfirmed': return { title: 'Unconfirmed', detail: receipt.reason };
-  }
-}
-function RecoveryEvidence({ receipt }: { receipt: CommandReceipt }) {
-  return receipt.outcome === 'recovery_authorized' ? <details><summary>Recovery evidence</summary>
-    <p>Exact opaque originals omitted from the next model request:</p>
-    {receipt.projection.omitted.length ? <ul>{receipt.projection.omitted.map((reference, index) => <li className="mono" key={index}>{reference}</li>)}</ul> : <p>None.</p>}
-    <p>Exchanges with unknown response completeness:</p>
-    {receipt.projection.unknownResponseCompleteness.length ? <ul>{receipt.projection.unknownResponseCompleteness.map((request, index) => <li className="mono" key={index}>{request}</li>)}</ul> : <p>None.</p>}
-  </details> : null;
-}
-function receiptIdentity(receipt: CommandReceipt, commands: readonly BrowserCommandRecord[]): string | undefined {
-  const target = receipt.target ?? (isOperationId(receipt.commandId)
-    ? commands.find(record => isOperationId(record.submission.operation_id)
-      && canonicalOperationId(record.submission.operation_id) === canonicalOperationId(receipt.commandId))?.submission.command.target
-    : undefined);
-  return target ? `run ${target.run} · actor ${target.actor} · incarnation ${target.incarnation}` : undefined;
-}
-function CommandPayload({ command }: { command: HostCommand }) {
-  const [opened, setOpened] = useState(false);
-  return <details open={opened}>
-    <summary onClick={event => { event.preventDefault(); setOpened(current => !current); }}>Original command JSON</summary>
-    {opened && <pre>{JSON.stringify(command, null, 2)}</pre>}
-  </details>;
-}
-function HostOperations({ commands, receipts, run, ready, data, onRetry }: {
-  commands: readonly BrowserCommandRecord[];
-  receipts: readonly CommandReceipt[];
-  run?: string;
-  ready: boolean;
-  data: HarnessViewModel;
-  onRetry?: RetryHostCommand;
-}) {
-  const [feedback, setFeedback] = useState('');
-  const [page, setPage] = useState(0);
-  const rows = useMemo(() => [
-    ...commands.map((record, index) => ({ kind: 'command' as const, record, key: `command:${operationKey(record)}:${index}` })),
-    ...receipts.map((receipt, index) => ({ kind: 'receipt' as const, receipt, index, key: `receipt:${receipt.commandId}:${index}` })),
-  ], [commands, receipts]);
-  const visible = useMemo(() => pageRows(rows, page, 50), [rows, page]);
-  if (!rows.length)
-    return null;
-  return <section aria-label="Retained browser operations">
-    <h2>Retained browser operations</h2>
-    {visible.rows.map(row => row.kind === 'command' ? <article className="operation" data-operation-id={row.record.submission.operation_id} key={row.key}>
-      <strong>{row.record.submission.command.action} · {row.record.authority === 'legacy' ? `Previously observed ${row.record.state}; fresh lookup required` : row.record.authority === 'local' ? 'Locally retained; host admission unknown' : row.record.state}</strong>
-      <div className="mono">{row.record.submission.operation_id} · run {row.record.hostRun} · actor {row.record.submission.command.target.actor} · incarnation {row.record.submission.command.target.incarnation}</div>
-      <CommandPayload command={row.record.submission.command} />
-      <p>Socket send: {row.record.send ?? 'unknown'}{row.record.accepted ? ' · Server acknowledged handoff; terminal outcome unknown.' : ''}</p>
-      {row.record.lookup && <p className="hint">Status lookup {row.record.lookup.kind}: {row.record.lookup.reason}</p>}
-      {row.record.localRefusal && <p className="error">Local channel refusal: {row.record.localRefusal.reason}</p>}
-      {row.record.issues?.map((issue, i) => <p className="error" key={i}>{issue}</p>)}
-      {row.record.receipt && <p>{receiptText(row.record.receipt).title}: {receiptText(row.record.receipt).detail}</p>}
-      {row.record.inputObservation && <p className="meta">Input {row.record.inputObservation.state}{row.record.inputObservation.state === 'included' ? ` · request ${row.record.inputObservation.request}; execution outcome unobserved` : ''}</p>}
-      {row.record.receipt && <RecoveryEvidence receipt={row.record.receipt} />}
-      <button disabled={!onRetry || !ready || row.record.hostRun !== run || !viewCommandIsCurrent(row.record.submission.command, data, row.record.submission.operation_id) || isSettledCommand(row.record)} onClick={() => {
-        const result = onRetry?.(row.record.submission); if (result)
-          setFeedback(result.kind === 'blocked' ? result.reason : `Same operation retained; socket send ${result.send}.`);
-      }}>Retry same operation</button>
-    </article> : <article className="operation" key={row.key}>
-      <strong>{receiptText(row.receipt).title}</strong>
-      <div className="mono">{row.receipt.commandId}{receiptIdentity(row.receipt, commands) && ` · ${receiptIdentity(row.receipt, commands)}`}</div>
-      <p>{receiptText(row.receipt).detail}</p>
-      <RecoveryEvidence receipt={row.receipt} />
-    </article>)}<Pager page={visible.page} count={visible.pageCount} total={visible.total} onPage={setPage} />
-    <p className="hint">Admission, request inclusion, execution, delivery and terminal outcome are separate observations.</p>
-    {feedback && <p role="status">
-      {feedback}
-    </p>}
-    <p className="hint">Original payloads are retained. Reconnect never automatically resubmits an operation.</p>
-  </section>;
-}
-function actorControls(data: HarnessViewModel, route: RouteState, unavailable: boolean, ready: boolean, submit?: SubmitHostCommand) {
-  const actor = resolveSelection(data, route.selection).actor;
-  const target = route.selection.kind === 'actor' ? route.selection.identity : undefined;
-  const enabled = Boolean(target && actor && !unavailable && actor.run === data.hostRun && ready && submit && ['running', 'waiting'].includes(actor.lifecycle));
-  return { actor, target, enabled };
-}
-function inputStatus(record: BrowserCommandRecord): string {
-  if (record.authority === 'status' || record.authority === 'receipt') {
-    if (record.state === 'input_admitted') return record.inputObservation?.state === 'included'
-      ? 'Included in a model request · execution outcome unobserved' : 'Host queued · request inclusion and execution unobserved';
-    if (record.state === 'refused') return 'Host refused';
-    if (record.state === 'unconfirmed') return 'Host outcome unconfirmed';
-    if (record.state === 'dispatching') return 'Host dispatching · input admission unobserved';
-    if (record.state === 'queued') return 'Host command queued · input admission unobserved';
-  }
-  if (record.accepted) return 'Host command accepted · input admission unobserved';
-  if (record.send === 'sent') return 'Sent to host · input admission unobserved';
-  if (record.send === 'unknown') return 'Send outcome unknown · retained locally';
-  return 'Retained locally · input admission unobserved';
-}
-function inputPublicationKey(reference: ChatInputOperation): string | undefined {
-  return isOperationId(reference.operationId) ? JSON.stringify([actorIdentityKey(reference.target), canonicalOperationId(reference.operationId), reference.envelopeId]) : undefined;
-}
-function OutgoingInputs({ records, rendered }: { records: readonly BrowserCommandRecord[]; rendered: ReadonlySet<string> }) {
-  const inputs = records.filter(record => record.submission.command.action === 'input'
-    && !(record.state === 'input_admitted' && ['status', 'receipt'].includes(record.authority) && record.inputObservation?.state === 'included'
-      && record.envelopeId != null && rendered.has(inputPublicationKey({ target:record.submission.command.target,
-        operationId:record.submission.operation_id, envelopeId:record.envelopeId })!)));
-  return inputs.length ? <section className="outgoing-inputs" aria-label="Outgoing messages"><div role="list">
-    {inputs.map(record => <div key={operationKey(record)} data-local-operation-id={record.submission.operation_id}>
-      <MessagePresentation kind="human" title="You" status={inputStatus(record)} details={<>
-        <p className="mono">Operation {record.submission.operation_id} · envelope {record.envelopeId ?? 'unobserved'}</p>
-        <p className="mono">{record.submission.command.target.actor} · run {record.hostRun} · incarnation {record.submission.command.target.incarnation}</p>
-        {record.receipt && <p>{receiptText(record.receipt).title}: {receiptText(record.receipt).detail}</p>}
-      </>}>
-        <MessageContent text={record.submission.command.action === 'input' ? record.submission.command.text : ''} label="outgoing message" format="plain" />
-      </MessagePresentation>
-    </div>)}
-  </div></section> : null;
-}
-function ActorComposer({ data, route, unavailable, ready, onHostCommand, operations }: {
-  data: HarnessViewModel; route: RouteState; unavailable: boolean; ready: boolean;
-  onHostCommand?: SubmitHostCommand; operations: readonly BrowserCommandRecord[];
-}) {
-  const { actor, target, enabled } = actorControls(data, route, unavailable, ready, onHostCommand);
-  const draft = useDraft(target ? actorDraftKey(target) : undefined);
-  const composing = useRef(false);
-  const [feedback, setFeedback] = useState('');
-  const latestInput = target ? operations.filter(record => record.submission.command.action === 'input'
-    && actorIdentityKey(record.submission.command.target) === actorIdentityKey(target)).at(-1) : undefined;
-  const send = (command: HostCommand) => {
-    const result = onHostCommand?.(command);
-    if (!result) return;
-    setFeedback(result.kind === 'blocked' ? result.reason : `Operation retained; socket send ${result.send}. Input admission remains a separate host observation.`);
-    if (result.kind === 'retained' && command.action === 'input') draft.submitted();
-  };
-  const sendInput = () => { if (target && enabled && draft.text.trim()) send({ action: 'input', target, text: draft.text }); };
-  return <section className="host-controls worker-chat-composer" aria-label="Message composer">
-    {actor?.inference && <p className="composer-state" role="status">Inference: {actor.inference.state}{actor.inference.state === 'blocked'
-      ? ' · input can queue; recovery requires an explicit decision in Actor controls.' : actor.inference.state === 'recovering' ? ' · recovery authorized; execution unobserved' : ''}</p>}
-    {!ready && <p role="status">Host controls await a fresh connected snapshot.</p>}
-    {!onHostCommand && <p role="status">Host command channel is unavailable; this view is read-only.</p>}
-    <form onSubmit={(event: FormEvent) => { event.preventDefault(); sendInput(); }} aria-label="Send actor message">
-      <label htmlFor="actor-message">Message to selected actor</label>
-      <textarea id="actor-message" rows={3} value={draft.text} onChange={event => draft.setText(event.target.value)}
-        disabled={!target || !actor || unavailable || !['running', 'waiting'].includes(actor.lifecycle)}
-        aria-describedby="actor-message-hint" onCompositionStart={() => { composing.current = true; }}
-        onCompositionEnd={() => { composing.current = false; }} onKeyDown={event => {
-          if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.altKey && !composing.current
-            && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
-            event.preventDefault(); sendInput();
-          }
-        }} />
-      <div className="composer-toolbar">
-        <span className="hint" id="actor-message-hint">Enter for a new line · Ctrl/Cmd+Enter to send</span>
-        <div className="host-actions">
-          <button disabled={!enabled || !draft.text.trim()}>Send input</button>
-          <button type="button" disabled={!enabled || !actor?.activeRound} onClick={() => {
-            if (target && actor?.activeRound) send({ action: 'interrupt', target, expected_round: actor.activeRound });
-          }}>Interrupt</button>
-        </div>
-      </div>
-    </form>
-    {latestInput && <p className="composer-delivery" role="status" data-input-state={latestInput.state} data-input-authority={latestInput.authority} data-input-operation-id={latestInput.submission.operation_id} data-input-observation={latestInput.inputObservation?.state}>{inputStatus(latestInput)}</p>}
-    {draft.error && <p className="error" role="status">{draft.error}</p>}
-    {feedback && <p className="composer-feedback" role="status">{feedback}</p>}
-  </section>;
-}
-function ActorControlPanel({ data, route, unavailable, ready, onHostCommand, operations }: {
-  data: HarnessViewModel; route: RouteState; unavailable: boolean; ready: boolean;
-  onHostCommand?: SubmitHostCommand; operations: readonly BrowserCommandRecord[];
-}) {
-  const { actor, target, enabled } = actorControls(data, route, unavailable, ready, onHostCommand);
-  const block = actor ? currentRecoveryBlock(actor) : undefined;
-  const [feedback, setFeedback] = useState('');
-  const report = (result: import('./client-contract').LocalSubmissionResult) =>
-    setFeedback(result.kind === 'blocked' ? result.reason : `Operation ${result.operationId} retained; socket send ${result.send}. Host outcome remains separate.`);
-  return <details className="actor-controls"><summary>Actor controls</summary>
-    {target && block && <RecoveryControls target={target} block={block} ready={enabled} submit={onHostCommand} onResult={report} operations={operations} />}
-    <section className="actor-retire" aria-label="Retire actor">
-      <h3>Retire this actor</h3><p>Close this exact actor. Retained history remains readable.</p>
-      <button type="button" disabled={!enabled} onClick={() => { if (target && onHostCommand) report(onHostCommand({ action: 'retire', target })); }}>Retire</button>
-    </section>
-    {feedback && <p role="status">{feedback}</p>}
-  </details>;
-}
 export default function App({ data, onHostCommand, onDemoCommand, onRetry, transportPhase = 'ready', pendingCommands = [], acceptedCommandIds = [], demoFeedback, onAuthExpired }: AppProps) {
   const { route, issue, navigate } = useRoute();
   const resolved = useMemo(() => resolveSelection(data, route.selection), [data.actors, data.nodes, route.selection]);
@@ -395,126 +192,9 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
     if (result.kind === 'sent')
       demo.submitted(text);
   };
-  const timeline = useMemo(() => <>
-    <div role="table" aria-label="Conversation activity timeline" className="rows">
-      <div className="row" role="row">
-        <strong role="columnheader">Activity</strong>
-        <strong role="columnheader">State</strong>
-        <strong role="columnheader">Source and time</strong>
-      </div>
-      {activity.rows.map(item => {
-        const time = formatActivityTime(item, now);
-        return <div className="row" role="row" key={item.key ?? `${item.kind}:${item.id}`}>
-          <span role="cell">
-            {item.kind} · {item.label}{item.kind === 'request' && <button onClick={event => inspect(item.id, event.currentTarget)}>Inspect history</button>}{item.parentId && <button onClick={event => inspect(item.parentId!, event.currentTarget)}>Inspect parent request</button>}
-          </span>
-          <span role="cell">
-            {item.state}{item.outcome && ` · outcome ${item.outcome}`}{item.delivered !== undefined && ` · delivered ${item.delivered}`}
-          </span>
-          <span role="cell" className="meta">
-            {link({ kind: 'conversation', conversationId: item.nodeId }, item.nodeId)} · id {item.id} · {time.start} · {time.duration}{item.commandId && ` · command ${item.commandId}`}{item.requestId && ` · request ${item.requestId}`}{item.callId && ` · call ${item.callId}`}{item.toolKind && ` · tool kind ${item.toolKind}`}{item.toolName && ` · ${item.toolName}`}{item.detail && ` · ${item.detail}`}{item.output !== undefined && <pre>
-              {typeof item.output === 'string' ? item.output : JSON.stringify(item.output, null, 2)}
-            </pre>}
-          </span>
-        </div>;
-      })}
-    </div>
-    {!activity.total && <Empty>No activity is available for this context.</Empty>}
-    <Pager page={activity.page} count={activity.pageCount} total={activity.total} onPage={setPage} />
-  </>, [activity, now, inspect, link]);
-  const tree = useMemo(() => <>
-          <section aria-label="Host actors">
-            <h2>Host actors</h2>
-            <div role="table" aria-label="Host actor lifecycles">
-              {actors.rows.map(actor => <div className="row" role="row" key={actorIdentityKey(identityOf(actor))} aria-selected={sameSelection(route.selection, { kind: 'actor', identity: identityOf(actor) })}>
-                <span role="cell">
-                  {link({ kind: 'actor', identity: identityOf(actor) }, actor.name)} · {actor.kind}
-                </span>
-                <span role="cell">
-                  {actor.lifecycle}
-                </span>
-                <span role="cell">run {actor.run} · incarnation {actor.incarnation}{actor.parentIdentity && <> · Parent {link({ kind: 'actor', identity: actor.parentIdentity }, actor.parentIdentity.actor)}
-                </>}{actor.modelConversation && <> · {link({ kind: 'conversation', conversationId: actor.modelConversation }, actor.modelConversation)}
-                </>}
-                </span>
-              </div>)}
-            </div>
-            <Pager page={actors.page} count={actors.pageCount} total={actors.total} onPage={setActorPage} />
-          </section>
-          <section aria-label="Conversations">
-            <h2>Conversations</h2>
-            <div role="table" aria-label="Conversation tree">
-              {conversations.rows.map(({ node, depth, lineage }) => <div className="row tree-row" role="row" key={node.id} aria-selected={route.selection.kind === 'conversation' && route.selection.conversationId === node.id}>
-                <span role="cell">
-                  <span className="branch" aria-hidden="true">
-                    {'· '.repeat(Math.min(depth, 8))}
-                  </span>
-                  {link({ kind: 'conversation', conversationId: node.id }, node.name)}{lineage === 'orphan' || lineage === 'cycle' ? ` · ${lineage}` : ''}
-                </span>
-                <span role="cell">
-                  {node.state}
-                </span>
-                <span role="cell" className="meta">
-                  {node.id} · {[node.model, node.effort, node.detail ?? node.updatedAt].filter(Boolean).join(' · ')}{node.forkSourceRequestId && <button onClick={event => inspect(node.forkSourceRequestId!, event.currentTarget)}>Inspect fork source</button>}
-                </span>
-              </div>)}
-            </div>
-            {!conversations.total && <Empty>No conversations are available.</Empty>}
-            <Pager page={conversations.page} count={conversations.pageCount} total={conversations.total} onPage={setPage} />
-          </section>
-        </>, [actors, conversations, link, inspect, route.selection]);
-  const inboxScreen = useMemo(() => <>
-          <div className="toolbar filters">
-            {(['sender', 'recipient'] as const).map(key => <label key={key}>
-              {key === 'sender' ? 'Sender' : 'Recipient'}
-              <select value={route.messageFilters[key] ?? ''} onChange={event => navigate({ ...route, messageFilters: { ...route.messageFilters, [key]: event.target.value || undefined } })}>
-                <option value="">All endpoints</option>
-                {route.messageFilters[key] && !endpoints.includes(route.messageFilters[key]!) && <option>
-                  {route.messageFilters[key]}
-                </option>}{endpoints.map(endpoint => <option key={endpoint}>
-                  {endpoint}
-                </option>)}
-              </select>
-            </label>)}
-            <label>Message type<select value={route.messageFilters.type ?? ''} onChange={event => navigate({ ...route, messageFilters: { ...route.messageFilters, type: event.target.value as RouteState['messageFilters']['type'] || undefined } })}>
-              <option value="">All types</option>
-              {['NEW_TASK', 'MESSAGE', 'FINAL_ANSWER', 'PROGRESS'].map(kind => <option key={kind}>
-                {kind}
-              </option>)}
-            </select>
-            </label>
-          </div>
-          <p className="hint">Filters match supplied endpoint labels. They do not prove an actor incarnation or that a question was answered.</p>
-          <div role="list" aria-label="Inbox messages">
-            {inbox.rows.map(item => <div className="row" role="listitem" key={item.id}>
-              <strong>
-                {item.sender}{item.recipient && ` → ${item.recipient}`}
-              </strong>
-              <span>
-                {item.type ?? item.state}{item.ordinal !== undefined && ` · #${item.ordinal}`}
-              </span>
-              <span className="message">
-                {item.message}
-                <span className="meta">
-                  {item.receivedAt}
-                </span>
-              </span>
-              <div>
-                {[...new Set([item.sender, item.recipient].filter((endpoint): endpoint is string => Boolean(endpoint)))].map(endpoint => {
-                  return <span key={endpoint}>
-                    {(endpointNodes.get(endpoint) ?? []).map(node => <span key={node.id}>
-                      {link({ kind: 'conversation', conversationId: node.id }, `Open conversation ${node.name} · ${node.id}`)} </span>)}{(endpointActors.get(endpoint) ?? []).map(actor => <span key={actorIdentityKey(identityOf(actor))}>
-                        {link({ kind: 'actor', identity: identityOf(actor) }, `Select actor ${actor.name} · run ${actor.run} · incarnation ${actor.incarnation}`)} </span>)}
-                    <button onClick={() => navigate({ ...route, messageFilters: { ...route.messageFilters, sender: endpoint } })}>Filter {endpoint}
-                    </button>
-                  </span>;
-                })}
-              </div>
-            </div>)}
-          </div>
-          {!inbox.total && <Empty>No messages match this context and filters.</Empty>}
-          <Pager page={inbox.page} count={inbox.pageCount} total={inbox.total} onPage={setPage} />
-        </>, [inbox, endpoints, endpointNodes, endpointActors, link, route, navigate]);
+  const timeline = <TimelineView {...{ activity, now, inspect, link, setPage }} />;
+  const tree = <ConversationTreeView {...{ actors, conversations, link, inspect, route, setPage, setActorPage }} />;
+  const inboxScreen = <InboxView {...{ inbox, endpoints, endpointNodes, endpointActors, link, route, navigate, setPage }} />;
   const selectedIdentity = route.selection.kind === 'actor' ? actorIdentityKey(route.selection.identity) : undefined;
   useEffect(() => { setRenderedInputs([]); }, [selectedIdentity, route.screen]);
   const showAllOperations = allOperations || !selectedIdentity;
@@ -590,40 +270,7 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
             {!chatCommands.length && !chatReceipts.length && <p className="hint">No operations retained for {showAllOperations ? 'this browser or host' : 'this exact actor'}.</p>}
           </section></details>
         </WorkerChat>}
-        {route.screen === 'command' && <section>
-          <h2>Send a command</h2>
-          <p className="hint">Standalone deterministic demo · sending is separate from server acceptance and completion.</p>
-          <p>
-            <code>echo TEXT · test · wait · message TEXT · cancel · child TEXT · fail</code>
-          </p>
-          <div className="toolbar" aria-label="Common deterministic actions">
-            {[['Run test', 'test'], ['Start wait', 'wait'], ['Cancel wait', 'cancel'], ['Create example child', 'child browser example'], ['Fail request', 'fail'], ['Recover with echo', 'echo recovered']].map(([label, value]) => <button key={value} disabled={!onDemoCommand || transportPhase !== 'ready'} onClick={() => sendDemo(value!)}>
-              {label}
-            </button>)}
-          </div>
-          <form className="command-form" onSubmit={event => {
-            event.preventDefault(); if (demo.text.trim())
-              sendDemo(demo.text);
-          }}>
-            <label htmlFor="demo-command">Command</label>
-            <input id="demo-command" value={demo.text} onChange={event => demo.setText(event.target.value)} autoComplete="off" />
-            <button disabled={!demo.text.trim() || !onDemoCommand || transportPhase !== 'ready'}>Send</button>
-          </form>
-          {!onDemoCommand && <p role="status">Command channel is unavailable; this view is read-only.</p>}{demo.error && <p role="status" className="error">
-            {demo.error}
-          </p>}{demoLocalFeedback && <p role="status">
-            {demoLocalFeedback}
-          </p>}{demoFeedback && <p role="status" className="error">
-            {demoFeedback}
-          </p>}{demo.lastSubmitted && <div>
-            <pre>
-              {demo.lastSubmitted}
-            </pre>
-            <button onClick={demo.restore}>Restore last demo command</button>
-          </div>}{acceptedCommandIds.filter(id => !commandIds.has(id)).map(id => <p role="status" key={id}>Server accepted command {id}; this acknowledgment is not a terminal outcome.</p>)}
-          <h2>Authoritative activity</h2>
-          {timeline}
-        </section>}
+        {route.screen === 'command' && <CommandView {...{ demo, sendDemo, onDemoCommand, transportPhase, demoLocalFeedback, demoFeedback, acceptedCommandIds, commandIds, timeline }} />}
       </>}{route.requestId && <NodeWindow requestId={route.requestId} conversationId={inspected?.nodeId} hostRun={data.hostRun} refreshKey={inspected?.historyRefreshKey} onAuthExpired={onAuthExpired} onClose={closeInspector} />}
     </main>
   </div>;
