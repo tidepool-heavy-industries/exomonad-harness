@@ -388,7 +388,7 @@ impl ResponsesTransport for ResumeAfterInput {
                 vec![
                     Item(json!({
                         "type":"custom_tool_call", "call_id":"slow-cell",
-                        "name":"haskell", "input":"slow"
+                        "name":"haskell", "input":"slow", "async":true
                     })),
                     Item(json!({
                         "type":"message", "role":"assistant", "phase":"final_answer",
@@ -406,7 +406,7 @@ impl ResponsesTransport for ResumeAfterInput {
                 assert_eq!(input_count, 1, "the durable wake attaches the input once");
                 vec![Item(json!({
                     "type":"custom_tool_call", "call_id":"fast-cell",
-                    "name":"haskell", "input":"fast"
+                    "name":"haskell", "input":"fast", "async":true
                 }))]
             }
             3 => {
@@ -478,7 +478,7 @@ async fn embedded_final_waits_internally_and_durable_input_resumes_once() {
         )
         .unwrap();
     let (_cancel, cancellation) = tokio::sync::watch::channel(false);
-    let running = tokio::spawn(async move {
+    let mut running = tokio::spawn(async move {
         engine
             .run_embedded(
                 None,
@@ -490,8 +490,16 @@ async fn embedded_final_waits_internally_and_durable_input_resumes_once() {
             )
             .await
     });
-    started.notified().await;
-    transport.first_final.notified().await;
+    tokio::select! {
+        _ = started.notified() => {},
+        result = &mut running => panic!("engine ended before dispatch: {:?}", result.map(|result| result.err())),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("dispatch did not start"),
+    }
+    tokio::select! {
+        _ = transport.first_final.notified() => {},
+        result = &mut running => panic!("engine ended before first_final: {:?}", result.map(|result| result.err())),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("first_final did not arrive"),
+    }
     assert!(
         tokio::time::timeout(
             std::time::Duration::from_millis(30),
@@ -506,8 +514,16 @@ async fn embedded_final_waits_internally_and_durable_input_resumes_once() {
         .input("operator-1", "operator", "wake me")
         .await
         .unwrap();
-    transport.second_request.notified().await;
-    transport.pending_final.notified().await;
+    tokio::select! {
+        _ = transport.second_request.notified() => {},
+        result = &mut running => panic!("engine ended before second_request: {:?}", result.map(|result| result.err())),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("second_request did not arrive"),
+    }
+    tokio::select! {
+        _ = transport.pending_final.notified() => {},
+        result = &mut running => panic!("engine ended before pending_final: {:?}", result.map(|result| result.err())),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("pending_final did not arrive"),
+    }
     assert!(
         tokio::time::timeout(
             std::time::Duration::from_millis(30),
