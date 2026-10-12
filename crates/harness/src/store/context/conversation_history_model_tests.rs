@@ -315,7 +315,7 @@ fn run_history(
                     .collect::<Vec<_>>();
                 let provider_occurrences = actual
                     .iter()
-                    .filter(|(request, _, _)| request == &head.0)
+                    .filter(|(_, _, item)| item.0["type"] != "configuration_update")
                     .cloned()
                     .collect::<Vec<_>>();
                 prop_assert_eq!(
