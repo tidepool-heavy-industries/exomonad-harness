@@ -75,15 +75,20 @@ impl Provider for EffectCounter {
     }
     fn tools(&self) -> Vec<serde_json::Value> {
         vec![
-            json!({"type":"function","name":"count_effect","parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}),
+            json!({"type":"function","name":"count_effect","strict":true,"parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}),
         ]
     }
+}
+
+struct ObservedRequest {
+    id: RequestId,
+    body: serde_json::Value,
 }
 
 struct Script {
     effects: Arc<EffectCounter>,
     scheduler: Arc<JobScheduler>,
-    requests: Arc<Mutex<Vec<ResponsesRequest>>>,
+    requests: Arc<Mutex<Vec<ObservedRequest>>>,
 }
 
 #[async_trait::async_trait]
@@ -91,18 +96,26 @@ impl ResponsesTransport for Script {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
-    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
         unreachable!()
     }
-    async fn create_streaming_for_request(
+    async fn create_streaming(
         &self,
-        id: &RequestId,
-        request: ResponsesRequest,
+        request: PreparedProviderRequest,
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
+        let id = request.request_id().clone();
+        assert_eq!(
+            request.response_contract(),
+            (ResponsesRoute::Codex, ResponsesProtocol::Standard)
+        );
+        let body = serde_json::from_slice(request.wire_body()).unwrap();
         let ordinal = {
             let mut requests = self.requests.lock().unwrap();
-            requests.push(request);
+            requests.push(ObservedRequest {
+                id: id.clone(),
+                body,
+            });
             requests.len()
         };
         if ordinal != 1 {
@@ -127,7 +140,7 @@ impl ResponsesTransport for Script {
             // Observe a real admitted scheduler job without claiming it or releasing it.
             tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
-                    if let Some(claim) = self.effects.store.claims_on(id).unwrap().first() {
+                    if let Some(claim) = self.effects.store.claims_on(&id).unwrap().first() {
                         if matches!(self.scheduler.output(&claim.operation).await, Ok(None)) {
                             break;
                         }
@@ -155,7 +168,7 @@ fn engine(
     store: Arc<Store>,
     effects: Arc<EffectCounter>,
     scheduler: Arc<JobScheduler>,
-    requests: Arc<Mutex<Vec<ResponsesRequest>>>,
+    requests: Arc<Mutex<Vec<ObservedRequest>>>,
     identity: &HostIdentity,
 ) -> TestEngine {
     Engine::with_transport(
@@ -528,19 +541,21 @@ async fn run_history(
             prop_assert_eq!(effects.calls.load(Ordering::SeqCst), 0);
         }
         let requests = requests.lock().unwrap();
-        let input = &requests[1].input;
+        prop_assert_eq!(&requests[0].id, &original.request);
+        prop_assert_eq!(&requests[1].id, &completed.head_request);
+        let input = requests[1].body["input"].as_array().unwrap();
         prop_assert_eq!(
             input
                 .iter()
-                .filter(|item| item.0["type"] == "function_call" && item.0["call_id"] == "effect")
+                .filter(|item| item["type"] == "function_call" && item["call_id"] == "effect")
                 .count(),
             1
         );
         prop_assert_eq!(
             input
                 .iter()
-                .filter(|item| item.0["type"] == "function_call_output"
-                    && item.0["call_id"] == "effect")
+                .filter(|item| item["type"] == "function_call_output"
+                    && item["call_id"] == "effect")
                 .count(),
             1
         );

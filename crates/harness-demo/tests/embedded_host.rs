@@ -12,7 +12,8 @@ use harness::{
     provider::{CallContext, Provider, ProviderError},
     store::Store,
     transport::{
-        Auth, ResponsesProtocol, ResponsesRequest, ResponsesRoute, ResponsesTurn, TransportError,
+        Auth, PreparedProviderRequest, ResponsesProtocol, ResponsesRequest, ResponsesRoute,
+        ResponsesTurn, TransportError,
     },
     turn::{JobOutput, JobScheduler},
 };
@@ -143,7 +144,11 @@ impl ResponsesTransport for ReloadDuringRequest {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        prepared: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = prepared.request().clone();
         assert_eq!(
             request
                 .tools
@@ -357,7 +362,11 @@ impl ResponsesTransport for ResumeAfterInput {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        prepared: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = prepared.request().clone();
         assert_eq!(
             request
                 .tools
@@ -562,7 +571,11 @@ impl ResponsesTransport for FinalOnly {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        prepared: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = prepared.request().clone();
         self.0.lock().unwrap().push(request);
         Ok(ResponsesTurn {
             response_id: "final".into(),
@@ -702,7 +715,11 @@ impl ResponsesTransport for NativeWaitAttempt {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        prepared: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = prepared.request().clone();
         assert_eq!(
             request
                 .tools
@@ -1041,12 +1058,13 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
         .unwrap();
     assert_eq!(history.status(), 200);
     let history: HistoryPage = history.json().await.unwrap();
-    assert!(
-        history
-            .items
-            .iter()
-            .any(|item| item.item.0.to_string().contains("done"))
-    );
+    assert!(history.items.iter().any(|item| {
+        let message = &item.item.0;
+        message["type"] == "message"
+            && message["role"] == "assistant"
+            && message["phase"] == "final_answer"
+            && message["content"] == json!([{"type":"output_text","text":"done"}])
+    }));
     assert!(matches!(
         conversation.input_observation(receipt.envelope_id).unwrap(),
         InputObservation::Included(_)
@@ -1171,7 +1189,10 @@ async fn checkpoint_conversations_keep_independent_children_after_origin_failure
         fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
             Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
         }
-        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            _: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             Ok(ResponsesTurn {
                 response_id: "source".into(),
                 items: vec![Item(
@@ -1332,12 +1353,20 @@ async fn checkpoint_conversations_keep_independent_children_after_origin_failure
 
     let child_a_checkpoint = checkpoint.clone();
     let child_b_checkpoint = checkpoint.clone();
-    assert_eq!(Arc::strong_count(&attachment), 4);
+    assert!(Arc::ptr_eq(&attachment, child_a_checkpoint.attachment()));
+    assert!(Arc::ptr_eq(
+        child_a_checkpoint.attachment(),
+        child_b_checkpoint.attachment(),
+    ));
+    drop(attachment);
     drop(checkpoint);
-    assert_eq!(Arc::strong_count(&attachment), 3);
     assert_eq!(
         child_a_checkpoint.attachment().as_ref(),
-        child_b_checkpoint.attachment().as_ref()
+        &"private scaffold"
+    );
+    assert_eq!(
+        child_b_checkpoint.attachment().as_ref(),
+        &"private scaffold"
     );
 
     let scheduler = Arc::new(JobScheduler::new(2).unwrap());
@@ -1398,7 +1427,6 @@ async fn checkpoint_conversations_keep_independent_children_after_origin_failure
     }
     assert_eq!(root_conversation.identity(), &root.identity);
     drop(child_a_checkpoint);
-    assert_eq!(Arc::strong_count(&attachment), 2);
     assert_eq!(
         child_b_checkpoint.attachment().as_ref(),
         &"private scaffold"
@@ -1416,7 +1444,10 @@ async fn checkpoint_attachment_uses_host_admission_and_commits_binding_atomicall
         fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
             Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
         }
-        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            _: PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             Ok(ResponsesTurn {
                 response_id: "source".into(),
                 items: vec![Item(

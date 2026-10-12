@@ -37,8 +37,11 @@ impl ResponsesTransport for Script {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
-        self.inputs.lock().unwrap().push(request);
+    async fn create(
+        &self,
+        prepared: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        self.inputs.lock().unwrap().push(prepared.request().clone());
         self.turns
             .lock()
             .unwrap()
@@ -824,7 +827,11 @@ impl ResponsesTransport for Arc<CutAfterCompaction> {
         Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        prepared: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = prepared.request();
         use std::sync::atomic::Ordering;
         if request.tools_allowed.as_ref().is_some_and(Vec::is_empty) {
             assert!(
@@ -859,7 +866,7 @@ impl ResponsesTransport for Arc<CutAfterCompaction> {
     }
     async fn create_streaming(
         &self,
-        request: ResponsesRequest,
+        request: PreparedProviderRequest,
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         let turn = self.create(request).await?;
