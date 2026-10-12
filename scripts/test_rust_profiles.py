@@ -20,7 +20,7 @@ def rules(profile):
         calls.append(kwargs)
     def fail(message):
         raise ValueError(message)
-    namespace = {"read_root_config": lambda section, key, default: profile or default,
+    namespace = {"read_root_config": lambda section, key, default=None: profile or default,
                  "fail": fail, "cargo": Cargo, "_rust_library": emit,
                  "_rust_binary": emit, "_rust_test": emit}
     source = "\n".join(line for line in (ROOT / "build/rust/profiles.bzl").read_text().splitlines()
