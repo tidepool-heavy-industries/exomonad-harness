@@ -6,9 +6,9 @@ This brief records the operator's choices for the usability pass based on
 
 - Audience: the daily technical operator. The conversation is the primary working
   surface; code and execution are first-class content, not hidden debug metadata.
-- Visual system: Solarized Dark, base03 canvas and base02 surfaces, warm readable
-  foregrounds, cyan actions/selection, amber pending input. Small link, warning,
-  error, and violet text use contrast-adjusted foregrounds. Prose is 16px with a
+- Visual system: Catppuccin Mocha, selected by the operator on 2026-10-12.
+  Named upstream colors map to semantic surface, text, action, warning and error
+  roles. Solarized remains a historical comparison, not a binding constraint. Prose is 16px with a
   comfortable measure; code uses the existing monospace stack. No new fonts,
   animation libraries, or runtime dependencies.
 - Reading: full prose, bounded code/results, full-source copy. Reasoning and

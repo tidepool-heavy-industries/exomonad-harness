@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
+import { PresentationDetails, usePresentationChoice } from './presentation-state'
 import type { HistoryEntry } from './history-client'
 import { MessageContent, MessagePresentation, type MessageKind } from './MessagePresentation'
 
@@ -106,23 +107,27 @@ export function readable(value: unknown): ReadableItem | undefined {
 }
 
 /** Presentation never replaces the wire item; raw formatting happens only on inspection. */
-export default function HistoryItem({ entry, listItem = true }: { readonly entry: HistoryEntry; readonly listItem?: boolean }) {
+export default function HistoryItem({ entry, listItem = true, diagnostics = true, publication }: { readonly entry: HistoryEntry; readonly listItem?: boolean; readonly diagnostics?: boolean; readonly publication?: { sequence: string; requestId: string } }) {
   const view = useMemo(() => readable(entry.item), [entry.item])
-  const [showRaw, setShowRaw] = useState(false)
+  const [showRaw, setShowRaw] = usePresentationChoice('raw-item')
   const rawVisible = showRaw || !view
   const raw = useMemo(() => rawVisible ? JSON.stringify(entry.item, null, 2) : undefined, [entry.item, rawVisible])
   // Empty or opaque-only reasoning adds no chat content; unfamiliar blocks remain inspectable.
-  if (object(entry.item) && entry.item.type === 'reasoning' && view?.texts.length === 0 && !view.unknownBlocks) return null
+  if (object(entry.item) && entry.item.type === 'reasoning' && view?.texts.length === 0 && !view.unknownBlocks) return publication
+    ? <PresentationDetails memoryKey="evidence" className="chat-message-details" summary="Publication details">
+      <p>Sequence {publication.sequence} · exchange {publication.requestId} · position {entry.position}</p>
+    </PresentationDetails> : null
   const texts = view?.texts.map((part, index, parts) => <div key={index} className={`history-${part.kind}`}>
     <MessageContent text={part.text} copyText={part.copyText} format={part.format} bounded={part.kind === 'code'} memoryKey={`part:${index}`} label={`${part.label} item ${entry.position}${parts.length > 1 ? ` block ${index + 1}` : ''}`} />
   </div>)
   const rawContent = rawVisible && <MessageContent key="raw" text={raw ?? 'Raw data could not be represented as JSON.'} label={`Raw item ${entry.position}`} />
   return <MessagePresentation listItem={listItem} kind={view?.kind ?? 'activity'} title={view?.label ?? 'Unrecognized item · Raw data'} collapsed={view?.kind === 'reasoning' && view.texts.length > 0}
-    details={<>
+    details={diagnostics ? <>
+      {publication && <p className="meta">Sequence {publication.sequence} · exchange {publication.requestId}</p>}
       <p className="meta">Item {entry.position} · hash {entry.hash} · {entry.byteLen} bytes</p>
       {view?.metadata?.map(({ label, value }) => <p className="meta" key={label}>{label}: <span className="mono">{value}</span></p>)}
       {view && <><button type="button" aria-expanded={showRaw} onClick={() => setShowRaw(!showRaw)}>{showRaw ? 'Hide' : 'Show'} Raw item {entry.position}</button>{rawContent}</>}
-    </>}>
+    </> : undefined}>
     {view ? <>
       {view.responseSummary ? <details className="history-tool-response"><summary>{view.responseSummary}</summary>{texts}</details> : texts}
       {view.unknownBlocks && <p className="message-content-note">Unknown content is retained. Open Raw to inspect all blocks.</p>}

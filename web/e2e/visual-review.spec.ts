@@ -22,7 +22,7 @@ for (const width of [1280, 390, 320]) {
     const cell = page.getByRole('region', { name: 'haskell tool call' })
     await cell.getByRole('heading', { name: 'haskell', exact: true }).scrollIntoViewIfNeeded()
     await capture(page, info, 'tool-source')
-    await cell.getByText('Execution log', { exact: true }).click()
+    await cell.getByText('Tool evidence', { exact: true }).click()
     await capture(page, info, 'tool-failure')
 
     await page.getByRole('button', { name: 'Jump to form', exact: true }).click()

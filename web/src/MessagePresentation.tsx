@@ -27,7 +27,7 @@ export function MessagePresentation({ kind, title, children, status, details, li
       <header className="chat-message-header">{heading}{status && <span className="chat-message-status">{status}</span>}</header>
       <div className="chat-message-body">{children}</div>
     </>}
-    {details && <details className="chat-message-details"><summary>Message details</summary>{details}</details>}
+    {details && <PresentationDetails memoryKey="evidence" className="chat-message-details" summary="Message details">{details}</PresentationDetails>}
   </Element>
 }
 
