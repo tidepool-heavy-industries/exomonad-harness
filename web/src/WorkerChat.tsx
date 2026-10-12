@@ -1,3 +1,4 @@
+import type { ChatInputOperation } from './generated/chat'
 import { useEffect, useState, type ReactNode } from 'react'
 import { belongsTo } from './live-output'
 import ChatHistory, { clearChatHistoryRetention } from './ChatHistory'
@@ -49,9 +50,9 @@ function WorkflowMessages({ data, identity }: { data: HarnessViewModel; identity
   </section>
 }
 
-export default function WorkerChat({ data, route, navigate, transportPhase, issue, onAuthExpired, children }: {
+export default function WorkerChat({ data, route, navigate, transportPhase, issue, onAuthExpired, children, composer, outgoing, onRenderedInputs }: {
   data: HarnessViewModel; route: RouteState; navigate: (route: RouteState) => void
-  transportPhase: TransportPhase; issue?: string; onAuthExpired?: () => void; children?: ReactNode
+  transportPhase: TransportPhase; issue?: string; onAuthExpired?: () => void; children?: ReactNode; composer?: ReactNode; outgoing?: ReactNode; onRenderedInputs?: (references: readonly ChatInputOperation[]) => void
 }) {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
@@ -109,8 +110,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
       {identity && !resolved.actor && <p>{workerLink(identity, identity.actor)} · selected exact actor unavailable</p>}
       <ul>{shown.rows.map(actor => <li key={actorIdentityKey(identityOf(actor))}>
         {workerLink(identityOf(actor), actor.name)}
-        <span className="meta">{actor.kind} · {actor.lifecycle} · incarnation {actor.incarnation}</span>
-        <span className="meta">Run {actor.run}</span>
+        <span className="meta">{actor.kind} · {actor.lifecycle}</span>
       </li>)}</ul>
       {!shown.total && <p>No workers match.</p>}
       {shown.pageCount > 1 && <div className="history-controls">
@@ -120,8 +120,11 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
       </div>}
     </aside>
     <section className="worker-chat-conversation" aria-label="Selected worker Chat">
+      <div className="worker-chat-scroll" role="region" aria-label="Worker conversation" tabIndex={0}>
       {identity && <header className="actor-heading">
         <h2>{identity.actor}</h2>
+        {resolved.actor && <p className="actor-state">{resolved.actor.kind} · {resolved.actor.lifecycle}{resolved.actor.inference && ` · inference ${resolved.actor.inference.state}`}</p>}
+        <details className="actor-technical-details"><summary>Actor details</summary>
         <p className="meta">run {identity.run} · incarnation {identity.incarnation}</p>
         {resolved.actor && <dl className="actor-details">
           <dt>Actor</dt><dd>{resolved.actor.kind} · {resolved.actor.lifecycle}</dd>
@@ -129,7 +132,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
           {resolved.conversationId && <><dt>Conversation</dt><dd className="mono">{resolved.conversationId}</dd></>}
           {resolved.actor.activeRound && <><dt>Active round</dt><dd className="mono">{resolved.actor.activeRound}</dd></>}
           {exactHead && <><dt>History head</dt><dd className="mono">{exactHead}</dd></>}
-        </dl>}
+        </dl>}</details>
       </header>}
       {issue ? <p role="alert">{issue}</p> : !identity ? <p>Select a worker to open its messages and controls.</p> :
         <>
@@ -139,6 +142,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
           {ambiguousConversation && !exactHead && <p role="status">The host associates this conversation with multiple exact actors. Its current history head is unavailable; only previously retained exact history can be shown.</p>}
           {outputOrigin && <UnifiedChat key={actorOutputKey(outputOrigin)}
             origin={outputOrigin} requestId={head?.id ?? exactHead}
+            {...{ modelOrigin: identity ? { kind: 'embedded' as const, ...identity } : undefined, onRenderedInputs }}
             revision={(data.actorOutputRevisions ?? []).find(reference => actorOutputKey(reference.origin) === actorOutputKey(outputOrigin))?.sequence}
             ready={transportPhase === 'ready'} active={!!resolved.actor && ['running', 'waiting'].includes(resolved.actor.lifecycle)} onAuthExpired={onAuthExpired}
             liveOutput={liveOutput} requests={new Map(data.timeline.filter(item => item.kind === 'request').map(item => [item.id, item]))}
@@ -154,7 +158,10 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
               historyRevisions={(data.historyRevisions ?? []).filter(revision => revision.origin.kind === 'embedded' && revision.origin.run === identity.run)} active={!!resolved.actor && ['running', 'waiting'].includes(resolved.actor.lifecycle)} liveOutput={liveOutput} refreshKey={refreshKey} ready={transportPhase === 'ready'} onAuthExpired={onAuthExpired} /> :
               <p>{ambiguousConversation ? 'No exact history head is available for this actor.' : resolved.missing ? 'The host has no retained conversation association for this exact actor.' : 'No retained model exchange is available yet.'}</p> : null}
         </>}
+      {outgoing}
       {children}
+      </div>
+      {composer}
     </section>
   </div>
 }

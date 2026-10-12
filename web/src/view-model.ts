@@ -22,6 +22,7 @@ export type HarnessViewModel = {
     modelConversation?: string;
     modelHeadRequest?: string;
     activeRound?: string;
+    inference?: import('./protocol').HostInferenceState;
   }>;
   commandReceipts?: CommandReceipt[];
   nodes: Array<{

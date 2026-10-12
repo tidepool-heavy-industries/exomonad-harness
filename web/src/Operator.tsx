@@ -1,3 +1,4 @@
+import { commandIsCurrent } from './recovery'
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import App from './App'
 import { CommandCorrelations } from './command-correlations'
@@ -5,7 +6,7 @@ import { clearDrafts } from './drafts'
 import { clearWorkerChatRetention } from './WorkerChat'
 import { createViewProjector } from './integration'
 import {
-  canonicalOperationId, isOperationId, normalizeSnapshot, sameHostCommand,
+  actorIdentityKey, canonicalOperationId, isOperationId, normalizeSnapshot, sameHostCommand,
   type HostCommand, type HostCommandSubmission, type NormalizedState, type Snapshot,
 } from './protocol'
 import {
@@ -259,6 +260,8 @@ export function Operator() {
     if (run === undefined || phaseRef.current !== 'ready' || !connectionRef.current) {
       return { kind: 'blocked', reason: 'A fresh authoritative host snapshot and connected command channel are required.' }
     }
+    if (!commandIsCurrent(command, stateRef.current.actors.get(actorIdentityKey(command.target))))
+      return { kind: 'blocked', reason: 'This operation no longer matches the current actor, round, or inference block.' }
     if (command.target.run !== run) return { kind: 'blocked', reason: 'The operation targets a different host run.' }
     try {
       const submission: HostCommandSubmission = { operation_id: allocateOperationId(), command }
@@ -285,6 +288,8 @@ export function Operator() {
       && canonicalOperationId(item.submission.operation_id) === canonicalOperationId(submission.operation_id))
     if (!record || !sameHostCommand(record.submission.command, submission.command))
       return { kind: 'blocked', reason: 'This exact retained operation is unavailable in the current host run.' }
+    if (!commandIsCurrent(submission.command, stateRef.current.actors.get(actorIdentityKey(submission.command.target)), submission.operation_id))
+      return { kind: 'blocked', reason: 'The retained operation is stale for this actor, round, or inference block.' }
     if (!updatePending(pendingRef.current, true)) return { kind: 'blocked', reason: 'This browser could not retain the operation before retrying.' }
     const send = connectionRef.current.send(record.submission)
     updatePending(observeCommand(pendingRef.current, run, record.submission.operation_id, { send }))

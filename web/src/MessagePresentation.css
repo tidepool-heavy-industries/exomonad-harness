@@ -1,0 +1,42 @@
+.chat-message { min-width: 0; max-width: 52rem; margin-block: 18px; padding: 16px 20px; white-space: normal; overflow-wrap: anywhere; color: var(--ink); }
+.chat-message-assistant { padding-inline-start: 0; }
+.chat-message-human { margin-inline-start: auto; max-width: 44rem; background: var(--panel); border: 1px solid var(--line); border-radius: 18px 18px 4px 18px; }
+.chat-message-reasoning, .chat-message-activity { padding: 12px 16px; border-inline-start: 3px solid var(--line); color: var(--muted); }
+.chat-message-header { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 12px; margin-block-end: 10px; }
+.chat-message-header h3 { margin: 0; font-size: .9rem; line-height: 1.5; font-weight: 650; }
+.chat-message-status { color: var(--muted); font-size: .85rem; }
+.chat-message-body { min-width: 0; font-size: 1.08rem; line-height: 1.7; }
+.chat-message-fold > summary, .chat-message-details > summary { cursor: pointer; }
+.chat-message-fold > summary { display: list-item; }
+.chat-message-fold > summary h3 { display: inline; }
+.chat-message-fold:not([open]) > summary { margin-block-end: 0; }
+.chat-message-details { margin-block-start: 12px; font-size: .85rem; color: var(--muted); }
+.chat-message-details > summary { width: fit-content; }
+.chat-message-details .meta { white-space: normal; overflow-wrap: anywhere; }
+.message-content { min-width: 0; }
+/* A bounded reading viewport keeps long retained messages manageable. */
+.message-content-viewport { max-height: 24rem; overflow: hidden; }
+.message-content-expanded { max-height: none; overflow: visible; }
+.message-content-body { white-space: normal; }
+.message-content-body > :first-child { margin-block-start: 0; }
+.message-content-body > :last-child { margin-block-end: 0; }
+.message-content-plain .history-content { margin: 0; white-space: pre-wrap; font: inherit; overflow-wrap: anywhere; }
+.message-content-markdown p { margin-block: 0 1em; }
+.message-content-markdown h1, .message-content-markdown h2, .message-content-markdown h3, .message-content-markdown h4 { margin-block: 1.25em .5em; line-height: 1.3; }
+.message-content-markdown h1 { font-size: 1.6em; }
+.message-content-markdown h2 { font-size: 1.35em; }
+.message-content-markdown h3 { font-size: 1.15em; }
+.message-content-markdown ul, .message-content-markdown ol { margin-block: .5em 1em; padding-inline-start: 1.5em; }
+.message-content-markdown li { margin-block: .35em; }
+.message-content-markdown blockquote { margin-inline: 0; padding-inline-start: 1em; border-inline-start: 3px solid var(--line); color: var(--muted); }
+.message-content-markdown :not(pre) > code { padding: .1em .35em; background: var(--paper); border: 1px solid var(--line); border-radius: 4px; font: .9em var(--mono); }
+.message-content-markdown img { max-width: 100%; height: auto; }
+.message-code-block { min-width: 0; margin-block: 1em; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink); overflow: hidden; }
+.message-code-actions { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 8px; padding: 5px 10px; border-bottom: 1px solid var(--line); }
+.message-code-block pre { margin: 0; padding: 14px; overflow-x: auto; white-space: pre; overflow-wrap: normal; word-break: normal; font: .9em/1.6 var(--mono); }
+.message-content-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-block-start: 8px; }
+.message-content-actions button, .message-code-actions button { padding: 4px 8px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); color: var(--muted); font: inherit; font-size: .85rem; line-height: 1.5; cursor: pointer; }
+.message-content-note, .message-copy-status { color: var(--muted); font-size: .8rem; line-height: 1.5; }
+.message-content-note { margin-block: 6px 0; }
+.chat-message-details .message-content-plain pre { font-family: var(--mono); }
+@media (max-width: 700px) { .chat-message { padding-inline: 12px; } .chat-message-assistant { padding-inline-start: 0; } .chat-message-human { max-width: 96%; } .chat-message-body { font-size: 1rem; } }
