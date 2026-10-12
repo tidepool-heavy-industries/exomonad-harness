@@ -487,7 +487,7 @@ impl ReplayProvider {
         let next = cut.and_then(|(index, _)| self.turns.get(index));
         let continuation = self
             .store
-            .replay_wait_continuation(local, &original, next)
+            .replay_wait_continuation(local, &original, next.map(|turn| &turn.record))
             .map_err(|error| {
                 ProviderError::Tool(format!("loading replay wait continuation: {error}").into())
             })?;
