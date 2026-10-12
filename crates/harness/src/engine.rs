@@ -1161,7 +1161,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .iter()
                 .find_map(Item::configuration_effort)
                 .ok_or(EngineError::MissingEffortPin)?;
-            let snapshot = match self.provider.request_snapshot().await {
+            let snapshot = tokio::select! {
+                result = self.provider.request_snapshot() => result,
+                changed = cancellation.changed() => {
+                    if changed.is_err() || *cancellation.borrow() {
+                        return Err(self.cleanup_pending(EngineError::Cancelled { head_request: Some(parent.clone()) }, &pending).await);
+                    }
+                    continue;
+                }
+            };
+            let snapshot = match snapshot {
                 Ok(snapshot) => snapshot,
                 Err(crate::provider::ProviderError::RequestAdmissionClosed) => {
                     return Err(self
@@ -2276,11 +2285,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .ok_or(EngineError::MissingInheritedOutput(call_id))
     }
 
-    fn tools(
+    async fn tools(
         &self,
         finalize_schema: Option<&serde_json::Value>,
     ) -> Result<crate::transport::ToolManifest, EngineError> {
-        self.compose_tools(finalize_schema, &self.provider.tool_manifest())
+        let snapshot = self.provider.request_snapshot().await?;
+        let provider = snapshot.as_ref().unwrap_or(&self.provider);
+        self.compose_tools(finalize_schema, &provider.tool_manifest())
     }
 
     fn compose_tools(
@@ -3634,6 +3645,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     instructions: self.config.instructions.clone(),
                     tools: self
                         .tools(None)
+                        .await
                         .map_err(|error| CompactError::Failed(error.to_string()))?,
                     tools_allowed: None,
                     model: model.to_owned(),
