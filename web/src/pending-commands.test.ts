@@ -201,3 +201,23 @@ it.each([
   writePendingCommands(joined)
   expect(readPendingCommands()[0]?.submission).toEqual(submission)
 })
+
+it('observes exact request inclusion monotonically without changing the admitted receipt or original command', () => {
+  const records = retainCommand([], 'run-1', { operation_id, command })
+  const receipt = { commandId: operation_id.toLowerCase(), target: command.target, outcome: 'admitted' as const, envelopeId: '42' }
+  const status = { operationId: operation_id, command, state: 'input_admitted' as const, envelopeId: '42', receipt,
+    inputObservation: { state: 'admitted' as const } }
+  const admitted = applyCommandStatus(records, 'run-1', status)
+  expect(needsCommandLookup(admitted[0]!)).toBe(true)
+  const included = applyCommandStatus(admitted, 'run-1', { ...status, inputObservation: { state: 'included', request: 'exact-request' } })
+  expect(included[0]!.inputObservation).toEqual({ state: 'included', request: 'exact-request' })
+  expect(included[0]!.receipt).toEqual(receipt)
+  expect(included[0]!.submission).toEqual(records[0]!.submission)
+  expect(needsCommandLookup(included[0]!)).toBe(false)
+  expect(applyCommandStatus(included, 'run-1', status)[0]!.inputObservation).toEqual(included[0]!.inputObservation)
+  const conflict = applyCommandStatus(included, 'run-1', { ...status, inputObservation: { state: 'included', request: 'other-request' } })
+  expect(conflict[0]!.inputObservation).toEqual(included[0]!.inputObservation)
+  expect(conflict[0]!.issues).toContain('Contradictory input request inclusion identity.')
+  writePendingCommands(included)
+  expect(readPendingCommands()[0]!.inputObservation).toEqual(included[0]!.inputObservation)
+})

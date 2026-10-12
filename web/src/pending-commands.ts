@@ -1,6 +1,6 @@
 import {
   canonicalOperationId, isCommandReceipt, isCommandRefusal, isCommandState, isHostCommand,
-  isObject, isOperationId, sameHostCommand, sameHostIdentity,
+  isObject, isOperationId, isEmbeddedCommandRecord, sameHostCommand, sameHostIdentity, sameInferenceBlock,
   type CommandReceipt, type EmbeddedCommandRecord, type HostCommandRefusal, type HostCommandSubmission,
 } from './protocol'
 
@@ -17,6 +17,7 @@ export interface BrowserCommandRecord {
   readonly state: EmbeddedCommandRecord['state']
   readonly receipt?: CommandReceipt | null
   readonly envelopeId?: string | null
+  readonly inputObservation?: EmbeddedCommandRecord['inputObservation']
   readonly accepted?: boolean
   readonly send?: 'sent' | 'not_sent' | 'unknown'
   readonly lookup?: { readonly kind: 'unavailable' | 'error'; readonly reason: string }
@@ -52,13 +53,14 @@ export function operationKey(record: Pick<BrowserCommandRecord, 'hostRun' | 'sub
 
 export function isSettledCommand(record: BrowserCommandRecord): boolean {
   return (record.authority === 'status' || record.authority === 'receipt')
-    && ['input_admitted', 'control_requested', 'refused'].includes(record.state)
+    && ['input_admitted', 'control_requested', 'recovery_authorized', 'refused'].includes(record.state)
 }
 
 /** Store unconfirmed is immutable evidence, but remains unresolved for retention. */
 export function needsCommandLookup(record: BrowserCommandRecord): boolean {
   return record.authority === 'local' || record.authority === 'legacy'
     || record.state === 'queued' || record.state === 'dispatching'
+    || (record.state === 'input_admitted' && record.inputObservation?.state !== 'included')
 }
 
 function issue(record: BrowserCommandRecord, message: string): BrowserCommandRecord {
@@ -74,6 +76,9 @@ function decodeRecord(value: unknown, legacy: boolean): BrowserCommandRecord | u
   if (value.receipt !== undefined && value.receipt !== null && !isCommandReceipt(value.receipt)) return
   if (value.envelopeId !== undefined && value.envelopeId !== null
     && !signedDecimal(value.envelopeId)) return
+  if (value.inputObservation != null && (!['status', 'receipt'].includes(value.authority as string)
+    || !isEmbeddedCommandRecord({ operationId:canonicalOperationId(value.submission.operation_id), command:value.submission.command,
+      state:value.state, envelopeId:value.envelopeId ?? null, receipt:value.receipt ?? null, inputObservation:value.inputObservation }))) return
   if (value.accepted !== undefined && typeof value.accepted !== 'boolean') return
   if (value.send !== undefined && !['sent', 'not_sent', 'unknown'].includes(value.send as string)) return
   if (value.lookup !== undefined && (!isObject(value.lookup) || !['unavailable', 'error'].includes(value.lookup.kind as string)
@@ -84,7 +89,8 @@ function decodeRecord(value: unknown, legacy: boolean): BrowserCommandRecord | u
   const record = { ...value, authority: legacy ? 'legacy' : value.authority } as unknown as BrowserCommandRecord
   if (!legacy && (record.authority === 'status' || record.authority === 'receipt')) {
     if ((record.state === 'input_admitted' && record.submission.command.action !== 'input')
-      || (record.state === 'control_requested' && record.submission.command.action === 'input')) return
+      || (record.state === 'control_requested' && !['interrupt', 'retire'].includes(record.submission.command.action))
+      || (record.state === 'recovery_authorized' && record.submission.command.action !== 'recover')) return
     if (record.authority === 'receipt' && (!record.receipt || !record.receipt.target)) return
     if (record.receipt && (!receiptMatches(record, record.receipt) || receiptState(record.receipt) !== record.state)) return
     if (record.receipt?.outcome === 'admitted' && record.envelopeId != null
@@ -163,14 +169,19 @@ export function retainCommand(records: readonly BrowserCommandRecord[], hostRun:
   }
   // A caller cannot mutate the retained payload after submission.
   const immutable = JSON.parse(JSON.stringify(submission)) as HostCommandSubmission
-  Object.freeze(immutable.command.target)
-  Object.freeze(immutable.command)
-  Object.freeze(immutable)
+  const freeze = (value: unknown): void => {
+    if (value !== null && typeof value === 'object') {
+      for (const child of Object.values(value)) freeze(child)
+      Object.freeze(value)
+    }
+  }
+  freeze(immutable)
   return compact([...records, { hostRun, submission: immutable, authority: 'local', state: 'queued' }])
 }
 
 function receiptState(receipt: CommandReceipt): EmbeddedCommandRecord['state'] {
   switch (receipt.outcome) {
+    case 'recovery_authorized': return 'recovery_authorized'
     case 'admitted': return 'input_admitted'
     case 'control_requested': return 'control_requested'
     case 'refused': return 'refused'
@@ -183,6 +194,8 @@ function receiptMatches(record: BrowserCommandRecord, receipt: CommandReceipt): 
     || canonicalOperationId(receipt.commandId) !== canonicalOperationId(record.submission.operation_id)) return false
   if (receipt.target != null && !sameHostIdentity(receipt.target, record.submission.command.target)) return false
   switch (receipt.outcome) {
+    case 'recovery_authorized': return record.submission.command.action === 'recover'
+      && record.submission.command.mode === receipt.mode && sameInferenceBlock(record.submission.command.expected_block, receipt.block)
     case 'admitted': return record.submission.command.action === 'input'
     case 'control_requested': return record.submission.command.action === receipt.control
     case 'refused': case 'unconfirmed': return true
@@ -192,14 +205,15 @@ function receiptMatches(record: BrowserCommandRecord, receipt: CommandReceipt): 
 function mergeEvidence(record: BrowserCommandRecord, state: EmbeddedCommandRecord['state'], authority: 'status' | 'receipt',
   receipt?: CommandReceipt | null, envelopeId?: string | null): BrowserCommandRecord {
   if ((state === 'input_admitted' && record.submission.command.action !== 'input')
-    || (state === 'control_requested' && record.submission.command.action === 'input'))
+    || (state === 'control_requested' && !['interrupt', 'retire'].includes(record.submission.command.action))
+    || (state === 'recovery_authorized' && record.submission.command.action !== 'recover'))
     return issue(record, 'Observed handoff state contradicts this operation’s action.')
   if ((record.authority === 'status' || record.authority === 'receipt')
     && ((record.state === 'dispatching' && state === 'queued')
       || (record.state === 'unconfirmed' && (state === 'queued' || state === 'dispatching')))) return record
   if (receipt && !receiptMatches(record, receipt)) return issue(record, 'Observed receipt contradicts this operation’s target or action.')
   if (receipt && receiptState(receipt) !== state) return issue(record, 'Observed status and receipt report contradictory handoff outcomes.')
-  if (isSettledCommand(record) && !['input_admitted', 'control_requested', 'refused'].includes(state)) return record
+  if (isSettledCommand(record) && !['input_admitted', 'control_requested', 'recovery_authorized', 'refused'].includes(state)) return record
   if (isSettledCommand(record) && record.state !== state) return issue(record, `Contradictory handoff evidence: retained ${record.state}, observed ${state}.`)
   if (record.envelopeId != null && envelopeId != null && record.envelopeId !== envelopeId)
     return issue(record, 'Contradictory admitted envelope identity.')
@@ -212,6 +226,10 @@ function mergeEvidence(record: BrowserCommandRecord, state: EmbeddedCommandRecor
       if (record.receipt.wakeError !== undefined && receipt.wakeError !== undefined && record.receipt.wakeError !== receipt.wakeError)
         return issue(record, 'Contradictory admitted wake observations.')
       combined = { ...record.receipt, ...receipt, wakeError: receipt.wakeError ?? record.receipt.wakeError }
+    } else if (receipt.outcome === 'recovery_authorized' && record.receipt.outcome === 'recovery_authorized'
+      && (JSON.stringify(receipt.projection.omitted) !== JSON.stringify(record.receipt.projection.omitted)
+        || JSON.stringify(receipt.projection.unknownResponseCompleteness) !== JSON.stringify(record.receipt.projection.unknownResponseCompleteness))) {
+      return issue(record, 'Contradictory recovery projection evidence.')
     } else if ('reason' in receipt && 'reason' in record.receipt && receipt.reason !== record.receipt.reason) {
       return issue(record, 'Contradictory handoff reasons.')
     }
@@ -223,7 +241,15 @@ export function applyCommandStatus(records: readonly BrowserCommandRecord[], hos
   return records.map((record) => {
     if (record.hostRun !== hostRun || canonicalOperationId(record.submission.operation_id) !== canonicalOperationId(status.operationId)) return record
     if (!sameHostCommand(record.submission.command, status.command)) throw new Error('The retained status does not match this operation’s exact target and contents.')
-    return mergeEvidence(record, status.state, 'status', status.receipt, status.envelopeId)
+    const merged = mergeEvidence(record, status.state, 'status', status.receipt, status.envelopeId)
+    if (status.inputObservation == null || merged.state !== 'input_admitted'
+      || status.state !== 'input_admitted' || merged.envelopeId !== status.envelopeId) return merged
+    if (record.inputObservation?.state === 'included') {
+      if (status.inputObservation.state === 'included' && record.inputObservation.request !== status.inputObservation.request)
+        return issue(merged, 'Contradictory input request inclusion identity.')
+      return merged
+    }
+    return { ...merged, inputObservation: status.inputObservation }
   })
 }
 

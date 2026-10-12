@@ -82,3 +82,24 @@ it('cancels old-run lookups before reading a new current run and rejects stale c
   retained = []
   scheduler.dispose()
 })
+
+it('continues observational reads after admission until exact inclusion, then stops without sending effects', async () => {
+  vi.useFakeTimers()
+  const command = { action: 'input' as const, target: { run: 'run', actor: '/root', incarnation: 'one' }, text: 'queued' }
+  const operation_id = '00000000-0000-4000-8000-000000000001'
+  let retained = retainCommand([], 'run', { operation_id, command })
+  const status = { operationId: operation_id, command, state: 'input_admitted' as const, envelopeId: '42', receipt: null }
+  const read = vi.fn().mockResolvedValueOnce({ ...status, inputObservation: { state: 'admitted' } })
+    .mockResolvedValue({ ...status, inputObservation: { state: 'included', request: 'request' } })
+  const scheduler = createCommandLookups({ current: () => retained, read,
+    result: (_record, observed) => { retained = applyCommandStatus(retained, 'run', observed!) }, error: vi.fn() })
+  scheduler.reconcile(retained, 'run')
+  await vi.advanceTimersByTimeAsync(0)
+  expect(read).toHaveBeenCalledTimes(1)
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(read).toHaveBeenCalledTimes(2)
+  expect(retained[0]!.inputObservation).toEqual({ state: 'included', request: 'request' })
+  await vi.advanceTimersByTimeAsync(120000)
+  expect(read).toHaveBeenCalledTimes(2)
+  scheduler.dispose()
+})

@@ -158,6 +158,7 @@ describe('linked operator views', () => {
     const blocked = vi.fn(() => ({ kind: 'blocked' as const, reason: 'retry blocked' }));
     const receipts = records.map(record => ({ commandId: record.submission.operation_id, target, outcome: 'refused' as const, reason: 'retained refusal' }));
     const mounted = render(<App data={{ ...data, commandReceipts: receipts }} pendingCommands={records} onRetry={blocked} />);
+    fireEvent.click(screen.getByText('Host operations', { selector: 'summary' }));
     const operations = screen.getByRole('region', { name: 'Host operations' });
     expect(within(operations).getAllByRole('article')).toHaveLength(50);
     expect(within(operations).getByRole('button', { name: 'Next page' })).toBeEnabled();
@@ -299,6 +300,7 @@ describe('linked operator views', () => {
     route('?view=host');
     const record: BrowserCommandRecord = { hostRun: 'run', authority: 'legacy', state: 'input_admitted', submission: { operation_id: '00000000-0000-4000-8000-000000000001', command: { action: 'input', target, text: ' exact retained ' } }, send: 'unknown', lookup: { kind: 'unavailable', reason: 'offline' } };
     render(<App data={{ ...data, commandReceipts: [{ commandId: '1', outcome: 'admitted', envelopeId: '1' }, { commandId: '2', outcome: 'control_requested', control: 'retire', target }, { commandId: '3', outcome: 'refused', reason: 'no' }, { commandId: '4', outcome: 'unconfirmed', target, reason: 'unknown' }] }} pendingCommands={[record]} />);
+    fireEvent.click(screen.getByText('Host operations', { selector: 'summary' }));
     expect(screen.getByText('Unconfirmed')).toBeVisible();
     expect(screen.getByText('Refused')).toBeVisible();
     expect(screen.getByText('Admitted for processing')).toBeVisible();

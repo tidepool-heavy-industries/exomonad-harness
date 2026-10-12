@@ -99,7 +99,7 @@ export function createViewProjector(): (state: NormalizedState) => HarnessViewMo
           parent: actor.parent ? `${actor.parent.actor} · incarnation ${actor.parent.incarnation} · run ${actor.parent.run}` : undefined,
           kind: actor.kind, lifecycle: actor.lifecycle,
           modelConversation: actor.modelConversation ?? undefined,
-          modelHeadRequest: actor.modelHeadRequest ?? undefined, activeRound: actor.activeRound ?? undefined,
+          modelHeadRequest: actor.modelHeadRequest ?? undefined, activeRound: actor.activeRound ?? undefined, inference: actor.inference ?? undefined,
         }))
       })
       actorsCache = next

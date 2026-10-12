@@ -68,6 +68,7 @@ test('transport reconnect is observational, preserves draft and gates sends on a
   await send(page).click()
   await expect.poll(async()=> (await observations(request)).commands.length).toBe(1)
   const first=(await observations(request)).commands[0]
+  await page.locator('summary').filter({hasText:/^Host operations$/}).click()
   const retained=page.locator(`[data-operation-id="${first.operation_id}"]`)
   await expect(retained).toContainText(target.actor)
   await expect(retained).toContainText(target.incarnation)
@@ -143,6 +144,7 @@ for(const outcome of ['admitted','refused','unconfirmed','control_requested'] as
     else { await composer(page).fill('Explicit receipt fixture'); await send(page).click() }
     await expect.poll(async()=> (await observations(request)).commands.length).toBe(1)
     const command=(await observations(request)).commands[0]
+    await page.locator('summary').filter({hasText:/^Host operations$/}).click()
     const row=page.locator(`[data-operation-id="${command.operation_id}"]`)
     await expect(row).toContainText(outcome==='admitted'?'input_admitted':outcome)
     if(outcome==='unconfirmed') await expect(page.getByRole('region',{name:'Retained browser operations'})).not.toContainText('Refused')
@@ -180,7 +182,8 @@ test('unsupported receipt outcome remains a protocol error and cannot settle or 
   await control(request,'frame',{type:'event',event:{seq:'11',event:{kind:'command.receipt',value:{commandId:command.operation_id,target:command.command.target,outcome:'future_unrecognized_outcome',reason:'Unsupported fixture outcome'}}}})
   await expect(send(page)).toBeDisabled()
   await expect.poll(async()=> (await observations(request)).snapshotRequests).toBe(1)
-  const row=page.locator(`[data-operation-id="${command.operation_id}"]`)
+  await page.locator('summary').filter({hasText:/^Host operations$/}).click()
+    const row=page.locator(`[data-operation-id="${command.operation_id}"]`)
   await expect(row).not.toContainText('refused')
   await expect(row).not.toContainText('input_admitted')
   await expect(composer(page)).toHaveValue('Preserve this later draft')
