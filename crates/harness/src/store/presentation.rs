@@ -87,6 +87,7 @@ impl ImageMime {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FormSpec {
+    #[schemars(schema_with = "form_version_schema")]
     pub version: u32,
     pub root: FormNode,
 }
@@ -118,6 +119,7 @@ pub enum FormNode {
     Number {
         id: String,
         label: String,
+        #[schemars(schema_with = "optional_number_schema")]
         initial: Option<f64>,
     },
     Bool {
@@ -163,11 +165,23 @@ pub struct FormAlternative {
 #[serde(untagged)]
 pub enum ControlValue {
     Bool(bool),
-    Integer(i64),
-    Number(f64),
+    Integer(#[schemars(schema_with = "integer_control_schema")] i64),
+    Number(#[schemars(schema_with = "number_control_schema")] f64),
     Text(String),
     Many(Vec<String>),
     Empty,
+}
+fn form_version_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type": "integer", "const": 1})
+}
+fn number_control_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type": "number"})
+}
+fn optional_number_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type": ["number", "null"]})
+}
+fn integer_control_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type": "integer", "minimum": i64::MIN, "maximum": i64::MAX})
 }
 pub type FormDraft = BTreeMap<String, ControlValue>;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
