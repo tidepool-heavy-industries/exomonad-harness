@@ -117,15 +117,30 @@ fn captured_cut_preserves_multicall_order_and_exact_earlier_dependencies() {
         json!({"type":"function_call","id":"fc-three","call_id":later.0,"name":"later","arguments":"{}"}),
     );
     store
-        .append_items(
+        .record_replay_turn_for_target(
             &source,
-            &[
-                user.clone(),
-                reasoning.clone(),
-                earlier_item.clone(),
-                current_item.clone(),
-                later_item,
-            ],
+            &crate::transport::ResponsesRequest {
+                input: vec![],
+                instructions: "fixture".into(),
+                tools: vec![].into(),
+                tools_allowed: None,
+                model: "test".into(),
+                pinned_effort: Effort::Medium,
+                session_id: "fixture".into(),
+            },
+            &crate::transport::ResponsesTurn {
+                response_id: "fixture".into(),
+                usage: Default::default(),
+                items: vec![
+                    user.clone(),
+                    reasoning.clone(),
+                    earlier_item.clone(),
+                    current_item.clone(),
+                    later_item,
+                ],
+            },
+            crate::transport::ResponsesRoute::Codex,
+            crate::transport::ResponsesProtocol::Standard,
         )
         .unwrap();
     let earlier_operation = store.claim(&earlier, &source).unwrap();
@@ -329,7 +344,7 @@ fn captured_metadata_migrates_schema_five_as_deferred_and_refuses_unknown_cuts()
     let mut conn = store.lock().unwrap();
     for invalid in [
         json!({"version":1,"cut":"unknown","operation":null,"host":{}}),
-        json!({"version":2,"cut":"deferred","operation":null,"host":{}}),
+        json!({"version":3,"cut":"deferred","operation":null,"host":{}}),
         json!({"version":1,"cut":"before_call","operation":null,"host":{}}),
     ] {
         conn.execute("UPDATE checkpoints SET metadata=?1", [invalid.to_string()])

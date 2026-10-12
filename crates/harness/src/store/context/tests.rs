@@ -2171,9 +2171,7 @@ fn unclaimed_provider_calls_cannot_borrow_finalize_name_or_another_occurrences_m
     assert!(
         matches!(
             &result,
-            Err(StoreError::Context(ContextError::Replay(
-                ContextReplayRejection::UnownedInvocation { .. }
-            )))
+            Err(StoreError::AmbiguousReplayCall { call_id }) if call_id == "final"
         ),
         "{result:?}"
     );
@@ -2241,10 +2239,18 @@ fn legacy_v3_replay_retry_retains_the_exact_committed_receipt() {
     for prefix in record["prefix"].as_array_mut().unwrap() {
         prefix.as_object_mut().unwrap().remove("origin");
     }
-    let mut candidate: serde_json::Value =
-        serde_json::from_str(record["candidate"].as_str().unwrap()).unwrap();
-    candidate.as_array_mut().unwrap().pop();
-    record["candidate"] = json!(candidate.to_string());
+    record["candidate"] = json!(
+        serde_json::to_string(&(
+            evidence
+                .prefix
+                .iter()
+                .map(|(item, sources, note, overlays)| (item, sources, note, overlays))
+                .collect::<Vec<_>>(),
+            &evidence.model,
+            evidence.next_effort,
+        ))
+        .unwrap()
+    );
     c.execute(
         "UPDATE events SET payload=?2 WHERE id=?1",
         params![id, record.to_string()],
