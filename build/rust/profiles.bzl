@@ -10,6 +10,9 @@ def selected_profile():
         fail("unknown native profile %r; expected one of %s" % (profile, ", ".join(_PROFILES)))
     return profile
 
+def dependency_library_optimization_level():
+    return "0" if selected_profile() == "debug" else "2"
+
 def _flags(dependency_library, flags):
     profile = selected_profile()
     for flag in flags:

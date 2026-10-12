@@ -41,6 +41,14 @@ class Profiles(unittest.TestCase):
                     self.assertIn("--cfg=fixture", flags)
                     CHECK.inspect(["/pinned/rustc", "-Cforce-frame-pointers=yes", "-Clinker=/pinned/cc", *flags],
                                   profile, kind, "/pinned/rustc", "/pinned/cc")
+    def test_dependency_buildscript_uses_library_profile(self):
+        for profile, expected in (("fast-dev", "2"), ("debug", "0"), ("production", "2")):
+            namespace, calls = rules(profile)
+            namespace["buildscript_run"] = lambda **kwargs: calls.append(kwargs)
+            source = "\n".join(line for line in (ROOT / "build/rust/buildscript.bzl").read_text().splitlines() if not line.startswith("load("))
+            exec(source, namespace)
+            namespace["tidepool_buildscript_run"](name="case")
+            self.assertEqual(calls[0]["env"]["OPT_LEVEL"], expected)
     def test_default_and_unknown_profile(self):
         namespace, _ = rules(None)
         self.assertEqual(namespace["selected_profile"](), "fast-dev")
