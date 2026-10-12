@@ -359,7 +359,10 @@ mod tests {
             if let Some(barrier) = &self.barrier {
                 let release = barrier.release.lock().unwrap().take();
                 if let Some(release) = release {
-                    barrier.arrival.send(request.input.clone()).unwrap();
+                    barrier
+                        .arrival
+                        .send(prepared.request().input.clone())
+                        .unwrap();
                     release
                         .await
                         .map_err(|_| TransportError::Stream("barrier dropped".into()))?;
