@@ -995,13 +995,24 @@ mod tests {
         ),
         StoreError,
     > {
-        let head = store.embedded_agent_head(&receipt.issuer)?.unwrap();
+        let frontier = store.embedded_round_frontier(&receipt.issuer)?;
         let call = crate::model::CallId(format!("edit-{index}"));
-        store.append_items(
-            &head,
-            &[Item(json!({"type":"custom_tool_call", "call_id":call.0,
-            "name":"haskell_sync", "input":"refresh"}))],
-        )?;
+        let item = Item(json!({"type":"custom_tool_call", "call_id":call.0,
+            "name":"haskell_sync", "input":"refresh"}));
+        let head = if let Some(pending) = frontier.pending_head {
+            store.append_items(&pending, &[item])?;
+            pending
+        } else {
+            let head = RequestId(format!("edit-round-{index}"));
+            store.write_embedded_request(
+                &receipt.issuer,
+                &head,
+                frontier.settled_head.as_ref(),
+                &[item],
+                crate::store::Usage::default(),
+            )?;
+            head
+        };
         let operation = store.claim(&call, &head)?;
         store.initialize_context_target(
             &operation.origin,
@@ -1039,13 +1050,23 @@ mod tests {
         index: usize,
         text: &str,
     ) -> Result<crate::context::ContextCommitReceipt, StoreError> {
+        let settled = store.embedded_agent_head(&receipt.issuer)?;
         let (snapshot, draft) = initial_context_edit(store, receipt, reference, index, text)?;
-        store.commit_context(crate::context::ContextCommit {
+        let committed = store.commit_context(crate::context::ContextCommit {
             snapshot: &snapshot,
             draft: &draft,
             output: &crate::turn::JobOutput::Completed(Ok(json!({"value":"done"}))),
             pending: &[],
-        })
+        })?;
+        if !store.settle_embedded_round(
+            &receipt.issuer,
+            settled.as_ref(),
+            &committed.head,
+            crate::store::EmbeddedRoundOutcome::Completed,
+        )? {
+            return Err(StoreError::InvalidEmbeddedFrontier);
+        }
+        Ok(committed)
     }
 
     #[test]
@@ -1183,10 +1204,10 @@ mod tests {
         let foreign = Conversation::attach(
             store.clone(),
             Arc::new(SeedHost(HostIdentity {
-                actor: AgentPath("/foreign".into()),
+                actor: AgentPath("/root/foreign".into()),
                 ..first.identity().clone()
             })),
-            None,
+            Some(&first.identity().actor),
         )
         .unwrap();
         let other = foreign
