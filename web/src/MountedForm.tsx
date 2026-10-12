@@ -28,22 +28,23 @@ function formNode(value: unknown, depth = 0, ids = new Set<string>()): value is 
     case 'group': return Array.isArray(value.children) && value.children.length <= 1024 && value.children.every(child => formNode(child, depth + 1, ids))
     case 'section': return text(value.title) && formNode(value.child, depth + 1, ids)
     case 'view': return isRichView(value.presentation)
-    case 'text': case 'int': case 'number': case 'bool': {
+    case 'text': case 'int': case 'number': case 'slider': case 'bool': {
       if (!text(value.id, 128) || value.id.length === 0 || ids.has(value.id) || !text(value.label)) return false
       ids.add(value.id)
+      if (value.kind === 'slider') return typeof value.minimum === 'number' && Number.isFinite(value.minimum) && typeof value.maximum === 'number' && Number.isFinite(value.maximum) && value.minimum < value.maximum && typeof value.initial === 'number' && Number.isFinite(value.initial) && value.initial >= value.minimum && value.initial <= value.maximum
       if (value.initial === null) return true
       return value.kind === 'text' ? typeof value.initial === 'string' : value.kind === 'int' ? decimalInteger(value.initial)
         : value.kind === 'bool' ? typeof value.initial === 'boolean' : typeof value.initial === 'number' && Number.isFinite(value.initial)
     }
-    case 'choice': case 'many': case 'alternatives': {
+    case 'choice': case 'many': case 'alternatives_many': case 'alternatives': {
       if (!text(value.id, 128) || value.id.length === 0 || ids.has(value.id) || !text(value.label) || !Array.isArray(value.options)
-        || value.options.length > 1024 || value.kind !== 'many' && value.options.length === 0) return false
+        || value.options.length > 1024 || value.kind !== 'many' && value.kind !== 'alternatives_many' && value.options.length === 0) return false
       ids.add(value.id)
       const optionIds = new Set<string>()
       if (!value.options.every(item => obj(item) && option(item) && !optionIds.has(item.id) && !!optionIds.add(item.id)
-        && (value.kind !== 'alternatives' || formNode(item.form, depth + 1, ids)))) return false
+        && ((value.kind !== 'alternatives' && value.kind !== 'alternatives_many') || formNode(item.form, depth + 1, ids)))) return false
       if (value.initial === null) return true
-      if (value.kind === 'many') return Array.isArray(value.initial) && value.initial.every(item => typeof item === 'string' && optionIds.has(item))
+      if (value.kind === 'many' || value.kind === 'alternatives_many') return Array.isArray(value.initial) && new Set(value.initial).size === value.initial.length && value.initial.every(item => typeof item === 'string' && optionIds.has(item))
       return typeof value.initial === 'string' && optionIds.has(value.initial)
     }
     default: return false
@@ -83,11 +84,11 @@ function keepDraft(key: string, draft: FormDraft) {
   retainedDrafts.delete(key); retainedDrafts.set(key, draft)
   while (retainedDrafts.size > MAX_DRAFTS) retainedDrafts.delete(retainedDrafts.keys().next().value!)
 }
-function initialDraft(node: FormNode, into: FormDraft = {}): FormDraft {
-  if (['text', 'int', 'number', 'bool', 'choice', 'many', 'alternatives'].includes(node.kind)) {
+function initialDraft(node: FormNode, into: FormDraft = Object.create(null) as FormDraft): FormDraft {
+  if (['text', 'int', 'number', 'slider', 'bool', 'choice', 'many', 'alternatives', 'alternatives_many'].includes(node.kind)) {
     const field = node as Extract<FormNode, { id: string }>
-    if (field.initial !== null && !Object.hasOwn(into, field.id)) into[field.id] = field.kind === 'many' ? [...field.initial] : field.initial
-    if (node.kind === 'many' && node.options.length === 0 && !Object.hasOwn(into, field.id)) into[field.id] = []
+    if (field.initial !== null && !Object.hasOwn(into, field.id)) into[field.id] = field.kind === 'many' || field.kind === 'alternatives_many' ? [...field.initial] : field.initial
+    if ((node.kind === 'many' || node.kind === 'alternatives_many') && node.options.length === 0 && !Object.hasOwn(into, field.id)) into[field.id] = []
   }
   if (node.kind === 'group') node.children.forEach(child => initialDraft(child, into))
   if (node.kind === 'section') initialDraft(node.child, into)
@@ -96,14 +97,18 @@ function initialDraft(node: FormNode, into: FormDraft = {}): FormDraft {
     const branch = typeof selected === 'string' ? node.options.find(item => item.id === selected) : undefined
     if (branch) initialDraft(branch.form, into)
   }
+  if (node.kind === 'alternatives_many') {
+    const selected = into[node.id]
+    node.options.filter(item => Array.isArray(selected) && selected.includes(item.id)).forEach(item => initialDraft(item.form, into))
+  }
   return into
 }
 function hydratedDraft(form: StoredActorForm, cached?: FormDraft): FormDraft {
   const draft = { ...initialDraft(form.opening.form.root), ...(form.draft ?? {}), ...(cached ?? {}) }
   return initialDraft(form.opening.form.root, draft)
 }
-function activeDraft(node: FormNode, draft: FormDraft, into: FormDraft = {}): FormDraft {
-  if (['text', 'int', 'number', 'bool', 'choice', 'many', 'alternatives'].includes(node.kind)) {
+function activeDraft(node: FormNode, draft: FormDraft, into: FormDraft = Object.create(null) as FormDraft): FormDraft {
+  if (['text', 'int', 'number', 'slider', 'bool', 'choice', 'many', 'alternatives', 'alternatives_many'].includes(node.kind)) {
     const field = node as Extract<FormNode, { id: string }>
     const value = draft[field.id]
     if (value !== undefined) into[field.id] = value
@@ -115,6 +120,10 @@ function activeDraft(node: FormNode, draft: FormDraft, into: FormDraft = {}): Fo
     const selected = typeof selectedValue === 'string' ? selectedValue : undefined
     const branch = node.options.find(item => item.id === selected)
     if (branch) activeDraft(branch.form, draft, into)
+  }
+  if (node.kind === 'alternatives_many') {
+    const selected = draft[node.id]
+    node.options.filter(item => Array.isArray(selected) && selected.includes(item.id)).forEach(item => activeDraft(item.form, draft, into))
   }
   return into
 }
@@ -184,7 +193,7 @@ function fieldLabel(node: FormNode, id: string): string | undefined {
   if ('id' in node && node.id === id) return node.label
   if (node.kind === 'group') return node.children.map(child => fieldLabel(child, id)).find(label => label !== undefined)
   if (node.kind === 'section') return fieldLabel(node.child, id)
-  if (node.kind === 'alternatives') return node.options.map(option => fieldLabel(option.form, id)).find(label => label !== undefined)
+  if (node.kind === 'alternatives' || node.kind === 'alternatives_many') return node.options.map(option => fieldLabel(option.form, id)).find(label => label !== undefined)
   return undefined
 }
 
@@ -204,6 +213,16 @@ function FormNodeView({ scope, node, draft, setDraft, editable, readOnly = false
       <RichViewRenderer view={item.presentation} />
     </label>)}{branch && <FormNodeView scope={scope} node={branch.form} draft={draft} setDraft={setDraft} editable={editable} readOnly={readOnly} />}</fieldset>
   }
+  if (node.kind === 'alternatives_many') {
+    const value = Object.hasOwn(draft, node.id) ? draft[node.id] : node.initial
+    const selected = Array.isArray(value) ? value : []
+    return <fieldset><legend>{node.label}</legend>{node.options.map(item => <div key={item.id}>
+      <label className="form-option"><input type="checkbox" aria-label={item.label} checked={selected.includes(item.id)} disabled={!editable}
+        onChange={event => change(node.id, event.target.checked ? [...selected, item.id] : selected.filter(id => id !== item.id), initialDraft(item.form, { ...draft }))} />
+        <RichViewRenderer view={item.presentation} /></label>
+      {selected.includes(item.id) && <FormNodeView scope={scope} node={item.form} draft={draft} setDraft={setDraft} editable={editable} readOnly={readOnly} />}
+    </div>)}</fieldset>
+  }
   if (node.kind === 'choice' || node.kind === 'many') return <fieldset><legend>{node.label}</legend>{node.options.map(item => {
     const hasValue = Object.hasOwn(draft, node.id)
     const selected = node.kind === 'many' ? (Array.isArray(draft[node.id]) ? draft[node.id] as string[] : !hasValue && Array.isArray(node.initial) ? [...node.initial] : [])
@@ -213,6 +232,8 @@ function FormNodeView({ scope, node, draft, setDraft, editable, readOnly = false
       <RichViewRenderer view={item.presentation} /></label>
   })}</fieldset>
   const value = Object.hasOwn(draft, node.id) ? draft[node.id] : node.initial
+  if (node.kind === 'slider') return <label className="form-field">{node.label}<input type="range" min={node.minimum} max={node.maximum} step="any" value={Number(value)} disabled={!editable}
+    onChange={event => change(node.id, Number(event.target.value))} /><output>{String(value)}</output></label>
   if (node.kind === 'bool') return <label className="form-toggle"><input type="checkbox" checked={value === true} disabled={!editable} onChange={event => change(node.id, event.target.checked)} />{node.label}</label>
   if (node.kind === 'int') return <label className="form-field">{node.label}<input type="text" inputMode="numeric" value={value === null ? '' : String(value)} disabled={!editable}
     onChange={event => change(node.id, event.target.value)} /></label>
@@ -224,12 +245,12 @@ function FormNodeView({ scope, node, draft, setDraft, editable, readOnly = false
 
 function ReadOnlyField({ scope, node, draft, setDraft }: { scope: string; node: Extract<FormNode, { id: string }>; draft: FormDraft; setDraft: (draft: FormDraft) => void }) {
   const value = Object.hasOwn(draft, node.id) ? draft[node.id] : node.initial
-  if (node.kind === 'choice' || node.kind === 'many' || node.kind === 'alternatives') {
+  if (node.kind === 'choice' || node.kind === 'many' || node.kind === 'alternatives' || node.kind === 'alternatives_many') {
     const selected = Array.isArray(value) ? value : typeof value === 'string' ? [value] : []
-    const branch = node.kind === 'alternatives' ? node.options.find(option => selected.includes(option.id)) : undefined
+    const branches = node.kind === 'alternatives' || node.kind === 'alternatives_many' ? node.options.filter(option => selected.includes(option.id)) : []
     return <fieldset><legend>{node.label}</legend><ul className="form-fixed-options">{node.options.map(option => <li key={option.id} aria-label={option.label}>
       <span className="form-selection">{selected.includes(option.id) ? 'Selected' : 'Not selected'}</span><RichViewRenderer view={option.presentation} />
-    </li>)}</ul>{!node.options.length && <p>No selections.</p>}{branch && <FormNodeView scope={scope} node={branch.form} draft={draft} setDraft={setDraft} editable={false} readOnly />}</fieldset>
+    </li>)}</ul>{!node.options.length && <p>No selections.</p>}{branches.map(branch => <FormNodeView key={branch.id} scope={scope} node={branch.form} draft={draft} setDraft={setDraft} editable={false} readOnly />)}</fieldset>
   }
   return <dl className="form-fixed-field"><dt>{node.label}</dt><dd>{value === null ? 'No response' : node.kind === 'bool' ? value ? 'Yes' : 'No' : String(value)}</dd></dl>
 }

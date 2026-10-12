@@ -122,6 +122,16 @@ pub enum FormNode {
         #[schemars(schema_with = "optional_number_schema")]
         initial: Option<f64>,
     },
+    Slider {
+        id: String,
+        label: String,
+        #[schemars(schema_with = "number_control_schema")]
+        minimum: f64,
+        #[schemars(schema_with = "number_control_schema")]
+        maximum: f64,
+        #[schemars(schema_with = "number_control_schema")]
+        initial: f64,
+    },
     Bool {
         id: String,
         label: String,
@@ -137,6 +147,12 @@ pub enum FormNode {
         id: String,
         label: String,
         options: Vec<FormOption>,
+        initial: Option<Vec<String>>,
+    },
+    AlternativesMany {
+        id: String,
+        label: String,
+        options: Vec<FormAlternative>,
         initial: Option<Vec<String>>,
     },
     Alternatives {
@@ -240,7 +256,12 @@ impl FormSpec {
                     return false;
                 }
             }
-            (!nonempty || n > 0) && n <= 1024 && initial.into_iter().all(|id| ids.contains(id))
+            let mut selected = HashSet::new();
+            (!nonempty || n > 0)
+                && n <= 1024
+                && initial
+                    .into_iter()
+                    .all(|id| ids.contains(id) && selected.insert(id))
         }
         fn go(n: &FormNode, depth: usize, ids: &mut HashSet<String>) -> bool {
             if depth > 32 {
@@ -250,6 +271,8 @@ impl FormSpec {
                 FormNode::Text { id, .. }
                 | FormNode::Int { id, .. }
                 | FormNode::Number { id, .. }
+                | FormNode::Slider { id, .. }
+                | FormNode::AlternativesMany { id, .. }
                 | FormNode::Bool { id, .. }
                 | FormNode::Choice { id, .. }
                 | FormNode::Many { id, .. }
@@ -265,9 +288,36 @@ impl FormSpec {
                 FormNode::Pure
                 | FormNode::Empty
                 | FormNode::Text { .. }
-                | FormNode::Int { .. }
                 | FormNode::Number { .. }
                 | FormNode::Bool { .. } => true,
+                FormNode::Int { initial, .. } => initial.as_ref().is_none_or(|text| {
+                    let digits = text.strip_prefix('-').unwrap_or(text);
+                    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+                }),
+                FormNode::Slider {
+                    minimum,
+                    maximum,
+                    initial,
+                    ..
+                } => {
+                    minimum.is_finite()
+                        && maximum.is_finite()
+                        && initial.is_finite()
+                        && minimum < maximum
+                        && initial >= minimum
+                        && initial <= maximum
+                }
+                FormNode::AlternativesMany {
+                    options: xs,
+                    initial,
+                    ..
+                } => {
+                    options(
+                        xs.iter().map(|o| (&o.id, &o.presentation)),
+                        initial.iter().flatten(),
+                        false,
+                    ) && xs.iter().all(|o| go(&o.form, depth + 1, ids))
+                }
                 FormNode::Group { children } => {
                     children.len() <= 1024 && children.iter().all(|c| go(c, depth + 1, ids))
                 }
@@ -325,6 +375,8 @@ impl FormSpec {
    FormNode::Text{id,..}=>control(d,id).is_none_or(|v|matches!(v,ControlValue::Text(_))),FormNode::Int{id,..}=>control(d,id).is_none_or(|v|matches!(v,ControlValue::Text(_))),FormNode::Number{id,..}=>control(d,id).is_none_or(|v|matches!(v,ControlValue::Integer(_)|ControlValue::Number(_))),FormNode::Bool{id,..}=>control(d,id).is_none_or(|v|matches!(v,ControlValue::Bool(_))),
    FormNode::Choice{id,options,..}=>control(d,id).is_none_or(|v|matches!(v,ControlValue::Text(s) if options.iter().any(|o|&o.id==s))),
    FormNode::Many{id,options,..}=>control(d,id).is_none_or(|v|matches!(v,ControlValue::Many(xs) if xs.iter().collect::<HashSet<_>>().len()==xs.len()&&xs.iter().all(|s|options.iter().any(|o|&o.id==s)))),
+   FormNode::Slider{id, minimum, maximum, ..} => control(d,id).is_none_or(|v| match v { ControlValue::Integer(n) => (*n as f64) >= *minimum && (*n as f64) <= *maximum, ControlValue::Number(n) => n.is_finite() && n >= minimum && n <= maximum, _ => false }),
+   FormNode::AlternativesMany{id,options,..} => control(d,id).is_none_or(|v| matches!(v, ControlValue::Many(xs) if xs.iter().collect::<HashSet<_>>().len()==xs.len() && xs.iter().all(|s|options.iter().find(|o| &o.id==s).is_some_and(|o|go(&o.form,d))))),
    FormNode::Alternatives{id,options,..}=>match control(d,id){None=>true,Some(ControlValue::Text(s))=>options.iter().find(|o|&o.id==s).is_some_and(|o|go(&o.form,d)),_=>false},
    FormNode::Group{children}=>children.iter().all(|c|go(c,d)),FormNode::Section{child,..}=>go(child,d),_=>true}
         }
@@ -469,5 +521,64 @@ mod integer_wire_tests {
         }
         let numeric: FormDraft = serde_json::from_value(json!({"f0":123})).unwrap();
         assert!(spec.validate_draft(&numeric).is_err());
+    }
+}
+
+#[cfg(test)]
+mod companion_forms_tests {
+    use super::*;
+    fn form() -> FormSpec {
+        serde_json::from_value(serde_json::json!({"version":1,"root": {
+            "kind":"alternatives_many", "id":"doors", "label":"Doors", "initial":[], "options":[
+                {"id":"a","label":"A","presentation":{"kind":"text","text":"A"},"form":{"kind":"slider","id":"s","label":"Strangeness","minimum":0,"maximum":10,"initial":4}},
+                {"id":"b","label":"B","presentation":{"kind":"text","text":"B"},"form":{"kind":"text","id":"t","label":"Thought","initial":null}}
+            ]
+        }})).unwrap()
+    }
+    #[test]
+    fn validates_selected_branches_and_slider_bounds() {
+        let form = form();
+        form.validate().unwrap();
+        for value in [
+            serde_json::json!({"doors":[],"s":999}),
+            serde_json::json!({"doors":["a","b"],"s":0,"t":"hello"}),
+            serde_json::json!({"doors":["a"],"s":10}),
+        ] {
+            form.validate_draft(&serde_json::from_value(value).unwrap())
+                .unwrap();
+        }
+        for value in [
+            serde_json::json!({"doors":["a"],"s":11}),
+            serde_json::json!({"doors":["a","a"],"s":4}),
+            serde_json::json!({"doors":["missing"]}),
+        ] {
+            assert!(
+                form.validate_draft(&serde_json::from_value(value).unwrap())
+                    .is_err()
+            );
+        }
+    }
+    #[test]
+    fn initial_answers_obey_selection_and_integer_syntax() {
+        let mut form = form();
+        if let FormNode::AlternativesMany { initial, .. } = &mut form.root {
+            *initial = Some(vec!["a".into(), "a".into()]);
+        }
+        assert!(form.validate().is_err());
+        for initial in ["-", "1.5", "", "+1"] {
+            let integer = FormSpec {
+                version: 1,
+                root: FormNode::Int {
+                    id: "i".into(),
+                    label: "i".into(),
+                    initial: Some(initial.into()),
+                },
+            };
+            assert!(integer.validate().is_err());
+            // Intermediate typing still reaches Haskell's field-level validator.
+            integer
+                .validate_draft(&[("i".into(), ControlValue::Text(initial.into()))].into())
+                .unwrap();
+        }
     }
 }
