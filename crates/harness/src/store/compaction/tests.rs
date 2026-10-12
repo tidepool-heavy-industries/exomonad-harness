@@ -4,10 +4,10 @@ use crate::{
         CompactContext, Compactor, NewWindow, Server, ServerCompactFuture, TypedTurnFuture,
     },
     model::Effort,
-    store::{ProviderRequestPurpose, Store, Usage},
+    store::{ProviderRequestPurpose, Store, Usage as StoredUsage},
     transport::{
         PreparedTransportSelection, ResponsesProtocol, ResponsesRequest, ResponsesRoute,
-        ResponsesTurn,
+        ResponsesTurn, Usage,
     },
 };
 use serde_json::json;
@@ -125,7 +125,7 @@ fn boundary(store: &Store, source_items: &[Item], raw: Vec<Item>) -> (RequestId,
     let source = RequestId("source".into());
     let target = RequestId("boundary".into());
     store
-        .write_request(&source, None, "/root", source_items, Usage::default())
+        .write_request(&source, None, "/root", source_items, StoredUsage::default())
         .unwrap();
     for item in source_items {
         if let Some(call) = item.tool_call().unwrap() {
@@ -238,7 +238,7 @@ fn equal_bytes_and_duplicate_raw_occurrences_keep_distinct_exact_provenance() {
         std::slice::from_ref(&reused),
         vec![
             reused.clone(),
-            reused,
+            reused.clone(),
             duplicate.clone(),
             duplicate,
             generated,
@@ -277,7 +277,7 @@ fn legacy_boundary_does_not_infer_the_selected_model() {
     let source = RequestId("source".into());
     let target = RequestId("legacy".into());
     store
-        .write_request(&source, None, "/root", &[], Usage::default())
+        .write_request(&source, None, "/root", &[], StoredUsage::default())
         .unwrap();
     store
         .write_compaction_request(
@@ -350,7 +350,7 @@ fn evidence_failure_rolls_back_boundary_selection_and_retains_completed_raw_fact
     let source = RequestId("source".into());
     let target = RequestId("boundary".into());
     store
-        .write_request(&source, None, "/root", &[], Usage::default())
+        .write_request(&source, None, "/root", &[], StoredUsage::default())
         .unwrap();
     let raw_only = Item(json!({"type":"message","role":"user","content":"filtered raw"}));
     let opaque = Item(json!({"type":"compaction","encrypted_content":"fresh"}));
