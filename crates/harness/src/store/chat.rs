@@ -458,7 +458,7 @@ fn project_tools(c: &Connection, entries: &mut [ChatEntry]) -> Result<()> {
         ) = (entry, operation)
         {
             let Some(issued) = ledger.get(&operation) else {
-                return Err(StoreError::InvalidActorOutput);
+                continue;
             };
             if matches!(
                 item["type"].as_str(),
