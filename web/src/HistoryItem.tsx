@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { HistoryEntry } from './history-client'
-
-const PREVIEW_LENGTH = 2000
+import { MessageContent, MessagePresentation, type MessageKind } from './MessagePresentation'
 
 function object(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -9,11 +8,11 @@ function object(value: unknown): value is Record<string, unknown> {
 
 interface ReadableItem {
   readonly label: string
-  readonly texts: readonly { label: string; text: string; kind: 'prose' | 'code' }[]
+  readonly kind: MessageKind
+  readonly texts: readonly { label: string; text: string; kind: 'prose' | 'code'; format?: 'markdown' | 'plain'; copyText?: string }[]
   readonly metadata?: readonly { label: string; value: string }[]
   readonly responseSummary?: string
   readonly unknownBlocks?: boolean
-  readonly reasoning?: boolean
 }
 
 function structuredJson(text: string): { text: string; summary?: string } | undefined {
@@ -72,73 +71,61 @@ function readable(value: unknown): ReadableItem | undefined {
       ? `Assistant · ${phase}`
       : phase === undefined ? 'Assistant' : `Assistant · unknown phase (${phase})`
     return { label: value.role === 'assistant' ? assistantLabel : value.role === 'user' ? 'You' : `Message · ${value.role}`,
-      texts: content.texts.map((text) => ({ label: 'Text', text, kind: 'prose' })),
+      kind: value.role === 'user' ? 'human' : value.role === 'assistant' ? 'assistant' : 'activity',
+      texts: content.texts.map((text) => ({ label: 'Text', text, kind: 'prose', format: value.role === 'assistant' ? 'markdown' : 'plain' })),
       unknownBlocks: content.unknownBlocks || (value.role === 'assistant' && phase !== undefined && phase !== 'commentary' && phase !== 'final') }
   }
   if (value.type === 'reasoning') {
-    const summary = blocks(value.summary, ['summary_text'])
+    const summary = value.summary === undefined ? { texts: [], unknownBlocks: false } : blocks(value.summary, ['summary_text'])
     const content = value.content === undefined ? {texts:[],unknownBlocks:false} : blocks(value.content, ['reasoning_text', 'text'])
-    return { label: summary.texts.length ? 'Reasoning summary' : 'Reasoning',
-      texts: [...summary.texts.map(text => ({label:'Summary',text,kind:'prose' as const})), ...content.texts.map(text => ({label:'Reasoning',text,kind:'prose' as const}))],
-      unknownBlocks: summary.unknownBlocks || content.unknownBlocks, reasoning: true }
+    const summaries = summary.texts.filter(text => text.trim().length > 0)
+    return { label: summaries.length ? 'Reasoning summary' : 'Reasoning', kind: 'reasoning',
+      texts: [...summaries.map(text => ({label:'Summary',text,kind:'prose' as const,format:'markdown' as const})), ...content.texts.filter(text => text.trim().length > 0).map(text => ({label:'Reasoning',text,kind:'prose' as const}))],
+      unknownBlocks: summary.unknownBlocks || content.unknownBlocks }
   }
   if ((value.type === 'function_call' || value.type === 'custom_tool_call')
     && typeof value.name === 'string' && typeof value.call_id === 'string') {
     const input = value.type === 'function_call' ? value.arguments : value.input
     if (typeof input !== 'string' && !(value.type === 'function_call' && object(input))) return undefined
-    return { label: `Model tool call · ${value.name}`,
+    return { label: `Model tool call · ${value.name}`, kind: 'activity',
       metadata: toolMetadata(value, value.type, value.call_id),
       texts: [{ label: value.type === 'function_call' ? (typeof input === 'string' ? 'Arguments' : 'Arguments JSON') : 'Input',
-        text: typeof input === 'string' ? presentJson(input) : JSON.stringify(input, null, 2), kind: 'code' }] }
+        text: typeof input === 'string' ? presentJson(input) : JSON.stringify(input, null, 2),
+        copyText: typeof input === 'string' ? input : undefined, kind: 'code' }] }
   }
   if ((value.type === 'function_call_output' || value.type === 'custom_tool_call_output')
     && typeof value.call_id === 'string' && typeof value.output === 'string') {
     const formatted = structuredJson(value.output)
-    return { label: 'Tool response', metadata: toolMetadata(value, value.type, value.call_id), responseSummary: formatted?.summary,
-      texts: [{ label: 'Result', text: formatted?.text ?? value.output, kind: 'code' }] }
+    return { label: 'Tool response', kind: 'activity', metadata: toolMetadata(value, value.type, value.call_id), responseSummary: formatted?.summary,
+      texts: [{ label: 'Result', text: formatted?.text ?? value.output, copyText: value.output, kind: 'code' }] }
   }
   if (value.type === 'configuration_update' && object(value.reasoning) && typeof value.reasoning.effort === 'string') {
-    return { label: 'Configuration update', texts: [{ label: 'Reasoning effort', text: value.reasoning.effort, kind: 'code' }] }
+    return { label: 'Configuration update', kind: 'activity', texts: [{ label: 'Reasoning effort', text: value.reasoning.effort, kind: 'code' }] }
   }
   return undefined
 }
 
-function TextPreview({ text, label, kind }: { readonly text: string; readonly label: string; readonly kind: 'prose' | 'code' }) {
-  const [expanded, setExpanded] = useState(false)
-  const long = text.length > PREVIEW_LENGTH
-  // Keep a preview boundary from splitting a Unicode surrogate pair.
-  const end = /[\uD800-\uDBFF]/.test(text.charAt(PREVIEW_LENGTH - 1))
-    && /[\uDC00-\uDFFF]/.test(text.charAt(PREVIEW_LENGTH)) ? PREVIEW_LENGTH - 1 : PREVIEW_LENGTH
-  return <div>
-    <pre className={`history-content history-${kind}`} aria-label={label}>{long && !expanded ? text.slice(0, end) : text}</pre>
-    {long && <><p className="meta">{expanded ? 'Showing the full fetched text.' : 'Text preview is limited to 2000 characters.'}</p>
-      <button type="button" onClick={() => setExpanded(!expanded)}>{expanded ? 'Collapse' : 'Expand'} {label}</button></>}
-  </div>
-}
-
-/** Plain React text retains wire strings; raw formatting happens only when shown. */
+/** Presentation never replaces the wire item; raw formatting happens only on inspection. */
 export default function HistoryItem({ entry, listItem = true }: { readonly entry: HistoryEntry; readonly listItem?: boolean }) {
   const view = useMemo(() => readable(entry.item), [entry.item])
   const [showRaw, setShowRaw] = useState(false)
   const rawVisible = showRaw || !view
   const raw = useMemo(() => rawVisible ? JSON.stringify(entry.item, null, 2) : undefined, [entry.item, rawVisible])
-  // Purely opaque reasoning has no readable or unknown blocks to inspect.
+  // Empty or opaque-only reasoning adds no chat content; unfamiliar blocks remain inspectable.
   if (object(entry.item) && entry.item.type === 'reasoning' && view?.texts.length === 0 && !view.unknownBlocks) return null
-  return <div role={listItem ? 'listitem' : undefined} className="message">
+  const texts = view?.texts.map((part, index, parts) => <div key={index} className={`history-${part.kind}`}>
+    <MessageContent text={part.text} copyText={part.copyText} format={part.format} label={`${part.label} item ${entry.position}${parts.length > 1 ? ` block ${index + 1}` : ''}`} />
+  </div>)
+  const rawContent = rawVisible && <MessageContent key="raw" text={raw ?? 'Raw data could not be represented as JSON.'} label={`Raw item ${entry.position}`} />
+  return <MessagePresentation listItem={listItem} kind={view?.kind ?? 'activity'} title={view?.label ?? 'Unrecognized item · Raw data'} collapsed={view?.kind === 'reasoning' && view.texts.length > 0}
+    details={<>
+      <p className="meta">Item {entry.position} · hash {entry.hash} · {entry.byteLen} bytes</p>
+      {view?.metadata?.map(({ label, value }) => <p className="meta" key={label}>{label}: <span className="mono">{value}</span></p>)}
+      {view && <><button type="button" aria-expanded={showRaw} onClick={() => setShowRaw(!showRaw)}>{showRaw ? 'Hide' : 'Show'} Raw item {entry.position}</button>{rawContent}</>}
+    </>}>
     {view ? <>
-      <h3>{view.label}</h3>
-      {view.reasoning && view.texts.length > 0 ? <details className="history-reasoning">
-        <summary>{view.label} · show readable text</summary>
-        {view.texts.map((part, index) => <TextPreview key={index} text={part.text} kind={part.kind} label={`${part.label} item ${entry.position}${view.texts.length > 1 ? ` block ${index + 1}` : ''}`} />)}
-      </details> : view.responseSummary ? <details className="history-tool-response">
-        <summary>{view.responseSummary}</summary>
-        {view.texts.map((part, index) => <TextPreview key={index} text={part.text} kind={part.kind} label={`${part.label} item ${entry.position}${view.texts.length > 1 ? ` block ${index + 1}` : ''}`} />)}
-      </details> : view.texts.map((part, index) => <TextPreview key={index} text={part.text} kind={part.kind} label={`${part.label} item ${entry.position}${view.texts.length > 1 ? ` block ${index + 1}` : ''}`} />)}
-      {view.unknownBlocks && <p>Unknown content is retained. Open Raw to inspect all blocks.</p>}
-      <details className="history-controls"><summary>Message details</summary><p className="meta">Item {entry.position} · hash {entry.hash} · {entry.byteLen} bytes</p>
-        {view.metadata?.map(({ label, value }) => <p className="meta" key={label}>{label}: <span className="mono">{value}</span></p>)}
-        <button type="button" aria-expanded={showRaw} onClick={() => setShowRaw(!showRaw)}>{showRaw ? 'Hide' : 'Show'} Raw item {entry.position}</button></details>
-    </> : <p>Unrecognized item · Raw data</p>}
-    {rawVisible && <TextPreview key="raw" text={raw ?? 'Raw data could not be represented as JSON.'} kind="code" label={`Raw item ${entry.position}`} />}
-  </div>
+      {view.responseSummary ? <details className="history-tool-response"><summary>{view.responseSummary}</summary>{texts}</details> : texts}
+      {view.unknownBlocks && <p className="message-content-note">Unknown content is retained. Open Raw to inspect all blocks.</p>}
+    </> : rawContent}
+  </MessagePresentation>
 }
