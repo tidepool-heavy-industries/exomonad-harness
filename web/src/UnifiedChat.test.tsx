@@ -11,32 +11,94 @@ describe('unified conversation pages', () => {
     const page = { origin, cutoverSequence: 4, legacyHistory: true, entries: [
       { sequence: 4, kind: 'message', requestId: 'req', position: 0, hash: 'a'.repeat(64), item: { type: 'message' } },
       { sequence: 5, kind: 'output', output: { reference: { origin, sequence: 5 }, emission: { origin, id: { displaySlot: 1, pageOrdinal: 1 }, page: { text: 'value', expansions: [], unavailable: false } } } },
-    ], nextAfter: null }
+    ], nextAfter: null, previousBefore: null }
     expect(decodeUnifiedPage(page, origin, 0).entries.map(entry => entry.sequence)).toEqual([4, 5])
     expect(() => decodeUnifiedPage({ ...page, entries: [...page.entries].reverse() }, origin, 0)).toThrow(/sequence/)
     expect(decodeUnifiedPage({ ...page, nextAfter: 5 }, origin, 0).nextAfter).toBe(5)
     expect(() => decodeUnifiedPage({ ...page, nextAfter: 6 }, origin, 0)).toThrow(/cursor/)
   })
-  it('uses server cursors for pages of varying sizes and retains a previous-page path', async () => {
-    const first = { origin, cutoverSequence: 0, legacyHistory: false, entries: [
-      { sequence: 10, kind: 'message', requestId: 'req', position: 0, hash: '1'.repeat(64), item: { type: 'message', role: 'assistant', content: 'First page' } },
-    ], nextAfter: 10 }
-    const second = { origin, cutoverSequence: 0, legacyHistory: false, entries: [
-      { sequence: 20, kind: 'message', requestId: 'req', position: 1, hash: '2'.repeat(64), item: { type: 'message', role: 'assistant', content: 'Second page' } },
-    ], nextAfter: null }
+  it('starts at latest and prepends older entries using the exact server cursor', async () => {
+    const latest = { origin, cutoverSequence: 0, legacyHistory: false, entries: [
+      { sequence: 20, kind: 'message', requestId: 'req', position: 1, hash: '2'.repeat(64), item: { type: 'message', role: 'assistant', content: 'Latest page' } },
+    ], nextAfter: null, previousBefore: 20 }
+    const older = { origin, cutoverSequence: 0, legacyHistory: false, entries: [
+      { sequence: 10, kind: 'message', requestId: 'req', position: 0, hash: '1'.repeat(64), item: { type: 'message', role: 'assistant', content: 'Older page' } },
+    ], nextAfter: null, previousBefore: null }
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const after = new URL(String(input), 'http://localhost').searchParams.get('after')
-      return new Response(JSON.stringify(after === '10' ? second : first), { status: 200 })
+      const before = new URL(String(input), 'http://localhost').searchParams.get('before')
+      return new Response(JSON.stringify(before === '20' ? older : latest), { status: 200 })
     })
     vi.stubGlobal('fetch', fetchMock)
     render(<UnifiedChat origin={origin} ready active={false} />)
-    await screen.findByText('First page')
-    fireEvent.click(screen.getByRole('button', { name: 'Next entries' }))
-    await screen.findByText('Second page')
-    expect(fetchMock.mock.calls.some(([input]) => new URL(String(input), 'http://localhost').searchParams.get('after') === '10')).toBe(true)
-    fireEvent.click(screen.getByRole('button', { name: 'Previous entries' }))
-    await screen.findByText('First page')
+    await screen.findByText('Latest page')
+    expect(new URL(String(fetchMock.mock.calls[0]![0]), 'http://localhost').searchParams.has('after')).toBe(false)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }))
+    await screen.findByText('Older page')
+    expect(screen.getByText('Latest page')).toBeVisible()
+    expect(fetchMock.mock.calls.some(([input]) => new URL(String(input), 'http://localhost').searchParams.get('before') === '20')).toBe(true)
+    expect([...screen.getByRole('list', { name: 'Conversation entries' }).children].map(item => item.getAttribute('data-sequence'))).toEqual(['10', '20'])
   })
+  it('rejects backward cursors outside the returned page or entries crossing the boundary', () => {
+    const page = { origin, cutoverSequence: 0, legacyHistory: false, entries: [
+      { sequence: 10, kind: 'message', requestId: 'req', position: 0, hash: 'a'.repeat(64), item: { type: 'message' } },
+    ], nextAfter: null, previousBefore: 10 }
+    expect(decodeUnifiedPage(page, origin, { before: 20 }).previousBefore).toBe(10)
+    expect(() => decodeUnifiedPage({ ...page, previousBefore: 9 }, origin, { before: 20 })).toThrow(/cursor/)
+    expect(() => decodeUnifiedPage(page, origin, { before: 10 })).toThrow(/sequence/)
+    expect(() => decodeUnifiedPage({ ...page, previousBefore: null, origin: { ...origin, incarnation: 2 } }, origin, {})).toThrow(/invalid page/)
+  })
+  it('keeps the streaming element through final fetch and live snapshot eviction', async () => {
+    const modelOrigin = { kind: 'embedded' as const, run: 'r', actor: '/worker', incarnation: 'one' }
+    const live = { origin: modelOrigin, requestId: 'req', itemId: 'id', channel: 'assistant' as const, index: 0, text: 'partial text', streaming: true, version: 1, overflow: false }
+    let entries: unknown[] = []
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ origin, entries, cutoverSequence: 0, legacyHistory: false, nextAfter: null, previousBefore: null }))))
+    const mounted = render(<UnifiedChat origin={origin} requestId="req" modelOrigin={modelOrigin} ready active={false} liveOutput={[live]} />)
+    const partial = await screen.findByText('partial text')
+    const row = partial.closest('[data-timeline-key]')
+    entries = [{ sequence: 5, kind: 'message', requestId: 'req', position: 0, hash: 'a'.repeat(64), item: { type: 'message', id: 'id', role: 'assistant', content: 'final text' } }]
+    mounted.rerender(<UnifiedChat origin={origin} requestId="req" revision={5} modelOrigin={modelOrigin} ready active={false} liveOutput={[{ ...live, streaming: false, committedHash: 'a'.repeat(64) }]} />)
+    expect((await screen.findByText('final text')).closest('[data-timeline-key]')).toBe(row)
+    expect(screen.queryByText('partial text')).toBeNull()
+    mounted.rerender(<UnifiedChat origin={origin} requestId="req" revision={5} modelOrigin={modelOrigin} ready active={false} liveOutput={[]} />)
+    expect(screen.getByText('final text').closest('[data-timeline-key]')).toBe(row)
+  })
+  it('anchors prepended history and offers new activity without scrolling an unpinned reader', async () => {
+    const entry = (sequence: number) => ({ sequence, kind: 'message', requestId: 'req', position: sequence, hash: 'a'.repeat(64), item: { type: 'message', role: 'assistant', content: `message ${sequence}` } })
+    let latest = [entry(20), entry(30), entry(40)]
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const before = new URL(String(input), 'http://localhost').searchParams.get('before')
+      return new Response(JSON.stringify({ origin, entries: before ? [entry(10)] : latest, cutoverSequence: 0, legacyHistory: false, nextAfter: null, previousBefore: before ? null : 20 }))
+    }))
+    const view = (revision = 0) => <div className="worker-chat-scroll"><UnifiedChat origin={origin} revision={revision} ready active={false} /></div>
+    const mounted = render(view())
+    const scroller = mounted.container.firstElementChild as HTMLElement
+    Object.defineProperties(scroller, { clientHeight: { value: 100 }, scrollHeight: { get: () => scroller.querySelectorAll('[data-timeline-key]').length * 100 + 200 } })
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      const index = this.dataset.timelineKey ? [...this.parentElement!.children].indexOf(this) : 0
+      const top = this.dataset.timelineKey ? index * 100 - scroller.scrollTop + 20 : 0
+      return { x: 0, y: top, top, bottom: top + 100, left: 0, right: 100, width: 100, height: 100, toJSON: () => ({}) }
+    })
+    try {
+      await screen.findByText('message 40')
+      scroller.scrollTop = 0; fireEvent.scroll(scroller)
+      const row = screen.getByText('message 20').closest<HTMLElement>('[data-timeline-key]')!
+      const offset = row.getBoundingClientRect().top
+      fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }))
+      await screen.findByText('message 10')
+      expect(row.getBoundingClientRect().top).toBe(offset)
+      expect(scroller.scrollTop).toBe(100)
+      latest = [...latest, entry(50)]
+      mounted.rerender(view(1))
+      await screen.findByRole('button', { name: 'New activity ↓' })
+      expect(scroller.scrollTop).toBe(100)
+      expect(screen.queryByText('message 50')).toBeNull()
+      fireEvent.click(screen.getByRole('button', { name: 'New activity ↓' }))
+      await screen.findByText('message 50')
+      expect(scroller.scrollTop).toBe(scroller.scrollHeight)
+    } finally { rect.mockRestore() }
+  })
+
   it('retains a mounted draft and publication rank through disconnection and a new head', async () => {
     const form = { sequence: 10, revisionSequence: 10, opening: { origin, mountId: 'same-mount', execution: { kind: 'actor_program' }, conversation: null,
       form: { version: 1, root: { kind: 'text', id: 'f0', label: 'Name', initial: null } } },
@@ -44,7 +106,7 @@ describe('unified conversation pages', () => {
     const first = { origin, cutoverSequence: 0, legacyHistory: false, entries: [
       { sequence: 10, kind: 'form', form },
       { sequence: 20, kind: 'message', requestId: 'head-a', position: 0, hash: '1'.repeat(64), item: { type: 'message', role: 'assistant', content: 'Model answer' } },
-    ], nextAfter: null }
+    ], nextAfter: null, previousBefore: null }
     const second = { ...first, entries: [...first.entries,
       { sequence: 30, kind: 'output', output: { reference: { origin, sequence: 30 }, emission: { origin, id: { displaySlot: 1, pageOrdinal: 0 }, execution: { kind: 'actor_program' }, conversation: null,
         page: { text: 'Later display', expansions: [], unavailable: false } } } },
