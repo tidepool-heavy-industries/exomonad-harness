@@ -5,7 +5,7 @@ import HistoryItem from './HistoryItem'
 import { MessageContent, MessagePresentation } from './MessagePresentation'
 import type { HistoryEntry } from './history-client'
 import MountedForm from './MountedForm'
-import { outputKey, outputLabels, type LiveOutput, type OutputOrigin } from './live-output'
+import { outputKey, outputLabels, originKey, type LiveOutput, type OutputOrigin } from './live-output'
 import { projectTimeline, mergeEntries, boundEntries, type TimelineRow } from './chat-timeline'
 import { isChatPage } from './generated/validators.mjs'
 import type { ChatPage, ChatEntry, ChatInputOperation } from './generated/chat'
@@ -101,13 +101,14 @@ function UnifiedChatView({ origin, requestId, revision, ready, active, onAuthExp
   const latestSequence = useRef('0')
   const previousLive = useRef('')
   const identity = actorOutputKey(origin)
-  const rows = projectTimeline(origin, entries, liveOutput, modelOrigin)
+  const scopedOutput = modelOrigin ? liveOutput.filter(item => originKey(item.origin) === originKey(modelOrigin)) : []
+  const rows = projectTimeline(origin, entries, scopedOutput, modelOrigin)
   const renderedInputs = rows.flatMap(row => 'entry' in row && row.entry.kind === 'message' && row.entry.inputOperation ? [row.entry.inputOperation] : [])
   const inputVersion = JSON.stringify(renderedInputs)
   const inputCallback = useRef(onRenderedInputs)
   inputCallback.current = onRenderedInputs
-  useEffect(() => { inputCallback.current?.(renderedInputs) }, [inputVersion])
-  const liveVersion = JSON.stringify(liveOutput.map(item => [outputKey(item), item.version, item.streaming]))
+  useLayoutEffect(() => { inputCallback.current?.(renderedInputs) }, [inputVersion])
+  const liveVersion = JSON.stringify(scopedOutput.map(item => [outputKey(item), item.version, item.streaming]))
   function revealLatest() {
     const element = section.current?.closest<HTMLElement>('.worker-chat-scroll')
     if (element) element.scrollTop = element.scrollHeight
@@ -193,6 +194,7 @@ function UnifiedChatView({ origin, requestId, revision, ready, active, onAuthExp
   return <section ref={section} className="unified-chat" aria-label="Conversation" aria-busy={ready && !page}>
     <div className="toolbar"><h2>Conversation</h2><button type="button" disabled={!ready} onClick={() => setAttempt(value => value + 1)}>Refresh conversation</button></div>
     {!ready && <p role="status">Host unavailable; retained conversation entries remain visible.</p>}
+    {!modelOrigin && liveOutput.length > 0 && <p role="status">Live output is unavailable for this actor.</p>}
     {issue && <div role="alert"><p>{issue}</p><button type="button" disabled={!ready} onClick={() => setAttempt(value => value + 1)}>Retry conversation</button></div>}
     {older !== null && <button type="button" className="load-older" disabled={!ready || loadingOlder} onClick={() => void loadOlder()}>{loadingOlder ? 'Loading older messages…' : 'Load older messages'}</button>}
     {page?.legacyHistory && older === null && <details><summary>Legacy message history</summary><p className="meta">Older messages use retained request order. Their order relative to displays and forms is unavailable before sequence {page.cutoverSequence}.</p>{legacy}</details>}
@@ -205,7 +207,7 @@ function UnifiedChatView({ origin, requestId, revision, ready, active, onAuthExp
     </div>)}</div>
     {newActivity && <button type="button" className="new-activity" onClick={returnToLatest}>New activity ↓</button>}
     {windowed && <div className="history-controls"><p className="meta">Showing a bounded history window. Additional messages remain in retained history.</p><button type="button" disabled={!ready} onClick={returnToLatest}>Return to latest messages</button></div>}
-    {page && !entries.length && !liveOutput.length && !page.legacyHistory && !issue && <p>No conversation entries have been retained yet.</p>}
+    {page && !entries.length && !scopedOutput.length && !page.legacyHistory && !issue && <p>No conversation entries have been retained yet.</p>}
   </section>
 }
 
