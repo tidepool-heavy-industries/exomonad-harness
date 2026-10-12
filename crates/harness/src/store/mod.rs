@@ -16,7 +16,7 @@ pub mod forms;
 pub mod history;
 pub mod media;
 mod output_publication;
-pub(crate) use output_publication::RecoveryItem;
+pub(crate) use output_publication::{RecoveryItem, RecoveryItemKind};
 mod prepared_request;
 pub mod presentation;
 pub(crate) use prepared_request::PrepareProviderError;

@@ -18,6 +18,12 @@ pub(crate) struct RecoveryItem {
     pub source_request: RequestId,
     pub item: Item,
     pub output: Option<PublishedOperationOutput>,
+    pub kind: RecoveryItemKind,
+}
+
+pub(crate) enum RecoveryItemKind {
+    Retained,
+    ValidatedCompletion,
 }
 
 pub(crate) struct AppendedOperationOutput {
@@ -178,17 +184,25 @@ fn validated_output<'a>(
     }
 }
 
-fn decode(occurrence: Occurrence, ledger: &RecoveryLedger) -> Result<RecoveryItem> {
+fn decode(c: &Connection, occurrence: Occurrence, ledger: &RecoveryLedger) -> Result<RecoveryItem> {
     let output =
         validated_output(&occurrence, ledger)?.map(|(operation, item)| PublishedOperationOutput {
             operation: operation.clone(),
             item: item.clone(),
         });
+    let kind = if occurrence.item.0["type"].as_str() == Some("function_call")
+        && super::replay::is_validated_completion(c, &occurrence.origin)?
+    {
+        RecoveryItemKind::ValidatedCompletion
+    } else {
+        RecoveryItemKind::Retained
+    };
     Ok(RecoveryItem {
         request: occurrence.request,
         source_request: occurrence.origin.request,
         item: occurrence.item,
         output,
+        kind,
     })
 }
 
@@ -305,7 +319,7 @@ impl Store {
         let _decode = tracing::debug_span!(target: "harness::runtime_cost", "recovery_occurrence_decode", input_items = history.len()).entered();
         history
             .into_iter()
-            .map(|occurrence| decode(occurrence, &ledger))
+            .map(|occurrence| decode(&c, occurrence, &ledger))
             .collect()
     }
 }

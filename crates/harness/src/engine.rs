@@ -817,6 +817,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         };
         if resuming {
             for record in &inherited_records {
+                // Engine-owned completion is sealed against its exact source
+                // occurrence and schema; it has no scheduler operation claim.
+                if matches!(
+                    record.kind,
+                    crate::store::RecoveryItemKind::ValidatedCompletion
+                ) {
+                    continue;
+                }
                 let request = &record.source_request;
                 let Some(call) = record
                     .item

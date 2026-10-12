@@ -356,6 +356,7 @@ fn schema14_migration_preserves_unbound_output_and_refuses_ownership_guess() {
             .unwrap();
     assert!(matches!(
         decode(
+            &connection,
             occurrence,
             &RecoveryLedger {
                 invocations: HashMap::new(),
