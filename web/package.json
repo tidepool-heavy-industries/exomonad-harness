@@ -7,10 +7,12 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "test": "vitest run",
-    "check": "tsc --noEmit",
+    "check": "npm run check:production && npm run check:tests",
     "test:browser": "playwright test",
     "check:browser": "tsc --project tsconfig.browser.json",
-    "test:tooling": "node --test e2e/report-validation.test.mjs"
+    "test:tooling": "node --test e2e/report-validation.test.mjs",
+    "check:production": "tsc --noEmit",
+    "check:tests": "tsc --noEmit --project tsconfig.test.json"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",

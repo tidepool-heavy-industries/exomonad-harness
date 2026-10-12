@@ -27,11 +27,18 @@ HARNESS_DEPS = [
     "//third-party/rust:uuid",
 ]
 
-HARNESS_SRCS = glob(["src/**/*.rs", "src/store/fixtures/*.json"]) + ["src/store/schema.sql"]
+HARNESS_PRODUCTION_SRCS = glob(
+    ["src/**/*.rs"],
+    exclude = ["src/**/*_tests.rs", "src/**/tests.rs", "src/**/tests/**", "src/bin/**"],
+) + ["src/store/schema.sql"]
+HARNESS_TEST_SRCS = glob(
+    ["src/**/*.rs", "src/**/fixtures/**"],
+    exclude = ["src/bin/**"],
+) + ["src/store/schema.sql", "tests/support/replay.rs"]
 
 # The bundle identity covers declared production inputs without forcing source
 # hashing or web actions into Rust library compilation.
-BROWSER_RUNTIME_SRCS = glob(["src/**/*.rs"], exclude = ["src/**/*tests.rs", "src/**/tests/**", "src/bin/**"]) + ["src/store/schema.sql", "src/bin/browser_contract_export.rs"]
+BROWSER_RUNTIME_SRCS = HARNESS_PRODUCTION_SRCS + ["src/bin/browser_contract_export.rs"]
 BROWSER_SOURCE_INPUTS = {source: source for source in BROWSER_RUNTIME_SRCS}
 BROWSER_SOURCE_INPUTS.update({
     "Cargo.toml": "Cargo.toml",
@@ -58,7 +65,7 @@ rust_library(
     crate = "harness",
     crate_root = "src/lib.rs",
     edition = "2024",
-    srcs = HARNESS_SRCS,
+    srcs = HARNESS_PRODUCTION_SRCS,
     deps = HARNESS_DEPS,
     visibility = ["PUBLIC"],
 )
@@ -68,7 +75,7 @@ rust_test(
     crate = "harness",
     crate_root = "src/lib.rs",
     edition = "2024",
-    srcs = HARNESS_SRCS + ["tests/support/replay.rs"],
+    srcs = HARNESS_TEST_SRCS,
     deps = HARNESS_DEPS + ["//third-party/rust:proptest"],
     # The counted focused runner executes from this package directory.
     env = {"HARNESS_PROPTEST_REGRESSIONS": "proptest-regressions/finalize.txt"},

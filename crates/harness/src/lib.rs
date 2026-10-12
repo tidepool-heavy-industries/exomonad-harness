@@ -19,7 +19,9 @@ pub mod observation;
 pub mod protocol;
 pub mod provider;
 pub mod replay;
-pub mod replay_fixture;
+#[cfg(test)]
+#[path = "replay_fixture_tests.rs"]
+mod replay_fixture;
 pub mod server;
 pub mod store;
 pub mod transport;

@@ -1,4 +1,4 @@
-import type { Snapshot } from './protocol'
+import type { Snapshot } from '../protocol'
 
 /** Synthetic examples conforming to the generated Rust browser projections. */
 export const fixtureSnapshot: Snapshot = {
