@@ -3,7 +3,7 @@
 The production entry point always checks `/api/session`, then connects to the
 same-origin `/api/ws` after authentication. It waits for an authoritative snapshot.
 Serving the asset directory alone does not provide a working operator session.
-`src/fixture.ts` supplies unit-test examples; there is no default fixture mode or
+`src/tests/fixture.ts` supplies unit-test examples; there is no default fixture mode or
 `?live=1` switch.
 
 For the standalone server, prepare the local release executable and production
@@ -70,7 +70,11 @@ systemd-run --user --wait --pipe --collect --unit=harness-frontend-browser \
 ```
 
 For ordinary frontend checks, build `//web:check`, `//web:test` or `//web:dist`
-through the admitted pinned Buck environment. These targets provide the Rust
+through the admitted pinned Buck environment. `//web:check` checks production types;
+`//web:check_tests` checks test types and is a dependency of `//web:test`.
+`npm run check` retains both checks for interactive use. Production assets and
+their source identity exclude test files and fixtures by convention.
+These targets provide the Rust
 schema artifact, generated declarations and standalone validators. The Vite dev server
 needs the protected API/WebSocket routes on its origin; static Vite alone does
 not authenticate or supply the operator state.

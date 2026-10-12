@@ -13,7 +13,13 @@
     "jsx": "react-jsx",
     "strict": true,
     "noUncheckedIndexedAccess": true,
-    "types": ["vitest/globals"]
+    "types": []
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": [
+    "src/**/*.test.*",
+    "src/**/tests/**",
+    "src/**/fixtures/**",
+    "src/**/test-setup.*"
+  ]
 }

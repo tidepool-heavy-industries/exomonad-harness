@@ -1,5 +1,5 @@
 import { actorIdentityKey, applyStateEvent, isCommandReceipt, isEmbeddedCommandRecord, isSequencedEvent, isSnapshot, normalizeSnapshot, type Snapshot } from './protocol'
-import { fixtureSnapshot } from './fixture'
+import { fixtureSnapshot } from './tests/fixture'
 import { describe, expect, it } from 'vitest'
 
 const nextCounter = (value: string) => (BigInt(value) + 1n).toString()

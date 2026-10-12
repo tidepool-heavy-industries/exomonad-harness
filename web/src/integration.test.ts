@@ -3,7 +3,7 @@ import { createElement } from 'react'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { normalizeSnapshot, type Snapshot, type RequestRecord } from './protocol'
 import { createViewProjector, toViewModel } from './integration'
-import { customJobJourney, customSuccessJourney } from './fixture'
+import { customJobJourney, customSuccessJourney } from './tests/fixture'
 import App from './App'
 
 describe('web outcome integration', () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fixtureSnapshot } from './fixture'
+import { fixtureSnapshot } from './tests/fixture'
 import { connectHarness } from './ws-client'
 
 function setup() {

@@ -1,28 +1,31 @@
 load("@prelude//:rules.bzl", "genrule")
 load(":web_rules.bzl", "browser_contract", "npm_dependencies", "web_action")
 
-WEB_SRCS = glob(["src/**/*"]) + [
+WEB_TEST_EXCLUDES = ["src/**/*.test.*", "src/**/tests/**", "src/**/fixtures/**", "src/**/test-setup.*"]
+WEB_PRODUCTION_SRCS = glob(["src/**/*"], exclude = WEB_TEST_EXCLUDES + ["src/generated/**"]) + [
     "scripts/seal-browser-bundle.mjs",
     "index.html",
     "package.json",
     "package-lock.json",
     "tsconfig.json",
+    "vite.config.ts",
+]
+WEB_TEST_SRCS = glob(["src/**/*"], exclude = ["src/generated/**"]) + [
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "tsconfig.test.json",
     "vite.config.ts",
 ]
 
-# An independent source-only leaf: no schema, npm installation or compilation
-# output enters this identity, so the contract producer remains acyclic.
-BROWSER_IDENTITY_SRCS = glob(["src/**/*"], exclude = ["src/generated/**", "src/**/*.test.*", "src/**/tests/**", "src/fixture.ts", "src/test-setup.ts"]) + [
+# This independent source-only leaf uses the production input boundary. Generated
+# schema/npm/compilation outputs enter downstream actions, preserving acyclicity.
+BROWSER_IDENTITY_SRCS = WEB_PRODUCTION_SRCS + [
     "BUCK",
     "web_rules.bzl",
     "scripts/generate-browser-contract.mjs",
-    "scripts/seal-browser-bundle.mjs",
-    "index.html",
-    "package.json",
-    "package-lock.json",
-    "tsconfig.json",
-    "vite.config.ts",
 ]
+
 genrule(
     name = "browser_source_identity",
     srcs = BROWSER_IDENTITY_SRCS,
@@ -34,6 +37,7 @@ genrule(
 npm_dependencies()
 browser_contract()
 
-web_action(name = "check", script = "check", output = "check.txt", srcs = WEB_SRCS)
-web_action(name = "test", script = "test", output = "test.log", srcs = WEB_SRCS)
-web_action(name = "dist", script = "build", output = "dist", srcs = WEB_SRCS, is_directory = True)
+web_action(name = "check", script = "check:production", output = "check.txt", srcs = WEB_PRODUCTION_SRCS)
+web_action(name = "check_tests", script = "check:tests", output = "check-tests.txt", srcs = WEB_TEST_SRCS)
+web_action(name = "test", script = "test", output = "test.log", srcs = WEB_TEST_SRCS)
+web_action(name = "dist", script = "build", output = "dist", srcs = WEB_PRODUCTION_SRCS, is_directory = True)

@@ -58,6 +58,7 @@ cp -rL "$CONTRACT/." "$TMP/web/src/generated/"
 cd "$TMP/web"
 """
     if script == "test":
+        command += ": $(location :check_tests)\n"
         command += "\"$NPM\" run test 2>&1 | tee \"$OUTPUT\"\n"
     else:
         command += "\"$NPM\" run " + script + "\n"
