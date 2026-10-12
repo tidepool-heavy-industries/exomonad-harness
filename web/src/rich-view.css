@@ -1,0 +1,7 @@
+.rich-view-text, .rich-view-markdown, .rich-view-inspection pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.rich-view-row { display: flex; align-items: flex-start; gap: 8px; }
+.rich-view-column { display: grid; gap: 8px; }
+.rich-view-caption { margin: 0; }
+.rich-view-caption figcaption { color: var(--muted); font-size: .9em; }
+.rich-view-truncated { border-inline-start: 2px solid var(--pending); color: var(--pending-text); padding-inline-start: 6px; font-size: .9em; }
+.rich-view-image { display: block; max-width: 100%; max-height: 30rem; object-fit: contain; }

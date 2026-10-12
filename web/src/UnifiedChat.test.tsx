@@ -1,3 +1,4 @@
+import { createRef } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import UnifiedChat, { decodeUnifiedPage } from './UnifiedChat'
@@ -175,7 +176,8 @@ describe('unified conversation pages', () => {
       const before = new URL(String(input), 'http://localhost').searchParams.get('before')
       return new Response(JSON.stringify({ origin, entries: before ? [entry(10)] : latest, cutoverSequence: '0', legacyHistory: false, nextAfter: null, previousBefore: before ? null : '20' }))
     }))
-    const view = (revision = 0) => <div className="worker-chat-scroll"><UnifiedChat origin={origin} revision={String(revision)} ready active={false} /></div>
+    const viewportRef = createRef<HTMLDivElement>()
+    const view = (revision = 0) => <div ref={viewportRef} className="worker-chat-scroll"><UnifiedChat viewportRef={viewportRef} origin={origin} revision={String(revision)} ready active={false} /></div>
     const mounted = render(view())
     const scroller = mounted.container.firstElementChild as HTMLElement
     Object.defineProperties(scroller, { clientHeight: { value: 100 }, scrollHeight: { get: () => scroller.querySelectorAll('[data-timeline-key]').length * 100 + 200 } })

@@ -1,3 +1,4 @@
+import './RecoveryControls.css'
 import { useState } from 'react'
 import { sameInferenceBlock, type HostActorIdentity, type InferenceBlock, type RecoveryMode } from './protocol'
 import type { LocalSubmissionResult, SubmitHostCommand } from './client-contract'

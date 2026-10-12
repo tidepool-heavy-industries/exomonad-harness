@@ -1,5 +1,5 @@
 import type { ChatInputOperation } from './generated/chat'
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { belongsTo } from './live-output'
 import ChatHistory, { clearChatHistoryRetention } from './ChatHistory'
 import { actorOutputKey, type ActorOutputOrigin } from './actor-output'
@@ -54,6 +54,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
   data: HarnessViewModel; route: RouteState; navigate: (route: RouteState) => void
   transportPhase: TransportPhase; issue?: string; onAuthExpired?: () => void; children?: ReactNode; composer?: ReactNode; outgoing?: ReactNode; onRenderedInputs?: (references: readonly ChatInputOperation[]) => void
 }) {
+  const viewportRef = useRef<HTMLDivElement>(null)
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
   const resolved = resolveSelection(data, route.selection)
@@ -120,7 +121,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
       </div>}
     </aside>
     <section className="worker-chat-conversation" aria-label="Selected worker Chat">
-      <div className="worker-chat-scroll" role="region" aria-label="Worker conversation" tabIndex={0}>
+      <div ref={viewportRef} className="worker-chat-scroll" role="region" aria-label="Worker conversation" tabIndex={0}>
       {identity && <header className="actor-heading">
         <h2>{identity.actor}</h2>
         {resolved.actor && <p className="actor-state" role="status">
@@ -150,7 +151,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
           {resolved.missing && <p role="status">This exact actor is unavailable. Retained history remains read-only; choose a different worker explicitly.</p>}
           {ambiguousConversation && !exactHead && <p role="status">The host associates this conversation with multiple exact actors. Its current history head is unavailable; only previously retained exact history can be shown.</p>}
           {outputOrigin && <UnifiedChat key={actorOutputKey(outputOrigin)}
-            origin={outputOrigin} requestId={head?.id ?? exactHead}
+            viewportRef={viewportRef} origin={outputOrigin} requestId={head?.id ?? exactHead}
             {...{ modelOrigin: identity ? { kind: 'embedded' as const, ...identity } : undefined, onRenderedInputs }}
             revision={(data.actorOutputRevisions ?? []).find(reference => actorOutputKey(reference.origin) === actorOutputKey(outputOrigin))?.sequence}
             ready={transportPhase === 'ready'} active={!!resolved.actor && ['running', 'waiting'].includes(resolved.actor.lifecycle)} onAuthExpired={onAuthExpired}

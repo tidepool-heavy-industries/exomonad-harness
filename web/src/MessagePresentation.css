@@ -15,7 +15,7 @@
 .chat-message-details .meta { white-space: normal; overflow-wrap: anywhere; }
 .message-content { min-width: 0; }
 /* A bounded reading viewport keeps long retained messages manageable. */
-.message-content-viewport { max-height: 24rem; overflow: hidden; }
+.message-content-viewport { max-height: var(--content-preview-height); overflow: hidden; }
 .message-content-expanded { max-height: none; overflow: visible; }
 .message-content-body { white-space: normal; }
 .message-content-body > :first-child { margin-block-start: 0; }
@@ -39,15 +39,14 @@
 .message-content-note, .message-copy-status { color: var(--muted); font-size: .8rem; line-height: 1.5; }
 .message-content-note { margin-block: 6px 0; }
 .chat-message-details .message-content-plain pre { font-family: var(--mono); }
-@media (max-width: 700px) { .chat-message { padding-inline: 12px; } .chat-message-assistant { padding-inline-start: 0; } .chat-message-human { max-width: 96%; } .chat-message-body { font-size: 1rem; } }
+@media (max-width: 700px) { .chat-message { padding-inline: 12px; } .chat-message-assistant { padding-inline-start: 0; } .chat-message-human { max-width: 96%; } }
 
 .chat-message-human .message-content-plain .history-content { font: inherit; white-space: pre-wrap; }
 .chat-message-body > .history-prose { font: inherit; }
 .chat-message-fold > summary .chat-message-header { display: inline; }
 .chat-message-fold > summary .chat-message-status { margin-inline-start: 8px; }
 .message-content-markdown p { max-width: var(--prose-measure); }
-@media (max-width: 700px) { .chat-message-body { font-size: var(--prose-size); } }
-.message-code-block pre.code-preview { max-height: 24rem; overflow-y: hidden; }
+.message-code-block pre.code-preview { max-height: var(--content-preview-height); overflow-y: hidden; }
 .message-code-block pre.code-expanded { max-height: none; }
 
 .chat-message { font-size: var(--prose-size); }
