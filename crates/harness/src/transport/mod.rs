@@ -8,6 +8,7 @@ pub mod client;
 mod http_error;
 mod request_failure;
 pub mod sse;
+pub use crate::store::PreparedProviderRequest;
 pub use request_failure::RequestFailure;
 
 use crate::item::Item;

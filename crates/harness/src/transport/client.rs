@@ -10,6 +10,28 @@ use serde_json::Value;
 use serde_json::json;
 use std::{borrow::Cow, time::Duration};
 
+/// Only transport normalization constructs a body admitted for dispatch.
+pub(crate) struct NormalizedProviderBody(Vec<u8>);
+
+impl NormalizedProviderBody {
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+pub(crate) fn normalize_for_dispatch(
+    request: &ResponsesRequest,
+    contract: (ResponsesRoute, ResponsesProtocol),
+) -> Result<NormalizedProviderBody, TransportError> {
+    let body = normalized_request(request, contract.1, contract.0)?;
+    let bytes = serde_json::to_vec(&body)
+        .map_err(|_| TransportError::Stream("request serialization failed".into()))?;
+    Ok(NormalizedProviderBody(bytes))
+}
+
 pub const ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 pub const CHATGPT_PLAN_ENDPOINT: &str = "https://api.openai.com/v1/responses";
 pub const CODEX_VERSION: &str = "0.160.0";

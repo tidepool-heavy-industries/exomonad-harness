@@ -25,6 +25,8 @@ pub struct IssuedReplayRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct IssuedRequestRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) purpose: Option<super::ProviderRequestPurpose>,
     input: Vec<ItemHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     outputs: Option<Vec<Option<IssuedOutputReference>>>,
@@ -456,6 +458,7 @@ impl Store {
             }
             let issued = IssuedReplayRequest {
                 record: IssuedRequestRecord {
+                    purpose: Some(super::ProviderRequestPurpose::Inference),
                     input,
                     outputs,
                     instructions,
