@@ -5,7 +5,7 @@ use harness::{
     engine::ResponsesTransport,
     provider::{CallContext, ProviderError},
     store::Store,
-    transport::{ResponsesRequest, ResponsesTurn, TransportError, sse::StreamEvent},
+    transport::{PreparedProviderRequest, ResponsesRequest, ResponsesTurn, TransportError, sse::StreamEvent},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -130,8 +130,9 @@ impl ResponsesTransport for ReplayTransport {
     > {
         Ok(self.contract)
     }
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
-        lock(&self.requests).push(request.clone());
+    async fn create(&self, request: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
+        let observed = request.request();
+        lock(&self.requests).push(observed.clone());
         let mut turn = lock(&self.turns)
             .pop_front()
             .ok_or_else(|| TransportError::Stream("replay turn queue exhausted".into()))?;
@@ -141,7 +142,7 @@ impl ResponsesTransport for ReplayTransport {
             *count
         };
         if let Some(observer) = &self.observer {
-            observer(&request, &mut turn, ordinal);
+            observer(observed, &mut turn, ordinal);
         }
         self.changed.notify_waiters();
         self.wait_for_response_release().await;
@@ -150,7 +151,7 @@ impl ResponsesTransport for ReplayTransport {
 
     async fn create_streaming(
         &self,
-        request: ResponsesRequest,
+        request: PreparedProviderRequest,
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         let turn = self.create(request).await?;
