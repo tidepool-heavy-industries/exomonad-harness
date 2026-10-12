@@ -390,6 +390,109 @@ mod host_wire_tests {
         server::{ClientCommand, HostCommand},
     };
     use serde_json::json;
+    fn recover_roundtrips_at_browser_boundaries(generation: u64) {
+        use crate::embedding::{InferenceBlock, InferenceBlockReason, RecoveryMode};
+        let operation_id = ClientOperationId(uuid::Uuid::from_u128(17));
+        let target = HostActorIdentity {
+            run: "run λ".into(),
+            actor: crate::model::AgentPath("/root".into()),
+            incarnation: "incarnation 🐈".into(),
+        };
+        for mode in [RecoveryMode::Exact, RecoveryMode::VisibleHistory] {
+            for reason in [
+                InferenceBlockReason::ContinuityUnproven,
+                InferenceBlockReason::HostInterrupted,
+            ] {
+                // A stale generation must survive transport distinctly; admission is
+                // owned by the inference gate, not by the browser decoder.
+                for observed in [generation, generation.wrapping_add(1)] {
+                    let command = HostCommand::Recover {
+                        target: target.clone(),
+                        expected_block: InferenceBlock {
+                            request: crate::model::RequestId("request λ".into()),
+                            generation: observed,
+                            reason: reason.clone(),
+                        },
+                        mode,
+                    };
+                    let native = ClientCommand::Host {
+                        operation_id,
+                        command: command.clone(),
+                    };
+                    let durable = serde_json::to_value(&native).unwrap();
+                    assert_eq!(
+                        durable["command"]["expected_block"]["generation"],
+                        json!(observed)
+                    );
+                    assert_eq!(
+                        serde_json::from_value::<ClientCommand>(durable.clone()).unwrap(),
+                        native
+                    );
+                    assert!(
+                        serde_json::from_value::<contract_extensions::ClientCommand>(durable)
+                            .is_err()
+                    );
+
+                    let http = contract_extensions::ClientCommand::Host {
+                        operation_id,
+                        command: (&command).into(),
+                    };
+                    let value = serde_json::to_value(&http).unwrap();
+                    assert_eq!(
+                        value["command"]["expected_block"]["generation"],
+                        observed.to_string()
+                    );
+                    let decoded: ClientCommand =
+                        serde_json::from_value::<contract_extensions::ClientCommand>(value)
+                            .unwrap()
+                            .into();
+                    assert_eq!(decoded, native);
+
+                    let ws = WsClientFrame::HostCommand {
+                        operation_id,
+                        command: (&command).into(),
+                    };
+                    let value = serde_json::to_value(&ws).unwrap();
+                    assert_eq!(
+                        value["command"]["expected_block"]["generation"],
+                        observed.to_string()
+                    );
+                    let WsClientFrame::HostCommand {
+                        operation_id,
+                        command,
+                    } = serde_json::from_value::<WsClientFrame>(value.clone()).unwrap()
+                    else {
+                        panic!("Recover must remain a host command");
+                    };
+                    assert_eq!(
+                        ClientCommand::Host {
+                            operation_id,
+                            command: command.into()
+                        },
+                        native
+                    );
+                    let mut numeric = value;
+                    numeric["command"]["expected_block"]["generation"] = json!(observed);
+                    assert!(serde_json::from_value::<WsClientFrame>(numeric).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn recover_envelopes_preserve_decimal_boundaries_and_native_durable_encoding() {
+        for generation in [0, 1, 9_007_199_254_740_993, u64::MAX] {
+            recover_roundtrips_at_browser_boundaries(generation);
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn recover_envelopes_preserve_generated_exact_and_stale_generations(generation in proptest::prelude::any::<u64>()) {
+            recover_roundtrips_at_browser_boundaries(generation);
+        }
+    }
+
     #[test]
     fn host_wire_requires_operation_and_interrupt_round_and_preserves_both() {
         let operation = ClientOperationId(uuid::Uuid::new_v4());
