@@ -2290,7 +2290,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         finalize_schema: Option<&serde_json::Value>,
     ) -> Result<crate::transport::ToolManifest, EngineError> {
         let snapshot = self.provider.request_snapshot().await?;
-        let provider = snapshot.as_ref().unwrap_or(&self.provider);
+        let provider: &dyn Provider = snapshot.as_deref().unwrap_or(self.provider.as_ref());
         self.compose_tools(finalize_schema, &provider.tool_manifest())
     }
 
