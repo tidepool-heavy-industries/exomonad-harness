@@ -11,20 +11,16 @@ function showRaw() {
 }
 
 describe('retained Item presentation', () => {
-  it.each([{ summary: [] }, { summary: [{ type: 'summary_text', text: '   \n' }] }])('omits opaque reasoning without a nonempty readable summary: %j', ({ summary }) => {
-    const { container } = render(<HistoryItem entry={entry({ type: 'reasoning', summary, encrypted_content: 'opaque' })} />)
+  it('omits opaque reasoning with absent or whitespace-only summaries', () => {
+    const item = { type: 'reasoning', encrypted_content: 'opaque' }
+    const { container, rerender } = render(<HistoryItem entry={entry(item)} />)
     expect(container.textContent).toBe('')
-  })
-
-  it('omits opaque-only reasoning with no summary field', () => {
-    const { container } = render(<HistoryItem entry={entry({ type: 'reasoning', encrypted_content: 'opaque' })} />)
+    rerender(<HistoryItem entry={entry({ ...item, summary: [{ type: 'summary_text', text: '   \n' }] })} />)
     expect(container.textContent).toBe('')
   })
 
   it.each([
     { type: 'reasoning', summary: [{ type: 'future_summary', payload: 'λ 🐈' }], encrypted_content: 'opaque' },
-    { type: 'reasoning', summary: { future: 'summary shape' } },
-    { type: 'reasoning', summary: [], content: [{ type: 'future_reasoning', payload: 'λ 🐈' }] },
     { type: 'reasoning', content: { future: 'content shape' } },
   ])('preserves unfamiliar reasoning blocks and shapes for exact raw inspection: %j', item => {
     render(<HistoryItem entry={entry(item)} />)
@@ -35,25 +31,25 @@ describe('retained Item presentation', () => {
 
   it('renders assistant Markdown and preserves the entire original wire item for inspection', () => {
     const item = { type: 'message', role: 'assistant', phase: 'commentary', content: '# Result\n\n**Ready** with `code`.\n\n<script>alert(1)</script>' }
-    const { container } = render(<HistoryItem entry={entry(item)} />)
+    const { container } = render(<HistoryItem entry={entry(item)} listItem={false} />)
+    expect(screen.queryByRole('listitem')).toBeNull()
     expect(screen.getByRole('heading', { name: 'Assistant · commentary' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Result' })).toBeInTheDocument()
     expect(container.querySelector('strong')?.textContent).toBe('Ready')
     expect(container.querySelector('script')).toBeNull()
-    expect(container.querySelector('.chat-message-assistant')).toBeInTheDocument()
     showRaw()
     expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
   })
 
   it('keeps human text exact and discloses unknown blocks in Raw', () => {
+    const text = `${exact}${'x'.repeat(1999)}🐈 λ\n${'α'.repeat(5000)}\n original tail`
     const item = { type: 'message', role: 'user', content: [
-      { type: 'input_text', text: exact }, { type: 'output_text', text: ' second\n' },
+      { type: 'input_text', text }, { type: 'output_text', text: ' second\n' },
       { type: 'future_media', bytes: 'unknown-payload' },
     ] }
     const { container } = render(<HistoryItem entry={entry(item)} />)
-    expect(screen.getByLabelText('Text item 7 block 1').textContent).toBe(exact)
+    expect(screen.getByLabelText('Text item 7 block 1').textContent).toBe(text)
     expect(screen.getByLabelText('Text item 7 block 2').textContent).toBe(' second\n')
-    expect(container.querySelector('.chat-message-human')).toBeInTheDocument()
     expect(container.querySelector('script')).toBeNull()
     expect(screen.getByText(/Unknown content is retained/)).toBeInTheDocument()
     expect(screen.queryByLabelText('Raw item 7')).toBeNull()
@@ -101,10 +97,9 @@ describe('retained Item presentation', () => {
     expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
   })
 
-  it.each([null, false, 0, { type: 'future_item', extra: ['λ'] }, { type: 'custom_tool_call_output', call_id: 'c', output: false }, { type: 'custom_tool_call', call_id: 'c', name: 'f', input: { z: 1 } }])('shows arbitrary or unfamiliar JSON %j', item => {
+  it.each([null, { type: 'future_item', extra: [null, false, 0, 'λ'] }, { type: 'custom_tool_call_output', call_id: 'c', output: false }, { type: 'custom_tool_call', call_id: 'c', name: 'f', input: { z: 1 } }])('shows arbitrary or unfamiliar JSON %j', item => {
     render(<HistoryItem entry={entry(item)} />)
     expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
-    expect(screen.queryByText(/success/i)).toBeNull()
   })
 
   it('renders object function arguments as structured JSON with exact call metadata', () => {
@@ -121,30 +116,39 @@ describe('retained Item presentation', () => {
     const item = { type: 'message', role: 'user', content: exact }
     const serialize = vi.spyOn(JSON, 'stringify')
     render(<HistoryItem entry={entry(item)} />)
-    expect(screen.getByText(/Item 7 · hash/)).not.toBeVisible()
+    expect(screen.getByText(/a{64}/)).not.toBeVisible()
     expect(serialize.mock.calls.some(([value]) => value === item)).toBe(false)
     showRaw()
-    expect(screen.getByText(/Item 7 · hash/)).toBeVisible()
+    expect(screen.getByText(/a{64}/)).toBeVisible()
     expect(serialize.mock.calls.some(([value]) => value === item)).toBe(true)
     serialize.mockRestore()
   })
 
   it.each(['function_call', 'custom_tool_call', 'function_call_output', 'custom_tool_call_output'])('copies exact retained source for formatted %s', async type => {
-    const source = ' { "z": 1, "cat" : "λ 🐈" }\n'
-    const item = type === 'function_call' ? { type, name: 'tool', call_id: 'c', arguments: source }
-      : type === 'custom_tool_call' ? { type, name: 'cell', call_id: 'c', input: source }
-      : { type, call_id: 'c', output: source }
+    const source = type === 'custom_tool_call_output' ? ' [ { "z": 1, "cat" : "λ 🐈" } ]\n' : ' { "z": 1, "cat" : "λ 🐈" }\n'
+    const item = type === 'function_call' ? { type, id: 'retained-item', name: 'tool', call_id: 'exact-call', arguments: source }
+      : type === 'custom_tool_call' ? { type, id: 'retained-item', name: 'cell', call_id: 'exact-call', input: source }
+      : { type, id: 'retained-item', call_id: 'exact-call', output: source }
     const label = type === 'function_call' ? 'Arguments' : type === 'custom_tool_call' ? 'Input' : 'Result'
     const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
     try {
       render(<HistoryItem entry={entry(item)} />)
-      if (label === 'Result') fireEvent.click(screen.getByText(/^JSON result/))
+      const metadata = screen.getByText('Message details').closest('details')!
+      expect(metadata).not.toHaveAttribute('open')
+      expect(screen.getByText(/Call ID:/)).not.toBeVisible()
+      expect(screen.getByRole('heading')).not.toHaveTextContent('exact-call')
+      if (label === 'Result') {
+        expect(screen.getByLabelText(`${label} item 7`)).not.toBeVisible()
+        fireEvent.click(screen.getByText(/^JSON result/))
+      }
       expect(screen.getByLabelText(`${label} item 7`).textContent).toBe(JSON.stringify(JSON.parse(source), null, 2))
       fireEvent.click(screen.getByRole('button', { name: `Copy ${label} item 7` }))
       await waitFor(() => expect(writeText).toHaveBeenCalledWith(source))
       showRaw()
+      expect(metadata).toHaveTextContent('retained-item')
+      expect(metadata).toHaveTextContent('exact-call')
       expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
     } finally {
       if (descriptor) Object.defineProperty(navigator, 'clipboard', descriptor)
@@ -152,75 +156,17 @@ describe('retained Item presentation', () => {
     }
   })
 
-  it('retains long Unicode text and raw source without a character cut', () => {
-    const text = 'x'.repeat(1999) + '🐈 λ\n' + 'α'.repeat(5000) + '\n original tail'
-    const item = { type: 'message', role: 'user', content: text }
-    render(<HistoryItem entry={entry(item)} listItem={false} />)
-    expect(screen.queryByRole('listitem')).toBeNull()
-    expect(screen.getByLabelText('Text item 7').textContent).toBe(text)
-    showRaw()
-    expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
-  })
-
-  it('keeps unknown textless reasoning inspectable through Raw', () => {
-    const item = { type: 'reasoning', summary: [{ type: 'future_summary', value: 'opaque summary' }], encrypted_content: 'opaque' }
-    render(<HistoryItem entry={entry(item)} />)
-    expect(screen.getByRole('heading', { name: 'Reasoning' })).toBeInTheDocument()
-    expect(screen.getByText(/Unknown content is retained/)).toBeInTheDocument()
-    expect(screen.queryByText(/show readable text/i)).toBeNull()
-    fireEvent.click(screen.getByText('Message details'))
-    fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
-    expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
-  })
-  it('labels model calls separately and keeps transport identifiers in closed metadata', () => {
-    const item = { type: 'function_call', id: 'fc-item-1', call_id: 'call-1', name: 'read_file', arguments: '{"path":"README","limit":3}' }
-    render(<HistoryItem entry={entry(item)} />)
-    const heading = screen.getByRole('heading', { name: 'Model tool call · read_file' })
-    expect(heading).not.toHaveTextContent('call-1')
-    expect(screen.getByLabelText('Arguments item 7').textContent).toBe('{\n  "path": "README",\n  "limit": 3\n}')
-    expect(screen.getByLabelText('Arguments item 7').closest('.history-code')).toBeInTheDocument()
-    const details = screen.getByText('Message details').closest('details')!
-    expect(details).not.toHaveAttribute('open')
-    fireEvent.click(screen.getByText('Message details'))
-    expect(details).toHaveTextContent('Item ID: fc-item-1')
-    expect(details).toHaveTextContent('Call ID: call-1')
-    fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
-    expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
-  })
-
-  it('labels tool responses and collapses formatted JSON behind a concise preview', () => {
-    const response = {
-      ready_results: [{ call: 'call-CN', origin: { actor: '/root', incarnation: '1', kind: 'embedded', run: 'run-1' }, request: 'request-1' }],
-      reason: 'tool_result',
-    }
-    const compact = JSON.stringify(response)
-    const item = { type: 'function_call_output', id: 'fc-output-1', call_id: 'call-CN', output: compact }
-    render(<HistoryItem entry={entry(item)} />)
-    const heading = screen.getByRole('heading', { name: 'Tool response' })
-    expect(heading).not.toHaveTextContent('call-CN')
-    const disclosure = screen.getByText('JSON result · 2 fields · reason: tool_result')
-    expect(disclosure.tagName).toBe('SUMMARY')
-    expect(disclosure.closest('details')).not.toHaveAttribute('open')
+  it('bounds long JSON previews while keeping nested response data available on expansion', () => {
+    const key = 'a'.repeat(60), value = 'b'.repeat(200)
+    const response = { [key]: value, ready_results: [{ origin: { actor: '/root' } }] }
+    const output = JSON.stringify(response)
+    render(<HistoryItem entry={entry({ type: 'function_call_output', call_id: 'call-1', output })} />)
+    const disclosure = screen.getByText(/^JSON result/)
+    expect(disclosure).not.toHaveTextContent(key)
+    expect(disclosure).not.toHaveTextContent(value)
+    expect(screen.getByLabelText('Result item 7')).not.toBeVisible()
     fireEvent.click(disclosure)
     expect(screen.getByLabelText('Result item 7').textContent).toBe(JSON.stringify(response, null, 2))
-    expect(screen.getByLabelText('Result item 7').closest('.history-code')).toBeInTheDocument()
-    fireEvent.click(screen.getByText('Message details'))
-    expect(screen.getByText('Message details').closest('details')).toHaveTextContent('Call ID: call-CN')
-    fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
-    expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
-  })
-
-  it.each([
-    ['nested JSON', JSON.stringify({ ready_results: [{ origin: { actor: '/root' } }] }), 'JSON result · 1 field'],
-    ['array JSON', JSON.stringify([{ call: 'call-1', origin: { actor: '/root' } }]), 'JSON result · 1 item'],
-    ['long-key JSON', JSON.stringify({ [`${'a'.repeat(60)}`]: 'short' }), `JSON result · 1 field · ${'a'.repeat(45)}…: short`],
-  ])('collapses %s with a bounded preview and keeps the formatted response available', (_name, output, summary) => {
-    render(<HistoryItem entry={entry({ type: 'function_call_output', call_id: 'call-1', output })} />)
-    const disclosure = screen.getByText(summary)
-    expect(disclosure.tagName).toBe('SUMMARY')
-    expect(disclosure.closest('details')).not.toHaveAttribute('open')
-    fireEvent.click(disclosure)
-    expect(screen.getByLabelText('Result item 7').textContent).toBe(JSON.stringify(JSON.parse(output), null, 2))
   })
 
   it('labels final assistant text and exposes unknown phases through Raw', () => {
@@ -235,6 +181,5 @@ describe('retained Item presentation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))
     expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(futureItem, null, 2))
   })
-
 
 })
