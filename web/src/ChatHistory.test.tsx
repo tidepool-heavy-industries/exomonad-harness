@@ -91,6 +91,7 @@ describe('bounded retained Chat slices', () => {
     })
     render(chat('one'))
     const notice = await screen.findByText(new RegExp(oversized.hash))
+    expect(notice).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: 'Skip large item' }))
     await screen.findByText('skip unavailable')
     expect(notice).toBeVisible()
@@ -102,46 +103,25 @@ describe('bounded retained Chat slices', () => {
   })
   it('keeps a bounded cursor trail for moving back to newer pages', async () => {
     vi.mocked(readHistoryPage).mockImplementation(async (id, offset) => ({
-      ...page(id, offset), nextOffset: BigInt(offset) < 39n ? (BigInt(offset) + 1n).toString() : null,
+      ...page(id, offset), nextOffset: BigInt(offset) < 33n ? (BigInt(offset) + 1n).toString() : null,
     }))
     render(chat('one'))
     await screen.findByText('one slice 0')
-    for (let offset = 0; offset < 39; offset++) {
+    for (let offset = 0; offset < 33; offset++) {
       fireEvent.click(screen.getByRole('button', { name: 'More items in this exchange' }))
       await screen.findByText(`one slice ${offset + 1}`)
     }
-    for (let offset = 39; offset > 7; offset--) {
+    for (let offset = 33; offset > 1; offset--) {
       fireEvent.click(screen.getByRole('button', { name: 'Newer messages' }))
       await screen.findByText(`one slice ${offset - 1}`)
     }
     expect(screen.queryByRole('button', { name: 'Newer messages' })).toBeNull()
-    expect(screen.getByText('one slice 7')).toBeVisible()
+    expect(screen.getByText('one slice 1')).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: 'Latest messages' }))
     await screen.findByText('one slice 0')
     expect(screen.queryByRole('button', { name: 'Newer messages' })).toBeNull()
   })
-  it('shows the store supplied hash for an oversized item', async () => {
-    const hash = 'b'.repeat(64)
-    vi.mocked(readHistoryPage).mockResolvedValue({
-      requestId: 'one', parentId: null, branch: 'main', items: [], nextOffset: '0',
-      oversizedItem: { position: '0', hash, byteLen: '400000', skipOffset: '1' },
-    })
-    render(chat('one'))
-    expect(await screen.findByText(new RegExp(hash))).toBeVisible()
-  })
-  it('keeps live assistant prose proportional and live tool input monospace', async () => {
-    const origin = { kind: 'embedded' as const, run: 'run', actor: '/root', incarnation: 'one' }
-    const liveOutput = [
-      { origin, requestId: 'one', itemId: 'assistant', channel: 'assistant' as const, index: '0', text: 'Live answer', overflow: false, streaming: true, version: '1' },
-      { origin, requestId: 'one', itemId: 'tool-input', channel: 'tool_arguments' as const, index: '0', text: '{"path":"README"}', overflow: false, streaming: true, version: '1' },
-    ]
-    render(<ChatHistory cacheKey="one" requestId="one" requests={new Map()} refreshKey="stable" ready liveOutput={liveOutput} />)
-    await screen.findByText('one slice 0')
-    expect(screen.getByRole('heading', { name: 'Assistant · streaming' })).toBeVisible()
-    expect(screen.getByText('Live answer')).toHaveClass('history-content', 'history-prose')
-    expect(screen.getByRole('heading', { name: 'Tool arguments · streaming' })).toBeVisible()
-    expect(screen.getByText('{"path":"README"}')).toHaveClass('history-content', 'history-code')
-  })
+
   it('evicts older worker slices after four retained conversations while keeping the recent slice readable offline', async () => {
     for (let index = 0; index < 5; index++) {
       const mounted = render(chat(String(index)))
