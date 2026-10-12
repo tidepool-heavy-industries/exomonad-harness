@@ -444,7 +444,7 @@ impl Store {
     pub(crate) fn qualify_model_visible_item(
         &self,
         occurrence: &Occurrence,
-        candidate: &Item,
+        candidate: &crate::provider::ModelVisibleItemCandidate,
     ) -> Result<CheckedModelItemProjection> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -470,9 +470,15 @@ impl Store {
              ON r.id=json_extract(a.payload,'$.ordinal') \
              WHERE a.kind='model_tool_annotation' AND r.kind='model_tool_result' \
              AND a.request_id=r.request_id AND r.request_id=?1 \
-             AND json_extract(r.payload,'$.operation.call')=?2 ORDER BY a.id DESC",
+             AND json_extract(r.payload,'$.operation.call')=?2 \
+             AND r.id=?3 AND a.id=?4",
         )?;
-        let mut rows = query.query(params![operation.request.0, operation.call.0])?;
+        let mut rows = query.query(params![
+            operation.request.0,
+            operation.call.0,
+            candidate.result_event,
+            candidate.annotation_event
+        ])?;
         while let Some(row) = rows.next()? {
             let result: ToolResult = serde_json::from_str(&row.get::<_, String>(1)?)?;
             let annotation: ToolAnnotation = serde_json::from_str(&row.get::<_, String>(2)?)?;
@@ -492,17 +498,17 @@ impl Store {
                 crate::item::ToolKind::Function,
                 &JobOutput::Completed(Ok(replacement)),
             );
-            if authorized != *candidate {
+            if authorized != candidate.item {
                 continue;
             }
             let mut occurrence = occurrence.clone();
             set_overlay(
                 &mut occurrence,
                 &ContextTextSelector::ToolResultText,
-                candidate.0["output"].as_str().ok_or_else(refused)?,
+                candidate.item.0["output"].as_str().ok_or_else(refused)?,
             )?;
             let item = project_bodies(&occurrence)?;
-            if item != *candidate {
+            if item != candidate.item {
                 return Err(refused().into());
             }
             return Ok(CheckedModelItemProjection { item, occurrence });

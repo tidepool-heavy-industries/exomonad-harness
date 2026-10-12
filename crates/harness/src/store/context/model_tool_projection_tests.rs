@@ -38,11 +38,15 @@ fn pruning_requires_the_exact_durable_operation_and_preserves_native_ownership()
         originals.push((operation, occurrence));
     }
     let (operation, occurrence) = &originals[0];
-    let candidate = Item::tool_output(
-        &operation.call,
-        ToolKind::Function,
-        &JobOutput::Completed(Ok(json!("short"))),
-    );
+    let mut candidate = crate::provider::ModelVisibleItemCandidate {
+        item: Item::tool_output(
+            &operation.call,
+            ToolKind::Function,
+            &JobOutput::Completed(Ok(json!("short"))),
+        ),
+        result_event: -1,
+        annotation_event: -1,
+    };
     assert!(matches!(
         store.qualify_model_visible_item(occurrence, &candidate),
         Err(StoreError::Context(ContextError::Replay(
@@ -57,7 +61,8 @@ fn pruning_requires_the_exact_durable_operation_and_preserves_native_ownership()
             &json!({"operation":originals[1].0,"output":originals[1].1.item}),
         )
         .unwrap();
-    store
+    candidate.result_event = foreign;
+    candidate.annotation_event = store
         .record_event(
             Some(&operation.request),
             "model_tool_annotation",
@@ -80,7 +85,8 @@ fn pruning_requires_the_exact_durable_operation_and_preserves_native_ownership()
             &json!({"operation":operation,"output":occurrence.item}),
         )
         .unwrap();
-    store
+    candidate.result_event = result;
+    candidate.annotation_event = store
         .record_event(
             Some(&operation.request),
             "model_tool_annotation",
@@ -93,7 +99,7 @@ fn pruning_requires_the_exact_durable_operation_and_preserves_native_ownership()
         .qualify_model_visible_item(occurrence, &candidate)
         .unwrap()
         .into_parts();
-    assert_eq!(rendered, candidate);
+    assert_eq!(rendered, candidate.item);
     assert_eq!(qualified.origin, occurrence.origin);
     assert_eq!(qualified.hash, occurrence.hash);
     assert_eq!(qualified.output_operation, occurrence.output_operation);
@@ -103,8 +109,43 @@ fn pruning_requires_the_exact_durable_operation_and_preserves_native_ownership()
         Some(occurrence.item.clone())
     );
 
-    let mut forged = candidate;
-    forged.0["call_id"] = json!("other");
+    // An exact selected pair cannot borrow an older valid same-byte annotation.
+    let wrong_result = store
+        .record_event(
+            Some(&operation.request),
+            "model_tool_result",
+            &json!({"operation":originals[1].0,"output":occurrence.item}),
+        )
+        .unwrap();
+    let wrong_annotation = store
+        .record_event(
+            Some(&operation.request),
+            "model_tool_annotation",
+            &json!({"ordinal":wrong_result,"annotation":HookAnnotation::Pruned {
+                replacement:json!("short"), annotation:"same visible bytes".into()
+            }}),
+        )
+        .unwrap();
+    let mut wrong_selection = candidate.clone();
+    wrong_selection.result_event = wrong_result;
+    wrong_selection.annotation_event = wrong_annotation;
+    assert!(matches!(
+        store.qualify_model_visible_item(occurrence, &wrong_selection),
+        Err(StoreError::Context(ContextError::Replay(
+            ContextReplayRejection::InvalidMembership
+        )))
+    ));
+    assert_eq!(
+        store
+            .qualify_model_visible_item(occurrence, &candidate)
+            .unwrap()
+            .into_parts()
+            .0,
+        candidate.item
+    );
+
+    let mut forged = candidate.clone();
+    forged.item.0["call_id"] = json!("other");
     assert!(matches!(
         store.qualify_model_visible_item(occurrence, &forged),
         Err(StoreError::Context(ContextError::Replay(

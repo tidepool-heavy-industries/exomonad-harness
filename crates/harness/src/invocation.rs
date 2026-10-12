@@ -219,7 +219,9 @@ struct CallbackProvider {
     sender: mpsc::Sender<BridgeEvent>,
     store: Arc<Store>,
     after_tool: bool,
-    projections: Mutex<std::collections::HashMap<(RequestId, String), Item>>,
+    projections: Mutex<
+        std::collections::HashMap<(RequestId, String), crate::provider::ModelVisibleItemCandidate>,
+    >,
     acknowledged: Mutex<std::collections::HashSet<crate::model::OperationId>>,
     closed: Arc<AtomicBool>,
     closed_signal: tokio_util::sync::CancellationToken,
@@ -259,7 +261,11 @@ impl CallbackProvider {
 }
 #[async_trait]
 impl Provider for CallbackProvider {
-    fn model_visible_item(&self, request: &RequestId, item: &Item) -> Option<Item> {
+    fn model_visible_item(
+        &self,
+        request: &RequestId,
+        item: &Item,
+    ) -> Option<crate::provider::ModelVisibleItemCandidate> {
         if item.0["type"] != "function_call_output" {
             return None;
         }
@@ -306,7 +312,8 @@ impl Provider for CallbackProvider {
             .await
             .map_err(|_| ProviderError::Tool("hook continuation closed".into()))?;
         let annotation = self.continuation(receive, &admission).await?;
-        self.store
+        let annotation_event = self
+            .store
             .record_event(
                 Some(&operation.request),
                 "model_tool_annotation",
@@ -326,7 +333,11 @@ impl Provider for CallbackProvider {
                 );
                 self.projections.lock().unwrap().insert(
                     (operation.request.clone(), operation.call.0.clone()),
-                    projected,
+                    crate::provider::ModelVisibleItemCandidate {
+                        item: projected,
+                        result_event: ordinal,
+                        annotation_event,
+                    },
                 );
                 Some(annotation)
             }

@@ -12,6 +12,15 @@ use tokio_util::sync::CancellationToken;
 mod failure;
 pub use failure::{MetadataOmission, ToolFailure};
 
+/// A visible edit candidate tied to the exact durable hook selection.
+/// Store qualifies the candidate before it can enter a prepared request.
+#[derive(Clone)]
+pub struct ModelVisibleItemCandidate {
+    pub(crate) item: crate::item::Item,
+    pub(crate) result_event: i64,
+    pub(crate) annotation_event: i64,
+}
+
 /// Maximum number of progress events retained while a provider call runs.
 /// When full, the scheduler drops the newest event rather than blocking work.
 pub const JOB_PROGRESS_CAPACITY: usize = 64;
@@ -395,7 +404,7 @@ pub trait Provider: Send + Sync {
         &self,
         _request: &crate::model::RequestId,
         _item: &crate::item::Item,
-    ) -> Option<crate::item::Item> {
+    ) -> Option<ModelVisibleItemCandidate> {
         None
     }
 
