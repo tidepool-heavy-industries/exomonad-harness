@@ -1697,7 +1697,7 @@ impl Store {
                 |r| r.get(0),
             )?;
             let mut items = Vec::with_capacity(envelopes.len());
-            for (_, hash, json) in &envelopes {
+            for (envelope_id, hash, json) in &envelopes {
                 let item = serde_json::from_str::<Item>(json)?;
                 // Envelopes are untrusted ingress, not a trusted settings writer.
                 // Mark configuration updates delivered below, but never attach
@@ -1710,7 +1710,9 @@ impl Store {
                     "INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)",
                     params![request.0, position, hash],
                 )?;
-                chat::publish(&tx, request, position, &ItemHash(hash.clone()), &item)?;
+                chat::publish_envelope(
+                    &tx, request, position, &ItemHash(hash.clone()), &item, *envelope_id,
+                )?;
                 position += 1;
                 items.push(item);
             }
