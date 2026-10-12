@@ -114,8 +114,8 @@ fn run_history(
         assert!(store.append_provider_done(&issued, &done).unwrap());
         let operation = store.claim(&CallId("capture".into()), &head).unwrap();
         let mut accepted = BTreeMap::<u64, u8>::new();
-        // Boundary arrival occupies position 0; the first capture writes the
-        // authored effort update at position 1. Provider indices are separate.
+        // The authored effort update and boundary arrival occupy two positions
+        // before generated callbacks. Provider indices are separate.
         let mut arrival_positions = BTreeMap::<u64, i64>::new();
         let mut next_arrival_position = 2_i64;
         let mut terminal = None;
