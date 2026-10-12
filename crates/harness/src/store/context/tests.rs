@@ -7,6 +7,30 @@ use crate::{
 
 fn issued_response(store: &Store, head: &RequestId, items: Vec<Item>, model: &str) {
     store
+        .record_replay_turn_for_target(
+            head,
+            &crate::transport::ResponsesRequest {
+                input: vec![],
+                instructions: "test".into(),
+                tools: vec![].into(),
+                tools_allowed: None,
+                model: model.into(),
+                pinned_effort: Effort::Low,
+                session_id: "test".into(),
+            },
+            &crate::transport::ResponsesTurn {
+                response_id: "response".into(),
+                items,
+                usage: Default::default(),
+            },
+            crate::transport::ResponsesRoute::Codex,
+            crate::transport::ResponsesProtocol::Standard,
+        )
+        .unwrap();
+}
+
+fn legacy_response(store: &Store, head: &RequestId, items: Vec<Item>, model: &str) {
+    store
         .record_replay_turn(
             head,
             &crate::transport::ResponsesRequest {
@@ -36,7 +60,14 @@ fn setup(store: &Store) -> (RequestId, OperationId) {
     store.set_effort(&head, Effort::Low).unwrap();
     let operation = store.claim(&CallId("edit".into()), &head).unwrap();
     store
-        .initialize_context_model(&operation.origin, "luna")
+        .initialize_context_target(
+            &operation.origin,
+            &crate::context::ContextProjectionTarget {
+                model: "luna".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
         .unwrap();
     (head, operation)
 }
@@ -347,7 +378,16 @@ fn model_state_is_exact_incarnation_owned() {
         actor: identity.actor.clone(),
         incarnation: identity.incarnation.clone(),
     };
-    store.initialize_context_model(&origin, "luna").unwrap();
+    store
+        .initialize_context_target(
+            &origin,
+            &crate::context::ContextProjectionTarget {
+                model: "luna".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
+        .unwrap();
     store
         .lock()
         .unwrap()
@@ -1289,13 +1329,7 @@ fn closed_opaque_response_conversion_is_rejected_preserving_raw_evidence() {
     let reasoning = Item(json!({"type":"reasoning","encrypted_content":"sealed","summary":[]}));
     let answer = Item(json!({"type":"message","role":"assistant","content":"useful discovery"}));
     store
-        .write_request(
-            &parent,
-            None,
-            "/root",
-            &[reasoning.clone(), answer.clone()],
-            Usage::default(),
-        )
+        .write_request(&parent, None, "/root", &[], Usage::default())
         .unwrap();
     issued_response(
         &store,
@@ -1307,7 +1341,14 @@ fn closed_opaque_response_conversion_is_rejected_preserving_raw_evidence() {
     store.write_request(&head,Some(&parent),"/root",&[Item(json!({"type":"custom_tool_call","call_id":"edit","name":"haskell_sync","input":"edit"}))],Usage::default()).unwrap();
     let operation = store.claim(&CallId("edit".into()), &head).unwrap();
     store
-        .initialize_context_model(&operation.origin, "luna")
+        .initialize_context_target(
+            &operation.origin,
+            &crate::context::ContextProjectionTarget {
+                model: "luna".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
         .unwrap();
     let snapshot = store.begin_context(&operation, &head).unwrap();
     let reference = match &snapshot.document.blocks[0] {
@@ -1405,7 +1446,7 @@ fn blocks_preserve_duplicate_call_order_orphans_and_cut_opaque_groups() {
         .append_operation_output(&orphan, &outside, &parent)
         .unwrap();
     store.append_items(&parent, &items[6..]).unwrap();
-    issued_response(
+    legacy_response(
         &store,
         &parent,
         vec![items[6].clone(), items[8].clone(), items[10].clone()],
@@ -1544,14 +1585,6 @@ fn claim_lineage_stops_at_fork_and_compaction_boundaries() {
 fn staged_effort_is_atomic_preserves_native_prefix_and_consumes_older_pending() {
     let store = Store::memory().unwrap();
     let (head, operation) = setup(&store);
-    store
-        .append_items(
-            &head,
-            &[Item(
-                json!({"type":"reasoning","encrypted_content":"keep opaque continuity"}),
-            )],
-        )
-        .unwrap();
     issued_response(
         &store,
         &head,
@@ -2113,7 +2146,9 @@ fn unclaimed_provider_calls_cannot_borrow_finalize_name_or_another_occurrences_m
                 output: &output(),
                 pending: &[]
             }),
-            Err(StoreError::Context(ContextError::ProtectedGroup))
+            Err(StoreError::Context(ContextError::Replay(
+                ContextReplayRejection::UnownedInvocation { .. }
+            )))
         ));
         assert!(store.context_receipt(&operation).unwrap().is_none());
     }
@@ -2134,7 +2169,9 @@ fn unclaimed_provider_calls_cannot_borrow_finalize_name_or_another_occurrences_m
             output: &output(),
             pending: &[]
         }),
-        Err(StoreError::Context(ContextError::ProtectedGroup))
+        Err(StoreError::Context(ContextError::Replay(
+            ContextReplayRejection::UnownedInvocation { .. }
+        )))
     ));
 }
 

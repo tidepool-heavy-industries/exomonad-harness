@@ -25,7 +25,7 @@ fn call(id: &str, asynchronous: bool) -> Item {
 
 fn record(store: &Store, head: &RequestId, items: Vec<Item>) {
     store
-        .record_replay_turn(
+        .record_replay_turn_for_target(
             head,
             &ResponsesRequest {
                 input: vec![],
@@ -41,6 +41,8 @@ fn record(store: &Store, head: &RequestId, items: Vec<Item>) {
                 items,
                 usage: Default::default(),
             },
+            crate::transport::ResponsesRoute::Codex,
+            crate::transport::ResponsesProtocol::Standard,
         )
         .unwrap();
 }
@@ -57,7 +59,7 @@ fn fixture(store: Store) -> Fixture {
         call("pending", true),
     ];
     store
-        .write_request(&previous, None, "/root", &response, Usage::default())
+        .write_request(&previous, None, "/root", &[], Usage::default())
         .unwrap();
     store.set_effort(&previous, Effort::Low).unwrap();
     record(&store, &previous, response);
@@ -76,12 +78,19 @@ fn fixture(store: Store) -> Fixture {
         call("edit", false),
     ];
     store
-        .write_request(&head, Some(&previous), "/root", &response, Usage::default())
+        .write_request(&head, Some(&previous), "/root", &[], Usage::default())
         .unwrap();
     record(&store, &head, response);
     let edit = store.claim(&CallId("edit".into()), &head).unwrap();
     store
-        .initialize_context_model(&edit.origin, "model-a")
+        .initialize_context_target(
+            &edit.origin,
+            &crate::context::ContextProjectionTarget {
+                model: "model-a".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
         .unwrap();
     let snapshot = store.begin_context(&edit, &head).unwrap();
     Fixture {
@@ -455,6 +464,7 @@ fn downgrade_receipt(store: &Store, operation: &OperationId, replay: bool) {
     let mut candidate: serde_json::Value =
         serde_json::from_str(record["candidate"].as_str().unwrap()).unwrap();
     if replay {
+        candidate.as_array_mut().unwrap().pop();
         for tuple in candidate[0].as_array_mut().unwrap() {
             assert_eq!(tuple.as_array_mut().unwrap().pop(), Some(json!([])));
         }
@@ -584,7 +594,14 @@ fn message_fixture(first: &str, second: &str) -> (Store, ContextSnapshot) {
     store.set_effort(&head, Effort::Low).unwrap();
     let operation = store.claim(&CallId("edit".into()), &head).unwrap();
     store
-        .initialize_context_model(&operation.origin, "model-a")
+        .initialize_context_target(
+            &operation.origin,
+            &crate::context::ContextProjectionTarget {
+                model: "model-a".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
         .unwrap();
     let snapshot = store.begin_context(&operation, &head).unwrap();
     (store, snapshot)

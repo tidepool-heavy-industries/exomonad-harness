@@ -21,6 +21,30 @@ fn call(id: &str) -> Item {
 
 fn record(store: &Store, head: &RequestId, items: Vec<Item>, model: &str) {
     store
+        .record_replay_turn_for_target(
+            head,
+            &ResponsesRequest {
+                input: vec![],
+                instructions: "test".into(),
+                tools: vec![].into(),
+                tools_allowed: None,
+                model: model.into(),
+                pinned_effort: Effort::Low,
+                session_id: "test".into(),
+            },
+            &ResponsesTurn {
+                response_id: "test".into(),
+                items,
+                usage: Default::default(),
+            },
+            crate::transport::ResponsesRoute::Codex,
+            crate::transport::ResponsesProtocol::Standard,
+        )
+        .unwrap();
+}
+
+fn record_legacy(store: &Store, head: &RequestId, items: Vec<Item>, model: &str) {
+    store
         .record_replay_turn(
             head,
             &ResponsesRequest {
@@ -42,6 +66,13 @@ fn record(store: &Store, head: &RequestId, items: Vec<Item>, model: &str) {
 }
 
 fn setup(extra: Vec<Item>) -> (Store, RequestId, OperationId, ContextSnapshot) {
+    setup_with_provenance(extra, false)
+}
+
+fn setup_with_provenance(
+    extra: Vec<Item>,
+    legacy: bool,
+) -> (Store, RequestId, OperationId, ContextSnapshot) {
     let store = Store::memory().unwrap();
     let head = RequestId("response".into());
     let mut items = vec![reasoning(), call("edit")];
@@ -50,11 +81,22 @@ fn setup(extra: Vec<Item>) -> (Store, RequestId, OperationId, ContextSnapshot) {
         .write_request(&head, None, "/root", &[], Usage::default())
         .unwrap();
     store.set_effort(&head, Effort::Low).unwrap();
-    store.append_items(&head, &items).unwrap();
-    record(&store, &head, items, "model-a");
+    if legacy {
+        store.append_items(&head, &items).unwrap();
+        record_legacy(&store, &head, items, "model-a");
+    } else {
+        record(&store, &head, items, "model-a");
+    }
     let operation = store.claim(&CallId("edit".into()), &head).unwrap();
     store
-        .initialize_context_model(&operation.origin, "model-a")
+        .initialize_context_target(
+            &operation.origin,
+            &crate::context::ContextProjectionTarget {
+                model: "model-a".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
         .unwrap();
     let snapshot = store.begin_context(&operation, &head).unwrap();
     (store, head, operation, snapshot)
@@ -343,7 +385,14 @@ fn empty_here_child_without_source_remains_a_valid_frozen_context() {
     assert_eq!(store.request(&head).unwrap().unwrap().parent, None);
     let identity = store.standalone_identity(child.clone());
     store
-        .initialize_context_model(&identity, "gpt-6-luna")
+        .initialize_context_target(
+            &identity,
+            &crate::context::ContextProjectionTarget {
+                model: "gpt-6-luna".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
         .unwrap();
     let context = store.context_request_state(&head, &identity).unwrap();
     assert!(
@@ -390,7 +439,14 @@ fn cross_model_frozen_child_projects_without_losing_source_occurrences_or_claims
         actor: child,
     };
     store
-        .initialize_context_model(&identity, "model-b")
+        .initialize_context_target(
+            &identity,
+            &crate::context::ContextProjectionTarget {
+                model: "model-b".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
         .unwrap();
     let raw_before = store.context_history(&child_head).unwrap();
     let projected = store.context_request_state(&child_head, &identity).unwrap();
@@ -414,9 +470,9 @@ fn cross_model_frozen_child_projects_without_losing_source_occurrences_or_claims
 #[test]
 fn missing_and_conflicting_issuing_models_fail_closed() {
     for conflicting in [false, true] {
-        let (store, head, operation, snapshot) = setup(vec![]);
+        let (store, head, operation, snapshot) = setup_with_provenance(vec![], true);
         if conflicting {
-            record(
+            record_legacy(
                 &store,
                 &head,
                 vec![reasoning(), call("edit")],
@@ -427,24 +483,24 @@ fn missing_and_conflicting_issuing_models_fail_closed() {
         }
         assert!(matches!(
             switch(&store, &snapshot),
-            Err(StoreError::Context(ContextError::OpaqueModel))
+            Err(StoreError::Context(ContextError::Replay(_)))
         ));
         assert!(matches!(
             store.context_request_state(&head, &operation.origin),
-            Err(StoreError::Context(ContextError::OpaqueModel))
+            Err(StoreError::Context(ContextError::Replay(_)))
         ));
     }
 }
 
 #[test]
 fn identical_bytes_do_not_establish_ambiguous_response_origin_membership() {
-    let (store, head, operation, _) = setup(vec![reasoning()]);
+    let (store, head, operation, _) = setup_with_provenance(vec![reasoning()], true);
     // Two equal hashes in the source request cannot be assigned to a response
     // that claims only one of those occurrences.
     store.lock().unwrap().execute("UPDATE events SET payload=json_remove(payload,'$.response.items[2]') WHERE kind='model_turn'", []).unwrap();
     assert!(matches!(
         store.context_request_state(&head, &operation.origin),
-        Err(StoreError::Context(ContextError::OpaqueModel))
+        Err(StoreError::Context(ContextError::Replay(_)))
     ));
 }
 
@@ -467,11 +523,17 @@ fn replay_collision_fixture(
         json!({"type":"custom_tool_call","call_id":"shared","name":"haskell_sync","input":"original A"}),
     );
     let a_items = vec![reasoning(), a_call];
-    store.append_items(&a, &a_items).unwrap();
     record(&store, &a, a_items, "model-a");
     let a_operation = store.claim(&CallId("shared".into()), &a).unwrap();
     store
-        .initialize_context_model(&a_operation.origin, "model-a")
+        .initialize_context_target(
+            &a_operation.origin,
+            &crate::context::ContextProjectionTarget {
+                model: "model-a".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
         .unwrap();
     let same_output = Item(
         json!({"type":"custom_tool_call_output","call_id":"shared","output":"identical result"}),
@@ -549,7 +611,7 @@ fn replay_collision_fixture(
     }
     b_items.push(b_call);
     store
-        .write_request(&b, Some(&dropped.head), "/root", &b_items, Usage::default())
+        .write_request(&b, Some(&dropped.head), "/root", &[], Usage::default())
         .unwrap();
     record(&store, &b, b_items, "model-b");
     let b_operation = store.claim(&CallId("shared".into()), &b).unwrap();
@@ -726,6 +788,14 @@ fn cut_fixture(earlier_pending: bool) -> CutFixture {
 }
 
 fn cut_fixture_with_reasoning(earlier_pending: bool, visible: bool, reasoning: Item) -> CutFixture {
+    try_cut_fixture_with_reasoning(earlier_pending, visible, reasoning).unwrap()
+}
+
+fn try_cut_fixture_with_reasoning(
+    earlier_pending: bool,
+    visible: bool,
+    reasoning: Item,
+) -> Result<CutFixture> {
     use crate::checkpoint::CheckpointChild;
     let store = Store::memory().unwrap();
     let initial = RequestId("cut-input".into());
@@ -756,7 +826,7 @@ fn cut_fixture_with_reasoning(earlier_pending: bool, visible: bool, reasoning: I
         Item(json!({"type":"message","role":"assistant","content":"excluded tail"})),
     ]);
     store
-        .write_request(&source, Some(&initial), "/root", &items, Usage::default())
+        .write_request(&source, Some(&initial), "/root", &[], Usage::default())
         .unwrap();
     record(&store, &source, items, "model-a");
     store.lock().unwrap().execute("INSERT INTO agents(path,head_request,contract,fork_source,state,created_at) VALUES('/root',?1,'{}','{}','active',0)", [&source.0]).unwrap();
@@ -769,34 +839,39 @@ fn cut_fixture_with_reasoning(earlier_pending: bool, visible: bool, reasoning: I
         .unwrap();
     let parent = AgentPath("/root".into());
     let path = AgentPath("/root/child".into());
-    let (child, _) = store
-        .attach_checkpoint_child(
-            cuts.before_call(),
-            CheckpointChild {
-                path: &path,
-                parent: &parent,
-                contract: &json!({}),
-                checkout: &json!({}),
-                task: None,
-                target: &crate::context::ContextProjectionTarget {
-                    model: "model-b".into(),
-                    route: crate::transport::ResponsesRoute::Codex,
-                    protocol: crate::transport::ResponsesProtocol::Standard,
-                },
+    let (child, _) = store.attach_checkpoint_child(
+        cuts.before_call(),
+        CheckpointChild {
+            path: &path,
+            parent: &parent,
+            contract: &json!({}),
+            checkout: &json!({}),
+            task: None,
+            target: &crate::context::ContextProjectionTarget {
+                model: "model-b".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        },
+    )?;
+    let identity = store.standalone_identity(path);
+    store
+        .initialize_context_target(
+            &identity,
+            &crate::context::ContextProjectionTarget {
+                model: "model-b".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )
         .unwrap();
-    let identity = store.standalone_identity(path);
-    store
-        .initialize_context_model(&identity, "model-b")
-        .unwrap();
-    CutFixture {
+    Ok(CutFixture {
         store,
         source,
         cuts,
         child,
         identity,
-    }
+    })
 }
 
 #[test]
@@ -817,7 +892,7 @@ fn authenticated_cut_survives_commit_freeze_and_deferred_child_without_later_arr
             &head,
             child.head_request.as_ref(),
             &child.path.0,
-            &items,
+            &[],
             Usage::default(),
         )
         .unwrap();
@@ -887,7 +962,14 @@ fn authenticated_cut_survives_commit_freeze_and_deferred_child_without_later_arr
         .unwrap();
     let grandchild_identity = store.standalone_identity(path);
     store
-        .initialize_context_model(&grandchild_identity, "model-b")
+        .initialize_context_target(
+            &grandchild_identity,
+            &crate::context::ContextProjectionTarget {
+                model: "model-b".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
         .unwrap();
     let projected = store
         .context_request_state(
@@ -956,7 +1038,7 @@ fn partial_envelope_needs_selected_checkpoint_ancestry_and_exact_prefix_origins(
     }
     assert!(matches!(
         store.context_request_state(&copied, &identity),
-        Err(StoreError::Context(ContextError::OpaqueModel))
+        Err(StoreError::Context(ContextError::Replay(_)))
     ));
     // The real cut is present elsewhere in Store, but not on this lineage.
     let equal = RequestId("equal-byte-prefix".into());
@@ -971,7 +1053,7 @@ fn partial_envelope_needs_selected_checkpoint_ancestry_and_exact_prefix_origins(
         .unwrap();
     assert!(matches!(
         store.context_request_state(&equal, &identity),
-        Err(StoreError::Context(ContextError::OpaqueModel))
+        Err(StoreError::Context(ContextError::Replay(_)))
     ));
     // A checkpoint on the lineage cannot excuse a hole or reintroduced suffix.
     let hole = RequestId("cut-prefix-hole".into());
@@ -1002,7 +1084,7 @@ fn partial_envelope_needs_selected_checkpoint_ancestry_and_exact_prefix_origins(
     }
     assert!(matches!(
         store.context_request_state(&hole, &identity),
-        Err(StoreError::Context(ContextError::OpaqueModel))
+        Err(StoreError::Context(ContextError::Replay(_)))
     ));
     let suffix = request_occurrences(&store.lock().unwrap(), &source)
         .unwrap()
@@ -1017,55 +1099,41 @@ fn partial_envelope_needs_selected_checkpoint_ancestry_and_exact_prefix_origins(
     }
     assert!(matches!(
         store.context_request_state(child.head_request.as_ref().unwrap(), &identity),
-        Err(StoreError::Context(ContextError::OpaqueModel))
+        Err(StoreError::Context(ContextError::Replay(_)))
     ));
 }
 
 #[test]
 fn captured_prefix_keeps_prior_pending_call_and_deferred_boundary_refusals() {
     use crate::checkpoint::CheckpointChild;
-    let fixture = cut_fixture(true);
     assert!(matches!(
-        fixture.store.context_request_state(
-            fixture.child.head_request.as_ref().unwrap(),
-            &fixture.identity
-        ),
+        try_cut_fixture_with_reasoning(true, true, reasoning()),
         Err(StoreError::Context(ContextError::OpaqueModel))
     ));
     let fixture = cut_fixture(false);
     let parent = AgentPath("/root".into());
     let path = AgentPath("/root/deferred".into());
-    let (child, _) = fixture
-        .store
-        .attach_checkpoint_child(
-            fixture.cuts.deferred(),
-            CheckpointChild {
-                path: &path,
-                parent: &parent,
-                contract: &json!({}),
-                checkout: &json!({}),
-                task: None,
-                target: &crate::context::ContextProjectionTarget {
-                    model: "model-b".into(),
-                    route: crate::transport::ResponsesRoute::Codex,
-                    protocol: crate::transport::ResponsesProtocol::Standard,
-                },
+    let refused = fixture.store.attach_checkpoint_child(
+        fixture.cuts.deferred(),
+        CheckpointChild {
+            path: &path,
+            parent: &parent,
+            contract: &json!({}),
+            checkout: &json!({}),
+            task: None,
+            target: &crate::context::ContextProjectionTarget {
+                model: "model-b".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
             },
-        )
-        .unwrap();
-    let identity = fixture.store.standalone_identity(path);
-    fixture
-        .store
-        .initialize_context_model(&identity, "model-b")
-        .unwrap();
+        },
+    );
     assert!(matches!(
-        fixture
-            .store
-            .context_request_state(child.head_request.as_ref().unwrap(), &identity),
+        refused,
         Err(StoreError::Context(ContextError::OpaqueModel))
     ));
+    assert!(fixture.store.agent(&path).unwrap().is_none());
 }
-
 #[test]
 fn authenticated_metadata_only_cut_is_omitted_but_full_or_malformed_groups_refuse() {
     for content in [
@@ -1112,12 +1180,8 @@ fn authenticated_metadata_only_cut_is_omitted_but_full_or_malformed_groups_refus
         ),
         Item(json!({"type":"reasoning","summary":[],"encrypted_content":7})),
     ] {
-        let fixture = cut_fixture_with_reasoning(false, false, item);
         assert!(matches!(
-            fixture.store.context_request_state(
-                fixture.child.head_request.as_ref().unwrap(),
-                &fixture.identity
-            ),
+            try_cut_fixture_with_reasoning(false, false, item),
             Err(StoreError::Context(ContextError::Portability(_)))
         ));
     }
@@ -1127,12 +1191,19 @@ fn authenticated_metadata_only_cut_is_omitted_but_full_or_malformed_groups_refus
         json!({"type":"reasoning","summary":[],"content":[],"encrypted_content":"continuity"}),
     )];
     store
-        .write_request(&head, None, "/root", &items, Usage::default())
+        .write_request(&head, None, "/root", &[], Usage::default())
         .unwrap();
     record(&store, &head, items, "model-a");
     let identity = store.standalone_identity(AgentPath("/root".into()));
     store
-        .initialize_context_model(&identity, "model-b")
+        .initialize_context_target(
+            &identity,
+            &crate::context::ContextProjectionTarget {
+                model: "model-b".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
         .unwrap();
     assert!(matches!(
         store.context_request_state(&head, &identity),
@@ -1197,7 +1268,14 @@ fn genuine_saved_reference_from_unrelated_checkpoint_cannot_authorize_model_swit
     }
     let operation = store.claim(&CallId("edit".into()), &head).unwrap();
     store
-        .initialize_context_model(&operation.origin, "model-a")
+        .initialize_context_target(
+            &operation.origin,
+            &crate::context::ContextProjectionTarget {
+                model: "model-a".into(),
+                route: crate::transport::ResponsesRoute::Codex,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
         .unwrap();
     let snapshot = store.begin_context(&operation, &head).unwrap();
     let mut document = snapshot.document.clone();
