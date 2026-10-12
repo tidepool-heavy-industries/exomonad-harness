@@ -1121,6 +1121,21 @@ mod tests {
             store.embedded_agent_head(conversation.identity()).unwrap(),
             Some(receipt.request.clone())
         );
+        let frontier = store
+            .embedded_round_frontier(conversation.identity())
+            .unwrap();
+        let pending_document = store
+            .read_context(
+                frontier
+                    .pending_head
+                    .as_ref()
+                    .or(frontier.settled_head.as_ref())
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(pending_document.blocks.iter().any(|block| matches!(block,
+            crate::context::ContextBlock::Text { reference: Some(r), text, .. }
+                if r == reference && text == "memory")));
         let (stale_snapshot, stale_draft) =
             initial_context_edit(&store, &receipt, reference, 1, "stale edit").unwrap();
         let committed =
@@ -1249,7 +1264,16 @@ mod tests {
         assert!(foreign_document.blocks.iter().any(|block| matches!(block,
             crate::context::ContextBlock::Text { reference: Some(r), text, .. }
                 if Some(r) == other.authored_reference.as_ref() && text == "foreign memory")));
-        let document = store.read_context(&first_head.unwrap()).unwrap();
+        let frontier = store.embedded_round_frontier(first.identity()).unwrap();
+        let document = store
+            .read_context(
+                frontier
+                    .pending_head
+                    .as_ref()
+                    .or(frontier.settled_head.as_ref())
+                    .unwrap(),
+            )
+            .unwrap();
         assert!(document.blocks.iter().any(|block| matches!(block,
             crate::context::ContextBlock::Text { reference: Some(r), text, .. }
                 if Some(r) == receipt.authored_reference.as_ref() && text == "memory")));
