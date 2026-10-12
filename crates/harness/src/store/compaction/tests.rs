@@ -183,11 +183,7 @@ fn fresh_server_membership_keeps_raw_occurrences_separate_from_retained_sources(
     let occurrences = context::request_occurrences(&c, &target).unwrap();
     assert_eq!(
         envelope.origins,
-        vec![
-            occurrences[1].origin.clone(),
-            occurrences[2].origin.clone(),
-            occurrences[3].origin.clone()
-        ]
+        vec![occurrences[1].origin.clone(), occurrences[2].origin.clone()]
     );
     assert!(
         envelope
@@ -195,14 +191,15 @@ fn fresh_server_membership_keeps_raw_occurrences_separate_from_retained_sources(
             .iter()
             .all(|origin| origin.request == provider)
     );
+    assert_eq!(occurrences[3].origin.request.0, "source");
     assert_eq!(occurrences[4].origin.request.0, "source");
-    assert_eq!(occurrences[5].origin.request.0, "source");
-    assert_ne!(occurrences[3].origin, occurrences[5].origin);
-    assert_eq!(occurrences[3].item, occurrences[5].item);
     let raw = context::request_occurrences(&c, &provider).unwrap();
     assert_eq!(raw.len(), 4);
     assert_eq!(raw[2].item, filtered_user);
     assert!(!envelope.origins.contains(&raw[2].origin));
+    assert!(!envelope.origins.contains(&raw[3].origin));
+    assert_ne!(raw[3].origin, occurrences[4].origin);
+    assert_eq!(raw[3].item, occurrences[4].item);
     let record: Record = serde_json::from_str(
         &c.query_row(
             "SELECT payload FROM events WHERE kind='compaction'",
@@ -215,7 +212,7 @@ fn fresh_server_membership_keeps_raw_occurrences_separate_from_retained_sources(
     assert!(record.evidence.is_none());
     let exact = record.exact.unwrap();
     assert_eq!(exact.provider_request, provider);
-    assert_eq!(exact.selected, vec![(1, 0), (2, 1), (3, 3)]);
+    assert_eq!(exact.selected, vec![(1, 0), (2, 1)]);
     assert_eq!(
         c.query_row(
             "SELECT COUNT(*) FROM claims WHERE request_id='source'",

@@ -439,9 +439,8 @@ mod tests {
             .iter()
             .filter(|item| item.0.get("type").and_then(|v| v.as_str()) == Some("function_call"))
             .collect();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].0["name"], "changed");
-        assert_eq!(calls[1], &call);
+        assert_eq!(calls, vec![&call]);
+        assert_eq!(window.generated, vec![(1, 2)]);
         assert!(
             window
                 .retained
