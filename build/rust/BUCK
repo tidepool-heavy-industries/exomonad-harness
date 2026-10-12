@@ -1,0 +1,9 @@
+load("@prelude//:rules.bzl", "export_file")
+load("//build/rust:profiles.bzl", "rust_binary", "rust_library", "rust_test")
+
+# Small native targets expose the effective rule/toolchain argv for each kind.
+rust_library(name = "profile_probe_library", crate = "profile_probe_library", crate_root = "profile_probe.rs", srcs = ["profile_probe.rs"], edition = "2024")
+rust_binary(name = "profile_probe_binary", crate = "profile_probe_binary", crate_root = "profile_probe.rs", srcs = ["profile_probe.rs"], deps = [":profile_probe_library"], edition = "2024")
+rust_test(name = "profile_probe_tests", crate = "profile_probe_tests", crate_root = "profile_probe.rs", srcs = ["profile_probe.rs"], deps = [":profile_probe_library"], edition = "2024")
+
+export_file(name = "profile_policy_source", src = "profiles.bzl", visibility = ["PUBLIC"])

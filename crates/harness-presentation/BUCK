@@ -1,0 +1,44 @@
+load("@prelude//:rules.bzl", "genrule")
+load("//build/rust:profiles.bzl", "rust_library", "rust_test")
+
+PRESENTATION_DEPS = [
+    "//third-party/rust:roxmltree",
+    "//third-party/rust:schemars",
+    "//third-party/rust:serde",
+    "//third-party/rust:serde_json",
+]
+
+PRESENTATION_SRCS = glob(["src/**/*.rs"], exclude = ["src/tests.rs", "src/**/*_tests.rs", "src/**/tests/**"])
+PRESENTATION_SOURCE_INPUTS = {source: source for source in PRESENTATION_SRCS}
+PRESENTATION_SOURCE_INPUTS.update({
+    "Cargo.toml": "Cargo.toml",
+    "BUCK": "BUCK",
+    "build/rust/profiles.bzl": "//build/rust:profile_policy_source",
+})
+
+genrule(
+    name = "browser_source_identity",
+    srcs = PRESENTATION_SOURCE_INPUTS,
+    out = "browser-source-identity.json",
+    bash = "$(exe toolchains//:python) $(location //scripts:browser_source_identity_issuer) \"$SRCDIR\" \"$OUT\"",
+    visibility = ["PUBLIC"],
+)
+
+rust_library(
+    name = "harness_presentation",
+    crate = "harness_presentation",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    srcs = PRESENTATION_SRCS,
+    deps = PRESENTATION_DEPS,
+    visibility = ["PUBLIC"],
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = "harness_presentation",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    srcs = glob(["src/**/*.rs"]),
+    deps = PRESENTATION_DEPS,
+)

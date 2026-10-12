@@ -1,4 +1,4 @@
-load("@prelude//:rules.bzl", "rust_test")
+load("//build/rust:profiles.bzl", "rust_test")
 
 def integration_test(name, deps, resources = [], run_env = {}, extra_srcs = []):
     rust_test(

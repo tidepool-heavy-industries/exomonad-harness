@@ -1,0 +1,42 @@
+load("@prelude//:rules.bzl", "genrule")
+load("//build/rust:profiles.bzl", "rust_library", "rust_test")
+
+SCHEMA_SRCS = glob(["src/**/*.rs"], exclude = ["src/**/*_tests.rs", "src/**/tests.rs", "src/**/tests/**"])
+SCHEMA_DEPS = [
+    "//third-party/rust:serde_json",
+    "//third-party/rust:thiserror",
+]
+
+rust_library(
+    name = "harness_schema",
+    crate = "harness_schema",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    srcs = SCHEMA_SRCS,
+    deps = SCHEMA_DEPS,
+    visibility = ["PUBLIC"],
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = "harness_schema",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    srcs = glob(["src/**/*.rs"]),
+    deps = SCHEMA_DEPS + ["//third-party/rust:schemars"],
+)
+
+SCHEMA_SOURCE_INPUTS = {source: source for source in SCHEMA_SRCS}
+SCHEMA_SOURCE_INPUTS.update({
+    "Cargo.toml": "Cargo.toml",
+    "BUCK": "BUCK",
+    "profile-policy.bzl": "//build/rust:profile_policy_source",
+})
+
+genrule(
+    name = "browser_source_identity",
+    srcs = SCHEMA_SOURCE_INPUTS,
+    out = "schema-source-identity.json",
+    bash = "$(exe toolchains//:python) $(location //scripts:browser_source_identity_issuer) \"$SRCDIR\" \"$OUT\"",
+    visibility = ["PUBLIC"],
+)

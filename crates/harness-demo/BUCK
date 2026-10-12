@@ -1,4 +1,4 @@
-load("@prelude//:rules.bzl", "rust_binary", "rust_test")
+load("//build/rust:profiles.bzl", "rust_binary", "rust_test")
 load("//:rust_tests.bzl", "integration_test")
 
 DEMO_DEPS = [
