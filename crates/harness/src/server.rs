@@ -98,7 +98,7 @@ pub enum ClientCommand {
 
 /// Exact host address supplied by the authenticated operator. The host still
 /// validates live ownership and admission; this envelope grants no authority.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum HostCommand {
     Input {
@@ -484,6 +484,7 @@ impl ServerControl {
     /// Receipts describe admission or control routing, never command
     /// completion. Durable input records remain in the owning store.
     pub fn publish_command_receipt(&self, receipt: CommandReceipt) -> ServerEvent {
+        let receipt = browser_contract::CommandReceipt::from(&receipt);
         let mut next_sequence = self.next_sequence.lock().expect("sequence lock poisoned");
         let mut snapshot = self.snapshot.write().expect("snapshot lock poisoned");
         if let Some(existing) = snapshot
@@ -1018,6 +1019,7 @@ async fn websocket_session(
                                 }
                             }
                             WsClientFrame::HostCommand { operation_id, command } => {
+                                let command = command.into();
                                 let reply = match retain_host_command(&state, operation_id, &command) {
                                     Ok(()) => WsServerFrame::CommandAccepted { command_id: operation_id.to_string() },
                                     Err((code,reason)) => WsServerFrame::CommandRefused { operation_id: Some(operation_id), code, reason },
