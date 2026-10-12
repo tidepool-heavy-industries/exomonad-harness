@@ -19,9 +19,6 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-#[cfg(test)]
-use harness::transport::ResponsesRequest;
-
 const QUEUE_CAPACITY: usize = 32;
 
 #[derive(Debug)]
