@@ -1152,15 +1152,64 @@ mod tests {
         }
     }
 
+    fn prepare_test_request<T: ResponsesTransport + ?Sized>(
+        receiver: &T,
+        local: &RequestId,
+        dto: ResponsesRequest,
+    ) -> Result<PreparedProviderRequest, TransportError> {
+        let selection = receiver.prepare_submission()?;
+        let store = Store::memory().unwrap();
+        store.create_request(local, None, "/root").unwrap();
+        let occurrences = vec![None; dto.input.len()];
+        store
+            .prepare_provider_request(
+                local,
+                local,
+                dto,
+                &occurrences,
+                None,
+                selection,
+                crate::store::ProviderRequestPurpose::Inference,
+            )
+            .map_err(|error| {
+                TransportError::Stream(format!("replay fixture preparation refused: {error}"))
+            })
+    }
+
+    async fn submit_test_request<T: ResponsesTransport + ?Sized>(
+        receiver: &T,
+        dto: ResponsesRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let local = RequestId(format!("fixture-{}", uuid::Uuid::new_v4()));
+        let prepared = prepare_test_request(receiver, &local, dto)?;
+        receiver.create(prepared).await
+    }
+
+    async fn stream_test_request<T: ResponsesTransport + ?Sized>(
+        receiver: &T,
+        local: &RequestId,
+        dto: ResponsesRequest,
+        sink: tokio::sync::mpsc::Sender<StreamEvent>,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let prepared = prepare_test_request(receiver, local, dto)?;
+        receiver.create_streaming(prepared, sink).await
+    }
+
     #[tokio::test]
     async fn transport_records_requests_and_consumes_turns_in_order() {
         let replay = ReplayTransport::scripted_codex_standard([turn("r1"), turn("r2")]);
         assert_eq!(
-            replay.create(request("s1")).await.unwrap().response_id,
+            submit_test_request(&replay, request("s1"))
+                .await
+                .unwrap()
+                .response_id,
             "r1"
         );
         assert_eq!(
-            replay.create(request("s2")).await.unwrap().response_id,
+            submit_test_request(&replay, request("s2"))
+                .await
+                .unwrap()
+                .response_id,
             "r2"
         );
         assert_eq!(replay.queue_remaining(), 0);
@@ -1172,7 +1221,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["s1", "s2"]
         );
-        assert!(replay.create(request("s3")).await.is_err());
+        assert!(submit_test_request(&replay, request("s3")).await.is_err());
         assert_eq!(replay.recorded_requests().len(), 3);
     }
 
@@ -1187,10 +1236,10 @@ mod tests {
             tokio::spawn(async move {
                 let mut ids = Vec::new();
                 for index in 1..=2 {
-                    let turn = replay
-                        .create(request(&format!("session-{index}")))
-                        .await
-                        .unwrap();
+                    let turn =
+                        submit_test_request(replay.as_ref(), request(&format!("session-{index}")))
+                            .await
+                            .unwrap();
                     ids.push(turn.response_id);
                 }
                 ids
@@ -1230,12 +1279,16 @@ mod tests {
         let running = {
             let replay = replay.clone();
             tokio::spawn(async move {
-                let first = replay.create(request("first-session")).await.unwrap();
+                let first = submit_test_request(replay.as_ref(), request("first-session"))
+                    .await
+                    .unwrap();
                 let mut second_request = request("second-session");
-                second_request
-                    .input
-                    .push(Item(json!({"type":"message","content":"extra"})));
-                let second = replay.create(second_request).await.unwrap();
+                second_request.input.push(Item(
+                    json!({"type":"message","role":"user","content":"extra"}),
+                ));
+                let second = submit_test_request(replay.as_ref(), second_request)
+                    .await
+                    .unwrap();
                 [first.usage.input_tokens, second.usage.input_tokens]
             })
         };
@@ -1372,7 +1425,7 @@ mod tests {
             mismatched_session,
             mismatched_allowed,
         ] {
-            assert!(match_probe.create(mismatched).await.is_err());
+            assert!(submit_test_request(&match_probe, mismatched).await.is_err());
             assert_eq!(match_probe.turns_remaining(), 2);
         }
 
@@ -1512,8 +1565,7 @@ mod tests {
         let provider = Arc::new(ReplayProvider::new(reopened, &root).unwrap());
         let local = RequestId("failure-local".into());
         let (sink, _stream) = tokio::sync::mpsc::channel(4);
-        provider
-            .create_streaming_for_request(&local, request("failure-session"), sink)
+        stream_test_request(&provider, &local, request("failure-session"), sink)
             .await
             .unwrap();
         let mut replay_operation = operation.clone();
@@ -1631,8 +1683,7 @@ mod tests {
         let provider = ReplayProvider::new(store.clone(), &root).unwrap();
         let local = RequestId("replay-direct".into());
         let (sink, _stream) = tokio::sync::mpsc::channel(4);
-        provider
-            .create_streaming_for_request(&local, request("terminal-session"), sink)
+        stream_test_request(&provider, &local, request("terminal-session"), sink)
             .await
             .unwrap();
         let context = call_context(call);
@@ -1699,8 +1750,7 @@ mod tests {
             let provider = Arc::new(ReplayProvider::new(store, &root).unwrap());
             let local = RequestId("replay-direct".into());
             let (sink, _stream) = tokio::sync::mpsc::channel(4);
-            provider
-                .create_streaming_for_request(&local, request("terminal-session"), sink)
+            stream_test_request(&provider, &local, request("terminal-session"), sink)
                 .await
                 .unwrap();
             let context = call_context(call.clone());
@@ -1843,14 +1893,14 @@ mod tests {
         assert!(!store.has_completed_output(&parent_op).unwrap());
         let provider = ReplayProvider::new(store, &root).unwrap();
         let (sink, _stream) = tokio::sync::mpsc::channel(4);
-        provider
-            .create_streaming_for_request(
-                &RequestId("replay-direct".into()),
-                request("terminal-session"),
-                sink,
-            )
-            .await
-            .unwrap();
+        stream_test_request(
+            &provider,
+            &RequestId("replay-direct".into()),
+            request("terminal-session"),
+            sink,
+        )
+        .await
+        .unwrap();
         let result = provider
             .retained_output(
                 "echo",
@@ -1873,8 +1923,7 @@ mod tests {
         let provider = ReplayProvider::new(store, &root).unwrap();
         let local = RequestId("replay-direct".into());
         let (sink, _stream) = tokio::sync::mpsc::channel(4);
-        provider
-            .create_streaming_for_request(&local, request("terminal-session"), sink)
+        stream_test_request(&provider, &local, request("terminal-session"), sink)
             .await
             .unwrap();
         let mut context = call_context(call);
@@ -1887,9 +1936,7 @@ mod tests {
         );
         let (sink, _stream) = tokio::sync::mpsc::channel(4);
         assert!(matches!(
-            provider
-                .create_streaming_for_request(&local, request("terminal-session"), sink)
-                .await,
+            stream_test_request(&provider, &local, request("terminal-session"), sink).await,
             Err(TransportError::ReplayRequestReuse { .. })
         ));
         assert_eq!(provider.turns_remaining(), 0);
@@ -1974,8 +2021,7 @@ mod tests {
         assert_eq!(provider.output_cut(&other, &output).unwrap(), None);
         let local = RequestId("replay-direct".into());
         let (sink, _stream) = tokio::sync::mpsc::channel(4);
-        provider
-            .create_streaming_for_request(&local, first, sink)
+        stream_test_request(&provider, &local, first, sink)
             .await
             .unwrap();
         let local = call_context(original.call.clone()).operation.unwrap();
@@ -2091,8 +2137,7 @@ mod tests {
             let provider = ReplayProvider::new(store, &root).unwrap();
             let local = RequestId("replay-direct".into());
             let (sink, _stream) = tokio::sync::mpsc::channel(4);
-            provider
-                .create_streaming_for_request(&local, first, sink)
+            stream_test_request(&provider, &local, first, sink)
                 .await
                 .unwrap();
             let before = call_context(CallId("before".into())).operation.unwrap();
@@ -2155,14 +2200,14 @@ mod tests {
         let original = provider.calls.keys().next().unwrap().clone();
         provider.calls.get_mut(&original).unwrap().name = "wait_agent".into();
         let (sink, _stream) = tokio::sync::mpsc::channel(4);
-        provider
-            .create_streaming_for_request(
-                &RequestId("replay-direct".into()),
-                request("terminal-session"),
-                sink,
-            )
-            .await
-            .unwrap();
+        stream_test_request(
+            &provider,
+            &RequestId("replay-direct".into()),
+            request("terminal-session"),
+            sink,
+        )
+        .await
+        .unwrap();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(1),
             provider.retained_output(
@@ -2383,8 +2428,7 @@ mod tests {
         ] {
             let local = RequestId(local.into());
             let (sink, _stream) = tokio::sync::mpsc::channel(4);
-            provider
-                .create_streaming_for_request(&local, request(session), sink)
+            stream_test_request(&provider, &local, request(session), sink)
                 .await
                 .unwrap();
             let mut context = call_context(CallId("ambiguous-id".into()));
