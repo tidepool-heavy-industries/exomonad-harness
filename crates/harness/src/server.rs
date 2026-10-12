@@ -3017,7 +3017,7 @@ mod tests {
             Some(TEST_SECRET),
         );
         assert!(handshake.starts_with("HTTP/1.1 101"), "{handshake}");
-        assert_eq!(read_ws_text(&mut socket)["snapshot"]["seq"], 0);
+        assert_eq!(read_ws_text(&mut socket)["snapshot"]["seq"], "0");
         tokio::time::timeout(Duration::from_secs(2), hooks.before_receive.notified())
             .await
             .unwrap();
@@ -3052,7 +3052,7 @@ mod tests {
                 });
             }
             emit(ModelOutputUpdate::Stopped);
-            publisher.snapshot.read().unwrap().seq
+            publisher.snapshot.read().unwrap().seq.get()
         });
         // Completion must not depend on the paused subscriber. The receive gate
         // guarantees true broadcast overflow rather than relying on TCP buffers.
@@ -3070,7 +3070,7 @@ mod tests {
         hooks.resume_snapshot.notify_one();
         let recovered = read_ws_text(&mut socket);
         assert_eq!(recovered["type"], "snapshot");
-        assert_eq!(recovered["snapshot"]["seq"], watermark);
+        assert_eq!(recovered["snapshot"]["seq"], watermark.to_string());
         let retained = &recovered["snapshot"]["liveOutput"];
         assert_eq!(retained.as_array().unwrap().len(), 1);
         assert_eq!(retained[0]["requestId"], "covered");
@@ -3113,12 +3113,12 @@ mod tests {
         {
             let event = read_ws_text(&mut socket);
             assert_eq!(event["type"], "event");
-            assert_eq!(event["event"]["seq"], watermark + offset as u64 + 1);
+            assert_eq!(event["event"]["seq"], (watermark + offset as u64 + 1).to_string());
             assert_eq!(event["event"]["event"]["kind"], kind);
             assert_eq!(event["event"]["event"]["value"]["requestId"], "later");
         }
         let authoritative = control.snapshot.read().unwrap().clone();
-        assert_eq!(authoritative.seq, watermark + 3);
+        assert_eq!(authoritative.seq.get(), watermark + 3);
         assert_eq!(hooks.lagged.load(Ordering::SeqCst), 1);
         assert_eq!(authoritative.live_output[1].text, "after");
         assert!(!authoritative.live_output[1].streaming);
