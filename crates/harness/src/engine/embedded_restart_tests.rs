@@ -160,6 +160,152 @@ pub(super) fn authorize_exact_restart(store: &Store, identity: &HostIdentity) {
 fn incoming() -> tokio::sync::mpsc::UnboundedReceiver<DurableMailboxWake> {
     tokio::sync::mpsc::unbounded_channel().1
 }
+
+#[tokio::test]
+async fn embedded_restart_retains_validated_finalize_without_provider_or_job() {
+    let path = path();
+    let identity = identity();
+    let schema = json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false});
+    let final_call = Item(json!({
+        "type":"function_call", "call_id":"final-restart", "name":"finalize",
+        "arguments":{"result":{"answer":"ready"}}
+    }));
+    let head;
+    let retained;
+    {
+        let store = Arc::new(Store::open(&path).unwrap());
+        store.bind_embedded_actor(&identity, None).unwrap();
+        let (engine, inputs) = engine(
+            store.clone(),
+            &identity,
+            vec![Ok(ResponsesTurn {
+                response_id: "validated-final-restart".into(),
+                items: vec![final_call.clone()],
+                usage: Usage::default(),
+            })],
+        );
+        let (_cancel, cancel) = watch::channel(false);
+        let completion = engine
+            .run_with_reply_schema(
+                None,
+                vec![Item(
+                    json!({"type":"message","role":"user","content":"finish"}),
+                )],
+                cancel,
+                tokio::sync::mpsc::unbounded_channel().1,
+                schema.clone(),
+            )
+            .await
+            .unwrap();
+        head = completion.head_request;
+        assert_eq!(inputs.lock().unwrap().len(), 1);
+        assert_eq!(completion.turn.items, vec![final_call.clone()]);
+        assert!(store.claims_on(&head).unwrap().is_empty());
+        retained = store.items(&head).unwrap();
+        // Engine has sealed completion; the host has not published its frontier.
+        assert_eq!(
+            store
+                .embedded_round_frontier(&identity)
+                .unwrap()
+                .pending_head,
+            Some(head.clone())
+        );
+        assert!(
+            store
+                .agent(&identity.actor)
+                .unwrap()
+                .unwrap()
+                .head_request
+                .is_none()
+        );
+    }
+    let store = Arc::new(Store::open(&path).unwrap());
+    authorize_exact_restart(&store, &identity);
+    let (resumed, inputs) = engine(store.clone(), &identity, vec![]);
+    let (_cancel, cancel) = watch::channel(false);
+    let completion = resumed
+        .run_with_reply_schema(
+            None,
+            vec![],
+            cancel,
+            tokio::sync::mpsc::unbounded_channel().1,
+            schema,
+        )
+        .await
+        .unwrap();
+    assert_eq!(completion.head_request, head);
+    assert_eq!(completion.turn.items, vec![final_call]);
+    assert_eq!(store.items(&head).unwrap(), retained);
+    assert!(store.claims_on(&head).unwrap().is_empty());
+    assert!(inputs.lock().unwrap().is_empty());
+    assert!(
+        store
+            .settle_embedded_round(&identity, None, &head, EmbeddedRoundOutcome::Completed)
+            .unwrap()
+    );
+    drop(resumed);
+    drop(store);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn embedded_restart_refuses_unvalidated_finalize_with_same_name() {
+    let store = Arc::new(Store::memory().unwrap());
+    let identity = identity();
+    store.bind_embedded_actor(&identity, None).unwrap();
+    let final_call = Item(json!({
+        "type":"function_call", "call_id":"unvalidated-final", "name":"finalize",
+        "arguments":{"result":{"answer":7}}
+    }));
+    let (first_engine, inputs) = engine(
+        store.clone(),
+        &identity,
+        vec![Ok(ResponsesTurn {
+            response_id: "unvalidated-final-restart".into(),
+            items: vec![final_call.clone()],
+            usage: Usage::default(),
+        })],
+    );
+    let (_cancel, cancel) = watch::channel(false);
+    let error = first_engine.run_with_reply_schema(
+        None,
+        vec![Item(json!({"type":"message","role":"user","content":"finish"}))],
+        cancel,
+        tokio::sync::mpsc::unbounded_channel().1,
+        json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}),
+    ).await.unwrap_err();
+    assert!(matches!(
+        error,
+        EngineError::Finalize(FinalizeError::ResultSchemaMismatch(_))
+    ));
+    assert_eq!(inputs.lock().unwrap().len(), 1);
+    let head = store
+        .embedded_round_frontier(&identity)
+        .unwrap()
+        .pending_head
+        .unwrap();
+    let retained = store.items(&head).unwrap();
+    assert!(retained.contains(&final_call));
+    assert!(store.claims_on(&head).unwrap().is_empty());
+    let receipt = authorize_restart(&store, &identity, crate::embedding::RecoveryMode::Exact);
+    assert!(
+        matches!(
+            receipt.outcome,
+            crate::server::CommandReceiptOutcome::Refused { .. }
+        ),
+        "{receipt:?}"
+    );
+    let (resumed, resumed_inputs) = engine(store.clone(), &identity, vec![]);
+    let (_cancel, cancel) = watch::channel(false);
+    let error = resumed
+        .run_recovering_embedded(None, vec![], cancel, incoming())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, EngineError::InferenceBlocked { .. }));
+    assert!(resumed_inputs.lock().unwrap().is_empty());
+    assert_eq!(store.items(&head).unwrap(), retained);
+}
+
 #[tokio::test]
 async fn embedded_seed_is_included_once_when_explicit_input_starts_inference() {
     let store = Arc::new(Store::memory().unwrap());
