@@ -239,7 +239,7 @@ fn run_history(
                 Op::Project(which, kind) => {
                     let capture = &frozen[which % frozen.len()];
                     let destination = target(kind);
-                    let child_path = AgentPath(format!("/root/child-{next_child}"));
+                    let child_path = AgentPath(format!("/root/child_{next_child}"));
                     next_child += 1;
                     let expected = capture.epoch == epoch
                         && capture.valid
@@ -256,6 +256,23 @@ fn run_history(
                             target: &destination,
                         },
                     );
+                    if capture.epoch != epoch {
+                        prop_assert!(matches!(&observed, Err(StoreError::ForeignCheckpoint)));
+                    } else if !capture.valid {
+                        prop_assert!(matches!(
+                            &observed,
+                            Err(StoreError::Context(ContextError::Replay(
+                                ContextReplayRejection::InvalidPrefix
+                            )))
+                        ));
+                    } else if kind == 2 {
+                        prop_assert!(matches!(
+                            &observed,
+                            Err(StoreError::Context(ContextError::Replay(
+                                ContextReplayRejection::IncompatibleTransport
+                            )))
+                        ));
+                    }
                     prop_assert_eq!(
                         observed.is_ok(),
                         expected,
