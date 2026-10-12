@@ -20,7 +20,7 @@ export function toolKind(entry: MessageEntry): 'invocation' | 'result' | undefin
   return ['function_call', 'custom_tool_call'].includes(String(entry.item.type)) ? 'invocation'
     : ['function_call_output', 'custom_tool_call_output'].includes(String(entry.item.type)) ? 'result' : undefined
 }
-function providerItemId(entry: MessageEntry): string | undefined { return object(entry.item) && typeof entry.item.id === 'string' && entry.item.id ? entry.item.id : undefined }
+function providerItemId(entry: MessageEntry): string | undefined { return entry.providerItemId ?? undefined }
 function liveMessageKey(output: LiveOutput): string { return JSON.stringify(['model-item', originKey(output.origin), output.requestId, output.itemId]) }
 function storedMessageKey(origin: ActorOutputOrigin, entry: MessageEntry): string | undefined {
   const id = providerItemId(entry)

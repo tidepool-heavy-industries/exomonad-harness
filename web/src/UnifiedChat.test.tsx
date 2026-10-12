@@ -9,7 +9,7 @@ describe('unified conversation pages', () => {
   const origin = { run: 'r', nativeActor: '3', incarnation: '1' }
   it('preserves server sequence order and rejects timestamp shaped alternatives', () => {
     const page = { origin, cutoverSequence: '4', legacyHistory: true, entries: [
-      { sequence: '4', kind: 'message', requestId: 'req', position: '0', hash: 'a'.repeat(64), tool: null, inputOperation: null, item: { type: 'message' } },
+      { sequence: '4', kind: 'message', requestId: 'req', position: '0', hash: 'a'.repeat(64), tool: null, providerItemId: null, inputOperation: null, item: { type: 'message' } },
       { sequence: '5', kind: 'output', output: { reference: { origin, sequence: '5' }, emission: { origin, id: { displaySlot: '1', pageOrdinal: '1' }, execution: { kind: 'actor_program' }, conversation: null, page: { text: 'value', expansions: [], unavailable: false } } } },
     ], nextAfter: null, previousBefore: null }
     expect(decodeUnifiedPage(page, origin, '0').entries.map(entry => entry.sequence)).toEqual(['4', '5'])
@@ -19,10 +19,10 @@ describe('unified conversation pages', () => {
   })
   it('starts at latest and prepends older entries using the exact server cursor', async () => {
     const latest = { origin, cutoverSequence: '0', legacyHistory: false, entries: [
-      { sequence: '20', kind: 'message', requestId: 'req', position: '1', hash: '2'.repeat(64), tool: null, inputOperation: null, item: { type: 'message', role: 'assistant', content: 'Latest page' } },
+      { sequence: '20', kind: 'message', requestId: 'req', position: '1', hash: '2'.repeat(64), tool: null, providerItemId: null, inputOperation: null, item: { type: 'message', role: 'assistant', content: 'Latest page' } },
     ], nextAfter: null, previousBefore: '20' }
     const older = { origin, cutoverSequence: '0', legacyHistory: false, entries: [
-      { sequence: '10', kind: 'message', requestId: 'req', position: '0', hash: '1'.repeat(64), tool: null, inputOperation: null, item: { type: 'message', role: 'assistant', content: 'Older page' } },
+      { sequence: '10', kind: 'message', requestId: 'req', position: '0', hash: '1'.repeat(64), tool: null, providerItemId: null, inputOperation: null, item: { type: 'message', role: 'assistant', content: 'Older page' } },
     ], nextAfter: null, previousBefore: null }
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const before = new URL(String(input), 'http://localhost').searchParams.get('before')
@@ -41,7 +41,7 @@ describe('unified conversation pages', () => {
   })
   it('rejects backward cursors outside the returned page or entries crossing the boundary', () => {
     const page = { origin, cutoverSequence: '0', legacyHistory: false, entries: [
-      { sequence: '10', kind: 'message', requestId: 'req', position: '0', hash: 'a'.repeat(64), tool: null, inputOperation: null, item: { type: 'message' } },
+      { sequence: '10', kind: 'message', requestId: 'req', position: '0', hash: 'a'.repeat(64), tool: null, providerItemId: null, inputOperation: null, item: { type: 'message' } },
     ], nextAfter: null, previousBefore: '10' }
     expect(decodeUnifiedPage(page, origin, { before: '20' }).previousBefore).toBe('10')
     expect(() => decodeUnifiedPage({ ...page, previousBefore: '9' }, origin, { before: '20' })).toThrow(/cursor/)
@@ -50,12 +50,19 @@ describe('unified conversation pages', () => {
   })
   it('retains exact before cursors above 2^53 and refuses numeric wire substitutes', () => {
     const page = { origin, cutoverSequence: '0', legacyHistory: false, entries: [
-      { sequence: '9007199254740993', kind: 'message', requestId: 'req', position: '0', hash: 'a'.repeat(64), item: { type: 'message' }, tool: null, inputOperation: null },
+      { sequence: '9007199254740993', kind: 'message', requestId: 'req', position: '0', hash: 'a'.repeat(64), item: { type: 'message' }, tool: null, providerItemId: null, inputOperation: null },
     ], nextAfter: null, previousBefore: '9007199254740993' }
     expect(decodeUnifiedPage(page, origin, { before: '9007199254740994' }).previousBefore).toBe('9007199254740993')
     expect(() => decodeUnifiedPage({ ...page, previousBefore: 9007199254740992 }, origin, {})).toThrow(/invalid page/)
     expect(() => decodeUnifiedPage({ ...page, previousBefore: undefined }, origin, '0')).toThrow(/invalid page/)
     expect(() => decodeUnifiedPage({ ...page, nextAfter: undefined }, origin, '0')).toThrow(/invalid page/)
+  })
+  it('rejects an inconsistent provider identity while retaining historical unknown provenance', () => {
+    const entry = { sequence: '1', kind: 'message', requestId: 'request', position: '0', hash: 'a'.repeat(64), tool: null, inputOperation: null, providerItemId: null, item: { type: 'message', id: 'raw-id' } }
+    const page = { origin, cutoverSequence: '0', legacyHistory: false, entries: [entry], nextAfter: null, previousBefore: null }
+    expect(decodeUnifiedPage(page, origin, {}).entries).toHaveLength(1)
+    expect(() => decodeUnifiedPage({ ...page, entries: [{ ...entry, providerItemId: 'different-id' }] }, origin, {})).toThrow(/provider identity/)
+    expect(() => decodeUnifiedPage({ ...page, entries: [{ ...entry, providerItemId: '' }] }, origin, {})).toThrow()
   })
   it('does not render unassociated live output when the exact model origin is absent', () => {
     render(<UnifiedChat origin={origin} ready={false} active={false} liveOutput={[
@@ -73,8 +80,8 @@ describe('unified conversation pages', () => {
     render(<UnifiedChat origin={origin} ready active={false} onRenderedInputs={acknowledgement} />)
     expect(acknowledgement.mock.calls.at(-1)![0]).toEqual([])
     resolve(new Response(JSON.stringify({ origin, cutoverSequence: '0', legacyHistory: false, nextAfter: null, previousBefore: null, entries: [
-      { sequence: '5', kind: 'message', requestId: 'req', position: '0', hash: 'a'.repeat(64), item: { type: 'message', role: 'user', content: 'identical submitted input' }, tool: null, inputOperation },
-      { sequence: '6', kind: 'message', requestId: 'req', position: '1', hash: 'a'.repeat(64), item: { type: 'message', role: 'user', content: 'identical submitted input' }, tool: null, inputOperation: null },
+      { sequence: '5', kind: 'message', requestId: 'req', position: '0', hash: 'a'.repeat(64), item: { type: 'message', role: 'user', content: 'identical submitted input' }, tool: null, providerItemId: null, inputOperation },
+      { sequence: '6', kind: 'message', requestId: 'req', position: '1', hash: 'a'.repeat(64), item: { type: 'message', role: 'user', content: 'identical submitted input' }, tool: null, providerItemId: null, inputOperation: null },
     ] })))
     await waitFor(() => expect(acknowledgement.mock.calls.at(-1)![0]).toEqual([inputOperation]))
     expect(screen.getAllByText('identical submitted input')).toHaveLength(2)
@@ -87,15 +94,37 @@ describe('unified conversation pages', () => {
     const mounted = render(<UnifiedChat origin={origin} requestId="req" modelOrigin={modelOrigin} ready active={false} liveOutput={[live]} />)
     const partial = await screen.findByText('partial text')
     const row = partial.closest('[data-timeline-key]')
-    entries = [{ sequence: '5', kind: 'message', requestId: 'req', position: '0', hash: 'a'.repeat(64), tool: null, inputOperation: null, item: { type: 'message', id: 'id', role: 'assistant', content: 'final text' } }]
+    entries = [{ sequence: '5', kind: 'message', requestId: 'req', position: '0', hash: 'a'.repeat(64), tool: null, providerItemId: 'id', inputOperation: null, item: { type: 'message', id: 'id', role: 'assistant', content: 'final text' } }]
     mounted.rerender(<UnifiedChat origin={origin} requestId="req" revision="5" modelOrigin={modelOrigin} ready active={false} liveOutput={[{ ...live, streaming: false, committedHash: 'a'.repeat(64) }]} />)
     expect((await screen.findByText('final text')).closest('[data-timeline-key]')).toBe(row)
     expect(screen.queryByText('partial text')).toBeNull()
     mounted.rerender(<UnifiedChat origin={origin} requestId="req" revision="5" modelOrigin={modelOrigin} ready active={false} liveOutput={[]} />)
     expect(screen.getByText('final text').closest('[data-timeline-key]')).toBe(row)
   })
+  it('does not resurrect a finalized partial preview when the bounded history window evicts its final row', async () => {
+    const modelOrigin = { kind: 'embedded' as const, run: 'r', actor: '/worker', incarnation: 'one' }
+    const live = { origin: modelOrigin, requestId: 'req', itemId: 'final-item', channel: 'assistant' as const, index: '0', text: 'partial already finalized', streaming: false, version: '1', overflow: false, committedHash: 'a'.repeat(64) }
+    const all = Array.from({ length: 9 }, (_, index) => ({ sequence: String(index + 1), kind: 'message', requestId: 'req', position: String(index), hash: 'a'.repeat(64), tool: null, providerItemId: index === 8 ? 'final-item' : null, inputOperation: null,
+      item: { type: 'message', role: 'assistant', content: `message ${index + 1} ` + 'x'.repeat(249_950), ...(index === 8 ? { id: 'final-item' } : {}) } }))
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const before = new URL(String(input), 'http://localhost').searchParams.get('before')
+      const available = all.filter(entry => before === null || BigInt(entry.sequence) < BigInt(before))
+      const entries = available.slice(-1)
+      return new Response(JSON.stringify({ origin, entries, cutoverSequence: '0', legacyHistory: false, nextAfter: null, previousBefore: available.length > entries.length ? entries[0]!.sequence : null }))
+    }))
+    const mounted = render(<UnifiedChat origin={origin} modelOrigin={modelOrigin} ready active={false} liveOutput={[live]} />)
+    await waitFor(() => expect(mounted.container.querySelector('[data-sequence="9"]')).toBeInTheDocument())
+    expect(screen.queryByText('partial already finalized')).toBeNull()
+    for (let sequence = 8; sequence >= 1; sequence--) {
+      fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }))
+      await waitFor(() => expect(mounted.container.querySelector(`[data-sequence="${sequence}"]`)).toBeInTheDocument())
+    }
+    expect(mounted.container.querySelector('[data-sequence="9"]')).toBeNull()
+    expect(screen.queryByText('partial already finalized')).toBeNull()
+    expect(screen.getByRole('list', { name: 'Conversation entries' }).children).toHaveLength(8)
+  })
   it('anchors prepended history and offers new activity without scrolling an unpinned reader', async () => {
-    const entry = (sequence: number) => ({ sequence: String(sequence), kind: 'message', requestId: 'req', position: String(sequence), hash: 'a'.repeat(64), tool: null, inputOperation: null, item: { type: 'message', role: 'assistant', content: `message ${sequence}` } })
+    const entry = (sequence: number) => ({ sequence: String(sequence), kind: 'message', requestId: 'req', position: String(sequence), hash: 'a'.repeat(64), tool: null, providerItemId: null, inputOperation: null, item: { type: 'message', role: 'assistant', content: `message ${sequence}` } })
     let latest = [entry(20), entry(30), entry(40)]
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const before = new URL(String(input), 'http://localhost').searchParams.get('before')
@@ -136,7 +165,7 @@ describe('unified conversation pages', () => {
       state: 'open', attemptId: null, draft: null, errors: [], answer: null }
     const first = { origin, cutoverSequence: '0', legacyHistory: false, entries: [
       { sequence: '10', kind: 'form', form },
-      { sequence: '20', kind: 'message', requestId: 'head-a', position: '0', hash: '1'.repeat(64), tool: null, inputOperation: null, item: { type: 'message', role: 'assistant', content: 'Model answer' } },
+      { sequence: '20', kind: 'message', requestId: 'head-a', position: '0', hash: '1'.repeat(64), tool: null, providerItemId: null, inputOperation: null, item: { type: 'message', role: 'assistant', content: 'Model answer' } },
     ], nextAfter: null, previousBefore: null }
     const second = { ...first, entries: [...first.entries,
       { sequence: '30', kind: 'output', output: { reference: { origin, sequence: '30' }, emission: { origin, id: { displaySlot: '1', pageOrdinal: '0' }, execution: { kind: 'actor_program' }, conversation: null,
