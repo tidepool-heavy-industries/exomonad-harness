@@ -388,11 +388,18 @@ fn http_request(
         .headers(protocol_headers(protocol))
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body);
+    let call = call.header("session-id", &request.session_id);
+    let call = if route == ResponsesRoute::ChatGptPlan {
+        call.header("thread-id", &request.session_id)
+            .header("x-client-request-id", &request.session_id)
+            .header(reqwest::header::USER_AGENT, "exomonad-harness/0.1.0")
+    } else {
+        call
+    };
     if let Some(account) = account {
         call.header("chatgpt-account-id", account)
             .header("version", CODEX_VERSION)
             .header("originator", "codex_cli_rs")
-            .header("session-id", &request.session_id)
     } else {
         call
     }

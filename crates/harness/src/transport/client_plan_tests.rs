@@ -56,11 +56,17 @@ fn public_production_request_preserves_async_and_full_history() {
         "chatgpt-account-id",
         "version",
         "originator",
-        "session-id",
         RESPONSES_LITE_HEADER,
     ] {
         assert!(!wire.headers().contains_key(header));
     }
+    for header in ["session-id", "thread-id", "x-client-request-id"] {
+        assert_eq!(wire.headers()[header], request.session_id);
+    }
+    assert_eq!(
+        wire.headers()[reqwest::header::USER_AGENT],
+        "exomonad-harness/0.1.0"
+    );
     let body: Value = serde_json::from_slice(wire.body().unwrap().as_bytes().unwrap()).unwrap();
     assert_eq!(body["store"], false);
     assert_eq!(body["stream"], true);
