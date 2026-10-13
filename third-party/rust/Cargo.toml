@@ -37,3 +37,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tokio-tungstenite = "0.29"
 tempfile = "3"
 proptest = "1.11.0"
+zstd = { version = "=0.13.3", default-features = false }

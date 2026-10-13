@@ -51,8 +51,29 @@ type EngineFixture = (
 
 #[async_trait]
 impl ResponsesTransport for Replay {
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
-        self.requests.lock().unwrap().push(request);
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::ChatGptPlan,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
+    async fn create(
+        &self,
+        request: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push(request.request().clone());
         self.turns
             .lock()
             .unwrap()

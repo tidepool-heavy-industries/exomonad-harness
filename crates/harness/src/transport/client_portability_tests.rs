@@ -90,7 +90,8 @@ async fn exchange(
                 }
             }
         };
-        let body = serde_json::from_slice(&received[offset..offset + length]).unwrap();
+        let decoded = zstd::stream::decode_all(&received[offset..offset + length]).unwrap();
+        let body = serde_json::from_slice(&decoded).unwrap();
         socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}", events.len()).as_bytes()).await.unwrap();
         socket.shutdown().await.unwrap();
         body
@@ -193,7 +194,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         turn.items, source_items,
         "SSE ingest must retain original provider bytes"
     );
-    assert!(sent.get("instructions").is_none());
+    assert_eq!(sent["instructions"], request.instructions);
     assert_eq!(sent["model"], "gpt-6.1-sol");
     let work = store.claim(&CallId("work-call".into()), &head).unwrap();
     store.settle_claims(&work, &Item(json!({"type":"custom_tool_call_output","call_id":"work-call","output":"original completed output"})), TerminalOutcome::Success).unwrap();

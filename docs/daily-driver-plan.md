@@ -16,10 +16,10 @@ for exact interfaces, revisions and offline evidence. Tidepool engine, concurren
 resident execution and real host checkpoint integration remain held pending its
 separate investigation. No deployment or live cutover is claimed.
 
-Initial operation uses the read-only Codex credential bridge and existing browser
-session login behind Tailscale HTTPS. Independent refresh and Tailscale identity
-login are later work. Codex remains the development default; no runtime pins,
-backend selection, deployments or active sessions change in this batch.
+Inference uses native public-plan OAuth and public Standard Responses HTTP.
+Existing browser session login stays behind Tailscale HTTPS. Stock Codex remains
+installed separately; private credential and endpoint routing are unsupported.
+Runtime pins, deployments and active session changes require their own delivery.
 
 ## Evidence baseline and reading order
 
@@ -46,7 +46,7 @@ Verified from source in the canonical checkout:
   interactive `tree_ask` is a separate path. A live browser root is not yet proven.
 - `harness-demo/src/tree.rs`: inherited/checkpoint starts are explicitly refused.
   History: `git log -S` locates that guard at `2ebdd30`.
-- `transport/auth.rs`: CodexFileAuth reads credentials without refreshing them.
+- `transport/auth/chatgpt.rs`: ChatGptPlanAuth owns native plan registration refresh.
   History: introduced at `fff38ec`. This is not independent credential lifecycle.
 - Engine/Store/mailbox, agent verbs, compaction, web transport and offline
   adapter-readiness tests already exist. Audit/reuse them before adding owners.
@@ -170,11 +170,8 @@ Prove async custom-call ordering, pending-call continuation, finalization,
 stream interruption, error/rate-limit behavior and bounded retry. Reuse existing
 redacted opt-in tracing; never retain auth headers/tokens in evidence.
 
-Use the approved explicit read-only CodexFileAuth bridge through Auth, with
-documented expiry and operator reauthentication;
-independent login/refresh is required before claiming no Codex dependency.
-Surface reauthentication to the operator and avoid retry storms. When independent
-refresh is implemented later, coordinate it across agents. Do not copy credentials to the new host implicitly.
+Use native ChatGptPlanAuth through token-only Auth and public Responses HTTP.
+Qualify the exact bundle and selected registration before a live trial.
 
 Gate: live one-root and child checks using the intended account/model/effort,
 plus deterministic replay of relevant failure cases. Distinguish mock, replay

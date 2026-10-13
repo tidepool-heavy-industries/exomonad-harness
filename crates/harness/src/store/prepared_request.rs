@@ -247,11 +247,13 @@ mod tests {
     #[test]
     fn normalization_refusal_prevents_issuance() {
         let (store, head) = store();
+        let mut invalid = request();
+        invalid.session_id = "invalid\nsession".into();
         assert!(matches!(
             store.prepare_provider_request(
                 &head,
                 &head,
-                request(),
+                invalid,
                 &[None],
                 None,
                 PreparedTransportSelection::native((

@@ -48,13 +48,28 @@ struct SharedReplay(Arc<ReplayTransport>);
 
 #[async_trait]
 impl ResponsesTransport for SharedReplay {
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        TransportError,
+    > {
+        self.0.response_contract()
+    }
+
+    async fn create(
+        &self,
+        request: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         self.0.create(request).await
     }
 
     async fn create_streaming(
         &self,
-        request: ResponsesRequest,
+        request: harness::transport::PreparedProviderRequest,
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         self.0.create_streaming(request, sink).await
@@ -138,7 +153,7 @@ async fn followup_queued_before_first_request_is_delivered_once_and_durable() {
         "name": "finalize",
         "arguments": "{\"result\":{\"answer\":\"follow-up observed\"}}"
     }));
-    let replay = Arc::new(ReplayTransport::scripted_codex_standard_gated([
+    let replay = Arc::new(ReplayTransport::scripted_public_standard_gated([
         ResponsesTurn {
             response_id: "first-and-final".into(),
             items: vec![final_call.clone()],

@@ -82,7 +82,7 @@ struct ToolChoice(&'static str);
 fn normalized_request(request: &ResponsesRequest) -> Result<RequestBody<'_>, TransportError> {
     if request.model.is_empty() || !request.session_id.valid() {
         return Err(TransportError::Stream(
-            "empty model or session identity".into(),
+            "empty model or invalid session identity headers".into(),
         ));
     }
     if request
@@ -195,15 +195,23 @@ fn http_request(
     body: Vec<u8>,
     token: &str,
 ) -> reqwest::RequestBuilder {
-    http.post(CHATGPT_PLAN_ENDPOINT)
+    let call = http
+        .post(CHATGPT_PLAN_ENDPOINT)
         .bearer_auth(token)
         .header(reqwest::header::ACCEPT, "text/event-stream")
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header("session-id", request.session_id.affinity())
         .header("thread-id", request.session_id.thread())
         .header("x-client-request-id", request.session_id.thread())
-        .header(reqwest::header::USER_AGENT, "exomonad-harness/0.1.0")
-        .body(body)
+        .header(reqwest::header::USER_AGENT, "exomonad-harness/0.1.0");
+    // Compression is a wire optimization. Preserve the admitted JSON if the
+    // compressor cannot encode it, matching the public client's fallback.
+    match zstd::stream::encode_all(body.as_slice(), 0) {
+        Ok(encoded) => call
+            .header(reqwest::header::CONTENT_ENCODING, "zstd")
+            .body(encoded),
+        Err(_) => call.body(body),
+    }
 }
 
 pub(super) fn http_client() -> Result<reqwest::Client, TransportError> {
@@ -400,11 +408,17 @@ mod tests {
             session_id: "gate".into(),
             prompt_cache_comparison: None,
         };
-        assert_eq!(request_body(&request).unwrap()["tools"][0]["tools"][0], valid);
+        assert_eq!(
+            request_body(&request).unwrap()["tools"][0]["tools"][0],
+            valid
+        );
         // Deserialization retains the same immutable admission result.
         let restored: ResponsesRequest =
             serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
-        assert_eq!(request_body(&restored).unwrap()["tools"][0]["tools"][0], valid);
+        assert_eq!(
+            request_body(&restored).unwrap()["tools"][0]["tools"][0],
+            valid
+        );
         for path in [
             "root-required",
             "nested-required",

@@ -205,7 +205,7 @@ pub enum TransportError {
     ConflictingOutputIndex { index: u64 },
     #[error("completed provider response has an output index gap at {index}")]
     IncompleteOutputIndices { index: u64 },
-    #[error("authentication expired; operator action required")]
+    #[error("native ChatGPT plan sign-in required; private Codex credentials are unsupported")]
     Authentication,
     #[error("terminal HTTP status {status}{suffix}", suffix = diagnostic_suffix(.diagnostic.as_ref()))]
     Http {

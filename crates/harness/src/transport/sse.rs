@@ -173,7 +173,7 @@ impl ResponseAssembly {
                 }
                 // A nonempty terminal output array carries authoritative output
                 // positions, including items whose streamed events were absent.
-                // The Codex backend may omit this array's contents entirely.
+                // Completed output items remain authoritative when this array is empty.
                 if let Some(output) = response
                     .get("output")
                     .and_then(Value::as_array)
@@ -313,6 +313,7 @@ impl ResponseAssembly {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn indexed_items_require_positions_and_conflicting_duplicates_refuse() {
@@ -399,6 +400,23 @@ mod tests {
         assert_eq!(turn.usage.output_tokens, 2);
         assert_eq!(turn.usage.cached_tokens, 3);
         assert_eq!(turn.usage.cache_write_tokens, 4);
+    }
+
+    #[test]
+    fn usage_presence_distinguishes_reported_zero_from_missing_or_partial_counters() {
+        for (usage, reported) in [
+            (json!({"input_tokens":0,"output_tokens":0}), true),
+            (json!({"input_tokens":0}), false),
+            (json!({"input_tokens":"0","output_tokens":0}), false),
+            (Value::Null, false),
+        ] {
+            let mut assembly = ResponseAssembly::default();
+            assembly.accept(&json!({"type":"response.completed","response":{"id":"usage-proof","output":[],"usage":usage}}).to_string()).unwrap();
+            let turn = assembly.finish().unwrap();
+            assert_eq!(turn.usage.reported, reported);
+            assert_eq!(turn.usage.input_tokens, 0);
+            assert_eq!(turn.usage.output_tokens, 0);
+        }
     }
 
     #[test]
@@ -656,13 +674,13 @@ mod tests {
 }
 
 #[cfg(test)]
-mod lite_tests {
+mod native_replay_tests {
     use super::*;
     use crate::item::ToolInput;
     use serde_json::json;
 
     #[test]
-    fn lite_namespaced_tool_done_uses_existing_call_and_completion_contract() {
+    fn namespaced_tool_done_preserves_raw_call_and_completion_contract() {
         let mut assembly = ResponseAssembly::default();
         for (index, (kind, name, payload)) in [
             (
@@ -696,10 +714,10 @@ mod lite_tests {
                 ToolInput::Custom(input) => assert_eq!(input, "raw Haskell λ"),
             }
         }
-        assembly.accept(&json!({"type":"response.completed","response":{"id":"lite-response","output":[],"usage":{"input_tokens":12,"output_tokens":7,"input_tokens_details":{"cached_tokens":4}}}}).to_string()).unwrap();
+        assembly.accept(&json!({"type":"response.completed","response":{"id":"native-response","output":[],"usage":{"input_tokens":12,"output_tokens":7,"input_tokens_details":{"cached_tokens":4}}}}).to_string()).unwrap();
         let completed = assembly.finish().unwrap();
         assert_eq!(completed.items.len(), 2);
-        assert_eq!(completed.response_id, "lite-response");
+        assert_eq!(completed.response_id, "native-response");
         assert_eq!(completed.usage.cached_tokens, 4);
     }
 

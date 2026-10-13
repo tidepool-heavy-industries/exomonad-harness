@@ -42,6 +42,18 @@ where
     type Engine = (Engine<A, P, C>, Option<Value>);
 
     async fn create(&self, agent: AgentPath) -> Result<Self::Engine, String> {
+        let record = self
+            .store
+            .agent(&agent)
+            .map_err(|error| error.to_string())?;
+        let identity = harness::transport::SessionIdentity::from_relationship(
+            format!("harness-tree-{}", agent.0),
+            record
+                .as_ref()
+                .and_then(|record| record.parent.as_ref())
+                .map(|parent| format!("harness-tree-{}", parent.0)),
+            None,
+        );
         let transport = (self.config)(&agent)?;
         let engine = Engine::with_transport(
             transport,
@@ -53,14 +65,11 @@ where
                 tools: Vec::new(),
                 model: "gpt-6-sol".into(),
                 effort: Effort::Low,
-                session_id: format!("harness-tree-{}", agent.0).into(),
+                session_id: identity,
                 agent: agent.clone(),
             },
         );
-        let reply_schema = self
-            .store
-            .agent(&agent)
-            .map_err(|error| error.to_string())?
+        let reply_schema = record
             .and_then(|record| record.contract.get("reply").cloned())
             .filter(|schema| !schema.is_null());
         let engine = match self.compact_at_input_tokens {

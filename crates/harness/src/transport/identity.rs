@@ -36,7 +36,10 @@ impl SessionIdentity {
         &self.affinity
     }
     pub(crate) fn valid(&self) -> bool {
-        !self.thread.is_empty() && !self.affinity.is_empty()
+        !self.thread.is_empty()
+            && !self.affinity.is_empty()
+            && reqwest::header::HeaderValue::from_str(&self.thread).is_ok()
+            && reqwest::header::HeaderValue::from_str(&self.affinity).is_ok()
     }
 
     pub(crate) fn cache_key(&self) -> String {

@@ -34,14 +34,14 @@ live-provider async behavior, or permission to migrate a running wave.
    exact typed replies and acknowledged cleanup as a separate milestone.
 4. Host this library's Router in the main Exomonad process. Connect host actor
    projection and control; do not install the standalone TreeDriver as a second
-   supervisor. Check Codex fallback independently.
+   supervisor. Check native public-plan authentication independently.
 5. Exercise the browser-operated Sol/Luna worker tree specified in
    [the embedded-host contract](docs/embedded-host-prd.md), then deliberately
    choose a trial wave and record matched binaries, workspace and asset revisions.
 
 The [daily-driver roadmap](docs/daily-driver-plan.md) retains the larger sequence.
-Stock Codex stays installed. Read-only Codex credentials, existing browser login
-behind loopback/Tailscale HTTPS and one shared instance per run remain the initial
+Stock Codex stays installed separately. Native public-plan OAuth, existing browser
+login behind loopback/Tailscale HTTPS and one shared instance per run form the
 operator profile. Deployment, live credentialed checks and default cutover need
 an operator assignment. No launch follows merely from passing these checks.
 

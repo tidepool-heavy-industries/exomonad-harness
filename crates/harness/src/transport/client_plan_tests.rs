@@ -59,7 +59,9 @@ fn public_production_request_preserves_async_and_full_history() {
         wire.headers()[reqwest::header::USER_AGENT],
         "exomonad-harness/0.1.0"
     );
-    let body: Value = serde_json::from_slice(wire.body().unwrap().as_bytes().unwrap()).unwrap();
+    assert_eq!(wire.headers()[reqwest::header::CONTENT_ENCODING], "zstd");
+    let decoded = zstd::stream::decode_all(wire.body().unwrap().as_bytes().unwrap()).unwrap();
+    let body: Value = serde_json::from_slice(&decoded).unwrap();
     assert_eq!(body["store"], false);
     assert_eq!(body["stream"], true);
     assert_eq!(body["reasoning"]["effort"], "high");
@@ -108,6 +110,149 @@ fn public_route_enforces_its_wire_contract_and_allowed_host_tools() {
     request.input.pop();
     request.tools = vec![json!({"type":"tool_search"})].into();
     assert!(request_body(&request).is_err());
+}
+
+#[test]
+fn issued_identity_binds_root_child_fork_and_retry_headers_to_cache_affinity() {
+    use crate::transport::SessionIdentity;
+    let cases = [
+        (SessionIdentity::standalone("root"), "root", "root"),
+        (
+            SessionIdentity::from_relationship("child".into(), Some("parent".into()), None),
+            "child",
+            "parent",
+        ),
+        (
+            SessionIdentity::from_relationship("fork".into(), None, Some("source".into())),
+            "fork",
+            "source",
+        ),
+        (
+            SessionIdentity::from_relationship(
+                "both".into(),
+                Some("parent".into()),
+                Some("source".into()),
+            ),
+            "both",
+            "parent",
+        ),
+    ];
+    for (identity, thread, affinity) in cases {
+        let store = crate::store::Store::memory().unwrap();
+        let head = crate::model::RequestId(format!("issued-{thread}"));
+        store.create_request(&head, None, "/root").unwrap();
+        let mut caller = ResponsesRequest {
+            input: vec![],
+            session_id: identity.clone(),
+            ..plan_request()
+        };
+        let contract = (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard);
+        let prepared = store
+            .prepare_provider_request(
+                &head,
+                &head,
+                caller.clone(),
+                &[],
+                None,
+                crate::transport::PreparedTransportSelection::native(contract),
+                crate::store::ProviderRequestPurpose::Inference,
+            )
+            .unwrap();
+        caller.session_id = SessionIdentity::standalone("changed-after-issuance");
+        let frozen = prepared.request().clone();
+        let wire = http_request(
+            &http_client().unwrap(),
+            &frozen,
+            prepared.wire_body().to_vec(),
+            "fixture-token",
+        )
+        .build()
+        .unwrap();
+        assert_eq!(wire.headers()["session-id"], affinity);
+        assert_eq!(wire.headers()["thread-id"], thread);
+        assert_eq!(wire.headers()["x-client-request-id"], thread);
+        let decoded = zstd::stream::decode_all(wire.body().unwrap().as_bytes().unwrap()).unwrap();
+        let body: Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(body["prompt_cache_key"], affinity);
+        assert_eq!(decoded, prepared.wire_body());
+        let issuer = prepared.issuer().clone();
+        store
+            .record_provider_turn(
+                &issuer,
+                &crate::transport::ResponsesTurn {
+                    response_id: "retained".into(),
+                    items: vec![],
+                    usage: Default::default(),
+                },
+            )
+            .unwrap();
+        let restored = store.replay_turns(&head).unwrap().remove(0).model_request;
+        assert_eq!(restored.session_id, identity);
+        let retry = store
+            .prepare_provider_request(
+                &head,
+                &head,
+                restored,
+                &[],
+                None,
+                crate::transport::PreparedTransportSelection::native(contract),
+                crate::store::ProviderRequestPurpose::Inference,
+            )
+            .unwrap();
+        let retry_wire = http_request(
+            &http_client().unwrap(),
+            retry.request(),
+            retry.wire_body().to_vec(),
+            "rotated-fixture-token",
+        )
+        .build()
+        .unwrap();
+        for header in ["session-id", "thread-id", "x-client-request-id"] {
+            assert_eq!(wire.headers()[header], retry_wire.headers()[header]);
+        }
+        assert_eq!(prepared.wire_body(), retry.wire_body());
+    }
+}
+
+#[test]
+fn affinity_cache_key_strips_only_exact_prefixed_digest_and_clamps() {
+    use crate::transport::SessionIdentity;
+    for (affinity, expected) in [
+        (format!("ses_{}", "a".repeat(64)), "a".repeat(64)),
+        (
+            format!("ses_{}", "g".repeat(64)),
+            format!("ses_{}", "g".repeat(60)),
+        ),
+        ("ses_short".into(), "ses_short".into()),
+        ("x".repeat(70), "x".repeat(64)),
+    ] {
+        let request = ResponsesRequest {
+            session_id: SessionIdentity::from_relationship(
+                "current-thread".into(),
+                Some(affinity.clone()),
+                None,
+            ),
+            ..plan_request()
+        };
+        let body = request_body(&request).unwrap();
+        assert_eq!(body["prompt_cache_key"], expected);
+        let wire = http_request(
+            &http_client().unwrap(),
+            &request,
+            serde_json::to_vec(&body).unwrap(),
+            "fixture-token",
+        )
+        .build()
+        .unwrap();
+        assert_eq!(wire.headers()["session-id"], affinity);
+        assert_eq!(wire.headers()["thread-id"], "current-thread");
+    }
+}
+
+#[test]
+fn retired_private_contracts_cannot_be_deserialized_as_public() {
+    assert!(serde_json::from_value::<ResponsesRoute>(json!("codex")).is_err());
+    assert!(serde_json::from_value::<ResponsesProtocol>(json!("lite")).is_err());
 }
 
 #[tokio::test]

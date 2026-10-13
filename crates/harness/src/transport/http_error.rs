@@ -47,7 +47,7 @@ fn parse(body: &[u8], token: &str, account: &str) -> Option<HttpDiagnostic> {
     }
     let document: Value = serde_json::from_slice(body).ok()?;
     let error = document.get("error").and_then(Value::as_object);
-    // The Codex backend also reports account/model refusals as a top-level
+    // Providers may also report account/model refusals as a top-level
     // detail string. Both known envelopes use the same bounded redaction path.
     let field = |name: &str| error?.get(name)?.as_str();
     diagnostic(

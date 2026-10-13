@@ -38,14 +38,14 @@ pub struct ReplayTransport {
 }
 
 impl ReplayTransport {
-    pub fn scripted_codex_standard(turns: impl IntoIterator<Item = ResponsesTurn>) -> Self {
+    pub fn scripted_public_standard(turns: impl IntoIterator<Item = ResponsesTurn>) -> Self {
         Self::with_gate(turns, false)
     }
 
     /// Create a replay transport which pauses before returning each queued
     /// turn. Tests coordinate boundaries using `wait_requested` and
     /// `release_next`, without sleeps or polling.
-    pub fn scripted_codex_standard_gated(turns: impl IntoIterator<Item = ResponsesTurn>) -> Self {
+    pub fn scripted_public_standard_gated(turns: impl IntoIterator<Item = ResponsesTurn>) -> Self {
         Self::with_gate(turns, true)
     }
 

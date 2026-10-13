@@ -155,7 +155,7 @@ async fn record_with_effort(rewrite: bool, note: bool, next_effort: Option<Effor
     ));
     let store = Arc::new(Store::open(&path).unwrap());
     let operations = Arc::new(Mutex::new(vec![]));
-    let transport = ReplayTransport::scripted_codex_standard([
+    let transport = ReplayTransport::scripted_public_standard([
         ResponsesTurn {
             response_id: "edit-call".into(),
             items: vec![Item(

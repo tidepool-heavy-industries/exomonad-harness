@@ -27,6 +27,7 @@ HARNESS_DEPS = [
     "//third-party/rust:tokio",
     "//third-party/rust:tokio-util",
     "//third-party/rust:uuid",
+    "//third-party/rust:zstd",
 ]
 
 HARNESS_PRODUCTION_SRCS = glob(

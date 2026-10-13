@@ -1230,7 +1230,7 @@ mod tests {
 
     #[tokio::test]
     async fn transport_records_requests_and_consumes_turns_in_order() {
-        let replay = ReplayTransport::scripted_codex_standard([turn("r1"), turn("r2")]);
+        let replay = ReplayTransport::scripted_public_standard([turn("r1"), turn("r2")]);
         assert_eq!(
             submit_test_request(&replay, request("s1"))
                 .await
@@ -1260,7 +1260,7 @@ mod tests {
 
     #[tokio::test]
     async fn gated_transport_waits_for_each_boundary_release() {
-        let replay = Arc::new(ReplayTransport::scripted_codex_standard_gated([
+        let replay = Arc::new(ReplayTransport::scripted_public_standard_gated([
             turn("r1"),
             turn("r2"),
         ]));
@@ -1306,7 +1306,7 @@ mod tests {
             )
         };
         let replay = Arc::new(
-            ReplayTransport::scripted_codex_standard_gated([turn("r1"), turn("r2")])
+            ReplayTransport::scripted_public_standard_gated([turn("r1"), turn("r2")])
                 .with_observer(observer),
         );
         let running = {
@@ -1365,7 +1365,7 @@ mod tests {
         let source_store = Arc::new(Store::open(&path).unwrap());
         let source_scheduler = Arc::new(JobScheduler::new(2).unwrap());
         let source_engine = Engine::<OfflineAuth, EchoTool, _>::with_transport(
-            ReplayTransport::scripted_codex_standard([
+            ReplayTransport::scripted_public_standard([
                 ResponsesTurn {
                     response_id: "echo-call".into(),
                     items: vec![call.clone()],
@@ -1446,7 +1446,8 @@ mod tests {
         let mut mismatched_effort = recorded_turns[0].model_request.clone();
         mismatched_effort.pinned_effort = Effort::High;
         let mut mismatched_session = recorded_turns[0].model_request.clone();
-        mismatched_session.session_id = format!("{}-different", mismatched_session.session_id.thread()).into();
+        mismatched_session.session_id =
+            format!("{}-different", mismatched_session.session_id.thread()).into();
         let mut mismatched_allowed = recorded_turns[0].model_request.clone();
         mismatched_allowed.tools_allowed = Some(vec![]);
         for mismatched in [

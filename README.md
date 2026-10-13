@@ -154,21 +154,27 @@ checks from a stable checkout. These artifacts can be removed with that target
 cache after their evidence is no longer needed.
 
 
-Embedded clients may select the Lite wire contract explicitly with
-`ResponsesClient::new(auth).with_protocol(ResponsesProtocol::Lite)`. The default
-is Standard. Lite uses the same Responses SSE endpoint and Engine scheduler;
-its transport header and input prefix carry namespaced tools and developer
-instructions. Strict schemas are admitted before projection, and content-derived
-prefix IDs stay stable across retries and exact-context forks. Durable effort
-controls remain in Store history; Lite projects the latest effort into the wire
-request. Tool calls retain their original names, call IDs and raw items.
+Inference uses native ChatGPT-plan OAuth token sharing and the public
+`https://api.openai.com/v1/responses` Standard HTTP endpoint. `ChatGptPlanAuth`
+owns selected registration refresh; `ResponsesClient` owns a shared lazy HTTP
+pool. Full-history requests use `store:false`, `stream:true`, retained encrypted
+reasoning, and zstd request compression with plain JSON fallback if encoding fails.
+Empty tools and tool choice are omitted, as is the default parallel-tool flag.
+Host async declarations and every returned native replay field remain intact.
 
-The contract follows the retained native Codex source at
-`d2d1d7c754a72f51087a54c230185831c649913b`: `core/src/client.rs` builds Lite
-requests and the opt-in header, `tools/src/tool_spec.rs` groups the default
-`functions` namespace, and `codex-api/src/sse/responses.rs` interprets the same
-SSE events. Harness has no Codex code dependency. `request_body_for_protocol`
-provides the selected body for offline diagnostics without authentication.
+`EngineConfig.session_id` is a typed `SessionIdentity` issued before the request
+is retained. Its immediate parent thread wins over its exact fork source;
+otherwise the current thread is its own affinity. `session-id` carries affinity,
+while `thread-id` and `x-client-request-id` carry the current thread.
+`prompt_cache_key` uses the same affinity, strips `ses_` only before exactly
+64 hexadecimal characters, and clamps to 64 characters. Replays retain the
+resolved identity; they never consult current caller configuration or lineage.
+`request_body` provides the production normalized JSON for offline diagnostics.
+
+Private Codex credential files, private backend routing and Responses Lite are
+unsupported. Old private route/protocol records are rejected rather than relabeled;
+start a new public-plan session after native sign-in. Existing public records with
+a scalar session ID restore that ID as both thread and affinity.
 
 Synchronous context drafts may stage the next reasoning effort together with
 transcript and model edits. Successful publication appends the host-owned

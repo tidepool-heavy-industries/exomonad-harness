@@ -189,19 +189,13 @@ later iteration (not wave1): streaming outputs from one job (N items then the te
 - dev loop ! one `just` entry: fmt, clippy, tests, typecheck, web build; web dev server proxies to core; lockfiles pinned; `cargo deny` (licenses/dupes/advisories); minimal features per dep.
 
 ## auth
-ChatGPT-subscription login behind `Auth` trait first, because it is the
-credential available to this run. Read `~/.codex/auth.json` without modifying,
-copying, or refreshing it; Codex owns refresh. Never store or log tokens.
-Subscription requests use the streaming-only
-`https://chatgpt.com/backend-api/codex/responses` endpoint (`stream: true`,
-`store: false`, SSE), with Codex CLI version, originator, account, and stable
-session headers. A 401 stops the run for operator attention, not a refresh.
-Platform API-key auth (`api.openai.com/v1/responses`) is later behind the same
-trait.
-Wave2: login (device code + browser) and refresh move INTO this trait so the
-run no longer depends on a codex install; the retired tidepool harness tree has
-a working implementation to read as reference (own code, codex rule applies). Subscription tokens lack `api.responses.write`, so the platform endpoint
-cannot serve as this run's pre-flight or first transport.
+Native ChatGPT-plan token-sharing OAuth owns login and selected registration
+refresh. `Auth` returns only the access token for the public Standard Responses
+HTTP endpoint at `https://api.openai.com/v1/responses`. No private Codex credential
+or endpoint path is admitted. Requests are stateless full history (`stream:true`,
+`store:false`), retain encrypted reasoning and async host tools, and use the
+issued session affinity/current-thread headers. A 401 requires operator sign-in.
+Credentials never enter Store, request receipts, logs or web output.
 
 ## web view
 - served from binary, tailscale iface; `tailscale serve` for https+identity when wanted. multi-viewer. operator view now; arena (generations/handoffs) over many runs later.

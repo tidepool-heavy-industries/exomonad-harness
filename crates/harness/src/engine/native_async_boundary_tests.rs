@@ -233,7 +233,14 @@ async fn native_async_custom_cell_survives_synchronous_context_commit() {
         );
         assert_eq!(
             wire["input"],
-            serde_json::to_value(&requests[2].input).unwrap()
+            serde_json::to_value(
+                requests[2]
+                    .input
+                    .iter()
+                    .filter(|item| !item.is_configuration_update())
+                    .collect::<Vec<_>>()
+            )
+            .unwrap()
         );
     }
     host.cell.add_permits(1);

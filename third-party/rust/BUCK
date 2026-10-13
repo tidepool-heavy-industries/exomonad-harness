@@ -412,9 +412,25 @@ rust_library(
     crate = "cc",
     crate_root = "cc-1.4.7.crate/src/lib.rs",
     edition = "2021",
+    features = ["parallel"],
+    platform = {
+        "linux-arm64": dict(
+            deps = [":libc-0.2"],
+        ),
+        "linux-x86_64": dict(
+            deps = [":libc-0.2"],
+        ),
+        "macos-arm64": dict(
+            deps = [":libc-0.2"],
+        ),
+        "macos-x86_64": dict(
+            deps = [":libc-0.2"],
+        ),
+    },
     visibility = [],
     deps = [
         ":find-msvc-tools-0.1",
+        ":jobserver-0.1",
         ":shlex-2",
     ],
 )
@@ -1157,6 +1173,12 @@ rust_library(
         "macos-x86_64": dict(
             deps = [":libc-0.2"],
         ),
+        "windows-gnu": dict(
+            features = ["std"],
+        ),
+        "windows-msvc": dict(
+            features = ["std"],
+        ),
     },
     rustc_flags = ["@$(location :getrandom-0.4-build-script-run[rustc_flags])"],
     visibility = [],
@@ -1169,6 +1191,14 @@ rust_binary(
     crate = "build_script_build",
     crate_root = "getrandom-0.4.3.crate/build.rs",
     edition = "2024",
+    platform = {
+        "windows-gnu": dict(
+            features = ["std"],
+        ),
+        "windows-msvc": dict(
+            features = ["std"],
+        ),
+    },
     visibility = [],
 )
 
@@ -1176,6 +1206,14 @@ tidepool_buildscript_run(
     name = "getrandom-0.4-build-script-run",
     package_name = "getrandom",
     buildscript_rule = ":getrandom-0.4-build-script-build",
+    platform = {
+        "windows-gnu": dict(
+            features = ["std"],
+        ),
+        "windows-msvc": dict(
+            features = ["std"],
+        ),
+    },
     version = "0.4.3",
 )
 
@@ -1756,6 +1794,43 @@ rust_library(
     crate = "itoa",
     crate_root = "itoa-1.0.18.crate/src/lib.rs",
     edition = "2021",
+    visibility = [],
+)
+
+http_archive(
+    name = "jobserver-0.1.35.crate",
+    sha256 = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3",
+    strip_prefix = "jobserver-0.1.35",
+    urls = ["https://static.crates.io/crates/jobserver/0.1.35/download"],
+    visibility = [],
+)
+
+rust_library(
+    name = "jobserver-0.1",
+    srcs = [":jobserver-0.1.35.crate"],
+    crate = "jobserver",
+    crate_root = "jobserver-0.1.35.crate/src/lib.rs",
+    edition = "2021",
+    platform = {
+        "linux-arm64": dict(
+            deps = [":libc-0.2"],
+        ),
+        "linux-x86_64": dict(
+            deps = [":libc-0.2"],
+        ),
+        "macos-arm64": dict(
+            deps = [":libc-0.2"],
+        ),
+        "macos-x86_64": dict(
+            deps = [":libc-0.2"],
+        ),
+        "windows-gnu": dict(
+            deps = [":getrandom-0.4"],
+        ),
+        "windows-msvc": dict(
+            deps = [":getrandom-0.4"],
+        ),
+    },
     visibility = [],
 )
 
@@ -4971,4 +5046,100 @@ tidepool_buildscript_run(
     package_name = "zmij",
     buildscript_rule = ":zmij-1-build-script-build",
     version = "1.0.23",
+)
+
+alias(
+    name = "zstd",
+    actual = ":zstd-0.13",
+    visibility = ["PUBLIC"],
+)
+
+http_archive(
+    name = "zstd-0.13.3.crate",
+    sha256 = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a",
+    strip_prefix = "zstd-0.13.3",
+    urls = ["https://static.crates.io/crates/zstd/0.13.3/download"],
+    visibility = [],
+)
+
+rust_library(
+    name = "zstd-0.13",
+    srcs = [":zstd-0.13.3.crate"],
+    crate = "zstd",
+    crate_root = "zstd-0.13.3.crate/src/lib.rs",
+    edition = "2018",
+    visibility = [],
+    deps = [":zstd-safe-7"],
+)
+
+http_archive(
+    name = "zstd-safe-7.3.0.crate",
+    sha256 = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882",
+    strip_prefix = "zstd-safe-7.3.0",
+    urls = ["https://static.crates.io/crates/zstd-safe/7.3.0/download"],
+    visibility = [],
+)
+
+rust_library(
+    name = "zstd-safe-7",
+    srcs = [":zstd-safe-7.3.0.crate"],
+    crate = "zstd_safe",
+    crate_root = "zstd-safe-7.3.0.crate/src/lib.rs",
+    edition = "2018",
+    features = ["std"],
+    visibility = [],
+    deps = [":zstd-sys-2"],
+)
+
+http_archive(
+    name = "zstd-sys-2.1.1+zstd.1.5.7.crate",
+    sha256 = "aeec9eaf2dffbbd09201e23bd0ffcbaa33bb8e9266a10734fd7ed90a85eca078",
+    strip_prefix = "zstd-sys-2.1.1+zstd.1.5.7",
+    urls = ["https://static.crates.io/crates/zstd-sys/2.1.1+zstd.1.5.7/download"],
+    visibility = [],
+)
+
+rust_library(
+    name = "zstd-sys-2",
+    srcs = [":zstd-sys-2.1.1+zstd.1.5.7.crate"],
+    crate = "zstd_sys",
+    crate_root = "zstd-sys-2.1.1+zstd.1.5.7.crate/src/lib.rs",
+    edition = "2018",
+    env = {
+        "CARGO_MANIFEST_DIR": "zstd-sys-2.1.1+zstd.1.5.7.crate",
+        "OUT_DIR": "$(location :zstd-sys-2-build-script-run[out_dir])",
+    },
+    features = ["std"],
+    rustc_flags = ["@$(location :zstd-sys-2-build-script-run[rustc_flags])"],
+    visibility = [],
+)
+
+rust_binary(
+    name = "zstd-sys-2-build-script-build",
+    srcs = [":zstd-sys-2.1.1+zstd.1.5.7.crate"],
+    crate = "build_script_build",
+    crate_root = "zstd-sys-2.1.1+zstd.1.5.7.crate/build.rs",
+    edition = "2018",
+    env = {
+        "CARGO_MANIFEST_DIR": "zstd-sys-2.1.1+zstd.1.5.7.crate",
+    },
+    features = ["std"],
+    visibility = [],
+    deps = [
+        ":cc-1",
+        ":pkg-config-0.3",
+    ],
+)
+
+tidepool_buildscript_run(
+    name = "zstd-sys-2-build-script-run",
+    package_name = "zstd-sys",
+    buildscript_rule = ":zstd-sys-2-build-script-build",
+    env = {
+        "CARGO_MANIFEST_LINKS": "zstd",
+    },
+    features = ["std"],
+    rustc_link_lib = True,
+    rustc_link_search = True,
+    version = "2.1.1+zstd.1.5.7",
 )

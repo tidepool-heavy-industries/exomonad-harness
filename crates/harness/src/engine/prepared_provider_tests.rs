@@ -502,8 +502,7 @@ async fn cache_comparison_engine_issuance_and_replay_preserve_opt_in() {
         turns[0].model_request.prompt_cache_comparison,
         Some(comparison)
     );
-    let body = crate::transport::client::request_body(&turns[0].model_request)
-    .unwrap();
+    let body = crate::transport::client::request_body(&turns[0].model_request).unwrap();
     assert_eq!(bodies.lock().unwrap()[0], body);
     drop(restored);
     std::fs::remove_file(path).unwrap();
