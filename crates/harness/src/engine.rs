@@ -1081,13 +1081,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             crate::transport::ToolManifest,
             crate::transport::ToolManifest,
         )> = None;
-        let store = self.store.clone();
-        let instructions = self.config.instructions.clone();
-        let replay_instructions =
-            match blocking(move || store.intern_replay_instructions(&instructions)).await {
-                Ok(hash) => hash,
-                Err(error) => return Err(self.cleanup_pending(error, &pending).await),
-            };
         loop {
             if *cancellation.borrow() {
                 return Err(self
@@ -1273,7 +1266,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
             let mut req = ResponsesRequest {
                 input: model_input,
-                instructions: self.config.instructions.clone(),
+                instructions: self
+                    .request_instructions(request_provider.as_ref())
+                    .to_owned(),
                 tools: request_tools
                     .as_ref()
                     .expect("request tools installed")
@@ -1433,9 +1428,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 return Err(self.cleanup_pending(error, &pending).await);
             }
             let store = self.store.clone();
-            let instructions = replay_instructions.clone();
             let seal_head = parent.clone();
             let (req, provider_request) = match blocking(move || {
+                let instructions = store.intern_replay_instructions(&req.instructions)?;
                 let prepared = store
                     .prepare_provider_request(
                         &seal_head,
@@ -2299,13 +2294,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .ok_or(EngineError::MissingInheritedOutput(call_id))
     }
 
-    async fn tools(
-        &self,
-        finalize_schema: Option<&serde_json::Value>,
-    ) -> Result<crate::transport::ToolManifest, EngineError> {
-        let snapshot = self.provider.request_snapshot().await?;
-        let provider: &dyn Provider = snapshot.as_deref().unwrap_or(self.provider.as_ref());
-        self.compose_tools(finalize_schema, &provider.tool_manifest())
+    fn request_instructions<'a>(&'a self, provider: &'a dyn Provider) -> &'a str {
+        provider
+            .request_instructions()
+            .unwrap_or(&self.config.instructions)
+    }
+
+    async fn snapshot_provider(&self) -> Result<Arc<dyn Provider>, EngineError> {
+        Ok(self
+            .provider
+            .request_snapshot()
+            .await?
+            .unwrap_or_else(|| self.provider.clone()))
     }
 
     fn compose_tools(
@@ -3654,12 +3654,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let server_response = &server_response;
             let cancellation = cancellation.clone();
             Box::pin(async move {
+                let request_provider = self
+                    .snapshot_provider()
+                    .await
+                    .map_err(|error| CompactError::Failed(error.to_string()))?;
                 let request = ResponsesRequest {
                     input: input.items,
-                    instructions: self.config.instructions.clone(),
+                    instructions: self
+                        .request_instructions(request_provider.as_ref())
+                        .to_owned(),
                     tools: self
-                        .tools(None)
-                        .await
+                        .compose_tools(None, &request_provider.tool_manifest())
                         .map_err(|error| CompactError::Failed(error.to_string()))?,
                     tools_allowed: None,
                     model: model.to_owned(),
@@ -3698,12 +3703,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let summary_response = &summary_response;
             let cancellation = cancellation.clone();
             Box::pin(async move {
+                let request_provider = self
+                    .snapshot_provider()
+                    .await
+                    .map_err(|error| CompactError::Failed(error.to_string()))?;
                 let prepared = self
                     .prepare_compaction_submission(
                         source,
                         ResponsesRequest {
                             input: input.items,
-                            instructions: self.config.instructions.clone(),
+                            instructions: self
+                                .request_instructions(request_provider.as_ref())
+                                .to_owned(),
                             tools: vec![].into(),
                             tools_allowed: Some(vec![]),
                             model: model.to_owned(),

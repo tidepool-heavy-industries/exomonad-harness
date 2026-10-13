@@ -817,6 +817,10 @@ impl Provider for BoundProvider {
 }
 #[async_trait]
 impl Provider for PinnedProvider {
+    fn request_instructions(&self) -> Option<&str> {
+        self.surface.dispatcher.request_instructions()
+    }
+
     fn holds_job_capacity(&self) -> bool {
         self.surface.dispatcher.holds_job_capacity()
     }
@@ -937,6 +941,44 @@ mod tests {
             actor: AgentPath("/root".into()),
             incarnation: "seed-incarnation".into(),
         }))
+    }
+
+    struct PromptDispatcher(&'static str);
+    #[async_trait]
+    impl Provider for PromptDispatcher {
+        fn tools(&self) -> Vec<Value> {
+            vec![]
+        }
+        fn request_instructions(&self) -> Option<&str> {
+            Some(self.0)
+        }
+        async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+            Ok(json!({"generation":self.0}))
+        }
+    }
+
+    #[test]
+    fn embedded_snapshot_keeps_instructions_with_its_dispatcher() {
+        let store = Arc::new(Store::memory().unwrap());
+        let host = seed_host();
+        let first = PinnedProvider {
+            store: store.clone(),
+            host: host.clone(),
+            surface: Arc::new(
+                ToolSurface::new("A".into(), vec![], Arc::new(PromptDispatcher("A"))).unwrap(),
+            ),
+        };
+        let second = PinnedProvider {
+            store,
+            host,
+            surface: Arc::new(
+                ToolSurface::new("B".into(), vec![], Arc::new(PromptDispatcher("B"))).unwrap(),
+            ),
+        };
+        assert_eq!(first.request_instructions(), Some("A"));
+        assert_eq!(second.request_instructions(), Some("B"));
+        assert_eq!(first.tool_surface_version(), Some("A"));
+        assert_eq!(second.tool_surface_version(), Some("B"));
     }
 
     struct PendingAdmissionHost {

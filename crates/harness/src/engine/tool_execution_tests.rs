@@ -557,3 +557,241 @@ async fn yield_timeout_and_durable_input_do_not_bypass_synchronous_result() {
         1
     );
 }
+
+struct PromptGeneration {
+    current: Arc<Mutex<Arc<str>>>,
+}
+struct IssuedPrompt {
+    instructions: Arc<str>,
+}
+#[async_trait::async_trait]
+impl Provider for PromptGeneration {
+    fn tools(&self) -> Vec<serde_json::Value> {
+        vec![]
+    }
+    async fn call(
+        &self,
+        _: &str,
+        _: serde_json::Value,
+    ) -> Result<serde_json::Value, ProviderError> {
+        panic!("unissued provider must not dispatch")
+    }
+    async fn request_snapshot(&self) -> Result<Option<Arc<dyn Provider>>, ProviderError> {
+        Ok(Some(Arc::new(IssuedPrompt {
+            instructions: self.current.lock().unwrap().clone(),
+        })))
+    }
+}
+#[async_trait::async_trait]
+impl Provider for IssuedPrompt {
+    fn tools(&self) -> Vec<serde_json::Value> {
+        vec![]
+    }
+    fn request_instructions(&self) -> Option<&str> {
+        Some(&self.instructions)
+    }
+    fn tool_scheduling(&self, _: &str) -> ToolScheduling {
+        ToolScheduling::BeforeNextInference
+    }
+    async fn call(
+        &self,
+        _: &str,
+        _: serde_json::Value,
+    ) -> Result<serde_json::Value, ProviderError> {
+        Ok(json!({"issued_prompt":self.instructions.as_ref()}))
+    }
+}
+struct PromptScript {
+    current: Arc<Mutex<Arc<str>>>,
+    requests: Arc<Mutex<Vec<(RequestId, ResponsesRequest)>>>,
+    turns: Mutex<VecDeque<ResponsesTurn>>,
+}
+#[async_trait::async_trait]
+impl ResponsesTransport for PromptScript {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
+    }
+    async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push((request.request_id().clone(), request.request().clone()));
+        // Publication races the response from the already-issued A request.
+        *self.current.lock().unwrap() = Arc::from("prompt B");
+        self.turns
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| TransportError::Stream("exhausted prompt script".into()))
+    }
+}
+
+#[tokio::test]
+async fn issued_prompt_generation_survives_publication_and_replay_retry() {
+    let current = Arc::new(Mutex::new(Arc::<str>::from("prompt A")));
+    let provider = Arc::new(PromptGeneration {
+        current: current.clone(),
+    });
+    let issued = provider.request_snapshot().await.unwrap().unwrap();
+    *current.lock().unwrap() = Arc::from("prompt B");
+    assert_eq!(issued.request_instructions(), Some("prompt A"));
+    assert_eq!(
+        issued.call("capture", json!({})).await.unwrap()["issued_prompt"],
+        "prompt A"
+    );
+    *current.lock().unwrap() = Arc::from("prompt A");
+    let requests = Arc::new(Mutex::new(vec![]));
+    let store = Arc::new(Store::memory().unwrap());
+    let engine = Engine::<Offline, _, _>::with_transport(
+        PromptScript {
+            current,
+            requests: requests.clone(),
+            turns: Mutex::new(
+                vec![
+                    turn(vec![call("capture", false, Some(false))]),
+                    final_turn(),
+                ]
+                .into(),
+            ),
+        },
+        store.clone(),
+        Arc::new(JobScheduler::new(1).unwrap()),
+        provider,
+        EngineConfig {
+            instructions: "generic fallback".into(),
+            tools: vec![],
+            model: "test".into(),
+            effort: Effort::Low,
+            session_id: "unchanged-affinity".into(),
+            agent: AgentPath("/root".into()),
+        },
+    );
+    let (_cancel, cancel) = watch::channel(false);
+    let (_mail, mail) = tokio::sync::mpsc::unbounded_channel::<Envelope>();
+    engine.run(None, vec![], cancel, mail).await.unwrap();
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].1.instructions, "prompt A");
+    assert_eq!(requests[1].1.instructions, "prompt B");
+    assert_eq!(requests[0].1.session_id, requests[1].1.session_id);
+    assert_eq!(
+        outputs(&requests[1].1, "original-capture"),
+        vec![json!({"issued_prompt":"prompt A"})]
+    );
+    for (id, request) in requests.iter() {
+        let restored = store
+            .replay_turns(id)
+            .unwrap()
+            .into_iter()
+            .find(|turn| &turn.request == id)
+            .unwrap()
+            .model_request;
+        assert_eq!(restored.instructions, request.instructions);
+        let available = store.history_occurrences(id).unwrap();
+        let occurrences = restored
+            .input
+            .iter()
+            .map(|item| {
+                if item.is_configuration_update() {
+                    return None;
+                }
+                Some(
+                    available
+                        .iter()
+                        .find(|occurrence| occurrence.item == *item)
+                        .expect("retry retains the Store-issued input occurrence")
+                        .clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let retry = store
+            .prepare_provider_request(
+                id,
+                id,
+                restored,
+                &occurrences,
+                None,
+                crate::transport::PreparedTransportSelection::native((
+                    ResponsesRoute::ChatGptPlan,
+                    ResponsesProtocol::Standard,
+                )),
+                crate::store::ProviderRequestPurpose::Inference,
+            )
+            .unwrap();
+        assert_eq!(retry.request().instructions, request.instructions);
+        assert_eq!(retry.request().session_id, request.session_id);
+    }
+}
+
+#[tokio::test]
+async fn server_and_text_compaction_capture_published_prompt_generation() {
+    for text_summary in [false, true] {
+        let current = Arc::new(Mutex::new(Arc::<str>::from("prompt A")));
+        let requests = Arc::new(Mutex::new(vec![]));
+        let store = Arc::new(Store::memory().unwrap());
+        let mut first = turn(vec![call("capture", false, Some(false))]);
+        first.usage.input_tokens = 3;
+        let compact = if text_summary {
+            final_turn()
+        } else {
+            turn(vec![Item(
+                json!({"type":"compaction","encrypted_content":"opaque"}),
+            )])
+        };
+        let engine = Engine::<Offline, _, _>::with_transport(
+            PromptScript {
+                current: current.clone(),
+                requests: requests.clone(),
+                turns: Mutex::new(vec![first, compact, final_turn()].into()),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(PromptGeneration { current }),
+            EngineConfig {
+                instructions: "generic fallback".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "unchanged-affinity".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let engine = if text_summary {
+            engine.with_plain_text_compaction(std::num::NonZeroU64::new(3).unwrap())
+        } else {
+            engine.with_compaction_threshold(3)
+        };
+        let (_cancel, cancel) = watch::channel(false);
+        let (_mail, mail) = tokio::sync::mpsc::unbounded_channel::<Envelope>();
+        engine.run(None, vec![], cancel, mail).await.unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3, "text summary {text_summary}");
+        assert_eq!(requests[0].1.instructions, "prompt A");
+        for (id, request) in &requests[1..] {
+            assert_eq!(request.instructions, "prompt B");
+            let recorded = store.replay_turns(id).unwrap();
+            assert_eq!(
+                recorded
+                    .iter()
+                    .find(|turn| &turn.request == id)
+                    .unwrap()
+                    .model_request
+                    .instructions,
+                "prompt B"
+            );
+            assert_eq!(request.session_id, requests[0].1.session_id);
+        }
+    }
+}
+
+#[tokio::test]
+async fn generic_provider_keeps_engine_instruction_fallback() {
+    let (engine, _host, _started, requests, _requested) = setup(vec![final_turn()]);
+    let (_cancel, cancel) = watch::channel(false);
+    let (_mail, mail) = tokio::sync::mpsc::unbounded_channel::<Envelope>();
+    engine.run(None, vec![], cancel, mail).await.unwrap();
+    assert_eq!(requests.lock().unwrap()[0].instructions, "test");
+}

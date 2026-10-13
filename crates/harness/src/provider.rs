@@ -447,6 +447,12 @@ pub trait Provider: Send + Sync {
         Ok(None)
     }
 
+    /// Exact instructions retained by this issued request snapshot. None uses
+    /// EngineConfig's immutable fallback for generic providers.
+    fn request_instructions(&self) -> Option<&str> {
+        None
+    }
+
     /// None means all work is owned by the call future and stops when it drops.
     /// Providers dispatching external work must supply its cancellation owner.
     fn cancellation_owner(&self) -> Option<std::sync::Arc<dyn CancellationOwner>> {
