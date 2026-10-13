@@ -162,54 +162,136 @@ fn refusal(code: CommandRefusal, reason: impl Into<String>) -> Response {
         .into_response()
 }
 
+/// Local-owner capability minted by the server composition root. It exposes
+/// ordinary input only; browser authentication and other controls remain separate.
+#[derive(Clone)]
+pub struct HostInputBridge {
+    snapshot: Arc<std::sync::RwLock<Snapshot>>,
+    history_store: Option<Arc<Store>>,
+    commands: mpsc::Sender<QueuedCommand>,
+}
+
+impl HostInputBridge {
+    fn for_app(state: &AppState) -> Self {
+        Self {
+            snapshot: state.snapshot.clone(),
+            history_store: state.history_store.clone(),
+            commands: state.commands.clone(),
+        }
+    }
+
+    /// Retain a user input through the same journal and wake owner as the GUI.
+    /// Acceptance proves durable queueing; it does not prove model inference.
+    pub fn submit_input(
+        &self,
+        operation: ClientOperationId,
+        target: HostActorIdentity,
+        text: String,
+    ) -> Result<CommandAccepted, (CommandRefusal, String)> {
+        self.retain(operation, &HostCommand::Input { target, text })?;
+        Ok(CommandAccepted {
+            command_id: operation.to_string(),
+        })
+    }
+
+    /// Observe one exact retained input without resubmitting it.
+    /// Absence does not exclude a concurrent in-flight admission.
+    pub fn input_status(
+        &self,
+        run: &str,
+        operation: ClientOperationId,
+    ) -> Result<Option<crate::store::EmbeddedCommandRecord>, (CommandRefusal, String)> {
+        let record = self.status(run, operation)?;
+        if record
+            .as_ref()
+            .is_some_and(|record| !matches!(record.command, HostCommand::Input { .. }))
+        {
+            return Err((
+                CommandRefusal::InvalidCommand,
+                "operation is not an input command".into(),
+            ));
+        }
+        Ok(record)
+    }
+
+    fn status(
+        &self,
+        run: &str,
+        operation: ClientOperationId,
+    ) -> Result<Option<crate::store::EmbeddedCommandRecord>, (CommandRefusal, String)> {
+        self.check_run(run)?;
+        self.history_store
+            .as_ref()
+            .ok_or((
+                CommandRefusal::Unavailable,
+                "command Store unavailable".into(),
+            ))?
+            .embedded_command(run, operation)
+            .map_err(|error| (CommandRefusal::Unavailable, error.to_string()))
+    }
+
+    fn check_run(&self, requested: &str) -> Result<(), (CommandRefusal, String)> {
+        let run = self
+            .snapshot
+            .read()
+            .map_err(|_| {
+                (
+                    CommandRefusal::Unavailable,
+                    "host projection unavailable".into(),
+                )
+            })?
+            .host_run
+            .clone();
+        if run.as_deref() != Some(requested) {
+            return Err((
+                CommandRefusal::WrongRun,
+                "command target is not in this embedded run".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn retain(
+        &self,
+        operation: ClientOperationId,
+        command: &HostCommand,
+    ) -> Result<(), (CommandRefusal, String)> {
+        self.check_run(&command.target().run)?;
+        let store = self.history_store.as_ref().ok_or((
+            CommandRefusal::Unavailable,
+            "command Store unavailable".into(),
+        ))?;
+        store
+            .enqueue_embedded_command(operation, command)
+            .map_err(|e| {
+                (
+                    if matches!(e, crate::store::StoreError::ConflictingCommand) {
+                        CommandRefusal::Conflict
+                    } else {
+                        CommandRefusal::Unavailable
+                    },
+                    e.to_string(),
+                )
+            })?;
+        // Notification only: the existing owner also drains queued Store rows at
+        // startup and on its periodic wake, closing the commit/enqueue crash gap.
+        let _ = self.commands.try_send(QueuedCommand {
+            command_id: operation.to_string(),
+            command: ClientCommand::Host {
+                operation_id: operation,
+                command: command.clone(),
+            },
+        });
+        Ok(())
+    }
+}
+
 fn retain_host_command(
     state: &AppState,
     operation: ClientOperationId,
     command: &HostCommand,
 ) -> Result<(), (CommandRefusal, String)> {
-    let run = state
-        .snapshot
-        .read()
-        .map_err(|_| {
-            (
-                CommandRefusal::Unavailable,
-                "host projection unavailable".into(),
-            )
-        })?
-        .host_run
-        .clone();
-    if run.as_deref() != Some(command.target().run.as_str()) {
-        return Err((
-            CommandRefusal::WrongRun,
-            "command target is not in this embedded run".into(),
-        ));
-    }
-    let store = state.history_store.as_ref().ok_or((
-        CommandRefusal::Unavailable,
-        "command Store unavailable".into(),
-    ))?;
-    store
-        .enqueue_embedded_command(operation, command)
-        .map_err(|e| {
-            (
-                if matches!(e, crate::store::StoreError::ConflictingCommand) {
-                    CommandRefusal::Conflict
-                } else {
-                    CommandRefusal::Unavailable
-                },
-                e.to_string(),
-            )
-        })?;
-    // Notification only: the existing owner also drains queued Store rows at
-    // startup and on its periodic wake, closing the commit/enqueue crash gap.
-    let _ = state.commands.try_send(QueuedCommand {
-        command_id: operation.to_string(),
-        command: ClientCommand::Host {
-            operation_id: operation,
-            command: command.clone(),
-        },
-    });
-    Ok(())
+    HostInputBridge::for_app(state).retain(operation, command)
 }
 
 /// Stable acknowledgement for an accepted command.
@@ -441,6 +523,7 @@ pub struct QueuedCommand {
 /// Producer-side API given to the scheduler.
 #[derive(Clone)]
 pub struct ServerControl {
+    input_bridge: HostInputBridge,
     #[cfg(test)]
     websocket_test_hooks: Arc<std::sync::OnceLock<Arc<WebSocketTestHooks>>>,
     actor_display_expander: Arc<std::sync::OnceLock<actor_output::ActorDisplayExpander>>,
@@ -462,8 +545,13 @@ struct WebSocketTestHooks {
 }
 
 impl ServerControl {
+    pub fn input_bridge(&self) -> HostInputBridge {
+        self.input_bridge.clone()
+    }
+
     fn for_app(state: &AppState) -> Self {
         Self {
+            input_bridge: HostInputBridge::for_app(state),
             #[cfg(test)]
             websocket_test_hooks: state.websocket_test_hooks.clone(),
             actor_display_expander: state.actor_display_expander.clone(),
@@ -781,6 +869,7 @@ pub fn server_with_config(
     };
     let snapshot = state.snapshot.clone();
     let control = ServerControl {
+        input_bridge: HostInputBridge::for_app(&state),
         #[cfg(test)]
         websocket_test_hooks: Arc::clone(&state.websocket_test_hooks),
         actor_display_expander: Arc::clone(&state.actor_display_expander),
@@ -1213,19 +1302,17 @@ async fn command_status(
         Ok(id) => ClientOperationId(id),
         Err(_) => return refusal(CommandRefusal::InvalidCommand, "invalid operation UUID"),
     };
-    let Some(store) = &state.history_store else {
-        return refusal(CommandRefusal::Unavailable, "command Store unavailable");
-    };
+    let bridge = HostInputBridge::for_app(&state);
     let run = state.snapshot.read().ok().and_then(|s| s.host_run.clone());
     let Some(run) = run else {
         return refusal(CommandRefusal::Unavailable, "embedded run unavailable");
     };
-    match store.embedded_command(&run, operation) {
+    match bridge.status(&run, operation) {
         Ok(Some(record)) => {
             Json(browser_contract::EmbeddedCommandRecord::from(&record)).into_response()
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(_) => refusal(CommandRefusal::Unavailable, "command Store read failed"),
+        Err((code, reason)) => refusal(code, reason),
     }
 }
 
@@ -3326,6 +3413,103 @@ mod tests {
 mod durable_command_tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn local_input_bridge_shares_http_journal_and_preserves_exact_operation() {
+        let secret = "local-input-bridge-tests-only-bearer-secret";
+        let store = Arc::new(Store::memory().unwrap());
+        let (router, control, mut commands) = server_with_config(
+            ServerConfig::new(PathBuf::from("."))
+                .with_history_store(store)
+                .with_bearer_secret(BearerSecret::new(secret).unwrap()),
+        );
+        control.set_snapshot(Snapshot {
+            host_run: Some("run".into()),
+            ..Snapshot::default()
+        });
+        let bridge = control.input_bridge();
+        let target = HostActorIdentity {
+            run: "run".into(),
+            actor: crate::model::AgentPath("/root".into()),
+            incarnation: "first".into(),
+        };
+        let operation = ClientOperationId(uuid::Uuid::new_v4());
+        // Discard acknowledgement; the exact operation remains observable.
+        bridge
+            .submit_input(operation, target.clone(), "héllo".into())
+            .unwrap();
+        let retained = bridge.input_status("run", operation).unwrap().unwrap();
+        assert_eq!(
+            retained.command,
+            HostCommand::Input {
+                target: target.clone(),
+                text: "héllo".into()
+            }
+        );
+        assert_eq!(retained.state, crate::store::EmbeddedCommandState::Queued);
+        assert!(retained.receipt.is_none());
+        assert!(
+            matches!(commands.recv().await.unwrap().command, ClientCommand::Host { operation_id, command } if operation_id == operation && command == retained.command)
+        );
+        bridge
+            .submit_input(operation, target.clone(), "héllo".into())
+            .unwrap();
+        assert_eq!(
+            bridge.input_status("run", operation).unwrap(),
+            Some(retained.clone())
+        );
+        assert!(matches!(
+            bridge.submit_input(operation, target.clone(), "different".into()),
+            Err((CommandRefusal::Conflict, _))
+        ));
+        let mut foreign = target;
+        foreign.run = "foreign".into();
+        assert!(matches!(
+            bridge.submit_input(ClientOperationId(uuid::Uuid::new_v4()), foreign, "x".into()),
+            Err((CommandRefusal::WrongRun, _))
+        ));
+        assert!(matches!(
+            bridge.input_status("foreign", operation),
+            Err((CommandRefusal::WrongRun, _))
+        ));
+        assert!(
+            bridge
+                .input_status("run", ClientOperationId(uuid::Uuid::new_v4()))
+                .unwrap()
+                .is_none()
+        );
+        let control_operation = ClientOperationId(uuid::Uuid::new_v4());
+        bridge
+            .retain(
+                control_operation,
+                &HostCommand::Retire {
+                    target: retained.command.target().clone(),
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            bridge.input_status("run", control_operation),
+            Err((CommandRefusal::InvalidCommand, _))
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/api/commands/{operation}"))
+            .bearer_auth(secret)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let observed: browser_contract::EmbeddedCommandRecord = response.json().await.unwrap();
+        assert_eq!(
+            observed,
+            browser_contract::EmbeddedCommandRecord::from(&retained)
+        );
+        server.abort();
+    }
 
     #[tokio::test]
     async fn host_http_lost_ack_lookup_conflict_and_receipt_eviction() {
