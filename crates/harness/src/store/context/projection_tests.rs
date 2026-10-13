@@ -27,6 +27,7 @@ fn request(model: &str) -> ResponsesRequest {
         model: model.into(),
         pinned_effort: Effort::Low,
         session_id: "projection".into(),
+        prompt_cache_comparison: None,
     }
 }
 

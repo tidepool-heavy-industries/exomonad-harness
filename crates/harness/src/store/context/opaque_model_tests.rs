@@ -73,6 +73,7 @@ fn prepare(provenance: Provenance<'_>, selected: &str) -> Restoration {
                         model: model.into(),
                         pinned_effort: Effort::Low,
                         session_id: "test".into(),
+                        prompt_cache_comparison: None,
                     },
                     &ResponsesTurn {
                         response_id: "response".into(),
@@ -95,6 +96,7 @@ fn prepare(provenance: Provenance<'_>, selected: &str) -> Restoration {
                         model: model.into(),
                         pinned_effort: Effort::Low,
                         session_id: "test".into(),
+                        prompt_cache_comparison: None,
                     },
                     &ResponsesTurn {
                         response_id: "response".into(),
@@ -509,6 +511,7 @@ fn identical_current_opaque_bytes_keep_distinct_origin_model_evidence() {
                 model: "model-b".into(),
                 pinned_effort: Effort::Low,
                 session_id: "test".into(),
+                prompt_cache_comparison: None,
             },
             &ResponsesTurn {
                 response_id: "equal-bytes".into(),

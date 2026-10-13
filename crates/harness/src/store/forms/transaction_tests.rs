@@ -489,6 +489,7 @@ fn replay_read_completion_checks_success_and_decode_refusal() {
                         model: "offline".into(),
                         pinned_effort: Effort::Low,
                         session_id: "session".into(),
+                        prompt_cache_comparison: None,
                     },
                     &ResponsesTurn {
                         response_id: "response".into(),

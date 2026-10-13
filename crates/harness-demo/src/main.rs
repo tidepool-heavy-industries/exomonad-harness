@@ -2958,6 +2958,7 @@ mod tests {
             model: "test-model".into(),
             pinned_effort: Effort::Low,
             session_id: "demo-contract".into(),
+            prompt_cache_comparison: None,
         };
         harness::transport::client::request_body(&request).unwrap();
         let schema = json!({"type":"object","properties":{"name":{"type":"string"}}});
@@ -3815,6 +3816,7 @@ mod tests {
             model: "deterministic-local".into(),
             pinned_effort: Effort::Low,
             session_id: "capture-test".into(),
+            prompt_cache_comparison: None,
         };
         capture_deterministic_request(&request, &path).unwrap();
         let record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();

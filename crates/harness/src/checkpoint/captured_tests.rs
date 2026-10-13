@@ -127,6 +127,7 @@ fn captured_cut_preserves_multicall_order_and_exact_earlier_dependencies() {
                 model: "test".into(),
                 pinned_effort: Effort::Medium,
                 session_id: "fixture".into(),
+                prompt_cache_comparison: None,
             },
             &crate::transport::ResponsesTurn {
                 response_id: "fixture".into(),

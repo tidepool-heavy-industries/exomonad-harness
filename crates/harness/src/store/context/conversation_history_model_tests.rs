@@ -97,6 +97,7 @@ fn run_history(
             model: "astra".into(),
             pinned_effort: Effort::Low,
             session_id: "cut-history".into(),
+            prompt_cache_comparison: None,
         };
         let issued = store
             .issue_provider_request(

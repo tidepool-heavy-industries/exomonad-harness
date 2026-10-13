@@ -17,6 +17,7 @@ fn issued_response(store: &Store, head: &RequestId, items: Vec<Item>, model: &st
                 model: model.into(),
                 pinned_effort: Effort::Low,
                 session_id: "test".into(),
+                prompt_cache_comparison: None,
             },
             &crate::transport::ResponsesTurn {
                 response_id: "response".into(),
@@ -41,6 +42,7 @@ fn legacy_response(store: &Store, head: &RequestId, items: Vec<Item>, model: &st
                 model: model.into(),
                 pinned_effort: Effort::Low,
                 session_id: "test".into(),
+                prompt_cache_comparison: None,
             },
             &crate::transport::ResponsesTurn {
                 response_id: "response".into(),
@@ -2081,6 +2083,7 @@ fn record_finalize_marker(store: &Store, head: &RequestId, item: &Item) -> i64 {
         model: "sol".into(),
         pinned_effort: Effort::Low,
         session_id: "marker".into(),
+        prompt_cache_comparison: None,
     };
     let event = store
         .record_replay_turn(

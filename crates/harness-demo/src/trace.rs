@@ -692,6 +692,7 @@ mod tests {
             model: "safe-model".into(),
             pinned_effort: harness::model::Effort::Low,
             session_id: "not-traced".into(),
+            prompt_cache_comparison: None,
         };
         assert!(
             transport
@@ -734,6 +735,7 @@ mod tests {
             model: "safe-model".into(),
             pinned_effort: harness::model::Effort::Low,
             session_id: "not-traced".into(),
+            prompt_cache_comparison: None,
         };
         transport
             .create_streaming(prepared_request(request).await, events_tx)
@@ -759,6 +761,7 @@ mod tests {
             model: "safe-model".into(),
             pinned_effort: harness::model::Effort::Low,
             session_id: "trace-disabled-fixture".into(),
+            prompt_cache_comparison: None,
         };
         assert!(
             transport

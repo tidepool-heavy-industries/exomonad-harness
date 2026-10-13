@@ -2670,6 +2670,7 @@ mod tests {
             model: "offline-recording".into(),
             pinned_effort: Effort::Low,
             session_id: "recorded-session".into(),
+            prompt_cache_comparison: None,
         };
         {
             let s = Store::open(&path).unwrap();

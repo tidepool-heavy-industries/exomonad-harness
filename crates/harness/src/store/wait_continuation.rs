@@ -256,6 +256,7 @@ mod tests {
             model: "test".into(),
             pinned_effort: Effort::Low,
             session_id: "test".into(),
+            prompt_cache_comparison: None,
         };
         let occurrences = store
             .history_occurrences(&source)

@@ -26,6 +26,7 @@ fn dto(tools: Vec<serde_json::Value>) -> ResponsesRequest {
         model: "model".into(),
         pinned_effort: Effort::Low,
         session_id: "session".into(),
+        prompt_cache_comparison: None,
     }
 }
 #[tokio::test]
@@ -230,4 +231,20 @@ fn legacy_serialized_contract_does_not_become_replay_authority() {
             .prepare_submission(),
         Err(TransportError::UnprovenResponseContract)
     ));
+}
+
+#[test]
+fn cache_comparison_baseline_is_part_of_exact_replay_request() {
+    let expected = dto(vec![]);
+    let mut changed = expected.clone();
+    changed.prompt_cache_comparison = Some(crate::transport::PromptCacheComparison {
+        comparison_response_id: "baseline".into(),
+    });
+    assert_eq!(
+        super::request_mismatch(&expected, &changed),
+        Some("prompt_cache_comparison")
+    );
+    let restored: ResponsesRequest =
+        serde_json::from_value(serde_json::to_value(&changed).unwrap()).unwrap();
+    assert!(super::request_mismatch(&changed, &restored).is_none());
 }

@@ -157,6 +157,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         tools_allowed: None,
         pinned_effort: Effort::High,
         session_id: "source-session".into(),
+        prompt_cache_comparison: None,
     };
     let source_items = vec![
         Item(
@@ -312,6 +313,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         model: "gpt-6-luna".into(),
         input,
         session_id: "child-session".into(),
+        prompt_cache_comparison: None,
         ..request
     };
     let mut answer = vec![Item(
@@ -516,6 +518,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
             .map(|(_, _, item)| item)
             .collect(),
         session_id: "grandchild-session".into(),
+        prompt_cache_comparison: None,
         ..destination
     };
     let grandchild_answer = vec![Item(

@@ -36,6 +36,8 @@ pub(super) struct IssuedRequestRecord {
     pub(super) model: String,
     pinned_effort: Effort,
     session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt_cache_comparison: Option<crate::transport::PromptCacheComparison>,
 }
 
 /// Issued position owns its immutable source independently of content equality.
@@ -539,6 +541,7 @@ impl Store {
                     model: request.model.clone(),
                     pinned_effort: request.pinned_effort,
                     session_id: request.session_id.clone(),
+                    prompt_cache_comparison: request.prompt_cache_comparison.clone(),
                 },
                 #[cfg(test)]
                 input_reencodings,
@@ -733,6 +736,7 @@ impl Store {
                 model: record.issued.model,
                 pinned_effort: record.issued.pinned_effort,
                 session_id: record.issued.session_id,
+                prompt_cache_comparison: record.issued.prompt_cache_comparison,
             };
             if let Some(outputs) = &record.issued.outputs {
                 validate_output_references(tx, event, &request.input, outputs)?;
@@ -866,6 +870,7 @@ mod tests {
             model: "offline".into(),
             pinned_effort: Effort::Medium,
             session_id: "session".into(),
+            prompt_cache_comparison: None,
         }
     }
 

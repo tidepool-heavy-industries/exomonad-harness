@@ -385,6 +385,7 @@ mod tests {
             model: "mock".into(),
             pinned_effort: crate::model::Effort::Low,
             session_id: "test".into(),
+            prompt_cache_comparison: None,
         };
         let response = crate::transport::ResponsesTurn {
             response_id: String::new(),
@@ -490,6 +491,7 @@ mod tests {
             model: "mock".into(),
             pinned_effort: crate::model::Effort::Low,
             session_id: "test".into(),
+            prompt_cache_comparison: None,
         };
         for response_id in ["first", "second"] {
             store

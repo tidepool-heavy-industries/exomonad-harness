@@ -11,6 +11,7 @@ fn request(input: Vec<Item>) -> ResponsesRequest {
         model: "test".into(),
         pinned_effort: Effort::Low,
         session_id: "ownership".into(),
+        prompt_cache_comparison: None,
     }
 }
 

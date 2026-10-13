@@ -410,6 +410,7 @@ fn request(parameters: Value) -> ResponsesRequest {
         model: "fixture-model".into(),
         pinned_effort: Effort::Low,
         session_id: "generated-schema".into(),
+        prompt_cache_comparison: None,
     }
 }
 

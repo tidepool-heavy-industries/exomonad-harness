@@ -22,6 +22,7 @@ fn plan_request() -> ResponsesRequest {
         model: "gpt-6.1-sol".into(),
         pinned_effort: Effort::Low,
         session_id: "plan-production-request".into(),
+        prompt_cache_comparison: None,
     }
 }
 
@@ -226,4 +227,27 @@ async fn production_http_client_never_forwards_history_on_redirect() {
         !server.await.unwrap(),
         "history was sent to the redirect target"
     );
+}
+
+#[test]
+fn cache_comparison_defaults_omit_and_invalid_selections_refuse_before_dispatch() {
+    let mut request = plan_request();
+    let body = request_body_for_route(&request, ResponsesRoute::ChatGptPlan).unwrap();
+    assert!(body.get("prompt_cache_options").is_none());
+    request.prompt_cache_comparison = Some(crate::transport::PromptCacheComparison {
+        comparison_response_id: "baseline".into(),
+    });
+    let body = request_body_for_route(&request, ResponsesRoute::ChatGptPlan).unwrap();
+    assert_eq!(
+        body["prompt_cache_options"],
+        json!({"comparison_response_id":"baseline"})
+    );
+    assert!(crate::transport::client::request_body(&request).is_err());
+    request
+        .prompt_cache_comparison
+        .as_mut()
+        .unwrap()
+        .comparison_response_id
+        .clear();
+    assert!(request_body_for_route(&request, ResponsesRoute::ChatGptPlan).is_err());
 }

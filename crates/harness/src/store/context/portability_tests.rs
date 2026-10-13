@@ -31,6 +31,7 @@ fn record(store: &Store, head: &RequestId, items: Vec<Item>, model: &str) {
                 model: model.into(),
                 pinned_effort: Effort::Low,
                 session_id: "test".into(),
+                prompt_cache_comparison: None,
             },
             &ResponsesTurn {
                 response_id: "test".into(),
@@ -55,6 +56,7 @@ fn record_legacy(store: &Store, head: &RequestId, items: Vec<Item>, model: &str)
                 model: model.into(),
                 pinned_effort: Effort::Low,
                 session_id: "test".into(),
+                prompt_cache_comparison: None,
             },
             &ResponsesTurn {
                 response_id: "test".into(),

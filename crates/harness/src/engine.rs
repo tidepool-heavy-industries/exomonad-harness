@@ -369,6 +369,7 @@ pub struct Engine<A: Auth, P: Provider, C: ResponsesTransport = ResponsesClient<
     compact_at_input_tokens: Option<u64>,
     bounded_invocation: bool,
     output_observer: Option<Arc<dyn ModelOutputObserver>>,
+    prompt_cache_comparison: Option<crate::transport::PromptCacheComparison>,
     compaction_strategy: CompactionStrategy,
     _auth: std::marker::PhantomData<fn() -> A>,
 }
@@ -441,9 +442,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             compact_at_input_tokens: None,
             bounded_invocation: false,
             output_observer: None,
+            prompt_cache_comparison: None,
             compaction_strategy: CompactionStrategy::Server,
             _auth: std::marker::PhantomData,
         }
+    }
+    /// Compare inference requests with one fixed diagnostic baseline.
+    pub fn with_prompt_cache_comparison(
+        mut self,
+        comparison: crate::transport::PromptCacheComparison,
+    ) -> Self {
+        self.prompt_cache_comparison = Some(comparison);
+        self
     }
     pub fn with_output_observer(mut self, observer: Arc<dyn ModelOutputObserver>) -> Self {
         self.output_observer = Some(observer);
@@ -1272,6 +1282,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 // of the first positional update in the exact history sent.
                 pinned_effort,
                 session_id: self.config.session_id.clone(),
+                prompt_cache_comparison: self.prompt_cache_comparison.clone(),
             };
             if let Some(version) = request_provider.tool_surface_version() {
                 let store = self.store.clone();
@@ -3651,6 +3662,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     model: model.to_owned(),
                     pinned_effort: effective_effort,
                     session_id: self.config.session_id.clone(),
+                    prompt_cache_comparison: None,
                 };
                 let prepared = self
                     .prepare_compaction_submission(
@@ -3694,6 +3706,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             model: model.to_owned(),
                             pinned_effort: effective_effort,
                             session_id: self.config.session_id.clone(),
+                            prompt_cache_comparison: None,
                         },
                         input.occurrences,
                         crate::store::ProviderRequestPurpose::TextSummary,
@@ -7603,6 +7616,7 @@ mod tests {
                     model: model_b.into(),
                     pinned_effort: Effort::Low,
                     session_id: "model-switch-fixture".into(),
+                    prompt_cache_comparison: None,
                 },
                 &ResponsesTurn {
                     response_id: "model-b-response".into(),

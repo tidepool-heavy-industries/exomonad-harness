@@ -114,6 +114,13 @@ impl<'de> Deserialize<'de> for ToolManifest {
     }
 }
 
+/// Requests best-effort cache diagnostics against one retained provider response.
+/// This selection does not load history or change cache behavior.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct PromptCacheComparison {
+    pub comparison_response_id: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ResponsesRequest {
     pub input: Vec<Item>,
@@ -125,6 +132,8 @@ pub struct ResponsesRequest {
     pub model: String,
     pub pinned_effort: Effort,
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_comparison: Option<PromptCacheComparison>,
 }
 
 /// The selected native contract or an exact step issued by the replay owner.

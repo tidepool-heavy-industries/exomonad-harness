@@ -54,6 +54,7 @@ fn record_response(store: &Store, source: &RequestId, raw: &[Item]) -> ServerCom
         model: "actual-model".into(),
         pinned_effort: Effort::Low,
         session_id: "compaction-test".into(),
+        prompt_cache_comparison: None,
     };
     let prepared = store
         .prepare_provider_request(

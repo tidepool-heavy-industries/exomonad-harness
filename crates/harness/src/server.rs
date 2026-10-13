@@ -1688,6 +1688,7 @@ mod tests {
             model: "offline".into(),
             pinned_effort: Effort::Low,
             session_id: "session".into(),
+            prompt_cache_comparison: None,
         };
         for (id, branch) in [("z-first", "/root"), ("a-last", "/root/child")] {
             let request = RequestId(id.into());

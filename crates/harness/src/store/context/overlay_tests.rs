@@ -35,6 +35,7 @@ fn record(store: &Store, head: &RequestId, items: Vec<Item>) {
                 model: "model-a".into(),
                 pinned_effort: Effort::Low,
                 session_id: "fixture".into(),
+                prompt_cache_comparison: None,
             },
             &ResponsesTurn {
                 response_id: head.0.clone(),

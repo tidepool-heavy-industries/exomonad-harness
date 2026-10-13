@@ -10,7 +10,7 @@ fn request() -> ResponsesRequest {
         model:"opaque-provider-model".into(),instructions:"shared instructions".into(),
         input:vec![Item::configuration_update(Effort::Low),Item(json!({"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}))],
         tools:vec![tool("work"),json!({"type":"custom","name":"cell","description":"raw Haskell","format":{"type":"text"}}),json!({"type":"function","name":"yield","strict":true,"parameters":{"type":"object","properties":{"until":{"anyOf":[{"type":"number","minimum":0},{"type":"null"}]}},"required":["until"],"additionalProperties":false}})].into(),
-        tools_allowed:None,pinned_effort:Effort::Low,session_id:"shared-session".into(),
+        tools_allowed:None,pinned_effort:Effort::Low,session_id:"shared-session".into(), prompt_cache_comparison: None,
     }
 }
 fn lite(request: &ResponsesRequest) -> Value {

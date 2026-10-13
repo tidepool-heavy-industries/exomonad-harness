@@ -609,6 +609,7 @@ mod tests {
                 model: "model".into(),
                 pinned_effort: Effort::Low,
                 session_id: "session".into(),
+                prompt_cache_comparison: None,
             })
             .unwrap();
         let issued = store

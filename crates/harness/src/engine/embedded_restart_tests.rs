@@ -739,6 +739,7 @@ async fn embedded_restart_preserves_committed_model_for_retained_opaque_history(
                     model: "model-b".into(),
                     pinned_effort: Effort::Low,
                     session_id: "embedded-restart".into(),
+                    prompt_cache_comparison: None,
                 },
                 &ResponsesTurn {
                     response_id: "model-b-output".into(),

@@ -33,6 +33,7 @@ mod tests {
             model: "fixture-model".into(),
             pinned_effort: Effort::Low,
             session_id: session_id.into(),
+            prompt_cache_comparison: None,
         }
     }
 

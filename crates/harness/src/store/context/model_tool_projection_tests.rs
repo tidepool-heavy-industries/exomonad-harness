@@ -128,6 +128,7 @@ fn pruning_requires_the_exact_durable_operation_and_preserves_native_ownership()
         model: "offline".into(),
         pinned_effort: crate::model::Effort::Low,
         session_id: "test".into(),
+        prompt_cache_comparison: None,
     };
     let hashes = vec![None; request.input.len()];
     // The raw owner cannot admit an unpersisted overlay, even when its bytes are plausible.

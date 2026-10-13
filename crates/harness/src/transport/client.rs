@@ -89,6 +89,8 @@ struct RequestBody<'a> {
     stream: bool,
     store: bool,
     prompt_cache_key: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_options: Option<&'a super::PromptCacheComparison>,
     include: [&'static str; 1],
 }
 
@@ -147,6 +149,18 @@ fn normalized_request(
 ) -> Result<RequestBody<'_>, TransportError> {
     if request.model.is_empty() || request.session_id.is_empty() {
         return Err(TransportError::Stream("empty model or session id".into()));
+    }
+    if let Some(comparison) = &request.prompt_cache_comparison {
+        if comparison.comparison_response_id.is_empty() {
+            return Err(TransportError::Stream(
+                "empty cache diagnostic comparison response id".into(),
+            ));
+        }
+        if route != ResponsesRoute::ChatGptPlan || protocol != ResponsesProtocol::Standard {
+            return Err(TransportError::Stream(
+                "cache diagnostic comparisons require the public Standard contract".into(),
+            ));
+        }
     }
     let admitted_tools = request.tools.strict_tools()?;
     let lite = protocol == ResponsesProtocol::Lite;
@@ -237,6 +251,7 @@ fn normalized_request(
         stream: true,
         store: false,
         prompt_cache_key: &request.session_id,
+        prompt_cache_options: request.prompt_cache_comparison.as_ref(),
         include: ["reasoning.encrypted_content"],
     })
 }
@@ -539,6 +554,7 @@ mod tests {
             model: "model".into(),
             pinned_effort: crate::model::Effort::Low,
             session_id: "session".into(),
+            prompt_cache_comparison: None,
         };
         let prepared = store
             .prepare_provider_request(
@@ -572,6 +588,7 @@ mod tests {
             model: "gpt-6-sol".into(),
             pinned_effort: Effort::Low,
             session_id: "shared".into(),
+            prompt_cache_comparison: None,
         };
         let body = request_body(&request).expect("body");
         assert_eq!(body["stream"], true);
@@ -599,6 +616,7 @@ mod tests {
             model: "gpt-6-sol".into(),
             pinned_effort: Effort::Low,
             session_id: "shared".into(),
+            prompt_cache_comparison: None,
         };
         let body = request_body(&request).unwrap();
         assert_eq!(body["tools"].as_array().unwrap().len(), 2);
@@ -618,6 +636,7 @@ mod tests {
             model: "gpt-6-sol".into(),
             pinned_effort: Effort::Low,
             session_id: "shared".into(),
+            prompt_cache_comparison: None,
         };
         assert!(request_body(&request).is_err());
     }
@@ -633,6 +652,7 @@ mod tests {
             model: "gpt-6-sol".into(),
             pinned_effort: Effort::Low,
             session_id: "shared".into(),
+            prompt_cache_comparison: None,
         };
         assert!(request_body(&request).is_ok());
     }
@@ -653,6 +673,7 @@ mod tests {
             model: "test-model".into(),
             pinned_effort: Effort::Low,
             session_id: "gate".into(),
+            prompt_cache_comparison: None,
         };
         assert_eq!(request_body(&request).unwrap()["tools"][0], valid);
         // Deserialization retains the same immutable admission result.
@@ -706,7 +727,7 @@ mod tests {
             input: vec![], instructions:String::new(), tools:vec![json!({
                 "type":"function","name":"status","strict":true,
                 "parameters":{"type":"object","properties":{"view":{"type":"string"}},"additionalProperties":false}
-            })].into(),tools_allowed:None,model:"test-model".into(),pinned_effort:Effort::Low,session_id:"gate-before-auth".into()
+            })].into(),tools_allowed:None,model:"test-model".into(),pinned_effort:Effort::Low,session_id:"gate-before-auth".into(),prompt_cache_comparison:None
         };
         let client = ResponsesClient::new(NoAuth);
         let selection = crate::engine::ResponsesTransport::prepare_submission(&client).unwrap();
@@ -852,6 +873,7 @@ mod tests {
             model: "gpt-6-sol".into(),
             pinned_effort: Effort::Low,
             session_id: "harness-wave0-transport-smoke".into(),
+            prompt_cache_comparison: None,
         };
         let selection = crate::engine::ResponsesTransport::prepare_submission(&client).unwrap();
         let store = crate::store::Store::memory().unwrap();

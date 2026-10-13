@@ -441,6 +441,7 @@ mod tests {
             model: "model-original".into(),
             pinned_effort: Effort::Low,
             session_id: "session".into(),
+            prompt_cache_comparison: None,
         }
     }
     fn issue(store: &Store) -> IssuedProviderRequest {

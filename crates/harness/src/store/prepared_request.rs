@@ -205,6 +205,7 @@ mod tests {
             model: "issued-model".into(),
             pinned_effort: Effort::Low,
             session_id: "session".into(),
+            prompt_cache_comparison: None,
         }
     }
 

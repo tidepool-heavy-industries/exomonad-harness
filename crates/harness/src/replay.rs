@@ -920,6 +920,8 @@ fn request_mismatch(
         Some("model")
     } else if expected.pinned_effort != actual.pinned_effort {
         Some("pinned_effort")
+    } else if expected.prompt_cache_comparison != actual.prompt_cache_comparison {
+        Some("prompt_cache_comparison")
     } else if expected.session_id != actual.session_id {
         Some("session_id")
     } else {
@@ -979,6 +981,7 @@ mod tests {
             model: "model".into(),
             pinned_effort: Effort::Low,
             session_id: "session".into(),
+            prompt_cache_comparison: None,
         };
         let turn = |id: &str| ResponsesTurn {
             response_id: id.into(),
@@ -1178,6 +1181,7 @@ mod tests {
             model: "test-model".into(),
             pinned_effort: Effort::Medium,
             session_id: session_id.into(),
+            prompt_cache_comparison: None,
         }
     }
 

@@ -142,6 +142,7 @@ async fn completed_compaction(streaming: bool) {
                 model: "model".into(),
                 pinned_effort: Effort::Low,
                 session_id: "session".into(),
+                prompt_cache_comparison: None,
             },
             &[],
             None,
@@ -227,6 +228,7 @@ async fn cancelled_compaction_prefix_is_interrupted_after_reopen() {
                 model: "model".into(),
                 pinned_effort: Effort::Low,
                 session_id: "session".into(),
+                prompt_cache_comparison: None,
             },
             &[],
             None,
@@ -340,6 +342,7 @@ async fn compaction_live_retention_failure_settles_failed_response() {
                 model: "model".into(),
                 pinned_effort: Effort::Low,
                 session_id: "session".into(),
+                prompt_cache_comparison: None,
             },
             &[],
             None,
@@ -408,6 +411,7 @@ async fn failed_auxiliary_issuance_does_not_pollute_embedded_frontier() {
                     model: "model".into(),
                     pinned_effort: Effort::Low,
                     session_id: "session".into(),
+                    prompt_cache_comparison: None,
                 },
                 vec![],
                 ProviderRequestPurpose::TextSummary
@@ -422,4 +426,88 @@ async fn failed_auxiliary_issuance_does_not_pollute_embedded_frontier() {
     let (children, issued): (u64, u64) = c.query_row("SELECT (SELECT COUNT(*) FROM requests WHERE parent_id=?1),(SELECT COUNT(*) FROM provider_requests)", [&source.0], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
     assert_eq!(children, 1);
     assert_eq!(issued, 0);
+}
+
+struct ComparisonCapture(Arc<Mutex<Vec<serde_json::Value>>>);
+#[async_trait::async_trait]
+impl ResponsesTransport for ComparisonCapture {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
+    }
+    async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        self.0
+            .lock()
+            .unwrap()
+            .push(serde_json::from_slice(request.wire_body()).unwrap());
+        Ok(ResponsesTurn {
+            response_id: "completed-comparison".into(),
+            items: vec![Item(
+                json!({"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"done"}]}),
+            )],
+            usage: Usage::default(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn cache_comparison_engine_issuance_and_replay_preserve_opt_in() {
+    let path =
+        std::env::temp_dir().join(format!("cache-comparison-{}.sqlite", uuid::Uuid::new_v4()));
+    let store = Arc::new(Store::open(&path).unwrap());
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let comparison = crate::transport::PromptCacheComparison {
+        comparison_response_id: "baseline-completed".into(),
+    };
+    let engine = Engine::<Offline, NoEffects, _>::with_transport(
+        ComparisonCapture(bodies.clone()),
+        store.clone(),
+        Arc::new(JobScheduler::new(1).unwrap()),
+        Arc::new(NoEffects(AtomicUsize::new(0))),
+        EngineConfig {
+            instructions: "stable".into(),
+            tools: vec![],
+            model: "gpt-6-luna".into(),
+            effort: Effort::Medium,
+            session_id: "stable-session".into(),
+            agent: AgentPath("/comparison".into()),
+        },
+    )
+    .with_prompt_cache_comparison(comparison.clone());
+    let (_cancel, receiver) = watch::channel(false);
+    let (_incoming, incoming) = tokio::sync::mpsc::unbounded_channel();
+    let completed = engine
+        .run(
+            None,
+            vec![Item(
+                json!({"type":"message","role":"user","content":"same prefix"}),
+            )],
+            receiver,
+            incoming,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        bodies.lock().unwrap()[0]["prompt_cache_options"],
+        json!({"comparison_response_id":"baseline-completed"})
+    );
+    drop(engine);
+    drop(store);
+    let restored = Store::open(&path).unwrap();
+    let turns = restored.replay_turns(&completed.head_request).unwrap();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(
+        turns[0].model_request.prompt_cache_comparison,
+        Some(comparison)
+    );
+    let body = crate::transport::client::request_body_for_route(
+        &turns[0].model_request,
+        ResponsesRoute::ChatGptPlan,
+    )
+    .unwrap();
+    assert_eq!(bodies.lock().unwrap()[0], body);
+    drop(restored);
+    std::fs::remove_file(path).unwrap();
 }
