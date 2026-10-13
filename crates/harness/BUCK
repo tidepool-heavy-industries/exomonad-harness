@@ -115,3 +115,13 @@ integration_test(name = "plain_text_compaction", deps = [":harness"] + HARNESS_D
 integration_test(name = "process_recovery", deps = [":harness"] + HARNESS_DEPS)
 integration_test(name = "progress_cancel", deps = [":harness"] + HARNESS_DEPS)
 integration_test(name = "tree_driver", deps = [":harness"] + HARNESS_DEPS)
+
+rust_binary(
+    name = "cache_probe",
+    crate = "cache_probe",
+    crate_root = "src/bin/cache_probe.rs",
+    edition = "2024",
+    srcs = ["src/bin/cache_probe.rs"],
+    deps = [":harness"] + HARNESS_DEPS,
+    visibility = ["PUBLIC"],
+)
