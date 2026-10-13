@@ -3,14 +3,14 @@ use crate::transport::ResponsesRoute;
 use crate::{
     context::{ContextBlock, ContextDraft, ContextRole},
     provider::{CallContext, ContextDisposition, ProviderCompletion, ProviderError},
-    transport::{ResponsesProtocol, client::request_body_for_protocol},
+    transport::{ResponsesProtocol, client::request_body},
 };
 use std::{sync::Mutex, time::Duration};
 use tokio::sync::{Semaphore, mpsc};
 
 struct Offline;
 impl Auth for Offline {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         panic!("offline regression must not authenticate")
     }
 }
@@ -92,7 +92,7 @@ struct NativeScript {
 #[async_trait::async_trait]
 impl ResponsesTransport for NativeScript {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
 
     async fn create(
@@ -218,8 +218,8 @@ async fn native_async_custom_cell_survives_synchronous_context_commit() {
         for native in &reasoning {
             assert!(requests[2].input.contains(native));
         }
-        let wire = request_body_for_protocol(&requests[2], ResponsesProtocol::Standard).unwrap();
-        let tools = wire["tools"].as_array().unwrap();
+        let wire = request_body(&requests[2]).unwrap();
+        let tools = wire["tools"][0]["tools"].as_array().unwrap();
         assert_eq!(
             tools.iter().find(|tool| tool["name"] == "cell").unwrap()["async"],
             true

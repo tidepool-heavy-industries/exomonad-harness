@@ -616,7 +616,7 @@ mod tests {
             .issue_provider_request(
                 &request,
                 sealed,
-                (ResponsesRoute::Codex, ResponsesProtocol::Lite),
+                (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
             )
             .unwrap();
         let packet =

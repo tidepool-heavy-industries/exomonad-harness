@@ -6,7 +6,7 @@ use tokio::sync::{Notify, mpsc};
 
 struct Offline;
 impl Auth for Offline {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         panic!("offline")
     }
 }
@@ -103,7 +103,7 @@ struct Streaming {
 #[async_trait::async_trait]
 impl ResponsesTransport for Streaming {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
 
     async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
@@ -711,7 +711,7 @@ async fn completed_owner_without_required_context_metadata_aborts_publication_pr
 #[async_trait::async_trait]
 impl ResponsesTransport for ContextScript {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
 
     async fn create(
@@ -1065,7 +1065,7 @@ struct PolicyStream {
 #[async_trait::async_trait]
 impl ResponsesTransport for PolicyStream {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
 
     async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
@@ -1417,7 +1417,7 @@ struct FinalOnly {
 #[async_trait::async_trait]
 impl ResponsesTransport for FinalOnly {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
 
     async fn create(
@@ -1651,7 +1651,7 @@ struct ContextNotesScript {
 #[async_trait::async_trait]
 impl ResponsesTransport for ContextNotesScript {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
 
     async fn create(
@@ -1744,7 +1744,7 @@ async fn completed_own_exchange_notes_do_not_reattach_on_ordinary_followup() {
 
 #[tokio::test]
 async fn staged_effort_preserves_the_issued_request_prefix_and_changes_the_next_inference() {
-    use crate::transport::{ResponsesProtocol, client::request_body_for_protocol};
+    use crate::transport::client::request_body;
     let (mut engine, requests, operations) = context_engine(false, false);
     Arc::get_mut(&mut engine.provider).unwrap().effort_only = true;
     let (_cancel, cancelled) = watch::channel(false);
@@ -1773,24 +1773,19 @@ async fn staged_effort_preserves_the_issued_request_prefix_and_changes_the_next_
         sent[1].input[sent[1].input.len() - 2].0["type"],
         "function_call_output"
     );
-    let first = request_body_for_protocol(&sent[0], ResponsesProtocol::Standard).unwrap();
-    let second = request_body_for_protocol(&sent[1], ResponsesProtocol::Standard).unwrap();
+    let first = request_body(&sent[0]).unwrap();
+    let second = request_body(&sent[1]).unwrap();
     let first_prefix = serde_json::to_vec(&first["input"]).unwrap();
     let second_prefix = serde_json::to_vec(
         &second["input"].as_array().unwrap()[..first["input"].as_array().unwrap().len()],
     )
     .unwrap();
     assert_eq!(first_prefix, second_prefix);
-    assert_eq!(first["reasoning"], second["reasoning"]);
+    assert_eq!(first["reasoning"]["effort"], "low");
+    assert_eq!(second["reasoning"]["effort"], "high");
     assert_eq!(first["instructions"], second["instructions"]);
     assert_eq!(first["tools"], second["tools"]);
     assert_eq!(first["prompt_cache_key"], second["prompt_cache_key"]);
-    assert_eq!(
-        second["input"].as_array().unwrap().last().unwrap()["reasoning"]["effort"],
-        "high"
-    );
-    let lite = request_body_for_protocol(&sent[1], ResponsesProtocol::Lite).unwrap();
-    assert_eq!(lite["reasoning"]["effort"], "high");
     let operation = operations.lock().unwrap()[0].clone();
     let receipt = engine.store.context_receipt(&operation).unwrap().unwrap();
     assert_eq!(receipt.head, operation.request);

@@ -26,8 +26,8 @@ use tokio::sync::watch;
 struct OfflineAuth;
 
 impl Auth for OfflineAuth {
-    fn access(&self) -> Result<(String, String), TransportError> {
-        Ok(("offline-only".into(), "https://offline.invalid".into()))
+    fn access(&self) -> Result<String, TransportError> {
+        Ok("offline-only".into())
     }
 }
 
@@ -138,11 +138,13 @@ async fn followup_queued_before_first_request_is_delivered_once_and_durable() {
         "name": "finalize",
         "arguments": "{\"result\":{\"answer\":\"follow-up observed\"}}"
     }));
-    let replay = Arc::new(ReplayTransport::scripted_codex_standard_gated([ResponsesTurn {
-        response_id: "first-and-final".into(),
-        items: vec![final_call.clone()],
-        usage: Default::default(),
-    }]));
+    let replay = Arc::new(ReplayTransport::scripted_codex_standard_gated([
+        ResponsesTurn {
+            response_id: "first-and-final".into(),
+            items: vec![final_call.clone()],
+            usage: Default::default(),
+        },
+    ]));
     assert!(
         replay.recorded_requests().is_empty(),
         "no model request existed before follow-up queueing"

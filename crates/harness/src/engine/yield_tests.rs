@@ -5,7 +5,7 @@ use std::{collections::VecDeque, sync::Mutex, time::Duration};
 
 struct Offline;
 impl Auth for Offline {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         panic!("offline fixture")
     }
 }
@@ -60,7 +60,7 @@ struct Script {
 #[async_trait::async_trait]
 impl ResponsesTransport for Script {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
 
     async fn create(

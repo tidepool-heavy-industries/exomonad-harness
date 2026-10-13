@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 struct Offline;
 impl Auth for Offline {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         panic!("offline history fixture")
     }
 }
@@ -148,7 +148,7 @@ struct Finish;
 #[async_trait::async_trait]
 impl ResponsesTransport for Finish {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
 
     async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {

@@ -26,7 +26,7 @@ use std::sync::{
 fn projection_target() -> harness::context::ContextProjectionTarget {
     harness::context::ContextProjectionTarget {
         model: "offline".into(),
-        route: ResponsesRoute::Codex,
+        route: ResponsesRoute::ChatGptPlan,
         protocol: ResponsesProtocol::Standard,
     }
 }
@@ -129,7 +129,7 @@ fn host(store: Arc<Store>, seen: Arc<Mutex<Vec<Value>>>) -> Arc<Host> {
 #[derive(Clone)]
 struct Offline;
 impl Auth for Offline {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         panic!("offline transport")
     }
 }
@@ -142,7 +142,7 @@ struct ReloadDuringRequest {
 #[async_trait]
 impl ResponsesTransport for ReloadDuringRequest {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
     async fn create(
         &self,
@@ -362,7 +362,7 @@ struct ResumeAfterInput {
 #[async_trait]
 impl ResponsesTransport for ResumeAfterInput {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
     async fn create(
         &self,
@@ -589,7 +589,7 @@ struct FinalOnly(Arc<Mutex<Vec<ResponsesRequest>>>);
 #[async_trait]
 impl ResponsesTransport for FinalOnly {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
     async fn create(
         &self,
@@ -739,7 +739,7 @@ struct NativeWaitAttempt(Arc<Mutex<Vec<ResponsesRequest>>>);
 #[async_trait]
 impl ResponsesTransport for NativeWaitAttempt {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
     async fn create(
         &self,
@@ -1236,7 +1236,7 @@ async fn checkpoint_conversations_keep_independent_children_after_origin_failure
     #[async_trait]
     impl ResponsesTransport for Finished {
         fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-            Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+            Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
         }
         async fn create(
             &self,
@@ -1434,7 +1434,7 @@ async fn checkpoint_conversations_keep_independent_children_after_origin_failure
                     tools: vec![],
                     model: "offline".into(),
                     effort: Effort::Medium,
-                    session_id: conversation.identity().incarnation.clone(),
+                    session_id: conversation.identity().incarnation.clone().into(),
                     agent: conversation.identity().actor.clone(),
                 },
                 std::num::NonZeroU64::new(200_000).unwrap(),
@@ -1497,7 +1497,7 @@ async fn checkpoint_attachment_uses_host_admission_and_commits_binding_atomicall
     #[async_trait]
     impl ResponsesTransport for Finished {
         fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-            Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+            Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
         }
         async fn create(
             &self,

@@ -42,7 +42,7 @@ fn record(store: &Store, head: &RequestId, items: Vec<Item>) {
                 items,
                 usage: Default::default(),
             },
-            crate::transport::ResponsesRoute::Codex,
+            crate::transport::ResponsesRoute::ChatGptPlan,
             crate::transport::ResponsesProtocol::Standard,
         )
         .unwrap();
@@ -88,7 +88,7 @@ fn fixture(store: Store) -> Fixture {
             &edit.origin,
             &crate::context::ContextProjectionTarget {
                 model: "model-a".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )
@@ -600,7 +600,7 @@ fn message_fixture(first: &str, second: &str) -> (Store, ContextSnapshot) {
             &operation.origin,
             &crate::context::ContextProjectionTarget {
                 model: "model-a".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )

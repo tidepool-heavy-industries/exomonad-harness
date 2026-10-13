@@ -53,7 +53,7 @@ where
                 tools: Vec::new(),
                 model: "gpt-6-sol".into(),
                 effort: Effort::Low,
-                session_id: format!("harness-tree-{}", agent.0),
+                session_id: format!("harness-tree-{}", agent.0).into(),
                 agent: agent.clone(),
             },
         );
@@ -117,7 +117,7 @@ mod tests {
     #[derive(Clone)]
     struct ReplayAuth;
     impl Auth for ReplayAuth {
-        fn access(&self) -> Result<(String, String), TransportError> {
+        fn access(&self) -> Result<String, TransportError> {
             Err(TransportError::Authentication)
         }
     }
@@ -143,7 +143,7 @@ mod tests {
             TransportError,
         > {
             Ok((
-                harness::transport::ResponsesRoute::Codex,
+                harness::transport::ResponsesRoute::ChatGptPlan,
                 harness::transport::ResponsesProtocol::Standard,
             ))
         }
@@ -153,7 +153,7 @@ mod tests {
         ) -> Result<ResponsesTurn, TransportError> {
             let request = prepared.request();
             let key = self.agent.clone();
-            assert!(request.session_id.ends_with(&key));
+            assert!(request.session_id.thread().ends_with(&key));
             self.inputs
                 .lock()
                 .unwrap()

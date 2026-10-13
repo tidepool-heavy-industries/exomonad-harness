@@ -795,7 +795,7 @@ mod tests {
     #[derive(Clone)]
     struct OfflineAuth;
     impl Auth for OfflineAuth {
-        fn access(&self) -> Result<(String, String), TransportError> {
+        fn access(&self) -> Result<String, TransportError> {
             Err(TransportError::Authentication)
         }
     }
@@ -818,7 +818,7 @@ mod tests {
             TransportError,
         > {
             Ok((
-                harness::transport::ResponsesRoute::Codex,
+                harness::transport::ResponsesRoute::ChatGptPlan,
                 harness::transport::ResponsesProtocol::Standard,
             ))
         }

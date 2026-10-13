@@ -272,7 +272,7 @@ pub struct EngineConfig {
     pub model: String,
     pub effort: Effort,
     /// Stable key shared for the conversation's request cache.
-    pub session_id: String,
+    pub session_id: crate::transport::SessionIdentity,
     /// Store branch and job claimant identity.
     pub agent: AgentPath,
 }
@@ -340,7 +340,10 @@ impl<A: Auth + Clone + 'static> ResponsesTransport for ResponsesClient<A> {
         ),
         TransportError,
     > {
-        Ok((self.auth.route(), self.protocol()))
+        Ok((
+            crate::transport::ResponsesRoute::ChatGptPlan,
+            crate::transport::ResponsesProtocol::Standard,
+        ))
     }
     async fn create(
         &self,
@@ -4098,8 +4101,8 @@ mod tests {
     #[derive(Clone)]
     struct FakeAuth;
     impl Auth for FakeAuth {
-        fn access(&self) -> Result<(String, String), TransportError> {
-            Ok(("unused".into(), "unused".into()))
+        fn access(&self) -> Result<String, TransportError> {
+            Ok("unused".into())
         }
     }
 
@@ -4119,7 +4122,7 @@ mod tests {
             TransportError,
         > {
             Ok((
-                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesRoute::ChatGptPlan,
                 crate::transport::ResponsesProtocol::Standard,
             ))
         }
@@ -4154,7 +4157,7 @@ mod tests {
             TransportError,
         > {
             Ok((
-                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesRoute::ChatGptPlan,
                 crate::transport::ResponsesProtocol::Standard,
             ))
         }
@@ -4648,7 +4651,7 @@ mod tests {
                 TransportError,
             > {
                 Ok((
-                    crate::transport::ResponsesRoute::Codex,
+                    crate::transport::ResponsesRoute::ChatGptPlan,
                     crate::transport::ResponsesProtocol::Standard,
                 ))
             }
@@ -6488,7 +6491,7 @@ mod tests {
             TransportError,
         > {
             Ok((
-                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesRoute::ChatGptPlan,
                 crate::transport::ResponsesProtocol::Standard,
             ))
         }
@@ -6592,7 +6595,7 @@ mod tests {
             TransportError,
         > {
             Ok((
-                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesRoute::ChatGptPlan,
                 crate::transport::ResponsesProtocol::Standard,
             ))
         }
@@ -6680,7 +6683,7 @@ mod tests {
             TransportError,
         > {
             Ok((
-                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesRoute::ChatGptPlan,
                 crate::transport::ResponsesProtocol::Standard,
             ))
         }
@@ -6747,7 +6750,7 @@ mod tests {
             TransportError,
         > {
             Ok((
-                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesRoute::ChatGptPlan,
                 crate::transport::ResponsesProtocol::Standard,
             ))
         }
@@ -6851,7 +6854,7 @@ mod tests {
             TransportError,
         > {
             Ok((
-                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesRoute::ChatGptPlan,
                 crate::transport::ResponsesProtocol::Standard,
             ))
         }
@@ -6988,7 +6991,7 @@ mod tests {
             TransportError,
         > {
             Ok((
-                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesRoute::ChatGptPlan,
                 crate::transport::ResponsesProtocol::Standard,
             ))
         }
@@ -7182,7 +7185,7 @@ mod tests {
             TransportError,
         > {
             Ok((
-                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesRoute::ChatGptPlan,
                 crate::transport::ResponsesProtocol::Standard,
             ))
         }
@@ -7270,7 +7273,7 @@ mod tests {
             TransportError,
         > {
             Ok((
-                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesRoute::ChatGptPlan,
                 crate::transport::ResponsesProtocol::Standard,
             ))
         }
@@ -8673,7 +8676,7 @@ mod tests {
             TransportError,
         > {
             Ok((
-                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesRoute::ChatGptPlan,
                 crate::transport::ResponsesProtocol::Standard,
             ))
         }
@@ -8737,7 +8740,7 @@ mod tests {
             TransportError,
         > {
             Ok((
-                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesRoute::ChatGptPlan,
                 crate::transport::ResponsesProtocol::Standard,
             ))
         }
@@ -8785,7 +8788,7 @@ mod tests {
             TransportError,
         > {
             Ok((
-                crate::transport::ResponsesRoute::Codex,
+                crate::transport::ResponsesRoute::ChatGptPlan,
                 crate::transport::ResponsesProtocol::Standard,
             ))
         }
@@ -9661,7 +9664,7 @@ mod tests {
                     tools: vec![],
                     model: "test".into(),
                     effort: Effort::Low,
-                    session_id: format!("bad-{name}"),
+                    session_id: format!("bad-{name}").into(),
                     agent: AgentPath("/root".into()),
                 },
             );
@@ -9694,8 +9697,8 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn live_subscription_engine_final_answer() {
-        use crate::transport::auth::CodexFileAuth;
-        let auth = CodexFileAuth::new(CodexFileAuth::default_path().expect("auth path"));
+        use crate::transport::auth::ChatGptPlanAuth;
+        let auth = ChatGptPlanAuth::new(ChatGptPlanAuth::default_path().expect("auth path"));
         let engine = Engine::new(
             auth,
             Arc::new(Store::memory().expect("store")),
@@ -9706,7 +9709,7 @@ mod tests {
                 tools: Vec::new(),
                 model: "gpt-6-sol".into(),
                 effort: Effort::Low,
-                session_id: format!("harness-engine-smoke-{}", uuid::Uuid::new_v4()),
+                session_id: format!("harness-engine-smoke-{}", uuid::Uuid::new_v4()).into(),
                 agent: AgentPath("/root".into()),
             },
         );

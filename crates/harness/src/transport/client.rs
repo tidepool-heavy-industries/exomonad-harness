@@ -1,6 +1,5 @@
 use super::{
-    Auth, AuthCredentials, ResponsesProtocol, ResponsesRequest, ResponsesRoute, ResponsesTurn,
-    TransportError,
+    Auth, ResponsesProtocol, ResponsesRequest, ResponsesRoute, ResponsesTurn, TransportError,
     sse::{ResponseAssembly, StreamEvent},
 };
 use futures_util::StreamExt;
@@ -24,18 +23,15 @@ impl NormalizedProviderBody {
 
 pub(crate) fn normalize_for_dispatch(
     request: &ResponsesRequest,
-    contract: (ResponsesRoute, ResponsesProtocol),
+    _contract: (ResponsesRoute, ResponsesProtocol),
 ) -> Result<NormalizedProviderBody, TransportError> {
-    let body = normalized_request(request, contract.1, contract.0)?;
+    let body = normalized_request(request)?;
     let bytes = serde_json::to_vec(&body)
         .map_err(|_| TransportError::Stream("request serialization failed".into()))?;
     Ok(NormalizedProviderBody(bytes))
 }
 
-pub const ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 pub const CHATGPT_PLAN_ENDPOINT: &str = "https://api.openai.com/v1/responses";
-pub const CODEX_VERSION: &str = "0.160.0";
-const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 
 #[cfg(test)]
 #[path = "client_portability_tests.rs"]
@@ -45,34 +41,8 @@ mod portability_tests;
 /// shared with prompt_cache_key, while caller controls the complete stateless
 /// item window. Never send previous_response_id or store:true.
 pub fn request_body(request: &ResponsesRequest) -> Result<Value, TransportError> {
-    request_body_for_protocol(request, ResponsesProtocol::Standard)
-}
-
-/// Serialize the selected client wire contract without credentials or traffic.
-pub fn request_body_for_protocol(
-    request: &ResponsesRequest,
-    protocol: ResponsesProtocol,
-) -> Result<Value, TransportError> {
-    serde_json::to_value(normalized_request(
-        request,
-        protocol,
-        ResponsesRoute::Codex,
-    )?)
-    .map_err(|_| TransportError::Stream("request serialization failed".into()))
-}
-
-/// The native plan route uses the public Standard contract and retains host
-/// async tool declarations. This is also the serializer used for real traffic.
-pub fn request_body_for_route(
-    request: &ResponsesRequest,
-    route: ResponsesRoute,
-) -> Result<Value, TransportError> {
-    serde_json::to_value(normalized_request(
-        request,
-        ResponsesProtocol::Standard,
-        route,
-    )?)
-    .map_err(|_| TransportError::Stream("request serialization failed".into()))
+    serde_json::to_value(normalized_request(request)?)
+        .map_err(|_| TransportError::Stream("request serialization failed".into()))
 }
 
 #[derive(Serialize)]
@@ -82,13 +52,13 @@ struct RequestBody<'a> {
     instructions: Option<&'a str>,
     input: Cow<'a, [crate::item::Item]>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<RequestTools<'a>>,
-    tool_choice: ToolChoice<'a>,
-    parallel_tool_calls: bool,
+    tools: Option<RequestTools>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<ToolChoice>,
     reasoning: Reasoning,
     stream: bool,
     store: bool,
-    prompt_cache_key: &'a str,
+    prompt_cache_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_options: Option<&'a super::PromptCacheComparison>,
     include: [&'static str; 1],
@@ -96,222 +66,83 @@ struct RequestBody<'a> {
 
 #[derive(Serialize)]
 #[serde(untagged)]
-enum RequestTools<'a> {
-    Flat(super::StrictToolManifest<'a>),
-    Namespaced(Vec<Value>),
+enum RequestTools {
+    Host(Vec<Value>),
 }
 
 #[derive(Serialize)]
 struct Reasoning {
     effort: crate::model::Effort,
     summary: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    context: Option<&'static str>,
 }
 
 #[derive(Serialize)]
-#[serde(untagged)]
-enum ToolChoice<'a> {
-    Automatic(&'static str),
-    Allowed {
-        #[serde(rename = "type")]
-        kind: &'static str,
-        mode: &'static str,
-        tools: AllowedTools<'a>,
-    },
-}
+struct ToolChoice(&'static str);
 
-struct AllowedTools<'a>(&'a [String]);
-impl Serialize for AllowedTools<'_> {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeSeq;
-        #[derive(Serialize)]
-        struct AllowedTool<'a> {
-            #[serde(rename = "type")]
-            kind: &'static str,
-            name: &'a str,
-        }
-        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
-        for name in self.0 {
-            sequence.serialize_element(&AllowedTool {
-                kind: "function",
-                name,
-            })?;
-        }
-        sequence.end()
-    }
-}
-
-fn normalized_request(
-    request: &ResponsesRequest,
-    protocol: ResponsesProtocol,
-    route: ResponsesRoute,
-) -> Result<RequestBody<'_>, TransportError> {
-    if request.model.is_empty() || request.session_id.is_empty() {
-        return Err(TransportError::Stream("empty model or session id".into()));
-    }
-    if let Some(comparison) = &request.prompt_cache_comparison {
-        if comparison.comparison_response_id.is_empty() {
-            return Err(TransportError::Stream(
-                "empty cache diagnostic comparison response id".into(),
-            ));
-        }
-        if route != ResponsesRoute::ChatGptPlan || protocol != ResponsesProtocol::Standard {
-            return Err(TransportError::Stream(
-                "cache diagnostic comparisons require the public Standard contract".into(),
-            ));
-        }
-    }
-    let admitted_tools = request.tools.strict_tools()?;
-    let lite = protocol == ResponsesProtocol::Lite;
-    let public = route == ResponsesRoute::ChatGptPlan;
-    if public && lite {
+fn normalized_request(request: &ResponsesRequest) -> Result<RequestBody<'_>, TransportError> {
+    if request.model.is_empty() || !request.session_id.valid() {
         return Err(TransportError::Stream(
-            "ChatGPT plan usage requires the public Standard contract".into(),
+            "empty model or session identity".into(),
         ));
     }
-    let input = if lite {
-        Cow::Owned(lite_input(request)?)
-    } else if public {
-        if request.input.iter().any(|item| item.0["role"] == "system") {
+    if request
+        .prompt_cache_comparison
+        .as_ref()
+        .is_some_and(|comparison| comparison.comparison_response_id.is_empty())
+    {
+        return Err(TransportError::Stream(
+            "empty cache diagnostic comparison response id".into(),
+        ));
+    }
+    request.tools.strict_tools()?;
+    if request.input.iter().any(|item| item.0["role"] == "system") {
+        return Err(TransportError::Stream(
+            "ChatGPT plan input requires instructions or developer messages".into(),
+        ));
+    }
+    let input = Cow::Owned(
+        request
+            .input
+            .iter()
+            .filter(|item| !item.is_configuration_update())
+            .cloned()
+            .collect(),
+    );
+    let mut tools = Vec::new();
+    for tool in request.tools.iter() {
+        if !matches!(tool["type"].as_str(), Some("function" | "custom")) {
             return Err(TransportError::Stream(
-                "ChatGPT plan input requires instructions or developer messages".into(),
+                "ChatGPT plan route requires function or custom host tools".into(),
             ));
         }
-        Cow::Owned(
-            request
-                .input
-                .iter()
-                .filter(|item| !item.is_configuration_update())
-                .cloned()
-                .collect(),
-        )
-    } else {
-        Cow::Borrowed(request.input.as_slice())
-    };
+        if request
+            .tools_allowed
+            .as_ref()
+            .is_none_or(|allowed| allowed.iter().any(|name| tool["name"] == name.as_str()))
+        {
+            tools.push(tool.clone());
+        }
+    }
+    let has_tools = !tools.is_empty();
     Ok(RequestBody {
         model: &request.model,
-        instructions: (!lite).then_some(request.instructions.as_str()),
+        instructions: (!request.instructions.is_empty()).then_some(request.instructions.as_str()),
         input,
-        tools: if lite {
-            None
-        } else if public {
-            let mut tools = Vec::new();
-            for tool in request.tools.iter() {
-                if !matches!(tool["type"].as_str(), Some("function" | "custom")) {
-                    return Err(TransportError::Stream(
-                        "ChatGPT plan route requires function or custom host tools".into(),
-                    ));
-                }
-                if request
-                    .tools_allowed
-                    .as_ref()
-                    .is_none_or(|allowed| allowed.iter().any(|name| tool["name"] == name.as_str()))
-                {
-                    tools.push(tool.clone());
-                }
-            }
-            Some(RequestTools::Namespaced(if tools.is_empty() {
-                vec![]
-            } else {
-                vec![
-                    serde_json::json!({"type":"namespace","name":"functions","description":"Exomonad host tools","tools":tools}),
-                ]
-            }))
-        } else {
-            Some(RequestTools::Flat(admitted_tools))
-        },
-        tool_choice: match request.tools_allowed.as_deref() {
-            None => ToolChoice::Automatic("auto"),
-            Some([]) => ToolChoice::Automatic("none"),
-            Some(_) if lite || public => ToolChoice::Automatic("auto"),
-            Some(names) => ToolChoice::Allowed {
-                kind: "allowed_tools",
-                mode: "auto",
-                tools: AllowedTools(names),
-            },
-        },
-        parallel_tool_calls: !lite,
+        tools: has_tools.then(|| RequestTools::Host(vec![serde_json::json!({"type":"namespace","name":"functions","description":"Exomonad host tools","tools":tools})])),
+        tool_choice: has_tools.then_some(ToolChoice("auto")),
         reasoning: Reasoning {
-            // Project local effort controls into the selected request field;
-            // the original durable history remains immutable.
-            effort: if lite || public {
-                request
-                    .input
-                    .iter()
-                    .rev()
-                    .find_map(crate::item::Item::configuration_effort)
-                    .unwrap_or(request.pinned_effort)
-            } else {
-                request.pinned_effort
-            },
+            effort: request.input.iter().rev().find_map(crate::item::Item::configuration_effort).unwrap_or(request.pinned_effort),
             summary: "auto",
-            context: lite.then_some("all_turns"),
         },
         stream: true,
         store: false,
-        prompt_cache_key: &request.session_id,
+        prompt_cache_key: request.session_id.cache_key(),
         prompt_cache_options: request.prompt_cache_comparison.as_ref(),
         include: ["reasoning.encrypted_content"],
     })
 }
 
-// The backend caps item IDs at 64 characters. A UUID-size content digest
-// preserves stable identities without adding hashing dependencies or a registry.
-fn content_id(prefix: &str, payload: &[u8]) -> String {
-    let digest = blake3::hash(payload);
-    let mut bytes = [0; 16];
-    bytes.copy_from_slice(&digest.as_bytes()[..16]);
-    format!("{prefix}_{}", uuid::Uuid::from_bytes(bytes))
-}
-
-fn lite_input(request: &ResponsesRequest) -> Result<Vec<crate::item::Item>, TransportError> {
-    use crate::item::Item;
-    let mut tools = Vec::new();
-    for tool in request.tools.iter() {
-        if request
-            .tools_allowed
-            .as_ref()
-            .is_some_and(|allowed| !allowed.iter().any(|name| tool["name"] == name.as_str()))
-        {
-            continue;
-        }
-        if !matches!(tool["type"].as_str(), Some("function" | "custom")) {
-            return Err(TransportError::Stream(
-                "Lite requires function or custom host tools".into(),
-            ));
-        }
-        let mut tool = tool.clone();
-        // Async ownership belongs to Engine, independently of wire scheduling.
-        tool.as_object_mut()
-            .expect("admitted tool declaration")
-            .remove("async");
-        tools.push(tool);
-    }
-    let tools = if tools.is_empty() {
-        serde_json::json!([])
-    } else {
-        serde_json::json!([{"type":"namespace","name":"functions","description":"","tools":tools}])
-    };
-    let bytes = serde_json::to_vec(&tools)
-        .map_err(|_| TransportError::Stream("tool serialization failed".into()))?;
-    let mut input = vec![Item(
-        serde_json::json!({"type":"additional_tools","role":"developer","id":content_id("at", &bytes),"tools":tools}),
-    )];
-    if !request.instructions.is_empty() {
-        input.push(Item(serde_json::json!({"type":"message","role":"developer","id":content_id("msg", request.instructions.as_bytes()),"content":[{"type":"input_text","text":request.instructions}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["model.base_instructions"]}})));
-    }
-    input.extend(
-        request
-            .input
-            .iter()
-            .filter(|item| !item.is_configuration_update())
-            .cloned(),
-    );
-    Ok(input)
-}
-
-/// A small SSE framer for the Codex endpoint. We keep it here rather than
+/// A small SSE framer for the public Responses endpoint. We keep it here rather than
 /// splitting by network chunk or by single line: one event may contain
 /// multiple `data:` lines and span arbitrary chunks. The caller feeds events
 /// to `ResponseAssembly` without waiting for the stream to end.
@@ -358,54 +189,24 @@ impl SseFramer {
     }
 }
 
-fn protocol_headers(protocol: ResponsesProtocol) -> reqwest::header::HeaderMap {
-    let mut headers = reqwest::header::HeaderMap::new();
-    if protocol == ResponsesProtocol::Lite {
-        headers.insert(
-            RESPONSES_LITE_HEADER,
-            reqwest::header::HeaderValue::from_static("true"),
-        );
-    }
-    headers
-}
-
 fn http_request(
     http: &reqwest::Client,
-    route: ResponsesRoute,
-    protocol: ResponsesProtocol,
     request: &ResponsesRequest,
     body: Vec<u8>,
     token: &str,
-    account: Option<&str>,
 ) -> reqwest::RequestBuilder {
-    let call = http
-        .post(match route {
-            ResponsesRoute::Codex => ENDPOINT,
-            ResponsesRoute::ChatGptPlan => CHATGPT_PLAN_ENDPOINT,
-        })
+    http.post(CHATGPT_PLAN_ENDPOINT)
         .bearer_auth(token)
         .header(reqwest::header::ACCEPT, "text/event-stream")
-        .headers(protocol_headers(protocol))
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(body);
-    let call = call.header("session-id", &request.session_id);
-    let call = if route == ResponsesRoute::ChatGptPlan {
-        call.header("thread-id", &request.session_id)
-            .header("x-client-request-id", &request.session_id)
-            .header(reqwest::header::USER_AGENT, "exomonad-harness/0.1.0")
-    } else {
-        call
-    };
-    if let Some(account) = account {
-        call.header("chatgpt-account-id", account)
-            .header("version", CODEX_VERSION)
-            .header("originator", "codex_cli_rs")
-    } else {
-        call
-    }
+        .header("session-id", request.session_id.affinity())
+        .header("thread-id", request.session_id.thread())
+        .header("x-client-request-id", request.session_id.thread())
+        .header(reqwest::header::USER_AGENT, "exomonad-harness/0.1.0")
+        .body(body)
 }
 
-fn http_client() -> Result<reqwest::Client, TransportError> {
+pub(super) fn http_client() -> Result<reqwest::Client, TransportError> {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(300))
@@ -419,39 +220,18 @@ fn http_client() -> Result<reqwest::Client, TransportError> {
 /// is included in errors, traces, stored items, or returned data.
 pub(super) async fn execute<A: Auth + Clone + 'static>(
     auth: A,
+    http: reqwest::Client,
     prepared: super::PreparedProviderRequest,
     sink: Option<tokio::sync::mpsc::Sender<StreamEvent>>,
 ) -> Result<ResponsesTurn, TransportError> {
     if !prepared.selection().is_native() {
         return Err(TransportError::PreparedSelectionMismatch);
     }
-    let (request, body, (route, protocol)) = prepared.into_dispatch_parts();
-    let credentials = tokio::task::spawn_blocking(move || auth.credentials())
+    let (request, body, _) = prepared.into_dispatch_parts();
+    let token = tokio::task::spawn_blocking(move || auth.access())
         .await
         .map_err(|_| TransportError::Authentication)??;
-    let http = http_client()?;
-    let (token, account) = match (route, credentials) {
-        (
-            ResponsesRoute::Codex,
-            AuthCredentials::Codex {
-                access_token,
-                account_id,
-            },
-        ) => (access_token, Some(account_id)),
-        (ResponsesRoute::ChatGptPlan, AuthCredentials::ChatGptPlan { access_token }) => {
-            (access_token, None)
-        }
-        _ => return Err(TransportError::Authentication),
-    };
-    let call = http_request(
-        &http,
-        route,
-        protocol,
-        &request,
-        body,
-        &token,
-        account.as_deref(),
-    );
+    let call = http_request(&http, &request, body, &token);
     let response = call
         .send()
         .await
@@ -461,11 +241,10 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
         return Err(TransportError::Authentication);
     }
     if status != 200 {
-        let diagnostic =
-            super::http_error::read(response, &token, account.as_deref().unwrap_or("")).await;
+        let diagnostic = super::http_error::read(response, &token, "").await;
         return Err(TransportError::Http { status, diagnostic });
     }
-    read_response(response, sink, &token, account.as_deref().unwrap_or("")).await
+    read_response(response, sink, &token, "").await
 }
 
 async fn read_response(
@@ -518,72 +297,8 @@ mod tests {
     use crate::{
         item::Item,
         model::Effort,
-        transport::{ResponsesClient, auth::CodexFileAuth},
+        transport::{ResponsesClient, auth::ChatGptPlanAuth},
     };
-
-    #[tokio::test]
-    async fn execute_uses_frozen_route_when_auth_selection_changes() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-        #[derive(Clone)]
-        struct ChangingAuth(Arc<AtomicUsize>);
-        impl Auth for ChangingAuth {
-            fn access(&self) -> Result<(String, String), TransportError> {
-                Err(TransportError::Authentication)
-            }
-            fn route(&self) -> ResponsesRoute {
-                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-                    ResponsesRoute::Codex
-                } else {
-                    ResponsesRoute::ChatGptPlan
-                }
-            }
-            fn credentials(&self) -> Result<AuthCredentials, TransportError> {
-                // Rotation changed the credential variant after preparation.
-                Ok(AuthCredentials::ChatGptPlan {
-                    access_token: "rotated-fixture".into(),
-                })
-            }
-        }
-        let calls = Arc::new(AtomicUsize::new(0));
-        let client = super::super::ResponsesClient::new(ChangingAuth(calls.clone()));
-        let contract = crate::engine::ResponsesTransport::prepare_submission(&client).unwrap();
-        let store = crate::store::Store::memory().unwrap();
-        let head = crate::model::RequestId("route-change".into());
-        store.create_request(&head, None, "/root").unwrap();
-        let request = ResponsesRequest {
-            input: vec![],
-            instructions: "fixed".into(),
-            tools: vec![].into(),
-            tools_allowed: None,
-            model: "model".into(),
-            pinned_effort: crate::model::Effort::Low,
-            session_id: "session".into(),
-            prompt_cache_comparison: None,
-        };
-        let prepared = store
-            .prepare_provider_request(
-                &head,
-                &head,
-                request,
-                &[],
-                None,
-                contract,
-                crate::store::ProviderRequestPurpose::Inference,
-            )
-            .unwrap();
-        assert!(matches!(
-            client.create(prepared).await,
-            Err(TransportError::Authentication)
-        ));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            store.provider_response_state(&head).unwrap(),
-            Some(crate::store::ProviderResponseState::Streaming)
-        );
-    }
 
     #[test]
     fn request_is_stateless_and_pins_effort() {
@@ -605,12 +320,14 @@ mod tests {
         assert_eq!(body["prompt_cache_key"], "shared");
         assert_eq!(body["instructions"], "fixed");
         assert_eq!(body["input"][0]["content"], "hello");
-        assert_eq!(body["tool_choice"], "auto");
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("tools").is_none());
+        assert!(body.get("parallel_tool_calls").is_none());
         assert!(body.get("previous_response_id").is_none());
     }
 
     #[test]
-    fn restricted_tools_serialize_exact_order_and_empty_as_none() {
+    fn restricted_tools_keep_manifest_order_and_empty_omits_tool_fields() {
         let mut request = ResponsesRequest {
             input: vec![],
             instructions: String::new(),
@@ -626,11 +343,12 @@ mod tests {
             prompt_cache_comparison: None,
         };
         let body = request_body(&request).unwrap();
-        assert_eq!(body["tools"].as_array().unwrap().len(), 2);
-        assert_eq!(body["tool_choice"]["tools"][0]["name"], "b");
-        assert_eq!(body["tool_choice"]["tools"][1]["name"], "a");
+        assert_eq!(body["tools"][0]["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(body["tools"][0]["tools"][0]["name"], "a");
+        assert_eq!(body["tools"][0]["tools"][1]["name"], "b");
         request.tools_allowed = Some(vec![]);
-        assert_eq!(request_body(&request).unwrap()["tool_choice"], "none");
+        assert!(request_body(&request).unwrap().get("tool_choice").is_none());
+        assert!(request_body(&request).unwrap().get("tools").is_none());
     }
 
     #[test]
@@ -682,11 +400,11 @@ mod tests {
             session_id: "gate".into(),
             prompt_cache_comparison: None,
         };
-        assert_eq!(request_body(&request).unwrap()["tools"][0], valid);
+        assert_eq!(request_body(&request).unwrap()["tools"][0]["tools"][0], valid);
         // Deserialization retains the same immutable admission result.
         let restored: ResponsesRequest =
             serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
-        assert_eq!(request_body(&restored).unwrap()["tools"][0], valid);
+        assert_eq!(request_body(&restored).unwrap()["tools"][0]["tools"][0], valid);
         for path in [
             "root-required",
             "nested-required",
@@ -726,7 +444,7 @@ mod tests {
         #[derive(Clone)]
         struct NoAuth;
         impl Auth for NoAuth {
-            fn access(&self) -> Result<(String, String), TransportError> {
+            fn access(&self) -> Result<String, TransportError> {
                 panic!("invalid schema must be refused before authentication");
             }
         }
@@ -868,7 +586,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn live_subscription_response() {
-        let auth = CodexFileAuth::new(CodexFileAuth::default_path().expect("auth path"));
+        let auth = ChatGptPlanAuth::new(ChatGptPlanAuth::default_path().expect("auth path"));
         let client = ResponsesClient::new(auth);
         let request = ResponsesRequest {
             input: vec![Item(
@@ -906,10 +624,6 @@ mod tests {
         assert!(!turn.response_id.is_empty());
     }
 }
-
-#[cfg(test)]
-#[path = "client_lite_tests.rs"]
-mod lite_tests;
 
 #[cfg(test)]
 #[path = "client_plan_tests.rs"]

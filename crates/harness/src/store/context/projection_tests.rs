@@ -13,7 +13,7 @@ use crate::{
 fn target(model: &str) -> ContextProjectionTarget {
     ContextProjectionTarget {
         model: model.into(),
-        route: ResponsesRoute::Codex,
+        route: ResponsesRoute::ChatGptPlan,
         protocol: ResponsesProtocol::Standard,
     }
 }
@@ -36,7 +36,7 @@ fn issue(store: &Store, head: &RequestId, model: &str) -> IssuedProviderRequest 
         .issue_provider_request(
             head,
             store.seal_replay_request(&request(model)).unwrap(),
-            (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+            (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
         )
         .unwrap()
 }
@@ -128,7 +128,7 @@ fn equal_item_bytes_have_distinct_issued_positions_and_portable_sources() {
         &canonical,
         Some("luna"),
         None,
-        Some((ResponsesRoute::Codex, ResponsesProtocol::Standard)),
+        Some((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard)),
     )
     .unwrap()
     .into_items();
@@ -339,7 +339,7 @@ fn committed_native_prefix_retains_exact_origins_and_rejects_corrupted_restore_p
             &first,
             &request("astra"),
             &turn,
-            ResponsesRoute::Codex,
+            ResponsesRoute::ChatGptPlan,
             ResponsesProtocol::Standard,
         )
         .unwrap();
@@ -355,7 +355,7 @@ fn committed_native_prefix_retains_exact_origins_and_rejects_corrupted_restore_p
             &edit,
             &request("astra"),
             &turn,
-            ResponsesRoute::Codex,
+            ResponsesRoute::ChatGptPlan,
             ResponsesProtocol::Standard,
         )
         .unwrap();

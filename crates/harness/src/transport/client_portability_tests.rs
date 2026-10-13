@@ -23,11 +23,11 @@ async fn exchange(
     #[derive(Clone)]
     struct FixtureAuth;
     impl Auth for FixtureAuth {
-        fn access(&self) -> Result<(String, String), TransportError> {
+        fn access(&self) -> Result<String, TransportError> {
             unreachable!("fixture exchange supplies local HTTP credentials")
         }
     }
-    let receiver = super::super::ResponsesClient::new(FixtureAuth).with_protocol(protocol);
+    let receiver = super::super::ResponsesClient::new(FixtureAuth);
     let selection = crate::engine::ResponsesTransport::prepare_submission(&receiver).unwrap();
     let prepared = store
         .prepare_provider_request(
@@ -43,14 +43,14 @@ async fn exchange(
     assert_eq!(prepared.request_id(), local);
     assert_eq!(
         prepared.response_contract(),
-        (ResponsesRoute::Codex, protocol)
+        (ResponsesRoute::ChatGptPlan, protocol)
     );
     assert_eq!(
         store.provider_response_state(local).unwrap(),
         Some(crate::store::ProviderResponseState::Streaming)
     );
     let issuer = prepared.issuer().clone();
-    let (request, body, (route, selected_protocol)) = prepared.into_dispatch_parts();
+    let (request, body, _) = prepared.into_dispatch_parts();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let mut events = items
@@ -96,17 +96,9 @@ async fn exchange(
         body
     });
     let http = http_client().unwrap();
-    let mut built = http_request(
-        &http,
-        route,
-        selected_protocol,
-        &request,
-        body,
-        "fixture-token",
-        Some("fixture-account"),
-    )
-    .build()
-    .unwrap();
+    let mut built = http_request(&http, &request, body, "fixture-token")
+        .build()
+        .unwrap();
     *built.url_mut() = format!("http://{address}/responses").parse().unwrap();
     let response = http.execute(built).await.unwrap();
     let turn = read_response(response, None, "fixture-token", "fixture-account")
@@ -121,7 +113,7 @@ async fn exchange(
 }
 
 #[tokio::test]
-async fn captured_lite_history_seeds_standard_model_through_production_http_and_store() {
+async fn captured_native_history_seeds_model_through_production_http_and_store() {
     captured_history(false, Descendant::None).await;
 }
 
@@ -193,7 +185,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         &head,
         &request,
         &occurrences,
-        ResponsesProtocol::Lite,
+        ResponsesProtocol::Standard,
         &source_items,
     )
     .await;
@@ -224,7 +216,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         &spawn_head,
         &request,
         &occurrences,
-        ResponsesProtocol::Lite,
+        ResponsesProtocol::Standard,
         &spawn_items,
     )
     .await;
@@ -249,7 +241,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
                 task: None,
                 target: &crate::context::ContextProjectionTarget {
                     model: "gpt-6-luna".into(),
-                    route: crate::transport::ResponsesRoute::Codex,
+                    route: crate::transport::ResponsesRoute::ChatGptPlan,
                     protocol: crate::transport::ResponsesProtocol::Standard,
                 },
             },
@@ -263,7 +255,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         .context_request_state_for_transport(
             child.head_request.as_ref().unwrap(),
             &identity,
-            (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+            (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
         )
         .unwrap();
     let destination_occurrences = state.occurrences.clone();
@@ -375,7 +367,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
                         task: None,
                         target: &crate::context::ContextProjectionTarget {
                             model: "gpt-6-luna".into(),
-                            route: crate::transport::ResponsesRoute::Codex,
+                            route: crate::transport::ResponsesRoute::ChatGptPlan,
                             protocol: crate::transport::ResponsesProtocol::Standard,
                         },
                     },
@@ -410,7 +402,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         .context_request_state_for_transport(
             grandchild_head,
             &grandchild_identity,
-            (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+            (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
         )
         .unwrap();
     let visible = serde_json::to_string(&state.history).unwrap();
@@ -472,7 +464,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         store.context_request_state_for_transport(
             &wrong_head,
             &grandchild_identity,
-            (ResponsesRoute::Codex, ResponsesProtocol::Standard)
+            (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard)
         ),
         Err(crate::store::StoreError::Context(
             crate::context::ContextError::Replay(
@@ -505,7 +497,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         .context_request_state_for_transport(
             grandchild_head,
             &grandchild_identity,
-            (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+            (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
         )
         .unwrap();
     assert_eq!(state.history, repeated.history);

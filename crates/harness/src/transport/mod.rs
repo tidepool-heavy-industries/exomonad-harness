@@ -1,11 +1,13 @@
 //! Streaming Responses transport with provider-bound credential sources.
 //!
 //! Stateless requests, protected native authentication, and SSE item assembly.
-//! Codex-owned credentials remain a separate read-only source.
+//! One public ChatGPT-plan credential and Standard Responses HTTP contract.
 
 pub mod auth;
 pub mod client;
 mod http_error;
+mod identity;
+pub use identity::SessionIdentity;
 mod request_failure;
 pub mod sse;
 pub use crate::store::PreparedProviderRequest;
@@ -131,7 +133,7 @@ pub struct ResponsesRequest {
     pub tools_allowed: Option<Vec<String>>,
     pub model: String,
     pub pinned_effort: Effort,
-    pub session_id: String,
+    pub session_id: SessionIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache_comparison: Option<PromptCacheComparison>,
 }
@@ -225,7 +227,9 @@ pub enum TransportError {
 
 /// An explicit provider failure event, distinct from local framing or schema
 /// errors. It gives no proof that escaped tool work did not execute.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Error, schemars::JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Error, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderStreamFailureEvent {
     #[error("response.failed")]
@@ -236,7 +240,9 @@ pub enum ProviderStreamFailureEvent {
 
 /// The response ended without completion proof. This does not establish whether
 /// completed tool items escaped the stream or their external calls ran.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Error, schemars::JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Error, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamInterruption {
     #[error("missing response.completed")]
@@ -268,44 +274,18 @@ fn diagnostic_suffix(diagnostic: Option<&HttpDiagnostic>) -> String {
     })
 }
 
-/// Request credentials bound to the provider that issued them. Deliberately
-/// has no Debug implementation: diagnostic formatting must not expose tokens.
-pub enum AuthCredentials {
-    Codex {
-        access_token: String,
-        account_id: String,
-    },
-    ChatGptPlan {
-        access_token: String,
-    },
-}
-
-/// The credential authority selects the provider endpoint at preparation.
+/// Retained provenance for the single public provider endpoint.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponsesRoute {
     #[default]
-    Codex,
     ChatGptPlan,
 }
 
-/// Credential source. Dispatch retains the prepared endpoint while credentials
-/// may rotate; their returned variant must still match the frozen endpoint.
-/// Codex-owned files remain read-only. A 401 is surfaced as Authentication.
+/// Public-plan token source. A 401 requires operator sign-in; tokens never enter
+/// retained requests or diagnostic formatting.
 pub trait Auth: Send + Sync {
-    fn access(&self) -> Result<(String, String), TransportError>;
-
-    fn route(&self) -> ResponsesRoute {
-        ResponsesRoute::Codex
-    }
-
-    fn credentials(&self) -> Result<AuthCredentials, TransportError> {
-        let (access_token, account_id) = self.access()?;
-        Ok(AuthCredentials::Codex {
-            access_token,
-            account_id,
-        })
-    }
+    fn access(&self) -> Result<String, TransportError>;
 }
 
 /// Selected wire contract, independent of model-name spelling and Engine jobs.
@@ -314,36 +294,33 @@ pub trait Auth: Send + Sync {
 pub enum ResponsesProtocol {
     #[default]
     Standard,
-    Lite,
 }
 
 pub struct ResponsesClient<A: Auth> {
     pub auth: A,
-    protocol: ResponsesProtocol,
+    http: std::sync::OnceLock<Result<reqwest::Client, &'static str>>,
 }
 
 impl<A: Auth + Clone + 'static> ResponsesClient<A> {
     pub fn new(auth: A) -> Self {
         Self {
             auth,
-            protocol: ResponsesProtocol::Standard,
+            http: std::sync::OnceLock::new(),
         }
     }
 
-    pub fn with_protocol(mut self, protocol: ResponsesProtocol) -> Self {
-        self.protocol = protocol;
-        self
-    }
-
-    pub fn protocol(&self) -> ResponsesProtocol {
-        self.protocol
+    fn http(&self) -> Result<reqwest::Client, TransportError> {
+        self.http
+            .get_or_init(|| client::http_client().map_err(|_| "HTTP client initialization failed"))
+            .clone()
+            .map_err(|message| TransportError::Stream(message.into()))
     }
 
     pub async fn create(
         &self,
         request: PreparedProviderRequest,
     ) -> Result<ResponsesTurn, TransportError> {
-        client::execute(self.auth.clone(), request, None).await
+        client::execute(self.auth.clone(), self.http()?, request, None).await
     }
 
     /// Sends completed items as they arrive; text deltas are best-effort.
@@ -353,6 +330,6 @@ impl<A: Auth + Clone + 'static> ResponsesClient<A> {
         request: PreparedProviderRequest,
         sink: tokio::sync::mpsc::Sender<sse::StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
-        client::execute(self.auth.clone(), request, Some(sink)).await
+        client::execute(self.auth.clone(), self.http()?, request, Some(sink)).await
     }
 }

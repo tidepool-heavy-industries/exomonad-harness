@@ -10,7 +10,7 @@ use tokio::sync::Notify;
 
 struct Offline;
 impl Auth for Offline {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         panic!("scripted cancellation must not authenticate")
     }
 }
@@ -55,7 +55,7 @@ struct Script {
 #[async_trait::async_trait]
 impl ResponsesTransport for Script {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
     async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
         unreachable!("Engine uses streaming")

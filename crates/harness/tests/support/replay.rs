@@ -5,7 +5,9 @@ use harness::{
     engine::ResponsesTransport,
     provider::{CallContext, ProviderError},
     store::Store,
-    transport::{PreparedProviderRequest, ResponsesRequest, ResponsesTurn, TransportError, sse::StreamEvent},
+    transport::{
+        PreparedProviderRequest, ResponsesRequest, ResponsesTurn, TransportError, sse::StreamEvent,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -51,7 +53,7 @@ impl ReplayTransport {
         Self {
             turns: Mutex::new(turns.into_iter().collect()),
             contract: (
-                harness::transport::ResponsesRoute::Codex,
+                harness::transport::ResponsesRoute::ChatGptPlan,
                 harness::transport::ResponsesProtocol::Standard,
             ),
             requests: Mutex::new(Vec::new()),
@@ -130,7 +132,10 @@ impl ResponsesTransport for ReplayTransport {
     > {
         Ok(self.contract)
     }
-    async fn create(&self, request: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         let observed = request.request();
         lock(&self.requests).push(observed.clone());
         let mut turn = lock(&self.turns)

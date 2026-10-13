@@ -9,7 +9,7 @@ use std::{collections::VecDeque, sync::Mutex};
 
 struct Offline;
 impl Auth for Offline {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         panic!("offline fixture")
     }
 }
@@ -34,7 +34,7 @@ struct Script {
 #[async_trait::async_trait]
 impl ResponsesTransport for Script {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
 
     async fn create(
@@ -115,7 +115,7 @@ pub(super) fn authorize_restart(
             },
             &crate::context::ContextProjectionTarget {
                 model: "test".into(),
-                route: ResponsesRoute::Codex,
+                route: ResponsesRoute::ChatGptPlan,
                 protocol: ResponsesProtocol::Standard,
             },
         )
@@ -831,7 +831,7 @@ async fn embedded_restart_preserves_committed_model_for_retained_opaque_history(
         store.context_request_state_for_transport(
             &opaque_head,
             &next_origin,
-            (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+            (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
         ),
         Err(StoreError::Context(crate::context::ContextError::Replay(
             crate::context::ContextReplayRejection::IncompatibleTransport,
@@ -841,7 +841,7 @@ async fn embedded_restart_preserves_committed_model_for_retained_opaque_history(
         .context_request_state_for_transport(
             &completion.head_request,
             &next_origin,
-            (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+            (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
         )
         .unwrap();
     assert_eq!(state.model.as_deref(), Some("model-b"));
@@ -971,7 +971,7 @@ struct CutAfterCompaction {
 #[async_trait::async_trait]
 impl ResponsesTransport for Arc<CutAfterCompaction> {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
 
     async fn create(

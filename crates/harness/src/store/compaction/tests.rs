@@ -33,7 +33,7 @@ fn record_response(store: &Store, source: &RequestId, raw: &[Item]) -> ServerCom
             &store.standalone_identity(crate::model::AgentPath("/root".into())),
             &crate::context::ContextProjectionTarget {
                 model: "actual-model".into(),
-                route: ResponsesRoute::Codex,
+                route: ResponsesRoute::ChatGptPlan,
                 protocol: ResponsesProtocol::Standard,
             },
         )
@@ -64,7 +64,7 @@ fn record_response(store: &Store, source: &RequestId, raw: &[Item]) -> ServerCom
             &occurrences.into_iter().map(Some).collect::<Vec<_>>(),
             None,
             PreparedTransportSelection::native((
-                ResponsesRoute::Codex,
+                ResponsesRoute::ChatGptPlan,
                 ResponsesProtocol::Standard,
             )),
             ProviderRequestPurpose::ServerCompaction,
@@ -287,7 +287,7 @@ fn legacy_boundary_does_not_infer_the_selected_model() {
             &store.standalone_identity(crate::model::AgentPath("/root".into())),
             &crate::context::ContextProjectionTarget {
                 model: "actual-model".into(),
-                route: ResponsesRoute::Codex,
+                route: ResponsesRoute::ChatGptPlan,
                 protocol: ResponsesProtocol::Standard,
             },
         )

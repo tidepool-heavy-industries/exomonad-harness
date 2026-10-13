@@ -11,7 +11,7 @@ struct Native;
 #[async_trait::async_trait]
 impl ResponsesTransport for Native {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
     async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
         unreachable!()
@@ -213,7 +213,7 @@ fn legacy_serialized_contract_does_not_become_replay_authority() {
         })
         .unwrap();
     let mut record: serde_json::Value = serde_json::from_str(&payload).unwrap();
-    record["provider_contract"] = json!([ResponsesRoute::Codex, ResponsesProtocol::Standard]);
+    record["provider_contract"] = json!([ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard]);
     c.execute(
         "UPDATE events SET payload=?2 WHERE id=?1",
         rusqlite::params![event, serde_json::to_string(&record).unwrap()],

@@ -25,7 +25,7 @@ fn config(actor: AgentPath) -> EngineConfig {
         tools: vec![],
         model: "test".into(),
         effort: Effort::Medium,
-        session_id: actor.0.clone(),
+        session_id: actor.0.clone().into(),
         agent: actor,
     }
 }
@@ -33,8 +33,8 @@ fn config(actor: AgentPath) -> EngineConfig {
 #[derive(Clone)]
 struct FakeAuth;
 impl Auth for FakeAuth {
-    fn access(&self) -> std::result::Result<(String, String), TransportError> {
-        Ok(("unused".into(), "unused".into()))
+    fn access(&self) -> std::result::Result<String, TransportError> {
+        Ok("unused".into())
     }
 }
 
@@ -72,7 +72,7 @@ impl ResponsesTransport for Replay {
         TransportError,
     > {
         Ok((
-            crate::transport::ResponsesRoute::Codex,
+            crate::transport::ResponsesRoute::ChatGptPlan,
             crate::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -140,7 +140,7 @@ fn captured_cut_preserves_multicall_order_and_exact_earlier_dependencies() {
                     later_item,
                 ],
             },
-            crate::transport::ResponsesRoute::Codex,
+            crate::transport::ResponsesRoute::ChatGptPlan,
             crate::transport::ResponsesProtocol::Standard,
         )
         .unwrap();
@@ -207,7 +207,7 @@ fn captured_cut_preserves_multicall_order_and_exact_earlier_dependencies() {
                     task: None,
                     target: &crate::context::ContextProjectionTarget {
                         model: "test".into(),
-                        route: crate::transport::ResponsesRoute::Codex,
+                        route: crate::transport::ResponsesRoute::ChatGptPlan,
                         protocol: crate::transport::ResponsesProtocol::Standard,
                     },
                 },
@@ -369,7 +369,7 @@ impl ResponsesTransport for StalledTransport {
         TransportError,
     > {
         Ok((
-            crate::transport::ResponsesRoute::Codex,
+            crate::transport::ResponsesRoute::ChatGptPlan,
             crate::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -405,7 +405,7 @@ impl ResponsesTransport for ParentTransport {
         TransportError,
     > {
         Ok((
-            crate::transport::ResponsesRoute::Codex,
+            crate::transport::ResponsesRoute::ChatGptPlan,
             crate::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -602,7 +602,7 @@ async fn captured_cut_two_child_engines_finish_while_original_provider_call_is_p
                     task: None,
                     target: &crate::context::ContextProjectionTarget {
                         model: "test".into(),
-                        route: crate::transport::ResponsesRoute::Codex,
+                        route: crate::transport::ResponsesRoute::ChatGptPlan,
                         protocol: crate::transport::ResponsesProtocol::Standard,
                     },
                 },
@@ -672,7 +672,7 @@ async fn captured_cut_two_child_engines_finish_while_original_provider_call_is_p
                 task: None,
                 target: &crate::context::ContextProjectionTarget {
                     model: "test".into(),
-                    route: crate::transport::ResponsesRoute::Codex,
+                    route: crate::transport::ResponsesRoute::ChatGptPlan,
                     protocol: crate::transport::ResponsesProtocol::Standard,
                 },
             },

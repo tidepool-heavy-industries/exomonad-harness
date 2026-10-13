@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 struct Offline;
 impl Auth for Offline {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         panic!("offline fixture")
     }
 }
@@ -34,7 +34,7 @@ struct FinalResponse(Arc<Mutex<Vec<ResponsesRequest>>>);
 #[async_trait::async_trait]
 impl ResponsesTransport for FinalResponse {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
 
     async fn create(
@@ -260,7 +260,7 @@ async fn checkpoint_child_context_rewrite_preserves_consuming_claim_through_reco
                         task: None,
                         target: &crate::context::ContextProjectionTarget {
                             model: "test".into(),
-                            route: crate::transport::ResponsesRoute::Codex,
+                            route: crate::transport::ResponsesRoute::ChatGptPlan,
                             protocol: crate::transport::ResponsesProtocol::Standard,
                         },
                     },

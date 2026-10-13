@@ -933,7 +933,7 @@ mod tests {
                     task: None,
                     target: &crate::context::ContextProjectionTarget {
                         model: "test".into(),
-                        route: crate::transport::ResponsesRoute::Codex,
+                        route: crate::transport::ResponsesRoute::ChatGptPlan,
                         protocol: crate::transport::ResponsesProtocol::Standard,
                     },
                 },
@@ -950,7 +950,7 @@ mod tests {
                     task: None,
                     target: &crate::context::ContextProjectionTarget {
                         model: "test".into(),
-                        route: crate::transport::ResponsesRoute::Codex,
+                        route: crate::transport::ResponsesRoute::ChatGptPlan,
                         protocol: crate::transport::ResponsesProtocol::Standard,
                     },
                 },
@@ -1070,7 +1070,7 @@ mod tests {
                     task: None,
                     target: &crate::context::ContextProjectionTarget {
                         model: "test".into(),
-                        route: crate::transport::ResponsesRoute::Codex,
+                        route: crate::transport::ResponsesRoute::ChatGptPlan,
                         protocol: crate::transport::ResponsesProtocol::Standard
                     },
                 }
@@ -1104,8 +1104,8 @@ mod tests {
         #[derive(Clone)]
         struct FakeAuth;
         impl Auth for FakeAuth {
-            fn access(&self) -> std::result::Result<(String, String), TransportError> {
-                Ok(("unused".into(), "unused".into()))
+            fn access(&self) -> std::result::Result<String, TransportError> {
+                Ok("unused".into())
             }
         }
         struct Replay {
@@ -1124,7 +1124,7 @@ mod tests {
                 TransportError,
             > {
                 Ok((
-                    crate::transport::ResponsesRoute::Codex,
+                    crate::transport::ResponsesRoute::ChatGptPlan,
                     crate::transport::ResponsesProtocol::Standard,
                 ))
             }
@@ -1215,7 +1215,7 @@ mod tests {
                     task: None,
                     target: &crate::context::ContextProjectionTarget {
                         model: "test".into(),
-                        route: crate::transport::ResponsesRoute::Codex,
+                        route: crate::transport::ResponsesRoute::ChatGptPlan,
                         protocol: crate::transport::ResponsesProtocol::Standard,
                     },
                 },
@@ -1306,8 +1306,8 @@ mod tests {
         #[derive(Clone)]
         struct FakeAuth;
         impl Auth for FakeAuth {
-            fn access(&self) -> std::result::Result<(String, String), TransportError> {
-                Ok(("unused".into(), "unused".into()))
+            fn access(&self) -> std::result::Result<String, TransportError> {
+                Ok("unused".into())
             }
         }
         struct Replay {
@@ -1325,7 +1325,7 @@ mod tests {
                 TransportError,
             > {
                 Ok((
-                    crate::transport::ResponsesRoute::Codex,
+                    crate::transport::ResponsesRoute::ChatGptPlan,
                     crate::transport::ResponsesProtocol::Standard,
                 ))
             }
@@ -1448,7 +1448,7 @@ mod tests {
                     task: None,
                     target: &crate::context::ContextProjectionTarget {
                         model: "test".into(),
-                        route: crate::transport::ResponsesRoute::Codex,
+                        route: crate::transport::ResponsesRoute::ChatGptPlan,
                         protocol: crate::transport::ResponsesProtocol::Standard,
                     },
                 },
@@ -1528,8 +1528,8 @@ mod tests {
         #[derive(Clone)]
         struct FakeAuth;
         impl Auth for FakeAuth {
-            fn access(&self) -> std::result::Result<(String, String), TransportError> {
-                Ok(("unused".into(), "unused".into()))
+            fn access(&self) -> std::result::Result<String, TransportError> {
+                Ok("unused".into())
             }
         }
         struct Replay {
@@ -1547,7 +1547,7 @@ mod tests {
                 TransportError,
             > {
                 Ok((
-                    crate::transport::ResponsesRoute::Codex,
+                    crate::transport::ResponsesRoute::ChatGptPlan,
                     crate::transport::ResponsesProtocol::Standard,
                 ))
             }

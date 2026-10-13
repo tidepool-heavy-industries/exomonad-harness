@@ -1,5 +1,5 @@
 //! Native public-client ChatGPT-plan OAuth, independent of Codex credential files.
-use super::super::{Auth, AuthCredentials, ResponsesRoute, TransportError};
+use super::super::{Auth, TransportError};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
 use serde::{Deserialize, Serialize};
@@ -71,16 +71,8 @@ impl ChatGptPlanAuth {
     }
 }
 impl Auth for ChatGptPlanAuth {
-    fn access(&self) -> Result<(String, String), TransportError> {
-        Err(TransportError::Authentication)
-    }
-    fn route(&self) -> ResponsesRoute {
-        ResponsesRoute::ChatGptPlan
-    }
-    fn credentials(&self) -> Result<AuthCredentials, TransportError> {
-        credentials(&self.path, &OfficialService)
-            .map(|access_token| AuthCredentials::ChatGptPlan { access_token })
-            .map_err(|_| TransportError::Authentication)
+    fn access(&self) -> Result<String, TransportError> {
+        credentials(&self.path, &OfficialService).map_err(|_| TransportError::Authentication)
     }
 }
 

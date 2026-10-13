@@ -452,7 +452,7 @@ mod tests {
             .issue_provider_request(
                 &id,
                 sealed,
-                (ResponsesRoute::Codex, ResponsesProtocol::Lite),
+                (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
             )
             .unwrap()
     }
@@ -487,8 +487,8 @@ mod tests {
         let owned = response_envelopes(&c, &issued.request).unwrap().unwrap();
         let envelope = owned.values().next().unwrap();
         assert_eq!(envelope.model, "model-original");
-        assert_eq!(envelope.route, Some(ResponsesRoute::Codex));
-        assert_eq!(envelope.protocol, Some(ResponsesProtocol::Lite));
+        assert_eq!(envelope.route, Some(ResponsesRoute::ChatGptPlan));
+        assert_eq!(envelope.protocol, Some(ResponsesProtocol::Standard));
         assert_eq!(envelope.completeness, ResponseCompleteness::ObservedPrefix);
         assert_eq!(owned.len(), 1);
     }
@@ -668,7 +668,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             decoded.provider_contract,
-            Some((ResponsesRoute::Codex, ResponsesProtocol::Lite))
+            Some((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
         );
     }
 

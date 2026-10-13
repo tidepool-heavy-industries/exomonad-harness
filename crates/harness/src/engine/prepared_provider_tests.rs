@@ -9,7 +9,7 @@ use std::sync::{
 
 struct Offline;
 impl Auth for Offline {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         unreachable!()
     }
 }
@@ -38,7 +38,7 @@ struct Script {
 #[async_trait::async_trait]
 impl ResponsesTransport for Script {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
     async fn create(
         &self,
@@ -502,10 +502,7 @@ async fn cache_comparison_engine_issuance_and_replay_preserve_opt_in() {
         turns[0].model_request.prompt_cache_comparison,
         Some(comparison)
     );
-    let body = crate::transport::client::request_body_for_route(
-        &turns[0].model_request,
-        ResponsesRoute::ChatGptPlan,
-    )
+    let body = crate::transport::client::request_body(&turns[0].model_request)
     .unwrap();
     assert_eq!(bodies.lock().unwrap()[0], body);
     drop(restored);

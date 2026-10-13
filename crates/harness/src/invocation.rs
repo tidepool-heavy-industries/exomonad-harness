@@ -633,7 +633,7 @@ impl Invocation {
         }
         let invocation_id = uuid::Uuid::new_v4().to_string();
         config.agent = AgentPath(format!("model/{parent_cell}/{invocation_id}"));
-        config.session_id = invocation_id.clone();
+        config.session_id = invocation_id.clone().into();
         let tools = std::mem::take(&mut config.tools);
         let (sender, callbacks) = mpsc::channel(1);
         let closed = Arc::new(AtomicBool::new(false));
@@ -843,7 +843,7 @@ mod tests {
     #[derive(Clone)]
     struct TestAuth;
     impl Auth for TestAuth {
-        fn access(&self) -> Result<(String, String), TransportError> {
+        fn access(&self) -> Result<String, TransportError> {
             unreachable!()
         }
     }
@@ -851,7 +851,7 @@ mod tests {
     #[async_trait]
     impl ResponsesTransport for Script {
         fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-            Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+            Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
         }
 
         async fn create(
@@ -893,7 +893,7 @@ mod tests {
             ],
             model: "offline".into(),
             effort: Effort::Low,
-            session_id: String::new(),
+            session_id: String::new().into(),
             agent: AgentPath(String::new()),
         }
     }
@@ -1277,7 +1277,7 @@ mod tests {
             fn response_contract(
                 &self,
             ) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-                Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+                Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
             }
 
             async fn create(
@@ -1299,7 +1299,7 @@ mod tests {
             ],
             model: "offline".into(),
             effort: Effort::Low,
-            session_id: String::new(),
+            session_id: String::new().into(),
             agent: AgentPath(String::new()),
         };
         let mut invocation = Invocation::start::<TestAuth, _>(
@@ -1393,7 +1393,7 @@ mod tests {
     #[test]
     fn duplicate_and_reserved_manifests_fail_before_any_provider_request() {
         for names in [vec!["echo", "echo"], vec!["spawn_agent"], vec!["finalize"]] {
-            let config=EngineConfig { instructions:String::new(),tools:names.into_iter().map(|name|json!({"type":"function","name":name,"parameters":{"type":"object","properties":{}}})).collect(),model:"offline".into(),effort:Effort::Low,session_id:String::new(),agent:AgentPath(String::new()) };
+            let config=EngineConfig { instructions:String::new(),tools:names.into_iter().map(|name|json!({"type":"function","name":name,"parameters":{"type":"object","properties":{}}})).collect(),model:"offline".into(),effort:Effort::Low,session_id:String::new().into(),agent:AgentPath(String::new()) };
             let result = Invocation::start::<TestAuth, _>(
                 Script(Mutex::new(VecDeque::new())),
                 Arc::new(Store::memory().unwrap()),
@@ -1424,7 +1424,7 @@ mod tests {
             fn response_contract(
                 &self,
             ) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-                Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+                Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
             }
 
             async fn create(
@@ -1545,7 +1545,7 @@ mod tests {
             fn response_contract(
                 &self,
             ) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-                Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+                Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
             }
 
             async fn create(
@@ -1650,7 +1650,7 @@ mod tests {
             fn response_contract(
                 &self,
             ) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-                Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+                Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
             }
 
             async fn create(

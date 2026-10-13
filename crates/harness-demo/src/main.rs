@@ -29,7 +29,7 @@ use harness::server::{ToolJobState, WireI64, WireU64};
 use harness::store::Store;
 use harness::transport::{
     Auth, ResponsesClient, ResponsesRequest, ResponsesTurn, TransportError, Usage,
-    auth::CodexFileAuth,
+    auth::ChatGptPlanAuth,
 };
 use harness::turn::JobScheduler;
 use serde_json::{Value, json};
@@ -257,13 +257,14 @@ impl Provider for CliProvider {
 }
 
 struct CliDriver {
-    engine: Engine<CodexFileAuth, CliProvider>,
+    engine: Engine<ChatGptPlanAuth, CliProvider>,
 }
 
 impl CliDriver {
     fn new(options: &CliOptions) -> Result<Self, String> {
-        let auth_path = CodexFileAuth::default_path()
-            .map_err(|_| "Codex credentials unavailable; check ~/.codex/auth.json".to_owned())?;
+        let auth_path = ChatGptPlanAuth::default_path().map_err(|_| {
+            "Codex credentials unavailable; sign in with the native ChatGPT plan account".to_owned()
+        })?;
         let store = Arc::new(
             Store::open(&options.db).map_err(|_| "could not open SQLite store".to_owned())?,
         );
@@ -275,7 +276,7 @@ impl CliDriver {
             options.dev_shell,
         )));
         let engine = Engine::new(
-            CodexFileAuth::new(auth_path),
+            ChatGptPlanAuth::new(auth_path),
             store,
             jobs,
             provider.clone(),
@@ -284,7 +285,7 @@ impl CliDriver {
                 tools: Vec::new(),
                 model: "gpt-6-sol".into(),
                 effort: Effort::Low,
-                session_id: format!("harness-demo-{}", std::process::id()),
+                session_id: format!("harness-demo-{}", std::process::id()).into(),
                 agent: AgentPath("/root".into()),
             },
         );
@@ -322,9 +323,10 @@ impl CliDriver {
 /// refused here until the driver can distinguish interrupted from settled
 /// model calls across a process boundary.
 async fn tree_ask(options: &CliOptions) -> Result<(String, EngineCompletion), String> {
-    let auth_path = CodexFileAuth::default_path()
-        .map_err(|_| "Codex credentials unavailable; check ~/.codex/auth.json".to_owned())?;
-    let auth = CodexFileAuth::new(auth_path);
+    let auth_path = ChatGptPlanAuth::default_path().map_err(|_| {
+        "Codex credentials unavailable; sign in with the native ChatGPT plan account".to_owned()
+    })?;
+    let auth = ChatGptPlanAuth::new(auth_path);
     let store =
         Arc::new(Store::open(&options.db).map_err(|_| "could not open SQLite store".to_owned())?);
     if store
@@ -733,7 +735,7 @@ fn deterministic_command(
 struct OfflineServerAuth;
 
 impl Auth for OfflineServerAuth {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         Err(TransportError::Authentication)
     }
 }
@@ -763,7 +765,7 @@ impl harness::engine::ResponsesTransport for DeterministicServerTransport {
         TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -2593,7 +2595,7 @@ fn final_text(items: &[Item]) -> Option<String> {
 fn safe_transport_error(error: &TransportError) -> String {
     match error {
         harness::transport::TransportError::Authentication => {
-            "authentication failed; check ~/.codex/auth.json (credentials were not displayed)"
+            "authentication failed; sign in with the native ChatGPT plan account (credentials were not displayed)"
                 .into()
         }
         harness::transport::TransportError::Http { status, .. } => {
@@ -3833,7 +3835,7 @@ mod tests {
     struct FakeAuth;
 
     impl Auth for FakeAuth {
-        fn access(&self) -> Result<(String, String), TransportError> {
+        fn access(&self) -> Result<String, TransportError> {
             Err(TransportError::Authentication)
         }
     }
@@ -3852,7 +3854,7 @@ mod tests {
             TransportError,
         > {
             Ok((
-                harness::transport::ResponsesRoute::Codex,
+                harness::transport::ResponsesRoute::ChatGptPlan,
                 harness::transport::ResponsesProtocol::Standard,
             ))
         }

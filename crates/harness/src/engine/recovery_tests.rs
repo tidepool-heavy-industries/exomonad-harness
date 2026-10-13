@@ -14,8 +14,8 @@ use tokio::sync::oneshot;
 #[derive(Clone)]
 struct TestAuth;
 impl Auth for TestAuth {
-    fn access(&self) -> Result<(String, String), TransportError> {
-        Ok(("unused".into(), "unused".into()))
+    fn access(&self) -> Result<String, TransportError> {
+        Ok("unused".into())
     }
 }
 
@@ -27,7 +27,7 @@ struct Replay {
 #[async_trait]
 impl ResponsesTransport for Replay {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
 
     async fn create(
@@ -353,7 +353,7 @@ struct StreamCustomThenWait;
 #[async_trait]
 impl ResponsesTransport for StreamCustomThenWait {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
 
     async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {

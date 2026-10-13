@@ -343,7 +343,7 @@ mod tests {
                         task: None,
                         target: &crate::context::ContextProjectionTarget {
                             model: "test".into(),
-                            route: crate::transport::ResponsesRoute::Codex,
+                            route: crate::transport::ResponsesRoute::ChatGptPlan,
                             protocol: crate::transport::ResponsesProtocol::Standard,
                         },
                     },

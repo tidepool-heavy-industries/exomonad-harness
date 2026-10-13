@@ -1090,7 +1090,7 @@ mod tests {
             &operation.origin,
             &crate::context::ContextProjectionTarget {
                 model: "luna".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )?;

@@ -29,8 +29,8 @@ use tokio::sync::{Notify, watch};
 struct OfflineAuth;
 
 impl Auth for OfflineAuth {
-    fn access(&self) -> Result<(String, String), TransportError> {
-        Ok(("offline-only".into(), "https://offline.invalid".into()))
+    fn access(&self) -> Result<String, TransportError> {
+        Ok("offline-only".into())
     }
 }
 

@@ -12,7 +12,7 @@ use tokio::sync::{Mutex, Notify};
 #[derive(Clone)]
 struct TestAuth;
 impl Auth for TestAuth {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         unreachable!("offline transport")
     }
 }
@@ -21,7 +21,7 @@ struct FinalTransport;
 #[async_trait]
 impl ResponsesTransport for FinalTransport {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
 
     async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
@@ -359,7 +359,7 @@ struct StalledTransport {
 #[async_trait]
 impl ResponsesTransport for StalledTransport {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
 
     async fn create(
@@ -721,7 +721,7 @@ struct RequestBoundaryTransport {
 #[async_trait]
 impl ResponsesTransport for RequestBoundaryTransport {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
 
     async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {

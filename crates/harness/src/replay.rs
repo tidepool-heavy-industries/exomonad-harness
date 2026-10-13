@@ -993,7 +993,7 @@ mod tests {
                 &first,
                 &dto,
                 &turn("first"),
-                ResponsesRoute::Codex,
+                ResponsesRoute::ChatGptPlan,
                 ResponsesProtocol::Standard,
             )
             .unwrap();
@@ -1002,7 +1002,7 @@ mod tests {
                 &second,
                 &dto,
                 &turn("second"),
-                ResponsesRoute::Codex,
+                ResponsesRoute::ChatGptPlan,
                 ResponsesProtocol::Standard,
             )
             .unwrap();
@@ -1051,7 +1051,7 @@ mod tests {
     struct OfflineAuth;
 
     impl Auth for OfflineAuth {
-        fn access(&self) -> Result<(String, String), TransportError> {
+        fn access(&self) -> Result<String, TransportError> {
             Err(TransportError::Authentication)
         }
     }
@@ -1250,7 +1250,7 @@ mod tests {
             replay
                 .recorded_requests()
                 .iter()
-                .map(|request| request.session_id.as_str())
+                .map(|request| request.session_id.thread())
                 .collect::<Vec<_>>(),
             ["s1", "s2"]
         );
@@ -1446,7 +1446,7 @@ mod tests {
         let mut mismatched_effort = recorded_turns[0].model_request.clone();
         mismatched_effort.pinned_effort = Effort::High;
         let mut mismatched_session = recorded_turns[0].model_request.clone();
-        mismatched_session.session_id.push_str("-different");
+        mismatched_session.session_id = format!("{}-different", mismatched_session.session_id.thread()).into();
         let mut mismatched_allowed = recorded_turns[0].model_request.clone();
         mismatched_allowed.tools_allowed = Some(vec![]);
         for mismatched in [
@@ -1868,7 +1868,7 @@ mod tests {
                     task: None,
                     target: &crate::context::ContextProjectionTarget {
                         model: "test-model".into(),
-                        route: crate::transport::ResponsesRoute::Codex,
+                        route: crate::transport::ResponsesRoute::ChatGptPlan,
                         protocol: crate::transport::ResponsesProtocol::Standard,
                     },
                 },

@@ -38,7 +38,7 @@ fn record(store: &Store, head: &RequestId, items: Vec<Item>, model: &str) {
                 items,
                 usage: Default::default(),
             },
-            crate::transport::ResponsesRoute::Codex,
+            crate::transport::ResponsesRoute::ChatGptPlan,
             crate::transport::ResponsesProtocol::Standard,
         )
         .unwrap();
@@ -95,7 +95,7 @@ fn setup_with_provenance(
             &operation.origin,
             &crate::context::ContextProjectionTarget {
                 model: "model-a".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )
@@ -391,7 +391,7 @@ fn empty_here_child_without_source_remains_a_valid_frozen_context() {
             &identity,
             &crate::context::ContextProjectionTarget {
                 model: "gpt-6-luna".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )
@@ -445,7 +445,7 @@ fn cross_model_frozen_child_projects_without_losing_source_occurrences_or_claims
             &identity,
             &crate::context::ContextProjectionTarget {
                 model: "model-b".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )
@@ -532,7 +532,7 @@ fn replay_collision_fixture(
             &a_operation.origin,
             &crate::context::ContextProjectionTarget {
                 model: "model-a".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )
@@ -859,7 +859,7 @@ fn try_cut_fixture_with_reasoning(
             task: None,
             target: &crate::context::ContextProjectionTarget {
                 model: "model-b".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         },
@@ -870,7 +870,7 @@ fn try_cut_fixture_with_reasoning(
             &identity,
             &crate::context::ContextProjectionTarget {
                 model: "model-b".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )
@@ -964,7 +964,7 @@ fn authenticated_cut_survives_commit_freeze_and_deferred_child_without_later_arr
                 task: None,
                 target: &crate::context::ContextProjectionTarget {
                     model: "model-b".into(),
-                    route: crate::transport::ResponsesRoute::Codex,
+                    route: crate::transport::ResponsesRoute::ChatGptPlan,
                     protocol: crate::transport::ResponsesProtocol::Standard,
                 },
             },
@@ -976,7 +976,7 @@ fn authenticated_cut_survives_commit_freeze_and_deferred_child_without_later_arr
             &grandchild_identity,
             &crate::context::ContextProjectionTarget {
                 model: "model-b".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )
@@ -1133,7 +1133,7 @@ fn captured_prefix_keeps_prior_pending_call_and_deferred_boundary_refusals() {
             task: None,
             target: &crate::context::ContextProjectionTarget {
                 model: "model-b".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         },
@@ -1212,7 +1212,7 @@ fn authenticated_metadata_only_cut_is_omitted_but_full_or_malformed_groups_refus
             &identity,
             &crate::context::ContextProjectionTarget {
                 model: "model-b".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )
@@ -1255,7 +1255,7 @@ fn genuine_saved_reference_from_unrelated_checkpoint_cannot_authorize_model_swit
                 Some("model-b"),
                 None,
                 Some((
-                    crate::transport::ResponsesRoute::Codex,
+                    crate::transport::ResponsesRoute::ChatGptPlan,
                     crate::transport::ResponsesProtocol::Standard
                 ))
             )
@@ -1271,7 +1271,7 @@ fn genuine_saved_reference_from_unrelated_checkpoint_cannot_authorize_model_swit
                 Some("model-b"),
                 None,
                 Some((
-                    crate::transport::ResponsesRoute::Codex,
+                    crate::transport::ResponsesRoute::ChatGptPlan,
                     crate::transport::ResponsesProtocol::Standard
                 ))
             ),
@@ -1284,7 +1284,7 @@ fn genuine_saved_reference_from_unrelated_checkpoint_cannot_authorize_model_swit
             &operation.origin,
             &crate::context::ContextProjectionTarget {
                 model: "model-a".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )

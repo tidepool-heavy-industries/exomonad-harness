@@ -24,7 +24,7 @@ fn issued_response(store: &Store, head: &RequestId, items: Vec<Item>, model: &st
                 items,
                 usage: Default::default(),
             },
-            crate::transport::ResponsesRoute::Codex,
+            crate::transport::ResponsesRoute::ChatGptPlan,
             crate::transport::ResponsesProtocol::Standard,
         )
         .unwrap();
@@ -71,7 +71,7 @@ fn claim_edit(store: &Store, head: &RequestId) -> OperationId {
             &operation.origin,
             &crate::context::ContextProjectionTarget {
                 model: "luna".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )
@@ -388,7 +388,7 @@ fn model_state_is_exact_incarnation_owned() {
             &origin,
             &crate::context::ContextProjectionTarget {
                 model: "luna".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )
@@ -664,7 +664,7 @@ fn deferred_child_inherits_committed_context_and_terminal_before_call_stays_froz
             &operation.origin,
             &crate::context::ContextProjectionTarget {
                 model: "luna".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )
@@ -716,7 +716,7 @@ fn deferred_child_inherits_committed_context_and_terminal_before_call_stays_froz
                 task: None,
                 target: &crate::context::ContextProjectionTarget {
                     model: "sol".into(),
-                    route: crate::transport::ResponsesRoute::Codex,
+                    route: crate::transport::ResponsesRoute::ChatGptPlan,
                     protocol: crate::transport::ResponsesProtocol::Standard,
                 },
             },
@@ -762,7 +762,7 @@ fn deferred_child_inherits_committed_context_and_terminal_before_call_stays_froz
                 task: None,
                 target: &crate::context::ContextProjectionTarget {
                     model: "sol".into(),
-                    route: crate::transport::ResponsesRoute::Codex,
+                    route: crate::transport::ResponsesRoute::ChatGptPlan,
                     protocol: crate::transport::ResponsesProtocol::Standard,
                 },
             },
@@ -1353,7 +1353,7 @@ fn closed_opaque_response_conversion_is_rejected_preserving_raw_evidence() {
             &operation.origin,
             &crate::context::ContextProjectionTarget {
                 model: "luna".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )

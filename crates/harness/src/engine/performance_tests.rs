@@ -306,7 +306,7 @@ async fn store_cohort(depth: usize, payload_bytes: usize, workers: usize, separa
 
 struct Offline;
 impl Auth for Offline {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         panic!("offline measurement")
     }
 }
@@ -327,7 +327,7 @@ struct Scripted(Arc<Mutex<Vec<ResponsesRequest>>>);
 #[async_trait::async_trait]
 impl ResponsesTransport for Scripted {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
 
     async fn create(
@@ -375,7 +375,7 @@ async fn engine_cohort(depth: usize, payload_bytes: usize, workers: usize) {
                     tools: vec![],
                     model: "test".into(),
                     effort: crate::model::Effort::Low,
-                    session_id: format!("perf-{worker}"),
+                    session_id: format!("perf-{worker}").into(),
                     agent: seed.identity.actor().clone(),
                 },
             );

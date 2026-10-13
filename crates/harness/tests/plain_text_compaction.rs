@@ -20,7 +20,7 @@ use tokio::sync::watch;
 struct OfflineAuth;
 
 impl Auth for OfflineAuth {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         unreachable!("replay does not authenticate")
     }
 }

@@ -20,7 +20,7 @@ use tokio::sync::Notify;
 #[derive(Clone)]
 struct Offline;
 impl Auth for Offline {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         panic!("scripted transport never authenticates")
     }
 }
@@ -94,7 +94,7 @@ struct Script {
 #[async_trait::async_trait]
 impl ResponsesTransport for Script {
     fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
-        Ok((ResponsesRoute::Codex, ResponsesProtocol::Standard))
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
     }
     async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
         unreachable!()
@@ -107,7 +107,7 @@ impl ResponsesTransport for Script {
         let id = request.request_id().clone();
         assert_eq!(
             request.response_contract(),
-            (ResponsesRoute::Codex, ResponsesProtocol::Standard)
+            (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard)
         );
         let body = serde_json::from_slice(request.wire_body()).unwrap();
         let ordinal = {

@@ -66,7 +66,7 @@ fn target(kind: u8) -> ContextProjectionTarget {
         route: if kind == 2 {
             ResponsesRoute::ChatGptPlan
         } else {
-            ResponsesRoute::Codex
+            ResponsesRoute::ChatGptPlan
         },
         protocol: ResponsesProtocol::Standard,
     }
@@ -103,7 +103,7 @@ fn run_history(
             .issue_provider_request(
                 &head,
                 store.seal_replay_request(&request).unwrap(),
-                (ResponsesRoute::Codex, ResponsesProtocol::Standard),
+                (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
             )
             .unwrap();
         let mut assembly = ResponseAssembly::default();

@@ -220,7 +220,7 @@ mod tests {
     fn frozen_body_and_contract_are_bound_to_durable_issuance() {
         let (store, head) = store();
         let mut dto = request();
-        let contract = (ResponsesRoute::Codex, ResponsesProtocol::Lite);
+        let contract = (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard);
         let expected = client::normalize_for_dispatch(&dto, contract).unwrap();
         let prepared = store
             .prepare_provider_request(
@@ -256,7 +256,7 @@ mod tests {
                 None,
                 PreparedTransportSelection::native((
                     ResponsesRoute::ChatGptPlan,
-                    ResponsesProtocol::Lite
+                    ResponsesProtocol::Standard
                 )),
                 ProviderRequestPurpose::Inference
             ),
@@ -283,7 +283,7 @@ mod tests {
                     &[None],
                     None,
                     PreparedTransportSelection::native((
-                        ResponsesRoute::Codex,
+                        ResponsesRoute::ChatGptPlan,
                         ResponsesProtocol::Standard
                     )),
                     ProviderRequestPurpose::Inference
@@ -306,7 +306,7 @@ mod tests {
                 &[None],
                 None,
                 PreparedTransportSelection::native((
-                    ResponsesRoute::Codex,
+                    ResponsesRoute::ChatGptPlan,
                     ResponsesProtocol::Standard
                 )),
                 ProviderRequestPurpose::Inference

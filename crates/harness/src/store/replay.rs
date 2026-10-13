@@ -35,7 +35,7 @@ pub(super) struct IssuedRequestRecord {
     tools_allowed: Option<Vec<String>>,
     pub(super) model: String,
     pinned_effort: Effort,
-    session_id: String,
+    session_id: crate::transport::SessionIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     prompt_cache_comparison: Option<crate::transport::PromptCacheComparison>,
 }

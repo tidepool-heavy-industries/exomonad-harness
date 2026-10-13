@@ -30,20 +30,12 @@ fn plan_request() -> ResponsesRequest {
 fn public_production_request_preserves_async_and_full_history() {
     let request = plan_request();
     let original = serde_json::to_value(&request).unwrap();
-    let normalized = normalized_request(
-        &request,
-        ResponsesProtocol::Standard,
-        ResponsesRoute::ChatGptPlan,
-    )
-    .unwrap();
+    let normalized = normalized_request(&request).unwrap();
     let wire = http_request(
         &reqwest::Client::new(),
-        ResponsesRoute::ChatGptPlan,
-        ResponsesProtocol::Standard,
         &request,
         serde_json::to_vec(&normalized).unwrap(),
         "test-bearer",
-        None,
     )
     .build()
     .unwrap();
@@ -56,12 +48,12 @@ fn public_production_request_preserves_async_and_full_history() {
         "chatgpt-account-id",
         "version",
         "originator",
-        RESPONSES_LITE_HEADER,
+        "x-openai-internal-codex-responses-lite",
     ] {
         assert!(!wire.headers().contains_key(header));
     }
     for header in ["session-id", "thread-id", "x-client-request-id"] {
-        assert_eq!(wire.headers()[header], request.session_id);
+        assert_eq!(wire.headers()[header], request.session_id.thread());
     }
     assert_eq!(
         wire.headers()[reqwest::header::USER_AGENT],
@@ -101,41 +93,30 @@ fn public_production_request_preserves_async_and_full_history() {
 #[test]
 fn public_route_enforces_its_wire_contract_and_allowed_host_tools() {
     let mut request = plan_request();
-    assert!(
-        normalized_request(
-            &request,
-            ResponsesProtocol::Lite,
-            ResponsesRoute::ChatGptPlan
-        )
-        .is_err()
-    );
     request.tools_allowed = Some(vec!["yield".into()]);
-    let body = request_body_for_route(&request, ResponsesRoute::ChatGptPlan).unwrap();
+    let body = request_body(&request).unwrap();
     assert_eq!(body["tools"][0]["tools"].as_array().unwrap().len(), 1);
     assert_eq!(body["tools"][0]["tools"][0]["name"], "yield");
     request.tools_allowed = Some(vec![]);
-    let body = request_body_for_route(&request, ResponsesRoute::ChatGptPlan).unwrap();
-    assert_eq!(body["tool_choice"], "none");
-    assert_eq!(body["tools"], json!([]));
+    let body = request_body(&request).unwrap();
+    assert!(body.get("tool_choice").is_none());
+    assert!(body.get("tools").is_none());
     request.input.push(Item(
         json!({"type":"message","role":"system","content":"bad"}),
     ));
-    assert!(request_body_for_route(&request, ResponsesRoute::ChatGptPlan).is_err());
+    assert!(request_body(&request).is_err());
     request.input.pop();
     request.tools = vec![json!({"type":"tool_search"})].into();
-    assert!(request_body_for_route(&request, ResponsesRoute::ChatGptPlan).is_err());
+    assert!(request_body(&request).is_err());
 }
 
 #[tokio::test]
-async fn mismatched_credentials_are_refused_before_traffic() {
+async fn missing_plan_credentials_are_refused_before_traffic() {
     #[derive(Clone)]
     struct WrongAuthority;
     impl Auth for WrongAuthority {
-        fn access(&self) -> Result<(String, String), TransportError> {
-            Ok(("codex-test-bearer".into(), "codex-account".into()))
-        }
-        fn route(&self) -> ResponsesRoute {
-            ResponsesRoute::ChatGptPlan
+        fn access(&self) -> Result<String, TransportError> {
+            Err(TransportError::Authentication)
         }
     }
     let client = ResponsesClient::new(WrongAuthority);
@@ -238,22 +219,21 @@ async fn production_http_client_never_forwards_history_on_redirect() {
 #[test]
 fn cache_comparison_defaults_omit_and_invalid_selections_refuse_before_dispatch() {
     let mut request = plan_request();
-    let body = request_body_for_route(&request, ResponsesRoute::ChatGptPlan).unwrap();
+    let body = request_body(&request).unwrap();
     assert!(body.get("prompt_cache_options").is_none());
     request.prompt_cache_comparison = Some(crate::transport::PromptCacheComparison {
         comparison_response_id: "baseline".into(),
     });
-    let body = request_body_for_route(&request, ResponsesRoute::ChatGptPlan).unwrap();
+    let body = request_body(&request).unwrap();
     assert_eq!(
         body["prompt_cache_options"],
         json!({"comparison_response_id":"baseline"})
     );
-    assert!(crate::transport::client::request_body(&request).is_err());
     request
         .prompt_cache_comparison
         .as_mut()
         .unwrap()
         .comparison_response_id
         .clear();
-    assert!(request_body_for_route(&request, ResponsesRoute::ChatGptPlan).is_err());
+    assert!(request_body(&request).is_err());
 }

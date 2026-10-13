@@ -80,7 +80,7 @@ fn prepare(provenance: Provenance<'_>, selected: &str) -> Restoration {
                         items: items.clone(),
                         usage: Default::default(),
                     },
-                    crate::transport::ResponsesRoute::Codex,
+                    crate::transport::ResponsesRoute::ChatGptPlan,
                     crate::transport::ResponsesProtocol::Standard,
                 )
                 .unwrap();
@@ -124,7 +124,7 @@ fn prepare(provenance: Provenance<'_>, selected: &str) -> Restoration {
             &first.origin,
             &crate::context::ContextProjectionTarget {
                 model: initial.into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )
@@ -473,7 +473,7 @@ fn historical_compaction_without_issuing_evidence_stays_protected() {
             &operation.origin,
             &crate::context::ContextProjectionTarget {
                 model: "model-a".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )
@@ -518,7 +518,7 @@ fn identical_current_opaque_bytes_keep_distinct_origin_model_evidence() {
                 items: vec![opaque],
                 usage: Default::default(),
             },
-            crate::transport::ResponsesRoute::Codex,
+            crate::transport::ResponsesRoute::ChatGptPlan,
             crate::transport::ResponsesProtocol::Standard,
         )
         .unwrap();
@@ -575,7 +575,7 @@ fn current_opaque_retention_refuses_unknown_issuing_provenance() {
             &operation.origin,
             &crate::context::ContextProjectionTarget {
                 model: "model-a".into(),
-                route: crate::transport::ResponsesRoute::Codex,
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
             },
         )

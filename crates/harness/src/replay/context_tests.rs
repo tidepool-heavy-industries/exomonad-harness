@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 struct Offline;
 impl Auth for Offline {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         panic!("context replay must not access a provider")
     }
 }
