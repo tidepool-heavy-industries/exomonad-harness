@@ -220,9 +220,9 @@ actor/resource release evidence. Audit slow operations, rejected/confused cells,
 lost obligations, useful/missed helpers, redundant frontier turns and Jev packet
 quality. Reconstruct the whole workflow before choosing the repair.
 
-Operator decides default cutover. Retain the functioning Codex path as a temporary
-recovery option during trials; remove its process/relay/rollout dependencies after
-a consumer audit. Do not wholesale-delete Haskell watches or fork APIs because an
+Operator selects the matched runtime cutover after public-plan qualification.
+Retain the previous exact bundle for rollback. The new bundle admits only native
+public-plan credentials and public Responses routing. Do not wholesale-delete Haskell watches or fork APIs because an
 old design assumed async tools replace every non-model-actor use.
 
 ## Suggested scheduling

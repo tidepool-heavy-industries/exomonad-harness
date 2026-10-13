@@ -64,7 +64,7 @@ fn capture_call() -> Item {
 }
 
 #[test]
-fn interrupted_done_items_keep_same_model_replay_and_require_exact_transport() {
+fn interrupted_done_items_keep_same_model_replay_without_terminal_completion() {
     let store = Store::memory().unwrap();
     let head = RequestId("interrupted-items".into());
     let actor = AgentPath("/root".into());
@@ -86,16 +86,9 @@ fn interrupted_done_items_keep_same_model_replay_and_require_exact_transport() {
             .2,
         reasoning("visible reasoning")
     );
-    let incompatible = ContextProjectionTarget {
-        route: ResponsesRoute::ChatGptPlan,
-        ..target("astra")
-    };
-    assert!(matches!(
-        store.preflight_context_target(&head, &identity, &incompatible),
-        Err(StoreError::Context(ContextError::Replay(
-            ContextReplayRejection::IncompatibleTransport
-        )))
-    ));
+    store
+        .preflight_context_target(&head, &identity, &target("astra"))
+        .unwrap();
     assert!(store.replay_turns(&head).unwrap().is_empty());
 }
 

@@ -5371,8 +5371,17 @@ mod tests {
         );
         let body = crate::transport::client::request_body(&sent[0]).unwrap();
         assert_eq!(body["input"].as_array().unwrap().last(), Some(&injected.0));
-        assert_eq!(body["input"].as_array().unwrap().len(), sent[0].input.len());
-        assert_eq!(body["tool_choice"]["tools"][0]["name"], "slow");
+        assert_eq!(
+            body["input"].as_array().unwrap().len(),
+            sent[0]
+                .input
+                .iter()
+                .filter(|item| !item.is_configuration_update())
+                .count()
+        );
+        assert_eq!(body["tools"][0]["tools"][0]["name"], "slow");
+        assert_eq!(body["tools"][0]["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(body["tool_choice"], "auto");
         assert_eq!(sent[0].tools_allowed, Some(vec!["slow".into()]));
         let row = store.decisions(None).unwrap().pop().unwrap();
         assert_eq!(row.decision.event_refs.len(), sent[0].input.len() - 1);

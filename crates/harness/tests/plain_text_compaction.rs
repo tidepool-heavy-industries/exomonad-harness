@@ -128,7 +128,7 @@ fn engine(turns: Vec<Result<ResponsesTurn, TransportError>>) -> EngineFixture {
 
 fn input() -> Vec<Item> {
     vec![
-        Item(json!({"type":"message","role":"system","content":"standing system"})),
+        Item(json!({"type":"message","role":"developer","content":"standing system"})),
         Item(json!({"type":"message","role":"developer","content":"standing developer"})),
         Item(json!({"type":"message","role":"user","content":"old history ".repeat(2500)})),
         Item(json!({"type":"message","role":"user","content":"recent user"})),

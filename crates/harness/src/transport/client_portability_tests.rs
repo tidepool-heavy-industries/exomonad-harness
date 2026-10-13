@@ -336,7 +336,14 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
     assert_eq!(sent["model"], "gpt-6-luna");
     assert_eq!(
         sent["input"],
-        serde_json::to_value(&destination.input).unwrap()
+        serde_json::to_value(
+            destination
+                .input
+                .iter()
+                .filter(|item| !item.is_configuration_update())
+                .collect::<Vec<_>>()
+        )
+        .unwrap()
     );
     assert_eq!(sent["instructions"], "source instructions");
     if descendant == Descendant::None {
@@ -532,7 +539,17 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
     )
     .await;
     assert_eq!(completed.items, grandchild_answer);
-    assert_eq!(sent["input"], serde_json::to_value(&request.input).unwrap());
+    assert_eq!(
+        sent["input"],
+        serde_json::to_value(
+            request
+                .input
+                .iter()
+                .filter(|item| !item.is_configuration_update())
+                .collect::<Vec<_>>()
+        )
+        .unwrap()
+    );
     assert_eq!(
         store.items(&head).unwrap()[..source_items.len()],
         source_items

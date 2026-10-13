@@ -517,7 +517,7 @@ fn strict_request_preserves_constrained_nullable_type_array_bytes() {
         }},"required":["entries"],"additionalProperties":false
     }},"required":["nested"],"additionalProperties":false});
     let body = request_body(&request(parameters.clone())).unwrap();
-    assert_eq!(body["tools"][0]["parameters"], parameters);
+    assert_eq!(body["tools"][0]["tools"][0]["parameters"], parameters);
     for key in ["required", "additionalProperties"] {
         let mut invalid = parameters.clone();
         invalid["properties"]["nested"]

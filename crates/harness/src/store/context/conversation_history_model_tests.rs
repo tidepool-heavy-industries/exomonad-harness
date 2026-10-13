@@ -63,11 +63,7 @@ fn boundary() -> Item {
 fn target(kind: u8) -> ContextProjectionTarget {
     ContextProjectionTarget {
         model: if kind == 1 { "luna" } else { "astra" }.into(),
-        route: if kind == 2 {
-            ResponsesRoute::ChatGptPlan
-        } else {
-            ResponsesRoute::ChatGptPlan
-        },
+        route: ResponsesRoute::ChatGptPlan,
         protocol: ResponsesProtocol::Standard,
     }
 }
@@ -244,8 +240,7 @@ fn run_history(
                     next_child += 1;
                     let expected = capture.epoch == epoch
                         && capture.valid
-                        && kind != 2
-                        && (kind == 0 || capture.entries.iter().all(|(_, _, class)| *class != 2));
+                        && (kind != 1 || capture.entries.iter().all(|(_, _, class)| *class != 2));
                     let observed = store.attach_checkpoint_child(
                         capture.cuts.before_call(),
                         CheckpointChild {
@@ -264,13 +259,6 @@ fn run_history(
                             &observed,
                             Err(StoreError::Context(ContextError::Replay(
                                 ContextReplayRejection::InvalidPrefix
-                            )))
-                        ));
-                    } else if kind == 2 {
-                        prop_assert!(matches!(
-                            &observed,
-                            Err(StoreError::Context(ContextError::Replay(
-                                ContextReplayRejection::IncompatibleTransport
                             )))
                         ));
                     }
@@ -390,7 +378,7 @@ fn captured_cuts_match_independent_occurrence_histories() {
                 1 => Op::Complete(value),
                 2 => Op::Eof,
                 3 => Op::Capture,
-                4 | 5 => Op::Project(slot as usize, value),
+                4 | 5 => Op::Project(slot as usize, value % 2),
                 _ => Op::Reopen,
             })
             .collect::<Vec<_>>()
