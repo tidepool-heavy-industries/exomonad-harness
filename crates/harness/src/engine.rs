@@ -378,6 +378,7 @@ fn retain_post_action_failure(
 pub struct EngineBlockedAction {
     primary: Box<EngineError>,
     block: crate::embedding::InferenceBlock,
+    head_settlement: Option<crate::store::EmbeddedRoundSettlement>,
 }
 impl EngineBlockedAction {
     pub fn primary(&self) -> &EngineError {
@@ -2985,6 +2986,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         Ok(block) => EngineError::BlockedAction(EngineBlockedAction {
                             primary: Box::new(primary),
                             block,
+                            head_settlement: None,
                         }),
                         Err(persistence) => EngineError::InferenceBlockPersistence {
                             primary: Box::new(primary),
@@ -3017,13 +3019,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             cause,
                         }
                     }
-                    Ok(ModelRequestRecording::RecordedEmbedded { block }) => {
+                    Ok(ModelRequestRecording::RecordedEmbedded(recording)) => {
+                        let block = recording.into_block();
                         EngineError::BlockedAction(EngineBlockedAction {
                             primary: Box::new(EngineError::InterruptedModelRound {
                                 head_request,
                                 cause,
                             }),
                             block,
+                            head_settlement: None,
                         })
                     }
                     Ok(ModelRequestRecording::StaleFrontier) => primary.with_secondary(
@@ -3056,10 +3060,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .await
                 {
                     Ok(ModelRequestRecording::RecordedStandalone) => primary,
-                    Ok(ModelRequestRecording::RecordedEmbedded { block }) => {
+                    Ok(ModelRequestRecording::RecordedEmbedded(recording)) => {
+                        let (block, settlement) = recording.into_parts();
                         EngineError::BlockedAction(EngineBlockedAction {
                             primary: Box::new(primary),
                             block,
+                            head_settlement: Some(settlement),
                         })
                     }
                     Ok(ModelRequestRecording::StaleFrontier) => primary.with_secondary(

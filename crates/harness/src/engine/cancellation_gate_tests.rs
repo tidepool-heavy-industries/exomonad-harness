@@ -252,6 +252,17 @@ async fn rejection_keeps_its_explicit_recovery_block() {
         .await
         .unwrap();
     let assessment = receipt.assessment();
+    let [settlement] = assessment.head_settlements() else {
+        panic!("rejection lost its committed head receipt");
+    };
+    assert_eq!(Some(settlement.request()), assessment.head());
+    assert_eq!(settlement.outcome(), EmbeddedRoundOutcome::Rejected);
+    assert!(
+        engine
+            .store
+            .matches_embedded_settlement_issuer(&identity, settlement)
+    );
+
     let error = receipt.into_result().unwrap_err();
     let EngineError::BlockedAction(recorded) = error else {
         panic!("scripted rejection lost its issued block: {error:?}");

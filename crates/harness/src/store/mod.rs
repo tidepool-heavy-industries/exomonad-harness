@@ -10,6 +10,7 @@ pub(crate) use compaction::ServerCompactionResponse;
 pub(crate) use embedded::{CommandInputAdmission, EmbeddedInputState};
 pub use embedded_commands::{EmbeddedCommandRecord, EmbeddedCommandState};
 pub use embedded_round::{EmbeddedRoundFrontier, EmbeddedRoundOutcome};
+pub(crate) use embedded_round::{EmbeddedRoundSettlement, EmbeddedRoundSettlementResult};
 pub(crate) use inference::{EmbeddedRoundSnapshot, InferenceAttempt};
 pub mod actor_output;
 pub mod chat;

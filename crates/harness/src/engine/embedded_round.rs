@@ -61,6 +61,7 @@ pub struct RoundAssessment {
     outstanding: Vec<OperationId>,
     retained: Vec<RetainedFollowup>,
     continuity_refusal: bool,
+    settlements: Vec<crate::store::EmbeddedRoundSettlement>,
 }
 impl RoundAssessment {
     pub fn execution(&self) -> RoundExecution {
@@ -83,6 +84,9 @@ impl RoundAssessment {
     }
     pub fn retained_followups(&self) -> &[RetainedFollowup] {
         &self.retained
+    }
+    pub(super) fn head_settlements(&self) -> &[crate::store::EmbeddedRoundSettlement] {
+        &self.settlements
     }
     pub(super) fn continuity_refused(&self) -> bool {
         self.continuity_refusal
@@ -170,8 +174,8 @@ pub enum EmbeddedRoundWait {
     RecoveryRequired { block: InferenceBlock },
 }
 
-/// This opaque selection is tied to one driver, attempt, exact Store frontier
-/// and inference gate. Revalidation follows native host admission.
+/// This opaque selection is tied to one driver and an exact Store observation.
+/// Store revalidation and attempt issuance follow native host admission.
 pub struct EmbeddedRoundSelection {
     generation: std::sync::Arc<()>,
     identity: crate::embedding::HostIdentity,
@@ -191,6 +195,7 @@ struct ErrorFacts {
     cleanup_uncertain: bool,
     outstanding: Vec<OperationId>,
     continuity_refusal: bool,
+    settlements: Vec<crate::store::EmbeddedRoundSettlement>,
 }
 fn retain_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
     if !items.contains(&item) {
@@ -207,6 +212,7 @@ impl ErrorFacts {
             cleanup_uncertain: false,
             outstanding: Vec::new(),
             continuity_refusal: false,
+            settlements: Vec::new(),
         }
     }
     fn accumulate(&mut self, other: Self) {
@@ -215,6 +221,9 @@ impl ErrorFacts {
         self.continuity_refusal |= other.continuity_refusal;
         for obligation in other.inference {
             retain_unique(&mut self.inference, obligation);
+        }
+        for settlement in other.settlements {
+            retain_unique(&mut self.settlements, settlement);
         }
         for operation in other.outstanding {
             retain_unique(&mut self.outstanding, operation);
@@ -256,6 +265,9 @@ impl EngineError {
                 facts = failure
                     .primary
                     .round_facts(Some(failure.block.request.clone()));
+                if let Some(settlement) = &failure.head_settlement {
+                    retain_unique(&mut facts.settlements, settlement.clone());
+                }
                 facts.inference.retain(|obligation| !matches!(obligation,
                     InferenceObligation::ExplicitInput { request } if request == &failure.block.request));
                 retain_unique(
@@ -480,6 +492,7 @@ impl EngineRunReceipt {
                     Err(primary) => Err(EngineError::BlockedAction(super::EngineBlockedAction {
                         primary: Box::new(primary),
                         block,
+                        head_settlement: None,
                     })),
                     // The completed action remains valid, but continuation is
                     // refused by the issued block. This is settlement evidence,
@@ -569,6 +582,7 @@ fn assess_evidence(
         outstanding: facts.outstanding,
         retained: retained.iter().cloned().map(RetainedFollowup).collect(),
         continuity_refusal: facts.continuity_refusal,
+        settlements: facts.settlements,
     }
 }
 

@@ -34,6 +34,8 @@ enum Gate {
 /// it does not issue one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EmbeddedRoundSnapshot {
+    store_id: String,
+    identity: HostIdentity,
     pub(crate) frontier: super::EmbeddedRoundFrontier,
     pub(crate) inference: HostInferenceState,
     pub(crate) generation: u64,
@@ -226,6 +228,24 @@ fn validate_cleanup(c: &Connection, identity: &HostIdentity, head: &RequestId) -
     Ok(())
 }
 
+fn selected_snapshot(
+    c: &Connection,
+    store_id: &str,
+    identity: &HostIdentity,
+    frontier: super::EmbeddedRoundFrontier,
+    generation: u64,
+    state: &Gate,
+) -> Result<EmbeddedRoundSnapshot> {
+    Ok(EmbeddedRoundSnapshot {
+        store_id: store_id.into(), identity: identity.clone(), frontier,
+        inference: projection(state.clone()), generation,
+        first_envelope: c.query_row(
+            "SELECT id FROM envelopes WHERE recipient=?1 AND delivered_request IS NULL ORDER BY id LIMIT 1",
+            [&identity.actor.0], |row| row.get(0),
+        ).optional()?,
+    })
+}
+
 impl Store {
     pub fn embedded_inference_state(&self, identity: &HostIdentity) -> Result<HostInferenceState> {
         let mut c = self.lock()?;
@@ -239,16 +259,21 @@ impl Store {
         let mut c = self.lock()?;
         c.write_transaction(|tx| {
             let (generation, state) = initialize(tx, identity)?;
-            Ok(EmbeddedRoundSnapshot {
-                frontier: embedded_round::frontier(tx, identity)?,
-                inference: projection(state),
-                generation,
-                first_envelope: tx.query_row(
-                    "SELECT id FROM envelopes WHERE recipient=?1 AND delivered_request IS NULL ORDER BY id LIMIT 1",
-                    [&identity.actor.0], |row| row.get(0),
-                ).optional()?,
-            })
+            let frontier = embedded_round::frontier(tx, identity)?;
+            selected_snapshot(tx, &self.store_id, identity, frontier, generation, &state)
         })
+    }
+
+    pub(crate) fn begin_selected_embedded_inference(
+        &self,
+        identity: &HostIdentity,
+        snapshot: &EmbeddedRoundSnapshot,
+    ) -> Result<InferenceAttempt> {
+        self.begin_inference(
+            identity,
+            snapshot.frontier.settled_head.as_ref(),
+            Some(snapshot),
+        )
     }
 
     pub(crate) fn begin_embedded_inference(
@@ -256,10 +281,32 @@ impl Store {
         identity: &HostIdentity,
         expected: Option<&RequestId>,
     ) -> Result<InferenceAttempt> {
+        self.begin_inference(identity, expected, None)
+    }
+
+    fn begin_inference(
+        &self,
+        identity: &HostIdentity,
+        expected: Option<&RequestId>,
+        selected: Option<&EmbeddedRoundSnapshot>,
+    ) -> Result<InferenceAttempt> {
         let mut c = self.lock()?;
         c.write_transaction(|tx| {
             let (generation, state) = initialize(tx, identity)?;
             let frontier = embedded_round::frontier(tx, identity)?;
+            if let Some(selected) = selected {
+                let current = selected_snapshot(
+                    tx,
+                    &self.store_id,
+                    identity,
+                    frontier.clone(),
+                    generation,
+                    &state,
+                )?;
+                if &current != selected {
+                    return Err(StoreError::StaleInferenceRecovery);
+                }
+            }
             if frontier.settled_head.as_ref() != expected {
                 return Err(StoreError::StaleInferenceRecovery);
             }
@@ -513,6 +560,79 @@ mod tests {
             .unwrap();
         operation
     }
+    #[test]
+    fn selected_snapshot_checks_store_mailbox_frontier_and_gate_in_existing_admission() {
+        let store = Store::memory().unwrap();
+        let identity = identity();
+        ready(&store, &identity);
+        let selected = store.select_embedded_round(&identity).unwrap();
+        let foreign_actor = HostIdentity {
+            actor: AgentPath("/other".into()),
+            ..identity.clone()
+        };
+        ready(&store, &foreign_actor);
+        assert!(matches!(
+            store.begin_selected_embedded_inference(&foreign_actor, &selected),
+            Err(StoreError::StaleInferenceRecovery)
+        ));
+        assert_eq!(
+            store.embedded_inference_state(&foreign_actor).unwrap(),
+            HostInferenceState::Idle
+        );
+        let foreign = Store::memory().unwrap();
+        ready(&foreign, &identity);
+        assert!(matches!(
+            foreign.begin_selected_embedded_inference(&identity, &selected),
+            Err(StoreError::StaleInferenceRecovery)
+        ));
+        store
+            .admit_embedded_input(
+                &identity,
+                "queued",
+                "human",
+                &crate::item::Item(
+                    serde_json::json!({"type":"message","role":"user","content":"new input"}),
+                ),
+            )
+            .unwrap();
+        assert!(matches!(
+            store.begin_selected_embedded_inference(&identity, &selected),
+            Err(StoreError::StaleInferenceRecovery)
+        ));
+        let selected = store.select_embedded_round(&identity).unwrap();
+        store
+            .write_embedded_request(
+                &identity,
+                &RequestId("pending".into()),
+                None,
+                &[],
+                Usage::default(),
+            )
+            .unwrap();
+        assert!(matches!(
+            store.begin_selected_embedded_inference(&identity, &selected),
+            Err(StoreError::StaleInferenceRecovery)
+        ));
+        assert_eq!(
+            store.embedded_inference_state(&identity).unwrap(),
+            HostInferenceState::Idle
+        );
+        let selected = store.select_embedded_round(&identity).unwrap();
+        let attempt = store
+            .begin_selected_embedded_inference(&identity, &selected)
+            .unwrap();
+        assert!(!attempt.recovering);
+        assert!(matches!(
+            store.begin_selected_embedded_inference(&identity, &selected),
+            Err(StoreError::StaleInferenceRecovery)
+        ));
+        let running = store.select_embedded_round(&identity).unwrap();
+        assert!(matches!(
+            store.begin_selected_embedded_inference(&identity, &running),
+            Err(StoreError::InferenceRunning)
+        ));
+    }
+
     #[test]
     fn eof_input_and_wake_cannot_authorize_and_duplicate_recovery_is_once_only() {
         let store = Store::memory().unwrap();

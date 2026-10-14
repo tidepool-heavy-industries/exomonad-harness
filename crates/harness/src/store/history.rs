@@ -48,19 +48,41 @@ pub(crate) struct ModelRequestObservation {
 /// The recording transaction returns any block it actually issued; a later
 /// projection cannot substitute for this exact generation and request.
 #[derive(Debug)]
-pub(crate) enum ModelRequestRecording {
+pub(crate) enum ModelRequestRecording<T> {
     StaleFrontier,
     RecordedStandalone,
-    RecordedEmbedded {
-        block: crate::embedding::InferenceBlock,
-    },
+    RecordedEmbedded(T),
+}
+#[derive(Debug)]
+pub(crate) struct InterruptedRecording {
+    block: crate::embedding::InferenceBlock,
+}
+impl InterruptedRecording {
+    pub(crate) fn into_block(self) -> crate::embedding::InferenceBlock {
+        self.block
+    }
+}
+#[derive(Debug)]
+pub(crate) struct RejectedRecording {
+    block: crate::embedding::InferenceBlock,
+    settlement: super::EmbeddedRoundSettlement,
+}
+impl RejectedRecording {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        crate::embedding::InferenceBlock,
+        super::EmbeddedRoundSettlement,
+    ) {
+        (self.block, self.settlement)
+    }
 }
 #[cfg(test)]
-impl ModelRequestRecording {
+impl<T> ModelRequestRecording<T> {
     pub(crate) fn was_recorded(&self) -> bool {
         match self {
             Self::StaleFrontier => false,
-            Self::RecordedStandalone | Self::RecordedEmbedded { .. } => true,
+            Self::RecordedStandalone | Self::RecordedEmbedded(_) => true,
         }
     }
 }
@@ -74,7 +96,7 @@ impl Store {
         request: &RequestId,
         cause: crate::transport::StreamInterruption,
         agent_head: Option<(&crate::embedding::HostIdentity, Option<&RequestId>)>,
-    ) -> Result<ModelRequestRecording> {
+    ) -> Result<ModelRequestRecording<InterruptedRecording>> {
         let mut connection = self.lock()?;
         connection.write_transaction(|transaction| {
             if let Some((identity, expected)) = agent_head {
@@ -92,7 +114,7 @@ impl Store {
             if let Some((identity, _)) = agent_head {
                 let block = super::inference::block_tx(transaction, identity, request,
                     crate::embedding::InferenceBlockReason::StreamInterrupted { cause })?;
-                return Ok(ModelRequestRecording::RecordedEmbedded { block });
+                return Ok(ModelRequestRecording::RecordedEmbedded(InterruptedRecording { block }));
             }
 
             Ok(ModelRequestRecording::RecordedStandalone)
@@ -105,20 +127,20 @@ impl Store {
         request: &RequestId,
         failure: &crate::transport::RequestFailure,
         agent_head: Option<(&crate::embedding::HostIdentity, Option<&RequestId>)>,
-    ) -> Result<ModelRequestRecording> {
+    ) -> Result<ModelRequestRecording<RejectedRecording>> {
         let mut connection = self.lock()?;
         connection.write_transaction(|transaction| {
-            if let Some((identity, expected)) = agent_head {
-                if !super::embedded_round::settle_tx(
-                    &transaction,
-                    identity,
-                    expected,
-                    request,
+            let settlement = if let Some((identity, expected)) = agent_head {
+                match super::embedded_round::settle_tx(
+                    &transaction, &self.store_id, identity, expected, request,
                     super::EmbeddedRoundOutcome::Rejected,
                 )? {
-                    return Ok(ModelRequestRecording::StaleFrontier);
+                    super::EmbeddedRoundSettlementResult::Committed(receipt) => Some(receipt),
+                    super::EmbeddedRoundSettlementResult::AlreadySettled
+                    | super::EmbeddedRoundSettlementResult::StaleFrontier =>
+                        return Ok(ModelRequestRecording::StaleFrontier),
                 }
-            }
+            } else { None };
             transaction.execute(
                 "INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,'request_failed',?2,?3)",
                 params![request.0, serde_json::to_string(failure)?, super::utc_millis()],
@@ -126,7 +148,7 @@ impl Store {
             if let Some((identity, _)) = agent_head {
                 let block = super::inference::block_tx(transaction, identity, request,
                     crate::embedding::InferenceBlockReason::RequestRejected { failure: failure.clone() })?;
-                return Ok(ModelRequestRecording::RecordedEmbedded { block });
+                return Ok(ModelRequestRecording::RecordedEmbedded(RejectedRecording { block, settlement: settlement.expect("embedded rejection settled in this transaction") }));
             }
 
             Ok(ModelRequestRecording::RecordedStandalone)
@@ -279,6 +301,9 @@ mod tests {
             actor: agent.clone(),
             incarnation: "1".into(),
         };
+        let committed_receipt;
+        let committed_block;
+        let old_selection;
         {
             let store = Store::open(&path).unwrap();
             store.bind_embedded_actor(&identity, None).unwrap();
@@ -330,18 +355,63 @@ mod tests {
                     .was_recorded()
             );
             assert!(store.events(Some(&request)).unwrap().is_empty());
-            assert!(
+            let ModelRequestRecording::RecordedEmbedded(RejectedRecording { block, settlement }) =
                 store
                     .record_failed_model_request(
                         &request,
                         &RequestFailure::Authentication,
-                        Some((&identity, None))
+                        Some((&identity, None)),
                     )
                     .unwrap()
-                    .was_recorded()
+            else {
+                panic!("rejection must return actual committed settlement");
+            };
+            assert_eq!(settlement.request(), &request);
+            assert_eq!(settlement.previous(), None);
+            assert_eq!(
+                settlement.outcome(),
+                super::super::EmbeddedRoundOutcome::Rejected
             );
+            assert!(store.matches_embedded_settlement_issuer(&identity, &settlement));
+            let mut foreign_identity = identity.clone();
+            foreign_identity.incarnation = "foreign".into();
+            assert!(!store.matches_embedded_settlement_issuer(&foreign_identity, &settlement));
+            assert!(
+                !Store::memory()
+                    .unwrap()
+                    .matches_embedded_settlement_issuer(&identity, &settlement)
+            );
+            assert!(matches!(
+                store
+                    .settle_embedded_round_receipt(
+                        &identity,
+                        None,
+                        &request,
+                        super::super::EmbeddedRoundOutcome::Rejected
+                    )
+                    .unwrap(),
+                super::super::EmbeddedRoundSettlementResult::AlreadySettled
+            ));
+            committed_receipt = settlement;
+            committed_block = block;
+            old_selection = store.select_embedded_round(&identity).unwrap();
         }
         let store = Store::open(&path).unwrap();
+        assert!(!store.matches_embedded_settlement_issuer(&identity, &committed_receipt));
+        assert!(matches!(
+            store.begin_selected_embedded_inference(&identity, &old_selection),
+            Err(StoreError::StaleInferenceRecovery)
+        ));
+        let reopened_selection = store.select_embedded_round(&identity).unwrap();
+        assert!(
+            matches!(store.begin_selected_embedded_inference(&identity, &reopened_selection), Err(StoreError::InferenceBlocked { block }) if block == committed_block)
+        );
+        assert_eq!(
+            store.embedded_inference_state(&identity).unwrap(),
+            crate::embedding::HostInferenceState::Blocked {
+                block: committed_block.clone()
+            }
+        );
         assert_eq!(
             store.agent(&agent).unwrap().unwrap().head_request,
             Some(request.clone())

@@ -25,6 +25,35 @@ pub enum EmbeddedRoundOutcome {
     Cancelled,
     Rejected,
 }
+/// Evidence of a head transition issued by this Store's committed transaction.
+/// Reopening creates a new Store identity; this receipt is not a recovery grant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EmbeddedRoundSettlement {
+    store_id: String,
+    identity: HostIdentity,
+    previous: Option<RequestId>,
+    request: RequestId,
+    outcome: EmbeddedRoundOutcome,
+}
+impl EmbeddedRoundSettlement {
+    pub(crate) fn request(&self) -> &RequestId {
+        &self.request
+    }
+    pub(crate) fn previous(&self) -> Option<&RequestId> {
+        self.previous.as_ref()
+    }
+    pub(crate) fn outcome(&self) -> EmbeddedRoundOutcome {
+        self.outcome
+    }
+}
+
+pub(crate) enum EmbeddedRoundSettlementResult {
+    Committed(EmbeddedRoundSettlement),
+    /// An observation of an existing settlement issues no new transition receipt.
+    AlreadySettled,
+    StaleFrontier,
+}
+
 impl EmbeddedRoundOutcome {
     fn as_str(self) -> &'static str {
         match self {
@@ -103,21 +132,32 @@ pub(super) fn frontier(c: &Connection, identity: &HostIdentity) -> Result<Embedd
 
 pub(super) fn settle_tx(
     tx: &Transaction<'_>,
+    store_id: &str,
     identity: &HostIdentity,
     expected: Option<&RequestId>,
     request: &RequestId,
     outcome: EmbeddedRoundOutcome,
-) -> Result<bool> {
+) -> Result<EmbeddedRoundSettlementResult> {
     let current = frontier(tx, identity)?;
+    if current.settled_head.as_ref() == Some(request) && current.pending_head.is_none() {
+        let phase: Option<String> = tx.query_row(
+            "SELECT round_phase FROM requests WHERE id=?1",
+            [&request.0],
+            |row| row.get(0),
+        )?;
+        if phase.as_deref() == Some(outcome.as_str()) {
+            return Ok(EmbeddedRoundSettlementResult::AlreadySettled);
+        }
+    }
     if current.settled_head.as_ref() != expected || current.pending_head.as_ref() != Some(request) {
-        return Ok(false);
+        return Ok(EmbeddedRoundSettlementResult::StaleFrontier);
     }
     if tx.execute(
         "UPDATE agents SET head_request=?3 WHERE path=?1 AND head_request IS ?2",
         params![identity.actor.0, expected.map(|id| &id.0), request.0],
     )? != 1
     {
-        return Ok(false);
+        return Ok(EmbeddedRoundSettlementResult::StaleFrontier);
     }
     if tx.execute(
         "UPDATE requests SET round_phase=?2 WHERE id=?1 AND round_phase='pending'",
@@ -126,7 +166,15 @@ pub(super) fn settle_tx(
     {
         return Err(StoreError::InvalidEmbeddedFrontier);
     }
-    Ok(true)
+    Ok(EmbeddedRoundSettlementResult::Committed(
+        EmbeddedRoundSettlement {
+            store_id: store_id.into(),
+            identity: identity.clone(),
+            previous: expected.cloned(),
+            request: request.clone(),
+            outcome,
+        },
+    ))
 }
 
 impl Store {
@@ -165,8 +213,33 @@ impl Store {
         request: &RequestId,
         outcome: EmbeddedRoundOutcome,
     ) -> Result<bool> {
+        Ok(matches!(
+            self.settle_embedded_round_receipt(identity, expected, request, outcome)?,
+            EmbeddedRoundSettlementResult::Committed(_)
+        ))
+    }
+
+    pub(crate) fn settle_embedded_round_receipt(
+        &self,
+        identity: &HostIdentity,
+        expected: Option<&RequestId>,
+        request: &RequestId,
+        outcome: EmbeddedRoundOutcome,
+    ) -> Result<EmbeddedRoundSettlementResult> {
         let mut c = self.lock()?;
-        c.write_transaction(|tx| settle_tx(tx, identity, expected, request, outcome))
+        c.write_transaction(|tx| {
+            settle_tx(tx, &self.store_id, identity, expected, request, outcome)
+        })
+    }
+
+    /// Check issuer provenance only. A round must also match its selected
+    /// previous head, request and outcome before consuming this evidence.
+    pub(crate) fn matches_embedded_settlement_issuer(
+        &self,
+        identity: &HostIdentity,
+        receipt: &EmbeddedRoundSettlement,
+    ) -> bool {
+        receipt.store_id == self.store_id && &receipt.identity == identity
     }
 
     /// Admission closes the request-row cut before any input is marked delivered.
