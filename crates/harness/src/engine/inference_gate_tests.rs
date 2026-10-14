@@ -637,3 +637,139 @@ async fn restart_invalidates_old_grant_without_effect_replay() {
         run_history(queued, &[], true).await.unwrap();
     }
 }
+
+async fn continuity_refusal_preserves_action(cancelled: bool, direct_block: bool) {
+    let store = Arc::new(Store::memory().unwrap());
+    let identity = HostIdentity {
+        run: "continuity-composition".into(),
+        actor: AgentPath("/root".into()),
+        incarnation: "original".into(),
+    };
+    store.bind_embedded_actor(&identity, None).unwrap();
+    let effects = Arc::new(EffectCounter {
+        store: store.clone(),
+        queued: false,
+        calls: AtomicUsize::new(0),
+        operations: Mutex::new(vec![]),
+        committed: Notify::new(),
+    });
+    let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+    // The script's second response completes without issuing any operation.
+    let requests = Arc::new(Mutex::new(vec![ObservedRequest {
+        id: RequestId("prior-observation".into()),
+        body: serde_json::Value::Null,
+    }]));
+    let runner = engine(store.clone(), effects, scheduler, requests, &identity);
+    let (route, protocol) = runner.client.response_contract().unwrap();
+    store
+        .initialize_context_target(
+            &runner.origin,
+            &crate::context::ContextProjectionTarget {
+                model: runner.config.model.clone(),
+                route,
+                protocol,
+            },
+        )
+        .unwrap();
+    let attempt = store.begin_embedded_inference(&identity, None).unwrap();
+    let (_cancel, cancellation) = watch::channel(cancelled);
+    let (_incoming, envelopes) = tokio::sync::mpsc::unbounded_channel();
+    let mut receipt = runner
+        .run_loop(None, vec![], cancellation, envelopes, true, None, false)
+        .await;
+    let expected = if cancelled {
+        RoundExecution::Cancelled
+    } else {
+        RoundExecution::Completed
+    };
+    assert_eq!(receipt.assessment().execution(), expected);
+    assert_eq!(receipt.assessment().cleanup(), RoundCleanup::Confirmed);
+    let request = receipt
+        .assessment()
+        .head()
+        .cloned()
+        .expect("actual round head");
+    if direct_block {
+        let block = store
+            .block_embedded_inference(
+                &identity,
+                &request,
+                crate::embedding::InferenceBlockReason::ContinuityUnproven,
+            )
+            .unwrap();
+        receipt.inference.push(InferenceObligation::RecoverBlock {
+            block: block.clone(),
+        });
+        let error = receipt.into_result().unwrap_err();
+        let EngineError::CompletionSettlement(settlement) = error else {
+            panic!("completed action with issued block lost its completion: {error:?}");
+        };
+        assert_eq!(settlement.completion.head_request, request);
+        assert_eq!(
+            settlement.stage,
+            RoundFailureStage::InferenceAttemptSettlement
+        );
+        assert!(
+            matches!(*settlement.source, EngineError::InferenceBlocked { block: retained } if retained == block)
+        );
+        return;
+    }
+    // Obtain the refusal through the real Store evidence boundary. This control
+    // composes owner-issued round evidence with a secondary projection refusal.
+    let refusal = store
+        .stop_provider_response(&request, crate::store::ProviderResponseState::Completed)
+        .unwrap_err();
+    assert!(refusal.is_inference_projection_refusal());
+    receipt.add_failure(
+        RoundFailureStage::ProviderResponseSettlement,
+        refusal.into(),
+    );
+    runner.settle_inference_attempt(&attempt, &mut receipt);
+    let assessment = receipt.assessment();
+    assert_eq!(assessment.execution(), expected);
+    let [InferenceObligation::RecoverBlock { block }] = assessment.inference_obligations() else {
+        panic!("continuity refusal must retain exact recovery block: {assessment:?}");
+    };
+    assert_eq!(block.request, request);
+    assert_eq!(
+        store.embedded_inference_state(&identity).unwrap(),
+        HostInferenceState::Blocked {
+            block: block.clone()
+        }
+    );
+    assert!(matches!(
+        store.begin_embedded_inference(&identity, Some(&request)),
+        Err(StoreError::InferenceBlocked { .. })
+    ));
+    let error = receipt.into_result().unwrap_err();
+    let EngineError::BlockedAction(recorded) = error else {
+        panic!("legacy rendering lost issued block: {error:?}");
+    };
+    assert_eq!(recorded.block.request, request);
+    if cancelled {
+        let EngineError::Secondary(secondary) = *recorded.primary else {
+            panic!("cancellation must retain its secondary stage");
+        };
+        assert!(matches!(*secondary.primary, EngineError::Cancelled { .. }));
+    } else {
+        assert!(matches!(
+            *recorded.primary,
+            EngineError::CompletionSettlement(_)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn cancelled_action_with_projection_refusal_blocks_before_finish() {
+    continuity_refusal_preserves_action(true, false).await;
+}
+
+#[tokio::test]
+async fn completed_action_with_projection_refusal_blocks_without_panicking() {
+    continuity_refusal_preserves_action(false, false).await;
+}
+
+#[tokio::test]
+async fn completed_receipt_with_issued_block_preserves_both_during_projection() {
+    continuity_refusal_preserves_action(false, true).await;
+}

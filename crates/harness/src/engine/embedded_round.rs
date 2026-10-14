@@ -474,6 +474,24 @@ impl EngineRunReceipt {
                 super::retain_post_action_failure(result, failure.stage, source)
             };
         }
+        for obligation in self.inference {
+            if let InferenceObligation::RecoverBlock { block } = obligation {
+                result = match result {
+                    Err(primary) => Err(EngineError::BlockedAction(super::EngineBlockedAction {
+                        primary: Box::new(primary),
+                        block,
+                    })),
+                    // The completed action remains valid, but continuation is
+                    // refused by the issued block. This is settlement evidence,
+                    // not a failure to persist the block.
+                    Ok(completion) => super::retain_post_action_failure(
+                        Ok(completion),
+                        RoundFailureStage::InferenceAttemptSettlement,
+                        EngineError::InferenceBlocked { block },
+                    ),
+                };
+            }
+        }
         result
     }
     fn into_failure(self) -> EmbeddedRoundFailure {
@@ -514,6 +532,11 @@ fn assess_evidence(
         }
     }
     for obligation in inference {
+        if let InferenceObligation::RecoverBlock { block } = obligation {
+            facts.inference.retain(|existing| {
+                !matches!(existing, InferenceObligation::ExplicitInput { request } if request == &block.request)
+            });
+        }
         retain_unique(&mut facts.inference, obligation.clone());
     }
     let cleanup = match cleanup_receipt {

@@ -899,53 +899,55 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         drop(keepalive);
         forwarder.abort();
         if let Some(attempt) = &inference_attempt {
-            let assessment = receipt.assessment();
-            let released = matches!(
-                assessment.cleanup(),
-                RoundCleanup::Confirmed | RoundCleanup::ReleasedWithFollowup
-            );
-            if released
-                && (receipt.result.is_ok() || assessment.execution() == RoundExecution::Cancelled)
-            {
-                if let Err(source) = self.store.finish_embedded_inference(attempt) {
-                    receipt
-                        .add_failure(RoundFailureStage::InferenceAttemptSettlement, source.into());
-                }
-            } else if assessment.continuity_refused() {
-                let identity = self.embedded_identity().expect("embedded attempt");
-                let recording = (|| {
-                    let frontier = self.store.embedded_round_frontier(&identity)?;
-                    frontier
-                        .pending_head
-                        .or(frontier.settled_head)
-                        .map(|request| {
-                            self.store.block_embedded_inference(
-                                &identity,
-                                &request,
-                                crate::embedding::InferenceBlockReason::ContinuityUnproven,
-                            )
-                        })
-                        .transpose()
-                })();
-                match recording {
-                    Ok(Some(block)) => {
-                        let primary = receipt
-                            .result
-                            .expect_err("continuity refusal has an action cause");
-                        receipt.result = Err(EngineError::BlockedAction(EngineBlockedAction {
-                            primary: Box::new(primary),
-                            block,
-                        }));
-                    }
-                    Ok(None) => {}
-                    Err(source) => {
-                        receipt
-                            .add_failure(RoundFailureStage::InferenceBlockRecording, source.into());
-                    }
-                }
-            }
+            self.settle_inference_attempt(attempt, &mut receipt);
         }
         Ok(receipt)
+    }
+
+    fn settle_inference_attempt(
+        &self,
+        attempt: &crate::store::InferenceAttempt,
+        receipt: &mut embedded_round::EngineRunReceipt,
+    ) {
+        let assessment = receipt.assessment();
+        let released = matches!(
+            assessment.cleanup(),
+            RoundCleanup::Confirmed | RoundCleanup::ReleasedWithFollowup
+        );
+        if assessment.continuity_refused() {
+            let identity = self.embedded_identity().expect("embedded attempt");
+            let recording = (|| {
+                let frontier = self.store.embedded_round_frontier(&identity)?;
+                frontier
+                    .pending_head
+                    .or(frontier.settled_head)
+                    .map(|request| {
+                        self.store.block_embedded_inference(
+                            &identity,
+                            &request,
+                            crate::embedding::InferenceBlockReason::ContinuityUnproven,
+                        )
+                    })
+                    .transpose()
+            })();
+            match recording {
+                Ok(Some(block)) => {
+                    receipt
+                        .inference
+                        .push(InferenceObligation::RecoverBlock { block });
+                }
+                Ok(None) => {}
+                Err(source) => {
+                    receipt.add_failure(RoundFailureStage::InferenceBlockRecording, source.into());
+                }
+            }
+        } else if released
+            && (receipt.result.is_ok() || assessment.execution() == RoundExecution::Cancelled)
+        {
+            if let Err(source) = self.store.finish_embedded_inference(attempt) {
+                receipt.add_failure(RoundFailureStage::InferenceAttemptSettlement, source.into());
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
