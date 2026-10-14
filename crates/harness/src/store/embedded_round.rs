@@ -26,7 +26,8 @@ pub enum EmbeddedRoundOutcome {
     Rejected,
 }
 /// Evidence of a head transition issued by this Store's committed transaction.
-/// Reopening creates a new Store identity; this receipt is not a recovery grant.
+/// Database identity persists across reopening. This receipt records history;
+/// it does not authorize another transition or grant inference recovery.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EmbeddedRoundSettlement {
     store_id: String,
@@ -232,7 +233,8 @@ impl Store {
         })
     }
 
-    /// Check issuer provenance only. A round must also match its selected
+    /// Check persistent database and actor issuer provenance only.
+    /// A round must also match its selected
     /// previous head, request and outcome before consuming this evidence.
     pub(crate) fn matches_embedded_settlement_issuer(
         &self,

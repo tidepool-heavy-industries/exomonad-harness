@@ -397,10 +397,12 @@ mod tests {
             old_selection = store.select_embedded_round(&identity).unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert!(!store.matches_embedded_settlement_issuer(&identity, &committed_receipt));
+        // Reopening preserves database provenance and committed facts. Neither
+        // the historical receipt nor an unchanged observation authorizes resume.
+        assert!(store.matches_embedded_settlement_issuer(&identity, &committed_receipt));
         assert!(matches!(
             store.begin_selected_embedded_inference(&identity, &old_selection),
-            Err(StoreError::StaleInferenceRecovery)
+            Err(StoreError::InferenceBlocked { block }) if block == committed_block
         ));
         let reopened_selection = store.select_embedded_round(&identity).unwrap();
         assert!(
