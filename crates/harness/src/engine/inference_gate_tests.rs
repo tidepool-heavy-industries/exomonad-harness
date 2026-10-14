@@ -732,17 +732,16 @@ async fn continuity_refusal_preserves_action(cancelled: bool, direct_block: bool
         panic!("continuity refusal did not block inference");
     };
     assert_eq!(block.request, request);
-    assert_eq!(
-        assessment.inference_obligations(),
-        &[
-            InferenceObligation::Reconcile {
-                head: Some(request.clone())
-            },
-            InferenceObligation::RecoverBlock {
-                block: block.clone()
-            },
-        ],
-    );
+    let mut expected_obligations = Vec::new();
+    if cancelled {
+        expected_obligations.push(InferenceObligation::Reconcile {
+            head: Some(request.clone()),
+        });
+    }
+    expected_obligations.push(InferenceObligation::RecoverBlock {
+        block: block.clone(),
+    });
+    assert_eq!(assessment.inference_obligations(), expected_obligations);
     let frontier = store.embedded_round_frontier(&identity).unwrap();
     assert!(matches!(
         store.begin_embedded_inference(&identity, frontier.settled_head.as_ref()),
