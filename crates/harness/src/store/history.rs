@@ -45,6 +45,26 @@ pub(crate) struct ModelRequestObservation {
     pub interruption: Option<crate::transport::StreamInterruption>,
 }
 
+/// The recording transaction returns any block it actually issued; a later
+/// projection cannot substitute for this exact generation and request.
+#[derive(Debug)]
+pub(crate) enum ModelRequestRecording {
+    StaleFrontier,
+    RecordedStandalone,
+    RecordedEmbedded {
+        block: crate::embedding::InferenceBlock,
+    },
+}
+#[cfg(test)]
+impl ModelRequestRecording {
+    pub(crate) fn was_recorded(&self) -> bool {
+        match self {
+            Self::StaleFrontier => false,
+            Self::RecordedStandalone | Self::RecordedEmbedded { .. } => true,
+        }
+    }
+}
+
 impl Store {
     /// Retain a stopped provider attempt without certifying its request as
     /// completed, cancelled or rejected. The exact pending frontier is fenced
@@ -54,7 +74,7 @@ impl Store {
         request: &RequestId,
         cause: crate::transport::StreamInterruption,
         agent_head: Option<(&crate::embedding::HostIdentity, Option<&RequestId>)>,
-    ) -> Result<bool> {
+    ) -> Result<ModelRequestRecording> {
         let mut connection = self.lock()?;
         connection.write_transaction(|transaction| {
             if let Some((identity, expected)) = agent_head {
@@ -62,7 +82,7 @@ impl Store {
                 if frontier.settled_head.as_ref() != expected
                     || frontier.pending_head.as_ref() != Some(request)
                 {
-                    return Ok(false);
+                    return Ok(ModelRequestRecording::StaleFrontier);
                 }
             }
             transaction.execute(
@@ -70,11 +90,12 @@ impl Store {
                 params![request.0, serde_json::to_string(&cause)?, super::utc_millis()],
             )?;
             if let Some((identity, _)) = agent_head {
-                super::inference::block_tx(transaction, identity, request,
+                let block = super::inference::block_tx(transaction, identity, request,
                     crate::embedding::InferenceBlockReason::StreamInterrupted { cause })?;
+                return Ok(ModelRequestRecording::RecordedEmbedded { block });
             }
 
-            Ok(true)
+            Ok(ModelRequestRecording::RecordedStandalone)
         })
     }
     /// Failure publication and an embedded actor's head advance share one
@@ -84,7 +105,7 @@ impl Store {
         request: &RequestId,
         failure: &crate::transport::RequestFailure,
         agent_head: Option<(&crate::embedding::HostIdentity, Option<&RequestId>)>,
-    ) -> Result<bool> {
+    ) -> Result<ModelRequestRecording> {
         let mut connection = self.lock()?;
         connection.write_transaction(|transaction| {
             if let Some((identity, expected)) = agent_head {
@@ -95,7 +116,7 @@ impl Store {
                     request,
                     super::EmbeddedRoundOutcome::Rejected,
                 )? {
-                    return Ok(false);
+                    return Ok(ModelRequestRecording::StaleFrontier);
                 }
             }
             transaction.execute(
@@ -103,11 +124,12 @@ impl Store {
                 params![request.0, serde_json::to_string(failure)?, super::utc_millis()],
             )?;
             if let Some((identity, _)) = agent_head {
-                super::inference::block_tx(transaction, identity, request,
+                let block = super::inference::block_tx(transaction, identity, request,
                     crate::embedding::InferenceBlockReason::RequestRejected { failure: failure.clone() })?;
+                return Ok(ModelRequestRecording::RecordedEmbedded { block });
             }
 
-            Ok(true)
+            Ok(ModelRequestRecording::RecordedStandalone)
         })
     }
 
@@ -305,6 +327,7 @@ mod tests {
                         Some((&identity, Some(&RequestId("stale".into()))))
                     )
                     .unwrap()
+                    .was_recorded()
             );
             assert!(store.events(Some(&request)).unwrap().is_empty());
             assert!(
@@ -315,6 +338,7 @@ mod tests {
                         Some((&identity, None))
                     )
                     .unwrap()
+                    .was_recorded()
             );
         }
         let store = Store::open(&path).unwrap();
@@ -471,6 +495,7 @@ mod interruption_fencing_tests {
                         Some((&identity, Some(&RequestId("stale".into()))))
                     )
                     .unwrap()
+                    .was_recorded()
             );
             store.lock().unwrap().execute_batch("CREATE TRIGGER reject_interruption BEFORE INSERT ON events WHEN NEW.kind='model_interrupted' BEGIN SELECT RAISE(ABORT,'refuse'); END;").unwrap();
             assert!(
@@ -496,6 +521,7 @@ mod interruption_fencing_tests {
                         Some((&identity, None))
                     )
                     .unwrap()
+                    .was_recorded()
             );
             // Emulate the previous v9 outcome index at a durable reopen cut.
             store.lock().unwrap().execute_batch("DROP INDEX events_model_outcomes_recent; CREATE INDEX events_model_settled_recent ON events(id DESC,request_id) WHERE kind IN ('model_turn','request_failed');").unwrap();

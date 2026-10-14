@@ -482,6 +482,7 @@ mod tests {
                     Some((identity, parent))
                 )
                 .unwrap()
+                .was_recorded()
         );
         let HostInferenceState::Blocked { block } =
             store.embedded_inference_state(identity).unwrap()

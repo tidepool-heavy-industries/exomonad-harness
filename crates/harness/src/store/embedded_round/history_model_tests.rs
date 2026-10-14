@@ -318,7 +318,8 @@ impl Model {
                             cause,
                             Some((&self.current, expected_head.as_ref()))
                         )
-                        .unwrap(),
+                        .unwrap()
+                        .was_recorded(),
                     expected,
                     "{trace:?}"
                 );

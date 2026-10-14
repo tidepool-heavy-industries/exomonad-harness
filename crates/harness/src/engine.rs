@@ -2941,6 +2941,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         request: &RequestId,
         pending: Vec<PendingCall>,
     ) -> embedded_round::OrderedProviderFailure {
+        use crate::store::history::ModelRequestRecording;
         use crate::transport::TransportFailureKind;
         use embedded_round::{CleanupReceipt, OrderedProviderFailure};
         let kind = error.failure_kind();
@@ -3008,11 +3009,22 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 })
                 .await
                 {
-                    Ok(true) => EngineError::InterruptedModelRound {
-                        head_request,
-                        cause,
-                    },
-                    Ok(false) => primary.with_secondary(
+                    Ok(ModelRequestRecording::RecordedStandalone) => {
+                        EngineError::InterruptedModelRound {
+                            head_request,
+                            cause,
+                        }
+                    }
+                    Ok(ModelRequestRecording::RecordedEmbedded { block }) => {
+                        EngineError::BlockedAction(EngineBlockedAction {
+                            primary: Box::new(EngineError::InterruptedModelRound {
+                                head_request,
+                                cause,
+                            }),
+                            block,
+                        })
+                    }
+                    Ok(ModelRequestRecording::StaleFrontier) => primary.with_secondary(
                         RoundFailureStage::InterruptedRequestRecording,
                         Some(head_request),
                         EngineError::InterruptedHeadMismatch,
@@ -3041,8 +3053,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 })
                 .await
                 {
-                    Ok(true) => primary,
-                    Ok(false) => primary.with_secondary(
+                    Ok(ModelRequestRecording::RecordedStandalone) => primary,
+                    Ok(ModelRequestRecording::RecordedEmbedded { block }) => {
+                        EngineError::BlockedAction(EngineBlockedAction {
+                            primary: Box::new(primary),
+                            block,
+                        })
+                    }
+                    Ok(ModelRequestRecording::StaleFrontier) => primary.with_secondary(
                         RoundFailureStage::RejectedRequestRecording,
                         Some(head_request),
                         EngineError::RejectedHeadMismatch,

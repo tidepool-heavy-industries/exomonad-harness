@@ -257,17 +257,31 @@ async fn run_history(
             &identity,
         );
         let (_keep_cancel, cancellation) = watch::channel(false);
-        let error = runner
-            .run_embedded(None, vec![], cancellation.clone(), mailbox())
+        let receipt = runner
+            .run_with_finalize_receipt(None, vec![], cancellation.clone(), mailbox(), None, false)
             .await
-            .unwrap_err();
+            .unwrap();
+        let assessment = receipt.assessment();
+        let error = receipt.into_result().unwrap_err();
+        let EngineError::BlockedAction(recorded) = error else {
+            return Err(TestCaseError::fail(format!(
+                "EOF did not carry the Store-issued block: {error:?}"
+            )));
+        };
+        prop_assert_eq!(
+            assessment.inference_obligations(),
+            &[InferenceObligation::RecoverBlock {
+                block: recorded.block.clone()
+            }]
+        );
+        let primary = *recorded.primary;
         let EngineError::InterruptedModelRound {
             head_request,
             cause,
-        } = error
+        } = primary
         else {
             return Err(TestCaseError::fail(format!(
-                "first real EOF failed before recoverable block: {error:?}"
+                "first real EOF lost its original action: {primary:?}"
             )));
         };
         prop_assert_eq!(cause, StreamInterruption::MissingCompletion);
@@ -276,6 +290,7 @@ async fn run_history(
         else {
             return Err(TestCaseError::fail("EOF did not retain blocked state"));
         };
+        prop_assert_eq!(&block, &recorded.block);
         prop_assert_eq!(&block.request, &head_request);
         prop_assert_eq!(block.generation, 1);
         let expected_effects = usize::from(!queued);

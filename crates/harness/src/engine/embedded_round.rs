@@ -256,6 +256,8 @@ impl EngineError {
                 facts = failure
                     .primary
                     .round_facts(Some(failure.block.request.clone()));
+                facts.inference.retain(|obligation| !matches!(obligation,
+                    InferenceObligation::ExplicitInput { request } if request == &failure.block.request));
                 retain_unique(
                     &mut facts.inference,
                     InferenceObligation::RecoverBlock {

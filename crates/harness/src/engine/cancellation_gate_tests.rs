@@ -247,11 +247,22 @@ async fn unconfirmed_cancellation_keeps_gate_closed() {
 async fn rejection_keeps_its_explicit_recovery_block() {
     let (engine, identity) = engine(false, true);
     let (_keep_cancel, cancellation) = watch::channel(false);
-    let EngineError::RequestRejected { head_request, .. } = engine
-        .run_embedded(None, vec![], cancellation.clone(), mailbox())
+    let receipt = engine
+        .run_with_finalize_receipt(None, vec![], cancellation.clone(), mailbox(), None, false)
         .await
-        .unwrap_err()
-    else {
+        .unwrap();
+    let assessment = receipt.assessment();
+    let error = receipt.into_result().unwrap_err();
+    let EngineError::BlockedAction(recorded) = error else {
+        panic!("scripted rejection lost its issued block: {error:?}");
+    };
+    assert_eq!(
+        assessment.inference_obligations(),
+        &[InferenceObligation::RecoverBlock {
+            block: recorded.block.clone()
+        }]
+    );
+    let EngineError::RequestRejected { head_request, .. } = *recorded.primary else {
         panic!("scripted rejection must retain its request")
     };
     let HostInferenceState::Blocked { block } =
@@ -259,6 +270,7 @@ async fn rejection_keeps_its_explicit_recovery_block() {
     else {
         panic!("provider rejection requires explicit recovery")
     };
+    assert_eq!(block, recorded.block);
     assert_eq!(block.request, head_request);
     assert!(matches!(
         block.reason,

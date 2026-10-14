@@ -358,13 +358,18 @@ async fn incomplete_response_retains_pending_frontier_and_requires_explicit_reco
             )
             .await
             .unwrap_err();
+        let EngineError::BlockedAction(recorded) = error else {
+            panic!("interruption lost its Store-issued block: {error:?}");
+        };
+        let primary = *recorded.primary;
         let EngineError::InterruptedModelRound {
             head_request,
             cause: actual,
-        } = error
+        } = primary
         else {
-            panic!("unexpected failure: {error}");
+            panic!("unexpected primary: {primary}");
         };
+        assert_eq!(recorded.block.request, head_request);
         assert_eq!(actual, cause);
         assert_eq!(requests.lock().unwrap().len(), 1);
         let frontier = store.embedded_round_frontier(&identity).unwrap();
