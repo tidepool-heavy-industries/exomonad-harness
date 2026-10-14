@@ -745,7 +745,7 @@ async fn bounded_output_recording_failure_keeps_the_issued_operation_in_cleanup_
     ).unwrap();
     let provider = Arc::new(CompletedTools(std::sync::atomic::AtomicUsize::new(0)));
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let engine = Engine::with_transport(
+    let engine: Engine<Offline, CompletedTools, Script> = Engine::with_transport(
         Script {
             requests: requests.clone(),
             turns: Mutex::new(VecDeque::from([Ok(ResponsesTurn {
@@ -800,7 +800,7 @@ async fn policy_recording_failure_releases_unstarted_claim_without_dispatch() {
     ).unwrap();
     let provider = Arc::new(CompletedTools(std::sync::atomic::AtomicUsize::new(0)));
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let engine = Engine::with_transport(
+    let engine: Engine<Offline, CompletedTools, Script> = Engine::with_transport(
         Script {
             requests: requests.clone(),
             turns: Mutex::new(VecDeque::from([Ok(ResponsesTurn {
@@ -881,4 +881,57 @@ async fn response_settlement_failure_preserves_provider_action_and_stage() {
     ));
     assert_eq!(receipt.assessment().execution(), RoundExecution::Rejected);
     assert_eq!(receipt.assessment().cleanup(), RoundCleanup::Confirmed);
+}
+
+#[tokio::test]
+async fn unstarted_cleanup_requires_retained_not_started_evidence_even_when_update_succeeds() {
+    for state in ["missing", "interrupted", "pending", "not_started"] {
+        let (engine, store, _) = engine(TransportError::Authentication);
+        let request = RequestId(format!("unstarted-{state}"));
+        store.create_request(&request, None, "/root").unwrap();
+        let operation = OperationId {
+            origin: engine.origin.clone(),
+            request: request.clone(),
+            call: CallId("work".into()),
+        };
+        if state != "missing" {
+            store.claim_operation(&operation, &request).unwrap();
+        }
+        if state == "interrupted" {
+            store
+                .interrupt_operation_claim(&operation, &request)
+                .unwrap();
+        }
+        if state == "not_started" {
+            store
+                .interrupt_unstarted_operation_claim(&operation, &request)
+                .unwrap();
+        }
+        let obligation = PendingCall {
+            operation: operation.clone(),
+            call_id: operation.call.clone(),
+            claim_request: request,
+            wait: None,
+            tool_kind: ToolKind::Function,
+            execution: ToolExecution::Asynchronous,
+            persist_here_invocation_output: false,
+            custody: PendingCustody::Unstarted,
+            scheduling: ToolScheduling::Async,
+            queued: false,
+            completion: PendingCompletion::BlocksCompletion,
+        };
+        let outcome = engine.cancel_pending(&[obligation]).await;
+        match state {
+            "missing" | "interrupted" => assert!(matches!(outcome,
+                Err(EngineError::UnconfirmedCancellation { operation: actual, .. }) if actual == operation)),
+            "pending" | "not_started" => {
+                outcome.unwrap();
+                assert!(matches!(
+                    store.operation_cleanup_evidence(&operation).unwrap(),
+                    crate::store::OperationCleanupEvidence::NotStarted
+                ));
+            }
+            _ => unreachable!(),
+        }
+    }
 }

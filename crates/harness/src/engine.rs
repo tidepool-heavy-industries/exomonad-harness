@@ -2874,16 +2874,33 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     });
                 }
 
-                if let Err(error) = blocking(move || {
+                let owned_producer = call.custody != PendingCustody::Observation;
+                match blocking(move || {
                     if not_started {
-                        store.interrupt_unstarted_operation_claim(&operation, &request)
+                        store.interrupt_unstarted_operation_claim(&operation, &request)?;
                     } else {
-                        store.interrupt_operation_claim(&operation, &request)
+                        store.interrupt_operation_claim(&operation, &request)?;
+                    }
+                    if owned_producer || not_started {
+                        store.operation_cleanup_evidence(&operation).map(Some)
+                    } else {
+                        Ok(None)
                     }
                 })
                 .await
                 {
-                    failures.push(error);
+                    Ok(Some(crate::store::OperationCleanupEvidence::Uncertain)) => {
+                        failures.push(EngineError::UnconfirmedCancellation {
+                            operation: call.operation.clone(),
+                            detail: "claim settlement retained no affirmative operation cleanup evidence".into(),
+                        });
+                    }
+                    Ok(Some(
+                        crate::store::OperationCleanupEvidence::NotStarted
+                        | crate::store::OperationCleanupEvidence::Terminal(_),
+                    ))
+                    | Ok(None) => {}
+                    Err(error) => failures.push(error),
                 }
             }
         }
