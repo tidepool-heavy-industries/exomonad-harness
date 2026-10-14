@@ -736,7 +736,7 @@ impl Provider for CompletedTools {
     }
     fn tools(&self) -> Vec<Value> {
         vec![
-            json!({"type":"function","name":"work","parameters":{"type":"object","properties":{}}}),
+            json!({"type":"function","name":"work","strict":true,"parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}),
         ]
     }
 }
