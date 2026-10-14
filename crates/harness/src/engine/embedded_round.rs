@@ -31,8 +31,22 @@ pub enum StoreContinuation {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoundCleanup {
+    /// This round's obligations have affirmative release evidence.
     Confirmed,
+    /// Owned obligations are released while exact foreign work is observed.
+    ReleasedWithFollowup,
     Unconfirmed,
+}
+
+#[derive(Debug)]
+pub struct RetainedFollowup(crate::turn::ForeignPublicationObservation);
+impl RetainedFollowup {
+    pub fn operation(&self) -> &OperationId {
+        self.0.operation()
+    }
+    pub fn publication(&self) -> crate::turn::FollowupPublicationState {
+        self.0.state()
+    }
 }
 
 /// One immutable assessment of the owner's retained action and receipts.
@@ -45,6 +59,7 @@ pub struct RoundAssessment {
     storage: StoreContinuation,
     cleanup: RoundCleanup,
     outstanding: Vec<OperationId>,
+    retained: Vec<RetainedFollowup>,
     continuity_refusal: bool,
 }
 impl RoundAssessment {
@@ -66,6 +81,9 @@ impl RoundAssessment {
     pub fn outstanding_operations(&self) -> &[OperationId] {
         &self.outstanding
     }
+    pub fn retained_followups(&self) -> &[RetainedFollowup] {
+        &self.retained
+    }
     pub(super) fn continuity_refused(&self) -> bool {
         self.continuity_refusal
     }
@@ -77,6 +95,7 @@ pub enum RoundFailureStage {
     OperationClaimSettlement,
     ProviderTailRecording,
     ProviderResponseSettlement,
+    FollowupObservation,
     InterruptedRequestRecording,
     RejectedRequestRecording,
     InferenceBlockRecording,
@@ -116,6 +135,11 @@ pub(super) enum CleanupReceipt {
     Outstanding(Vec<OperationId>),
 }
 
+pub(super) struct ConsumedCleanup {
+    pub(super) receipt: CleanupReceipt,
+    pub(super) retained: Vec<crate::turn::ForeignPublicationObservation>,
+}
+
 #[derive(Debug)]
 enum RoundAction {
     Completed {
@@ -135,6 +159,7 @@ pub struct EmbeddedRoundFailure {
     secondary: Vec<RoundSecondaryFailure>,
     cleanup: CleanupReceipt,
     inference: Vec<InferenceObligation>,
+    retained: Vec<crate::turn::ForeignPublicationObservation>,
 }
 
 /// Waiting preserves why a notification cannot start a provider request.
@@ -373,7 +398,13 @@ impl EmbeddedRoundFailure {
             }
             RoundAction::Failed { head, cause } => cause.round_facts(head.clone()),
         };
-        assess_evidence(facts, &self.secondary, &self.cleanup, &self.inference)
+        assess_evidence(
+            facts,
+            &self.secondary,
+            &self.cleanup,
+            &self.inference,
+            &self.retained,
+        )
     }
     pub fn primary_error(&self) -> Option<&EngineError> {
         match &self.action {
@@ -394,6 +425,7 @@ pub(super) struct EngineRunReceipt {
     pub(super) cleanup: CleanupReceipt,
     pub(super) secondary: Vec<RoundSecondaryFailure>,
     pub(super) inference: Vec<InferenceObligation>,
+    pub(super) retained: Vec<crate::turn::ForeignPublicationObservation>,
 }
 impl EngineRunReceipt {
     pub(super) fn assessment(&self) -> RoundAssessment {
@@ -405,7 +437,13 @@ impl EngineRunReceipt {
             }
             Err(cause) => cause.round_facts(self.head.clone()),
         };
-        assess_evidence(facts, &self.secondary, &self.cleanup, &self.inference)
+        assess_evidence(
+            facts,
+            &self.secondary,
+            &self.cleanup,
+            &self.inference,
+            &self.retained,
+        )
     }
     pub(super) fn add_failure(&mut self, stage: RoundFailureStage, source: EngineError) {
         self.secondary.push(RoundSecondaryFailure {
@@ -450,6 +488,7 @@ impl EngineRunReceipt {
             secondary: self.secondary,
             cleanup: self.cleanup,
             inference: self.inference,
+            retained: self.retained,
         }
     }
 }
@@ -459,6 +498,7 @@ fn assess_evidence(
     secondary: &[RoundSecondaryFailure],
     cleanup_receipt: &CleanupReceipt,
     inference: &[InferenceObligation],
+    retained: &[crate::turn::ForeignPublicationObservation],
 ) -> RoundAssessment {
     for failure in secondary {
         match &failure.source {
@@ -476,7 +516,13 @@ fn assess_evidence(
     }
     let cleanup = match cleanup_receipt {
         CleanupReceipt::Unobserved => RoundCleanup::Unconfirmed,
-        CleanupReceipt::Confirmed if !facts.cleanup_uncertain => RoundCleanup::Confirmed,
+        CleanupReceipt::Confirmed if !facts.cleanup_uncertain => {
+            if retained.is_empty() {
+                RoundCleanup::Confirmed
+            } else {
+                RoundCleanup::ReleasedWithFollowup
+            }
+        }
         CleanupReceipt::Confirmed => RoundCleanup::Unconfirmed,
         CleanupReceipt::Outstanding(operations) => {
             for operation in operations {
@@ -496,6 +542,7 @@ fn assess_evidence(
         },
         cleanup,
         outstanding: facts.outstanding,
+        retained: retained.iter().cloned().map(RetainedFollowup).collect(),
         continuity_refusal: facts.continuity_refusal,
     }
 }
@@ -503,4 +550,5 @@ fn assess_evidence(
 pub(super) struct OrderedProviderFailure {
     pub(super) cause: EngineError,
     pub(super) cleanup: CleanupReceipt,
+    pub(super) retained: Vec<crate::turn::ForeignPublicationObservation>,
 }

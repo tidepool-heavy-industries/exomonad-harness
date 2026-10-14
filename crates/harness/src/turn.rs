@@ -62,6 +62,65 @@ pub struct JobSettlement {
     pub claimants: Vec<ConversationIdentity>,
 }
 
+/// Scheduler observation of a foreign publication obligation. These facts do
+/// not assert that its producer has stopped or transferred cancellation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FollowupPublicationState {
+    Admitted,
+    Running,
+    TerminalUnpublished,
+    Published,
+    Unconfirmed,
+}
+
+/// Holding this receipt keeps the existing registry, including its other Jobs,
+/// alive. Identity selects one exact Job; this is observation custody, not a
+/// live Engine, producer transfer, or resume grant.
+#[derive(Clone)]
+pub(crate) struct ForeignPublicationObservation {
+    jobs: Arc<Mutex<HashMap<OperationId, Job>>>,
+    operation: OperationId,
+    handle: JobHandle,
+    state: FollowupPublicationState,
+}
+impl std::fmt::Debug for ForeignPublicationObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForeignPublicationObservation")
+            .field("operation", &self.operation)
+            .field("handle", &self.handle)
+            .field("state", &self.state)
+            .finish()
+    }
+}
+impl ForeignPublicationObservation {
+    pub(crate) fn operation(&self) -> &OperationId {
+        &self.operation
+    }
+    pub(crate) fn state(&self) -> FollowupPublicationState {
+        self.state
+    }
+    pub(crate) fn retain_unconfirmed(mut self) -> Self {
+        self.state = FollowupPublicationState::Unconfirmed;
+        self
+    }
+    pub(crate) async fn observe_retained(&self) -> Result<Self, JobError> {
+        let jobs = self.jobs.lock().await;
+        let job = jobs.get(&self.operation).ok_or(JobError::UnknownCall)?;
+        if job.handle != self.handle {
+            return Err(JobError::UnavailablePublicationObservation);
+        }
+        let state = publication_observation(job)?;
+        Ok(Self {
+            state,
+            ..self.clone()
+        })
+    }
+}
+pub(crate) struct ForkAttachment {
+    pub(crate) settlement: Option<JobOutput>,
+    pub(crate) publication: Option<ForeignPublicationObservation>,
+}
+
 #[derive(Debug, Error)]
 pub enum JobError {
     #[error("job capacity must be greater than zero")]
@@ -70,6 +129,8 @@ pub enum JobError {
     DuplicateCall,
     #[error("unknown call id")]
     UnknownCall,
+    #[error("the exact foreign publication owner cannot be observed")]
+    UnavailablePublicationObservation,
     #[error("operation origin does not match scheduler admission context")]
     OperationContextMismatch,
     #[error("completed tool call item has invalid fields")]
@@ -185,6 +246,36 @@ struct Job {
     published: tokio::sync::watch::Sender<bool>,
     task: Option<JoinHandle<()>>,
     launch: Option<tokio::sync::oneshot::Sender<Option<crate::context::ContextSnapshot>>>,
+}
+
+fn publication_observation(job: &Job) -> Result<FollowupPublicationState, JobError> {
+    match &job.output {
+        Some(JobOutput::CancellationUnconfirmed(_) | JobOutput::Interrupted) => {
+            return Ok(FollowupPublicationState::Unconfirmed);
+        }
+        Some(
+            JobOutput::Completed(_) | JobOutput::Cancelled | JobOutput::CancelledWithReceipt(_),
+        ) => {
+            return Ok(if *job.published.borrow() {
+                FollowupPublicationState::Published
+            } else {
+                FollowupPublicationState::TerminalUnpublished
+            });
+        }
+        None => {}
+    }
+    let task = job
+        .task
+        .as_ref()
+        .ok_or(JobError::UnavailablePublicationObservation)?;
+    if task.is_finished() {
+        return Ok(FollowupPublicationState::Unconfirmed);
+    }
+    Ok(if job.started {
+        FollowupPublicationState::Running
+    } else {
+        FollowupPublicationState::Admitted
+    })
 }
 
 fn retain_progress(progress: &mut Vec<Value>, event: Value) {
@@ -774,6 +865,39 @@ impl JobScheduler {
         }
     }
 
+    /// Atomically attach the observer and issue any exact foreign publication
+    /// receipt from the retained Job. Claimant membership is never custody proof.
+    pub(crate) async fn fork_owned_attachment(
+        &self,
+        operation: &OperationId,
+        claimant: ConversationIdentity,
+    ) -> Result<ForkAttachment, JobError> {
+        let mut jobs = self.jobs.lock().await;
+        let job = jobs.get_mut(operation).ok_or(JobError::UnknownCall)?;
+        let publication = if operation.origin != claimant && job.requires_publication {
+            Some(ForeignPublicationObservation {
+                jobs: self.jobs.clone(),
+                operation: operation.clone(),
+                handle: job.handle.clone(),
+                state: publication_observation(job)?,
+            })
+        } else {
+            None
+        };
+        let settlement = if !job.requires_publication || *job.published.borrow() {
+            job.output.clone()
+        } else {
+            None
+        };
+        if settlement.is_none() {
+            job.claimants.insert(claimant);
+        }
+        Ok(ForkAttachment {
+            settlement,
+            publication,
+        })
+    }
+
     pub async fn settled_claimants(&self, call_id: &CallId) -> Result<Vec<AgentPath>, JobError> {
         Ok(self
             .settled_claimants_exact(&self.detached_operation(call_id))
@@ -804,21 +928,6 @@ impl JobScheduler {
             return Ok(None);
         }
         Ok(job.output.clone())
-    }
-
-    /// Synchronous invocation results become visible to attached conversations
-    /// only after their owning Engine publishes the terminal in Store.
-    pub(crate) async fn requires_store_publication(
-        &self,
-        operation: &OperationId,
-    ) -> Result<bool, JobError> {
-        Ok(self
-            .jobs
-            .lock()
-            .await
-            .get(operation)
-            .ok_or(JobError::UnknownCall)?
-            .requires_publication)
     }
 
     pub(crate) async fn unpublished_output<K: JobKey>(
@@ -1469,6 +1578,101 @@ mod tests {
         fn tools(&self) -> Vec<Value> {
             vec![]
         }
+    }
+
+    #[tokio::test]
+    async fn foreign_publication_observation_retains_cancelled_and_published_jobs_without_tasks() {
+        let scheduler = JobScheduler::new(1).unwrap();
+        let operation = scheduler.detached_operation(&CallId("foreign-terminal".into()));
+        scheduler
+            .register_engine_operation(
+                Arc::new(Slow),
+                operation.clone(),
+                AgentPath("/root".into()),
+                Some(operation.request.clone()),
+                "slow".into(),
+                json!({}),
+                true,
+            )
+            .await
+            .unwrap();
+        scheduler.cancel(&operation).await.unwrap();
+        assert!(
+            scheduler
+                .jobs
+                .lock()
+                .await
+                .get(&operation)
+                .unwrap()
+                .task
+                .is_none()
+        );
+        let claimant = ConversationIdentity::Standalone {
+            store: scheduler.detached_store.clone(),
+            actor: AgentPath("/fork".into()),
+        };
+        let attachment = scheduler
+            .fork_owned_attachment(&operation, claimant.clone())
+            .await
+            .unwrap();
+        assert!(attachment.settlement.is_none());
+        let observation = attachment.publication.unwrap();
+        assert_eq!(observation.operation(), &operation);
+        assert_eq!(
+            observation.state(),
+            FollowupPublicationState::TerminalUnpublished
+        );
+        scheduler.mark_output_committed(&operation).await.unwrap();
+        assert_eq!(
+            observation.observe_retained().await.unwrap().state(),
+            FollowupPublicationState::Published
+        );
+        let published = scheduler
+            .fork_owned_attachment(&operation, claimant)
+            .await
+            .unwrap();
+        assert!(matches!(published.settlement, Some(JobOutput::Cancelled)));
+        assert_eq!(
+            published.publication.unwrap().state(),
+            FollowupPublicationState::Published
+        );
+    }
+
+    #[tokio::test]
+    async fn foreign_publication_observation_refuses_missing_task_without_retained_outcome() {
+        let scheduler = JobScheduler::new(1).unwrap();
+        let operation = scheduler.detached_operation(&CallId("missing-task".into()));
+        scheduler
+            .register_engine_operation(
+                Arc::new(Slow),
+                operation.clone(),
+                AgentPath("/root".into()),
+                Some(operation.request.clone()),
+                "slow".into(),
+                json!({}),
+                true,
+            )
+            .await
+            .unwrap();
+        let task = scheduler
+            .jobs
+            .lock()
+            .await
+            .get_mut(&operation)
+            .unwrap()
+            .task
+            .take()
+            .unwrap();
+        task.abort();
+        let _ = task.await;
+        let claimant = ConversationIdentity::Standalone {
+            store: scheduler.detached_store.clone(),
+            actor: AgentPath("/fork".into()),
+        };
+        assert!(matches!(
+            scheduler.fork_owned_attachment(&operation, claimant).await,
+            Err(JobError::UnavailablePublicationObservation)
+        ));
     }
 
     #[tokio::test]

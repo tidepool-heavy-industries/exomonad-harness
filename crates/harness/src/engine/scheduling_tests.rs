@@ -1573,13 +1573,30 @@ async fn child_final_completes_while_parent_sync_waits_for_child() {
         },
     );
     let (_child_cancel, cancelled) = watch::channel(false);
-    let mut completed = tokio::time::timeout(
+    let receipt = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        child.run(Some(snapshot.clone()), vec![], cancelled, mailbox()),
+        child.run_with_finalize_receipt(
+            Some(snapshot.clone()),
+            vec![],
+            cancelled,
+            mailbox(),
+            None,
+            false,
+        ),
     )
     .await
     .expect("child final must not wait for parent's synchronous invocation")
     .unwrap();
+    let assessment = receipt.assessment();
+    assert_eq!(assessment.cleanup(), RoundCleanup::ReleasedWithFollowup);
+    assert!(assessment.outstanding_operations().is_empty());
+    assert_eq!(assessment.retained_followups().len(), 1);
+    assert_eq!(assessment.retained_followups()[0].operation(), &operation);
+    assert_eq!(
+        assessment.retained_followups()[0].publication(),
+        crate::turn::FollowupPublicationState::Running
+    );
+    let mut completed = receipt.into_result().unwrap();
     assert!(is_final(&completed.turn, false));
     assert_eq!(parent.scheduler.output(&operation).await.unwrap(), None);
     let claims = parent.store.claims_for_operation(&operation).unwrap();

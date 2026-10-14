@@ -8,8 +8,8 @@ mod embedded_round;
 mod output;
 pub use embedded_round::{
     EmbeddedRoundFailure, EmbeddedRoundReadiness, EmbeddedRoundSelection, EmbeddedRoundWait,
-    InferenceObligation, RoundAssessment, RoundCleanup, RoundExecution, RoundFailureSource,
-    RoundFailureStage, RoundSecondaryFailure, StoreContinuation,
+    InferenceObligation, RetainedFollowup, RoundAssessment, RoundCleanup, RoundExecution,
+    RoundFailureSource, RoundFailureStage, RoundSecondaryFailure, StoreContinuation,
 };
 #[cfg(test)]
 #[path = "engine/prepared_provider_tests.rs"]
@@ -83,6 +83,7 @@ struct PendingCall {
     execution: ToolExecution,
     persist_here_invocation_output: bool,
     custody: PendingCustody,
+    foreign: Option<crate::turn::ForeignPublicationObservation>,
     scheduling: ToolScheduling,
     queued: bool,
     completion: PendingCompletion,
@@ -899,9 +900,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         forwarder.abort();
         if let Some(attempt) = &inference_attempt {
             let assessment = receipt.assessment();
-            if receipt.result.is_ok()
-                || (assessment.execution() == RoundExecution::Cancelled
-                    && assessment.cleanup() == RoundCleanup::Confirmed)
+            let released = matches!(
+                assessment.cleanup(),
+                RoundCleanup::Confirmed | RoundCleanup::ReleasedWithFollowup
+            );
+            if released
+                && (receipt.result.is_ok() || assessment.execution() == RoundExecution::Cancelled)
             {
                 if let Err(source) = self.store.finish_embedded_inference(attempt) {
                     receipt
@@ -977,19 +981,25 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .await;
         pending.extend(recovery_cleanup);
         let operations = pending.iter().map(|call| call.operation.clone()).collect();
+        let retained = pending
+            .iter()
+            .filter_map(|call| call.foreign.clone())
+            .collect();
         let mut receipt = EngineRunReceipt {
             result,
             head: observed_head,
             cleanup: CleanupReceipt::Unobserved,
             secondary: Vec::new(),
             inference: Vec::new(),
+            retained,
         };
         if let Some(cleanup) = ordered_cleanup {
             assert!(
                 pending.is_empty(),
                 "ordered provider cleanup consumes the round's obligations"
             );
-            receipt.cleanup = cleanup;
+            receipt.cleanup = cleanup.receipt;
+            receipt.retained = cleanup.retained;
         } else if receipt.result.is_err() {
             match self.cancel_pending(&pending).await {
                 Ok(()) => receipt.cleanup = CleanupReceipt::Confirmed,
@@ -999,11 +1009,24 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
             }
         } else {
-            receipt.cleanup = if pending.is_empty() {
+            receipt.cleanup = if pending.iter().all(|call| {
+                call.custody == PendingCustody::Observation
+                    && call.completion == PendingCompletion::PreserveForFollowup
+                    && call.foreign.is_some()
+            }) {
                 CleanupReceipt::Confirmed
             } else {
                 CleanupReceipt::Outstanding(operations)
             };
+        }
+        for observation in std::mem::take(&mut receipt.retained) {
+            match observation.observe_retained().await {
+                Ok(retained) => receipt.retained.push(retained),
+                Err(source) => {
+                    receipt.retained.push(observation.retain_unconfirmed());
+                    receipt.add_failure(RoundFailureStage::FollowupObservation, source.into());
+                }
+            }
         }
         receipt
     }
@@ -1021,7 +1044,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         pending: &mut Vec<PendingCall>,
         recovery_cleanup: &mut Vec<PendingCall>,
         observed_head: &mut Option<RequestId>,
-        ordered_cleanup: &mut Option<embedded_round::CleanupReceipt>,
+        ordered_cleanup: &mut Option<embedded_round::ConsumedCleanup>,
     ) -> Result<EngineCompletion, EngineError> {
         let settled_head = head.clone();
         {
@@ -1230,23 +1253,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
                 Err(error) => return Err(EngineError::Job(error)),
             }
-            let completion = if claim.operation.origin != self.origin
-                && self
-                    .scheduler
-                    .requires_store_publication(&claim.operation)
-                    .await?
-            {
+            attachable.push((claim, tool_kind, execution));
+        }
+        for (claim, tool_kind, execution) in attachable {
+            let issued = self
+                .scheduler
+                .fork_owned_attachment(&claim.operation, self.origin.clone())
+                .await?;
+            let completion = if issued.publication.is_some() {
                 PendingCompletion::PreserveForFollowup
             } else {
                 PendingCompletion::BlocksCompletion
             };
-            attachable.push((claim, tool_kind, execution, completion));
-        }
-        for (claim, tool_kind, execution, completion) in attachable {
-            let settlement = self
-                .scheduler
-                .fork_claim_exact(&claim.operation, self.origin.clone(), true)
-                .await?;
             let attachment = PendingCall {
                 operation: claim.operation.clone(),
                 call_id: claim.call_id,
@@ -1256,11 +1274,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 execution,
                 persist_here_invocation_output: false,
                 custody: PendingCustody::Observation,
+                foreign: issued.publication,
                 scheduling: ToolScheduling::Async,
                 queued: false,
                 completion,
             };
-            match settlement {
+            match issued.settlement {
                 Some(output) => {
                     recovery_cleanup.push(attachment);
                     replay_outputs.push((claim.operation, output, tool_kind, claim.request));
@@ -1749,7 +1768,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             let stopped = blocking(move || store.stop_provider_response(&stopped_request, state)).await;
                             let failure = self.reject_or_cleanup(error, settled_head.as_ref(),
                                 &parent, std::mem::take(pending)).await;
-                            *ordered_cleanup = Some(failure.cleanup);
+                            *ordered_cleanup = Some(embedded_round::ConsumedCleanup {
+                                receipt: failure.cleanup, retained: failure.retained,
+                            });
                             let mut cause = failure.cause;
                             if let Err(source) = retained_tail {
                                 cause = cause.with_secondary(RoundFailureStage::ProviderTailRecording,
@@ -2655,6 +2676,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 execution,
                 persist_here_invocation_output: false,
                 custody: PendingCustody::Observation,
+                foreign: None,
                 scheduling: ToolScheduling::Async,
                 queued: false,
                 completion: PendingCompletion::BlocksCompletion,
@@ -2710,6 +2732,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             execution,
             persist_here_invocation_output: is_here_spawn,
             custody: PendingCustody::Unstarted,
+            foreign: None,
             scheduling,
             queued: scheduling == ToolScheduling::BeforeNextInference,
             completion: PendingCompletion::BlocksCompletion,
@@ -2931,6 +2954,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             | TransportFailureKind::Other => EngineError::Transport(error),
         };
         let operations = pending.iter().map(|call| call.operation.clone()).collect();
+        let retained = pending
+            .iter()
+            .filter_map(|call| call.foreign.clone())
+            .collect();
         if let Err(cleanup) = self.cancel_pending(&pending).await {
             return OrderedProviderFailure {
                 cause: EngineError::Cleanup {
@@ -2938,6 +2965,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     cleanup: cleanup.into(),
                 },
                 cleanup: CleanupReceipt::Outstanding(operations),
+                retained,
             };
         }
         let cause = match kind {
@@ -3031,6 +3059,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         OrderedProviderFailure {
             cause,
             cleanup: CleanupReceipt::Confirmed,
+            retained,
         }
     }
 
