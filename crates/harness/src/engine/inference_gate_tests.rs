@@ -727,15 +727,21 @@ async fn continuity_refusal_preserves_action(cancelled: bool, direct_block: bool
     runner.settle_inference_attempt(&attempt, &mut receipt);
     let assessment = receipt.assessment();
     assert_eq!(assessment.execution(), expected);
-    let [InferenceObligation::RecoverBlock { block }] = assessment.inference_obligations() else {
-        panic!("continuity refusal must retain exact recovery block: {assessment:?}");
+    let HostInferenceState::Blocked { block } = store.embedded_inference_state(&identity).unwrap()
+    else {
+        panic!("continuity refusal did not block inference");
     };
     assert_eq!(block.request, request);
     assert_eq!(
-        store.embedded_inference_state(&identity).unwrap(),
-        HostInferenceState::Blocked {
-            block: block.clone()
-        }
+        assessment.inference_obligations(),
+        &[
+            InferenceObligation::Reconcile {
+                head: Some(request.clone())
+            },
+            InferenceObligation::RecoverBlock {
+                block: block.clone()
+            },
+        ],
     );
     assert!(matches!(
         store.begin_embedded_inference(&identity, Some(&request)),
