@@ -293,3 +293,90 @@ async fn rejection_keeps_its_explicit_recovery_block() {
     );
     assert_eq!(engine.client.requests.lock().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn driver_cancelled_action_commits_head_without_erasing_cleanup_or_attempt_obligations() {
+    for refuse_head in [false, true] {
+        let (engine, identity) = engine(true, false);
+        let store = engine.store.clone();
+        let provider = engine.provider.clone();
+        store
+            .admit_embedded_input(
+                &identity,
+                "first",
+                "human",
+                &Item(json!({"type":"message","role":"user","content":"start"})),
+            )
+            .unwrap();
+        let engine = Arc::try_unwrap(engine)
+            .ok()
+            .expect("fixture has one execution owner");
+        let mut driver = engine.into_embedded_rounds().unwrap();
+        let EmbeddedRoundReadiness::Selected(selection) = driver.next_round().unwrap() else {
+            panic!("actual input selects round");
+        };
+        let (cancel, cancellation) = watch::channel(false);
+        let mut task = tokio::spawn(async move {
+            driver
+                .run_round(
+                    selection,
+                    cancellation,
+                    tokio::sync::mpsc::unbounded_channel().1,
+                )
+                .await
+        });
+        if let Err(error) =
+            tokio::time::timeout(Duration::from_secs(10), provider.started.notified()).await
+        {
+            task.abort();
+            let _ = task.await;
+            panic!("real producer did not start: {error}");
+        }
+        if refuse_head {
+            store.lock().unwrap().execute_batch("CREATE TRIGGER refuse_cancelled_head BEFORE UPDATE OF head_request ON agents BEGIN SELECT RAISE(ABORT,'head refused'); END;").unwrap();
+        }
+        cancel.send_replace(true);
+        let joined = match tokio::time::timeout(Duration::from_secs(10), &mut task).await {
+            Ok(joined) => joined,
+            Err(error) => {
+                task.abort();
+                let _ = task.await;
+                panic!("cancellation did not complete: {error}");
+            }
+        };
+        let failure = joined.unwrap().unwrap_err();
+        let assessment = failure.assessment();
+        assert_eq!(assessment.execution(), RoundExecution::Cancelled);
+        assert_eq!(assessment.cleanup(), RoundCleanup::Unconfirmed);
+        assert!(matches!(
+            failure.primary_error(),
+            Some(EngineError::Cancelled { .. })
+        ));
+        assert!(
+            assessment
+                .secondary_failure_stages()
+                .contains(&RoundFailureStage::NativeCleanup)
+        );
+        assert_eq!(
+            assessment
+                .secondary_failure_stages()
+                .contains(&RoundFailureStage::DurableHeadSettlement),
+            refuse_head
+        );
+        assert!(assessment.inference_obligations().iter().any(|obligation| matches!(obligation, InferenceObligation::PreserveUnsettled { request } if Some(request) == assessment.head())));
+        let frontier = store.embedded_round_frontier(&identity).unwrap();
+        if refuse_head {
+            assert!(assessment.head_settlements().is_empty());
+            assert!(frontier.settled_head.is_none());
+            assert_eq!(frontier.pending_head.as_ref(), assessment.head());
+        } else {
+            assert_eq!(assessment.head_settlements().len(), 1);
+            assert_eq!(frontier.settled_head.as_ref(), assessment.head());
+            assert!(frontier.pending_head.is_none());
+        }
+        assert_eq!(
+            store.embedded_inference_state(&identity).unwrap(),
+            HostInferenceState::Running
+        );
+    }
+}

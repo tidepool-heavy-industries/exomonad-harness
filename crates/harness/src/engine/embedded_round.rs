@@ -191,6 +191,7 @@ pub struct EmbeddedRoundFailure {
     cleanup: CleanupReceipt,
     inference: Vec<InferenceObligation>,
     retained: Vec<crate::turn::ForeignPublicationObservation>,
+    head_settlements: Vec<crate::store::EmbeddedRoundSettlement>,
 }
 
 /// Waiting preserves why a notification cannot start a provider request.
@@ -204,6 +205,7 @@ pub enum EmbeddedRoundWait {
 /// This opaque selection is tied to one driver and an exact Store observation.
 /// Store revalidation and attempt issuance follow native host admission.
 pub struct EmbeddedRoundSelection {
+    driver: std::sync::Arc<()>,
     generation: std::sync::Arc<()>,
     identity: crate::embedding::HostIdentity,
     snapshot: crate::store::EmbeddedRoundSnapshot,
@@ -469,6 +471,7 @@ impl EmbeddedRoundFailure {
             &self.cleanup,
             &self.inference,
             &self.retained,
+            &self.head_settlements,
         )
     }
     pub fn primary_error(&self) -> Option<&EngineError> {
@@ -491,6 +494,7 @@ fn completion_facts(completion: &super::EngineCompletion) -> ErrorFacts<'_> {
 
 /// One execution owner's private receipt crosses into both standalone rendering
 /// and embedded settlement. No global or separately mutable classifier exists.
+#[derive(Debug)]
 pub(super) struct EngineRunReceipt {
     pub(super) result: Result<super::EngineCompletion, EngineError>,
     pub(super) head: Option<RequestId>,
@@ -498,6 +502,7 @@ pub(super) struct EngineRunReceipt {
     pub(super) secondary: Vec<RoundSecondaryFailure>,
     pub(super) inference: Vec<InferenceObligation>,
     pub(super) retained: Vec<crate::turn::ForeignPublicationObservation>,
+    pub(super) head_settlements: Vec<crate::store::EmbeddedRoundSettlement>,
 }
 impl EngineRunReceipt {
     fn action_facts(&self) -> ErrorFacts<'_> {
@@ -523,6 +528,7 @@ impl EngineRunReceipt {
             &self.cleanup,
             &self.inference,
             &self.retained,
+            &self.head_settlements,
         )
     }
     pub(super) fn add_failure(&mut self, stage: RoundFailureStage, source: EngineError) {
@@ -586,6 +592,7 @@ impl EngineRunReceipt {
             cleanup: self.cleanup,
             inference: self.inference,
             retained: self.retained,
+            head_settlements: self.head_settlements,
         }
     }
 }
@@ -621,8 +628,12 @@ fn assess_evidence<'a>(
     cleanup_receipt: &CleanupReceipt,
     inference: &[InferenceObligation],
     retained: &[crate::turn::ForeignPublicationObservation],
+    head_settlements: &[crate::store::EmbeddedRoundSettlement],
 ) -> RoundAssessment {
     facts = with_secondary_evidence(facts, secondary);
+    for settlement in head_settlements {
+        retain_unique(&mut facts.settlements, settlement.clone());
+    }
     for obligation in inference {
         if let InferenceObligation::RecoverBlock { block } = obligation {
             facts.inference.retain(|existing| {
@@ -674,4 +685,298 @@ pub(super) struct OrderedProviderFailure {
     pub(super) cause: EngineError,
     pub(super) cleanup: CleanupReceipt,
     pub(super) retained: Vec<crate::turn::ForeignPublicationObservation>,
+}
+
+/// Issued after the execution owner has retained its action and durable evidence.
+/// Cleanup confirmation covers this round's own custody; foreign observations
+/// remain separate and do not certify global producer quiescence.
+#[derive(Debug)]
+pub struct EmbeddedRoundSettlement {
+    receipt: EngineRunReceipt,
+}
+impl EmbeddedRoundSettlement {
+    pub fn assessment(&self) -> RoundAssessment {
+        self.receipt.assessment()
+    }
+    pub fn issue(&self) -> Option<&EngineError> {
+        self.receipt.primary_error()
+    }
+    pub fn original_completion(&self) -> Option<&super::EngineCompletion> {
+        self.receipt.original_completion()
+    }
+    pub fn secondary_failures(&self) -> Vec<RoundSecondaryFailureRef<'_>> {
+        self.receipt.secondary_failures()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum HistoryMode {
+    Recent,
+    Reconcile,
+}
+
+pub struct EmbeddedRounds<A: super::Auth, P: super::Provider, C: super::ResponsesTransport> {
+    driver: std::sync::Arc<()>,
+    generation: std::sync::Arc<()>,
+    engine: super::Engine<A, P, C>,
+    identity: crate::embedding::HostIdentity,
+    history: HistoryMode,
+}
+impl<A: super::Auth, P: super::Provider + 'static, C: super::ResponsesTransport>
+    super::Engine<A, P, C>
+{
+    pub fn into_embedded_rounds(self) -> Result<EmbeddedRounds<A, P, C>, EmbeddedRoundFailure> {
+        let identity = self
+            .embedded_identity()
+            .filter(|identity| identity.actor == self.config.agent)
+            .ok_or_else(|| {
+                EmbeddedRoundFailure::refused(StoreError::InvalidEmbeddedBinding.into(), None)
+            })?;
+        Ok(EmbeddedRounds {
+            driver: std::sync::Arc::new(()),
+            generation: std::sync::Arc::new(()),
+            engine: self,
+            identity,
+            history: HistoryMode::Reconcile,
+        })
+    }
+}
+impl<A: super::Auth, P: super::Provider + 'static, C: super::ResponsesTransport>
+    EmbeddedRounds<A, P, C>
+{
+    pub fn next_round(&self) -> Result<EmbeddedRoundReadiness, EmbeddedRoundFailure> {
+        let snapshot = self
+            .engine
+            .store
+            .select_embedded_round(&self.identity)
+            .map_err(|source| EmbeddedRoundFailure::refused(source.into(), None))?;
+        let wait = match &snapshot.inference {
+            crate::embedding::HostInferenceState::Blocked { block } => {
+                Some(EmbeddedRoundWait::RecoveryRequired {
+                    block: block.clone(),
+                })
+            }
+            crate::embedding::HostInferenceState::Running => {
+                let head = snapshot
+                    .frontier
+                    .pending_head
+                    .clone()
+                    .or(snapshot.frontier.settled_head.clone());
+                let mut failure = EmbeddedRoundFailure::refused(
+                    StoreError::InferenceRunning.into(),
+                    head.clone(),
+                );
+                failure
+                    .inference
+                    .push(InferenceObligation::Reconcile { head });
+                return Err(failure);
+            }
+            crate::embedding::HostInferenceState::Recovering { .. } => None,
+            crate::embedding::HostInferenceState::Idle => {
+                if snapshot.first_envelope.is_some()
+                    || (snapshot.frontier.pending_head.is_some()
+                        && snapshot.frontier.pending_interruption.is_none())
+                {
+                    None
+                } else {
+                    Some(match &snapshot.frontier.pending_head {
+                        Some(request) => EmbeddedRoundWait::ExplicitInputRequired {
+                            request: request.clone(),
+                        },
+                        None => EmbeddedRoundWait::NoPendingWork,
+                    })
+                }
+            }
+        };
+        match wait {
+            Some(wait) => Ok(EmbeddedRoundReadiness::Waiting(wait)),
+            None => Ok(EmbeddedRoundReadiness::Selected(EmbeddedRoundSelection {
+                driver: self.driver.clone(),
+                generation: self.generation.clone(),
+                identity: self.identity.clone(),
+                snapshot,
+            })),
+        }
+    }
+
+    /// Native host admission precedes this call. An observation cannot issue an
+    /// inference attempt: the existing Store transaction validates and issues it.
+    pub async fn run_round(
+        &mut self,
+        selection: EmbeddedRoundSelection,
+        cancellation: tokio::sync::watch::Receiver<bool>,
+        incoming: tokio::sync::mpsc::UnboundedReceiver<crate::mailbox::DurableMailboxWake>,
+    ) -> Result<EmbeddedRoundSettlement, EmbeddedRoundFailure> {
+        let epoch = std::mem::replace(&mut self.generation, std::sync::Arc::new(()));
+        let previous = selection.snapshot.frontier.settled_head.clone();
+        if selection.identity != self.identity
+            || !std::sync::Arc::ptr_eq(&selection.driver, &self.driver)
+            || !std::sync::Arc::ptr_eq(&selection.generation, &epoch)
+        {
+            return Err(EmbeddedRoundFailure::refused(
+                StoreError::InvalidEmbeddedFrontier.into(),
+                previous,
+            ));
+        }
+        let recovering = matches!(self.history, HistoryMode::Reconcile)
+            || selection.snapshot.frontier.pending_head.is_some();
+        let receipt = self
+            .engine
+            .run_with_selected_receipt(
+                previous.clone(),
+                Vec::new(),
+                cancellation,
+                incoming,
+                None,
+                recovering,
+                Some(&selection.snapshot),
+            )
+            .await
+            .map_err(|cause| EmbeddedRoundFailure::refused(cause, previous.clone()))?;
+        self.finish(previous, receipt)
+    }
+
+    fn head_committed(
+        &self,
+        assessment: &RoundAssessment,
+        previous: Option<&RequestId>,
+        outcome: crate::store::EmbeddedRoundOutcome,
+    ) -> bool {
+        assessment.head_settlements().iter().any(|settlement| {
+            self.engine
+                .store
+                .matches_embedded_settlement_issuer(&self.identity, settlement)
+                && settlement.previous() == previous
+                && Some(settlement.request()) == assessment.head()
+                && settlement.outcome() == outcome
+        })
+    }
+
+    pub(super) fn finish(
+        &mut self,
+        previous: Option<RequestId>,
+        mut receipt: EngineRunReceipt,
+    ) -> Result<EmbeddedRoundSettlement, EmbeddedRoundFailure> {
+        let assessment = receipt.assessment();
+        match assessment.execution() {
+            RoundExecution::Completed | RoundExecution::Cancelled => {
+                let outcome = if assessment.execution() == RoundExecution::Completed {
+                    crate::store::EmbeddedRoundOutcome::Completed
+                } else {
+                    crate::store::EmbeddedRoundOutcome::Cancelled
+                };
+                let recording = match assessment.head() {
+                    Some(request) => self.engine.store.settle_embedded_round_receipt(
+                        &self.identity,
+                        previous.as_ref(),
+                        request,
+                        outcome,
+                    ),
+                    None => Err(StoreError::InvalidEmbeddedFrontier),
+                };
+                match recording {
+                    Ok(crate::store::EmbeddedRoundSettlementResult::Committed(settlement)) => {
+                        receipt.head_settlements.push(settlement)
+                    }
+                    Ok(
+                        crate::store::EmbeddedRoundSettlementResult::AlreadySettled
+                        | crate::store::EmbeddedRoundSettlementResult::StaleFrontier,
+                    ) => receipt.add_failure(
+                        RoundFailureStage::DurableHeadSettlement,
+                        StoreError::InvalidEmbeddedFrontier.into(),
+                    ),
+                    Err(source) => {
+                        receipt.add_failure(RoundFailureStage::DurableHeadSettlement, source.into())
+                    }
+                }
+            }
+            RoundExecution::Rejected => {
+                let proved = self.head_committed(
+                    &assessment,
+                    previous.as_ref(),
+                    crate::store::EmbeddedRoundOutcome::Rejected,
+                );
+                // A failed recording already carries its actual typed stage. A
+                // clean rejection must have the same transaction's head receipt.
+                if !proved && assessment.secondary_failure_stages().is_empty() {
+                    receipt.add_failure(
+                        RoundFailureStage::DurableHeadSettlement,
+                        StoreError::InvalidEmbeddedFrontier.into(),
+                    );
+                }
+            }
+            RoundExecution::Interrupted | RoundExecution::Failed => {}
+        }
+        let assessment = receipt.assessment();
+        self.history = if assessment.execution() == RoundExecution::Completed
+            && assessment.inference_obligations().is_empty()
+            && assessment.secondary_failure_stages().is_empty()
+        {
+            HistoryMode::Recent
+        } else {
+            HistoryMode::Reconcile
+        };
+        let outcome = match assessment.execution() {
+            RoundExecution::Completed => Some(crate::store::EmbeddedRoundOutcome::Completed),
+            RoundExecution::Cancelled => Some(crate::store::EmbeddedRoundOutcome::Cancelled),
+            RoundExecution::Rejected => Some(crate::store::EmbeddedRoundOutcome::Rejected),
+            RoundExecution::Interrupted | RoundExecution::Failed => None,
+        };
+        let durable = match outcome {
+            Some(outcome) => self.head_committed(&assessment, previous.as_ref(), outcome),
+            None => assessment.inference_obligations().iter().any(|obligation|
+                matches!(obligation, InferenceObligation::RecoverBlock { block } if Some(&block.request) == assessment.head())),
+        };
+        if durable
+            && assessment.store_continuation() == StoreContinuation::NoReopenRequired
+            && matches!(
+                assessment.cleanup(),
+                RoundCleanup::Confirmed | RoundCleanup::ReleasedWithFollowup
+            )
+            && assessment.secondary_failure_stages().is_empty()
+        {
+            Ok(EmbeddedRoundSettlement { receipt })
+        } else {
+            Err(receipt.into_failure())
+        }
+    }
+}
+
+impl EmbeddedRoundFailure {
+    fn refused(cause: EngineError, head: Option<RequestId>) -> Self {
+        Self {
+            action: RoundAction::Failed { head, cause },
+            secondary: Vec::new(),
+            cleanup: CleanupReceipt::Unobserved,
+            inference: Vec::new(),
+            retained: Vec::new(),
+            head_settlements: Vec::new(),
+        }
+    }
+}
+impl std::fmt::Display for RoundFailureSourceRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Engine(source) => std::fmt::Display::fmt(source, f),
+            Self::Store(source) => std::fmt::Display::fmt(source, f),
+            Self::Cleanup(source) => std::fmt::Display::fmt(source, f),
+        }
+    }
+}
+impl std::fmt::Display for EmbeddedRoundFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "embedded round {:?}", self.assessment().execution())?;
+        if let Some(primary) = self.primary_error() {
+            write!(f, ": {primary}")?;
+        }
+        for secondary in self.secondary_failures() {
+            write!(f, "; {:?}: {}", secondary.stage(), secondary.source())?;
+        }
+        Ok(())
+    }
+}
+impl std::error::Error for EmbeddedRoundFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.primary_error().map(|source| source as _)
+    }
 }

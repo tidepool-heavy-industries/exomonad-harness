@@ -1078,3 +1078,299 @@ async fn nested_stage_view_preserves_primary_and_independent_recovery_obligation
     );
     assert_eq!(owned.assessment().cleanup(), RoundCleanup::Unconfirmed);
 }
+
+fn driver_fixture(
+    turns: Vec<Result<ResponsesTurn, TransportError>>,
+) -> (
+    Engine<Offline, NoTools, Script>,
+    Arc<Store>,
+    crate::embedding::HostIdentity,
+    Arc<Mutex<Vec<ResponsesRequest>>>,
+) {
+    let (mut engine, store, requests) = engine(TransportError::Authentication);
+    engine.client.turns = Mutex::new(VecDeque::from(turns));
+    let identity = crate::embedding::HostIdentity {
+        run: "round-driver".into(),
+        actor: AgentPath("/root".into()),
+        incarnation: "original".into(),
+    };
+    store.bind_embedded_actor(&identity, None).unwrap();
+    let engine = engine.with_origin(ConversationIdentity::Embedded {
+        run: identity.run.clone(),
+        actor: identity.actor.clone(),
+        incarnation: identity.incarnation.clone(),
+    });
+    store
+        .admit_embedded_input(
+            &identity,
+            "first",
+            "human",
+            &Item(json!({"type":"message","role":"user","content":"first input"})),
+        )
+        .unwrap();
+    (engine, store, identity, requests)
+}
+fn selected<A: Auth, P: Provider + 'static, C: ResponsesTransport>(
+    driver: &EmbeddedRounds<A, P, C>,
+) -> EmbeddedRoundSelection {
+    let EmbeddedRoundReadiness::Selected(selection) = driver.next_round().unwrap() else {
+        panic!("fixture must select actual input");
+    };
+    selection
+}
+fn driver_mailbox() -> tokio::sync::mpsc::UnboundedReceiver<DurableMailboxWake> {
+    tokio::sync::mpsc::unbounded_channel().1
+}
+
+#[tokio::test]
+async fn driver_foreign_refusal_consumes_epoch_before_any_provider_request() {
+    let (engine, store, identity, requests) = driver_fixture(vec![Ok(success())]);
+    let other = Engine::with_transport(
+        Script {
+            requests: requests.clone(),
+            turns: Mutex::new(VecDeque::from([Ok(success())])),
+        },
+        store.clone(),
+        engine.scheduler.clone(),
+        engine.provider.clone(),
+        engine.config.clone(),
+    )
+    .with_origin(engine.origin.clone());
+    let first = engine.into_embedded_rounds().unwrap();
+    let mut second = other.into_embedded_rounds().unwrap();
+    let foreign = selected(&first);
+    let stale = selected(&second);
+    let (_cancel, cancellation) = watch::channel(false);
+    for selection in [foreign, stale] {
+        let error = second
+            .run_round(selection, cancellation.clone(), driver_mailbox())
+            .await
+            .unwrap_err();
+        assert_eq!(error.assessment().cleanup(), RoundCleanup::Unconfirmed);
+        assert!(matches!(
+            error.primary_error(),
+            Some(EngineError::Store(StoreError::InvalidEmbeddedFrontier))
+        ));
+    }
+    assert!(requests.lock().unwrap().is_empty());
+    assert_eq!(
+        store.embedded_inference_state(&identity).unwrap(),
+        crate::embedding::HostInferenceState::Idle
+    );
+}
+
+#[tokio::test]
+async fn driver_revalidates_selected_frontier_in_existing_begin_transaction() {
+    let (engine, store, identity, requests) = driver_fixture(vec![Ok(success())]);
+    let mut driver = engine.into_embedded_rounds().unwrap();
+    let old = selected(&driver);
+    store
+        .write_embedded_request(
+            &identity,
+            &RequestId("intervening".into()),
+            None,
+            &[],
+            crate::store::Usage::default(),
+        )
+        .unwrap();
+    let (_cancel, cancellation) = watch::channel(false);
+    let error = driver
+        .run_round(old, cancellation, driver_mailbox())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.primary_error(),
+        Some(EngineError::Store(StoreError::StaleInferenceRecovery))
+    ));
+    assert!(requests.lock().unwrap().is_empty());
+    assert_eq!(
+        store.embedded_inference_state(&identity).unwrap(),
+        crate::embedding::HostInferenceState::Idle
+    );
+}
+
+#[tokio::test]
+async fn driver_success_and_precancel_have_actual_head_commits() {
+    for cancelled in [false, true] {
+        let (engine, store, identity, requests) = driver_fixture(vec![Ok(success())]);
+        let mut driver = engine.into_embedded_rounds().unwrap();
+        let selection = selected(&driver);
+        let (_cancel, cancellation) = watch::channel(cancelled);
+        let report = driver
+            .run_round(selection, cancellation, driver_mailbox())
+            .await
+            .unwrap();
+        let assessment = report.assessment();
+        let expected = if cancelled {
+            RoundExecution::Cancelled
+        } else {
+            RoundExecution::Completed
+        };
+        assert_eq!(assessment.execution(), expected);
+        let [commit] = assessment.head_settlements() else {
+            panic!("round must return actual head commit");
+        };
+        assert_eq!(Some(commit.request()), assessment.head());
+        assert!(store.matches_embedded_settlement_issuer(&identity, commit));
+        let frontier = store.embedded_round_frontier(&identity).unwrap();
+        assert_eq!(frontier.settled_head.as_ref(), assessment.head());
+        assert!(frontier.pending_head.is_none());
+        assert_eq!(requests.lock().unwrap().len(), usize::from(!cancelled));
+        assert!(matches!(
+            driver.next_round().unwrap(),
+            EmbeddedRoundReadiness::Waiting(EmbeddedRoundWait::NoPendingWork)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn driver_rejection_keeps_issued_head_and_block_despite_queued_input() {
+    let (engine, store, identity, requests) =
+        driver_fixture(vec![Err(TransportError::Authentication)]);
+    let mut driver = engine.into_embedded_rounds().unwrap();
+    let selection = selected(&driver);
+    let (_cancel, cancellation) = watch::channel(false);
+    let report = driver
+        .run_round(selection, cancellation, driver_mailbox())
+        .await
+        .unwrap();
+    let assessment = report.assessment();
+    assert_eq!(assessment.execution(), RoundExecution::Rejected);
+    assert!(matches!(
+        report.issue(),
+        Some(EngineError::RequestRejected {
+            error: TransportError::Authentication,
+            ..
+        })
+    ));
+    let [commit] = assessment.head_settlements() else {
+        panic!("rejected transaction must carry its head receipt");
+    };
+    assert_eq!(
+        commit.outcome(),
+        crate::store::EmbeddedRoundOutcome::Rejected
+    );
+    store
+        .admit_embedded_input(
+            &identity,
+            "later",
+            "human",
+            &Item(json!({"type":"message","role":"user","content":"later input"})),
+        )
+        .unwrap();
+    let EmbeddedRoundReadiness::Waiting(EmbeddedRoundWait::RecoveryRequired { block }) =
+        driver.next_round().unwrap()
+    else {
+        panic!("queued input cannot replace exact recovery grant");
+    };
+    assert_eq!(
+        assessment.inference_obligations(),
+        &[InferenceObligation::RecoverBlock { block }]
+    );
+    assert_eq!(requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn driver_head_failure_retains_completed_action_and_stage() {
+    let (engine, store, identity, _) = driver_fixture(vec![Ok(success())]);
+    store.lock().unwrap().execute_batch("CREATE TRIGGER refuse_driver_head BEFORE UPDATE OF head_request ON agents BEGIN SELECT RAISE(ABORT,'head refused'); END;").unwrap();
+    let mut driver = engine.into_embedded_rounds().unwrap();
+    let selection = selected(&driver);
+    let (_cancel, cancellation) = watch::channel(false);
+    let failure = driver
+        .run_round(selection, cancellation, driver_mailbox())
+        .await
+        .unwrap_err();
+    assert!(failure.primary_error().is_none());
+    let completion = failure
+        .original_completion()
+        .expect("head refusal retains full completion");
+    assert_eq!(completion.turn.response_id, "success");
+    assert_eq!(failure.assessment().execution(), RoundExecution::Completed);
+    assert_eq!(
+        failure.assessment().secondary_failure_stages(),
+        &[RoundFailureStage::DurableHeadSettlement]
+    );
+    assert!(matches!(
+        failure.secondary_failures()[0].source(),
+        RoundFailureSourceRef::Engine(EngineError::Store(StoreError::Sql(_)))
+    ));
+    let frontier = store.embedded_round_frontier(&identity).unwrap();
+    assert!(frontier.settled_head.is_none());
+    assert_eq!(
+        frontier.pending_head.as_ref(),
+        Some(&completion.head_request)
+    );
+    store
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER refuse_driver_head")
+        .unwrap();
+    let retry = selected(&driver);
+    let (_cancel, cancellation) = watch::channel(false);
+    let settled = driver
+        .run_round(retry, cancellation, driver_mailbox())
+        .await
+        .unwrap();
+    assert_eq!(settled.assessment().execution(), RoundExecution::Completed);
+    assert_eq!(settled.assessment().head(), Some(&completion.head_request));
+    // The one scripted response was already consumed; any provider replay
+    // would fail the transport's strict unexpected-retry guard.
+    assert!(
+        store
+            .embedded_round_frontier(&identity)
+            .unwrap()
+            .pending_head
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn driver_completed_head_commit_preserves_independently_issued_block() {
+    let (engine, store, identity, _) = driver_fixture(vec![Ok(success())]);
+    let (_cancel, cancellation) = watch::channel(false);
+    let mut receipt = engine
+        .run_with_finalize_receipt(None, vec![], cancellation, mailbox(), None, false)
+        .await
+        .unwrap();
+    let request = receipt.original_completion().unwrap().head_request.clone();
+    let block = store
+        .block_embedded_inference(
+            &identity,
+            &request,
+            crate::embedding::InferenceBlockReason::ContinuityUnproven,
+        )
+        .unwrap();
+    receipt.inference.push(InferenceObligation::RecoverBlock {
+        block: block.clone(),
+    });
+    let mut driver = engine.into_embedded_rounds().unwrap();
+    let report = driver.finish(None, receipt).unwrap();
+    let assessment = report.assessment();
+    assert_eq!(assessment.execution(), RoundExecution::Completed);
+    assert_eq!(
+        assessment.inference_obligations(),
+        &[InferenceObligation::RecoverBlock {
+            block: block.clone()
+        }]
+    );
+    assert_eq!(
+        store.embedded_inference_state(&identity).unwrap(),
+        crate::embedding::HostInferenceState::Blocked {
+            block: block.clone()
+        }
+    );
+    assert_eq!(
+        store
+            .embedded_round_frontier(&identity)
+            .unwrap()
+            .settled_head,
+        Some(request)
+    );
+    let EmbeddedRoundReadiness::Waiting(EmbeddedRoundWait::RecoveryRequired { block: retained }) =
+        driver.next_round().unwrap()
+    else {
+        panic!("head commit must not clear inference block");
+    };
+    assert_eq!(retained, block);
+}

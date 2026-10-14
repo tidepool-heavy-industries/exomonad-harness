@@ -7,10 +7,10 @@
 mod embedded_round;
 mod output;
 pub use embedded_round::{
-    EmbeddedRoundFailure, EmbeddedRoundReadiness, EmbeddedRoundSelection, EmbeddedRoundWait,
-    InferenceObligation, RetainedFollowup, RoundAssessment, RoundCleanup, RoundExecution,
-    RoundFailureSource, RoundFailureSourceRef, RoundFailureStage, RoundSecondaryFailure,
-    RoundSecondaryFailureRef, StoreContinuation,
+    EmbeddedRoundFailure, EmbeddedRoundReadiness, EmbeddedRoundSelection, EmbeddedRoundSettlement,
+    EmbeddedRoundWait, EmbeddedRounds, InferenceObligation, RetainedFollowup, RoundAssessment,
+    RoundCleanup, RoundExecution, RoundFailureSource, RoundFailureSourceRef, RoundFailureStage,
+    RoundSecondaryFailure, RoundSecondaryFailureRef, StoreContinuation,
 };
 #[cfg(test)]
 #[path = "engine/prepared_provider_tests.rs"]
@@ -845,9 +845,31 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         head: Option<RequestId>,
         new_items: Vec<Item>,
         cancellation: watch::Receiver<bool>,
+        incoming: tokio::sync::mpsc::UnboundedReceiver<I>,
+        finalize_schema: Option<serde_json::Value>,
+        recovering: bool,
+    ) -> Result<embedded_round::EngineRunReceipt, EngineError> {
+        self.run_with_selected_receipt(
+            head,
+            new_items,
+            cancellation,
+            incoming,
+            finalize_schema,
+            recovering,
+            None,
+        )
+        .await
+    }
+
+    async fn run_with_selected_receipt<I: Into<MailboxSignal> + Send + 'static>(
+        &self,
+        head: Option<RequestId>,
+        new_items: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
         mut incoming: tokio::sync::mpsc::UnboundedReceiver<I>,
         finalize_schema: Option<serde_json::Value>,
         recovering: bool,
+        selected: Option<&crate::store::EmbeddedRoundSnapshot>,
     ) -> Result<embedded_round::EngineRunReceipt, EngineError> {
         let (route, protocol) = self.client.response_contract()?;
         self.store.initialize_context_target(
@@ -859,10 +881,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             },
         )?;
         let inference_attempt = match self.embedded_identity() {
-            Some(identity) => match self
-                .store
-                .begin_embedded_inference(&identity, head.as_ref())
-            {
+            Some(identity) => match match selected {
+                Some(snapshot) => self
+                    .store
+                    .begin_selected_embedded_inference(&identity, snapshot),
+                None => self
+                    .store
+                    .begin_embedded_inference(&identity, head.as_ref()),
+            } {
                 Ok(attempt) => Some(attempt),
                 Err(StoreError::InferenceBlocked { block }) => {
                     return Err(EngineError::InferenceBlocked { block });
@@ -876,6 +902,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .as_ref()
                 .is_some_and(|attempt| attempt.recovering);
         let (envelope_tx, envelopes) = tokio::sync::mpsc::unbounded_channel();
+        if let Some(envelope_id) = selected.and_then(|snapshot| snapshot.first_envelope) {
+            envelope_tx
+                .send(DurableMailboxWake { envelope_id }.into())
+                .expect("newly owned mailbox receiver remains open");
+        }
         let keepalive = envelope_tx.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(envelope) = incoming.recv().await {
@@ -948,7 +979,22 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         {
             if let Err(source) = self.store.finish_embedded_inference(attempt) {
                 receipt.add_failure(RoundFailureStage::InferenceAttemptSettlement, source.into());
+            } else {
+                return;
             }
+        }
+        let assessment = receipt.assessment();
+        if !assessment
+            .inference_obligations()
+            .iter()
+            .any(|obligation| matches!(obligation, InferenceObligation::RecoverBlock { .. }))
+        {
+            // The privately issued attempt remains unsettled. Preserve that
+            // responsibility independently of action, cleanup and reopening.
+            receipt.inference.push(match receipt.head.clone() {
+                Some(request) => InferenceObligation::PreserveUnsettled { request },
+                None => InferenceObligation::Reconcile { head: None },
+            });
         }
     }
 
@@ -996,6 +1042,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             secondary: Vec::new(),
             inference: Vec::new(),
             retained,
+            head_settlements: Vec::new(),
         };
         if let Some(cleanup) = ordered_cleanup {
             assert!(
