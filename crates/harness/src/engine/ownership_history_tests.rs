@@ -528,13 +528,19 @@ async fn pending_wait_cancellation_recovers_interruption_without_completion_noti
         store.set_effort(&request, Effort::Low).unwrap();
         let original_items = vec![invocation.clone(), Item::configuration_update(Effort::Low)];
         assert_eq!(store.items(&request).unwrap(), original_items);
-        let DispatchResult::Pending(pending) = runtime
-            .dispatch_completed_item(invocation.clone(), &request)
+        let mut issued = Vec::new();
+        let DispatchResult::Registered { operation } = runtime
+            .dispatch_completed_item(invocation.clone(), &request, &mut issued)
             .await
             .unwrap()
         else {
             panic!("unsettled wait must retain its pending claim");
         };
+        let index = issued
+            .iter()
+            .position(|call| call.operation == operation)
+            .unwrap();
+        let pending = issued.remove(index);
         assert_eq!(pending.operation.origin, runtime.origin);
         assert!(pending.wait.is_some());
         assert_eq!(

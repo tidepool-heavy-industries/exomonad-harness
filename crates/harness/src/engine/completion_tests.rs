@@ -161,12 +161,19 @@ async fn admit(
         )
         .unwrap();
     engine.store.set_effort(&head, Effort::Low).unwrap();
-    let DispatchResult::Pending(pending) =
-        engine.dispatch_completed_item(item, &head).await.unwrap()
+    let mut issued = Vec::new();
+    let DispatchResult::Registered { operation } = engine
+        .dispatch_completed_item(item, &head, &mut issued)
+        .await
+        .unwrap()
     else {
         panic!("live ordinary call must retain its pending scheduler job");
     };
-    (head, pending)
+    let index = issued
+        .iter()
+        .position(|call| call.operation == operation)
+        .unwrap();
+    (head, issued.remove(index))
 }
 
 fn empty_mailbox() -> tokio::sync::mpsc::UnboundedReceiver<Envelope> {
@@ -877,7 +884,7 @@ async fn closed_next_request_preserves_settlement_and_cleanup_without_transport_
                 assert!(
                     matches!(*primary, EngineError::Cancelled { head_request: Some(ref actual) } if *actual == head)
                 );
-                assert!(!cleanup.is_empty());
+                assert!(matches!(cleanup, EngineCleanupError::Engine(_)));
                 let pending_claim = store
                     .claims(&CallId("pending-work".into()))
                     .unwrap()

@@ -12,6 +12,7 @@ mod request_failure;
 pub mod sse;
 pub use crate::store::PreparedProviderRequest;
 pub use request_failure::RequestFailure;
+pub(crate) use request_failure::TransportFailureKind;
 
 use crate::item::Item;
 use crate::model::Effort;

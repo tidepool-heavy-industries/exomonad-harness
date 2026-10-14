@@ -29,6 +29,17 @@ enum Gate {
     },
 }
 
+/// Inference authorization, request frontier and mailbox input share one
+/// owner-selected transaction. The captured state observes an existing grant;
+/// it does not issue one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EmbeddedRoundSnapshot {
+    pub(crate) frontier: super::EmbeddedRoundFrontier,
+    pub(crate) inference: HostInferenceState,
+    pub(crate) generation: u64,
+    pub(crate) first_envelope: Option<i64>,
+}
+
 pub(crate) struct InferenceAttempt {
     identity: HostIdentity,
     attempt: String,
@@ -219,6 +230,25 @@ impl Store {
     pub fn embedded_inference_state(&self, identity: &HostIdentity) -> Result<HostInferenceState> {
         let mut c = self.lock()?;
         c.write_transaction(|tx| Ok(projection(initialize(tx, identity)?.1)))
+    }
+
+    pub(crate) fn select_embedded_round(
+        &self,
+        identity: &HostIdentity,
+    ) -> Result<EmbeddedRoundSnapshot> {
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let (generation, state) = initialize(tx, identity)?;
+            Ok(EmbeddedRoundSnapshot {
+                frontier: embedded_round::frontier(tx, identity)?,
+                inference: projection(state),
+                generation,
+                first_envelope: tx.query_row(
+                    "SELECT id FROM envelopes WHERE recipient=?1 AND delivered_request IS NULL ORDER BY id LIMIT 1",
+                    [&identity.actor.0], |row| row.get(0),
+                ).optional()?,
+            })
+        })
     }
 
     pub(crate) fn begin_embedded_inference(

@@ -368,6 +368,7 @@ impl JobScheduler {
             input.into(),
             context_snapshot,
             false,
+            false,
         )
         .await
     }
@@ -392,6 +393,33 @@ impl JobScheduler {
             input.into(),
             None,
             true,
+            true,
+        )
+        .await
+    }
+
+    /// Engine registers this original in its cleanup owner before physical
+    /// launch. There is no suspension after registry issuance on this path.
+    pub(crate) async fn register_engine_operation<I: Into<ToolInput>>(
+        &self,
+        provider: Arc<dyn Provider>,
+        operation: OperationId,
+        agent: AgentPath,
+        request: Option<RequestId>,
+        name: String,
+        input: I,
+        requires_publication: bool,
+    ) -> Result<JobHandle, JobError> {
+        self.admit_operation(
+            provider,
+            operation,
+            agent,
+            request,
+            name,
+            input.into(),
+            None,
+            true,
+            requires_publication,
         )
         .await
     }
@@ -429,7 +457,8 @@ impl JobScheduler {
         name: String,
         input: ToolInput,
         context_snapshot: Option<crate::context::ContextSnapshot>,
-        deferred: bool,
+        defer_launch: bool,
+        requires_publication: bool,
     ) -> Result<JobHandle, JobError> {
         if context_snapshot
             .as_ref()
@@ -460,7 +489,7 @@ impl JobScheduler {
             Job {
                 handle: handle.clone(),
                 started: false,
-                requires_publication: deferred,
+                requires_publication,
                 cancellation_owner: provider.cancellation_owner(),
                 cancellation_gate: Arc::new(Mutex::new(())),
                 cancellation_ack: None,
@@ -643,7 +672,7 @@ impl JobScheduler {
             return Err(JobError::UnknownCall);
         }
         drop(registry);
-        if !deferred {
+        if !defer_launch {
             self.release_operation(&operation, context_snapshot).await?;
         }
         Ok(handle)

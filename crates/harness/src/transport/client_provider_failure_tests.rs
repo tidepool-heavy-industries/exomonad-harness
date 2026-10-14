@@ -131,9 +131,14 @@ async fn provider_failure_diagnostic_survives_engine_block_reopen_and_recovery_r
             .await
             .unwrap_err();
         server.await.unwrap();
-        let EngineError::InferenceBlocked { block } = error else {
+        let EngineError::BlockedAction(failure) = error else {
             panic!("unexpected error: {error}");
         };
+        let block = failure.block().clone();
+        assert!(matches!(
+            failure.primary(),
+            EngineError::Transport(TransportError::ProviderStreamFailure { .. })
+        ));
         let InferenceBlockReason::ProviderStreamFailure {
             event: actual,
             diagnostic,

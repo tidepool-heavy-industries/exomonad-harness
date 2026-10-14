@@ -10,6 +10,7 @@ pub(crate) use compaction::ServerCompactionResponse;
 pub(crate) use embedded::{CommandInputAdmission, EmbeddedInputState};
 pub use embedded_commands::{EmbeddedCommandRecord, EmbeddedCommandState};
 pub use embedded_round::{EmbeddedRoundFrontier, EmbeddedRoundOutcome};
+pub(crate) use inference::EmbeddedRoundSnapshot;
 pub mod actor_output;
 pub mod chat;
 pub mod forms;
@@ -224,7 +225,95 @@ pub enum CompactionOwnershipRefusal {
 #[cfg(test)]
 #[path = "recovery_tests.rs"]
 mod recovery_tests;
+pub(crate) struct StoreRecoveryRequirements<'a> {
+    pub(crate) reopen: bool,
+    pub(crate) block: Option<&'a crate::embedding::InferenceBlock>,
+    pub(crate) uncertain: Option<&'a OperationId>,
+}
+
 impl StoreError {
+    /// A failed COMMIT fences every sibling handle. Other failures remain
+    /// distinct refusals and cannot issue authenticated reopen authority.
+    pub(crate) fn recovery_requirements(&self) -> StoreRecoveryRequirements<'_> {
+        match self {
+            Self::RecoveryRequired(_) | Self::AdmissionFenced => StoreRecoveryRequirements {
+                reopen: true,
+                block: None,
+                uncertain: None,
+            },
+            Self::InferenceBlocked { block } => StoreRecoveryRequirements {
+                reopen: false,
+                block: Some(block),
+                uncertain: None,
+            },
+            Self::InferenceRecoveryUncertain { operation } => StoreRecoveryRequirements {
+                reopen: false,
+                block: None,
+                uncertain: Some(operation),
+            },
+            Self::ProviderAdmission(..)
+            | Self::ConflictingProviderIssuance(..)
+            | Self::ConflictingProviderItem { .. }
+            | Self::IncompleteProviderPrefix { .. }
+            | Self::InvalidProviderEvidence(..)
+            | Self::InvalidForm
+            | Self::FormUnavailable
+            | Self::ConflictingFormOperation
+            | Self::InvalidSvg(..)
+            | Self::InvalidMedia
+            | Self::ActorOutputNeedsAuthority
+            | Self::InvalidActorOutput
+            | Self::ActorOutputRefused
+            | Self::ActorOutputAuthority(..)
+            | Self::ConflictingActorOutput
+            | Self::Context(..)
+            | Self::UnsupportedReplayOutcome { .. }
+            | Self::InvalidWaitContinuation { .. }
+            | Self::ConflictingReplayOutcome { .. }
+            | Self::UnsupportedReplayFormat { .. }
+            | Self::InvalidReplayOwnership { .. }
+            | Self::InvalidCompletionMarker { .. }
+            | Self::MissingReplayItem(..)
+            | Self::ConflictingCommand
+            | Self::InvalidCommandState
+            | Self::InferenceRunning
+            | Self::StaleInferenceRecovery
+            | Self::InvalidEmbeddedFrontier
+            | Self::UnownedEmbeddedRequest
+            | Self::InvalidEmbeddedBinding
+            | Self::DurabilityAdmissionBusy { .. }
+            | Self::Sql(..)
+            | Self::Json(..)
+            | Self::MissingRequest(..)
+            | Self::InvalidHistoryOffset
+            | Self::RequestAgentMismatch { .. }
+            | Self::DuplicateClaim
+            | Self::InvalidOutputPublication { .. }
+            | Self::UnboundOutputPublication { .. }
+            | Self::InconsistentOutputPublication { .. }
+            | Self::CompactionOwnership { .. }
+            | Self::OperationOriginMismatch
+            | Self::InvalidAgentPath(..)
+            | Self::MissingAgentParent(..)
+            | Self::MissingActiveSpawnCall { .. }
+            | Self::ReservedSessionStateNamespace(..)
+            | Self::MalformedReplayCall { .. }
+            | Self::ReplayOutputKindMismatch { .. }
+            | Self::AmbiguousReplayCall { .. }
+            | Self::MissingCheckpointCall { .. }
+            | Self::MissingCheckpointClaim { .. }
+            | Self::CheckpointBoundaryNotPending(..)
+            | Self::InvalidCheckpointMetadata
+            | Self::MissingCheckpointEffort(..)
+            | Self::ForeignCheckpoint
+            | Self::LegacyProvenance { .. } => StoreRecoveryRequirements {
+                reopen: false,
+                block: None,
+                uncertain: None,
+            },
+        }
+    }
+
     /// A checked projection refused retained continuity. Storage observation and
     /// transaction failures remain distinct and cannot become recovery evidence.
     pub(crate) fn is_inference_projection_refusal(&self) -> bool {

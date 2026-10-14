@@ -4,7 +4,13 @@
 //! calls are started immediately. Synchronous calls settle before another
 //! model request; asynchronous calls keep their original identities until settled.
 
+mod embedded_round;
 mod output;
+pub use embedded_round::{
+    EmbeddedRoundFailure, EmbeddedRoundReadiness, EmbeddedRoundSelection, EmbeddedRoundWait,
+    InferenceObligation, RoundAssessment, RoundCleanup, RoundExecution, RoundFailureSource,
+    RoundFailureStage, RoundSecondaryFailure, StoreContinuation,
+};
 #[cfg(test)]
 #[path = "engine/prepared_provider_tests.rs"]
 mod prepared_provider_tests;
@@ -60,6 +66,13 @@ enum PendingCompletion {
     PreserveForFollowup,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingCustody {
+    Unstarted,
+    Producer,
+    Observation,
+}
+
 #[derive(Clone)]
 struct PendingCall {
     operation: OperationId,
@@ -69,7 +82,7 @@ struct PendingCall {
     tool_kind: ToolKind,
     execution: ToolExecution,
     persist_here_invocation_output: bool,
-    cancel_job_on_cleanup: bool,
+    custody: PendingCustody,
     scheduling: ToolScheduling,
     queued: bool,
     completion: PendingCompletion,
@@ -110,7 +123,9 @@ enum YieldReason {
 
 enum DispatchResult {
     NotCall,
-    Pending(PendingCall),
+    Registered {
+        operation: OperationId,
+    },
     Settled {
         operation: OperationId,
         continuation: Option<crate::store::RecordedWaitContinuation>,
@@ -191,6 +206,12 @@ pub enum EngineError {
         persistence: StoreError,
     },
     #[error(transparent)]
+    Secondary(EngineSecondaryFailure),
+    #[error(transparent)]
+    CompletionSettlement(EngineCompletionSettlement),
+    #[error(transparent)]
+    BlockedAction(EngineBlockedAction),
+    #[error(transparent)]
     Transport(#[from] TransportError),
     /// Stream completion is unknown, but every locally admitted outstanding
     /// call was cleaned up and the interruption was durably recorded. The
@@ -213,8 +234,13 @@ pub enum EngineError {
     Store(#[from] StoreError),
     #[error(transparent)]
     Job(#[from] JobError),
-    #[error("cancellation of operation {operation:?} remains unconfirmed")]
-    UnconfirmedCancellation { operation: OperationId },
+    #[error("outstanding call cleanup failures: {0:?}")]
+    CleanupFailures(Vec<EngineError>),
+    #[error("cancellation of operation {operation:?} remains unconfirmed: {detail}")]
+    UnconfirmedCancellation {
+        operation: OperationId,
+        detail: String,
+    },
     #[error("rejected request lost its embedded agent head fence")]
     RejectedHeadMismatch,
     #[error("blocking store task failed")]
@@ -266,8 +292,123 @@ pub enum EngineError {
     )]
     Cleanup {
         primary: Box<EngineError>,
-        cleanup: String,
+        cleanup: EngineCleanupError,
     },
+}
+
+/// A failure after the original action preserves both its cause and stage.
+/// Only the Engine owner constructs this composition.
+#[derive(Debug, Error)]
+#[error("{primary}; additionally {stage:?} failed: {source}")]
+pub struct EngineSecondaryFailure {
+    primary: Box<EngineError>,
+    stage: RoundFailureStage,
+    source: Box<EngineError>,
+    head_request: Option<RequestId>,
+}
+impl EngineSecondaryFailure {
+    pub fn primary(&self) -> &EngineError {
+        &self.primary
+    }
+    pub fn stage(&self) -> RoundFailureStage {
+        self.stage
+    }
+    pub fn source_error(&self) -> &EngineError {
+        &self.source
+    }
+    pub fn head_request(&self) -> Option<&RequestId> {
+        self.head_request.as_ref()
+    }
+}
+impl EngineError {
+    fn with_secondary(
+        self,
+        stage: RoundFailureStage,
+        head_request: Option<RequestId>,
+        source: EngineError,
+    ) -> Self {
+        Self::Secondary(EngineSecondaryFailure {
+            primary: Box::new(self),
+            stage,
+            source: Box::new(source),
+            head_request,
+        })
+    }
+}
+
+/// Successful execution remains inspectable when a later owner settlement fails.
+#[derive(Debug, Error)]
+#[error("completed Engine action; {stage:?} failed: {source}")]
+pub struct EngineCompletionSettlement {
+    completion: Box<EngineCompletion>,
+    stage: RoundFailureStage,
+    source: Box<EngineError>,
+}
+impl EngineCompletionSettlement {
+    pub fn completion(&self) -> &EngineCompletion {
+        &self.completion
+    }
+    pub fn stage(&self) -> RoundFailureStage {
+        self.stage
+    }
+    pub fn source_error(&self) -> &EngineError {
+        &self.source
+    }
+}
+fn retain_post_action_failure(
+    result: Result<EngineCompletion, EngineError>,
+    stage: RoundFailureStage,
+    source: EngineError,
+) -> Result<EngineCompletion, EngineError> {
+    Err(match result {
+        Ok(completion) => EngineError::CompletionSettlement(EngineCompletionSettlement {
+            completion: Box::new(completion),
+            stage,
+            source: Box::new(source),
+        }),
+        Err(primary) => primary.with_secondary(stage, None, source),
+    })
+}
+
+/// A successful durable block records an obligation without replacing the
+/// action that required it. This is observation, never recovery authority.
+#[derive(Debug, Error)]
+#[error("{primary}; inference is durably blocked: {block:?}")]
+pub struct EngineBlockedAction {
+    primary: Box<EngineError>,
+    block: crate::embedding::InferenceBlock,
+}
+impl EngineBlockedAction {
+    pub fn primary(&self) -> &EngineError {
+        &self.primary
+    }
+    pub fn block(&self) -> &crate::embedding::InferenceBlock {
+        &self.block
+    }
+}
+
+/// Cleanup failures preserve their source independently of the action cause.
+#[derive(Debug, Error)]
+pub enum EngineCleanupError {
+    #[error(transparent)]
+    Engine(Box<EngineError>),
+    #[error("{0}")]
+    External(String),
+}
+impl From<EngineError> for EngineCleanupError {
+    fn from(error: EngineError) -> Self {
+        Self::Engine(Box::new(error))
+    }
+}
+impl From<String> for EngineCleanupError {
+    fn from(detail: String) -> Self {
+        Self::External(detail)
+    }
+}
+impl From<&str> for EngineCleanupError {
+    fn from(detail: &str) -> Self {
+        Self::External(detail.into())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -537,6 +678,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         )
         .instrument(span)
         .await
+        .into_result()
     }
 
     /// Opt into explicit server compaction after a turn whose input usage
@@ -679,10 +821,31 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         head: Option<RequestId>,
         new_items: Vec<Item>,
         cancellation: watch::Receiver<bool>,
-        mut incoming: tokio::sync::mpsc::UnboundedReceiver<I>,
+        incoming: tokio::sync::mpsc::UnboundedReceiver<I>,
         finalize_schema: Option<serde_json::Value>,
         recovering: bool,
     ) -> Result<EngineCompletion, EngineError> {
+        self.run_with_finalize_receipt(
+            head,
+            new_items,
+            cancellation,
+            incoming,
+            finalize_schema,
+            recovering,
+        )
+        .await?
+        .into_result()
+    }
+
+    async fn run_with_finalize_receipt<I: Into<MailboxSignal> + Send + 'static>(
+        &self,
+        head: Option<RequestId>,
+        new_items: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+        mut incoming: tokio::sync::mpsc::UnboundedReceiver<I>,
+        finalize_schema: Option<serde_json::Value>,
+        recovering: bool,
+    ) -> Result<embedded_round::EngineRunReceipt, EngineError> {
         let (route, protocol) = self.client.response_contract()?;
         self.store.initialize_context_target(
             &self.origin,
@@ -720,7 +883,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         });
         let span = tracing::debug_span!(target: "harness::runtime_cost", "engine_run",
             actor = %self.config.agent.0, recovering, initial_items = new_items.len());
-        let mut result = self
+        let mut receipt = self
             .run_loop(
                 head,
                 new_items,
@@ -735,27 +898,118 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         drop(keepalive);
         forwarder.abort();
         if let Some(attempt) = &inference_attempt {
-            if matches!(&result, Ok(_) | Err(EngineError::Cancelled { .. })) {
-                self.store.finish_embedded_inference(attempt)?;
-            } else if matches!(&result, Err(EngineError::Store(error)) if error.is_inference_projection_refusal())
+            let assessment = receipt.assessment();
+            if receipt.result.is_ok()
+                || (assessment.execution() == RoundExecution::Cancelled
+                    && assessment.cleanup() == RoundCleanup::Confirmed)
             {
+                if let Err(source) = self.store.finish_embedded_inference(attempt) {
+                    receipt
+                        .add_failure(RoundFailureStage::InferenceAttemptSettlement, source.into());
+                }
+            } else if assessment.continuity_refused() {
                 let identity = self.embedded_identity().expect("embedded attempt");
-                let frontier = self.store.embedded_round_frontier(&identity)?;
-                if let Some(request) = frontier.pending_head.or(frontier.settled_head) {
-                    let block = self.store.block_embedded_inference(
-                        &identity,
-                        &request,
-                        crate::embedding::InferenceBlockReason::ContinuityUnproven,
-                    )?;
-                    result = Err(EngineError::InferenceBlocked { block });
+                let recording = (|| {
+                    let frontier = self.store.embedded_round_frontier(&identity)?;
+                    frontier
+                        .pending_head
+                        .or(frontier.settled_head)
+                        .map(|request| {
+                            self.store.block_embedded_inference(
+                                &identity,
+                                &request,
+                                crate::embedding::InferenceBlockReason::ContinuityUnproven,
+                            )
+                        })
+                        .transpose()
+                })();
+                match recording {
+                    Ok(Some(block)) => {
+                        let primary = receipt
+                            .result
+                            .expect_err("continuity refusal has an action cause");
+                        receipt.result = Err(EngineError::BlockedAction(EngineBlockedAction {
+                            primary: Box::new(primary),
+                            block,
+                        }));
+                    }
+                    Ok(None) => {}
+                    Err(source) => {
+                        receipt
+                            .add_failure(RoundFailureStage::InferenceBlockRecording, source.into());
+                    }
                 }
             }
         }
-        result
+        Ok(receipt)
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn run_loop(
+        &self,
+        head: Option<RequestId>,
+        initial: Vec<Item>,
+        cancellation: watch::Receiver<bool>,
+        envelopes: tokio::sync::mpsc::UnboundedReceiver<MailboxSignal>,
+        admit_inbox: bool,
+        finalize_schema: Option<&serde_json::Value>,
+        recovering: bool,
+    ) -> embedded_round::EngineRunReceipt {
+        use embedded_round::{CleanupReceipt, EngineRunReceipt};
+        let mut pending = Vec::new();
+        let mut recovery_cleanup = Vec::new();
+        let mut observed_head = head.clone();
+        let mut ordered_cleanup = None;
+        let result = self
+            .run_loop_inner(
+                head,
+                initial,
+                cancellation,
+                envelopes,
+                admit_inbox,
+                finalize_schema,
+                recovering,
+                &mut pending,
+                &mut recovery_cleanup,
+                &mut observed_head,
+                &mut ordered_cleanup,
+            )
+            .await;
+        pending.extend(recovery_cleanup);
+        let operations = pending.iter().map(|call| call.operation.clone()).collect();
+        let mut receipt = EngineRunReceipt {
+            result,
+            head: observed_head,
+            cleanup: CleanupReceipt::Unobserved,
+            secondary: Vec::new(),
+            inference: Vec::new(),
+        };
+        if let Some(cleanup) = ordered_cleanup {
+            assert!(
+                pending.is_empty(),
+                "ordered provider cleanup consumes the round's obligations"
+            );
+            receipt.cleanup = cleanup;
+        } else if receipt.result.is_err() {
+            match self.cancel_pending(&pending).await {
+                Ok(()) => receipt.cleanup = CleanupReceipt::Confirmed,
+                Err(source) => {
+                    receipt.cleanup = CleanupReceipt::Outstanding(operations);
+                    receipt.add_failure(RoundFailureStage::NativeCleanup, source);
+                }
+            }
+        } else {
+            receipt.cleanup = if pending.is_empty() {
+                CleanupReceipt::Confirmed
+            } else {
+                CleanupReceipt::Outstanding(operations)
+            };
+        }
+        receipt
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_loop_inner(
         &self,
         head: Option<RequestId>,
         initial: Vec<Item>,
@@ -764,6 +1018,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         admit_inbox: bool,
         finalize_schema: Option<&serde_json::Value>,
         recovering: bool,
+        pending: &mut Vec<PendingCall>,
+        recovery_cleanup: &mut Vec<PendingCall>,
+        observed_head: &mut Option<RequestId>,
+        ordered_cleanup: &mut Option<embedded_round::CleanupReceipt>,
     ) -> Result<EngineCompletion, EngineError> {
         let settled_head = head.clone();
         {
@@ -784,6 +1042,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         };
         let resuming = pending_head.is_some();
         let head = pending_head.or(head);
+        *observed_head = head.clone();
         let recorded_response = if resuming {
             self.store
                 .recorded_response(head.as_ref().expect("pending request"))?
@@ -871,7 +1130,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
             }
         }
-        let mut pending = Vec::<PendingCall>::new();
         let mut replay_items = Vec::<(OperationId, RequestId)>::new();
         let mut replay_outputs =
             Vec::<(OperationId, crate::turn::JobOutput, ToolKind, RequestId)>::new();
@@ -989,23 +1247,25 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .scheduler
                 .fork_claim_exact(&claim.operation, self.origin.clone(), true)
                 .await?;
+            let attachment = PendingCall {
+                operation: claim.operation.clone(),
+                call_id: claim.call_id,
+                claim_request: claim.request.clone(),
+                wait: None,
+                tool_kind,
+                execution,
+                persist_here_invocation_output: false,
+                custody: PendingCustody::Observation,
+                scheduling: ToolScheduling::Async,
+                queued: false,
+                completion,
+            };
             match settlement {
                 Some(output) => {
-                    replay_outputs.push((claim.operation, output, tool_kind, claim.request))
+                    recovery_cleanup.push(attachment);
+                    replay_outputs.push((claim.operation, output, tool_kind, claim.request));
                 }
-                None => pending.push(PendingCall {
-                    operation: claim.operation,
-                    call_id: claim.call_id,
-                    claim_request: claim.request,
-                    wait: None,
-                    tool_kind,
-                    execution,
-                    persist_here_invocation_output: false,
-                    cancel_job_on_cleanup: false,
-                    scheduling: ToolScheduling::Async,
-                    queued: false,
-                    completion,
-                }),
+                None => pending.push(attachment),
             }
         }
         if let Some(turn) = &recorded_response {
@@ -1047,6 +1307,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             ),
         })
         .await?;
+        *observed_head = Some(id.clone());
         if !inherited_history.iter().any(Item::is_configuration_update) {
             let store = self.store.clone();
             let request = id.clone();
@@ -1067,6 +1328,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             self.publish_operation_output(&id, &operation, &claimant)
                 .await?;
         }
+        recovery_cleanup.clear();
         if admit_inbox {
             let store = self.store.clone();
             let recipient = self.config.agent.clone();
@@ -1088,27 +1350,22 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         )> = None;
         loop {
             if *cancellation.borrow() {
-                return Err(self
-                    .cleanup_pending(
-                        EngineError::Cancelled {
-                            head_request: Some(parent.clone()),
-                        },
-                        &pending,
-                    )
-                    .await);
+                return Err(EngineError::Cancelled {
+                    head_request: Some(parent.clone()),
+                });
             }
             if let Err(error) = self
-                .settle_synchronous_calls(&mut pending, &parent, &mut cancellation)
+                .settle_synchronous_calls(pending, &parent, &mut cancellation)
                 .await
             {
-                return Err(self.cleanup_pending(error, &pending).await);
+                return Err(error);
             }
             // AtBoundary is a property of *every* model request, not of a
             // completed turn. Admission is a Store transaction and neither
             // polls nor cancels an in-flight provider Job.
             if admit_inbox {
                 if let Err(error) = self.append_unread_envelopes(&parent).await {
-                    return Err(self.cleanup_pending(error, &pending).await);
+                    return Err(error);
                 }
             }
             let request_preparation_started =
@@ -1116,7 +1373,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     .then(std::time::Instant::now);
             let history = match self.read_model_history_window(&parent).await {
                 Ok(history) => history,
-                Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                Err(error) => return Err(error),
             };
             let history_bytes = (compact_due
                 && self.compaction_strategy == CompactionStrategy::PlainText)
@@ -1137,7 +1394,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     .compact_window(
                         &parent,
                         &history,
-                        &pending,
+                        pending,
                         &previous_usage,
                         compact_model,
                         cancellation.clone(),
@@ -1145,24 +1402,25 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     .await
                 {
                     Ok(request) => request,
-                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                    Err(error) => return Err(error),
                 };
                 if self.compaction_strategy == CompactionStrategy::PlainText {
                     last_text_compaction_attempt_bytes = history_bytes;
                 }
                 if let Some(request) = successor {
                     parent = request;
+                    *observed_head = Some(parent.clone());
                 }
             }
             if did_compact && admit_inbox {
                 if let Err(error) = self.append_unread_envelopes(&parent).await {
-                    return Err(self.cleanup_pending(error, &pending).await);
+                    return Err(error);
                 }
             }
             let history = if did_compact {
                 match self.read_model_history_window(&parent).await {
                     Ok(history) => history,
-                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                    Err(error) => return Err(error),
                 }
             } else {
                 history
@@ -1176,7 +1434,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 result = self.provider.request_snapshot() => result,
                 changed = cancellation.changed() => {
                     if changed.is_err() || *cancellation.borrow() {
-                        return Err(self.cleanup_pending(EngineError::Cancelled { head_request: Some(parent.clone()) }, &pending).await);
+                        return Err(EngineError::Cancelled { head_request: Some(parent.clone()) });
                     }
                     continue;
                 }
@@ -1184,16 +1442,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let snapshot = match snapshot {
                 Ok(snapshot) => snapshot,
                 Err(crate::provider::ProviderError::RequestAdmissionClosed) => {
-                    return Err(self
-                        .cleanup_pending(
-                            EngineError::Cancelled {
-                                head_request: Some(parent.clone()),
-                            },
-                            &pending,
-                        )
-                        .await);
+                    return Err(EngineError::Cancelled {
+                        head_request: Some(parent.clone()),
+                    });
                 }
-                Err(error) => return Err(self.cleanup_pending(error.into(), &pending).await),
+                Err(error) => return Err(error.into()),
             };
             let request_provider: Arc<dyn Provider> =
                 snapshot.unwrap_or_else(|| self.provider.clone());
@@ -1204,7 +1457,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             {
                 let tools = match self.compose_tools(finalize_schema, &provider_tools) {
                     Ok(tools) => tools,
-                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                    Err(error) => return Err(error),
                 };
                 request_tools = Some((provider_tools, tools));
             }
@@ -1240,15 +1493,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             .and_then(Option::as_ref)
                             .cloned()
                         else {
-                            return Err(self
-                                .cleanup_pending(
-                                    StoreError::Context(crate::context::ContextError::Replay(
-                                        crate::context::ContextReplayRejection::InvalidMembership,
-                                    ))
-                                    .into(),
-                                    &pending,
-                                )
-                                .await);
+                            return Err(StoreError::Context(crate::context::ContextError::Replay(
+                                crate::context::ContextReplayRejection::InvalidMembership,
+                            ))
+                            .into());
                         };
                         let store = self.store.clone();
                         let projected = blocking(move || {
@@ -1257,7 +1505,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         .await;
                         let projected = match projected {
                             Ok(projected) => projected,
-                            Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                            Err(error) => return Err(error),
                         };
                         let (item, occurrence) = projected.into_parts();
                         input_occurrences[index] = Some(occurrence);
@@ -1295,7 +1543,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     blocking(move || store.record_event(Some(&request), "tool_surface", &evidence))
                         .await
                 {
-                    return Err(self.cleanup_pending(error, &pending).await);
+                    return Err(error);
                 }
             }
             let plan = crate::hooks::RequestPlanView {
@@ -1308,7 +1556,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 result = request_provider.before_request(&plan) => result,
                 changed = cancellation.changed() => {
                     if changed.is_err() || *cancellation.borrow() {
-                        return Err(self.cleanup_pending(EngineError::Cancelled { head_request: Some(parent.clone()) }, &pending).await);
+                        return Err(EngineError::Cancelled { head_request: Some(parent.clone()) });
                     }
                     continue;
                 }
@@ -1340,22 +1588,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         !seen.insert(name.as_str()) || !available.contains(name.as_str())
                     });
                     if let Some(name) = invalid {
-                        return Err(self
-                            .cleanup_pending(
-                                EngineError::InvalidToolSelection(name.clone()),
-                                &pending,
-                            )
-                            .await);
+                        return Err(EngineError::InvalidToolSelection(name.clone()));
                     }
                     if finalize_schema.is_some() && !seen.contains(FINALIZE_TOOL_NAME) {
-                        return Err(self
-                            .cleanup_pending(
-                                EngineError::InvalidToolSelection(
-                                    "required typed completion tool excluded".into(),
-                                ),
-                                &pending,
-                            )
-                            .await);
+                        return Err(EngineError::InvalidToolSelection(
+                            "required typed completion tool excluded".into(),
+                        ));
                     }
                     Some(tools_allowed.clone())
                 }
@@ -1375,9 +1613,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 .is_some_and(|content| !content.is_empty())
                     });
                     if !valid {
-                        return Err(self
-                            .cleanup_pending(EngineError::InvalidInjectedItem, &pending)
-                            .await);
+                        return Err(EngineError::InvalidInjectedItem);
                     }
                     if let Some(names) = tools_allowed {
                         let mut seen = std::collections::HashSet::new();
@@ -1389,22 +1625,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         if let Some(name) = names.iter().find(|name| {
                             !seen.insert(name.as_str()) || !available.contains(name.as_str())
                         }) {
-                            return Err(self
-                                .cleanup_pending(
-                                    EngineError::InvalidToolSelection(name.clone()),
-                                    &pending,
-                                )
-                                .await);
+                            return Err(EngineError::InvalidToolSelection(name.clone()));
                         }
                         if finalize_schema.is_some() && !seen.contains(FINALIZE_TOOL_NAME) {
-                            return Err(self
-                                .cleanup_pending(
-                                    EngineError::InvalidToolSelection(
-                                        "required typed completion tool excluded".into(),
-                                    ),
-                                    &pending,
-                                )
-                                .await);
+                            return Err(EngineError::InvalidToolSelection(
+                                "required typed completion tool excluded".into(),
+                            ));
                         }
                     }
                     req.input.push(item.clone());
@@ -1430,7 +1656,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             if let Err(error) =
                 blocking(move || store.record_decision(Some(&decision_request), &decision)).await
             {
-                return Err(self.cleanup_pending(error, &pending).await);
+                return Err(error);
             }
             let store = self.store.clone();
             let seal_head = parent.clone();
@@ -1453,7 +1679,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .await
             {
                 Ok(sealed) => sealed,
-                Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                Err(error) => return Err(error),
             };
             if let Some(started) = request_preparation_started {
                 tracing::debug!(target: "harness::runtime_cost", request_id = %parent.0,
@@ -1469,10 +1695,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let mut retained_in_stream = HashSet::new();
             let mut settlements_open = true;
             if let Err(error) = self
-                .retain_pending_outputs(&pending, &mut retained_in_stream)
+                .retain_pending_outputs(pending, &mut retained_in_stream)
                 .await
             {
-                return Err(self.cleanup_pending(error, &pending).await);
+                return Err(error);
             }
             let mut output_lifetime = output::OutputLifetime {
                 observer: self.output_observer.clone(),
@@ -1505,8 +1731,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     settlement = settlements.recv(), if settlements_open => {
                         match settlement {
                             Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                if let Err(error) = self.retain_pending_outputs(&pending, &mut retained_in_stream).await {
-                                    return Err(self.cleanup_pending(error, &pending).await);
+                                if let Err(error) = self.retain_pending_outputs(pending, &mut retained_in_stream).await {
+                                    return Err(error);
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => settlements_open = false,
@@ -1520,13 +1746,20 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             let state = if matches!(error, TransportError::IncompleteResponse(_)) { crate::store::ProviderResponseState::Interrupted } else if error.request_failure().is_some() { crate::store::ProviderResponseState::Rejected } else { crate::store::ProviderResponseState::Failed };
                             let store = self.store.clone();
                             let stopped_request = parent.clone();
-                            if let Err(stop_error) = blocking(move || store.stop_provider_response(&stopped_request, state)).await {
-                                return Err(self.cleanup_pending(stop_error, &pending).await);
+                            let stopped = blocking(move || store.stop_provider_response(&stopped_request, state)).await;
+                            let failure = self.reject_or_cleanup(error, settled_head.as_ref(),
+                                &parent, std::mem::take(pending)).await;
+                            *ordered_cleanup = Some(failure.cleanup);
+                            let mut cause = failure.cause;
+                            if let Err(source) = retained_tail {
+                                cause = cause.with_secondary(RoundFailureStage::ProviderTailRecording,
+                                    Some(parent.clone()), source);
                             }
-                            if let Err(retain_error) = retained_tail {
-                                return Err(self.cleanup_pending(retain_error, &pending).await);
+                            if let Err(source) = stopped {
+                                cause = cause.with_secondary(RoundFailureStage::ProviderResponseSettlement,
+                                    Some(parent.clone()), source);
                             }
-                            return Err(self.reject_or_cleanup(error, settled_head.as_ref(), &parent, &pending).await);
+                            return Err(cause);
                         }
                     },
                     changed = cancellation.changed() => {
@@ -1535,13 +1768,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             let retained_tail = self.retain_provider_tail(&provider_request, &parent, &mut event_rx).await;
                             let store = self.store.clone();
                             let stopped = parent.clone();
-                            if let Err(error) = blocking(move || store.stop_provider_response(&stopped, crate::store::ProviderResponseState::Interrupted)).await {
-                                return Err(self.cleanup_pending(error, &pending).await);
+                            let stopped = blocking(move || store.stop_provider_response(&stopped, crate::store::ProviderResponseState::Interrupted)).await;
+                            let mut cause = EngineError::Cancelled { head_request: Some(parent.clone()) };
+                            if let Err(source) = retained_tail {
+                                cause = cause.with_secondary(RoundFailureStage::ProviderTailRecording,
+                                    Some(parent.clone()), source);
                             }
-                            if let Err(error) = retained_tail {
-                                return Err(self.cleanup_pending(error, &pending).await);
+                            if let Err(source) = stopped {
+                                cause = cause.with_secondary(RoundFailureStage::ProviderResponseSettlement,
+                                    Some(parent.clone()), source);
                             }
-                            return Err(self.cleanup_pending(EngineError::Cancelled { head_request: Some(parent.clone()) }, &pending).await);
+                            return Err(cause);
                         }
                     }
                     event = event_rx.recv(), if event_stream_open => {
@@ -1549,16 +1786,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             Some(StreamEvent::CompletedItem(done)) => {
                                 let (item, inserted) = match self.retain_provider_item(&provider_request, done).await {
                                     Ok(retained) => retained,
-                                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                                    Err(error) => return Err(error),
                                 };
                                 let call_id = match parsed_call_id(&item) {
                                     Ok(call_id) => call_id,
-                                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                                    Err(error) => return Err(error),
                                 };
                                 if let Some(call_id) = call_id {
                                     if turn_call_ids.contains(&call_id) {
                                         if conflicting_call(&turn_call_items, &call_id, &item) {
-                                            return Err(self.cleanup_pending(EngineError::InvalidFunctionCall, &pending).await);
+                                            return Err(EngineError::InvalidFunctionCall);
                                         }
                                         continue;
                                     }
@@ -1578,9 +1815,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                     continue;
                                 }
                                 let call_item = item.clone();
-                                match self.dispatch_with_provider(item, &parent, request_provider.clone(), Some(&request_scheduling), &mut cancellation).await {
-                                    Ok(DispatchResult::Pending(call)) => {
-                                        if !pending.iter().any(|current| current.operation == call.operation) {
+                                match self.dispatch_with_provider(item, &parent, request_provider.clone(), Some(&request_scheduling), &mut cancellation, pending).await {
+                                    Ok(DispatchResult::Registered { operation }) => {
+                                        let call = pending.iter().find(|call| call.operation == operation)
+                                            .expect("dispatch registered its exact operation").clone();
+                                        if !turn_call_ids.contains(&call.call_id) {
                                             if call.wait.is_some() && (wait_call.is_some() || !inline_settled.is_empty()) {
                                                 deferred_dispatch_error = Some(EngineError::MultipleWaitAgents);
                                                 continue;
@@ -1588,7 +1827,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                             if call.wait.is_some() { wait_call = Some(call.call_id.clone()); }
                                             turn_call_ids.push(call.call_id.clone());
                                             turn_call_items.push((call.call_id.clone(), call_item));
-                                            pending.push(call);
                                         }
                                     }
                                     Ok(DispatchResult::Settled { operation, continuation, barrier, commit }) => {
@@ -1624,7 +1862,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .await
                 {
                     Ok(turn) => turn,
-                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                    Err(error) => return Err(error),
                 }
             };
             // A completed response can race the buffered final item events.
@@ -1642,18 +1880,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 if let StreamEvent::CompletedItem(done) = event {
                     let (item, _) = match self.retain_provider_item(&provider_request, done).await {
                         Ok(retained) => retained,
-                        Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                        Err(error) => return Err(error),
                     };
                     let call_id = match parsed_call_id(&item) {
                         Ok(call_id) => call_id,
-                        Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                        Err(error) => return Err(error),
                     };
                     if let Some(call_id) = call_id {
                         if turn_call_ids.contains(&call_id) {
                             if conflicting_call(&turn_call_items, &call_id, &item) {
-                                return Err(self
-                                    .cleanup_pending(EngineError::InvalidFunctionCall, &pending)
-                                    .await);
+                                return Err(EngineError::InvalidFunctionCall);
                             }
                             continue;
                         }
@@ -1676,27 +1912,27 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             request_provider.clone(),
                             Some(&request_scheduling),
                             &mut cancellation,
+                            pending,
                         )
                         .await
                     {
-                        Ok(DispatchResult::Pending(call)) => {
-                            if !pending
+                        Ok(DispatchResult::Registered { operation }) => {
+                            let call = pending
                                 .iter()
-                                .any(|current| current.operation == call.operation)
-                            {
+                                .find(|call| call.operation == operation)
+                                .expect("dispatch registered its exact operation")
+                                .clone();
+                            if !turn_call_ids.contains(&call.call_id) {
                                 if call.wait.is_some()
                                     && (wait_call.is_some() || !inline_settled.is_empty())
                                 {
-                                    return Err(self
-                                        .cleanup_pending(EngineError::MultipleWaitAgents, &pending)
-                                        .await);
+                                    return Err(EngineError::MultipleWaitAgents);
                                 }
                                 if call.wait.is_some() {
                                     wait_call = Some(call.call_id.clone());
                                 }
                                 turn_call_ids.push(call.call_id.clone());
                                 turn_call_items.push((call.call_id.clone(), call_item));
-                                pending.push(call);
                             }
                         }
                         Ok(DispatchResult::Settled {
@@ -1706,9 +1942,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             commit,
                         }) => {
                             if wait_call.is_some() || !inline_settled.is_empty() {
-                                return Err(self
-                                    .cleanup_pending(EngineError::MultipleWaitAgents, &pending)
-                                    .await);
+                                return Err(EngineError::MultipleWaitAgents);
                             }
                             turn_call_ids.push(operation.call.clone());
                             turn_call_items.push((operation.call.clone(), call_item));
@@ -1716,7 +1950,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         }
                         Ok(DispatchResult::NotCall) => {}
                         Err(error) => {
-                            return Err(self.cleanup_pending(error, &pending).await);
+                            return Err(error);
                         }
                     }
                 }
@@ -1727,7 +1961,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             for item in &turn.items {
                 if let Some(call_id) = match parsed_call_id(item) {
                     Ok(call_id) => call_id,
-                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                    Err(error) => return Err(error),
                 } {
                     if conflicting_call(&turn_call_items, &call_id, item)
                         || (self.bounded_invocation
@@ -1736,9 +1970,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                     && retained != item
                             }))
                     {
-                        return Err(self
-                            .cleanup_pending(EngineError::InvalidFunctionCall, &pending)
-                            .await);
+                        return Err(EngineError::InvalidFunctionCall);
                     }
                 }
                 remove_matching_item(&mut persisted_items, item);
@@ -1752,11 +1984,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     let call_id = match parsed_call_id(item) {
                         Ok(Some(call_id)) => call_id,
                         Ok(None) => {
-                            return Err(self
-                                .cleanup_pending(EngineError::InvalidFunctionCall, &pending)
-                                .await);
+                            return Err(EngineError::InvalidFunctionCall);
                         }
-                        Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                        Err(error) => return Err(error),
                     };
                     if !turn_call_ids.contains(&call_id) {
                         match self
@@ -1766,23 +1996,26 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 request_provider.clone(),
                                 Some(&request_scheduling),
                                 &mut cancellation,
+                                pending,
                             )
                             .await
                         {
-                            Ok(DispatchResult::Pending(call)) => {
+                            Ok(DispatchResult::Registered { operation }) => {
+                                let call = pending
+                                    .iter()
+                                    .find(|call| call.operation == operation)
+                                    .expect("dispatch registered its exact operation")
+                                    .clone();
                                 if call.wait.is_some()
                                     && (wait_call.is_some() || !inline_settled.is_empty())
                                 {
-                                    return Err(self
-                                        .cleanup_pending(EngineError::MultipleWaitAgents, &pending)
-                                        .await);
+                                    return Err(EngineError::MultipleWaitAgents);
                                 }
                                 if call.wait.is_some() {
                                     wait_call = Some(call_id.clone());
                                 }
                                 turn_call_ids.push(call_id.clone());
                                 turn_call_items.push((call_id.clone(), item.clone()));
-                                pending.push(call);
                             }
                             Ok(DispatchResult::Settled {
                                 operation,
@@ -1791,28 +2024,24 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 commit,
                             }) => {
                                 if wait_call.is_some() || !inline_settled.is_empty() {
-                                    return Err(self
-                                        .cleanup_pending(EngineError::MultipleWaitAgents, &pending)
-                                        .await);
+                                    return Err(EngineError::MultipleWaitAgents);
                                 }
                                 turn_call_ids.push(operation.call.clone());
                                 turn_call_items.push((operation.call.clone(), item.clone()));
                                 inline_settled.push((operation, continuation, barrier, commit));
                             }
                             Ok(DispatchResult::NotCall) => {
-                                return Err(self
-                                    .cleanup_pending(EngineError::InvalidFunctionCall, &pending)
-                                    .await);
+                                return Err(EngineError::InvalidFunctionCall);
                             }
                             Err(error) => {
-                                return Err(self.cleanup_pending(error, &pending).await);
+                                return Err(error);
                             }
                         }
                     }
                 }
             }
             if let Some(error) = deferred_dispatch_error {
-                return Err(self.cleanup_pending(error, &pending).await);
+                return Err(error);
             }
             let usage_for_store = StoredUsage {
                 input_tokens: i64::try_from(turn.usage.input_tokens).unwrap_or(i64::MAX),
@@ -1822,7 +2051,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let store = self.store.clone();
             let request = parent.clone();
             if let Err(error) = blocking(move || store.set_usage(&request, usage_for_store)).await {
-                return Err(self.cleanup_pending(error, &pending).await);
+                return Err(error);
             }
             let usage = json!({
                 "response_id":turn.response_id,
@@ -1838,7 +2067,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 blocking(move || store.record_event(Some(&request), "responses_usage", &usage))
                     .await
             {
-                return Err(self.cleanup_pending(error, &pending).await);
+                return Err(error);
             }
             previous_usage = turn.usage.clone();
             compact_due = self
@@ -1856,15 +2085,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     .collect::<Vec<_>>();
                 if !calls.is_empty() {
                     if calls.len() != 1 {
-                        return Err(self
-                            .cleanup_pending(EngineError::InvalidFinalizeCount, &pending)
-                            .await);
+                        return Err(EngineError::InvalidFinalizeCount);
                     }
                     let completion =
                         match crate::finalize::ValidatedFinalize::parse(calls[0], schema) {
                             Ok(completion) => completion,
                             Err(error) => {
-                                return Err(self.cleanup_pending(error.into(), &pending).await);
+                                return Err(error.into());
                             }
                         };
                     let store = self.store.clone();
@@ -1874,7 +2101,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     })
                     .await
                     {
-                        return Err(self.cleanup_pending(error, &pending).await);
+                        return Err(error);
                     }
                 }
             }
@@ -1885,7 +2112,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let had_sync_calls = pending.iter().any(|call| call.queued);
             if let Err(error) = self
                 .execute_sync_calls(
-                    &mut pending,
+                    pending,
                     &mut parent,
                     &turn.items,
                     &mut cancellation,
@@ -1893,7 +2120,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 )
                 .await
             {
-                return Err(self.cleanup_pending(error, &pending).await);
+                return Err(error);
             }
 
             let had_inline_wait = !inline_settled.is_empty();
@@ -1902,87 +2129,79 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     .await_replay_barrier(
                         barrier,
                         ReplayBarrierStage::BeforeWait,
-                        &pending,
+                        pending,
                         &parent,
                         &mut cancellation,
                     )
                     .await
                 {
-                    return Err(self.cleanup_pending(error, &pending).await);
+                    return Err(error);
                 }
             }
 
-            let mut settled_this_turn = match self.persist_settled(&mut pending, &parent).await {
+            let mut settled_this_turn = match self.persist_settled(pending, &parent).await {
                 Ok(settled) => settled,
-                Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                Err(error) => return Err(error),
             };
 
             // Retained builtin output follows every model Item and the ready
             // job drain, matching the live wait boundary's history order.
             for (operation, continuation, barrier, commit) in inline_settled {
                 if commit.is_some() && settled_this_turn != barrier.before {
-                    return Err(self
-                        .cleanup_pending(
-                            EngineError::ClaimRecoveryConflict(operation.call.0.clone()),
-                            &pending,
-                        )
-                        .await);
+                    return Err(EngineError::ClaimRecoveryConflict(operation.call.0.clone()));
                 }
                 let item = match self
                     .read_settled_output(&operation, &operation.request)
                     .await
                 {
                     Ok(item) => item,
-                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                    Err(error) => return Err(error),
                 };
                 let mut attached = vec![item];
                 if let Some(continuation) = continuation {
                     match continuation.into_items(&operation, &attached[0]) {
                         Ok(items) => attached.extend(items),
                         Err(error) => {
-                            return Err(self.cleanup_pending(error.into(), &pending).await);
+                            return Err(error.into());
                         }
                     }
                 }
                 let published = match self.append_retaining_items(&parent, attached).await {
                     Ok(items) => items,
-                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                    Err(error) => return Err(error),
                 };
                 let recorded_wait = commit.is_some();
                 if let Some(commit) = commit {
                     if let Err(error) = commit.commit(&operation, &published[0]) {
-                        return Err(self.cleanup_pending(error.into(), &pending).await);
+                        return Err(error.into());
                     }
                 }
                 drop(published);
                 if let Err(error) = self.acknowledge_output(&operation).await {
-                    return Err(self.cleanup_pending(error, &pending).await);
+                    return Err(error);
                 }
                 if let Err(error) = self
                     .await_replay_barrier(
                         &barrier,
                         ReplayBarrierStage::AfterWait,
-                        &pending,
+                        pending,
                         &parent,
                         &mut cancellation,
                     )
                     .await
                 {
-                    return Err(self.cleanup_pending(error, &pending).await);
+                    return Err(error);
                 }
-                match self.persist_settled(&mut pending, &parent).await {
+                match self.persist_settled(pending, &parent).await {
                     Ok(settled) => {
                         if recorded_wait && settled != barrier.after {
-                            return Err(self
-                                .cleanup_pending(
-                                    EngineError::ClaimRecoveryConflict(operation.call.0.clone()),
-                                    &pending,
-                                )
-                                .await);
+                            return Err(EngineError::ClaimRecoveryConflict(
+                                operation.call.0.clone(),
+                            ));
                         }
                         settled_this_turn.extend(settled)
                     }
-                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                    Err(error) => return Err(error),
                 }
             }
 
@@ -1994,11 +2213,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                 } else {
                     match self
-                        .wait_for_resume(&pending, &mut envelopes, &mut cancellation)
+                        .wait_for_resume(pending, &mut envelopes, &mut cancellation)
                         .await
                     {
                         Ok(result) => result,
-                        Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                        Err(error) => return Err(error),
                     }
                 };
                 let cancelled = matches!(&result.resumed_by, WaitResumeExact::Cancelled);
@@ -2009,7 +2228,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 };
                 if let Err(error) = self
                     .persist_wait_result(
-                        &mut pending,
+                        pending,
                         &parent,
                         Some(&wait_operation),
                         result,
@@ -2018,17 +2237,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     )
                     .await
                 {
-                    return Err(self.cleanup_pending(error, &pending).await);
+                    return Err(error);
                 }
                 if cancelled {
-                    return Err(self
-                        .cleanup_pending(
-                            EngineError::Cancelled {
-                                head_request: Some(parent.clone()),
-                            },
-                            &pending,
-                        )
-                        .await);
+                    return Err(EngineError::Cancelled {
+                        head_request: Some(parent.clone()),
+                    });
                 }
             } else if !had_inline_wait
                 && is_final(&turn, finalize_schema.is_some())
@@ -2038,27 +2252,22 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 && settled_this_turn.is_empty()
             {
                 let result = match self
-                    .wait_for_resume(&pending, &mut envelopes, &mut cancellation)
+                    .wait_for_resume(pending, &mut envelopes, &mut cancellation)
                     .await
                 {
                     Ok(result) => result,
-                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                    Err(error) => return Err(error),
                 };
                 if matches!(&result.resumed_by, WaitResumeExact::Cancelled) {
-                    return Err(self
-                        .cleanup_pending(
-                            EngineError::Cancelled {
-                                head_request: Some(parent.clone()),
-                            },
-                            &pending,
-                        )
-                        .await);
+                    return Err(EngineError::Cancelled {
+                        head_request: Some(parent.clone()),
+                    });
                 }
                 if let Err(error) = self
-                    .persist_wait_result(&mut pending, &parent, None, result, &[], admit_inbox)
+                    .persist_wait_result(pending, &parent, None, result, &[], admit_inbox)
                     .await
                 {
-                    return Err(self.cleanup_pending(error, &pending).await);
+                    return Err(error);
                 }
             } else if !had_inline_wait
                 && !had_sync_calls
@@ -2085,7 +2294,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 // from this final turn has been persisted.
                 let transcript = match self.read_history(&parent).await {
                     Ok(history) => history,
-                    Err(error) => return Err(self.cleanup_pending(error, &pending).await),
+                    Err(error) => return Err(error),
                 };
                 return Ok(EngineCompletion {
                     turn,
@@ -2120,7 +2329,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             })
             .await
             {
-                return Err(self.cleanup_pending(error, &pending).await);
+                return Err(error);
             }
             {
                 let store = self.store.clone();
@@ -2129,15 +2338,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 if let Err(error) =
                     blocking(move || store.apply_pending_effort(&agent, &request)).await
                 {
-                    return Err(self.cleanup_pending(error, &pending).await);
+                    return Err(error);
                 }
             }
             if admit_inbox {
                 if let Err(error) = self.append_unread_envelopes(&next_id).await {
-                    return Err(self.cleanup_pending(error, &pending).await);
+                    return Err(error);
                 }
             }
             parent = next_id;
+            *observed_head = Some(parent.clone());
             // Outputs were appended individually as their jobs settled; next
             // iteration sends the full ordered transcript to the model.
         }
@@ -2365,6 +2575,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         &self,
         item: Item,
         request: &RequestId,
+        pending: &mut Vec<PendingCall>,
     ) -> Result<DispatchResult, EngineError> {
         if item.0["type"] != "function_call" && item.0["type"] != "custom_tool_call" {
             return Ok(DispatchResult::NotCall);
@@ -2376,6 +2587,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             self.provider.clone(),
             None,
             &mut cancellation,
+            pending,
         )
         .await
     }
@@ -2387,6 +2599,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         provider: Arc<dyn Provider>,
         scheduling: Option<&HashMap<String, ToolScheduling>>,
         cancellation: &mut watch::Receiver<bool>,
+        pending: &mut Vec<PendingCall>,
     ) -> Result<DispatchResult, EngineError> {
         if item.0["type"] != "function_call" && item.0["type"] != "custom_tool_call" {
             return Ok(DispatchResult::NotCall);
@@ -2432,10 +2645,25 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let is_here_spawn = name == "spawn_agent"
             && matches!(&input, ToolInput::Function(args) if args["from"]["kind"].as_str() == Some("here"));
         if wait.is_some() {
+            pending.reserve(1);
+            let obligation = PendingCall {
+                operation: operation.clone(),
+                call_id,
+                claim_request: request.clone(),
+                wait,
+                tool_kind,
+                execution,
+                persist_here_invocation_output: false,
+                custody: PendingCustody::Observation,
+                scheduling: ToolScheduling::Async,
+                queued: false,
+                completion: PendingCompletion::BlocksCompletion,
+            };
             let store = self.store.clone();
             let call = operation.clone();
             let request_id = request.clone();
             blocking(move || store.claim_operation(&call, &request_id)).await?;
+            pending.push(obligation);
             let retained = tokio::select! {
                 biased;
                 _ = await_cancellation(cancellation) => Err(EngineError::Cancelled { head_request: Some(request.clone()) }),
@@ -2447,19 +2675,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         .map(|retained| retained.into_parts(&operation)).transpose()
                 } => result.map_err(EngineError::from),
             };
-            let retained = match retained {
-                Ok(retained) => retained,
-                Err(error) => {
-                    let store = self.store.clone();
-                    let call = operation.clone();
-                    let request = request.clone();
-                    blocking(move || store.interrupt_operation_claim(&call, &request)).await?;
-                    return Err(error);
-                }
-            };
+            let retained = retained?;
             if let Some((output, continuation, barrier, commit)) = retained {
                 self.retain_output(&operation, tool_kind, &output, request)
                     .await?;
+                let index = pending
+                    .iter()
+                    .position(|call| call.operation == operation)
+                    .expect("registered wait obligation");
+                pending.remove(index);
                 return Ok(DispatchResult::Settled {
                     operation,
                     continuation,
@@ -2468,35 +2692,34 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 });
             }
             if *cancellation.borrow() || cancellation.has_changed().is_err() {
-                let store = self.store.clone();
-                let call = operation.clone();
-                let request_id = request.clone();
-                blocking(move || store.interrupt_operation_claim(&call, &request_id)).await?;
                 return Err(EngineError::Cancelled {
                     head_request: Some(request.clone()),
                 });
             }
-            return Ok(DispatchResult::Pending(PendingCall {
-                operation,
-                call_id,
-                claim_request: request.clone(),
-                wait,
-                tool_kind,
-                execution,
-                persist_here_invocation_output: false,
-                cancel_job_on_cleanup: false,
-                scheduling: ToolScheduling::Async,
-                queued: false,
-                completion: PendingCompletion::BlocksCompletion,
-            }));
+            return Ok(DispatchResult::Registered { operation });
         }
-        // Admission is durable before the provider can execute or capture a
-        // checkpoint containing this call. Failure never cancels an unrelated
-        // job whose call ID happened to collide with this attempted admission.
+        // The round owns the unstarted durable claim before policy recording;
+        // scheduler issuance upgrades that same obligation to producer custody.
+        pending.reserve(1);
+        let obligation = PendingCall {
+            operation: operation.clone(),
+            call_id,
+            claim_request: request.clone(),
+            wait,
+            tool_kind,
+            execution,
+            persist_here_invocation_output: is_here_spawn,
+            custody: PendingCustody::Unstarted,
+            scheduling,
+            queued: scheduling == ToolScheduling::BeforeNextInference,
+            completion: PendingCompletion::BlocksCompletion,
+        };
         let store = self.store.clone();
         let call = operation.clone();
         let request_id = request.clone();
         blocking(move || store.claim_operation(&call, &request_id)).await?;
+        pending.push(obligation);
+        let index = pending.len() - 1;
         let policy_store = self.store.clone();
         let policy_request = request.clone();
         let policy = json!({"operation":operation,"scheduling":scheduling});
@@ -2504,66 +2727,32 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             policy_store.record_event(Some(&policy_request), "tool_scheduling", &policy)
         })
         .await?;
-        let admission = if scheduling == ToolScheduling::BeforeNextInference {
-            self.scheduler
-                .queue_operation(
-                    provider,
-                    operation.clone(),
-                    self.config.agent.clone(),
-                    Some(request.clone()),
-                    name,
-                    input,
-                )
-                .await
-        } else {
-            self.scheduler
-                .start_operation(
-                    provider,
-                    operation.clone(),
-                    self.config.agent.clone(),
-                    Some(request.clone()),
-                    name,
-                    input,
-                )
-                .await
-        };
-        if let Err(error) = admission {
-            let store = self.store.clone();
-            let call = operation.clone();
-            let request_id = request.clone();
-            blocking(move || store.interrupt_operation_claim(&call, &request_id)).await?;
-            return Err(EngineError::Job(error));
-        }
-        if let Err(error) = self
-            .scheduler
+        self.scheduler
+            .register_engine_operation(
+                provider,
+                operation.clone(),
+                self.config.agent.clone(),
+                Some(request.clone()),
+                name,
+                input,
+                scheduling == ToolScheduling::BeforeNextInference,
+            )
+            .await?;
+        // The issuer has no suspension after insertion. This mutation therefore
+        // precedes any fallible operation or await after actual issuance.
+        pending[index].custody = PendingCustody::Producer;
+        self.scheduler
             .claim_exact(&operation, self.origin.clone())
-            .await
-        {
-            let _ = self.scheduler.cancel(&operation).await;
-            let store = self.store.clone();
-            let call = operation.clone();
-            let request_id = request.clone();
-            blocking(move || store.interrupt_operation_claim(&call, &request_id)).await?;
-            return Err(EngineError::Job(error));
+            .await?;
+        if scheduling != ToolScheduling::BeforeNextInference {
+            self.scheduler.release_operation(&operation, None).await?;
         }
         if self.bounded_invocation && scheduling == ToolScheduling::Async {
             let output = self.scheduler.wait(&operation).await?;
             self.persist_output(&operation, tool_kind, &output, request, request)
                 .await?;
         }
-        Ok(DispatchResult::Pending(PendingCall {
-            operation,
-            call_id,
-            claim_request: request.clone(),
-            wait,
-            tool_kind,
-            execution,
-            persist_here_invocation_output: is_here_spawn,
-            cancel_job_on_cleanup: true,
-            scheduling,
-            queued: scheduling == ToolScheduling::BeforeNextInference,
-            completion: PendingCompletion::BlocksCompletion,
-        }))
+        Ok(DispatchResult::Registered { operation })
     }
 
     async fn await_replay_barrier(
@@ -2603,7 +2792,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     }
 
     async fn cancel_pending(&self, pending: &[PendingCall]) -> Result<(), EngineError> {
-        let mut first_error = None;
+        let mut failures = Vec::new();
         for call in pending {
             let mut persisted_terminal = false;
             match self.store.operation_cleanup_evidence(&call.operation) {
@@ -2613,26 +2802,26 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 ) => continue,
 
                 Err(error) => {
-                    first_error.get_or_insert(EngineError::Store(error));
+                    failures.push(EngineError::Store(error));
                 }
                 _ => {}
             }
-            if call.cancel_job_on_cleanup && call.wait.is_none() {
+            if call.custody == PendingCustody::Producer && call.wait.is_none() {
                 if let Err(error) = self.scheduler.cancel(&call.operation).await {
-                    first_error.get_or_insert_with(|| match error {
+                    failures.push(match error {
                         JobError::UnknownCall => EngineError::UnconfirmedCancellation {
                             operation: call.operation.clone(),
+                            detail: "scheduler has no owner for the operation".into(),
                         },
                         other => EngineError::Job(other),
                     });
                 }
                 match self.scheduler.unpublished_output(&call.operation).await {
                     Ok(Some(output)) => {
-                        if matches!(output, crate::turn::JobOutput::CancellationUnconfirmed(_)) {
-                            first_error.get_or_insert_with(|| {
-                                EngineError::UnconfirmedCancellation {
-                                    operation: call.operation.clone(),
-                                }
+                        if let crate::turn::JobOutput::CancellationUnconfirmed(detail) = &output {
+                            failures.push(EngineError::UnconfirmedCancellation {
+                                operation: call.operation.clone(),
+                                detail: detail.clone(),
                             });
                         }
                         let retention = async {
@@ -2658,17 +2847,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         match retention {
                             Ok(()) => persisted_terminal = true,
                             Err(error) => {
-                                first_error.get_or_insert(error);
+                                failures.push(error);
                             }
                         }
                     }
                     Err(JobError::UnknownCall) | Ok(None) => {
-                        first_error.get_or_insert_with(|| EngineError::UnconfirmedCancellation {
+                        failures.push(EngineError::UnconfirmedCancellation {
                             operation: call.operation.clone(),
+                            detail: "no terminal owner acknowledgment was retained".into(),
                         });
                     }
                     Err(error) => {
-                        first_error.get_or_insert(EngineError::Job(error));
+                        failures.push(EngineError::Job(error));
                     }
                 }
             }
@@ -2676,10 +2866,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 let store = self.store.clone();
                 let operation = call.operation.clone();
                 let request = call.claim_request.clone();
-                let not_started = call.wait.is_some();
+                let not_started = call.wait.is_some() || call.custody == PendingCustody::Unstarted;
                 if !not_started && call.operation.origin.actor() == self.origin.actor() {
-                    first_error.get_or_insert_with(|| EngineError::UnconfirmedCancellation {
+                    failures.push(EngineError::UnconfirmedCancellation {
                         operation: call.operation.clone(),
+                        detail: "started local operation has no retained terminal outcome".into(),
                     });
                 }
 
@@ -2692,11 +2883,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 })
                 .await
                 {
-                    first_error.get_or_insert(error);
+                    failures.push(error);
                 }
             }
         }
-        first_error.map_or(Ok(()), Err)
+        match failures.len() {
+            0 => Ok(()),
+            1 => Err(failures.remove(0)),
+            _ => Err(EngineError::CleanupFailures(failures)),
+        }
     }
 
     async fn reject_or_cleanup(
@@ -2704,125 +2899,121 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         error: TransportError,
         expected_head: Option<&RequestId>,
         request: &RequestId,
-        pending: &[PendingCall],
-    ) -> EngineError {
-        if let TransportError::ProviderStreamFailure { event, diagnostic } = &error {
-            let event = *event;
-            let diagnostic = diagnostic.clone();
-            let primary = EngineError::Transport(error);
-            if let Err(cleanup) = self.cancel_pending(pending).await {
-                return EngineError::Cleanup {
-                    primary: Box::new(primary),
-                    cleanup: cleanup.to_string(),
-                };
-            }
-            if let Some(identity) = self.embedded_identity() {
-                return match self.store.block_embedded_inference(
-                    &identity,
-                    request,
-                    crate::embedding::InferenceBlockReason::ProviderStreamFailure {
-                        event,
-                        diagnostic,
-                    },
-                ) {
-                    Ok(block) => EngineError::InferenceBlocked { block },
-                    Err(persistence) => EngineError::InferenceBlockPersistence {
-                        primary: Box::new(primary),
-                        persistence,
-                    },
-                };
-            }
-            return primary;
-        }
-        if let TransportError::IncompleteResponse(cause) = &error {
-            let cause = *cause;
-            let primary = EngineError::Transport(error);
-            if let Err(cleanup) = self.cancel_pending(pending).await {
-                return EngineError::Cleanup {
-                    primary: Box::new(primary),
-                    cleanup: cleanup.to_string(),
-                };
-            }
-            let store = self.store.clone();
-            let request = request.clone();
-            let head_request = request.clone();
-            let expected = expected_head.cloned();
-            let identity = self.embedded_identity();
-            match blocking(move || {
-                store.record_interrupted_model_request(
-                    &request,
-                    cause,
-                    identity
-                        .as_ref()
-                        .map(|identity| (identity, expected.as_ref())),
-                )
-            })
-            .await
-            {
-                Ok(true) => {
-                    return EngineError::InterruptedModelRound {
-                        head_request,
-                        cause,
-                    };
-                }
-                Ok(false) => return EngineError::InterruptedHeadMismatch,
-                Err(error) => return error,
-            }
-        }
-        let Some(failure) = error.request_failure() else {
-            return self
-                .cleanup_pending(EngineError::Transport(error), pending)
-                .await;
+        pending: Vec<PendingCall>,
+    ) -> embedded_round::OrderedProviderFailure {
+        use crate::transport::TransportFailureKind;
+        use embedded_round::{CleanupReceipt, OrderedProviderFailure};
+        let kind = error.failure_kind();
+        let primary = match &kind {
+            TransportFailureKind::Rejected(_) => EngineError::RequestRejected {
+                head_request: request.clone(),
+                error,
+            },
+            TransportFailureKind::Interrupted(_)
+            | TransportFailureKind::ProviderFailed { .. }
+            | TransportFailureKind::Other => EngineError::Transport(error),
         };
-        let primary = EngineError::RequestRejected {
-            head_request: request.clone(),
-            error,
-        };
-        if let Err(cleanup) = self.cancel_pending(pending).await {
-            return EngineError::Cleanup {
-                primary: Box::new(primary),
-                cleanup: cleanup.to_string(),
+        let operations = pending.iter().map(|call| call.operation.clone()).collect();
+        if let Err(cleanup) = self.cancel_pending(&pending).await {
+            return OrderedProviderFailure {
+                cause: EngineError::Cleanup {
+                    primary: Box::new(primary),
+                    cleanup: cleanup.into(),
+                },
+                cleanup: CleanupReceipt::Outstanding(operations),
             };
         }
-        let store = self.store.clone();
-        let request = request.clone();
-        let expected = expected_head.cloned();
-        let identity = match &self.origin {
-            ConversationIdentity::Embedded {
-                run,
-                actor,
-                incarnation,
-            } => Some(crate::embedding::HostIdentity {
-                run: run.clone(),
-                actor: actor.clone(),
-                incarnation: incarnation.clone(),
-            }),
-            ConversationIdentity::Standalone { .. } => None,
+        let cause = match kind {
+            TransportFailureKind::ProviderFailed { event, diagnostic } => {
+                match self.embedded_identity() {
+                    Some(identity) => match self.store.block_embedded_inference(
+                        &identity,
+                        request,
+                        crate::embedding::InferenceBlockReason::ProviderStreamFailure {
+                            event,
+                            diagnostic,
+                        },
+                    ) {
+                        Ok(block) => EngineError::BlockedAction(EngineBlockedAction {
+                            primary: Box::new(primary),
+                            block,
+                        }),
+                        Err(persistence) => EngineError::InferenceBlockPersistence {
+                            primary: Box::new(primary),
+                            persistence,
+                        },
+                    },
+                    None => primary,
+                }
+            }
+            TransportFailureKind::Interrupted(cause) => {
+                let store = self.store.clone();
+                let request = request.clone();
+                let head_request = request.clone();
+                let expected = expected_head.cloned();
+                let identity = self.embedded_identity();
+                match blocking(move || {
+                    store.record_interrupted_model_request(
+                        &request,
+                        cause,
+                        identity
+                            .as_ref()
+                            .map(|identity| (identity, expected.as_ref())),
+                    )
+                })
+                .await
+                {
+                    Ok(true) => EngineError::InterruptedModelRound {
+                        head_request,
+                        cause,
+                    },
+                    Ok(false) => primary.with_secondary(
+                        RoundFailureStage::InterruptedRequestRecording,
+                        Some(head_request),
+                        EngineError::InterruptedHeadMismatch,
+                    ),
+                    Err(error) => primary.with_secondary(
+                        RoundFailureStage::InterruptedRequestRecording,
+                        Some(head_request),
+                        error,
+                    ),
+                }
+            }
+            TransportFailureKind::Rejected(failure) => {
+                let store = self.store.clone();
+                let request = request.clone();
+                let head_request = request.clone();
+                let expected = expected_head.cloned();
+                let identity = self.embedded_identity();
+                match blocking(move || {
+                    store.record_failed_model_request(
+                        &request,
+                        &failure,
+                        identity
+                            .as_ref()
+                            .map(|identity| (identity, expected.as_ref())),
+                    )
+                })
+                .await
+                {
+                    Ok(true) => primary,
+                    Ok(false) => primary.with_secondary(
+                        RoundFailureStage::RejectedRequestRecording,
+                        Some(head_request),
+                        EngineError::RejectedHeadMismatch,
+                    ),
+                    Err(error) => primary.with_secondary(
+                        RoundFailureStage::RejectedRequestRecording,
+                        Some(head_request),
+                        error,
+                    ),
+                }
+            }
+            TransportFailureKind::Other => primary,
         };
-        match blocking(move || {
-            store.record_failed_model_request(
-                &request,
-                &failure,
-                identity
-                    .as_ref()
-                    .map(|identity| (identity, expected.as_ref())),
-            )
-        })
-        .await
-        {
-            Ok(true) => primary,
-            Ok(false) => EngineError::RejectedHeadMismatch,
-            Err(error) => error,
-        }
-    }
-
-    async fn cleanup_pending(&self, primary: EngineError, pending: &[PendingCall]) -> EngineError {
-        match self.cancel_pending(pending).await {
-            Ok(()) => primary,
-            Err(cleanup) => EngineError::Cleanup {
-                primary: Box::new(primary),
-                cleanup: cleanup.to_string(),
-            },
+        OrderedProviderFailure {
+            cause,
+            cleanup: CleanupReceipt::Confirmed,
         }
     }
 
@@ -3961,9 +4152,25 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     crate::store::ProviderResponseState::Failed
                 };
                 let store = self.store.clone();
-                blocking(move || store.stop_provider_response(&request, state)).await?;
-                retained_tail?;
-                Err(error)
+                let stopped_request = request.clone();
+                let stopped =
+                    blocking(move || store.stop_provider_response(&stopped_request, state)).await;
+                let mut cause = error;
+                if let Err(source) = retained_tail {
+                    cause = cause.with_secondary(
+                        RoundFailureStage::ProviderTailRecording,
+                        Some(request.clone()),
+                        source,
+                    );
+                }
+                if let Err(source) = stopped {
+                    cause = cause.with_secondary(
+                        RoundFailureStage::ProviderResponseSettlement,
+                        Some(request),
+                        source,
+                    );
+                }
+                Err(cause)
             }
         }
     }
@@ -4385,6 +4592,7 @@ mod tests {
                     agent: AgentPath("/root".into()),
                 },
             );
+            let mut issued = Vec::new();
             assert!(matches!(
                 tokio::time::timeout(
                     std::time::Duration::from_secs(1),
@@ -4393,13 +4601,16 @@ mod tests {
                         &request,
                         provider,
                         None,
-                        &mut cancellation
+                        &mut cancellation,
+                        &mut issued,
                     )
                 )
                 .await
                 .unwrap(),
                 Err(EngineError::Cancelled { .. })
             ));
+            assert_eq!(issued.len(), 1);
+            engine.cancel_pending(&issued).await.unwrap();
             assert_eq!(
                 store.claims_on(&request).unwrap()[0].state,
                 crate::store::ClaimState::Interrupted
@@ -4618,7 +4829,9 @@ mod tests {
             ),
         ] {
             assert!(matches!(
-                engine.dispatch_completed_item(item, &request).await,
+                engine
+                    .dispatch_completed_item(item, &request, &mut Vec::new())
+                    .await,
                 Err(EngineError::InvalidFunctionCall)
             ));
         }

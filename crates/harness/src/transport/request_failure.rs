@@ -18,15 +18,52 @@ fn http_status_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({"type": "integer", "minimum": u16::MIN, "maximum": u16::MAX})
 }
 
+/// Exhaustive transport-owned classification; Engine combines these facts with
+/// cleanup and persistence evidence instead of interpreting rendered errors.
+pub(crate) enum TransportFailureKind {
+    Rejected(RequestFailure),
+    Interrupted(super::StreamInterruption),
+    ProviderFailed {
+        event: super::ProviderStreamFailureEvent,
+        diagnostic: Option<HttpDiagnostic>,
+    },
+    Other,
+}
+
 impl TransportError {
-    pub(crate) fn request_failure(&self) -> Option<RequestFailure> {
+    pub(crate) fn failure_kind(&self) -> TransportFailureKind {
         match self {
-            Self::Authentication => Some(RequestFailure::Authentication),
-            Self::Http { status, diagnostic } => Some(RequestFailure::Http {
-                status: *status,
-                diagnostic: diagnostic.clone(),
-            }),
-            _ => None,
+            Self::Authentication => TransportFailureKind::Rejected(RequestFailure::Authentication),
+            Self::Http { status, diagnostic } => {
+                TransportFailureKind::Rejected(RequestFailure::Http {
+                    status: *status,
+                    diagnostic: diagnostic.clone(),
+                })
+            }
+            Self::IncompleteResponse(cause) => TransportFailureKind::Interrupted(*cause),
+            Self::ProviderStreamFailure { event, diagnostic } => {
+                TransportFailureKind::ProviderFailed {
+                    event: *event,
+                    diagnostic: diagnostic.clone(),
+                }
+            }
+            Self::PreparedSelectionMismatch
+            | Self::ReplayContractMismatch
+            | Self::UnprovenResponseContract
+            | Self::MissingOutputIndex
+            | Self::ConflictingOutputIndex { .. }
+            | Self::IncompleteOutputIndices { .. }
+            | Self::Stream(_)
+            | Self::ReplayRequestReuse { .. } => TransportFailureKind::Other,
+        }
+    }
+
+    pub(crate) fn request_failure(&self) -> Option<RequestFailure> {
+        match self.failure_kind() {
+            TransportFailureKind::Rejected(failure) => Some(failure),
+            TransportFailureKind::Interrupted(_)
+            | TransportFailureKind::ProviderFailed { .. }
+            | TransportFailureKind::Other => None,
         }
     }
 }
