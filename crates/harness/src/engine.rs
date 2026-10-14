@@ -9,7 +9,8 @@ mod output;
 pub use embedded_round::{
     EmbeddedRoundFailure, EmbeddedRoundReadiness, EmbeddedRoundSelection, EmbeddedRoundWait,
     InferenceObligation, RetainedFollowup, RoundAssessment, RoundCleanup, RoundExecution,
-    RoundFailureSource, RoundFailureStage, RoundSecondaryFailure, StoreContinuation,
+    RoundFailureSource, RoundFailureSourceRef, RoundFailureStage, RoundSecondaryFailure,
+    RoundSecondaryFailureRef, StoreContinuation,
 };
 #[cfg(test)]
 #[path = "engine/prepared_provider_tests.rs"]

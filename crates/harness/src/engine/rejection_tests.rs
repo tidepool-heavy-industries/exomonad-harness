@@ -875,6 +875,29 @@ async fn response_settlement_failure_preserves_provider_action_and_stage() {
         )
         .await;
     assert_eq!(requests.lock().unwrap().len(), 1);
+    assert!(matches!(
+        receipt.primary_error(),
+        Some(EngineError::RequestRejected {
+            error: TransportError::Authentication,
+            ..
+        })
+    ));
+    let flat = receipt.secondary_failures();
+    let [secondary] = flat.as_slice() else {
+        panic!("response settlement must have one flat stage");
+    };
+    assert_eq!(
+        secondary.stage(),
+        RoundFailureStage::ProviderResponseSettlement
+    );
+    assert!(matches!(
+        secondary.source(),
+        RoundFailureSourceRef::Engine(EngineError::Store(StoreError::Sql(_)))
+    ));
+    assert_eq!(
+        receipt.assessment().secondary_failure_stages(),
+        &[RoundFailureStage::ProviderResponseSettlement]
+    );
     let error = receipt.result.as_ref().unwrap_err();
     let EngineError::Secondary(failure) = error else {
         panic!("unexpected outcome: {error:?}");
@@ -950,4 +973,101 @@ async fn unstarted_cleanup_requires_retained_not_started_evidence_even_when_upda
             _ => unreachable!(),
         }
     }
+}
+
+#[tokio::test]
+async fn nested_stage_view_preserves_primary_and_independent_recovery_obligations() {
+    let (engine, store, _) = engine(TransportError::Authentication);
+    let (_cancel, cancellation) = watch::channel(false);
+    let mut receipt = engine
+        .run_loop(
+            None,
+            vec![],
+            cancellation,
+            tokio::sync::mpsc::unbounded_channel().1,
+            false,
+            None,
+            false,
+        )
+        .await;
+    let primary = Box::new(receipt.result.unwrap_err());
+    let original = &*primary as *const EngineError;
+    let request = receipt.head.clone().expect("real rejected request");
+    let tail = store
+        .stop_provider_response(&request, crate::store::ProviderResponseState::Completed)
+        .unwrap_err();
+    let stop = store
+        .stop_provider_response(&request, crate::store::ProviderResponseState::Streaming)
+        .unwrap_err();
+    store.lock().unwrap().execute_batch("CREATE TABLE flat_fence_parent(id INTEGER PRIMARY KEY); CREATE TABLE flat_fence_child(id INTEGER REFERENCES flat_fence_parent(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER flat_fence_fault AFTER INSERT ON events WHEN NEW.kind='force_fence' BEGIN INSERT INTO flat_fence_child VALUES(1); END;").unwrap();
+    let commit = store
+        .record_event(Some(&request), "force_fence", &serde_json::Value::Null)
+        .unwrap_err();
+    assert!(matches!(&commit, StoreError::RecoveryRequired(_)));
+    let fenced = store.ensure_ready().unwrap_err();
+    assert!(matches!(&fenced, StoreError::AdmissionFenced));
+    // Compose owner-issued failures to exercise the staged view. This is a
+    // component composition control, not a second native cleanup execution.
+    receipt.result = Err(EngineError::Cleanup {
+        primary,
+        cleanup: EngineCleanupError::Engine(Box::new(EngineError::CleanupFailures(vec![
+            commit.into(),
+            fenced.into(),
+        ]))),
+    }
+    .with_secondary(
+        RoundFailureStage::ProviderTailRecording,
+        Some(request.clone()),
+        tail.into(),
+    )
+    .with_secondary(
+        RoundFailureStage::ProviderResponseSettlement,
+        Some(request.clone()),
+        stop.into(),
+    ));
+    assert!(std::ptr::eq(receipt.primary_error().unwrap(), original));
+    assert!(
+        matches!(receipt.primary_error(), Some(EngineError::RequestRejected { error: TransportError::Authentication, head_request }) if head_request == &request)
+    );
+    let flat = receipt.secondary_failures();
+    assert_eq!(
+        flat.iter()
+            .map(|failure| failure.stage())
+            .collect::<Vec<_>>(),
+        vec![
+            RoundFailureStage::NativeCleanup,
+            RoundFailureStage::ProviderTailRecording,
+            RoundFailureStage::ProviderResponseSettlement,
+        ]
+    );
+    assert!(
+        matches!(flat[0].source(), RoundFailureSourceRef::Cleanup(EngineCleanupError::Engine(error)) if matches!(error.as_ref(), EngineError::CleanupFailures(failures) if failures.len() == 2))
+    );
+    let assessment = receipt.assessment();
+    assert_eq!(assessment.execution(), RoundExecution::Rejected);
+    assert_eq!(
+        assessment.store_continuation(),
+        StoreContinuation::ReopenRequired
+    );
+    assert_eq!(assessment.cleanup(), RoundCleanup::Unconfirmed);
+    assert_eq!(
+        assessment.inference_obligations(),
+        &[InferenceObligation::ExplicitInput {
+            request: request.clone()
+        }]
+    );
+    assert_eq!(
+        assessment.secondary_failure_stages(),
+        flat.iter()
+            .map(|failure| failure.stage())
+            .collect::<Vec<_>>()
+    );
+    let owned = receipt.into_failure();
+    assert!(std::ptr::eq(owned.primary_error().unwrap(), original));
+    assert_eq!(owned.secondary_failures().len(), 3);
+    assert_eq!(
+        owned.assessment().store_continuation(),
+        StoreContinuation::ReopenRequired
+    );
+    assert_eq!(owned.assessment().cleanup(), RoundCleanup::Unconfirmed);
 }

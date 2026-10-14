@@ -62,6 +62,7 @@ pub struct RoundAssessment {
     retained: Vec<RetainedFollowup>,
     continuity_refusal: bool,
     settlements: Vec<crate::store::EmbeddedRoundSettlement>,
+    secondary_stages: Vec<RoundFailureStage>,
 }
 impl RoundAssessment {
     pub fn execution(&self) -> RoundExecution {
@@ -75,6 +76,9 @@ impl RoundAssessment {
     }
     pub fn store_continuation(&self) -> StoreContinuation {
         self.storage
+    }
+    pub fn secondary_failure_stages(&self) -> &[RoundFailureStage] {
+        &self.secondary_stages
     }
     pub fn cleanup(&self) -> RoundCleanup {
         self.cleanup
@@ -116,6 +120,29 @@ pub enum RoundFailureSource {
     Store(StoreError),
 }
 
+/// A flat staged view borrows original typed sources from the execution owner.
+/// Sources may retain composite errors. Consumers decide from the canonical
+/// assessment and obligations; these source references are diagnostic evidence.
+#[derive(Clone, Copy, Debug)]
+pub enum RoundFailureSourceRef<'a> {
+    Engine(&'a EngineError),
+    Store(&'a StoreError),
+    Cleanup(&'a super::EngineCleanupError),
+}
+#[derive(Clone, Copy, Debug)]
+pub struct RoundSecondaryFailureRef<'a> {
+    stage: RoundFailureStage,
+    source: RoundFailureSourceRef<'a>,
+}
+impl<'a> RoundSecondaryFailureRef<'a> {
+    pub fn stage(&self) -> RoundFailureStage {
+        self.stage
+    }
+    pub fn source(&self) -> RoundFailureSourceRef<'a> {
+        self.source
+    }
+}
+
 #[derive(Debug)]
 pub struct RoundSecondaryFailure {
     stage: RoundFailureStage,
@@ -147,7 +174,7 @@ pub(super) struct ConsumedCleanup {
 #[derive(Debug)]
 enum RoundAction {
     Completed {
-        head: RequestId,
+        completion: super::EngineCompletion,
     },
     Failed {
         head: Option<RequestId>,
@@ -187,7 +214,7 @@ pub enum EmbeddedRoundReadiness {
     Waiting(EmbeddedRoundWait),
 }
 
-struct ErrorFacts {
+struct ErrorFacts<'a> {
     execution: RoundExecution,
     head: Option<RequestId>,
     inference: Vec<InferenceObligation>,
@@ -196,13 +223,16 @@ struct ErrorFacts {
     outstanding: Vec<OperationId>,
     continuity_refusal: bool,
     settlements: Vec<crate::store::EmbeddedRoundSettlement>,
+    primary: Option<&'a EngineError>,
+    completion: Option<&'a super::EngineCompletion>,
+    secondary: Vec<RoundSecondaryFailureRef<'a>>,
 }
 fn retain_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
     if !items.contains(&item) {
         items.push(item);
     }
 }
-impl ErrorFacts {
+impl<'a> ErrorFacts<'a> {
     fn failed(head: Option<RequestId>) -> Self {
         Self {
             execution: RoundExecution::Failed,
@@ -213,9 +243,13 @@ impl ErrorFacts {
             outstanding: Vec::new(),
             continuity_refusal: false,
             settlements: Vec::new(),
+            primary: None,
+            completion: None,
+            secondary: Vec::new(),
         }
     }
     fn accumulate(&mut self, other: Self) {
+        self.secondary.extend(other.secondary);
         self.reopen |= other.reopen;
         self.cleanup_uncertain |= other.cleanup_uncertain;
         self.continuity_refusal |= other.continuity_refusal;
@@ -251,14 +285,19 @@ impl ErrorFacts {
 impl EngineError {
     /// This is the sole Engine error fold. Secondary causes add obligations but
     /// cannot replace the action's execution fact or improve cleanup certainty.
-    fn round_facts(&self, head: Option<RequestId>) -> ErrorFacts {
+    fn round_facts(&self, head: Option<RequestId>) -> ErrorFacts<'_> {
         use super::EngineCleanupError;
         let mut facts = ErrorFacts::failed(head);
+        facts.primary = Some(self);
         match self {
             Self::Secondary(failure) => {
                 facts = failure
                     .primary
                     .round_facts(failure.head_request.clone().or(facts.head));
+                facts.secondary.push(RoundSecondaryFailureRef {
+                    stage: failure.stage,
+                    source: RoundFailureSourceRef::Engine(&failure.source),
+                });
                 facts.accumulate(failure.source.round_facts(failure.head_request.clone()));
             }
             Self::BlockedAction(failure) => {
@@ -278,6 +317,12 @@ impl EngineError {
                 );
             }
             Self::CompletionSettlement(failure) => {
+                facts.primary = None;
+                facts.completion = Some(&failure.completion);
+                facts.secondary.push(RoundSecondaryFailureRef {
+                    stage: failure.stage,
+                    source: RoundFailureSourceRef::Engine(&failure.source),
+                });
                 facts.execution = RoundExecution::Completed;
                 facts.head = Some(failure.completion.head_request.clone());
                 facts.accumulate(failure.source.round_facts(facts.head.clone()));
@@ -288,10 +333,18 @@ impl EngineError {
             } => {
                 facts = primary.round_facts(facts.head);
                 facts.store(persistence);
+                facts.secondary.push(RoundSecondaryFailureRef {
+                    stage: RoundFailureStage::InferenceBlockRecording,
+                    source: RoundFailureSourceRef::Store(persistence),
+                });
             }
             Self::Cleanup { primary, cleanup } => {
                 facts = primary.round_facts(facts.head);
                 facts.cleanup_uncertain = true;
+                facts.secondary.push(RoundSecondaryFailureRef {
+                    stage: RoundFailureStage::NativeCleanup,
+                    source: RoundFailureSourceRef::Cleanup(cleanup),
+                });
                 match cleanup {
                     EngineCleanupError::Engine(source) => {
                         facts.accumulate(source.round_facts(facts.head.clone()))
@@ -403,17 +456,15 @@ impl EngineError {
     }
 }
 impl EmbeddedRoundFailure {
-    pub fn assessment(&self) -> RoundAssessment {
-        let facts = match &self.action {
-            RoundAction::Completed { head } => {
-                let mut facts = ErrorFacts::failed(Some(head.clone()));
-                facts.execution = RoundExecution::Completed;
-                facts
-            }
+    fn action_facts(&self) -> ErrorFacts<'_> {
+        match &self.action {
+            RoundAction::Completed { completion } => completion_facts(completion),
             RoundAction::Failed { head, cause } => cause.round_facts(head.clone()),
-        };
+        }
+    }
+    pub fn assessment(&self) -> RoundAssessment {
         assess_evidence(
-            facts,
+            self.action_facts(),
             &self.secondary,
             &self.cleanup,
             &self.inference,
@@ -421,14 +472,21 @@ impl EmbeddedRoundFailure {
         )
     }
     pub fn primary_error(&self) -> Option<&EngineError> {
-        match &self.action {
-            RoundAction::Failed { cause, .. } => Some(cause),
-            RoundAction::Completed { .. } => None,
-        }
+        self.action_facts().primary
     }
-    pub fn secondary_failures(&self) -> &[RoundSecondaryFailure] {
-        &self.secondary
+    pub fn original_completion(&self) -> Option<&super::EngineCompletion> {
+        self.action_facts().completion
     }
+    pub fn secondary_failures(&self) -> Vec<RoundSecondaryFailureRef<'_>> {
+        with_secondary_evidence(self.action_facts(), &self.secondary).secondary
+    }
+}
+
+fn completion_facts(completion: &super::EngineCompletion) -> ErrorFacts<'_> {
+    let mut facts = ErrorFacts::failed(Some(completion.head_request.clone()));
+    facts.execution = RoundExecution::Completed;
+    facts.completion = Some(completion);
+    facts
 }
 
 /// One execution owner's private receipt crosses into both standalone rendering
@@ -442,15 +500,23 @@ pub(super) struct EngineRunReceipt {
     pub(super) retained: Vec<crate::turn::ForeignPublicationObservation>,
 }
 impl EngineRunReceipt {
-    pub(super) fn assessment(&self) -> RoundAssessment {
-        let facts = match &self.result {
-            Ok(completion) => {
-                let mut facts = ErrorFacts::failed(Some(completion.head_request.clone()));
-                facts.execution = RoundExecution::Completed;
-                facts
-            }
+    fn action_facts(&self) -> ErrorFacts<'_> {
+        match &self.result {
+            Ok(completion) => completion_facts(completion),
             Err(cause) => cause.round_facts(self.head.clone()),
-        };
+        }
+    }
+    pub(super) fn primary_error(&self) -> Option<&EngineError> {
+        self.action_facts().primary
+    }
+    pub(super) fn original_completion(&self) -> Option<&super::EngineCompletion> {
+        self.action_facts().completion
+    }
+    pub(super) fn secondary_failures(&self) -> Vec<RoundSecondaryFailureRef<'_>> {
+        with_secondary_evidence(self.action_facts(), &self.secondary).secondary
+    }
+    pub(super) fn assessment(&self) -> RoundAssessment {
+        let facts = self.action_facts();
         assess_evidence(
             facts,
             &self.secondary,
@@ -507,12 +573,10 @@ impl EngineRunReceipt {
         }
         result
     }
-    fn into_failure(self) -> EmbeddedRoundFailure {
+    pub(super) fn into_failure(self) -> EmbeddedRoundFailure {
         EmbeddedRoundFailure {
             action: match self.result {
-                Ok(completion) => RoundAction::Completed {
-                    head: completion.head_request,
-                },
+                Ok(completion) => RoundAction::Completed { completion },
                 Err(cause) => RoundAction::Failed {
                     head: self.head,
                     cause,
@@ -526,14 +590,18 @@ impl EngineRunReceipt {
     }
 }
 
-fn assess_evidence(
-    mut facts: ErrorFacts,
-    secondary: &[RoundSecondaryFailure],
-    cleanup_receipt: &CleanupReceipt,
-    inference: &[InferenceObligation],
-    retained: &[crate::turn::ForeignPublicationObservation],
-) -> RoundAssessment {
+fn with_secondary_evidence<'a>(
+    mut facts: ErrorFacts<'a>,
+    secondary: &'a [RoundSecondaryFailure],
+) -> ErrorFacts<'a> {
     for failure in secondary {
+        facts.secondary.push(RoundSecondaryFailureRef {
+            stage: failure.stage,
+            source: match &failure.source {
+                RoundFailureSource::Engine(source) => RoundFailureSourceRef::Engine(source),
+                RoundFailureSource::Store(source) => RoundFailureSourceRef::Store(source),
+            },
+        });
         match &failure.source {
             RoundFailureSource::Engine(source) => {
                 facts.accumulate(source.round_facts(facts.head.clone()))
@@ -544,6 +612,17 @@ fn assess_evidence(
             facts.cleanup_uncertain = true;
         }
     }
+    facts
+}
+
+fn assess_evidence<'a>(
+    mut facts: ErrorFacts<'a>,
+    secondary: &'a [RoundSecondaryFailure],
+    cleanup_receipt: &CleanupReceipt,
+    inference: &[InferenceObligation],
+    retained: &[crate::turn::ForeignPublicationObservation],
+) -> RoundAssessment {
+    facts = with_secondary_evidence(facts, secondary);
     for obligation in inference {
         if let InferenceObligation::RecoverBlock { block } = obligation {
             facts.inference.retain(|existing| {
@@ -583,6 +662,11 @@ fn assess_evidence(
         retained: retained.iter().cloned().map(RetainedFollowup).collect(),
         continuity_refusal: facts.continuity_refusal,
         settlements: facts.settlements,
+        secondary_stages: facts
+            .secondary
+            .iter()
+            .map(|failure| failure.stage)
+            .collect(),
     }
 }
 

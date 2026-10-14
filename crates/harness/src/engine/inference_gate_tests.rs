@@ -638,7 +638,11 @@ async fn restart_invalidates_old_grant_without_effect_replay() {
     }
 }
 
-async fn continuity_refusal_preserves_action(cancelled: bool, direct_block: bool) {
+async fn continuity_refusal_preserves_action(
+    cancelled: bool,
+    direct_block: bool,
+    owned_failure: bool,
+) {
     let store = Arc::new(Store::memory().unwrap());
     let identity = HostIdentity {
         run: "continuity-composition".into(),
@@ -689,6 +693,44 @@ async fn continuity_refusal_preserves_action(cancelled: bool, direct_block: bool
         .head()
         .cloned()
         .expect("actual round head");
+    if owned_failure {
+        let original = receipt
+            .original_completion()
+            .expect("actual completed action");
+        let original_turn = original.turn.response_id.clone();
+        let original_transcript = original.transcript.clone();
+        let refusal = store
+            .stop_provider_response(&request, crate::store::ProviderResponseState::Completed)
+            .unwrap_err();
+        receipt.add_failure(
+            RoundFailureStage::ProviderResponseSettlement,
+            refusal.into(),
+        );
+        let failure = receipt.into_failure();
+        assert!(failure.primary_error().is_none());
+        let retained = failure
+            .original_completion()
+            .expect("owned failure retains full completion");
+        assert_eq!(retained.head_request, request);
+        assert_eq!(retained.turn.response_id, original_turn);
+        assert_eq!(retained.transcript, original_transcript);
+        assert_eq!(failure.assessment().execution(), RoundExecution::Completed);
+        let flat = failure.secondary_failures();
+        let [secondary] = flat.as_slice() else {
+            panic!("completed failure must preserve one secondary");
+        };
+        assert_eq!(
+            secondary.stage(),
+            RoundFailureStage::ProviderResponseSettlement
+        );
+        assert!(matches!(
+            secondary.source(),
+            RoundFailureSourceRef::Engine(EngineError::Store(StoreError::InvalidProviderEvidence(
+                _
+            )))
+        ));
+        return;
+    }
     if direct_block {
         let block = store
             .block_embedded_inference(
@@ -767,15 +809,20 @@ async fn continuity_refusal_preserves_action(cancelled: bool, direct_block: bool
 
 #[tokio::test]
 async fn cancelled_action_with_projection_refusal_blocks_before_finish() {
-    continuity_refusal_preserves_action(true, false).await;
+    continuity_refusal_preserves_action(true, false, false).await;
 }
 
 #[tokio::test]
 async fn completed_action_with_projection_refusal_blocks_without_panicking() {
-    continuity_refusal_preserves_action(false, false).await;
+    continuity_refusal_preserves_action(false, false, false).await;
 }
 
 #[tokio::test]
 async fn completed_receipt_with_issued_block_preserves_both_during_projection() {
-    continuity_refusal_preserves_action(false, true).await;
+    continuity_refusal_preserves_action(false, true, false).await;
+}
+
+#[tokio::test]
+async fn post_completion_failure_retains_full_action_and_flat_secondary() {
+    continuity_refusal_preserves_action(false, false, true).await;
 }
