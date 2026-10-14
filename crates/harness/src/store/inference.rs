@@ -567,10 +567,12 @@ mod tests {
         ready(&store, &identity);
         let selected = store.select_embedded_round(&identity).unwrap();
         let foreign_actor = HostIdentity {
-            actor: AgentPath("/other".into()),
+            actor: AgentPath("/root/other".into()),
             ..identity.clone()
         };
-        ready(&store, &foreign_actor);
+        store
+            .bind_embedded_actor(&foreign_actor, Some(&identity.actor))
+            .unwrap();
         assert!(matches!(
             store.begin_selected_embedded_inference(&foreign_actor, &selected),
             Err(StoreError::StaleInferenceRecovery)
