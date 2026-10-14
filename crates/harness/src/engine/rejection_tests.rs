@@ -775,7 +775,13 @@ async fn bounded_output_recording_failure_keeps_the_issued_operation_in_cleanup_
             false,
         )
         .await;
-    assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        provider.0.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "original outcome: {:?}; secondary failures: {:?}",
+        receipt.result,
+        receipt.secondary
+    );
     assert_eq!(requests.lock().unwrap().len(), 1);
     assert!(matches!(
         &receipt.result,
