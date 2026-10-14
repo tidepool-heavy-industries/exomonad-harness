@@ -70,3 +70,24 @@ it('validates recovery receipts and exact journal correlation, including require
   expect(isEmbeddedCommandRecord({ ...record, receipt: { ...receipt, block: { ...block, generation: '4' } } })).toBe(false)
   expect(isEmbeddedCommandRecord({ ...record, command: { action: 'input', target, text: 'queued' } })).toBe(false)
 })
+
+it('retains bounded provider diagnostics in exact block comparisons and recovery validation', () => {
+  const diagnostic = { code: 'invalid_tools', error_type: 'invalid_request_error', param: 'tools[0]', message: 'schema refused [redacted]' }
+  const providerBlock: InferenceBlock = { ...block, reason: { kind: 'provider_stream_failure', event: 'error', diagnostic } }
+  const providerCommand = { ...command, expected_block: providerBlock }
+  expect(isHostCommand(providerCommand)).toBe(true)
+  expect(isHostInferenceState({ state: 'blocked', block: providerBlock })).toBe(true)
+  expect(sameHostCommand(providerCommand, { ...providerCommand, expected_block: { ...providerBlock, reason: { kind: 'provider_stream_failure', event: 'error', diagnostic: { message: diagnostic.message, param: diagnostic.param, error_type: diagnostic.error_type, code: diagnostic.code } } } })).toBe(true)
+  for (const key of ['code', 'error_type', 'param', 'message'] as const) {
+    const changed: InferenceBlock = { ...providerBlock, reason: { kind: 'provider_stream_failure', event: 'error', diagnostic: { ...diagnostic, [key]: 'changed' } } }
+    expect(sameHostCommand(providerCommand, { ...providerCommand, expected_block: changed })).toBe(false)
+    expect(commandIsCurrent(providerCommand, { ...actor, inference: { state: 'blocked', block: changed } })).toBe(false)
+    const oversized = { ...diagnostic, [key]: 'λ'.repeat(key === 'message' ? 2049 : 257) }
+    const bad = { ...providerBlock, reason: { kind: 'provider_stream_failure', event: 'error', diagnostic: oversized } }
+    expect(isHostCommand({ ...providerCommand, expected_block: bad })).toBe(false)
+    expect(isHostInferenceState({ state: 'blocked', block: bad })).toBe(false)
+  }
+  const absent: InferenceBlock = { ...providerBlock, reason: { kind: 'provider_stream_failure', event: 'error' } }
+  expect(isHostCommand({ ...providerCommand, expected_block: absent })).toBe(true)
+  expect(sameHostCommand(providerCommand, { ...providerCommand, expected_block: absent })).toBe(false)
+})

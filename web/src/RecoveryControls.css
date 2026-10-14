@@ -1,4 +1,5 @@
 .inference-recovery fieldset { border: 1px solid var(--line); margin-block: 8px; padding: 12px; min-width: 0; }
 .inference-recovery input[type="radio"] { margin-inline-end: 8px; accent-color: var(--accent); }
 .inference-recovery p { overflow-wrap: anywhere; }
+.inference-recovery dd { overflow-wrap: anywhere; }
 

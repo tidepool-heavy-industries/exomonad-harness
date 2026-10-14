@@ -37,6 +37,10 @@ pub const CHATGPT_PLAN_ENDPOINT: &str = "https://api.openai.com/v1/responses";
 #[path = "client_portability_tests.rs"]
 mod portability_tests;
 
+#[cfg(test)]
+#[path = "client_provider_failure_tests.rs"]
+mod provider_failure_tests;
+
 /// Only this transport builds the backend request; the stable session id is
 /// shared with prompt_cache_key, while caller controls the complete stateless
 /// item window. Never send previous_response_id or store:true.

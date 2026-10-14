@@ -185,6 +185,11 @@ pub enum EngineError {
     InferenceBlocked {
         block: crate::embedding::InferenceBlock,
     },
+    #[error("{primary}; additionally failed to persist the inference block: {persistence}")]
+    InferenceBlockPersistence {
+        primary: Box<EngineError>,
+        persistence: StoreError,
+    },
     #[error(transparent)]
     Transport(#[from] TransportError),
     /// Stream completion is unknown, but every locally admitted outstanding
@@ -2701,8 +2706,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         request: &RequestId,
         pending: &[PendingCall],
     ) -> EngineError {
-        if let TransportError::ProviderStreamFailure { event, .. } = &error {
+        if let TransportError::ProviderStreamFailure { event, diagnostic } = &error {
             let event = *event;
+            let diagnostic = diagnostic.clone();
             let primary = EngineError::Transport(error);
             if let Err(cleanup) = self.cancel_pending(pending).await {
                 return EngineError::Cleanup {
@@ -2714,10 +2720,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 return match self.store.block_embedded_inference(
                     &identity,
                     request,
-                    crate::embedding::InferenceBlockReason::ProviderStreamFailure { event },
+                    crate::embedding::InferenceBlockReason::ProviderStreamFailure {
+                        event,
+                        diagnostic,
+                    },
                 ) {
                     Ok(block) => EngineError::InferenceBlocked { block },
-                    Err(error) => error.into(),
+                    Err(persistence) => EngineError::InferenceBlockPersistence {
+                        primary: Box::new(primary),
+                        persistence,
+                    },
                 };
             }
             return primary;

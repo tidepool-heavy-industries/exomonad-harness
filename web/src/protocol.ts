@@ -213,7 +213,7 @@ export function isHostCommand(value: unknown): value is HostCommand {
   const frame = { type: 'host_command', operation_id: validationOperation, command: value };
   return isClientFrame(frame) && frame.type === 'host_command' && isHostIdentity(frame.command.target)
     && (frame.command.action !== 'recover' || (frame.command.expected_block.request.length > 0
-      && (frame.command.expected_block.reason.kind !== 'request_rejected' || withinDiagnosticBounds(frame.command.expected_block.reason.failure))));
+      && withinBlockDiagnosticBounds(frame.command.expected_block)));
 }
 export function sameHostCommand(left: HostCommand, right: HostCommand): boolean {
   return sameHostIdentity(left.target, right.target) && left.action === right.action
@@ -229,14 +229,12 @@ export function sameInferenceBlock(left: InferenceBlock, right: InferenceBlock):
   const a = left.reason, b = right.reason;
   switch (a.kind) {
     case 'stream_interrupted': return b.kind === a.kind && a.cause === b.cause;
-    case 'provider_stream_failure': return b.kind === a.kind && a.event === b.event;
+    case 'provider_stream_failure': return b.kind === a.kind && a.event === b.event && sameDiagnostic(a.diagnostic, b.diagnostic);
     case 'request_rejected': {
       if (b.kind !== a.kind || a.failure.kind !== b.failure.kind) return false;
       if (a.failure.kind === 'authentication') return true;
       if (b.failure.kind !== 'http' || a.failure.status !== b.failure.status) return false;
-      const x = a.failure.diagnostic, y = b.failure.diagnostic;
-      if (x == null || y == null) return x == null && y == null;
-      return (['code', 'error_type', 'param', 'message'] as const).every(key => (x[key] ?? null) === (y[key] ?? null));
+      return sameDiagnostic(a.failure.diagnostic, b.failure.diagnostic);
     }
     case 'continuity_unproven': case 'host_interrupted': return true;
   }
@@ -341,9 +339,22 @@ function validOutputScope({ origin, requestId }: OutputScope): boolean {
     && (origin.kind === 'embedded' ? origin.run.length > 0 && origin.incarnation.length > 0 : origin.store.length > 0);
 }
 
+function sameDiagnostic(x: HttpDiagnostic | null | undefined, y: HttpDiagnostic | null | undefined): boolean {
+  if (x == null || y == null) return x == null && y == null;
+  return (['code', 'error_type', 'param', 'message'] as const).every(key => (x[key] ?? null) === (y[key] ?? null));
+}
+
+function withinBlockDiagnosticBounds(block: InferenceBlock): boolean {
+  if (block.reason.kind === 'provider_stream_failure') return withinHttpDiagnosticBounds(block.reason.diagnostic);
+  return block.reason.kind !== 'request_rejected' || withinDiagnosticBounds(block.reason.failure);
+}
+
 function withinDiagnosticBounds(failure: RequestFailure | RecoveryRequestFailure | null): boolean {
-  if (failure?.kind !== 'http' || failure.diagnostic == null) return true;
-  const diagnostic = failure.diagnostic;
+  return failure?.kind !== 'http' || withinHttpDiagnosticBounds(failure.diagnostic);
+}
+
+function withinHttpDiagnosticBounds(diagnostic: HttpDiagnostic | null | undefined): boolean {
+  if (diagnostic == null) return true;
   const within = (text: string | null | undefined, limit: number) => text == null || Array.from(text).length <= limit;
   return within(diagnostic.code, 256) && within(diagnostic.error_type, 256)
     && within(diagnostic.param, 256) && within(diagnostic.message, 2048);

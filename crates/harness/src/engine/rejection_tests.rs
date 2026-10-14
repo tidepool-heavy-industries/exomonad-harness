@@ -508,3 +508,113 @@ async fn incomplete_response_cleanup_uncertainty_never_publishes_resumable_outco
             .any(|e| e.kind == "model_interrupted")
     );
 }
+
+#[tokio::test]
+async fn provider_failure_retains_primary_when_block_persistence_fails() {
+    let diagnostic = crate::transport::HttpDiagnostic {
+        code: Some("invalid_tools".into()),
+        message: Some("unsupported tool schema".into()),
+        ..Default::default()
+    };
+    let (engine, store, requests) = engine(TransportError::ProviderStreamFailure {
+        event: crate::transport::ProviderStreamFailureEvent::Error,
+        diagnostic: Some(diagnostic.clone()),
+    });
+    let identity = crate::embedding::HostIdentity {
+        run: "provider-block-write-fault".into(),
+        actor: AgentPath("/root".into()),
+        incarnation: "one".into(),
+    };
+    store.bind_embedded_actor(&identity, None).unwrap();
+    store.lock().unwrap().execute_batch("CREATE TRIGGER reject_block BEFORE INSERT ON embedded_inference WHEN json_extract(NEW.state,'$.state')='blocked' BEGIN SELECT RAISE(ABORT,'block write refused'); END;").unwrap();
+    let engine = engine.with_origin(ConversationIdentity::Embedded {
+        run: identity.run.clone(),
+        actor: identity.actor.clone(),
+        incarnation: identity.incarnation.clone(),
+    });
+    let (_stop, cancel) = watch::channel(false);
+    let error = engine
+        .run_embedded(
+            None,
+            vec![],
+            cancel,
+            tokio::sync::mpsc::unbounded_channel().1,
+        )
+        .await
+        .unwrap_err();
+    let EngineError::InferenceBlockPersistence {
+        primary,
+        persistence,
+    } = error
+    else {
+        panic!("provider primary was lost: {error}");
+    };
+    assert!(
+        matches!(*primary, EngineError::Transport(TransportError::ProviderStreamFailure { diagnostic:Some(ref actual), .. }) if actual == &diagnostic)
+    );
+    assert!(persistence.to_string().contains("block write refused"));
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        store.embedded_inference_state(&identity).unwrap(),
+        crate::embedding::HostInferenceState::Running
+    );
+}
+
+#[tokio::test]
+async fn provider_failure_cleanup_error_retains_sanitized_primary_without_certifying_block() {
+    let diagnostic = crate::transport::HttpDiagnostic {
+        code: Some("invalid_tools".into()),
+        message: Some("unsupported tool schema".into()),
+        ..Default::default()
+    };
+    let (engine, store, _) = engine(TransportError::Authentication);
+    let request = RequestId("provider-cleanup-fault".into());
+    store.create_request(&request, None, "/root").unwrap();
+    let pending = PendingCall {
+        operation: OperationId {
+            origin: engine.origin.clone(),
+            request: request.clone(),
+            call: CallId("missing".into()),
+        },
+        call_id: CallId("missing".into()),
+        claim_request: request.clone(),
+        wait: None,
+        tool_kind: ToolKind::Function,
+        execution: ToolExecution::Asynchronous,
+        persist_here_invocation_output: false,
+        cancel_job_on_cleanup: false,
+        scheduling: ToolScheduling::Async,
+        queued: false,
+        completion: PendingCompletion::BlocksCompletion,
+    };
+    store
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TABLE claims")
+        .unwrap();
+    let error = engine
+        .reject_or_cleanup(
+            TransportError::ProviderStreamFailure {
+                event: crate::transport::ProviderStreamFailureEvent::Error,
+                diagnostic: Some(diagnostic.clone()),
+            },
+            None,
+            &request,
+            &[pending],
+        )
+        .await;
+    let EngineError::Cleanup { primary, cleanup } = error else {
+        panic!("provider primary was lost: {error}");
+    };
+    assert!(
+        matches!(*primary, EngineError::Transport(TransportError::ProviderStreamFailure { diagnostic:Some(ref actual), .. }) if actual == &diagnostic)
+    );
+    assert!(cleanup.contains("claims"));
+    assert!(
+        !store
+            .events(Some(&request))
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "request_failed")
+    );
+}

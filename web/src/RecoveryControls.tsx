@@ -13,12 +13,24 @@ export default function RecoveryControls({ target, block, ready, submit, onResul
   const observed = operations.find(record => record.submission.operation_id === operation?.id)
   const refused = observed?.state === 'refused' && isSettledCommand(observed)
   const submitted = operation !== undefined && sameInferenceBlock(operation.block, block) && !refused
+  const diagnostic = block.reason.kind === 'provider_stream_failure' ? block.reason.diagnostic : undefined
   const mode = decision && sameInferenceBlock(decision.block, block) ? decision.mode : undefined
   return <section ref={sectionRef} tabIndex={-1} className="inference-recovery" aria-label="Inference recovery">
     <h3>Recover inference</h3>
     <p>Inference is paused. Choose how to recover before the agent can continue. New messages can still queue.</p>
     <p>Reason: {block.reason.kind.replaceAll('_', ' ')}</p>
-    <details><summary>Recovery details</summary><p className="meta">Request {block.request} · generation {block.generation} · actor {target.actor} · run {target.run} · incarnation {target.incarnation}</p></details>
+    <details><summary>Recovery details</summary>
+      {block.reason.kind === 'provider_stream_failure' && <>
+        <p>Provider stream event: {block.reason.event === 'response_failed' ? 'response.failed' : 'error'}</p>
+        {diagnostic?.message && <p>{diagnostic.message}</p>}
+        {diagnostic && <dl>
+          {diagnostic.code && <><dt>Code</dt><dd>{diagnostic.code}</dd></>}
+          {diagnostic.error_type && <><dt>Type</dt><dd>{diagnostic.error_type}</dd></>}
+          {diagnostic.param && <><dt>Parameter</dt><dd>{diagnostic.param}</dd></>}
+        </dl>}
+      </>}
+      <p className="meta">Request {block.request} · generation {block.generation} · actor {target.actor} · run {target.run} · incarnation {target.incarnation}</p>
+    </details>
     <fieldset disabled={!ready || !submit || submitted}>
       <legend>Choose recovery evidence</legend>
       <label><input type="radio" name="recovery-mode" checked={mode === 'exact'} onChange={() => setDecision({ block, mode: 'exact' })} />Exact retained prefix</label>

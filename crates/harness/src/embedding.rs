@@ -106,6 +106,8 @@ pub enum InferenceBlockReason {
     },
     ProviderStreamFailure {
         event: crate::transport::ProviderStreamFailureEvent,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<crate::transport::HttpDiagnostic>,
     },
     RequestRejected {
         failure: crate::transport::RequestFailure,

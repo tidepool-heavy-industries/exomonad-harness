@@ -48,3 +48,18 @@ it('allows a new explicit decision after authoritative refusal without retrying 
   fireEvent.click(screen.getByRole('button'))
   expect(submit).toHaveBeenLastCalledWith({ action: 'recover', target, expected_block: block, mode: 'visible_history' })
 })
+
+it('shows retained provider fields in recovery details and requires a fresh choice when they change', () => {
+  const diagnostic = { code: 'invalid_tools', error_type: 'invalid_request_error', param: 'tools[0]', message: 'schema refused [redacted]' }
+  const providerBlock: InferenceBlock = { ...block, reason: { kind: 'provider_stream_failure', event: 'response_failed', diagnostic } }
+  const submit = vi.fn()
+  const mounted = render(<RecoveryControls target={target} block={providerBlock} ready submit={submit} onResult={vi.fn()} />)
+  fireEvent.click(screen.getByText('Recovery details'))
+  for (const value of Object.values(diagnostic)) expect(screen.getByText(value)).toBeVisible()
+  expect(screen.getByText('Provider stream event: response.failed')).toBeVisible()
+  fireEvent.click(screen.getAllByRole('radio')[0]!)
+  mounted.rerender(<RecoveryControls target={target} block={{ ...providerBlock, reason: { kind: 'provider_stream_failure', event: 'response_failed' } }} ready submit={submit} onResult={vi.fn()} />)
+  expect(screen.queryByText(diagnostic.message)).not.toBeInTheDocument()
+  expect(screen.getByRole('button')).toBeDisabled()
+  expect(submit).not.toHaveBeenCalled()
+})
