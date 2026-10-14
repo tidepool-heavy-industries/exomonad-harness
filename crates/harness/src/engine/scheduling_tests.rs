@@ -1691,7 +1691,7 @@ async fn driver_foreign_followup_retains_observation_while_parent_sync_completes
     }
     let operation = operations.lock().unwrap()[0].clone();
     let child_path = AgentPath("/root/child".into());
-    let snapshot = RequestId("child-pending-sync-snapshot".into());
+
     parent
         .store
         .admit_agent(
@@ -1702,19 +1702,41 @@ async fn driver_foreign_followup_retains_observation_while_parent_sync_completes
             &json!({"kind":"root"}),
         )
         .unwrap();
-    parent
+    let identity = crate::embedding::HostIdentity {
+        run: "foreign-driver".into(),
+        actor: child_path.clone(),
+        incarnation: "original".into(),
+    };
+    let checkpoint = parent
         .store
-        .admit_here_agent_with_snapshot(
-            &child_path,
+        .capture_checkpoint(
             &AgentPath("/root".into()),
-            &snapshot,
+            &operation.request,
+            &operation.call,
             &json!({}),
-            "/root",
-            "/root/child",
-            "AtBoundary",
-            &Item(json!({"type":"message","role":"assistant","content":"NEW_TASK"})),
+            Arc::new(()),
         )
         .unwrap();
+    let (child_agent, _) = parent
+        .store
+        .attach_bound_checkpoint_child(
+            &checkpoint,
+            crate::checkpoint::CheckpointChild {
+                path: &child_path,
+                parent: &AgentPath("/root".into()),
+                contract: &json!({}),
+                checkout: &json!({}),
+                task: None,
+                target: &crate::context::ContextProjectionTarget {
+                    model: "model-old".into(),
+                    route: ResponsesRoute::ChatGptPlan,
+                    protocol: ResponsesProtocol::Standard,
+                },
+            },
+            &identity,
+        )
+        .unwrap();
+    let snapshot = child_agent.head_request.unwrap();
     let child_requests = Arc::new(Mutex::new(Vec::new()));
     let child = Engine::<Offline, ContextEditor, FinalOnly>::with_transport(
         FinalOnly {
@@ -1732,15 +1754,6 @@ async fn driver_foreign_followup_retains_observation_while_parent_sync_completes
             agent: child_path,
         },
     );
-    let identity = crate::embedding::HostIdentity {
-        run: "foreign-driver".into(),
-        actor: AgentPath("/root/child".into()),
-        incarnation: "original".into(),
-    };
-    parent
-        .store
-        .bind_embedded_actor(&identity, Some(&AgentPath("/root".into())))
-        .unwrap();
     parent
         .store
         .admit_embedded_input(
@@ -1788,7 +1801,12 @@ async fn driver_foreign_followup_retains_observation_while_parent_sync_completes
     assert!(is_final(&completed.turn, false));
     assert_eq!(parent.scheduler.output(&operation).await.unwrap(), None);
     let claims = parent.store.claims_for_operation(&operation).unwrap();
-    assert_eq!(claims.len(), 2);
+    assert_eq!(claims.len(), 3);
+    assert!(
+        claims
+            .iter()
+            .any(|claim| &claim.request == checkpoint.snapshot_request())
+    );
     assert!(
         claims
             .iter()
