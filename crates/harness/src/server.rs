@@ -3787,6 +3787,7 @@ mod interruption_projection_tests {
                     Some((&identity, None))
                 )
                 .unwrap()
+                .was_recorded()
         );
         let (_, control, _) = server(PathBuf::from("."));
         control.refresh_completed_model_requests(&store).unwrap();
