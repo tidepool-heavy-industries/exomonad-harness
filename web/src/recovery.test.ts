@@ -79,7 +79,7 @@ it('retains bounded provider diagnostics in exact block comparisons and recovery
   expect(isHostInferenceState({ state: 'blocked', block: providerBlock })).toBe(true)
   expect(sameHostCommand(providerCommand, { ...providerCommand, expected_block: { ...providerBlock, reason: { kind: 'provider_stream_failure', event: 'error', diagnostic: { message: diagnostic.message, param: diagnostic.param, error_type: diagnostic.error_type, code: diagnostic.code } } } })).toBe(true)
   for (const key of ['code', 'error_type', 'param', 'message'] as const) {
-    const changed: InferenceBlock = { ...providerBlock, reason: { kind: 'provider_stream_failure', event: 'error', diagnostic: { ...diagnostic, [key]: 'changed' } } }
+    const changed = { ...providerBlock, reason: { kind: 'provider_stream_failure', event: 'error', diagnostic: { ...diagnostic, [key]: 'changed' } } } satisfies InferenceBlock
     expect(sameHostCommand(providerCommand, { ...providerCommand, expected_block: changed })).toBe(false)
     expect(commandIsCurrent(providerCommand, { ...actor, inference: { state: 'blocked', block: changed } })).toBe(false)
     const oversized = { ...diagnostic, [key]: 'λ'.repeat(key === 'message' ? 2049 : 257) }
