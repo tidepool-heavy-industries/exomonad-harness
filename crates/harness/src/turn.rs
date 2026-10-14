@@ -2559,7 +2559,7 @@ mod cancellation_intent_tests {
         async fn call_with_context(
             &self,
             _: &str,
-            _: ToolInput,
+            _: Value,
             context: CallContext,
         ) -> Result<Value, ProviderError> {
             self.context
