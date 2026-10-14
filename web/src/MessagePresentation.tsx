@@ -2,6 +2,7 @@ import { useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } fro
 import Markdown, { type Components } from 'react-markdown'
 import './MessagePresentation.css'
 import { PresentationDetails, usePresentationChoice } from './presentation-state'
+import { copyText } from './clipboard'
 
 export type MessageKind = 'assistant' | 'human' | 'reasoning' | 'activity'
 
@@ -35,8 +36,7 @@ function CopyButton({ text, label, children }: { readonly text: string; readonly
   const [result, setResult] = useState<{ text: string; state: 'copied' | 'failed' }>()
   async function copy() {
     try {
-      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable')
-      await navigator.clipboard.writeText(text)
+      await copyText(text)
       setResult({ text, state: 'copied' })
     } catch {
       setResult({ text, state: 'failed' })
