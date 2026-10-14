@@ -978,20 +978,29 @@ async fn unstarted_cleanup_requires_retained_not_started_evidence_even_when_upda
 #[tokio::test]
 async fn nested_stage_view_preserves_primary_and_independent_recovery_obligations() {
     let (engine, store, _) = engine(TransportError::Authentication);
+    let identity = crate::embedding::HostIdentity {
+        run: "flat-sources".into(),
+        actor: AgentPath("/root".into()),
+        incarnation: "original".into(),
+    };
+    store.bind_embedded_actor(&identity, None).unwrap();
+    let engine = engine.with_origin(ConversationIdentity::Embedded {
+        run: identity.run.clone(),
+        actor: identity.actor.clone(),
+        incarnation: identity.incarnation.clone(),
+    });
     let (_cancel, cancellation) = watch::channel(false);
     let mut receipt = engine
-        .run_loop(
-            None,
-            vec![],
-            cancellation,
-            tokio::sync::mpsc::unbounded_channel().1,
-            false,
-            None,
-            false,
-        )
-        .await;
+        .run_with_finalize_receipt(None, vec![], cancellation, mailbox(), None, false)
+        .await
+        .unwrap();
+    let crate::embedding::HostInferenceState::Blocked { block } =
+        store.embedded_inference_state(&identity).unwrap()
+    else {
+        panic!("real embedded rejection must issue its recovery block");
+    };
+    let original = receipt.primary_error().unwrap() as *const EngineError;
     let primary = Box::new(receipt.result.unwrap_err());
-    let original = &*primary as *const EngineError;
     let request = receipt.head.clone().expect("real rejected request");
     let tail = store
         .stop_provider_response(&request, crate::store::ProviderResponseState::Completed)
@@ -1052,9 +1061,7 @@ async fn nested_stage_view_preserves_primary_and_independent_recovery_obligation
     assert_eq!(assessment.cleanup(), RoundCleanup::Unconfirmed);
     assert_eq!(
         assessment.inference_obligations(),
-        &[InferenceObligation::ExplicitInput {
-            request: request.clone()
-        }]
+        &[InferenceObligation::RecoverBlock { block }]
     );
     assert_eq!(
         assessment.secondary_failure_stages(),
