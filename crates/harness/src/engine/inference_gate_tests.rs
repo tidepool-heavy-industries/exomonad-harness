@@ -743,8 +743,9 @@ async fn continuity_refusal_preserves_action(cancelled: bool, direct_block: bool
             },
         ],
     );
+    let frontier = store.embedded_round_frontier(&identity).unwrap();
     assert!(matches!(
-        store.begin_embedded_inference(&identity, Some(&request)),
+        store.begin_embedded_inference(&identity, frontier.settled_head.as_ref()),
         Err(StoreError::InferenceBlocked { .. })
     ));
     let error = receipt.into_result().unwrap_err();
