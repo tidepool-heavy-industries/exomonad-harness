@@ -1125,7 +1125,7 @@ fn driver_mailbox() -> tokio::sync::mpsc::UnboundedReceiver<DurableMailboxWake> 
 #[tokio::test]
 async fn driver_foreign_refusal_consumes_epoch_before_any_provider_request() {
     let (engine, store, identity, requests) = driver_fixture(vec![Ok(success())]);
-    let other = Engine::with_transport(
+    let other: Engine<Offline, NoTools, Script> = Engine::with_transport(
         Script {
             requests: requests.clone(),
             turns: Mutex::new(VecDeque::from([Ok(success())])),
