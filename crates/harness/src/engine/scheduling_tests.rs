@@ -1762,7 +1762,7 @@ async fn driver_foreign_followup_retains_observation_while_parent_sync_completes
     let (_child_cancel, cancelled) = watch::channel(false);
     let receipt = match tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        driver.run_round(selection, cancelled, mailbox()),
+        driver.run_round(selection, cancelled, mpsc::unbounded_channel().1),
     )
     .await
     {
@@ -1832,7 +1832,7 @@ async fn driver_foreign_followup_retains_observation_while_parent_sync_completes
         };
         let (_cancel, cancelled) = watch::channel(false);
         let report = driver
-            .run_round(selection, cancelled, mailbox())
+            .run_round(selection, cancelled, mpsc::unbounded_channel().1)
             .await
             .unwrap();
         assert_eq!(report.assessment().cleanup(), RoundCleanup::Confirmed);
