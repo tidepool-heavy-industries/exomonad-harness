@@ -244,7 +244,10 @@ async fn cancellation_completed_output_is_acknowledged_and_retries_are_idempoten
     let (head, call) = admit(&runtime).await;
     provider.entered.notified().await;
     runtime
-        .cancel_pending(std::slice::from_ref(&call))
+        .cancel_pending(
+            std::slice::from_ref(&call),
+            crate::provider::CancellationCause::Unknown,
+        )
         .await
         .unwrap();
     assert_eq!(

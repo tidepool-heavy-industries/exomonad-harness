@@ -960,7 +960,9 @@ async fn unstarted_cleanup_requires_retained_not_started_evidence_even_when_upda
             queued: false,
             completion: PendingCompletion::BlocksCompletion,
         };
-        let outcome = engine.cancel_pending(&[obligation]).await;
+        let outcome = engine
+            .cancel_pending(&[obligation], crate::provider::CancellationCause::Unknown)
+            .await;
         match state {
             "missing" | "interrupted" => assert!(matches!(outcome,
                 Err(EngineError::UnconfirmedCancellation { operation: actual, .. }) if actual == operation)),

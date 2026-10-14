@@ -548,7 +548,10 @@ async fn pending_wait_cancellation_recovers_interruption_without_completion_noti
             crate::store::ClaimState::Pending
         );
         runtime
-            .cancel_pending(std::slice::from_ref(&pending))
+            .cancel_pending(
+                std::slice::from_ref(&pending),
+                crate::provider::CancellationCause::Unknown,
+            )
             .await
             .unwrap();
         assert_eq!(

@@ -2506,7 +2506,13 @@ mod bounded_wait_tests {
         assert_eq!(result.resumed_by, WaitResumeExact::TimedOut);
         assert!(started.elapsed() >= Duration::from_millis(10));
     }
+}
 
+#[cfg(test)]
+mod cancellation_intent_tests {
+    use super::*;
+    use crate::provider::ProviderError;
+    use serde_json::json;
     struct IntentOwner {
         calls: std::sync::Mutex<Vec<crate::provider::CancellationCause>>,
         park_first: bool,
