@@ -1662,6 +1662,206 @@ async fn child_final_completes_while_parent_sync_waits_for_child() {
     }
 }
 
+#[tokio::test]
+async fn driver_foreign_followup_retains_observation_while_parent_sync_completes() {
+    struct ParentTask<T>(tokio::task::JoinHandle<T>);
+    impl<T> Drop for ParentTask<T> {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let (mut parent, _, operations) = context_engine(false, false);
+    let started = Arc::new(Notify::new());
+    let child_final = Arc::new(Notify::new());
+    Arc::get_mut(&mut parent.provider).unwrap().paused =
+        Some((started.clone(), child_final.clone()));
+    let parent = Arc::new(parent);
+    let (_parent_cancel, cancelled) = watch::channel(false);
+    let mut running_parent = ParentTask({
+        let parent = parent.clone();
+        tokio::spawn(async move { parent.run(None, vec![], cancelled, mailbox()).await })
+    });
+    if tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+        .await
+        .is_err()
+    {
+        running_parent.0.abort();
+        let _ = (&mut running_parent.0).await;
+        panic!("parent invocation did not start");
+    }
+    let operation = operations.lock().unwrap()[0].clone();
+    let child_path = AgentPath("/root/child".into());
+    let snapshot = RequestId("child-pending-sync-snapshot".into());
+    parent
+        .store
+        .admit_agent(
+            &AgentPath("/root".into()),
+            None,
+            Some(&operation.request),
+            &json!({}),
+            &json!({"kind":"root"}),
+        )
+        .unwrap();
+    parent
+        .store
+        .admit_here_agent_with_snapshot(
+            &child_path,
+            &AgentPath("/root".into()),
+            &snapshot,
+            &json!({}),
+            "/root",
+            "/root/child",
+            "AtBoundary",
+            &Item(json!({"type":"message","role":"assistant","content":"NEW_TASK"})),
+        )
+        .unwrap();
+    let child_requests = Arc::new(Mutex::new(Vec::new()));
+    let child = Engine::<Offline, ContextEditor, FinalOnly>::with_transport(
+        FinalOnly {
+            requests: child_requests.clone(),
+        },
+        parent.store.clone(),
+        parent.scheduler.clone(),
+        parent.provider.clone(),
+        EngineConfig {
+            instructions: "child".into(),
+            tools: vec![],
+            model: "model-old".into(),
+            effort: Effort::Low,
+            session_id: "child-sync-tests".into(),
+            agent: child_path,
+        },
+    );
+    let identity = crate::embedding::HostIdentity {
+        run: "foreign-driver".into(),
+        actor: AgentPath("/root/child".into()),
+        incarnation: "original".into(),
+    };
+    parent
+        .store
+        .bind_embedded_actor(&identity, Some(&AgentPath("/root".into())))
+        .unwrap();
+    parent
+        .store
+        .admit_embedded_input(
+            &identity,
+            "first",
+            "human",
+            &Item(json!({"type":"message","role":"user","content":"finish child"})),
+        )
+        .unwrap();
+    let child = child.with_origin(ConversationIdentity::Embedded {
+        run: identity.run.clone(),
+        actor: identity.actor.clone(),
+        incarnation: identity.incarnation.clone(),
+    });
+    let mut driver = child.into_embedded_rounds().unwrap();
+    let EmbeddedRoundReadiness::Selected(selection) = driver.next_round().unwrap() else {
+        panic!("child input must be selected");
+    };
+    let (_child_cancel, cancelled) = watch::channel(false);
+    let receipt = match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        driver.run_round(selection, cancelled, mailbox()),
+    )
+    .await
+    {
+        Ok(result) => result.unwrap(),
+        Err(_) => {
+            running_parent.0.abort();
+            let _ = (&mut running_parent.0).await;
+            panic!("child final must not await foreign producer");
+        }
+    };
+    let assessment = receipt.assessment();
+    assert_eq!(assessment.cleanup(), RoundCleanup::ReleasedWithFollowup);
+    assert!(assessment.outstanding_operations().is_empty());
+    assert_eq!(assessment.retained_followups().len(), 1);
+    assert_eq!(assessment.retained_followups()[0].operation(), &operation);
+    assert_eq!(
+        assessment.retained_followups()[0].publication(),
+        crate::turn::FollowupPublicationState::Running
+    );
+    assert!(assessment.inference_obligations().is_empty());
+    assert!(receipt.secondary_failures().is_empty());
+    let mut completed = receipt.original_completion().unwrap().clone();
+    assert!(is_final(&completed.turn, false));
+    assert_eq!(parent.scheduler.output(&operation).await.unwrap(), None);
+    let claims = parent.store.claims_for_operation(&operation).unwrap();
+    assert_eq!(claims.len(), 2);
+    assert!(
+        claims
+            .iter()
+            .all(|claim| claim.state == crate::store::ClaimState::Pending)
+    );
+    assert!(claims.iter().any(|claim| claim.request == snapshot));
+    child_final.notify_one();
+    match tokio::time::timeout(std::time::Duration::from_secs(2), &mut running_parent.0).await {
+        Ok(result) => {
+            result.unwrap().unwrap();
+        }
+        Err(_) => {
+            running_parent.0.abort();
+            let _ = (&mut running_parent.0).await;
+            panic!("parent resumes when child finishes");
+        }
+    }
+    assert!(parent.store.context_receipt(&operation).unwrap().is_some());
+    assert!(
+        parent
+            .store
+            .claims_for_operation(&operation)
+            .unwrap()
+            .iter()
+            .all(|claim| claim.state == crate::store::ClaimState::Settled)
+    );
+    // Ordinary follow-up uses the returned head, whose claim attachment remains
+    // on the earlier snapshot. The same-branch lineage owns that continuation.
+    for _ in 0..2 {
+        parent
+            .store
+            .admit_embedded_input(
+                &identity,
+                &format!("followup-{}", completed.head_request.0),
+                "human",
+                &Item(json!({"type":"message","role":"user","content":"continue"})),
+            )
+            .unwrap();
+        let EmbeddedRoundReadiness::Selected(selection) = driver.next_round().unwrap() else {
+            panic!("followup input must be selected");
+        };
+        let (_cancel, cancelled) = watch::channel(false);
+        let report = driver
+            .run_round(selection, cancelled, mailbox())
+            .await
+            .unwrap();
+        assert_eq!(report.assessment().cleanup(), RoundCleanup::Confirmed);
+        let followed = report.original_completion().unwrap().clone();
+        assert_eq!(
+            followed
+                .transcript
+                .iter()
+                .filter(|item| item.0["type"] == "function_call_output"
+                    && item.0["call_id"] == operation.call.0)
+                .count(),
+            1
+        );
+        completed = followed;
+        let requests = child_requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .last()
+                .unwrap()
+                .input
+                .iter()
+                .filter(|item| item.0["type"] == "function_call_output"
+                    && item.0["call_id"] == operation.call.0)
+                .count(),
+            1
+        );
+    }
+}
+
 struct ContextNotesScript {
     requests: Arc<Mutex<Vec<ResponsesRequest>>>,
 }

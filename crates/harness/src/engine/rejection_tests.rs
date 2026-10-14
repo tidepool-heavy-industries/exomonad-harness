@@ -1374,3 +1374,74 @@ async fn driver_completed_head_commit_preserves_independently_issued_block() {
     };
     assert_eq!(retained, block);
 }
+
+#[tokio::test]
+async fn driver_interrupted_and_failed_reports_keep_original_cause_and_actual_block() {
+    for interrupted in [true, false] {
+        let error = if interrupted {
+            TransportError::IncompleteResponse(
+                crate::transport::StreamInterruption::MissingCompletion,
+            )
+        } else {
+            TransportError::ProviderStreamFailure {
+                event: crate::transport::ProviderStreamFailureEvent::Error,
+                diagnostic: None,
+            }
+        };
+        let (engine, store, identity, requests) = driver_fixture(vec![Err(error)]);
+        let mut driver = engine.into_embedded_rounds().unwrap();
+        let selection = selected(&driver);
+        let (_cancel, cancellation) = watch::channel(false);
+        let report = driver
+            .run_round(selection, cancellation, driver_mailbox())
+            .await
+            .unwrap();
+        let assessment = report.assessment();
+        assert_eq!(
+            assessment.execution(),
+            if interrupted {
+                RoundExecution::Interrupted
+            } else {
+                RoundExecution::Failed
+            }
+        );
+        if interrupted {
+            assert!(matches!(
+                report.issue(),
+                Some(EngineError::InterruptedModelRound {
+                    cause: crate::transport::StreamInterruption::MissingCompletion,
+                    ..
+                })
+            ));
+        } else {
+            assert!(matches!(
+                report.issue(),
+                Some(EngineError::Transport(
+                    TransportError::ProviderStreamFailure {
+                        event: crate::transport::ProviderStreamFailureEvent::Error,
+                        diagnostic: None
+                    }
+                ))
+            ));
+        }
+        let [InferenceObligation::RecoverBlock { block }] = assessment.inference_obligations()
+        else {
+            panic!("report must retain exact block");
+        };
+        assert_eq!(Some(&block.request), assessment.head());
+        assert!(assessment.head_settlements().is_empty());
+        assert!(report.secondary_failures().is_empty());
+        assert_eq!(assessment.cleanup(), RoundCleanup::Confirmed);
+        let frontier = store.embedded_round_frontier(&identity).unwrap();
+        assert_eq!(frontier.pending_head.as_ref(), assessment.head());
+        assert!(frontier.settled_head.is_none());
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        let EmbeddedRoundReadiness::Waiting(EmbeddedRoundWait::RecoveryRequired {
+            block: retained,
+        }) = driver.next_round().unwrap()
+        else {
+            panic!("blocked round must wait for grant");
+        };
+        assert_eq!(&retained, block);
+    }
+}
