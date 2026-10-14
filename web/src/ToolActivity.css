@@ -3,7 +3,7 @@
 .tool-heading h3 { margin: 0; font: 600 14px/1.4 var(--mono); }
 .tool-status { color: var(--muted); font-size: 12px; }
 .tool-source { padding: 16px; }
-.tool-source .history-content, .tool-results .history-content { white-space: pre; overflow-wrap: normal; word-break: normal; overflow-x: auto; padding-bottom: 4px; }
+.tool-source .history-content, .tool-results .history-content { padding-bottom: 4px; }
 .tool-results { border-top: 1px solid var(--line); padding: 12px 16px; }
 .tool-results h4 { margin: 0 0 8px; font-size: 12px; color: var(--muted); font-weight: 500; }
 .execution-log { border-top: 1px solid var(--line); padding: 8px 16px; }

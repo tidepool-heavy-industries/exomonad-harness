@@ -33,7 +33,7 @@
 .message-content-markdown img { max-width: 100%; height: auto; }
 .message-code-block { min-width: 0; margin-block: 1em; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink); overflow: hidden; }
 .message-code-actions { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 8px; padding: 5px 10px; border-bottom: 1px solid var(--line); }
-.message-code-block pre { margin: 0; padding: 14px; overflow-x: auto; white-space: pre; overflow-wrap: normal; word-break: normal; font: .9em/1.6 var(--mono); }
+.message-code-block pre { margin: 0; padding: 14px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; font: .9em/1.6 var(--mono); }
 .message-content-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-block-start: 8px; }
 .message-content-actions button, .message-code-actions button { padding: 4px 8px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); color: var(--muted); font: inherit; font-size: var(--diagnostic-size); line-height: 1.5; cursor: pointer; }
 .message-content-note, .message-copy-status { color: var(--muted); font-size: var(--diagnostic-size); line-height: 1.5; }
