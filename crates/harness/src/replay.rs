@@ -1125,6 +1125,7 @@ mod tests {
             agent,
             request,
             cancel,
+            cancellation_intent: None,
             verbs,
             progress,
             context: None,
@@ -2260,7 +2261,12 @@ mod tests {
         struct Owner(Arc<std::sync::atomic::AtomicUsize>);
         #[async_trait]
         impl CancellationOwner for Owner {
-            async fn cancel(&self, _: &OperationId, _: &JobHandle) -> CancellationAcknowledgment {
+            async fn cancel(
+                &self,
+                _: &OperationId,
+                _: &JobHandle,
+                _cause: crate::provider::CancellationCause,
+            ) -> CancellationAcknowledgment {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 CancellationAcknowledgment::Stopped
             }
@@ -2546,6 +2552,7 @@ mod tests {
             agent,
             request,
             cancel,
+            cancellation_intent: None,
             verbs,
             progress,
             context: None,
@@ -2619,6 +2626,7 @@ mod tests {
             agent,
             request,
             cancel,
+            cancellation_intent: None,
             verbs,
             progress,
             context: None,

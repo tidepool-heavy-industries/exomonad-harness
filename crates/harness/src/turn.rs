@@ -23,24 +23,68 @@ use tokio::{
     task::JoinHandle,
 };
 
+/// Read-only first-request evidence issued for one exact scheduler operation.
+/// This is intent, never a native winner, cleanup receipt or recovery authority.
+#[derive(Clone, Debug)]
+pub struct CancellationIntentObservation {
+    record: Arc<CancellationIntentRecord>,
+}
+#[derive(Debug)]
+struct CancellationIntentRecord {
+    operation: OperationId,
+    handle: JobHandle,
+    intent: std::sync::OnceLock<crate::provider::CancellationCause>,
+}
+impl CancellationIntentObservation {
+    fn new(operation: OperationId, handle: JobHandle) -> Self {
+        Self {
+            record: Arc::new(CancellationIntentRecord {
+                operation,
+                handle,
+                intent: std::sync::OnceLock::new(),
+            }),
+        }
+    }
+    fn admit(
+        &self,
+        cause: crate::provider::CancellationCause,
+    ) -> crate::provider::CancellationCause {
+        *self.record.intent.get_or_init(|| cause)
+    }
+    /// Foreign metadata and a boundary without an admitted intent observe none.
+    /// Neither absence establishes any cancellation or successful cleanup.
+    pub fn observed_for(
+        &self,
+        operation: &OperationId,
+        handle: &JobHandle,
+    ) -> Option<crate::provider::CancellationCause> {
+        if &self.record.operation != operation || &self.record.handle != handle {
+            return None;
+        }
+        self.record.intent.get().copied()
+    }
+}
+
 const JOB_CANCELLATION_GRACE: Duration = Duration::from_millis(250);
 
 async fn await_owner_cancellation(
     owner: &dyn crate::provider::CancellationOwner,
     operation: &OperationId,
     handle: &JobHandle,
+    cause: crate::provider::CancellationCause,
 ) -> crate::provider::CancellationAcknowledgment {
     use crate::provider::{CancellationAcknowledgment, CancellationWait};
 
     match owner.cancellation_wait() {
-        CancellationWait::OwnerSettlement => owner.cancel(operation, handle).await,
-        CancellationWait::ProviderGrace => {
-            tokio::time::timeout(JOB_CANCELLATION_GRACE, owner.cancel(operation, handle))
-                .await
-                .unwrap_or_else(|_| {
-                    CancellationAcknowledgment::Unconfirmed("owner acknowledgment timed out".into())
-                })
-        }
+        CancellationWait::OwnerSettlement => owner.cancel(operation, handle, cause).await,
+        CancellationWait::ProviderGrace => tokio::time::timeout(
+            JOB_CANCELLATION_GRACE,
+            owner.cancel(operation, handle, cause),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            CancellationAcknowledgment::Unconfirmed("owner acknowledgment timed out".into())
+        }),
     }
 }
 
@@ -230,6 +274,9 @@ struct Job {
     requires_publication: bool,
     cancellation_owner: Option<Arc<dyn crate::provider::CancellationOwner>>,
     cancellation_gate: Arc<Mutex<()>>,
+    // First admitted request intent, distinct from the native winning cause.
+    // An unconfirmed acknowledgment cannot authorize reattributing a retry.
+    cancellation_intent: CancellationIntentObservation,
     cancellation_ack: Option<crate::provider::CancellationAcknowledgment>,
     claimants: HashSet<ConversationIdentity>,
     settled_claimants: Vec<ConversationIdentity>,
@@ -583,6 +630,10 @@ impl JobScheduler {
                 requires_publication,
                 cancellation_owner: provider.cancellation_owner(),
                 cancellation_gate: Arc::new(Mutex::new(())),
+                cancellation_intent: CancellationIntentObservation::new(
+                    operation.clone(),
+                    handle.clone(),
+                ),
                 cancellation_ack: None,
                 claimants: HashSet::new(),
                 settled_claimants: Vec::new(),
@@ -619,6 +670,11 @@ impl JobScheduler {
             .get(&operation)
             .expect("admitted job")
             .completion_authority
+            .clone();
+        let task_cancellation_intent = registry
+            .get(&operation)
+            .expect("admitted job")
+            .cancellation_intent
             .clone();
         let verb_backend = provider.job_agent_service();
         let holds_capacity = provider.holds_job_capacity();
@@ -713,6 +769,7 @@ impl JobScheduler {
                 agent: task_agent,
                 request: task_request,
                 cancel: task_cancel,
+                cancellation_intent: Some(task_cancellation_intent),
                 verbs,
                 progress,
                 context: context_snapshot,
@@ -1034,6 +1091,17 @@ impl JobScheduler {
     /// Cancel an in-flight job. Cancellation is a typed terminal output; it
     /// is retained and delivered through the same claim mechanism.
     pub async fn cancel<K: JobKey>(&self, call_id: &K) -> Result<Option<JobSettlement>, JobError> {
+        self.cancel_with_cause(call_id, crate::provider::CancellationCause::Unknown)
+            .await
+    }
+
+    /// The existing cancellation gate admits one owner request. Attribution is
+    /// forwarded unchanged; the native cancellation owner records its winner.
+    pub async fn cancel_with_cause<K: JobKey>(
+        &self,
+        call_id: &K,
+        cause: crate::provider::CancellationCause,
+    ) -> Result<Option<JobSettlement>, JobError> {
         let call_id = call_id.operation(self);
         let gate = {
             let jobs = self.jobs.lock().await;
@@ -1051,18 +1119,22 @@ impl JobScheduler {
             .ok_or(JobError::UnknownCall)?
             .handle
             .clone();
-        let owner = {
-            let jobs = self.jobs.lock().await;
-            let job = jobs.get(&call_id).ok_or(JobError::UnknownCall)?;
+        let (owner, cause) = {
+            let mut jobs = self.jobs.lock().await;
+            let job = jobs.get_mut(&call_id).ok_or(JobError::UnknownCall)?;
             if job.output.is_some() {
                 return Ok(None);
             }
+            let cause = job.cancellation_intent.admit(cause);
             job.cancel.cancel();
-            if job.started {
-                job.cancellation_owner.clone()
-            } else {
-                None
-            }
+            (
+                if job.started {
+                    job.cancellation_owner.clone()
+                } else {
+                    None
+                },
+                cause,
+            )
         };
         if let Some(owner) = owner {
             {
@@ -1073,7 +1145,7 @@ impl JobScheduler {
                 }
                 job.cancel.cancel();
             }
-            let ack = await_owner_cancellation(owner.as_ref(), &call_id, &handle).await;
+            let ack = await_owner_cancellation(owner.as_ref(), &call_id, &handle, cause).await;
             // The native terminal can precede the ordinary result waiter. Its
             // publication metadata must be retained before waking the Engine.
             // Projection calls the invocation owner outside the scheduler lock.
@@ -1223,14 +1295,20 @@ impl JobScheduler {
             return Ok(None);
         };
         let _guard = gate.lock().await;
-        let handle = self
+        let (handle, cause) = self
             .jobs
             .lock()
             .await
             .get(&call_id)
-            .ok_or(JobError::UnknownCall)?
-            .handle
-            .clone();
+            .map(|job| {
+                (
+                    job.handle.clone(),
+                    job.cancellation_intent
+                        .observed_for(&call_id, &job.handle)
+                        .unwrap_or(crate::provider::CancellationCause::Unknown),
+                )
+            })
+            .ok_or(JobError::UnknownCall)?;
         {
             let jobs = self.jobs.lock().await;
             let job = jobs.get(&call_id).ok_or(JobError::UnknownCall)?;
@@ -1253,7 +1331,7 @@ impl JobScheduler {
                 Some(crate::provider::CancellationAcknowledgment::Unconfirmed(_)) => {}
             }
         }
-        let ack = await_owner_cancellation(owner.as_ref(), &call_id, &handle).await;
+        let ack = await_owner_cancellation(owner.as_ref(), &call_id, &handle, cause).await;
         let task = {
             let mut jobs = self.jobs.lock().await;
             let job = jobs.get_mut(&call_id).ok_or(JobError::UnknownCall)?;
@@ -2427,5 +2505,222 @@ mod bounded_wait_tests {
             .unwrap();
         assert_eq!(result.resumed_by, WaitResumeExact::TimedOut);
         assert!(started.elapsed() >= Duration::from_millis(10));
+    }
+
+    struct IntentOwner {
+        calls: std::sync::Mutex<Vec<crate::provider::CancellationCause>>,
+        park_first: bool,
+        entered: tokio::sync::Notify,
+    }
+    #[async_trait::async_trait]
+    impl crate::provider::CancellationOwner for IntentOwner {
+        fn cancellation_wait(&self) -> crate::provider::CancellationWait {
+            crate::provider::CancellationWait::OwnerSettlement
+        }
+        async fn cancel(
+            &self,
+            _: &OperationId,
+            _: &JobHandle,
+            cause: crate::provider::CancellationCause,
+        ) -> crate::provider::CancellationAcknowledgment {
+            let first = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push(cause);
+                calls.len() == 1
+            };
+            self.entered.notify_one();
+            if first && self.park_first {
+                std::future::pending::<()>().await;
+            }
+            if first {
+                crate::provider::CancellationAcknowledgment::Unconfirmed(
+                    "first acknowledgment unavailable".into(),
+                )
+            } else {
+                crate::provider::CancellationAcknowledgment::Stopped
+            }
+        }
+    }
+    struct IntentProvider {
+        context: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<CallContext>>>,
+        owner: Arc<IntentOwner>,
+    }
+    #[async_trait::async_trait]
+    impl Provider for IntentProvider {
+        async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+            unreachable!("scheduler supplies context")
+        }
+        async fn call_with_context(
+            &self,
+            _: &str,
+            _: ToolInput,
+            context: CallContext,
+        ) -> Result<Value, ProviderError> {
+            self.context
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .send(context)
+                .unwrap();
+            std::future::pending().await
+        }
+        fn tools(&self) -> Vec<Value> {
+            Vec::new()
+        }
+        fn cancellation_owner(&self) -> Option<Arc<dyn crate::provider::CancellationOwner>> {
+            Some(self.owner.clone())
+        }
+    }
+    struct IntentTask(tokio::task::AbortHandle);
+    impl Drop for IntentTask {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    async fn intent_fixture(
+        park_first: bool,
+    ) -> (JobScheduler, CallContext, Arc<IntentOwner>, IntentTask) {
+        let scheduler = JobScheduler::new(1).unwrap();
+        let owner = Arc::new(IntentOwner {
+            calls: Default::default(),
+            park_first,
+            entered: Default::default(),
+        });
+        let (sent, receive) = tokio::sync::oneshot::channel();
+        scheduler
+            .start(
+                Arc::new(IntentProvider {
+                    context: std::sync::Mutex::new(Some(sent)),
+                    owner: owner.clone(),
+                }),
+                CallId("intent-call".into()),
+                "pending".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        let abort = scheduler
+            .jobs
+            .lock()
+            .await
+            .get(&CallId("intent-call".into()).operation(&scheduler))
+            .unwrap()
+            .task
+            .as_ref()
+            .unwrap()
+            .abort_handle();
+        let task = IntentTask(abort);
+        let context = tokio::time::timeout(Duration::from_secs(1), receive)
+            .await
+            .unwrap()
+            .unwrap();
+        (scheduler, context, owner, task)
+    }
+
+    #[tokio::test]
+    async fn cancellation_intent_precedes_token_and_survives_unconfirmed_retry() {
+        use crate::provider::CancellationCause;
+        for intent in [
+            CancellationCause::ProviderFailureCleanup,
+            CancellationCause::RoundFailureCleanup,
+            CancellationCause::Unknown,
+        ] {
+            let (scheduler, context, owner, _task) = intent_fixture(false).await;
+            let operation = context.operation.as_ref().unwrap();
+            let observation = context.cancellation_intent.as_ref().unwrap();
+            assert_eq!(observation.observed_for(operation, &context.handle), None);
+            let observed = async {
+                context.cancel.cancelled().await;
+                observation.observed_for(operation, &context.handle)
+            };
+            let (cancelled, observed) =
+                tokio::join!(scheduler.cancel_with_cause(operation, intent), observed);
+            cancelled.unwrap();
+            assert_eq!(observed, Some(intent));
+            assert!(
+                scheduler
+                    .cancel_with_cause(operation, CancellationCause::Retirement)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(*owner.calls.lock().unwrap(), vec![intent]);
+            assert!(matches!(
+                scheduler.retry_cancellation(operation).await.unwrap(),
+                Some(crate::provider::CancellationAcknowledgment::Stopped)
+            ));
+            assert_eq!(*owner.calls.lock().unwrap(), vec![intent, intent]);
+            assert_eq!(
+                observation.observed_for(operation, &context.handle),
+                Some(intent)
+            );
+            let mut foreign = operation.clone();
+            foreign.call = CallId("foreign".into());
+            assert_eq!(observation.observed_for(&foreign, &context.handle), None);
+            assert_eq!(
+                observation.observed_for(operation, &JobHandle("foreign".into())),
+                None
+            );
+            assert!(
+                scheduler
+                    .jobs
+                    .lock()
+                    .await
+                    .get(operation)
+                    .unwrap()
+                    .task
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dropped_cancellation_observer_reentry_preserves_first_intent() {
+        use crate::provider::CancellationCause;
+        let (scheduler, context, owner, _task) = intent_fixture(true).await;
+        let operation = context.operation.as_ref().unwrap();
+        let mut first = Box::pin(
+            scheduler.cancel_with_cause(operation, CancellationCause::ProviderFailureCleanup),
+        );
+        tokio::select! {
+            () = owner.entered.notified() => {}
+            result = &mut first => panic!("first owner observation must stay pending: {result:?}"),
+        }
+        drop(first);
+        // No acknowledgment was issued, so retry_cancellation does not resume it.
+        assert!(
+            scheduler
+                .retry_cancellation(operation)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        scheduler
+            .cancel_with_cause(operation, CancellationCause::ExplicitCancellation)
+            .await
+            .unwrap();
+        assert_eq!(
+            *owner.calls.lock().unwrap(),
+            vec![CancellationCause::ProviderFailureCleanup; 2]
+        );
+        assert_eq!(
+            context
+                .cancellation_intent
+                .as_ref()
+                .unwrap()
+                .observed_for(operation, &context.handle),
+            Some(CancellationCause::ProviderFailureCleanup)
+        );
+        assert!(
+            scheduler
+                .jobs
+                .lock()
+                .await
+                .get(operation)
+                .unwrap()
+                .task
+                .is_none()
+        );
     }
 }

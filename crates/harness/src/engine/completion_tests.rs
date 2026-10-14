@@ -43,6 +43,7 @@ impl CancellationOwner for CompletedOwner {
         &self,
         _: &OperationId,
         _: &crate::provider::JobHandle,
+        _cause: crate::provider::CancellationCause,
     ) -> CancellationAcknowledgment {
         CancellationAcknowledgment::Completed(Ok(json!("owner result")))
     }
@@ -682,6 +683,7 @@ impl CancellationOwner for UnconfirmedRequestOwner {
         &self,
         operation: &OperationId,
         _: &crate::provider::JobHandle,
+        _cause: crate::provider::CancellationCause,
     ) -> CancellationAcknowledgment {
         assert_eq!(operation.call, CallId("pending-work".into()));
         CancellationAcknowledgment::Unconfirmed("pending owner still running".into())

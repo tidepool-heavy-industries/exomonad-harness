@@ -43,7 +43,12 @@ impl Provider for PendingWork {
 struct Unconfirmed;
 #[async_trait::async_trait]
 impl CancellationOwner for Unconfirmed {
-    async fn cancel(&self, _: &OperationId, _: &JobHandle) -> CancellationAcknowledgment {
+    async fn cancel(
+        &self,
+        _: &OperationId,
+        _: &JobHandle,
+        _cause: crate::provider::CancellationCause,
+    ) -> CancellationAcknowledgment {
         CancellationAcknowledgment::Unconfirmed("external work remains unresolved".into())
     }
 }

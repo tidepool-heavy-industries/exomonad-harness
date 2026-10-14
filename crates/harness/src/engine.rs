@@ -1052,7 +1052,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             receipt.cleanup = cleanup.receipt;
             receipt.retained = cleanup.retained;
         } else if receipt.result.is_err() {
-            match self.cancel_pending(&pending).await {
+            match self
+                .cancel_pending(&pending, receipt.cleanup_cancellation_intent())
+                .await
+            {
                 Ok(()) => receipt.cleanup = CleanupReceipt::Confirmed,
                 Err(source) => {
                     receipt.cleanup = CleanupReceipt::Outstanding(operations);
@@ -2865,7 +2868,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         Ok(())
     }
 
-    async fn cancel_pending(&self, pending: &[PendingCall]) -> Result<(), EngineError> {
+    async fn cancel_pending(
+        &self,
+        pending: &[PendingCall],
+        cause: crate::provider::CancellationCause,
+    ) -> Result<(), EngineError> {
         let mut failures = Vec::new();
         for call in pending {
             let mut persisted_terminal = false;
@@ -2881,7 +2888,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 _ => {}
             }
             if call.custody == PendingCustody::Producer && call.wait.is_none() {
-                if let Err(error) = self.scheduler.cancel(&call.operation).await {
+                if let Err(error) = self
+                    .scheduler
+                    .cancel_with_cause(&call.operation, cause)
+                    .await
+                {
                     failures.push(match error {
                         JobError::UnknownCall => EngineError::UnconfirmedCancellation {
                             operation: call.operation.clone(),
@@ -3010,7 +3021,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .iter()
             .filter_map(|call| call.foreign.clone())
             .collect();
-        if let Err(cleanup) = self.cancel_pending(&pending).await {
+        if let Err(cleanup) = self
+            .cancel_pending(&pending, primary.cleanup_cancellation_intent())
+            .await
+        {
             return OrderedProviderFailure {
                 cause: EngineError::Cleanup {
                     primary: Box::new(primary),
@@ -4730,7 +4744,10 @@ mod tests {
                 Err(EngineError::Cancelled { .. })
             ));
             assert_eq!(issued.len(), 1);
-            engine.cancel_pending(&issued).await.unwrap();
+            engine
+                .cancel_pending(&issued, crate::provider::CancellationCause::Unknown)
+                .await
+                .unwrap();
             assert_eq!(
                 store.claims_on(&request).unwrap()[0].state,
                 crate::store::ClaimState::Interrupted

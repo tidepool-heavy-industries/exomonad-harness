@@ -328,6 +328,7 @@ impl crate::provider::CancellationOwner for CompletedContextOwner {
         &self,
         _: &OperationId,
         _: &crate::provider::JobHandle,
+        _cause: crate::provider::CancellationCause,
     ) -> crate::provider::CancellationAcknowledgment {
         crate::provider::CancellationAcknowledgment::Completed(Ok(json!({"done":"edit_first"})))
     }

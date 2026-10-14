@@ -218,6 +218,7 @@ pub enum EmbeddedRoundReadiness {
 
 struct ErrorFacts<'a> {
     execution: RoundExecution,
+    cleanup_intent: crate::provider::CancellationCause,
     head: Option<RequestId>,
     inference: Vec<InferenceObligation>,
     reopen: bool,
@@ -238,6 +239,7 @@ impl<'a> ErrorFacts<'a> {
     fn failed(head: Option<RequestId>) -> Self {
         Self {
             execution: RoundExecution::Failed,
+            cleanup_intent: crate::provider::CancellationCause::RoundFailureCleanup,
             head,
             inference: Vec::new(),
             reopen: false,
@@ -285,6 +287,9 @@ impl<'a> ErrorFacts<'a> {
 }
 
 impl EngineError {
+    pub(super) fn cleanup_cancellation_intent(&self) -> crate::provider::CancellationCause {
+        self.round_facts(None).cleanup_intent
+    }
     /// This is the sole Engine error fold. Secondary causes add obligations but
     /// cannot replace the action's execution fact or improve cleanup certainty.
     fn round_facts(&self, head: Option<RequestId>) -> ErrorFacts<'_> {
@@ -363,6 +368,7 @@ impl EngineError {
             Self::Store(source) => facts.store(source),
             Self::Cancelled { head_request } => {
                 facts.execution = RoundExecution::Cancelled;
+                facts.cleanup_intent = crate::provider::CancellationCause::Unknown;
                 facts.head = head_request.clone().or(facts.head);
                 retain_unique(
                     &mut facts.inference,
@@ -373,10 +379,12 @@ impl EngineError {
             }
             Self::RequestRejected { head_request, .. } => {
                 facts.execution = RoundExecution::Rejected;
+                facts.cleanup_intent = crate::provider::CancellationCause::ProviderFailureCleanup;
                 facts.head = Some(head_request.clone());
             }
             Self::InterruptedModelRound { head_request, .. } => {
                 facts.execution = RoundExecution::Interrupted;
+                facts.cleanup_intent = crate::provider::CancellationCause::ProviderFailureCleanup;
                 facts.head = Some(head_request.clone());
                 retain_unique(
                     &mut facts.inference,
@@ -409,6 +417,8 @@ impl EngineError {
             }
             Self::Transport(source) => match source.failure_kind() {
                 crate::transport::TransportFailureKind::Interrupted(_) => {
+                    facts.cleanup_intent =
+                        crate::provider::CancellationCause::ProviderFailureCleanup;
                     facts.execution = RoundExecution::Interrupted;
                     if let Some(request) = &facts.head {
                         retain_unique(
@@ -420,10 +430,15 @@ impl EngineError {
                     }
                 }
                 crate::transport::TransportFailureKind::Rejected(_) => {
+                    facts.cleanup_intent =
+                        crate::provider::CancellationCause::ProviderFailureCleanup;
                     facts.execution = RoundExecution::Rejected
                 }
-                crate::transport::TransportFailureKind::ProviderFailed { .. }
-                | crate::transport::TransportFailureKind::Other => {}
+                crate::transport::TransportFailureKind::ProviderFailed { .. } => {
+                    facts.cleanup_intent =
+                        crate::provider::CancellationCause::ProviderFailureCleanup;
+                }
+                crate::transport::TransportFailureKind::Other => {}
             },
             Self::UnconfirmedCancellation { operation, .. } => {
                 facts.cleanup_uncertain = true;
@@ -505,6 +520,13 @@ pub(super) struct EngineRunReceipt {
     pub(super) head_settlements: Vec<crate::store::EmbeddedRoundSettlement>,
 }
 impl EngineRunReceipt {
+    pub(super) fn cleanup_cancellation_intent(&self) -> crate::provider::CancellationCause {
+        match &self.result {
+            Ok(_) => crate::provider::CancellationCause::Unknown,
+            Err(error) => error.round_facts(self.head.clone()).cleanup_intent,
+        }
+    }
+
     fn action_facts(&self) -> ErrorFacts<'_> {
         match &self.result {
             Ok(completion) => completion_facts(completion),

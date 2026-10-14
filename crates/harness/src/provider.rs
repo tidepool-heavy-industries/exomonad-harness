@@ -52,6 +52,9 @@ pub struct CallContext {
     /// Cooperative cancellation signal. External work remains owned by its
     /// CancellationOwner until that owner confirms cleanup.
     pub cancel: CancellationToken,
+    /// Scheduler-issued read-only request intent. Direct legacy contexts have
+    /// none; the token alone supplies Unknown attribution.
+    pub cancellation_intent: Option<crate::turn::CancellationIntentObservation>,
     /// Scheduler-created job authority. Providers cannot supply its identity.
     pub verbs: crate::agents::JobVerbs,
     /// Bounded, best-effort out-of-band progress; a full queue rejects sends.
@@ -151,6 +154,7 @@ impl CallContext {
                 agent,
                 request: None,
                 cancel,
+                cancellation_intent: None,
                 verbs,
                 progress,
                 context: None,
@@ -320,6 +324,18 @@ pub enum CancellationAcknowledgment {
     Unconfirmed(String),
 }
 
+/// Intent forwarded by the cleanup/request owner, not proof of a native winner.
+/// A boundary with only a boolean signal must retain Unknown attribution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CancellationCause {
+    DeliveredInput,
+    ProviderFailureCleanup,
+    RoundFailureCleanup,
+    ExplicitCancellation,
+    Retirement,
+    Unknown,
+}
+
 #[async_trait]
 pub trait CancellationOwner: Send + Sync {
     /// Choose who owns the cancellation observation's lifetime. OwnerSettlement
@@ -335,6 +351,7 @@ pub trait CancellationOwner: Send + Sync {
         &self,
         operation: &OperationId,
         handle: &JobHandle,
+        cause: CancellationCause,
     ) -> CancellationAcknowledgment;
 }
 

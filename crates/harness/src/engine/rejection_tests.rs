@@ -252,6 +252,7 @@ impl crate::provider::CancellationOwner for Unconfirmed {
         &self,
         _: &OperationId,
         _: &crate::provider::JobHandle,
+        _cause: crate::provider::CancellationCause,
     ) -> crate::provider::CancellationAcknowledgment {
         crate::provider::CancellationAcknowledgment::Unconfirmed(
             "external work is still running".into(),
@@ -999,6 +1000,11 @@ async fn nested_stage_view_preserves_primary_and_independent_recovery_obligation
     else {
         panic!("real embedded rejection must issue its recovery block");
     };
+    let intent = receipt.cleanup_cancellation_intent();
+    assert_eq!(
+        intent,
+        crate::provider::CancellationCause::ProviderFailureCleanup
+    );
     let original = receipt.primary_error().unwrap() as *const EngineError;
     let primary = Box::new(receipt.result.unwrap_err());
     let request = receipt.head.clone().expect("real rejected request");
@@ -1052,6 +1058,7 @@ async fn nested_stage_view_preserves_primary_and_independent_recovery_obligation
     assert!(
         matches!(flat[0].source(), RoundFailureSourceRef::Cleanup(EngineCleanupError::Engine(error)) if matches!(error.as_ref(), EngineError::CleanupFailures(failures) if failures.len() == 2))
     );
+    assert_eq!(receipt.cleanup_cancellation_intent(), intent);
     let assessment = receipt.assessment();
     assert_eq!(assessment.execution(), RoundExecution::Rejected);
     assert_eq!(
