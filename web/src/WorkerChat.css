@@ -66,7 +66,8 @@
 .composer-identity p { margin-block: 4px; }
 .composer-state { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
 .composer-state p { margin: 0; }
-.worker-chat-composer:focus-within textarea, .worker-chat-composer.has-draft textarea { min-height: 76px; }
+/* Focus must not move composer controls during pointer activation. */
+.worker-chat-composer.has-draft textarea { min-height: 76px; }
 .inference-recovery { scroll-margin-block-start: 12px; }
 @media (max-width: 700px) {
   .worker-switcher { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 40px; text-align: start; }
@@ -76,7 +77,7 @@
   .worker-picker.is-open { display: block; max-height: min(40dvh, 24rem); overflow: auto; padding: 8px; }
   .worker-chat-list { overflow: visible; }
   .composer-toolbar > .hint { display: none; }
-  .worker-chat-composer:focus-within .composer-toolbar > .hint, .worker-chat-composer.has-draft .composer-toolbar > .hint { display: block; }
+  .worker-chat-composer.has-draft .composer-toolbar > .hint { display: block; }
   .composer-toolbar { justify-content: flex-end; }
 }
 @media (pointer: coarse) {
