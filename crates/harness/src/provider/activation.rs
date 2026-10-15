@@ -51,6 +51,8 @@ pub enum InvocationRole {
 pub enum InvocationState {
     Queued,
     Running,
+    /// Scheduler terminal carrier without proof that native work stopped.
+    Unconfirmed,
 }
 
 /// Existing scheduler inventory, including calls registered before physical

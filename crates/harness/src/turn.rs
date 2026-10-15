@@ -340,10 +340,6 @@ fn retain_progress(progress: &mut Vec<Value>, event: Value) {
     progress.push(event);
 }
 
-/// Owns in-flight provider work and makes settlement replayable.
-///
-/// The semaphore bounds concurrent calls. The same registry can be shared by
-/// the request loop and the agent tree; it does not own durable persistence.
 /// Synchronous access to the existing jobs registry for one exact settlement
 /// invocation. The callback must not await or reenter the scheduler. Lock order
 /// is scheduler jobs, then the host's native request/operation admission owner.
@@ -393,17 +389,23 @@ impl InvocationAdmission {
         let mut pending = jobs
             .iter()
             .filter_map(|(operation, job)| {
-                (job.activation.as_ref() == Some(&self.activation)
-                    && job.role == InvocationRole::Domain
-                    && job.output.is_none())
-                .then(|| PendingInvocation {
+                if job.activation.as_ref() != Some(&self.activation)
+                    || job.role != InvocationRole::Domain
+                {
+                    return None;
+                }
+                let state = match &job.output {
+                    None if job.started => InvocationState::Running,
+                    None => InvocationState::Queued,
+                    Some(JobOutput::CancellationUnconfirmed(_) | JobOutput::Interrupted) => {
+                        InvocationState::Unconfirmed
+                    }
+                    Some(_) => return None,
+                };
+                Some(PendingInvocation {
                     operation: operation.clone(),
                     name: job.name.clone(),
-                    state: if job.started {
-                        InvocationState::Running
-                    } else {
-                        InvocationState::Queued
-                    },
+                    state,
                 })
             })
             .collect::<Vec<_>>();
@@ -427,6 +429,8 @@ impl InvocationAdmission {
     }
 }
 
+/// Owns in-flight provider work and makes settlement replayable. The semaphore
+/// bounds concurrent calls; this registry does not own durable persistence.
 pub struct JobScheduler {
     owner: Arc<()>,
     capacity: Arc<Semaphore>,
@@ -2858,3 +2862,7 @@ mod cancellation_intent_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "turn/activation_tests.rs"]
+mod activation_tests;

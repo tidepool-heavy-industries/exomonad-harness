@@ -89,6 +89,25 @@ operation cleanup and Store continuation grant own that decision. Body timings
 start after response headers arrive. An unfinished SSE event is discarded at
 EOF; its bytes are never promoted into a completed message or tool invocation.
 
+A host may issue one opaque `RequestActivation` per native request and retain it
+in every immutable `Provider::request_snapshot` for that activation. The scheduler
+pins each operation's `InvocationRole` and inventories queued and running domain
+work across provider responses using its existing jobs registry. Unconfirmed
+cleanup remains pending; completed unread output does not. Settlement and
+observation controls are excluded. `CallContext::invocations` admits a native
+request claim synchronously under the same lock as job registration and physical
+start. The callback takes the native request lock second, never awaits or
+reenters the scheduler, and may refine inventory only using exact native terminal
+facts. Refusal leaves domain admission open; acceptance fences that activation's
+new domain starts and returns an exact operation-bound `InvocationTerminal`.
+
+The native owner attaches that token to `ProviderCompletion::activation_terminal`
+only for its accepted settlement. Engine commits ordinary output and any context
+edit, executes remaining response-order controls, then returns before successor
+inference or further inbox admission. The reusable actor and a successor
+activation's queued input remain owned by the host. Output JSON, tool names,
+schema equality, passive replay and Store reopen issue no terminal authority.
+
 ## Focused tests
 
 ### Native Buck2 on x86_64 Linux
