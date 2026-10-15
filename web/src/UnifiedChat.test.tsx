@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import UnifiedChat, { decodeUnifiedPage } from './UnifiedChat'
 import { clearMountedFormDrafts } from './MountedForm'
 
-afterEach(() => { vi.unstubAllGlobals(); clearMountedFormDrafts() })
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); clearMountedFormDrafts() })
 
 describe('unified conversation pages', () => {
   const origin = { run: 'r', nativeActor: '3', incarnation: '1' }
@@ -32,7 +32,11 @@ describe('unified conversation pages', () => {
     let entries: unknown[] = []
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ origin, entries, cutoverSequence: '0', legacyHistory: false, nextAfter: null, previousBefore: null }))))
     const mounted = render(<UnifiedChat origin={origin} modelOrigin={modelOrigin} ready active={false} liveOutput={[live]} />)
-    expect(await screen.findByText('observe value')).toBeVisible()
+    const source = await screen.findByText('observe value')
+    expect(source).not.toBeVisible()
+    const group = screen.getByLabelText('Tool activity group') as HTMLDetailsElement
+    group.open = true; fireEvent(group, new Event('toggle'))
+    expect(source).toBeVisible()
     const disclosure = screen.getByText('Tool evidence').closest('details')!
     disclosure.open = true; fireEvent(disclosure, new Event('toggle'))
     const hash = 'a'.repeat(64)
@@ -53,6 +57,33 @@ describe('unified conversation pages', () => {
     mounted.rerender(<UnifiedChat origin={origin} revision="2" modelOrigin={modelOrigin} ready active={false} liveOutput={[live]} jobs={jobs} />)
     expect(screen.getByText(/Host duration: 1.5 s/)).toBeVisible()
     expect(screen.queryByText(/Tool running/)).toBeNull()
+  })
+  it('retains group and row disclosures when older adjacent tools are prepended', async () => {
+    const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(312)
+    const scroll = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(600)
+    const modelOrigin = { kind: 'embedded' as const, run: 'r', actor: '/worker', incarnation: 'one' }
+    const tool = (sequence: string) => ({ sequence, kind: 'message', requestId: 'req', position: sequence, hash: 'a'.repeat(64), providerItemId: null, inputOperation: null,
+      tool: { operation: { origin: modelOrigin, request: 'req', call: sequence }, invocation: { request: 'req', position: sequence, hash: 'a'.repeat(64) } },
+      item: { type: 'custom_tool_call', name: 'haskell', call_id: sequence, input: `observe value${sequence}` } })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const older = new URL(String(input), 'http://localhost').searchParams.has('before')
+      return new Response(JSON.stringify({ origin, entries: older ? [tool('1')] : [tool('2'), { ...tool('2'), sequence: '3', item: { type: 'custom_tool_call_output', call_id: '2', output: 'Long retained result\n'.repeat(100) } }], cutoverSequence: '0', legacyHistory: false, nextAfter: null, previousBefore: older ? null : '2' }))
+    }))
+    render(<UnifiedChat origin={origin} modelOrigin={modelOrigin} ready active={false} />)
+    await screen.findByRole('heading', { name: 'haskell' })
+    const group = screen.getByLabelText('Tool activity group') as HTMLDetailsElement
+    group.open = true; fireEvent(group, new Event('toggle'))
+    const evidence = screen.getByText('Tool evidence').closest('details')!
+    evidence.open = true; fireEvent(evidence, new Event('toggle'))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Result 3' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }))
+    await waitFor(() => expect(screen.getAllByRole('heading', { name: 'haskell' })).toHaveLength(2))
+    expect(screen.getByLabelText('Tool activity group')).toHaveAttribute('open')
+    const retained = screen.getAllByText('Tool evidence')[1]!.closest('details')!
+    expect(retained).toHaveAttribute('open')
+    expect(screen.getAllByLabelText('Input')[1]).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Collapse Result 3' })).toHaveAttribute('aria-expanded', 'true')
+    height.mockRestore(); scroll.mockRestore()
   })
   it('preserves server sequence order and rejects timestamp shaped alternatives', () => {
     const page = { origin, cutoverSequence: '4', legacyHistory: true, entries: [

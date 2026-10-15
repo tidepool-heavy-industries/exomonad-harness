@@ -25,7 +25,7 @@ export async function view(page: Page, name: string) {
 export async function chooseWorker(page: Page) {
   await view(page, 'Chat')
   const switcher = page.getByRole('button', { name: /^Worker:/ })
-  if (await switcher.isVisible()) await switcher.click()
+  if (await switcher.isVisible() && await switcher.getAttribute('aria-expanded') !== 'true') await switcher.click()
   await page.getByRole('complementary', { name: 'Workers' }).getByRole('link', { name: target.actor, exact: true }).click()
   await expect(page.getByRole('textbox', { name: /^Message / })).toBeEnabled()
 }

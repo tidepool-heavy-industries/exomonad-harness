@@ -81,13 +81,13 @@ export function readable(value: unknown): ReadableItem | undefined {
   if (value.type === 'message' && typeof value.role === 'string') {
     const content = blocks(value.content, ['input_text', 'output_text', 'refusal'])
     const phase = typeof value.phase === 'string' ? value.phase : undefined
-    const assistantLabel = phase === 'commentary' || phase === 'final'
-      ? `Assistant · ${phase}`
+    const assistantLabel = phase === 'commentary' || phase === 'final' || phase === 'final_answer'
+      ? `Assistant · ${phase === 'final_answer' ? 'final' : phase}`
       : phase === undefined ? 'Assistant' : `Assistant · unknown phase (${phase})`
     return { label: value.role === 'assistant' ? assistantLabel : value.role === 'user' ? 'You' : `Message · ${value.role}`,
       kind: value.role === 'user' ? 'human' : value.role === 'assistant' ? 'assistant' : 'activity',
       texts: content.texts.map((text) => ({ label: 'Text', text, kind: 'prose', format: value.role === 'assistant' ? 'markdown' : 'plain' })),
-      unknownBlocks: content.unknownBlocks || (value.role === 'assistant' && phase !== undefined && phase !== 'commentary' && phase !== 'final') }
+      unknownBlocks: content.unknownBlocks || (value.role === 'assistant' && phase !== undefined && phase !== 'commentary' && phase !== 'final' && phase !== 'final_answer') }
   }
   if (value.type === 'reasoning') {
     const summary = value.summary === undefined ? { texts: [], unknownBlocks: false } : blocks(value.summary, ['summary_text'])

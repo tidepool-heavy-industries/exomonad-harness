@@ -27,6 +27,9 @@ export function useConversationViewport(viewportRef?: RefObject<HTMLElement>) {
   function revealRow(key: string) {
     const row = [...(section.current?.querySelectorAll<HTMLElement>('[data-timeline-key]') ?? [])].find(row => row.dataset.timelineKey === key)
     if (!row) return
+    for (let parent = row.parentElement; parent && parent !== section.current; parent = parent.parentElement) {
+      if (parent instanceof HTMLDetailsElement) parent.open = true
+    }
     pinned.current = false
     row.scrollIntoView({ block: 'start' })
     row.focus({ preventScroll: true })

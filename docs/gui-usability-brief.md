@@ -20,7 +20,11 @@ This brief records the operator's choices for the usability pass based on
   technical identifiers remain available through disclosures. Streaming and
   retained versions preserve row identity and disclosure choices. An active text
   selection suspends automatic following; the user can explicitly jump to activity.
-- Execution: code/arguments and results are visible together. An expandable log
+- Execution: prose is the default reading surface. Consecutive tool calls and
+  results collapse into keyboard-accessible groups between prose, displays, and
+  forms. Literal result excerpts and observed failures remain in each summary;
+  expanding a group exposes the original calls, results, and execution evidence.
+  Code/arguments and results remain visible together inside each expanded cell. An expandable log
   beneath each cell shows observed publication and exactly correlated job state
   and timing. Missing results never imply completion or ongoing execution. Compiler
   phases and a complete effect log require the separate telemetry PRD.
@@ -28,7 +32,9 @@ This brief records the operator's choices for the usability pass based on
   in loaded history, retained drafts, field-associated validation and deliberate
   focus after submission. Submitted values read as an answer; full form details
   remain expandable. No background focus stealing.
-- Layout: retain worker navigation and the anchored composer. At short viewport
+- Layout: retain the anchored composer. Worker navigation can collapse on desktop
+  and narrow screens, with an always-available control to reopen it. An explicit
+  Latest messages action remains available without changing reading-position policy. At short viewport
   heights (including zoom), let the page scroll so the composer cannot cover an
   unusably small transcript. Horizontal code scrolling remains keyboard reachable.
 - Delivery: direct improvement of the current chat, followed by user iteration.

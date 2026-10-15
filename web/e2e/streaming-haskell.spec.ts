@@ -18,6 +18,9 @@ for (const width of [1280, 390]) {
     }
     const calls = page.getByRole('region', { name: 'haskell tool call', exact: true })
     await delta('custom', 'tool_input', source.slice(0, 30), 'haskell')
+    const toolGroup = page.getByLabel('Tool activity group', { exact: true })
+    await expect(toolGroup).not.toHaveAttribute('open')
+    await toolGroup.locator('summary').first().click()
     await expect(calls.locator('code.language-haskell')).toHaveText(source.slice(0, 30), { useInnerText: false })
     await delta('custom', 'tool_input', source.slice(30), 'haskell')
     await expect.poll(() => calls.locator('code').textContent()).toBe(source)

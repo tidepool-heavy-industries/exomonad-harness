@@ -1,0 +1,42 @@
+import { test, expect } from '@playwright/test'
+import { actorSnapshot, entries } from './chat-fixtures'
+import { chooseWorker, openFixture, captureViewport, noOverflow } from './support'
+
+for (const width of [1280, 390]) {
+  test(`prose stays primary with accessible tools and worker navigation at ${width}px`, async ({ page, request }, info) => {
+    await page.setViewportSize({ width, height: 844 })
+    await openFixture(page, request, { snapshot: actorSnapshot(), chatEntries: entries })
+    await chooseWorker(page)
+    const group = page.getByLabel('Tool activity group', { exact: true })
+    await expect(group).toHaveCount(1)
+    await expect(group).not.toHaveAttribute('open')
+    await expect(group.getByText('Result: Compilation failed')).toBeVisible()
+    await expect(page.getByRole('textbox', { name: 'Project name' })).toBeVisible()
+    const composer = page.getByRole('textbox', { name: /^Message / })
+    await composer.fill('Keep this draft')
+    await page.getByRole('textbox', { name: 'Project name' }).fill('Retain form draft')
+    await group.locator('summary').first().focus()
+    await page.keyboard.press('Enter')
+    await expect(group).toHaveAttribute('open')
+    await expect(group.getByLabel('Input', { exact: true })).toBeVisible()
+    await expect(group.getByRole('button', { name: 'Copy Input', exact: true })).toBeEnabled()
+    await page.keyboard.press('Enter')
+    await expect(group).not.toHaveAttribute('open')
+    const switcher = page.getByRole('button', { name: /Worker:.*workers/ })
+    if (await switcher.getAttribute('aria-expanded') === 'true') await switcher.click()
+    await expect(page.getByRole('searchbox', { name: 'Find worker' })).not.toBeVisible()
+    await switcher.focus()
+    await page.keyboard.press('Enter')
+    await expect(switcher).toHaveAttribute('aria-expanded', 'true')
+    await switcher.click()
+    await expect(composer).toHaveValue('Keep this draft')
+    await expect(page.getByRole('textbox', { name: 'Project name' })).toHaveValue('Retain form draft')
+    await expect(page.getByRole('button', { name: 'Latest messages', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Latest messages', exact: true }).click()
+    await noOverflow(page)
+    const read = page.getByRole('button', { name: 'Read conversation', exact: true })
+    if (await read.isVisible()) await read.click()
+    await group.evaluate(element => element.scrollIntoView({ block: 'center' }))
+    await captureViewport(page, info, `prose-first-${width}`)
+  })
+}

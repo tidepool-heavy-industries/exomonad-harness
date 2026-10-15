@@ -59,7 +59,6 @@
   .harness.is-chat .tab { padding: 6px; }
 }
 
-.worker-switcher { display: none; }
 .composer-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; margin-bottom: 6px; }
 .worker-chat-composer .composer-heading label { margin: 0; }
 .composer-identity { font-size: var(--diagnostic-size); color: var(--muted); }
@@ -116,3 +115,10 @@
   background: var(--selection); color: var(--action-ink);
 }
 .worker-chat-composer textarea { background: var(--paper); }
+
+.worker-switcher { display: flex; gap: 8px; align-items: center; width: 100%; text-align: start; margin-bottom: 8px; }
+.worker-switcher .mono { min-width: 0; overflow-wrap: anywhere; flex: 1; }
+.worker-picker[hidden] { display: none; }
+.worker-chat.workers-closed { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 8px; }
+.workers-closed .worker-chat-list { border-inline-end: 0; padding-inline-end: 0; overflow: visible; }
+.workers-closed .worker-switcher { width: auto; max-width: 100%; margin: 0; }

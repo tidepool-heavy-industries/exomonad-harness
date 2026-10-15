@@ -22,6 +22,7 @@ for (const width of [1280, 390]) {
     await page.setViewportSize({ width, height: 844 })
     await openFixture(page, request, { snapshot: actorSnapshot(), chatEntries })
     await chooseWorker(page)
+    await page.getByLabel('Tool activity group', { exact: true }).locator('summary').first().click()
     const calls = page.getByRole('region', { name: 'haskell tool call', exact: true })
     await expect(calls).toHaveCount(2)
     for (const call of await calls.all()) {

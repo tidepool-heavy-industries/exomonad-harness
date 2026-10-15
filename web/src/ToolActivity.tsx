@@ -37,7 +37,7 @@ export default function ToolActivity({ row, streamingActive, exchange, jobs = []
     {row.kind === 'live' && row.live.some(item => item.overflow) && <p className="hint">Partial live preview. Completed content will be available in retained history.</p>}
     {results.length > 0 && <div className="tool-results"><h4>Result</h4>{results.map(result => {
       const resultView = readable(result.item)
-      return <PresentationMemory key={result.sequence}>{resultView ? resultView.texts.map((part, index) =>
+      return <PresentationMemory key={result.sequence} namespace={`result:${result.sequence}`}>{resultView ? resultView.texts.map((part, index) =>
         <MessageContent key={index} text={part.text} copyText={part.copyText} label={`Result ${result.sequence}`} memoryKey={`result:${index}`} bounded />)
         : <HistoryItem listItem={false} diagnostics={false} entry={{ position: result.position, hash: result.hash, byteLen: String(new TextEncoder().encode(JSON.stringify(result.item)).length), item: result.item }} />}
       </PresentationMemory>

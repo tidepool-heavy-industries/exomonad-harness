@@ -210,6 +210,9 @@ describe('retained Item presentation', () => {
     const finalItem = { type: 'message', role: 'assistant', phase: 'final', content: 'Done.' }
     const { rerender } = render(<HistoryItem entry={entry(finalItem)} />)
     expect(screen.getByRole('heading', { name: 'Assistant · final' })).toBeInTheDocument()
+    rerender(<HistoryItem entry={entry({ ...finalItem, phase: 'final_answer' })} />)
+    expect(screen.getByRole('heading', { name: 'Assistant · final' })).toBeInTheDocument()
+    expect(screen.queryByText(/Unknown content is retained/)).toBeNull()
     const futureItem = { type: 'message', role: 'assistant', phase: 'future_phase', content: 'Retained.' }
     rerender(<HistoryItem entry={entry(futureItem)} />)
     expect(screen.getByRole('heading', { name: 'Assistant · unknown phase (future_phase)' })).toBeInTheDocument()

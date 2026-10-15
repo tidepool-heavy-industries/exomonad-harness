@@ -16,3 +16,12 @@
 
 .chat-attention button { flex-shrink: 0; }
 .timeline-metadata summary { padding-block: 4px; }
+
+.tool-sequence { margin-block: 12px; border-block: 1px solid var(--line); }
+.tool-sequence > summary { padding: 10px 0; cursor: pointer; font-size: 13px; color: var(--muted); }
+.tool-sequence-title { color: var(--ink); font-weight: 600; }
+.tool-sequence-result { display: block; margin-top: 4px; overflow-wrap: anywhere; }
+.tool-sequence-issue { display: inline-block; margin-inline-start: 12px; color: var(--failed); }
+.tool-sequence[open] > summary { border-bottom: 1px solid var(--line); }
+
+.tool-sequence-action { margin-inline-start: 12px; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }

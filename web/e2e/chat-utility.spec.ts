@@ -4,7 +4,8 @@ import { target } from './fixtures.mjs'
 import { audit, captureViewport, chooseWorker, control, observations, openFixture } from './support'
 
 async function switchWorker(page: Page, name: string) {
-  await page.getByRole('button', { name: /^Worker:/ }).click()
+  const switcher = page.getByRole('button', { name: /^Worker:/ })
+  if (await switcher.getAttribute('aria-expanded') !== 'true') await switcher.click()
   await page.getByRole('complementary', { name: 'Workers' }).getByRole('link', { name, exact: true }).click()
 }
 

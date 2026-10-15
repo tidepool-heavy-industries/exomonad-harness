@@ -9,6 +9,9 @@ import { PresentationMemory } from './presentation-state'
 import { TimelineContent, UnifiedOutput } from './ConversationContent'
 import { useConversationHistory } from './useConversationHistory'
 import { useConversationViewport, useConversationViewportUpdates } from './useConversationViewport'
+import ToolSequence from './ToolSequence'
+import { groupToolSequences } from './tool-sequences'
+import type { TimelineRow } from './chat-timeline'
 import './UnifiedChat.css'
 
 export { decodeUnifiedPage } from './conversation-client'
@@ -35,6 +38,12 @@ function UnifiedChatView({ viewportRef, origin, requestId, revision, ready, acti
   const residentPreviewKeys = new Set(projectTimeline(origin, [], scopedOutput, modelOrigin).map(row => row.key))
   const knownFinals = new Set([...observedFinals.current].filter(key => residentPreviewKeys.has(key)))
   const rows = projected.filter(row => row.kind !== 'live' || !knownFinals.has(row.key))
+  // Keep disclosure choices with exact rows across grouping and paging changes.
+  // Evicted rows release their memory with the bounded conversation window.
+  const rowMemory = useRef(new Map<string, Map<string, boolean>>())
+  const residentKeys = new Set(rows.map(row => row.key))
+  for (const key of rowMemory.current.keys()) if (!residentKeys.has(key)) rowMemory.current.delete(key)
+  for (const row of rows) if (!rowMemory.current.has(row.key)) rowMemory.current.set(row.key, new Map())
   const openForms = entries.filter((entry): entry is Extract<UnifiedEntry, { kind: 'form' }> => entry.kind === 'form' && entry.form.state === 'open')
   useLayoutEffect(() => {
     const element = attention.current
@@ -63,24 +72,28 @@ function UnifiedChatView({ viewportRef, origin, requestId, revision, ready, acti
   }, [entries, liveVersion])
   const failedRequests = [...(requests?.values() ?? [])].filter(item => item.state === 'failed'
     && entries.some(entry => entry.kind === 'message' && entry.requestId === item.id))
+  function renderRow(row: TimelineRow) {
+    return <div role="listitem" className="timeline-row" key={row.key} tabIndex={-1} data-timeline-key={row.key} data-sequence={'entry' in row ? row.entry.sequence : undefined}>
+      <PresentationMemory memory={rowMemory.current.get(row.key)}><TimelineContent onRevealActivity={viewport.revealRow} row={row} streamingActive={ready && active} requests={requests} jobs={jobs} modelOrigin={modelOrigin} /></PresentationMemory>
+      {row.kind === 'entry' && row.entry.kind === 'output' && <UnifiedOutput entry={row.entry} origin={origin} ready={ready} active={active} onAuthExpired={onAuthExpired} onExpanded={refresh} />}
+      {row.kind === 'entry' && row.entry.kind === 'form' && <MountedForm form={row.entry.form} ready={ready} active={active} onAuthExpired={onAuthExpired} onStateChange={updateForm} />}
+      {'entry' in row && row.entry.kind !== 'message' && <details className="timeline-metadata"><summary>Publication details</summary><p>Sequence {row.entry.sequence}</p>{row.entry.kind === 'oversized' && <p>Exchange {row.entry.requestId} · position {row.entry.position}</p>}</details>}
+    </div>
+  }
   return <section ref={section} className="unified-chat" aria-label="Conversation" aria-busy={ready && !page}>
     {active && openForms.length > 0 && <nav ref={attention} className="chat-attention" aria-label="Pending responses">
       <span role="status">{openForms.length} {openForms.length === 1 ? 'response' : 'responses'} needed <small>in loaded history{!ready ? ' · reconnect to respond' : ''}</small></span>
       <button type="button" onClick={jumpToForm}>{openForms.length === 1 ? 'Jump to form' : 'Jump to next form'}</button>
     </nav>}
-    <div className="toolbar"><h2>Conversation</h2><button type="button" disabled={!ready} onClick={refresh}>Refresh conversation</button></div>
+    <div className="toolbar"><h2>Conversation</h2><div className="host-actions"><button type="button" disabled={!ready} onClick={returnToLatest}>Latest messages</button><button type="button" disabled={!ready} onClick={refresh}>Refresh conversation</button></div></div>
     {!ready && <p role="status">Host unavailable; retained conversation entries remain visible.</p>}
     {!modelOrigin && liveOutput.length > 0 && <p role="status">Live output is unavailable for this actor.</p>}
     {issue && <div role="alert"><p>{issue}</p><button type="button" disabled={!ready} onClick={refresh}>Retry conversation</button></div>}
     {older !== null && <button type="button" className="load-older" disabled={!ready || loadingOlder} onClick={() => void loadOlder()}>{loadingOlder ? 'Loading older messages…' : 'Load older messages'}</button>}
     {page?.legacyHistory && older === null && <details><summary>Legacy message history</summary><p className="meta">Older messages use retained request order. Their order relative to displays and forms is unavailable before sequence {page.cutoverSequence}.</p>{legacy}</details>}
     {failedRequests.map(item => <div className="error" role="alert" key={item.id}><strong>Response interrupted</strong><details><summary>Response details</summary><p>{item.detail ?? 'The model request failed.'}</p>{item.id}</details></div>)}
-    <div className="unified-entries" role="list" aria-label="Conversation entries">{rows.map(row => <div role="listitem" className="timeline-row" key={row.key} tabIndex={-1} data-timeline-key={row.key} data-sequence={'entry' in row ? row.entry.sequence : undefined}>
-      <PresentationMemory><TimelineContent onRevealActivity={viewport.revealRow} row={row} streamingActive={ready && active} requests={requests} jobs={jobs} modelOrigin={modelOrigin} /></PresentationMemory>
-      {row.kind === 'entry' && row.entry.kind === 'output' && <UnifiedOutput entry={row.entry} origin={origin} ready={ready} active={active} onAuthExpired={onAuthExpired} onExpanded={refresh} />}
-      {row.kind === 'entry' && row.entry.kind === 'form' && <MountedForm form={row.entry.form} ready={ready} active={active} onAuthExpired={onAuthExpired} onStateChange={updateForm} />}
-      {'entry' in row && row.entry.kind !== 'message' && <details className="timeline-metadata"><summary>Publication details</summary><p>Sequence {row.entry.sequence}</p>{row.entry.kind === 'oversized' && <p>Exchange {row.entry.requestId} · position {row.entry.position}</p>}</details>}
-    </div>)}</div>
+    <div className="unified-entries" role="list" aria-label="Conversation entries">{groupToolSequences(rows).map(group => group.kind === 'row' ? renderRow(group.row)
+      : <div role="listitem" key={group.key} data-timeline-key={group.key} className="tool-sequence-row"><ToolSequence memories={group.rows.map(row => rowMemory.current.get(row.key)!)} streamingActive={ready && active} rows={group.rows} renderRow={renderRow} requests={requests} jobs={jobs} modelOrigin={modelOrigin} /></div>)}</div>
     {newActivity && <button type="button" className="new-activity" onClick={returnToLatest}>New activity ↓</button>}
     {windowed && <div className="history-controls"><p className="meta">Showing a bounded history window. Additional messages remain in retained history.</p><button type="button" disabled={!ready} onClick={returnToLatest}>Return to latest messages</button></div>}
     {page && !entries.length && !scopedOutput.length && !page.legacyHistory && !issue && <p>No conversation entries have been retained yet.</p>}

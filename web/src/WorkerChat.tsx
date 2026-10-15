@@ -56,7 +56,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
   const viewportRef = useRef<HTMLDivElement>(null)
   const workerSwitcher = useRef<HTMLButtonElement>(null)
   const workerPickerId = useId()
-  const [workersOpen, setWorkersOpen] = useState(false)
+  const [workersOpen, setWorkersOpen] = useState(() => window.innerWidth > 700)
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
   const resolved = resolveSelection(data, route.selection)
@@ -103,15 +103,17 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
       onClick={event => {
         if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
         event.preventDefault(); navigate(next)
-        setWorkersOpen(false)
-        if (workerSwitcher.current?.getClientRects().length) workerSwitcher.current.focus({ preventScroll: true })
+        if (window.innerWidth <= 700) {
+          setWorkersOpen(false)
+          workerSwitcher.current?.focus({ preventScroll: true })
+        }
       }}>{label}</a>
   }
-  return <div className="worker-chat">
+  return <div className={`worker-chat${workersOpen ? ' workers-open' : ' workers-closed'}`}>
     <aside className="worker-chat-list" aria-label="Workers">
       <button ref={workerSwitcher} className="worker-switcher" type="button" aria-expanded={workersOpen} aria-controls={workerPickerId}
-        onClick={() => setWorkersOpen(!workersOpen)}>Worker: <span className="mono">{identity?.actor ?? 'Choose worker'}</span><span>{workersOpen ? 'Close' : 'Change'}</span></button>
-      <div id={workerPickerId} className={`worker-picker${workersOpen ? ' is-open' : ''}`} onKeyDown={event => {
+        onClick={() => setWorkersOpen(!workersOpen)}>Worker: <span className="mono">{identity?.actor ?? 'Choose worker'}</span><span>{workersOpen ? 'Hide workers' : 'Show workers'}</span></button>
+      <div id={workerPickerId} hidden={!workersOpen} className={`worker-picker${workersOpen ? ' is-open' : ''}`} onKeyDown={event => {
         if (event.key === 'Escape') { setWorkersOpen(false); workerSwitcher.current?.focus() }
       }}>
       <h2>Workers</h2>

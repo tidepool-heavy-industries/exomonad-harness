@@ -68,7 +68,7 @@ function CodeBlock({ children, text, copyText = text, label, memoryKey, copy = t
   children: ReactNode; text: string; copyText?: string; label: string; memoryKey: string; copy?: boolean; bounded?: boolean; sourceLabel?: string
 }) {
   const [expanded, setExpanded] = usePresentationChoice(memoryKey)
-  const [overflowing, setOverflowing] = useState(false)
+  const [overflowing, setOverflowing] = useState(expanded)
   const pre = useRef<HTMLPreElement>(null)
   const id = useId()
   useLayoutEffect(() => {
@@ -93,7 +93,7 @@ export function MessageContent({ text, copyText = text, label, format = 'plain',
   const preview = useStreamingText(text, streaming)
   const contentBounded = bounded && !language
   const [expanded, setExpanded] = usePresentationChoice(`content:${memoryKey}`)
-  const [overflowing, setOverflowing] = useState(false)
+  const [overflowing, setOverflowing] = useState(expanded)
   const viewport = useRef<HTMLDivElement>(null)
   const body = useRef<HTMLDivElement>(null)
   const id = useId()
