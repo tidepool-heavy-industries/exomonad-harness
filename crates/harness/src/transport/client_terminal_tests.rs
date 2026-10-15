@@ -167,6 +167,7 @@ async fn observer_closure_releases_full_summary_channel_without_replacing_termin
     let (response, release, server) = response(incomplete(), false, true).await;
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     tx.send(StreamEvent::Delta {
+        tool_name: None,
         item_id: "prior".into(),
         channel: super::super::sse::OutputChannel::Assistant,
         index: 0,
