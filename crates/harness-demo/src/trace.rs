@@ -648,9 +648,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn completion_event_has_no_response_identity_or_content() {
-        let turn = ResponsesTurn {
+    #[tokio::test]
+    async fn completion_event_has_no_response_identity_or_content() {
+        let mut turn = ResponsesTurn {
             response_id: "SENTINEL_RESPONSE_ID".into(),
             items: vec![Item(json!({"text":"SENTINEL_RESPONSE_TEXT"}))],
             usage: Usage {
@@ -661,14 +661,34 @@ mod tests {
                 cache_write_tokens: Some(0),
             },
         };
-        let event = json!({
-            "event":"turn_complete",
-            "timestamp_ms":timestamp_ms(),
-            "item_count":turn.items.len(),
-            "usage":{"input_tokens":turn.usage.input_tokens}
-        });
-        assert!(!event.to_string().contains("SENTINEL_RESPONSE_ID"));
-        assert!(!event.to_string().contains("SENTINEL_RESPONSE_TEXT"));
+        let path = std::env::temp_dir().join(format!(
+            "harness-trace-completion-{}-{}.jsonl",
+            std::process::id(),
+            timestamp_ms()
+        ));
+        let sink = TraceSink::open(path.clone()).await.unwrap();
+        let transport = TraceTransport::new(MustNotDispatch(AtomicBool::new(false)), sink.clone());
+        transport.record_turn(&turn).await.unwrap();
+        turn.usage.cached_tokens = None;
+        turn.usage.cache_write_tokens = None;
+        transport.record_turn(&turn).await.unwrap();
+        sink.flush().await.unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("SENTINEL_RESPONSE_ID"));
+        assert!(!text.contains("SENTINEL_RESPONSE_TEXT"));
+        let events = text
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["usage"]["version"], 2);
+        assert_eq!(events[0]["usage"]["cached_tokens"], 1);
+        assert_eq!(events[0]["usage"]["cache_write_tokens"], 0);
+        assert!(events[1]["usage"]["cached_tokens"].is_null());
+        assert!(events[1]["usage"]["cache_write_tokens"].is_null());
+        drop(transport);
+        drop(sink);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
