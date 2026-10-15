@@ -679,3 +679,100 @@ fn run_auth_discovers_new_saved_accounts_and_refuses_removed_or_invalid_choices(
         .unwrap();
     assert_eq!(auth.access().unwrap(), "second-token");
 }
+
+#[test]
+fn concurrent_account_commands_publish_in_commit_order_and_replay_current_authority() {
+    use crate::{
+        embedding::{ClientOperationId, HostIdentity},
+        model::AgentPath,
+        server::HostCommand,
+        store::Store,
+    };
+    use std::sync::{Mutex, mpsc};
+    let files = Temp::new();
+    let a = files.path();
+    let b = files.0.join("second.json");
+    let first = record(now().unwrap() + 600);
+    save(&a, &first).unwrap();
+    let mut second = first.clone();
+    second.access_token = "second-token".into();
+    second.email = Some("second@example.test".into());
+    save(&b, &second).unwrap();
+    let store = Arc::new(Store::memory().unwrap());
+    let accounts = SavedAccounts::beside(a).unwrap();
+    let a_id = accounts.launch_id().clone();
+    let b_id = accounts
+        .projection(a_id.clone())
+        .accounts
+        .into_iter()
+        .find(|entry| entry.label == "second@example.test")
+        .unwrap()
+        .id;
+    let auth = RunAccountAuth::new(store.clone(), "run".into(), accounts).unwrap();
+    let target = HostIdentity {
+        run: "run".into(),
+        actor: AgentPath("/root".into()),
+        incarnation: "first".into(),
+    };
+    let operation_b = ClientOperationId(uuid::Uuid::new_v4());
+    let operation_a = ClientOperationId(uuid::Uuid::new_v4());
+    for (operation, id) in [(operation_b, b_id.clone()), (operation_a, a_id.clone())] {
+        store
+            .enqueue_embedded_command(
+                operation,
+                &HostCommand::SelectAccount {
+                    target: target.clone(),
+                    account_id: id,
+                },
+            )
+            .unwrap();
+        store
+            .claim_embedded_command("run", operation)
+            .unwrap()
+            .unwrap();
+    }
+    let published = Arc::new(Mutex::new(Vec::new()));
+    let (entered, observed) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let first_auth = auth.clone();
+    let first_published = published.clone();
+    let first_thread = std::thread::spawn(move || {
+        first_auth
+            .select_account(operation_b, |selection| {
+                entered.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(10)).unwrap();
+                first_published.lock().unwrap().push(selection.selected_id);
+            })
+            .unwrap()
+    });
+    observed.recv_timeout(Duration::from_secs(10)).unwrap();
+    let (started, starting) = mpsc::channel();
+    let (second_done, second_observed) = mpsc::channel();
+    let second_auth = auth.clone();
+    let second_published = published.clone();
+    let second_thread = std::thread::spawn(move || {
+        started.send(()).unwrap();
+        second_auth
+            .select_account(operation_a, |selection| {
+                second_published.lock().unwrap().push(selection.selected_id);
+                second_done.send(()).unwrap();
+            })
+            .unwrap()
+    });
+    starting.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(matches!(
+        second_observed.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(store.run_account("run").unwrap(), Some(b_id.clone()));
+    release.send(()).unwrap();
+    first_thread.join().unwrap();
+    second_thread.join().unwrap();
+    assert_eq!(*published.lock().unwrap(), vec![b_id, a_id.clone()]);
+    assert_eq!(auth.access().unwrap(), first.access_token);
+    // Replaying the older B receipt must publish the current A authority.
+    auth.select_account(operation_b, |selection| {
+        assert_eq!(selection.selected_id, a_id)
+    })
+    .unwrap();
+}

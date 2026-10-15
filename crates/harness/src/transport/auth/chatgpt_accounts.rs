@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 /// Stable credential-owner-issued identity; its representation is not a path.
@@ -148,6 +148,7 @@ pub struct RunAccountAuth {
     store: Arc<Store>,
     run: String,
     launch_path: PathBuf,
+    selection_writer: Arc<Mutex<()>>,
 }
 impl RunAccountAuth {
     pub fn new(
@@ -165,8 +166,59 @@ impl RunAccountAuth {
             store,
             run,
             launch_path: accounts.launch_path.clone(),
+            selection_writer: Arc::new(Mutex::new(())),
         })
     }
+    /// The sole host constructs this owner once and shares its clones. Keep
+    /// credential validation, durable selection and browser publication in the
+    /// same order even when several browser clients submit concurrently.
+    pub fn select_account(
+        &self,
+        operation: crate::embedding::ClientOperationId,
+        publish: impl FnOnce(AccountSelection),
+    ) -> Result<crate::server::CommandReceipt, crate::store::StoreError> {
+        let _writer = self
+            .selection_writer
+            .lock()
+            .map_err(|_| crate::store::StoreError::InvalidCommandState)?;
+        let accounts = match self.accounts() {
+            Ok(accounts) => accounts,
+            Err(_) => {
+                let target = self
+                    .store
+                    .embedded_command(&self.run, operation)?
+                    .ok_or(crate::store::StoreError::InvalidCommandState)?
+                    .command
+                    .target()
+                    .clone();
+                return self.store.settle_embedded_command(
+                    &self.run,
+                    operation,
+                    crate::server::CommandReceiptOutcome::Refused {
+                        target: Some(target),
+                        reason: "Saved accounts are unavailable.".into(),
+                    },
+                );
+            }
+        };
+        let receipt = self
+            .store
+            .select_run_account(&self.run, operation, &accounts)?;
+        if matches!(
+            receipt.outcome,
+            crate::server::CommandReceiptOutcome::AccountSelected { .. }
+        ) {
+            // A retained receipt may describe an earlier selection. Project
+            // current authority, never reconstruct it from that operation.
+            let selected = self
+                .store
+                .run_account(&self.run)?
+                .ok_or(crate::store::StoreError::InvalidCommandState)?;
+            publish(accounts.projection(selected));
+        }
+        Ok(receipt)
+    }
+
     pub fn accounts(&self) -> Result<SavedAccounts, TransportError> {
         SavedAccounts::beside(self.launch_path.clone()).map_err(|_| TransportError::Authentication)
     }
