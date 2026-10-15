@@ -3876,7 +3876,21 @@ mod interruption_projection_tests {
             SavedAccounts::beside(launch.clone()).unwrap(),
         )
         .unwrap();
-        let peers = Arc::new(TestPeerAuth::default());
+        #[derive(Default)]
+        struct InventoryPeerAuth {
+            outcome: std::sync::atomic::AtomicU8,
+        }
+        #[async_trait::async_trait]
+        impl BrowserPeerAuthenticator for InventoryPeerAuth {
+            async fn authenticate(&self, _: SocketAddr) -> Result<(), PeerAuthError> {
+                if self.outcome.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                    Ok(())
+                } else {
+                    Err(PeerAuthError::Denied)
+                }
+            }
+        }
+        let peers = Arc::new(InventoryPeerAuth::default());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let origin = format!("http://{address}");
