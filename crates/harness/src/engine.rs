@@ -8504,19 +8504,31 @@ mod tests {
     #[tokio::test]
     async fn replay_sends_full_history_after_immediate_tool_dispatch() {
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut turns = [
+            turn(
+                "r1",
+                vec![Item(json!({
+                    "type":"function_call","call_id":"c1","name":"echo","arguments":"{\"x\":1}"
+                }))],
+            ),
+            turn(
+                "r2",
+                vec![Item(json!({
+                    "type":"function_call","call_id":"c2","name":"echo","arguments":"{\"x\":2}"
+                }))],
+            ),
+            turn(
+                "r3",
+                vec![Item(json!({
+                    "type":"message","role":"assistant","phase":"final_answer","content":"done"
+                }))],
+            ),
+        ];
+        turns[1].usage.cached_tokens = None;
+        turns[1].usage.cache_write_tokens = None;
         let replay = Replay {
             requests: requests.clone(),
-            turns: Mutex::new([
-                turn("r1", vec![Item(json!({
-                    "type":"function_call","call_id":"c1","name":"echo","arguments":"{\"x\":1}"
-                }))]),
-                turn("r2", vec![Item(json!({
-                    "type":"function_call","call_id":"c2","name":"echo","arguments":"{\"x\":2}"
-                }))]),
-                turn("r3", vec![Item(json!({
-                    "type":"message","role":"assistant","phase":"final_answer","content":"done"
-                }))]),
-            ].into()),
+            turns: Mutex::new(turns.into()),
         };
         let path = std::env::temp_dir().join(format!("harness-engine-{}.db", uuid::Uuid::new_v4()));
         let store = Arc::new(Store::open(&path).unwrap());
@@ -8539,7 +8551,7 @@ mod tests {
         let result = engine
             .run(
                 None,
-                vec![Item(json!({"role":"user","content":"go"}))],
+                vec![Item(json!({"type":"message","role":"user","content":"go"}))],
                 cancel_rx,
                 empty_mailbox(),
             )
@@ -8592,12 +8604,15 @@ mod tests {
             .filter(|event| event.kind == "responses_usage")
             .collect();
         assert_eq!(usage_events.len(), 3);
-        for event in &usage_events {
+        for (event, expected) in
+            usage_events
+                .iter()
+                .zip([(Some(1), Some(0)), (None, None), (Some(1), Some(0))])
+        {
             let payload: Value = serde_json::from_str(&event.payload).unwrap();
             assert_eq!(payload["version"], 2);
             let usage: Usage = serde_json::from_value(payload).unwrap();
-            assert_eq!(usage.cached_tokens, Some(1));
-            assert_eq!(usage.cache_write_tokens, Some(0));
+            assert_eq!((usage.cached_tokens, usage.cache_write_tokens), expected);
         }
         let request_ids: Vec<_> = usage_events
             .iter()
@@ -8623,7 +8638,15 @@ mod tests {
         let recorded = reopened.replay_turns(&first.id).unwrap();
         let sent = requests.lock().unwrap();
         assert_eq!(recorded.len(), sent.len());
-        for (recorded, sent) in recorded.iter().zip(sent.iter()) {
+        for (index, (recorded, sent)) in recorded.iter().zip(sent.iter()).enumerate() {
+            assert_eq!(
+                recorded.model_response.usage.cached_tokens,
+                if index == 1 { None } else { Some(1) }
+            );
+            assert_eq!(
+                recorded.model_response.usage.cache_write_tokens,
+                if index == 1 { None } else { Some(0) }
+            );
             assert_eq!(
                 crate::transport::client::request_body(&recorded.model_request).unwrap(),
                 crate::transport::client::request_body(sent).unwrap(),

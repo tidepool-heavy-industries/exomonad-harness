@@ -47,21 +47,21 @@ impl TryFrom<UsageWire> for Usage {
     type Error = &'static str;
 
     fn try_from(value: UsageWire) -> Result<Self, Self::Error> {
-        let counter = |count: Option<u64>| match value.version {
+        let (cached_tokens, cache_write_tokens) = match value.version {
             // The previous reader defaulted missing provider counters to zero.
-            1 => count.filter(|count| *count != 0),
-            2 => count,
-            _ => unreachable!("version checked before counters"),
+            1 => (
+                value.cached_tokens.filter(|count| *count != 0),
+                value.cache_write_tokens.filter(|count| *count != 0),
+            ),
+            2 => (value.cached_tokens, value.cache_write_tokens),
+            _ => return Err("unsupported usage observation version"),
         };
-        if !matches!(value.version, 1 | 2) {
-            return Err("unsupported usage observation version");
-        }
         Ok(Self {
             reported: value.reported,
             input_tokens: value.input_tokens,
             output_tokens: value.output_tokens,
-            cached_tokens: counter(value.cached_tokens),
-            cache_write_tokens: counter(value.cache_write_tokens),
+            cached_tokens,
+            cache_write_tokens,
         })
     }
 }
