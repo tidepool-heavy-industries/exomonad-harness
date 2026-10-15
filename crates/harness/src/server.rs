@@ -3862,4 +3862,72 @@ mod interruption_projection_tests {
                 .is_none()
         );
     }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn account_inventory_uses_existing_peer_auth_origin_and_safe_projection() {
+        use crate::transport::auth::chatgpt::{AccountSelection, RunAccountAuth, SavedAccounts};
+        let directory =
+            std::env::temp_dir().join(format!("harness-accounts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let launch = directory.join("account.json");
+        let store = Arc::new(Store::memory().unwrap());
+        let auth = RunAccountAuth::new(
+            store,
+            "run".into(),
+            SavedAccounts::beside(launch.clone()).unwrap(),
+        )
+        .unwrap();
+        let peers = Arc::new(TestPeerAuth::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let origin = format!("http://{address}");
+        let (app, _, mut commands) = server_with_config(
+            ServerConfig::new(directory.clone())
+                .with_account_auth(auth)
+                .with_browser_peer_auth(peers.clone())
+                .unwrap()
+                .with_public_origin(origin.clone())
+                .unwrap(),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let url = format!("{origin}/api/account-selection");
+        assert_eq!(
+            client
+                .get(&url)
+                .header(header::ORIGIN, "http://attacker.invalid")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        peers.outcome.store(1, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            client.get(&url).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        peers.outcome.store(0, std::sync::atomic::Ordering::SeqCst);
+        let response = client
+            .get(&url)
+            .header(header::ORIGIN, origin)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.text().await.unwrap();
+        assert!(!body.contains(launch.to_str().unwrap()));
+        let projection: AccountSelection = serde_json::from_str(&body).unwrap();
+        assert_eq!(projection.accounts.len(), 1);
+        assert_eq!(projection.selected_id, projection.accounts[0].id);
+        assert!(commands.try_recv().is_err());
+        task.abort();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
