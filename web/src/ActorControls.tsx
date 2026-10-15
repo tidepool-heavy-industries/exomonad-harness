@@ -8,7 +8,7 @@ import type { HarnessViewModel } from './view-model'
 import type { RouteState, RetryHostCommand, SubmitHostCommand } from './client-contract'
 import { resolveSelection } from './selectors'
 import { actorDraftKey, useDraft } from './drafts'
-import { inputStatus, inputPublicationKey, receiptText } from './command-presentation'
+import { inputStatus, inputIsIncluded, receiptText } from './command-presentation'
 
 function actorControls(data: HarnessViewModel, route: RouteState, unavailable: boolean, ready: boolean, submit?: SubmitHostCommand) {
   const actor = resolveSelection(data, route.selection).actor;
@@ -16,11 +16,8 @@ function actorControls(data: HarnessViewModel, route: RouteState, unavailable: b
   const enabled = Boolean(target && actor && !unavailable && actor.run === data.hostRun && ready && submit && ['running', 'waiting'].includes(actor.lifecycle));
   return { actor, target, enabled };
 }
-export function OutgoingInputs({ records, rendered }: { records: readonly BrowserCommandRecord[]; rendered: ReadonlySet<string> }) {
-  const inputs = records.filter(record => record.submission.command.action === 'input'
-    && !(record.state === 'input_admitted' && ['status', 'receipt'].includes(record.authority) && record.inputObservation?.state === 'included'
-      && record.envelopeId != null && rendered.has(inputPublicationKey({ target:record.submission.command.target,
-        operationId:record.submission.operation_id, envelopeId:record.envelopeId })!)));
+export function OutgoingInputs({ records }: { records: readonly BrowserCommandRecord[] }) {
+  const inputs = records.filter(record => record.submission.command.action === 'input' && !inputIsIncluded(record));
   return inputs.length ? <section className="outgoing-inputs" aria-label="Outgoing messages"><div role="list">
     {inputs.map(record => <div key={operationKey(record)} data-local-operation-id={record.submission.operation_id}>
       <MessagePresentation kind="human" title="You" status={inputStatus(record)} details={<>
@@ -106,7 +103,7 @@ export function ActorComposer({ data, route, unavailable, ready, onHostCommand, 
         </div>
       </div>
     </form>
-    {latestInput && <p className="composer-delivery" role="status" data-input-state={latestInput.state} data-input-authority={latestInput.authority} data-input-operation-id={latestInput.submission.operation_id} data-input-observation={latestInput.inputObservation?.state}>{inputStatus(latestInput)}</p>}
+    {latestInput && !inputIsIncluded(latestInput) && <p className="composer-delivery" role="status" data-input-state={latestInput.state} data-input-authority={latestInput.authority} data-input-operation-id={latestInput.submission.operation_id} data-input-observation={latestInput.inputObservation?.state}>{inputStatus(latestInput)}</p>}
     {draft.error && <p className="error" role="status">{draft.error}</p>}
     {feedback.text && !(feedback.input && latestInput && ['status', 'receipt'].includes(latestInput.authority))
       && <p className="composer-feedback" role="status">{feedback.text}</p>}

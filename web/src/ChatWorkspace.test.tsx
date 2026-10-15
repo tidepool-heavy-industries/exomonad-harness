@@ -21,7 +21,7 @@ const input: BrowserCommandRecord = { hostRun: 'run', authority: 'status', state
 const response = (entries: ChatEntry[]): Response => ({ ok: true, status: 200,
   text: async () => JSON.stringify({ origin, cutoverSequence: '0', legacyHistory: false, nextAfter: null, previousBefore: null, entries } satisfies ChatPage),
 }) as Response
-const entry = (sequence: string, reference: NonNullable<Extract<ChatEntry, { kind: 'message' }>['inputOperation']>): ChatEntry => ({
+const entry = (sequence: string, reference: NonNullable<Extract<ChatEntry, { kind: 'message' }>['inputOperation']>): Extract<ChatEntry, { kind: 'message' }> => ({
   kind: 'message', sequence, requestId: 'head', position: sequence, hash: 'a'.repeat(64), tool: null, providerItemId: null, inputOperation: reference,
   item: { type: 'message', role: 'user', content: 'Equal text' },
 })
@@ -32,37 +32,39 @@ beforeEach(() => {
 })
 afterEach(() => { vi.unstubAllGlobals(); clearDrafts(); clearWorkerChatRetention() })
 
-it('keeps included local input until an actual rendered row acknowledges exact target, operation, and decimal envelope', async () => {
+it('retires included pending bubbles independently of the loaded history window, including remount and replay', async () => {
   let deliver!: (value: Response) => void
   const held = new Promise<Response>(resolve => { deliver = resolve })
   const fetchMock = vi.fn().mockReturnValueOnce(held)
   vi.stubGlobal('fetch', fetchMock)
-  const sibling = { ...input, envelopeId: '9007199254740994', submission: { ...input.submission, operation_id: otherOperationId } }
-  const mounted = render(<App data={data} pendingCommands={[input, sibling]} />)
+  const unknown: BrowserCommandRecord = { ...input, authority: 'local', state: 'queued', inputObservation: undefined,
+    submission: { ...input.submission, operation_id: otherOperationId } }
+  const mounted = render(<App data={data} pendingCommands={[input, unknown]} />)
   const bubble = (id: string) => document.querySelector(`[data-local-operation-id="${id}"]`)
-  expect(bubble(operationId)).not.toBeNull()
-  expect(bubble(otherOperationId)).not.toBeNull()
-  await act(async () => { deliver(response([
-    entry('1', { target: { ...target, incarnation: 'replacement' }, operationId, envelopeId: envelope }),
-    entry('2', { target, operationId, envelopeId: '9007199254740992' }),
-    entry('3', { target, operationId: 'legacy-operation', envelopeId: envelope }),
-  ])); await held })
-  expect(bubble(operationId)).not.toBeNull()
-  expect(bubble(otherOperationId)).not.toBeNull()
-  fetchMock.mockResolvedValue(response([entry('4', { target, operationId, envelopeId: envelope })]))
-  fireEvent.click(screen.getByRole('button', { name: 'Refresh conversation' }))
-  await waitFor(() => expect(bubble(operationId)).toBeNull())
-  expect(bubble(otherOperationId)).not.toBeNull()
-  expect(document.querySelector('[data-sequence="4"]')).not.toBeNull()
-  fetchMock.mockResolvedValue(response([]))
-  mounted.rerender(<App data={{ ...data, actors: data.actors!.map(actor => ({ ...actor, outputOrigin: { ...origin, nativeActor: '8' } })) }} pendingCommands={[input, sibling]} />)
-  await waitFor(() => expect(document.querySelector('[data-sequence="4"]')).toBeNull())
-  expect(bubble(operationId)).toBeNull()
-  fireEvent.click(screen.getByRole('link', { name: 'Tree' }))
-  fireEvent.click(screen.getByRole('link', { name: 'Chat' }))
   expect(bubble(operationId)).toBeNull()
   expect(bubble(otherOperationId)).not.toBeNull()
+  await act(async () => { deliver(response([{ ...entry('90', { target, operationId: otherOperationId, envelopeId: '9' }),
+    inputOperation: null, item: { type: 'message', role: 'assistant', content: 'A later reply in the latest history window' } }])); await held })
+  expect(bubble(operationId)).toBeNull()
+  expect(bubble(otherOperationId)).not.toBeNull()
+  expect(screen.getByText('A later reply in the latest history window')).toBeVisible()
+  expect(document.querySelector('.composer-delivery')).not.toBeNull() // The distinct unknown submission remains visible.
   mounted.unmount()
+  fetchMock.mockResolvedValue(response([entry('1', { target, operationId, envelopeId: envelope })]))
+  render(<App data={data} pendingCommands={[input]} />)
+  await waitFor(() => expect(document.querySelector('[data-sequence="1"]')).not.toBeNull())
+  expect(bubble(operationId)).toBeNull()
+  expect(document.querySelector('.composer-delivery')).toBeNull()
+  fireEvent.click(screen.getByText('Host operations', { selector: 'summary' }))
+  expect(screen.getByRole('region', { name: 'Retained browser operations' })).toHaveTextContent('Input included · request head')
+})
+
+it('keeps legacy inclusion unconfirmed until fresh authoritative status arrives', async () => {
+  vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})))
+  const mounted = render(<App data={data} pendingCommands={[{ ...input, authority: 'legacy' }]} />)
+  expect(screen.getByLabelText('outgoing message').textContent).toBe('Equal text')
+  mounted.rerender(<App data={data} pendingCommands={[input]} />)
+  expect(screen.queryByLabelText('outgoing message')).toBeNull()
 })
 
 it('preserves exact multiline drafts and ignores composition Enter before explicit Ctrl/Cmd+Enter', () => {

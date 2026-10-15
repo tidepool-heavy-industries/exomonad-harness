@@ -3,7 +3,6 @@ import { actorOutputKey, type ActorOutputOrigin } from './actor-output'
 import MountedForm from './MountedForm'
 import { outputKey, originKey, type LiveOutput, type OutputOrigin } from './live-output'
 import { projectTimeline } from './chat-timeline'
-import type { ChatInputOperation } from './generated/chat'
 import type { UnifiedEntry } from './conversation-client'
 import type { ExchangeObservation, ToolJobObservation } from './ToolActivity'
 import { PresentationMemory } from './presentation-state'
@@ -19,10 +18,10 @@ export interface UnifiedChatProps {
   viewportRef?: RefObject<HTMLElement>
   jobs?: readonly ToolJobObservation[]
   origin: ActorOutputOrigin; requestId?: string; revision?: string; ready: boolean; active: boolean; onAuthExpired?: () => void; legacy?: ReactNode
-  liveOutput?: readonly LiveOutput[]; modelOrigin?: OutputOrigin; onRenderedInputs?: (references: readonly ChatInputOperation[]) => void; requests?: ReadonlyMap<string, ExchangeObservation>
+  liveOutput?: readonly LiveOutput[]; modelOrigin?: OutputOrigin; requests?: ReadonlyMap<string, ExchangeObservation>
 }
 export default function UnifiedChat(props: UnifiedChatProps) { return <UnifiedChatView key={actorOutputKey(props.origin)} {...props} /> }
-function UnifiedChatView({ viewportRef, origin, requestId, revision, ready, active, onAuthExpired, legacy, liveOutput = [], requests, jobs = [], modelOrigin, onRenderedInputs }: UnifiedChatProps) {
+function UnifiedChatView({ viewportRef, origin, requestId, revision, ready, active, onAuthExpired, legacy, liveOutput = [], requests, jobs = [], modelOrigin }: UnifiedChatProps) {
   const viewport = useConversationViewport(viewportRef)
   const { section, pinned, newActivity } = viewport
   const { page, entries, older, issue, loadingOlder, windowed, updateForm, loadOlder, returnToLatest, refresh } = useConversationHistory({ origin, requestId, revision, ready, active, onAuthExpired }, viewport)
@@ -56,11 +55,6 @@ function UnifiedChatView({ viewportRef, origin, requestId, revision, ready, acti
     form?.scrollIntoView({ block: 'start' })
     target?.focus({ preventScroll: true })
   }
-  const renderedInputs = rows.flatMap(row => 'entry' in row && row.entry.kind === 'message' && row.entry.inputOperation ? [row.entry.inputOperation] : [])
-  const inputVersion = JSON.stringify(renderedInputs)
-  const inputCallback = useRef(onRenderedInputs)
-  inputCallback.current = onRenderedInputs
-  useLayoutEffect(() => { inputCallback.current?.(renderedInputs) }, [inputVersion])
   const liveVersion = JSON.stringify(scopedOutput.map(item => [outputKey(item), item.version, item.streaming]))
   useConversationViewportUpdates(viewport, entries, liveVersion)
   useLayoutEffect(() => {

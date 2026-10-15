@@ -1,4 +1,3 @@
-import type { ChatInputOperation } from './generated/chat'
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { belongsTo } from './live-output'
 import ChatHistory, { clearChatHistoryRetention } from './ChatHistory'
@@ -50,9 +49,9 @@ function WorkflowMessages({ data, identity }: { data: HarnessViewModel; identity
   </section>
 }
 
-export default function WorkerChat({ data, route, navigate, transportPhase, issue, onAuthExpired, children, composer, outgoing, onRenderedInputs }: {
+export default function WorkerChat({ data, route, navigate, transportPhase, issue, onAuthExpired, children, composer, outgoing }: {
   data: HarnessViewModel; route: RouteState; navigate: (route: RouteState) => void
-  transportPhase: TransportPhase; issue?: string; onAuthExpired?: () => void; children?: ReactNode; composer?: ReactNode; outgoing?: ReactNode; onRenderedInputs?: (references: readonly ChatInputOperation[]) => void
+  transportPhase: TransportPhase; issue?: string; onAuthExpired?: () => void; children?: ReactNode; composer?: ReactNode; outgoing?: ReactNode
 }) {
   const viewportRef = useRef<HTMLDivElement>(null)
   const workerSwitcher = useRef<HTMLButtonElement>(null)
@@ -164,7 +163,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
           {ambiguousConversation && !exactHead && <p role="status">The host associates this conversation with multiple exact actors. Its current history head is unavailable; only previously retained exact history can be shown.</p>}
           {outputOrigin && <UnifiedChat key={actorOutputKey(outputOrigin)}
             viewportRef={viewportRef} origin={outputOrigin} requestId={head?.id ?? exactHead}
-            {...{ modelOrigin: identity ? { kind: 'embedded' as const, ...identity } : undefined, onRenderedInputs }}
+            {...{ modelOrigin: identity ? { kind: 'embedded' as const, ...identity } : undefined }}
             revision={(data.actorOutputRevisions ?? []).find(reference => actorOutputKey(reference.origin) === actorOutputKey(outputOrigin))?.sequence}
             ready={transportPhase === 'ready'} active={!!resolved.actor && ['running', 'waiting'].includes(resolved.actor.lifecycle)} onAuthExpired={onAuthExpired}
             liveOutput={liveOutput} requests={new Map(data.timeline.filter(item => item.kind === 'request').map(item => [item.id, item]))}

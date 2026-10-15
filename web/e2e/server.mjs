@@ -29,7 +29,7 @@ function receive(socket, message) {
     observations.commands.push(message);
     const {operation_id: id, command} = message;
     const receipt = config.receipt === 'none' ? null : config.receipt === 'admitted'
-      ? {commandId:id,target:command.target,outcome:'admitted',envelopeId:'1', ...(config.continuation ? {continuation:config.continuation} : {})}
+      ? {commandId:id,target:command.target,outcome:'admitted',envelopeId:config.envelopeId ?? '1', ...(config.continuation ? {continuation:config.continuation} : {})}
       : config.receipt === 'continuation_refused'
       ? {commandId:id,target:command.target,outcome:'continuation_refused',block:command.expected_block,reason:config.continuationReason ?? 'exact_projection_unavailable'}
       : config.receipt === 'account_selected'
@@ -37,7 +37,7 @@ function receive(socket, message) {
       : config.receipt === 'control_requested'
       ? {commandId:id,target:command.target,outcome:'control_requested',control:command.action}
       : {commandId:id,target:command.target,outcome:config.receipt,reason:'Deterministic fixture result'};
-    statuses.set(id, { operationId: id, command, state: receipt?.outcome === 'admitted' ? 'input_admitted' : receipt?.outcome === 'continuation_refused' ? 'refused' : receipt?.outcome ?? 'queued', envelopeId: receipt?.outcome === 'admitted' ? '1' : null, receipt });
+    statuses.set(id, { operationId: id, command, state: receipt?.outcome === 'admitted' ? 'input_admitted' : receipt?.outcome === 'continuation_refused' ? 'refused' : receipt?.outcome ?? 'queued', envelopeId: receipt?.outcome === 'admitted' ? receipt.envelopeId : null, receipt });
     frame(socket, {type:'command.accepted',command_id:id});
     if (receipt) {
       config.snapshot.seq = (BigInt(config.snapshot.seq) + 1n).toString();

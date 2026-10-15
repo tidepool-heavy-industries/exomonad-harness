@@ -1,16 +1,14 @@
 import CommandView from './CommandView'
 import { Empty } from './view-controls'
-import { inputPublicationKey } from './command-presentation'
 import { ActorComposer, ActorControlPanel, OutgoingInputs } from './ActorControls'
 import HostOperations from './HostOperations'
 import TimelineView from './TimelineView'
 import ConversationTreeView from './ConversationTreeView'
 import InboxView from './InboxView'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import NodeWindow from './NodeWindow';
 import WorkerChat from './WorkerChat';
 import ActiveWorkerTree from './ActiveWorkerTree';
-import type { ChatInputOperation } from './generated/chat';
 import type { HostActorIdentity } from './protocol';
 import { actorIdentityKey, canonicalOperationId, isOperationId } from './protocol';
 import type { BrowserCommandRecord } from './pending-commands';
@@ -48,27 +46,6 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
   const [page, setPage] = useState(0);
   const [actorPage, setActorPage] = useState(0);
   const [allOperations, setAllOperations] = useState(false);
-  const [renderedInputs, setRenderedInputs] = useState<readonly ChatInputOperation[]>([]);
-  const onRenderedInputs = useCallback((references: readonly ChatInputOperation[]) => {
-    setRenderedInputs(previous => previous.length === references.length
-      && previous.every((reference, index) => inputPublicationKey(reference) === inputPublicationKey(references[index]!)) ? previous : references);
-  }, []);
-  const currentRenderedInputKeys = useMemo(() => new Set(renderedInputs.flatMap(reference => {
-    const key = inputPublicationKey(reference); return key === undefined ? [] : [key];
-  })), [renderedInputs]);
-  const retainedInputKeys = useMemo(() => new Set(pendingCommands.flatMap(record => {
-    if (record.submission.command.action !== 'input' || record.envelopeId == null) return [];
-    const key = inputPublicationKey({target:record.submission.command.target, operationId:record.submission.operation_id, envelopeId:record.envelopeId});
-    return key === undefined ? [] : [key];
-  })), [pendingCommands]);
-  const [acknowledgedInputKeys, setAcknowledgedInputKeys] = useState<ReadonlySet<string>>(new Set());
-  useLayoutEffect(() => {
-    setAcknowledgedInputKeys(previous => {
-      const next = new Set([...previous, ...currentRenderedInputKeys].filter(key => retainedInputKeys.has(key)));
-      return next.size === previous.size && [...next].every(key => previous.has(key)) ? previous : next;
-    });
-  }, [currentRenderedInputKeys, retainedInputKeys]);
-  const renderedInputKeys = useMemo(() => new Set([...currentRenderedInputKeys, ...acknowledgedInputKeys]), [currentRenderedInputKeys, acknowledgedInputKeys]);
   const [now, setNow] = useState(() => Date.now());
   const demo = useDraft(demoDraftKey);
   const [demoLocalFeedback, setDemoLocalFeedback] = useState('');
@@ -196,7 +173,6 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
   const tree = <ConversationTreeView {...{ actors, conversations, link, inspect, route, setPage, setActorPage }} />;
   const inboxScreen = <InboxView {...{ inbox, endpoints, endpointNodes, endpointActors, link, route, navigate, setPage }} />;
   const selectedIdentity = route.selection.kind === 'actor' ? actorIdentityKey(route.selection.identity) : undefined;
-  useEffect(() => { setRenderedInputs([]); }, [selectedIdentity, route.screen]);
   const showAllOperations = allOperations || !selectedIdentity;
   const chatCommands = pendingCommands.filter(record => showAllOperations || actorIdentityKey(record.submission.command.target) === selectedIdentity);
   const chatCommandIds = new Set(chatCommands.map(record => canonicalOperationId(record.submission.operation_id)));
@@ -257,8 +233,8 @@ export default function App({ data, onHostCommand, onDemoCommand, onRetry, trans
         {route.screen === 'tree' && (embedded ? <ActiveWorkerTree data={data} route={route} navigate={navigate} /> : tree)}
         {route.screen === 'timeline' && timeline}
         {route.screen === 'inbox' && inboxScreen}
-        {route.screen === 'chat' && <WorkerChat data={data} route={route} navigate={navigate} transportPhase={transportPhase} issue={issue} onAuthExpired={onAuthExpired} onRenderedInputs={onRenderedInputs}
-          outgoing={<OutgoingInputs records={chatCommands.filter(record => selectedIdentity !== undefined && actorIdentityKey(record.submission.command.target) === selectedIdentity)} rendered={renderedInputKeys} />}
+        {route.screen === 'chat' && <WorkerChat data={data} route={route} navigate={navigate} transportPhase={transportPhase} issue={issue} onAuthExpired={onAuthExpired}
+          outgoing={<OutgoingInputs records={chatCommands.filter(record => selectedIdentity !== undefined && actorIdentityKey(record.submission.command.target) === selectedIdentity)} />}
           composer={<ActorComposer onRetry={onRetry} key={route.selection.kind === 'actor' ? actorIdentityKey(route.selection.identity) : 'none'} data={data} route={route} unavailable={Boolean(issue || resolved.missing)} ready={transportPhase === 'ready'} onHostCommand={onHostCommand} operations={pendingCommands} />} >
           <ActorControlPanel key={selectedIdentity ?? 'none'} data={data} route={route} unavailable={Boolean(issue || resolved.missing)} ready={transportPhase === 'ready'} onHostCommand={onHostCommand} />
           <details className="actor-operation-details"><summary>Host operations</summary>

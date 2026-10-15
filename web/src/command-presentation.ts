@@ -1,5 +1,3 @@
-import type { ChatInputOperation } from './generated/chat'
-import { actorIdentityKey, canonicalOperationId, isOperationId } from './protocol'
 import type { BrowserCommandRecord } from './pending-commands'
 import type { CommandReceipt, InferenceBlock } from './protocol'
 
@@ -37,8 +35,10 @@ export function inputStatus(record: BrowserCommandRecord): string {
   if (record.send === 'unknown') return 'Send outcome unknown · retained locally';
   return 'Retained locally · input admission unobserved';
 }
-export function inputPublicationKey(reference: ChatInputOperation): string | undefined {
-  return isOperationId(reference.operationId) ? JSON.stringify([actorIdentityKey(reference.target), canonicalOperationId(reference.operationId), reference.envelopeId]) : undefined;
+/** Inclusion is host evidence that an input left the pending queue, not an effect outcome. */
+export function inputIsIncluded(record: BrowserCommandRecord): boolean {
+  return (record.authority === 'status' || record.authority === 'receipt')
+    && record.state === 'input_admitted' && record.inputObservation?.state === 'included';
 }
 
 function continuationRefusalText(reason: NonNullable<InferenceBlock['continuationRefusal']>): string {

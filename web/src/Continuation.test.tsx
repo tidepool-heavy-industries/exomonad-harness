@@ -20,13 +20,13 @@ afterEach(clearDrafts)
 it('sends exactly one input while blocked, preserves it as queued after continuation refusal, and never resubmits it for visible continuation', () => {
   const submit = vi.fn((_command: HostCommand) => ({ kind: 'retained', operationId: id, send: 'sent' } as const))
   const props = { route, unavailable: false, ready: true, onHostCommand: submit, operations: [] }
-  const mounted = render(<><ActorComposer {...props} data={data({ state: 'blocked', block })} /><OutgoingInputs records={[]} rendered={new Set()} /></>)
+  const mounted = render(<><ActorComposer {...props} data={data({ state: 'blocked', block })} /><OutgoingInputs records={[]} /></>)
   fireEvent.change(screen.getByRole('textbox'), { target: { value: text } })
   fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter', ctrlKey: true })
   expect(submit).toHaveBeenCalledExactlyOnceWith({ action: 'input', target, text })
   const receipt = { commandId: id, outcome: 'admitted' as const, target, envelopeId: '7', continuation: { state: 'refused' as const, block, reason: 'exact_projection_unavailable' as const } }
   const records = applyCommandReceipt(retainCommand([], target.run, { operation_id: id, command: { action: 'input', target, text } }), receipt)
-  mounted.rerender(<><ActorComposer {...props} operations={records} data={data({ state: 'blocked', block })} /><OutgoingInputs records={records} rendered={new Set()} /></>)
+  mounted.rerender(<><ActorComposer {...props} operations={records} data={data({ state: 'blocked', block })} /><OutgoingInputs records={records} /></>)
   expect(screen.getByLabelText('outgoing message').textContent).toBe(text)
   expect(screen.getByRole('textbox')).toHaveValue('')
   expect(records[0]!.state).toBe('input_admitted')

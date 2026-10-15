@@ -118,21 +118,6 @@ describe('unified conversation pages', () => {
     expect(screen.queryByText('unrelated actor output')).toBeNull()
     expect(screen.getByText('Live output is unavailable for this actor.')).toBeVisible()
   })
-  it('acknowledges only exact input references after their message row is rendered', async () => {
-    const target = { run: 'r', actor: '/worker', incarnation: 'one' }
-    const inputOperation = { target, operationId: 'same-operation', envelopeId: '9007199254740993' }
-    const acknowledgement = vi.fn()
-    let resolve!: (value: Response) => void
-    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(done => { resolve = done })))
-    render(<UnifiedChat origin={origin} ready active={false} onRenderedInputs={acknowledgement} />)
-    expect(acknowledgement.mock.calls.at(-1)![0]).toEqual([])
-    resolve(new Response(JSON.stringify({ origin, cutoverSequence: '0', legacyHistory: false, nextAfter: null, previousBefore: null, entries: [
-      { sequence: '5', kind: 'message', requestId: 'req', position: '0', hash: 'a'.repeat(64), item: { type: 'message', role: 'user', content: 'identical submitted input' }, tool: null, providerItemId: null, inputOperation },
-      { sequence: '6', kind: 'message', requestId: 'req', position: '1', hash: 'a'.repeat(64), item: { type: 'message', role: 'user', content: 'identical submitted input' }, tool: null, providerItemId: null, inputOperation: null },
-    ] })))
-    await waitFor(() => expect(acknowledgement.mock.calls.at(-1)![0]).toEqual([inputOperation]))
-    expect(screen.getAllByText('identical submitted input')).toHaveLength(2)
-  })
   it('keeps the streaming element through final fetch and live snapshot eviction', async () => {
     const modelOrigin = { kind: 'embedded' as const, run: 'r', actor: '/worker', incarnation: 'one' }
     const live = { origin: modelOrigin, requestId: 'req', itemId: 'id', channel: 'assistant' as const, index: '0', text: 'partial text', streaming: true, version: '1', overflow: false, committedHash: null }
