@@ -382,3 +382,149 @@ fn cache_comparison_defaults_omit_and_invalid_selections_refuse_before_dispatch(
         .clear();
     assert!(request_body(&request).is_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saved_account_switch_during_held_stream_preserves_sent_authentication() {
+    use crate::{
+        embedding::{ClientOperationId, HostIdentity},
+        model::AgentPath,
+        server::HostCommand,
+        store::Store,
+        transport::auth::chatgpt::{RunAccountAuth, SavedAccounts},
+    };
+    use std::{io::Write, os::unix::fs::OpenOptionsExt, sync::Arc};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let directory =
+        std::env::temp_dir().join(format!("harness-held-account-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    let launch = directory.join("first.json");
+    let second = directory.join("second.json");
+    let fixture = include_str!("fixtures/saved-account-test.json");
+    for (path, bytes) in [
+        (&launch, fixture.to_owned()),
+        (
+            &second,
+            fixture
+                .replace("test-account-a", "test-account-b")
+                .replace("first@example.test", "second@example.test"),
+        ),
+    ] {
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap()
+            .write_all(bytes.as_bytes())
+            .unwrap();
+    }
+    let store = Arc::new(Store::memory().unwrap());
+    let auth = RunAccountAuth::new(
+        store.clone(),
+        "run".into(),
+        SavedAccounts::beside(launch).unwrap(),
+    )
+    .unwrap();
+    let selected = auth
+        .selection()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|entry| entry.label == "second@example.test")
+        .unwrap()
+        .id;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (held, observed) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut held = Some(held);
+        let mut released = Some(released);
+        for (index, expected) in ["test-account-a", "test-account-b"].into_iter().enumerate() {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0u8; 4096];
+                let count = socket.read(&mut chunk).await.unwrap();
+                assert_ne!(count, 0);
+                bytes.extend_from_slice(&chunk[..count]);
+            }
+            assert!(
+                String::from_utf8_lossy(&bytes)
+                    .to_ascii_lowercase()
+                    .contains(&format!("authorization: bearer {expected}"))
+            );
+            let prefix = format!(
+                "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"r{index}\"}}}}\n\n"
+            );
+            let completed = format!(
+                "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"r{index}\",\"output\":[]}}}}\n\n"
+            );
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{prefix}", prefix.len() + completed.len()).as_bytes()).await.unwrap();
+            if index == 0 {
+                held.take().unwrap().send(()).unwrap();
+                released.take().unwrap().await.unwrap();
+            }
+            socket.write_all(completed.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+        }
+    });
+    // The production request builder and SSE reader use the captured token.
+    // Only the destination is changed to a local fixture; native dispatch's
+    // public endpoint remains fixed.
+    async fn submit(auth: RunAccountAuth, address: std::net::SocketAddr) -> ResponsesTurn {
+        let token = tokio::task::spawn_blocking(move || auth.access())
+            .await
+            .unwrap()
+            .unwrap();
+        let http = http_client().unwrap();
+        let request = plan_request();
+        let mut wire = http_request(
+            &http,
+            &request,
+            serde_json::to_vec(&request_body(&request).unwrap()).unwrap(),
+            &token,
+        )
+        .build()
+        .unwrap();
+        *wire.url_mut() = reqwest::Url::parse(&format!("http://{address}/responses")).unwrap();
+        let response = http.execute(wire).await.unwrap();
+        read_response(response, None, &token, "").await.unwrap()
+    }
+    let first_auth = auth.clone();
+    let first = tokio::spawn(async move { submit(first_auth, address).await });
+    tokio::time::timeout(Duration::from_secs(10), observed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!first.is_finished());
+    let operation = ClientOperationId(uuid::Uuid::new_v4());
+    store
+        .enqueue_embedded_command(
+            operation,
+            &HostCommand::SelectAccount {
+                target: HostIdentity {
+                    run: "run".into(),
+                    actor: AgentPath("/root".into()),
+                    incarnation: "first".into(),
+                },
+                account_id: selected,
+            },
+        )
+        .unwrap();
+    store
+        .claim_embedded_command("run", operation)
+        .unwrap()
+        .unwrap();
+    let selecting = auth.clone();
+    tokio::task::spawn_blocking(move || selecting.select_account(operation, |_| {}))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!first.is_finished());
+    release.send(()).unwrap();
+    assert_eq!(first.await.unwrap().response_id, "r0");
+    assert_eq!(submit(auth, address).await.response_id, "r1");
+    server.await.unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+}
