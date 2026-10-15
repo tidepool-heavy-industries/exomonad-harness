@@ -464,3 +464,47 @@ fn exact_recovery_refuses_unowned_invocations_and_visible_mode_cites_the_loss() 
     );
     assert!(store.claims(&CallId("capture".into())).unwrap().is_empty());
 }
+
+#[test]
+fn authored_user_text_projects_without_provider_provenance_but_raw_lookalikes_refuse() {
+    for text in ["", "  λ\n雪  "] {
+        let store = Store::memory().unwrap();
+        let head = RequestId("authored-user-text".into());
+        let identity = store.standalone_identity(AgentPath("/root".into()));
+        store
+            .initialize_context_target(&identity, &target("astra"))
+            .unwrap();
+        store
+            .write_request(
+                &head,
+                None,
+                "/root",
+                &[Item::user_text(text)],
+                Default::default(),
+            )
+            .unwrap();
+        let projected = store.context_request_state(&head, &identity).unwrap();
+        assert_eq!(projected.history.len(), 1);
+        let value = &projected.history[0].2.0;
+        assert_eq!(value["type"], "message");
+        assert_eq!(value["role"], "user");
+        assert_eq!(value["content"], text);
+
+        let raw_head = RequestId("raw-user-lookalike".into());
+        store
+            .write_request(
+                &raw_head,
+                None,
+                "/root",
+                &[Item(json!({"role":"user","content":text}))],
+                Default::default(),
+            )
+            .unwrap();
+        assert!(matches!(
+            store.context_request_state(&raw_head, &identity),
+            Err(StoreError::Context(ContextError::Replay(
+                ContextReplayRejection::MissingProvenance { request }
+            ))) if request == raw_head
+        ));
+    }
+}

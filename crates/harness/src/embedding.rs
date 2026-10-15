@@ -522,7 +522,7 @@ impl Conversation {
         prompt: &str,
     ) -> Result<RequestId, EmbeddedError> {
         let _admission = self.host.admit().await?;
-        let item = Item(serde_json::json!({"type":"message","role":"user","content":prompt}));
+        let item = Item::user_text(prompt);
         self.store
             .seed_embedded_context(self.identity(), operation_id, &item)
     }
@@ -559,7 +559,7 @@ impl Conversation {
         text: &str,
     ) -> Result<InputReceipt, EmbeddedError> {
         let _admission = self.host.admit().await?;
-        let item = Item(serde_json::json!({"type":"message","role":"user","content":text}));
+        let item = Item::user_text(text);
         let envelope_id =
             self.store
                 .admit_embedded_input(self.identity(), operation_id, sender, &item)?;

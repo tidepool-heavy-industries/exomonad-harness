@@ -53,6 +53,12 @@ impl ToolInput {
 }
 
 impl Item {
+    /// Construct ordinary authored user text; admission and provenance remain
+    /// the responsibility of the receiving runtime.
+    pub fn user_text(text: impl Into<String>) -> Self {
+        Self(json!({"type":"message","role":"user","content":text.into()}))
+    }
+
     /// `None` is a non-call item; a recognized but malformed call is an error.
     pub fn tool_call(&self) -> Result<Option<ToolCall>, &'static str> {
         let Some(kind) = self.0.get("type").and_then(Value::as_str) else {
