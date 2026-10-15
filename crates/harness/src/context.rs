@@ -100,6 +100,9 @@ pub struct ContextVisibleText {
     pub selector: ContextTextSelector,
     pub text: String,
     pub editable: bool,
+    /// Only independently authored occurrences can be removed from native groups.
+    #[serde(default)]
+    pub removable: bool,
 }
 
 /// Occurrence-local request projection; canonical item bytes stay unchanged.

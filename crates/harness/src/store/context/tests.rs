@@ -1481,6 +1481,7 @@ fn blocks_preserve_duplicate_call_order_orphans_and_cut_opaque_groups() {
                 selector: ContextTextSelector::ToolResultText,
                 text: "first".into(),
                 editable: true,
+                removable: false,
             }],
         }
     );

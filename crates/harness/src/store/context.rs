@@ -539,17 +539,26 @@ fn edited_native(stored: &StoredBlock, candidate: &ContextBlock) -> Result<Vec<O
         *texts = original.clone();
         *preview = old_preview.clone();
     }
-    if structural != stored.block || texts.len() != original.len() {
+    if structural != stored.block {
         return Err(ContextError::NativeEdit.into());
     }
     let mut items = stored.items.clone();
-    for (field, old) in texts.iter().zip(original) {
-        if field.reference != old.reference
-            || field.selector != old.selector
+    let mut retained = HashSet::new();
+    let mut previous = None;
+    for field in texts {
+        let (index, old) = original
+            .iter()
+            .enumerate()
+            .find(|(_, old)| field.reference == old.reference && field.selector == old.selector)
+            .ok_or(ContextError::NativeEdit)?;
+        if previous.is_some_and(|previous| index <= previous)
             || field.editable != old.editable
+            || field.removable != old.removable
         {
             return Err(ContextError::NativeEdit.into());
         }
+        previous = Some(index);
+        retained.insert(index);
         if field.text != old.text {
             if !old.editable {
                 return Err(ContextError::NativeEdit.into());
@@ -561,6 +570,21 @@ fn edited_native(stored: &StoredBlock, candidate: &ContextBlock) -> Result<Vec<O
             set_overlay(occurrence, &field.selector, &field.text)?;
         }
     }
+    let mut removed = HashSet::new();
+    for (index, old) in original.iter().enumerate() {
+        if retained.contains(&index) {
+            continue;
+        }
+        let occurrence = items
+            .iter()
+            .find(|item| reference(std::slice::from_ref(item)) == old.reference)
+            .ok_or(ContextError::InvalidReference)?;
+        if !old.removable || !removable_note(occurrence) {
+            return Err(ContextError::NativeEdit.into());
+        }
+        removed.insert(old.reference.clone());
+    }
+    items.retain(|item| !removed.contains(&reference(std::slice::from_ref(item))));
     if let (
         ContextBlock::Native {
             preview: submitted, ..
@@ -575,6 +599,40 @@ fn edited_native(stored: &StoredBlock, candidate: &ContextBlock) -> Result<Vec<O
         }
     }
     Ok(items)
+}
+
+fn removable_note(occurrence: &Occurrence) -> bool {
+    occurrence.note && occurrence.output_operation.is_none() && message(&occurrence.item).is_some()
+}
+
+// Replay may omit independently authored notes while retaining exact native
+// response membership. Use the same admission as ordinary context edits.
+fn replay_native_selection(
+    stored: &StoredBlock,
+    evidence: &ContextCommitEvidence,
+) -> Result<StoredBlock> {
+    if evidence.version < 4 || !matches!(stored.block, ContextBlock::Native { .. }) {
+        return Ok(stored.clone());
+    }
+    let origins = evidence
+        .prefix_origins
+        .as_ref()
+        .ok_or(ContextError::UnsupportedState)?;
+    let removed = stored
+        .items
+        .iter()
+        .filter(|item| removable_note(item) && !origins.contains(&item.origin))
+        .map(|item| reference(std::slice::from_ref(item)))
+        .collect::<HashSet<_>>();
+    let mut candidate = stored.block.clone();
+    if let ContextBlock::Native { texts, .. } = &mut candidate {
+        texts.retain(|field| !removed.contains(&field.reference));
+    }
+    Ok(StoredBlock {
+        items: edited_native(stored, &candidate)?,
+        block: candidate,
+        ..stored.clone()
+    })
 }
 
 fn visible_texts(
@@ -616,6 +674,7 @@ fn visible_texts(
                 selector,
                 text: text.into(),
                 editable,
+                removable: removable_note(occurrence),
             });
         }
     }
@@ -2227,7 +2286,10 @@ impl Store {
             if let Some(evidence) = replay {
                 let mut native = HashMap::<ItemHash, Vec<&StoredBlock>>::new();
                 let mut text = HashMap::<ItemHash, Vec<&Occurrence>>::new();
-                for stored in &available {
+                let replay_available = available.iter().map(|stored|
+                    replay_native_selection(stored, evidence)
+                ).collect::<Result<Vec<_>>>()?;
+                for stored in &replay_available {
                     match &stored.block {
                         ContextBlock::Native { .. } => {
                             native
@@ -2247,7 +2309,7 @@ impl Store {
                 while cursor < evidence.prefix.len() {
                     let (item, sources, note, overlays) = &evidence.prefix[cursor];
                     let hash = Self::put_item_tx(&tx, item)?;
-                    let matching = native
+                    let mut matching = native
                         .get(&hash)
                         .into_iter()
                         .flatten()
@@ -2268,6 +2330,13 @@ impl Store {
                         })
                         .copied()
                         .collect::<Vec<_>>();
+                    // Historical views can differ only by independently removed
+                    // notes. Equal retained origin sequences name the same native
+                    // owner, not competing authority to reconstruct an envelope.
+                    let mut owners = HashSet::new();
+                    matching.retain(|stored| owners.insert(
+                        stored.items.iter().map(|item| item.origin.clone()).collect::<Vec<_>>()
+                    ));
                     match matching.as_slice() {
                         [stored] => {
                             // A native segment has one local owner. Resolve every
@@ -2343,6 +2412,7 @@ impl Store {
                 // Replay must preserve every protected local envelope as an intact
                 // group; foreign evidence cannot replace local pending operations.
                 for stored in &snapshot.blocks {
+                    let stored = replay_native_selection(stored, evidence)?;
                     if (stored.mandatory || (stored.opaque && evidence.version >= 3))
                         && !rewritten.windows(stored.items.len()).any(|w| {
                             w.iter()

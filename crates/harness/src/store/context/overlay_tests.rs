@@ -934,3 +934,509 @@ fn visible_result_without_exact_terminal_has_no_edit_authority() {
             .is_none()
     );
 }
+
+fn next_note_editor(
+    store: &Store,
+    parent: &RequestId,
+    ordinal: usize,
+) -> (RequestId, OperationId, ContextSnapshot) {
+    let head = RequestId(format!("note-edit-{ordinal}"));
+    store
+        .write_request(&head, Some(parent), "/root", &[], Usage::default())
+        .unwrap();
+    let call_id = format!("note-edit-{ordinal}");
+    record(
+        store,
+        &head,
+        vec![
+            Item(
+                json!({"type":"reasoning","encrypted_content":format!("opaque-editor-{ordinal}"),"summary":[]}),
+            ),
+            Item(
+                json!({"type":"custom_tool_call","call_id":call_id,"name":"cell","input":"edit context"}),
+            ),
+        ],
+    );
+    let operation = store.claim(&CallId(call_id), &head).unwrap();
+    let snapshot = store.begin_context(&operation, &head).unwrap();
+    (head, operation, snapshot)
+}
+
+fn note_draft(
+    snapshot: &ContextSnapshot,
+    append: Option<&str>,
+    remove: Option<&ContextReference>,
+) -> ContextDraft {
+    let mut document = snapshot.document.clone();
+    if let Some(selected) = remove {
+        document.blocks.retain(|block| !matches!(block, ContextBlock::Text {reference: Some(reference),..} if reference == selected));
+        for block in &mut document.blocks {
+            if let ContextBlock::Native { texts, .. } = block {
+                texts.retain(|field| &field.reference != selected);
+            }
+        }
+    }
+    if let Some(body) = append {
+        document.blocks.push(ContextBlock::Text {
+            reference: None,
+            role: crate::context::ContextRole::Assistant,
+            text: body.into(),
+            sources: vec![],
+        });
+    }
+    ContextDraft {
+        document,
+        next_model: None,
+        next_effort: None,
+    }
+}
+
+fn projected_notes(
+    store: &Store,
+    head: &RequestId,
+    identity: &ConversationIdentity,
+) -> Vec<String> {
+    store
+        .context_request_state(head, identity)
+        .unwrap()
+        .history
+        .into_iter()
+        .filter_map(|(_, _, item)| {
+            item.0["content"]
+                .as_str()
+                .filter(|body| body.starts_with("[Agent-authored context note]\n"))
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+#[test]
+fn authored_note_removal_preserves_opaque_members_and_replays_after_reopen() {
+    let original = fixture(Store::memory().unwrap());
+    let first = commit(
+        &original,
+        &note_draft(&original.snapshot, Some("same note"), None),
+    );
+    let (_, _, second_snapshot) = next_note_editor(&original.store, &first.head, 1);
+    let second = original
+        .store
+        .commit_context(ContextCommit {
+            snapshot: &second_snapshot,
+            draft: &note_draft(&second_snapshot, Some("same note"), None),
+            output: &output(),
+            pending: std::slice::from_ref(&original.pending),
+        })
+        .unwrap();
+    let (head, edit, snapshot) = next_note_editor(&original.store, &second.head, 2);
+    let notes = snapshot
+        .document
+        .blocks
+        .iter()
+        .flat_map(|block| match block {
+            ContextBlock::Native { texts, .. } => texts
+                .iter()
+                .filter(|field| field.removable)
+                .cloned()
+                .collect::<Vec<_>>(),
+            _ => vec![],
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        notes.len(),
+        2,
+        "both authored occurrences remain individually addressable within opaque groups"
+    );
+    assert_ne!(notes[0].reference, notes[1].reference);
+    let before = original.store.history_occurrences(&head).unwrap();
+    let native = before
+        .iter()
+        .filter(|occurrence| !occurrence.note)
+        .map(|occurrence| (occurrence.origin.clone(), occurrence.item.clone()))
+        .collect::<Vec<_>>();
+    let path = std::env::temp_dir().join(format!("note-replay-{}.sqlite", uuid::Uuid::new_v4()));
+    original
+        .store
+        .lock()
+        .unwrap()
+        .execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+        .unwrap();
+    let terminal = original
+        .store
+        .replay_tool_output_operation(&original.completed)
+        .unwrap();
+    let receipt = original
+        .store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &note_draft(&snapshot, None, Some(&notes[0].reference)),
+            output: &output(),
+            pending: std::slice::from_ref(&original.pending),
+        })
+        .unwrap();
+    assert_eq!(
+        projected_notes(&original.store, &receipt.head, &edit.origin),
+        vec!["[Agent-authored context note]\nsame note"]
+    );
+    let after = original.store.history_occurrences(&receipt.head).unwrap();
+    for (origin, item) in &native {
+        assert!(
+            after
+                .iter()
+                .any(|actual| &actual.origin == origin && &actual.item == item),
+            "native member/order remains owned"
+        );
+    }
+    let retained_native = after
+        .iter()
+        .filter(|occurrence| {
+            native
+                .iter()
+                .any(|(origin, _)| origin == &occurrence.origin)
+        })
+        .map(|occurrence| (occurrence.origin.clone(), occurrence.item.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(retained_native, native);
+    let evidence = original
+        .store
+        .context_commit_evidence(&edit)
+        .unwrap()
+        .unwrap();
+    let local = Store::open(&path).unwrap();
+    let local_snapshot = local.begin_context(&edit, &head).unwrap();
+    let restored = local
+        .restore_context_commit(
+            &local_snapshot,
+            &evidence,
+            &output(),
+            std::slice::from_ref(&original.pending),
+        )
+        .unwrap();
+    assert_eq!(
+        projected_notes(&local, &restored.head, &edit.origin),
+        vec!["[Agent-authored context note]\nsame note"]
+    );
+    assert_eq!(
+        local
+            .replay_tool_output_operation(&original.completed)
+            .unwrap(),
+        terminal
+    );
+    assert_eq!(
+        local
+            .restore_context_commit(&local_snapshot, &evidence, &output(), &[])
+            .unwrap(),
+        restored
+    );
+    drop(local);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn completed_native_history_replays_repeated_note_removal() {
+    let fixture = fixture(Store::memory().unwrap());
+    let first = commit(&fixture, &note_draft(&fixture.snapshot, Some("same"), None));
+    let (_, _, snapshot) = next_note_editor(&fixture.store, &first.head, 1);
+    let second = fixture
+        .store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &note_draft(&snapshot, Some("same"), None),
+            output: &output(),
+            pending: std::slice::from_ref(&fixture.pending),
+        })
+        .unwrap();
+    let (_, _, snapshot) = next_note_editor(&fixture.store, &second.head, 2);
+    let references = snapshot
+        .document
+        .blocks
+        .iter()
+        .flat_map(|block| match block {
+            ContextBlock::Native { texts, .. } => texts
+                .iter()
+                .filter(|field| field.removable)
+                .map(|field| field.reference.clone())
+                .collect::<Vec<_>>(),
+            _ => vec![],
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(references.len(), 2);
+    let removed = fixture
+        .store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &note_draft(&snapshot, None, Some(&references[0])),
+            output: &output(),
+            pending: std::slice::from_ref(&fixture.pending),
+        })
+        .unwrap();
+    fixture
+        .store
+        .write_job_output(
+            &fixture.pending,
+            ToolKind::Custom,
+            &JobOutput::Completed(Ok(json!("pending finished"))),
+        )
+        .unwrap();
+    fixture
+        .store
+        .append_operation_output(&fixture.pending, &fixture.pending.request, &removed.head)
+        .unwrap();
+    let (_, _, snapshot) = next_note_editor(&fixture.store, &removed.head, 3);
+    let edited = fixture
+        .store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &draft(&snapshot, "same", "edited"),
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    let (head, operation, snapshot) = next_note_editor(&fixture.store, &edited.head, 4);
+    let path = std::env::temp_dir().join(format!(
+        "completed-note-replay-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    fixture
+        .store
+        .lock()
+        .unwrap()
+        .execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+        .unwrap();
+    let removed = fixture
+        .store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &note_draft(&snapshot, None, Some(&references[1])),
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    let evidence = fixture
+        .store
+        .context_commit_evidence(&operation)
+        .unwrap()
+        .unwrap();
+    let restored_store = Store::open(&path).unwrap();
+    let snapshot = restored_store.begin_context(&operation, &head).unwrap();
+    let restored = restored_store
+        .restore_context_commit(&snapshot, &evidence, &output(), &[])
+        .unwrap();
+    assert_eq!(
+        projected_notes(&fixture.store, &removed.head, &operation.origin),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        projected_notes(&restored_store, &restored.head, &operation.origin),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        restored_store
+            .restore_context_commit(&snapshot, &evidence, &output(), &[])
+            .unwrap(),
+        restored
+    );
+    assert_eq!(
+        restored_store
+            .replay_tool_output_operation(&fixture.pending)
+            .unwrap(),
+        fixture
+            .store
+            .replay_tool_output_operation(&fixture.pending)
+            .unwrap()
+    );
+    drop(restored_store);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn note_removal_cannot_drop_provider_text_or_forge_removal_metadata() {
+    let fixture = fixture(Store::memory().unwrap());
+    let before = fixture
+        .store
+        .context_request_state(&fixture.head, &fixture.edit.origin)
+        .unwrap()
+        .history;
+    for forge in [false, true] {
+        let mut draft = note_draft(&fixture.snapshot, None, None);
+        let texts = draft
+            .document
+            .blocks
+            .iter_mut()
+            .find_map(|block| match block {
+                ContextBlock::Native { texts, .. }
+                    if texts.iter().any(|field| field.text == "verbose result") =>
+                {
+                    Some(texts)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let index = texts
+            .iter()
+            .position(|field| field.text == "verbose result")
+            .unwrap();
+        if forge {
+            texts[index].removable = true;
+        } else {
+            texts.remove(index);
+        }
+        assert!(matches!(
+            fixture.store.commit_context(ContextCommit {
+                snapshot: &fixture.snapshot,
+                draft: &draft,
+                output: &output(),
+                pending: std::slice::from_ref(&fixture.pending)
+            }),
+            Err(StoreError::Context(ContextError::NativeEdit))
+        ));
+        assert!(
+            fixture
+                .store
+                .context_receipt(&fixture.edit)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            fixture
+                .store
+                .context_request_state(&fixture.head, &fixture.edit.origin)
+                .unwrap()
+                .history,
+            before
+        );
+    }
+}
+
+#[test]
+fn authored_note_histories_match_provider_projection() {
+    use proptest::prelude::*;
+    let strategy = proptest::collection::vec((0u8..6, 0usize..5, 0u8..3), 1..18);
+    proptest::test_runner::TestRunner::new(proptest::test_runner::Config {
+        cases: 48,
+        ..Default::default()
+    })
+    .run(&strategy, |steps| {
+        let path =
+            std::env::temp_dir().join(format!("note-history-{}.sqlite", uuid::Uuid::new_v4()));
+        let fixture = fixture(Store::open(&path).unwrap());
+        let mut store = fixture.store;
+        let pending = fixture.pending;
+        let mut model = Vec::<(ContextReference, String)>::new();
+        let initial = store
+            .commit_context(ContextCommit {
+                snapshot: &fixture.snapshot,
+                draft: &note_draft(&fixture.snapshot, Some("note-0"), None),
+                output: &output(),
+                pending: std::slice::from_ref(&pending),
+            })
+            .unwrap();
+        let mut head = initial.head;
+        for (step, (kind, slot, body)) in std::iter::once((0, 0, 0)).chain(steps).enumerate() {
+            if kind == 5 {
+                drop(store);
+                store = Store::open(&path).unwrap();
+            }
+            let (_, operation, snapshot) = next_note_editor(&store, &head, step + 1);
+            let observed = snapshot
+                .document
+                .blocks
+                .iter()
+                .flat_map(|block| match block {
+                    ContextBlock::Native { texts, .. } => texts
+                        .iter()
+                        .filter(|field| field.removable)
+                        .map(|field| (field.reference.clone(), field.text.clone()))
+                        .collect::<Vec<_>>(),
+                    ContextBlock::Text {
+                        reference: Some(reference),
+                        text,
+                        ..
+                    } => vec![(reference.clone(), text.clone())],
+                    _ => vec![],
+                })
+                .collect::<Vec<_>>();
+            if model.is_empty() && step == 0 {
+                model = observed.clone();
+            }
+            prop_assert_eq!(&observed, &model);
+            let selected = (!model.is_empty()).then(|| model[slot % model.len()].0.clone());
+            let append = (kind <= 1).then(|| format!("note-{body}"));
+            let remove = (kind == 2).then_some(selected.as_ref()).flatten();
+            let mut draft = note_draft(&snapshot, append.as_deref(), remove);
+            if kind == 3 {
+                if let Some(selected) = &selected {
+                    for block in &mut draft.document.blocks {
+                        if let ContextBlock::Native { texts, .. } = block {
+                            for field in texts {
+                                if &field.reference == selected {
+                                    field.text = format!("note-{body}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if kind == 4 {
+                prop_assert!(
+                    matches!(
+                        store.commit_context_guarded(
+                            ContextCommit {
+                                snapshot: &snapshot,
+                                draft: &draft,
+                                output: &output(),
+                                pending: std::slice::from_ref(&pending)
+                            },
+                            || true
+                        ),
+                        Err(StoreError::Context(ContextError::Cancelled))
+                    ),
+                    "cancelled context must refuse publication"
+                );
+            }
+            let receipt = store
+                .commit_context(ContextCommit {
+                    snapshot: &snapshot,
+                    draft: &draft,
+                    output: &output(),
+                    pending: std::slice::from_ref(&pending),
+                })
+                .unwrap();
+            head = receipt.head;
+            if let Some(selected) = remove {
+                model.retain(|(reference, _)| reference != selected);
+            }
+            if kind == 3 {
+                if let Some(selected) = selected {
+                    if let Some((_, text)) = model
+                        .iter_mut()
+                        .find(|(reference, _)| reference == &selected)
+                    {
+                        *text = format!("note-{body}");
+                    }
+                }
+            }
+            if let Some(body) = append {
+                let occurrences = store.history_occurrences(&head).unwrap();
+                let new = occurrences
+                    .iter()
+                    .filter(|occurrence| occurrence.note)
+                    .map(|occurrence| reference(std::slice::from_ref(occurrence)))
+                    .filter(|reference| !model.iter().any(|(known, _)| known == reference))
+                    .collect::<Vec<_>>();
+                prop_assert_eq!(new.len(), 1);
+                model.push((new[0].clone(), body));
+            }
+            prop_assert_eq!(
+                projected_notes(&store, &head, &operation.origin),
+                model
+                    .iter()
+                    .map(|(_, body)| format!("[Agent-authored context note]\n{body}"))
+                    .collect::<Vec<_>>()
+            );
+        }
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+        Ok(())
+    })
+    .unwrap();
+}
