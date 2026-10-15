@@ -1,4 +1,4 @@
-import { canonicalOperationId, isEmbeddedCommandRecord, isObject, isOperationId, type EmbeddedCommandRecord } from './protocol'
+import { canonicalOperationId, isAccountSelection, isEmbeddedCommandRecord, isObject, isOperationId, type AccountSelection, type EmbeddedCommandRecord } from './protocol'
 
 export class SessionApiError extends Error {
   constructor(readonly status: number, operation: 'check' | 'login' | 'logout') {
@@ -72,6 +72,19 @@ export async function logout(signal?: AbortSignal): Promise<void> {
 
 export class CommandStatusError extends Error {
   constructor(readonly status: number) { super(`Command status lookup failed (HTTP ${status}).`) }
+}
+
+export class AccountSelectionError extends Error {
+  constructor(readonly status: number) { super(`Saved accounts could not be refreshed (HTTP ${status}).`) }
+}
+
+export async function getAccountSelection(signal?: AbortSignal): Promise<AccountSelection> {
+  return request('/api/account-selection', { method: 'GET', cache: 'no-store', headers: { Accept: 'application/json' } }, async response => {
+    if (!response.ok) throw new AccountSelectionError(response.status)
+    const value: unknown = await response.json()
+    if (!isAccountSelection(value)) throw new Error('The saved account endpoint returned an invalid account list.')
+    return value
+  }, signal)
 }
 
 export async function getCommandStatus(operationId: string, signal?: AbortSignal): Promise<EmbeddedCommandRecord | undefined> {

@@ -13,11 +13,13 @@ export default function RecoveryControls({ target, block, ready, submit, onResul
   const observed = operations.find(record => record.submission.operation_id === operation?.id)
   const refused = observed?.state === 'refused' && isSettledCommand(observed)
   const submitted = operation !== undefined && sameInferenceBlock(operation.block, block) && !refused
-  const diagnostic = block.reason.kind === 'provider_stream_failure' ? block.reason.diagnostic : undefined
+  const diagnostic = block.reason.kind === 'provider_stream_failure' ? block.reason.diagnostic
+    : block.reason.kind === 'request_rejected' && block.reason.failure.kind === 'http' ? block.reason.failure.diagnostic : undefined
   const mode = decision && sameInferenceBlock(decision.block, block) ? decision.mode : undefined
   return <section ref={sectionRef} tabIndex={-1} className="inference-recovery" aria-label="Inference recovery">
     <h3>Recover inference</h3>
     <p>Inference is paused. Choose how to recover before the agent can continue. New messages can still queue.</p>
+    {diagnostic?.code === 'subscription_sharing_usage_limit_exceeded' && <p>The provider reports that the account’s subscription sharing usage limit was reached. Select another saved model account, then authorize recovery below.</p>}
     <p>Reason: {block.reason.kind.replaceAll('_', ' ')}</p>
     <details><summary>Recovery details</summary>
       {block.reason.kind === 'provider_stream_failure' && <>

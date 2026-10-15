@@ -53,7 +53,7 @@ export function operationKey(record: Pick<BrowserCommandRecord, 'hostRun' | 'sub
 
 export function isSettledCommand(record: BrowserCommandRecord): boolean {
   return (record.authority === 'status' || record.authority === 'receipt')
-    && ['input_admitted', 'control_requested', 'recovery_authorized', 'refused'].includes(record.state)
+    && ['input_admitted', 'control_requested', 'recovery_authorized', 'account_selected', 'refused'].includes(record.state)
 }
 
 /** Store unconfirmed is immutable evidence, but remains unresolved for retention. */
@@ -90,6 +90,7 @@ function decodeRecord(value: unknown, legacy: boolean): BrowserCommandRecord | u
   if (!legacy && (record.authority === 'status' || record.authority === 'receipt')) {
     if ((record.state === 'input_admitted' && record.submission.command.action !== 'input')
       || (record.state === 'control_requested' && !['interrupt', 'retire'].includes(record.submission.command.action))
+      || (record.state === 'account_selected' && record.submission.command.action !== 'select_account')
       || (record.state === 'recovery_authorized' && record.submission.command.action !== 'recover')) return
     if (record.authority === 'receipt' && (!record.receipt || !record.receipt.target)) return
     if (record.receipt && (!receiptMatches(record, record.receipt) || receiptState(record.receipt) !== record.state)) return
@@ -181,6 +182,7 @@ export function retainCommand(records: readonly BrowserCommandRecord[], hostRun:
 
 function receiptState(receipt: CommandReceipt): EmbeddedCommandRecord['state'] {
   switch (receipt.outcome) {
+    case 'account_selected': return 'account_selected'
     case 'recovery_authorized': return 'recovery_authorized'
     case 'admitted': return 'input_admitted'
     case 'control_requested': return 'control_requested'
@@ -194,6 +196,7 @@ function receiptMatches(record: BrowserCommandRecord, receipt: CommandReceipt): 
     || canonicalOperationId(receipt.commandId) !== canonicalOperationId(record.submission.operation_id)) return false
   if (receipt.target != null && !sameHostIdentity(receipt.target, record.submission.command.target)) return false
   switch (receipt.outcome) {
+    case 'account_selected': return record.submission.command.action === 'select_account' && record.submission.command.account_id === receipt.accountId
     case 'recovery_authorized': return record.submission.command.action === 'recover'
       && record.submission.command.mode === receipt.mode && sameInferenceBlock(record.submission.command.expected_block, receipt.block)
     case 'admitted': return record.submission.command.action === 'input'
@@ -206,6 +209,7 @@ function mergeEvidence(record: BrowserCommandRecord, state: EmbeddedCommandRecor
   receipt?: CommandReceipt | null, envelopeId?: string | null): BrowserCommandRecord {
   if ((state === 'input_admitted' && record.submission.command.action !== 'input')
     || (state === 'control_requested' && !['interrupt', 'retire'].includes(record.submission.command.action))
+    || (state === 'account_selected' && record.submission.command.action !== 'select_account')
     || (state === 'recovery_authorized' && record.submission.command.action !== 'recover'))
     return issue(record, 'Observed handoff state contradicts this operation’s action.')
   if ((record.authority === 'status' || record.authority === 'receipt')
@@ -213,7 +217,7 @@ function mergeEvidence(record: BrowserCommandRecord, state: EmbeddedCommandRecor
       || (record.state === 'unconfirmed' && (state === 'queued' || state === 'dispatching')))) return record
   if (receipt && !receiptMatches(record, receipt)) return issue(record, 'Observed receipt contradicts this operation’s target or action.')
   if (receipt && receiptState(receipt) !== state) return issue(record, 'Observed status and receipt report contradictory handoff outcomes.')
-  if (isSettledCommand(record) && !['input_admitted', 'control_requested', 'recovery_authorized', 'refused'].includes(state)) return record
+  if (isSettledCommand(record) && !['input_admitted', 'control_requested', 'recovery_authorized', 'account_selected', 'refused'].includes(state)) return record
   if (isSettledCommand(record) && record.state !== state) return issue(record, `Contradictory handoff evidence: retained ${record.state}, observed ${state}.`)
   if (record.envelopeId != null && envelopeId != null && record.envelopeId !== envelopeId)
     return issue(record, 'Contradictory admitted envelope identity.')

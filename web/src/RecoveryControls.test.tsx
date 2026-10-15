@@ -6,6 +6,17 @@ import type { InferenceBlock } from './protocol'
 const target = { run: 'run', actor: '/root', incarnation: 'one' }
 const block: InferenceBlock = { request: 'head', generation: '3', reason: { kind: 'continuity_unproven' } }
 
+it.each(['provider_stream_failure', 'request_rejected'] as const)('keeps quota recovery explicit after %s', kind => {
+  const diagnostic = { code: 'subscription_sharing_usage_limit_exceeded' }
+  const quota: InferenceBlock = { ...block, reason: kind === 'provider_stream_failure'
+    ? { kind, event: 'response_failed', diagnostic } : { kind, failure: { kind: 'http', status: 429, diagnostic } } }
+  const submit = vi.fn()
+  render(<RecoveryControls target={target} block={quota} ready submit={submit} onResult={vi.fn()} />)
+  expect(screen.getByRole('button', { name: 'Authorize recovery' })).toBeDisabled()
+  expect(submit).not.toHaveBeenCalled()
+  expect(screen.getAllByRole('radio')).toHaveLength(2)
+})
+
 describe('recovery decisions', () => {
   it.each(['exact', 'visible_history'] as const)('sends %s only after explicit selection and authorization', mode => {
     const submit = vi.fn().mockReturnValue({ kind: 'retained', operationId: 'operation', send: 'unknown' })

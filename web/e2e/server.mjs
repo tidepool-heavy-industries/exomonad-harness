@@ -30,6 +30,8 @@ function receive(socket, message) {
     const {operation_id: id, command} = message;
     const receipt = config.receipt === 'none' ? null : config.receipt === 'admitted'
       ? {commandId:id,target:command.target,outcome:'admitted',envelopeId:'1'}
+      : config.receipt === 'account_selected'
+      ? {commandId:id,target:command.target,outcome:'account_selected',accountId:command.account_id}
       : config.receipt === 'control_requested'
       ? {commandId:id,target:command.target,outcome:'control_requested',control:command.action}
       : {commandId:id,target:command.target,outcome:config.receipt,reason:'Deterministic fixture result'};
@@ -39,6 +41,11 @@ function receive(socket, message) {
       config.snapshot.seq = (BigInt(config.snapshot.seq) + 1n).toString();
       config.snapshot.commandReceipts.push(receipt);
       broadcast({type:'event',event:{seq:config.snapshot.seq,event:{kind:'command.receipt',value:receipt}}});
+      if (receipt.outcome === 'account_selected') {
+        config.snapshot.accountSelection = { ...config.snapshot.accountSelection, selectedId: receipt.accountId };
+        config.snapshot.seq = (BigInt(config.snapshot.seq) + 1n).toString();
+        broadcast({type:'event',event:{seq:config.snapshot.seq,event:{kind:'account_selection.upsert',value:config.snapshot.accountSelection}}});
+      }
     }
   } else if (message.type === 'command') {
     observations.commands.push(message);
@@ -58,6 +65,11 @@ const server = createServer(async (request, response) => {
       if (url.pathname === '/__fixture/disconnect') for (const socket of sockets) socket.terminate();
       if (url.pathname === '/__fixture/snapshot') { config.snapshot = body; broadcast({type:'snapshot',snapshot:body}); }
       return json(response, observations);
+    }
+    if (url.pathname === '/api/account-selection') {
+      if (!config.authenticated) return json(response, {}, 401);
+      if (!config.snapshot.accountSelection) return json(response, {}, 404);
+      return json(response, { ...(config.accountInventory ?? config.snapshot.accountSelection), selectedId: config.snapshot.accountSelection.selectedId });
     }
     if (url.pathname === '/api/session') {
       if (request.method === 'DELETE') config.authenticated = false;

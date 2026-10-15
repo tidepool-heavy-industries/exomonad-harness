@@ -1,4 +1,5 @@
 import { SessionScreen, SessionBar } from './SessionView'
+import AccountSelector from './AccountSelector'
 import { commandIsCurrent } from './recovery'
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import App from './App'
@@ -367,8 +368,13 @@ export function Operator() {
 
   if (authenticated !== true) return <SessionScreen {...{ authentication, authenticationAvailable, authenticated, checking, failure, secret, setSecret, submitLogin, checkSession }} />
 
+  const roots = [...state.actors.values()].filter(actor => actor.identity.run === state.hostRun && actor.parent === null)
+  const rootTarget = roots.length === 1 ? roots[0]!.identity : undefined
   return <>
-    <SessionBar {...{ authentication, transportPhase, checking, signOut, checkSession, failure }} />
+    <SessionBar {...{ authentication, transportPhase, checking, signOut, checkSession, failure }}>
+      {snapshotLoaded && state.accountSelection && <AccountSelector key={state.hostRun} selection={state.accountSelection} target={rootTarget}
+        ready={transportPhase === 'ready'} submit={submitHostCommand} retry={retryHostCommand} operations={pendingCommands} onAuthExpired={onAuthExpired} />}
+    </SessionBar>
     {snapshotLoaded
       ? <App data={project(state)} onHostCommand={submitHostCommand} onDemoCommand={submitDemoCommand}
         onRetry={retryHostCommand} transportPhase={transportPhase} pendingCommands={pendingCommands}

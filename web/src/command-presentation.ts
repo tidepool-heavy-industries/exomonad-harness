@@ -8,6 +8,7 @@ export function receiptText(receipt: CommandReceipt): {
   detail: string;
 } {
   switch (receipt.outcome) {
+    case 'account_selected': return { title: 'Model account selected', detail: 'The account setting applies to this run. Paused inference still requires explicit recovery.' };
     case 'recovery_authorized': return { title: 'Recovery authorized', detail: `${receipt.mode} · request ${receipt.block.request} · generation ${receipt.block.generation} · omitted ${receipt.projection.omitted.length} opaque originals · response completeness unknown for ${receipt.projection.unknownResponseCompleteness.length} exchanges. Execution is not established.` };
     case 'admitted': return { title: 'Admitted for processing', detail: `envelope ${receipt.envelopeId} · input admitted; model execution is not established${receipt.wakeError ? ` · wake issue: ${receipt.wakeError}` : ''}` };
     case 'control_requested': return { title: receipt.control === 'interrupt' ? 'Interrupt requested' : 'Retire requested', detail: 'Host control request; actor completion is not established.' };

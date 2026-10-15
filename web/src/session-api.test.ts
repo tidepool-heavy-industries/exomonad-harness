@@ -1,9 +1,29 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { CommandStatusError, decodeSessionStatus, getCommandStatus } from './session-api'
+import { AccountSelectionError, CommandStatusError, decodeSessionStatus, getAccountSelection, getCommandStatus } from './session-api'
 
 afterEach(() => vi.unstubAllGlobals())
 const operationId = '11111111-1111-4111-8111-111111111111'
 const record = { operationId, command: { action: 'retire', target: { run: 'run', actor: '/root', incarnation: 'one' } }, state: 'queued', envelopeId: null, receipt: null }
+
+it('refreshes only the safe saved-account projection with authenticated uncached reads', async () => {
+  const value = { selectedId: 'one', accounts: [{ id: 'one', label: 'One' }] }
+  const fetcher = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => value })
+  vi.stubGlobal('fetch', fetcher)
+  await expect(getAccountSelection()).resolves.toEqual(value)
+  expect(fetcher).toHaveBeenCalledWith('/api/account-selection', expect.objectContaining({ method: 'GET', credentials: 'same-origin', cache: 'no-store' }))
+  for (const invalid of [{ ...value, token: 'unexpected' }, { ...value, accounts: [{ id: 'one', label: 'One', path: '/unexpected' }] }]) {
+    fetcher.mockResolvedValue({ ok: true, status: 200, json: async () => invalid })
+    await expect(getAccountSelection()).rejects.toThrow(/invalid account list/)
+  }
+})
+
+it('preserves typed account-inventory failures rather than reporting an empty list', async () => {
+  const fetcher = vi.fn().mockResolvedValue({ ok: false, status: 401 })
+  vi.stubGlobal('fetch', fetcher)
+  await expect(getAccountSelection()).rejects.toBeInstanceOf(AccountSelectionError)
+  fetcher.mockResolvedValue({ ok: false, status: 500 })
+  await expect(getAccountSelection()).rejects.toMatchObject({ status: 500 })
+})
 
 it('decodes each browser authentication mode and rejects incomplete status contracts', () => {
   expect(decodeSessionStatus({ authenticated: true, authentication: 'tailscale', available: true }))

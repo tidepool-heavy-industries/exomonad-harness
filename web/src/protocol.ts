@@ -19,6 +19,7 @@ export type InferenceBlock = Extract<HostCommand, { action: 'recover' }>['expect
 type RecoveryRequestFailure = Extract<InferenceBlock['reason'], { kind:'request_rejected' }>['failure'];
 export type RecoveryMode = Extract<HostCommand, { action: 'recover' }>['mode'];
 export type HostActorIdentity = HostActorProjection['identity'];
+export type AccountSelection = NonNullable<Snapshot['accountSelection']>;
 export type HostCommand = Extract<ClientFrame, { type: 'host_command' }>['command'];
 export type HostCommandSubmission = Omit<Extract<ClientFrame, { type: 'host_command' }>, 'type'>;
 export type ClientOperationId = HostCommandSubmission['operation_id'];
@@ -36,6 +37,12 @@ const validationOperation = '00000000-0000-0000-0000-000000000000';
 const validationTarget = { run: 'validation', actor: 'validation', incarnation: 'validation' };
 // Root validators also admit subvalues without duplicating their field schemas.
 
+export function isAccountSelection(value: unknown): value is AccountSelection {
+  return value != null && isServerFrame({ type: 'snapshot', snapshot: {
+    seq: '0', conversations: [], requests: [], jobs: [], envelopes: [], accountSelection: value,
+  } });
+}
+
 export function actorIdentityKey(identity: HostActorIdentity): string {
   return JSON.stringify([identity.run, identity.actor, identity.incarnation]);
 }
@@ -47,6 +54,7 @@ export interface NormalizedState {
   readonly historyRevisions?: ReadonlyMap<string, HistoryRevision>;
   readonly seq: string;
   readonly hostRun?: string;
+  readonly accountSelection?: AccountSelection;
   readonly actors: ReadonlyMap<EntityId, HostActorProjection>;
   readonly commandReceipts: ReadonlyMap<EntityId, CommandReceipt>;
   readonly conversations: ReadonlyMap<EntityId, Conversation>;
@@ -67,6 +75,7 @@ export function normalizeSnapshot(snapshot: Snapshot): NormalizedState {
     liveOutput: new Map((snapshot.liveOutput ?? []).map(item => [outputKey(item), item])),
     historyRevisions: new Map((snapshot.historyRevisions ?? []).map(item => [revisionKey(item), item])),
     hostRun: snapshot.hostRun ?? undefined,
+    accountSelection: snapshot.accountSelection ?? undefined,
     actors: new Map((snapshot.actors ?? []).map((actor) => [actorIdentityKey(actor.identity), actor])),
     commandReceipts: (snapshot.commandReceipts ?? []).reduce<ReadonlyMap<EntityId, CommandReceipt>>(
       (receipts, receipt) => setCommandReceipt(receipts, receipt),
@@ -109,8 +118,11 @@ export function applyStateEvent(state: NormalizedState, message: SequencedEvent)
       const outputs = new Map(next.liveOutput); outputs.delete(outputKey(message.event.value));
       return {kind:'applied', state:{...next, liveOutput:outputs}};
     }
+    case "account_selection.upsert":
+      return { kind: "applied", state: { ...next, accountSelection: message.event.value } };
     case "host_run.upsert":
-      return { kind: "applied", state: { ...next, hostRun: message.event.value.run } };
+      return { kind: "applied", state: { ...next, hostRun: message.event.value.run,
+        accountSelection: message.event.value.run === next.hostRun ? next.accountSelection : undefined } };
     case "command.receipt":
       return {
         kind: "applied",
@@ -216,13 +228,14 @@ export function isHostCommand(value: unknown): value is HostCommand {
       && withinBlockDiagnosticBounds(frame.command.expected_block)));
 }
 export function sameHostCommand(left: HostCommand, right: HostCommand): boolean {
-  return sameHostIdentity(left.target, right.target) && left.action === right.action
-    && (left.action !== 'input' || (right.action === 'input' && left.text === right.text))
-    && (left.action !== 'interrupt' || (right.action === 'interrupt'
-      && canonicalOperationId(left.expected_round) === canonicalOperationId(right.expected_round)))
-    && (left.action !== 'recover' || (right.action === 'recover' && left.mode === right.mode
-      && left.expected_block.request === right.expected_block.request && left.expected_block.generation === right.expected_block.generation
-      && sameInferenceBlock(left.expected_block, right.expected_block)));
+  if (!sameHostIdentity(left.target, right.target)) return false;
+  switch (left.action) {
+    case 'select_account': return right.action === left.action && left.account_id === right.account_id;
+    case 'input': return right.action === left.action && left.text === right.text;
+    case 'interrupt': return right.action === left.action && canonicalOperationId(left.expected_round) === canonicalOperationId(right.expected_round);
+    case 'recover': return right.action === left.action && left.mode === right.mode && sameInferenceBlock(left.expected_block, right.expected_block);
+    case 'retire': return right.action === left.action;
+  }
 }
 export function sameInferenceBlock(left: InferenceBlock, right: InferenceBlock): boolean {
   if (left.request !== right.request || left.generation !== right.generation || left.reason.kind !== right.reason.kind) return false;
@@ -268,6 +281,7 @@ export function isEmbeddedCommandRecord(value: unknown): value is EmbeddedComman
   if (!isCommandRecordShape(value) || !isHostCommand(value.command)) return false;
   if (value.state === 'input_admitted' && value.command.action !== 'input') return false;
   if (value.state === 'control_requested' && value.command.action !== 'interrupt' && value.command.action !== 'retire') return false;
+  if (value.state === 'account_selected' && value.command.action !== 'select_account') return false;
   if (value.state === 'recovery_authorized' && value.command.action !== 'recover') return false;
   if (value.inputObservation != null && (value.state !== 'input_admitted' || value.command.action !== 'input' || value.envelopeId === null
     || (value.inputObservation.state === 'included' && value.inputObservation.request.length === 0))) return false;
@@ -276,6 +290,7 @@ export function isEmbeddedCommandRecord(value: unknown): value is EmbeddedComman
   if (!isOperationId(receipt.commandId) || canonicalOperationId(receipt.commandId) !== canonicalOperationId(value.operationId)
     || (receipt.target != null && !sameHostIdentity(receipt.target, value.command.target))) return false;
   switch (receipt.outcome) {
+    case 'account_selected': return value.state === 'account_selected' && value.command.action === 'select_account' && value.command.account_id === receipt.accountId;
     case 'recovery_authorized': return value.state === 'recovery_authorized' && value.command.action === 'recover'
       && sameHostCommand(value.command, {action:'recover', target:receipt.target, expected_block:receipt.block, mode:receipt.mode});
     case 'admitted': return value.state === 'input_admitted' && value.command.action === 'input'
@@ -329,6 +344,7 @@ function validStateEvent(event: StateEvent): boolean {
     case 'request.upsert': return event.value.id.length > 0 && nullableIdentity(event.value.parentId)
       && withinDiagnosticBounds(event.value.failure);
     case 'job.upsert': case 'envelope.upsert': case 'entity.remove': return event.value.id.length > 0;
+    case 'account_selection.upsert': return true;
     case 'host_run.upsert': return event.value.run.length > 0;
     case 'command.receipt': return isCommandReceipt(event.value);
   }
