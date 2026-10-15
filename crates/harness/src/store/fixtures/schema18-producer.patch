@@ -1,0 +1,55 @@
+diff --git a/crates/harness/src/store/inference.rs b/crates/harness/src/store/inference.rs
+index 0925cf8..c22e1ce 100644
+--- a/crates/harness/src/store/inference.rs
++++ b/crates/harness/src/store/inference.rs
+@@ -1094,4 +1094,50 @@ mod tests {
+         drop(store);
+         std::fs::remove_file(path).unwrap();
+     }
++    #[test]
++    fn produce_schema18_continuation_fixtures() {
++        let output = std::path::PathBuf::from(
++            std::env::var("HARNESS_LEGACY_FIXTURE_DIR").expect("fixture output"),
++        );
++        std::fs::create_dir_all(&output).unwrap();
++        for phase in ["idle", "running", "blocked"] {
++            let path = output.join(format!("schema18-{phase}.sqlite"));
++            assert!(!path.exists(), "preserve existing fixture evidence");
++            let store = Store::open(&path).unwrap();
++            let identity = identity();
++            ready(&store, &identity);
++            store
++                .admit_embedded_input(
++                    &identity,
++                    "00000000-0000-0000-0000-000000000111",
++                    "operator",
++                    &crate::item::Item::user_text("legacy input"),
++                )
++                .unwrap();
++            if phase != "idle" {
++                let _attempt = store.begin_embedded_inference(&identity, None).unwrap();
++                let request = RequestId("legacy-request".into());
++                store
++                    .write_embedded_request(&identity, &request, None, &[], Usage::default())
++                    .unwrap();
++                store
++                    .append_unread_envelopes(&identity.actor, &request)
++                    .unwrap();
++                if phase == "blocked" {
++                    store
++                        .record_interrupted_model_request(
++                            &request,
++                            StreamInterruption::MissingCompletion,
++                            Some((&identity, None)),
++                        )
++                        .unwrap();
++                }
++            }
++            eprintln!(
++                "produced {}: {:?}",
++                path.display(),
++                store.embedded_inference_state(&identity).unwrap()
++            );
++        }
++    }
+ }

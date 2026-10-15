@@ -1401,4 +1401,104 @@ mod tests {
         drop(store);
         std::fs::remove_file(path).unwrap();
     }
+    #[test]
+    fn genuine_schema18_reopen_retains_old_inputs_without_issuing_continuation() {
+        let fixtures: [(&str, &[u8]); 3] = [
+            ("idle", include_bytes!("fixtures/schema18-idle.sqlite.zst")),
+            (
+                "running",
+                include_bytes!("fixtures/schema18-running.sqlite.zst"),
+            ),
+            (
+                "blocked",
+                include_bytes!("fixtures/schema18-blocked.sqlite.zst"),
+            ),
+        ];
+        for (phase, bytes) in fixtures {
+            let path = std::env::temp_dir().join(format!(
+                "schema18-reopen-{}-{}.sqlite",
+                phase,
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::write(&path, zstd::stream::decode_all(bytes).unwrap()).unwrap();
+            let store = Store::open(&path).unwrap();
+            let identity = identity();
+            let before = store.embedded_inference_state(&identity).unwrap();
+            match (&before, phase) {
+                (HostInferenceState::Idle, "idle") | (HostInferenceState::Running, "running") => {}
+                (HostInferenceState::Blocked { block }, "blocked") => {
+                    assert_eq!(block.continuation_refusal, None)
+                }
+                _ => panic!("migration changed old gate: {before:?}"),
+            }
+            let old_operation = "00000000-0000-0000-0000-000000000111";
+            let old_item = crate::item::Item::user_text("legacy input");
+            let envelope = store
+                .admit_embedded_input(&identity, old_operation, "operator", &old_item)
+                .unwrap();
+            assert_eq!(store.embedded_input_continuation(envelope).unwrap(), None);
+            assert_eq!(store.embedded_inference_state(&identity).unwrap(), before);
+            // A newly journaled browser command can refer to the same native
+            // input operation; retained issuance must remain retained here too.
+            let operation = ClientOperationId(uuid::Uuid::parse_str(old_operation).unwrap());
+            store
+                .enqueue_embedded_command(
+                    operation,
+                    &HostCommand::Input {
+                        target: identity.clone(),
+                        text: "legacy input".into(),
+                    },
+                )
+                .unwrap();
+            store
+                .claim_embedded_command(&identity.run, operation)
+                .unwrap()
+                .unwrap();
+            let crate::store::CommandInputAdmission::New(receipt) = store
+                .admit_embedded_command_input(&identity, operation, "legacy input")
+                .unwrap()
+            else {
+                panic!("new journal record");
+            };
+            assert!(matches!(
+                receipt.outcome,
+                CommandReceiptOutcome::Admitted {
+                    continuation: None,
+                    ..
+                }
+            ));
+            assert_eq!(store.embedded_inference_state(&identity).unwrap(), before);
+            store
+                .recover_embedded_inference_after_host_loss(&identity.run)
+                .unwrap();
+            let recovered = store.embedded_inference_state(&identity).unwrap();
+            assert_eq!(
+                store
+                    .admit_embedded_input(&identity, old_operation, "operator", &old_item)
+                    .unwrap(),
+                envelope
+            );
+            assert_eq!(
+                store.embedded_inference_state(&identity).unwrap(),
+                recovered
+            );
+            let c = store.lock().unwrap();
+            let intents: u64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM embedded_input_continuations",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let budgets: u64 = c
+                .query_row("SELECT COUNT(*) FROM embedded_retry_lineage", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!((intents, budgets), (0, 0));
+            drop(c);
+            drop(store);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
 }

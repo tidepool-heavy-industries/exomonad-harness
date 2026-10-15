@@ -1,0 +1,25 @@
+{
+  "base": "159c110802fa1b064907192532294dd4240d5409",
+  "producer": "8a59416c3d00c76f7e726f3a9fee6d1fc5ee6d9a",
+  "profile": "fast-dev",
+  "patch": "schema18-producer.patch",
+  "test": "store::inference::tests::produce_schema18_continuation_fixtures",
+  "schema": 18,
+  "fixtures": {
+    "idle": {
+      "sqlite_sha256": "0eba22c04e36f638a1eea56499a465c1eebc1163ac9d8a0ddeae4f666165c42a",
+      "compressed_sha256": "5e89507e592f38d001d1e2f94284312e122be610a7b8c205ba1d2ccaa8d96051",
+      "bytes": 253952
+    },
+    "running": {
+      "sqlite_sha256": "0d5f8a0b5fa4724d745932969e97e219ec898e67e51957cdd5c8000dd71ee144",
+      "compressed_sha256": "7f650a6cf38a6e8ebe3e43c34ba1798b6623afd36a2ba120b8936f194e046e00",
+      "bytes": 253952
+    },
+    "blocked": {
+      "sqlite_sha256": "c40fb906a769688fb36955088b0331f467fd22cfce83bf24ef06aa916df262af",
+      "compressed_sha256": "f6b7de4215615f763a9339b5efec39e05a033d47fe8435f8e95c243b6052a8a3",
+      "bytes": 253952
+    }
+  }
+}
