@@ -2147,13 +2147,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             if let Err(error) = blocking(move || store.set_usage(&request, usage_for_store)).await {
                 return Err(error);
             }
-            let usage = json!({
-                "response_id":turn.response_id,
-                "input_tokens":turn.usage.input_tokens,
-                "output_tokens":turn.usage.output_tokens,
-                "cached_tokens":turn.usage.cached_tokens,
-                "cache_write_tokens":turn.usage.cache_write_tokens,
-                "reported":turn.usage.reported
+            #[derive(serde::Serialize)]
+            struct ResponseUsage<'a> {
+                response_id: &'a str,
+                #[serde(flatten)]
+                usage: &'a Usage,
+            }
+            let usage = json!(ResponseUsage {
+                response_id: &turn.response_id,
+                usage: &turn.usage,
             });
             let store = self.store.clone();
             let request = parent.clone();
@@ -7398,8 +7400,8 @@ mod tests {
                 reported: true,
                 input_tokens: 3,
                 output_tokens: 2,
-                cached_tokens: 1,
-                cache_write_tokens: 0,
+                cached_tokens: Some(1),
+                cache_write_tokens: Some(0),
             },
         }
     }
@@ -8590,6 +8592,13 @@ mod tests {
             .filter(|event| event.kind == "responses_usage")
             .collect();
         assert_eq!(usage_events.len(), 3);
+        for event in &usage_events {
+            let payload: Value = serde_json::from_str(&event.payload).unwrap();
+            assert_eq!(payload["version"], 2);
+            let usage: Usage = serde_json::from_value(payload).unwrap();
+            assert_eq!(usage.cached_tokens, Some(1));
+            assert_eq!(usage.cache_write_tokens, Some(0));
+        }
         let request_ids: Vec<_> = usage_events
             .iter()
             .map(|event| event.request.clone().unwrap())

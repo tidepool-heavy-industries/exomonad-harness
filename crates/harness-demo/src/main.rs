@@ -3874,8 +3874,8 @@ mod tests {
                     reported: true,
                     input_tokens: 12,
                     output_tokens: 4,
-                    cached_tokens: 0,
-                    cache_write_tokens: 0,
+                    cached_tokens: Some(0),
+                    cache_write_tokens: Some(0),
                 },
             })
         }

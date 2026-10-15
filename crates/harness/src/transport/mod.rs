@@ -10,9 +10,11 @@ mod identity;
 pub use identity::SessionIdentity;
 mod request_failure;
 pub mod sse;
+mod usage;
 pub use crate::store::PreparedProviderRequest;
 pub use request_failure::RequestFailure;
 pub(crate) use request_failure::TransportFailureKind;
+pub use usage::Usage;
 
 use crate::item::Item;
 use crate::model::Effort;
@@ -172,17 +174,6 @@ impl PreparedTransportSelection {
     pub(crate) fn is_native(&self) -> bool {
         matches!(self.0, PreparedTransportEvidence::Native(..))
     }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct Usage {
-    /// True only when both input and output counters were reported.
-    #[serde(default)]
-    pub reported: bool,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cached_tokens: u64,
-    pub cache_write_tokens: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

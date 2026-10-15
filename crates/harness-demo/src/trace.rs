@@ -241,12 +241,7 @@ impl<T> TraceTransport<T> {
             "event": "turn_complete",
             "timestamp_ms": timestamp_ms(),
             "item_count": turn.items.len(),
-            "usage": {
-                "input_tokens": turn.usage.input_tokens,
-                "output_tokens": turn.usage.output_tokens,
-                "cached_tokens": turn.usage.cached_tokens,
-                "cache_write_tokens": turn.usage.cache_write_tokens,
-            }
+            "usage": turn.usage,
         }))
         .await
         .map_err(trace_transport_error)
@@ -662,8 +657,8 @@ mod tests {
                 reported: true,
                 input_tokens: 2,
                 output_tokens: 3,
-                cached_tokens: 1,
-                cache_write_tokens: 0,
+                cached_tokens: Some(1),
+                cache_write_tokens: Some(0),
             },
         };
         let event = json!({

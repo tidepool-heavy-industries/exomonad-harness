@@ -235,14 +235,10 @@ impl ResponseAssembly {
                             .get("output_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
-                        cached_tokens: details
-                            .get("cached_tokens")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0),
+                        cached_tokens: details.get("cached_tokens").and_then(Value::as_u64),
                         cache_write_tokens: details
                             .get("cache_write_tokens")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0),
+                            .and_then(Value::as_u64),
                     },
                 ));
                 Ok(None)
@@ -398,8 +394,8 @@ mod tests {
         assert_eq!(turn.response_id, "resp_1");
         assert_eq!(turn.usage.input_tokens, 12);
         assert_eq!(turn.usage.output_tokens, 2);
-        assert_eq!(turn.usage.cached_tokens, 3);
-        assert_eq!(turn.usage.cache_write_tokens, 4);
+        assert_eq!(turn.usage.cached_tokens, Some(3));
+        assert_eq!(turn.usage.cache_write_tokens, Some(4));
     }
 
     #[test]
@@ -416,6 +412,46 @@ mod tests {
             assert_eq!(turn.usage.reported, reported);
             assert_eq!(turn.usage.input_tokens, 0);
             assert_eq!(turn.usage.output_tokens, 0);
+        }
+    }
+
+    #[test]
+    fn cache_counter_presence_survives_provider_assembly_independently() {
+        for (details, cached, written) in [
+            (Value::Null, None, None),
+            (json!({}), None, None),
+            (json!({"cached_tokens":0}), Some(0), None),
+            (json!({"cache_write_tokens":0}), None, Some(0)),
+            (
+                json!({"cached_tokens":17,"cache_write_tokens":3}),
+                Some(17),
+                Some(3),
+            ),
+            (
+                json!({"cached_tokens":"0","cache_write_tokens":-1}),
+                None,
+                None,
+            ),
+        ] {
+            let mut assembly = ResponseAssembly::default();
+            assembly
+                .accept(
+                    &json!({"type":"response.completed","response":{
+                        "id":"cache-observation","output":[],"usage":{
+                            "input_tokens":20,"output_tokens":2,"input_tokens_details":details
+                        }
+                    }})
+                    .to_string(),
+                )
+                .unwrap();
+            let usage = assembly.finish().unwrap().usage;
+            assert!(usage.reported);
+            assert_eq!(usage.cached_tokens, cached);
+            assert_eq!(usage.cache_write_tokens, written);
+            assert_eq!(
+                serde_json::from_value::<Usage>(serde_json::to_value(&usage).unwrap()).unwrap(),
+                usage
+            );
         }
     }
 
@@ -718,7 +754,7 @@ mod native_replay_tests {
         let completed = assembly.finish().unwrap();
         assert_eq!(completed.items.len(), 2);
         assert_eq!(completed.response_id, "native-response");
-        assert_eq!(completed.usage.cached_tokens, 4);
+        assert_eq!(completed.usage.cached_tokens, Some(4));
     }
 
     #[test]

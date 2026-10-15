@@ -58,6 +58,13 @@ history recovery records exact omissions while preserving canonical history and
 operation identities. Exclusive host startup fences earlier attempts and unused
 grants; passive Store reopen, input and wake notifications grant no inference.
 
+Usage observations serialize as version 2. Cache read/write counters are
+independently optional: `null` means unavailable, while zero means the provider
+reported zero. The usage reader treats zeros in historical unversioned records
+as unavailable because the previous parser synthesized them for missing fields;
+positive historical counts remain observed. Input/output `reported` does not
+establish cache-counter availability. Existing records are never rewritten.
+
 ## Focused tests
 
 ### Native Buck2 on x86_64 Linux
