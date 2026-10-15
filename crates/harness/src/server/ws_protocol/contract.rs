@@ -449,6 +449,8 @@ pub struct OutputDelta {
     pub text: String,
     pub version: WireU64,
     pub overflow: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -475,6 +477,8 @@ pub struct LiveOutput {
     pub streaming: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committed_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -807,6 +811,7 @@ pub fn wire_samples() -> serde_json::Value {
         index: u64::MAX.into(),
     };
     let live_output = LiveOutput {
+        tool_name: Some("haskell".into()),
         origin: item.origin.clone(),
         request_id: item.request_id.clone(),
         item_id: item.item_id.clone(),
@@ -837,6 +842,7 @@ pub fn wire_samples() -> serde_json::Value {
         StateEvent::ModelOutputStarted(scope.clone()),
         StateEvent::ModelOutputStopped(scope.clone()),
         StateEvent::ModelOutputDelta(OutputDelta {
+            tool_name: Some("haskell".into()),
             origin: item.origin.clone(),
             request_id: item.request_id.clone(),
             item_id: item.item_id.clone(),

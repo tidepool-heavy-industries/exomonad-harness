@@ -556,6 +556,7 @@ mod tests {
                 channel: harness::transport::sse::OutputChannel::Assistant,
                 index: 0,
                 text: "sentinel-event".into(),
+                tool_name: None,
             })
             .await
             .map_err(|_| TransportError::Stream("receiver closed".into()))?;

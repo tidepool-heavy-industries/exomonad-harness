@@ -3236,6 +3236,7 @@ mod tests {
                     channel: OutputChannel::Assistant,
                     index: 0,
                     text: "λ".into(),
+                    tool_name: None,
                 });
             }
             emit(ModelOutputUpdate::Stopped);
@@ -3284,6 +3285,7 @@ mod tests {
                 channel: OutputChannel::Assistant,
                 index: 0,
                 text: "after".into(),
+                tool_name: None,
             },
         ));
         control.observe(output("later", ModelOutputUpdate::Stopped));

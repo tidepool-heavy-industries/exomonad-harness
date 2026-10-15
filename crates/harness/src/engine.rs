@@ -637,6 +637,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         channel: OutputChannel,
         index: u64,
         text: String,
+        tool_name: Option<String>,
     ) {
         if let Some(observer) = &self.output_observer {
             observer.observe(ModelOutput {
@@ -647,6 +648,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     channel,
                     index,
                     text,
+                    tool_name,
                 },
             });
         }
@@ -1936,8 +1938,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                     Err(error) => deferred_dispatch_error = Some(error),
                                 }
                             }
-                            Some(StreamEvent::Delta {item_id, channel, index, text}) => {
-                                self.observe_delta(&parent, item_id, channel, index, text);
+                            Some(StreamEvent::Delta {item_id, channel, index, text, tool_name}) => {
+                                self.observe_delta(&parent, item_id, channel, index, text, tool_name);
                             }
                             None => event_stream_open = false,
                         }
@@ -1966,9 +1968,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     channel,
                     index,
                     text,
+                    tool_name,
                 } = event
                 {
-                    self.observe_delta(&parent, item_id, channel, index, text);
+                    self.observe_delta(&parent, item_id, channel, index, text, tool_name);
                     continue;
                 }
                 if let StreamEvent::CompletedItem(done) = event {
@@ -3870,9 +3873,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     channel,
                     index,
                     text,
+                    tool_name,
                 } => {
                     if issued.purpose() == crate::store::ProviderRequestPurpose::Inference {
-                        self.observe_delta(request, item_id, channel, index, text);
+                        self.observe_delta(request, item_id, channel, index, text, tool_name);
                     }
                     Ok(())
                 }
@@ -7680,6 +7684,7 @@ mod tests {
                 channel: OutputChannel::Assistant,
                 index: 0,
                 text: "incomplete".into(),
+                tool_name: None,
             })
             .await
             .unwrap();
@@ -7771,6 +7776,7 @@ mod tests {
                     channel: OutputChannel::Assistant,
                     index: 0,
                     text: "Before tool".into(),
+                    tool_name: None,
                 })
                 .await
                 .unwrap();

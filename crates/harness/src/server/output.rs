@@ -49,6 +49,7 @@ impl ModelOutputObserver for ServerControl {
                 channel,
                 index,
                 text,
+                tool_name,
             } => {
                 let existing = snapshot.live_output.iter().position(|item| {
                     item.origin == output.origin
@@ -72,6 +73,7 @@ impl ModelOutputObserver for ServerControl {
                         }));
                     }
                     snapshot.live_output.push(LiveOutput {
+                        tool_name: tool_name.clone(),
                         origin: output.origin.clone(),
                         request_id: output.request_id.0.clone(),
                         item_id: item_id.clone(),
@@ -89,10 +91,12 @@ impl ModelOutputObserver for ServerControl {
                 while !text.is_char_boundary(end) {
                     end -= 1;
                 }
+                item.tool_name = tool_name.clone().or_else(|| item.tool_name.clone());
                 item.text.push_str(&text[..end]);
                 item.version = (*next + removals.len() as u64).into();
                 item.overflow |= end != text.len();
                 StateEvent::ModelOutputDelta(OutputDelta {
+                    tool_name: item.tool_name.clone(),
                     origin: output.origin.clone(),
                     request_id: output.request_id.0.clone(),
                     item_id: item_id.clone(),
@@ -211,6 +215,7 @@ mod tests {
                 channel: OutputChannel::Assistant,
                 index: 0,
                 text: text.into(),
+                tool_name: None,
             },
         }
     }
@@ -294,6 +299,28 @@ mod tests {
             snapshot.live_output
         );
     }
+    #[test]
+    fn live_output_tool_name_survives_snapshot_and_delta_projection() {
+        let (_, control, _) = server_with_config(ServerConfig::new(PathBuf::new()));
+        let mut events = control.events.subscribe();
+        let mut output = delta("first", "haskell-item", "let x = \"partial λ");
+        if let ModelOutputUpdate::Delta { tool_name, .. } = &mut output.update {
+            *tool_name = Some("haskell".into());
+        }
+        control.observe(output);
+        assert_eq!(
+            control.snapshot.read().unwrap().live_output[0]
+                .tool_name
+                .as_deref(),
+            Some("haskell")
+        );
+        let StateEvent::ModelOutputDelta(event) = events.try_recv().unwrap().event else {
+            panic!("expected delta")
+        };
+        assert_eq!(event.tool_name.as_deref(), Some("haskell"));
+        assert_eq!(event.text, "let x = \"partial λ");
+    }
+
     #[test]
     fn live_output_interleaved_eviction_marks_missing_prefix_and_stop() {
         let (_, control, _) = server_with_config(ServerConfig::new(PathBuf::new()));

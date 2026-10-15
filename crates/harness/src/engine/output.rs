@@ -28,6 +28,8 @@ pub enum ModelOutputUpdate {
         channel: OutputChannel,
         index: u64,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_name: Option<String>,
     },
     Committed {
         item_id: Option<String>,

@@ -36,6 +36,8 @@ impl CompletedOutputItem {
 #[derive(Default)]
 pub struct ResponseAssembly {
     items: BTreeMap<u64, Item>,
+    // Display metadata only; partial input never becomes a completed item.
+    tool_names: BTreeMap<String, String>,
     completed: Option<(String, Usage)>,
     response_id: Option<String>,
 }
@@ -59,6 +61,7 @@ pub enum StreamEvent {
         channel: OutputChannel,
         index: u64,
         text: String,
+        tool_name: Option<String>,
     },
 }
 
@@ -88,6 +91,23 @@ impl ResponseAssembly {
                     return Err(TransportError::Stream("response identity changed".into()));
                 }
                 self.response_id = Some(id.to_owned());
+                Ok(None)
+            }
+            Some("response.output_item.added") => {
+                let item = &event["item"];
+                if matches!(
+                    item["type"].as_str(),
+                    Some("function_call" | "custom_tool_call")
+                ) {
+                    if let Some(name) = item["name"].as_str() {
+                        for id in [item["id"].as_str(), item["call_id"].as_str()]
+                            .into_iter()
+                            .flatten()
+                        {
+                            self.tool_names.insert(id.to_owned(), name.to_owned());
+                        }
+                    }
+                }
                 Ok(None)
             }
             Some("response.output_item.done") => {
@@ -158,6 +178,13 @@ impl ResponseAssembly {
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
                         text: text.to_owned(),
+                        tool_name: matches!(
+                            kind,
+                            "response.function_call_arguments.delta"
+                                | "response.custom_tool_call_input.delta"
+                        )
+                        .then(|| self.tool_names.get(item_id).cloned())
+                        .flatten(),
                     }))
             }
             Some("response.completed") => {
@@ -499,6 +526,49 @@ mod tests {
     }
 
     #[test]
+    fn live_tool_names_come_from_added_items_without_completing_partial_input() {
+        let mut assembly = ResponseAssembly::default();
+        for (kind, channel) in [
+            ("custom_tool_call", "response.custom_tool_call_input.delta"),
+            ("function_call", "response.function_call_arguments.delta"),
+        ] {
+            assembly.accept(&serde_json::json!({"type":"response.output_item.added","item":{"type":kind,"id":"item","call_id":"call","name":"haskell"}}).to_string()).unwrap();
+            for id in ["item", "call"] {
+                let event = serde_json::json!({"type":channel,"item_id":id,"delta":"let x = \"unfinished λ"});
+                let Some(StreamEvent::Delta {
+                    text, tool_name, ..
+                }) = assembly.accept(&event.to_string()).unwrap()
+                else {
+                    panic!("expected preview")
+                };
+                assert_eq!(tool_name.as_deref(), Some("haskell"));
+                assert_eq!(text, "let x = \"unfinished λ");
+            }
+            let Some(StreamEvent::Delta { tool_name, .. }) = assembly
+                .accept(
+                    &serde_json::json!({"type":channel,"item_id":"unknown","delta":"x"})
+                        .to_string(),
+                )
+                .unwrap()
+            else {
+                panic!("expected preview")
+            };
+            assert_eq!(tool_name, None);
+        }
+        assert!(
+            assembly.items.is_empty(),
+            "display metadata cannot manufacture completed items"
+        );
+        let Some(StreamEvent::Delta { tool_name, .. }) = assembly
+            .accept(r#"{"type":"response.output_text.delta","item_id":"item","delta":"prose"}"#)
+            .unwrap()
+        else {
+            panic!("expected preview")
+        };
+        assert_eq!(tool_name, None);
+    }
+
+    #[test]
     fn live_output_deltas_keep_item_channel_and_block_identity() {
         let mut assembly = ResponseAssembly::default();
         for (channel, expected) in [
@@ -525,7 +595,9 @@ mod tests {
                     channel: actual,
                     index,
                     text,
+                    tool_name,
                 } => {
+                    assert_eq!(tool_name, None);
                     assert_eq!(item_id, "message-2");
                     assert_eq!(actual, expected);
                     assert_eq!(index, 3);
