@@ -153,6 +153,14 @@ fn normalized_request(request: &ResponsesRequest) -> Result<RequestBody<'_>, Tra
 struct SseFramer {
     line: Vec<u8>,
     data: Vec<String>,
+    event_name: Option<String>,
+    skip_lf: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FramedEvent {
+    data: String,
+    event_name: Option<String>,
 }
 
 impl SseFramer {
@@ -160,36 +168,75 @@ impl SseFramer {
         Self {
             line: Vec::new(),
             data: Vec::new(),
+            event_name: None,
+            skip_lf: false,
         }
     }
 
-    fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, TransportError> {
+    // Preserve earlier frames if a later line in the same network chunk is
+    // malformed. Terminal interpretation must not depend on network chunking.
+    fn push(&mut self, chunk: &[u8]) -> (Vec<FramedEvent>, Option<TransportError>) {
         let mut events = Vec::new();
         for byte in chunk {
-            if *byte != b'\n' {
+            if self.skip_lf {
+                self.skip_lf = false;
+                if *byte == b'\n' {
+                    continue;
+                }
+            }
+            if *byte == b'\r' || *byte == b'\n' {
+                self.skip_lf = *byte == b'\r';
+                match self.end_line() {
+                    Ok(Some(event)) => events.push(event),
+                    Ok(None) => {}
+                    Err(error) => return (events, Some(error)),
+                }
+            } else {
                 self.line.push(*byte);
+                // Existing runaway safeguard for a single provider-controlled line.
                 if self.line.len() > 1024 * 1024 {
-                    return Err(TransportError::Stream("SSE line too large".into()));
+                    return (
+                        events,
+                        Some(TransportError::Stream("SSE line too large".into())),
+                    );
                 }
-                continue;
             }
-            if self.line.last() == Some(&b'\r') {
-                self.line.pop();
-            }
-            let line = std::str::from_utf8(&self.line)
-                .map_err(|_| TransportError::Stream("invalid SSE UTF-8".into()))?;
-            if line.is_empty() {
-                if !self.data.is_empty() {
-                    events.push(self.data.join("\n"));
-                    self.data.clear();
-                }
-            } else if let Some(data) = line.strip_prefix("data:") {
-                self.data
-                    .push(data.strip_prefix(' ').unwrap_or(data).to_owned());
-            }
-            self.line.clear();
         }
-        Ok(events)
+        (events, None)
+    }
+
+    fn end_line(&mut self) -> Result<Option<FramedEvent>, TransportError> {
+        let line = std::str::from_utf8(&self.line)
+            .map_err(|_| TransportError::Stream("invalid SSE UTF-8".into()))?;
+        let event = if line.is_empty() {
+            let event_name = self.event_name.take();
+            if self.data.is_empty() {
+                None
+            } else {
+                let data = self.data.join("\n");
+                self.data.clear();
+                Some(FramedEvent { data, event_name })
+            }
+        } else {
+            let (field, value) = line.split_once(':').unwrap_or((line, ""));
+            let value = value.strip_prefix(' ').unwrap_or(value);
+            match field {
+                "data" => self.data.push(value.to_owned()),
+                "event" => self.event_name = Some(value.to_owned()),
+                _ => {}
+            }
+            None
+        };
+        self.line.clear();
+        Ok(event)
+    }
+
+    fn observe_tail(&self, summary: &mut super::TransportFailureSummary) {
+        // WHATWG requires discarding this unfinished event at EOF. Retain only
+        // its lengths; never promote partial JSON or arguments into an item.
+        summary.unframed_line_bytes = self.line.len() as u64;
+        summary.unframed_data_bytes = self.data.iter().map(|line| line.len() as u64).sum();
+        summary.unframed_event_name = self.event_name.is_some();
     }
 }
 
@@ -244,19 +291,41 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
         .await
         .map_err(|_| TransportError::Authentication)??;
     let call = http_request(&http, &request, body, &token);
-    let response = call
-        .send()
-        .await
-        .map_err(|_| TransportError::Stream("HTTP request failed".into()))?;
+    let response = match call.send().await {
+        Ok(response) => response,
+        Err(_) => {
+            return failure_summary(
+                &sink,
+                super::TransportFailureSummary::new(super::ResponseEnd::SendFailed),
+                TransportError::Stream("HTTP request failed".into()),
+            )
+            .await;
+        }
+    };
     let status = response.status().as_u16();
     if status == 401 {
-        return Err(TransportError::Authentication);
+        let summary = super::TransportFailureSummary::response(&response, &token, "");
+        return failure_summary(&sink, summary, TransportError::Authentication).await;
     }
     if status != 200 {
+        let summary = super::TransportFailureSummary::response(&response, &token, "");
         let diagnostic = super::http_error::read(response, &token, "").await;
-        return Err(TransportError::Http { status, diagnostic });
+        return failure_summary(&sink, summary, TransportError::Http { status, diagnostic }).await;
     }
     read_response(response, sink, &token, "").await
+}
+
+async fn failure_summary(
+    sink: &Option<tokio::sync::mpsc::Sender<StreamEvent>>,
+    summary: super::TransportFailureSummary,
+    error: TransportError,
+) -> Result<ResponsesTurn, TransportError> {
+    if let Some(sender) = sink {
+        // The Engine consumes this same bounded stream and drains its tail on
+        // failure. Closure means the observer stopped; never replace the cause.
+        let _ = sender.send(StreamEvent::FailureSummary(summary)).await;
+    }
+    Err(error)
 }
 
 async fn read_response(
@@ -265,42 +334,81 @@ async fn read_response(
     token: &str,
     account: &str,
 ) -> Result<ResponsesTurn, TransportError> {
+    use super::{ResponseEnd, TransportFailureSummary};
+    let started = std::time::Instant::now();
+    let mut summary = TransportFailureSummary::response(&response, token, account);
+    summary.received_bytes = Some(0);
+    summary.received_chunks = Some(0);
+    summary.framed_events = Some(0);
     let mut stream = response.bytes_stream();
     let mut framer = SseFramer::new();
     let mut assembly = ResponseAssembly::default();
-    while let Some(chunk) = stream.next().await {
+    let (result, end) = 'body: loop {
+        let Some(chunk) = stream.next().await else {
+            break (assembly.finish(), ResponseEnd::CleanEof);
+        };
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(error) => {
                 // Body-read errors contain transport causes, never provider body data.
-                // Remove the request URL before retaining a bounded diagnostic.
                 let diagnostic: String = format!("{:?}", error.without_url())
                     .chars()
                     .take(512)
                     .map(|c| if c.is_control() { ' ' } else { c })
                     .collect();
                 tracing::warn!(error = %diagnostic, "provider response body read failed");
-                // A valid completion remains authoritative even if the HTTP body
-                // fails afterwards. Otherwise retain the transport interruption cause.
-                return assembly.finish().map_err(|_| {
-                    TransportError::IncompleteResponse(super::StreamInterruption::ReadFailed)
-                });
+                break (
+                    assembly.finish().map_err(|_| {
+                        TransportError::IncompleteResponse(super::StreamInterruption::ReadFailed)
+                    }),
+                    ResponseEnd::ReadFailed,
+                );
             }
         };
-        for data in framer.push(&chunk)? {
-            if let Some(event) = assembly.accept_with_credentials(&data, token, account)? {
-                if let Some(sender) = &sink {
-                    // Bounded backpressure preserves every provider delta and completed item.
-                    // A closed consumer has stopped; the final turn remains authoritative.
-                    let _ = sender.send(event).await;
+        if !chunk.is_empty() && summary.first_byte_ms.is_none() {
+            summary.first_byte_ms = Some(started.elapsed().as_millis() as u64);
+        }
+        *summary.received_bytes.as_mut().unwrap() += chunk.len() as u64;
+        *summary.received_chunks.as_mut().unwrap() += 1;
+        let (events, framing_error) = framer.push(&chunk);
+        for frame in events {
+            *summary.framed_events.as_mut().unwrap() += 1;
+            if let Some(name) = &frame.event_name {
+                summary.sse_event(super::EventKind::from_provider(Some(name)));
+            }
+            match assembly.accept_observed(&frame.data, token, account, Some(&mut summary)) {
+                Ok(Some(event)) => {
+                    if let Some(sender) = &sink {
+                        let _ = sender.send(event).await;
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let end = if summary.terminal.is_some() {
+                        ResponseEnd::ProviderTerminal
+                    } else {
+                        ResponseEnd::ProtocolError
+                    };
+                    break 'body (Err(error), end);
                 }
             }
             if assembly.is_complete() {
-                return assembly.finish();
+                break 'body (assembly.finish(), ResponseEnd::ProviderTerminal);
             }
         }
+        if let Some(error) = framing_error {
+            break (Err(error), ResponseEnd::ProtocolError);
+        }
+    };
+    match result {
+        Ok(turn) => Ok(turn),
+        Err(error) => {
+            summary.end = end;
+            summary.body_elapsed_ms = started.elapsed().as_millis() as u64;
+            framer.observe_tail(&mut summary);
+            failure_summary(&sink, summary, error).await
+        }
     }
-    assembly.finish()
 }
 
 #[cfg(test)]
@@ -499,11 +607,14 @@ mod tests {
     #[test]
     fn sse_frame_accepts_split_multiline_event() {
         let mut f = SseFramer::new();
-        assert!(f.push(b"data: {\"type\":\r\n").expect("first").is_empty());
-        assert!(f.push(b"data: \"x\"}\n").expect("second").is_empty());
+        assert!(f.push(b"data: {\"type\":\r\n").0.is_empty());
+        assert!(f.push(b"data: \"x\"}\n").0.is_empty());
         assert_eq!(
-            f.push(b"\n").expect("end"),
-            vec!["{\"type\":\n\"x\"}".to_owned()]
+            f.push(b"\n").0,
+            vec![FramedEvent {
+                data: "{\"type\":\n\"x\"}".to_owned(),
+                event_name: None
+            }]
         );
     }
 
