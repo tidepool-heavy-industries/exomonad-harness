@@ -1,0 +1,195 @@
+//! Bounded native response metadata, delivered through the existing provider stream.
+use super::http_error;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+// Diagnostic retention budgets, independent of the provider protocol limits.
+const KIND_TAIL: usize = 8;
+const METADATA_BYTES: usize = 128;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IncompleteReason {
+    MaxOutputTokens,
+    ContentFilter,
+    Steered,
+    Unknown,
+}
+impl IncompleteReason {
+    pub(super) fn from_provider(value: &str) -> Self {
+        match value {
+            "max_output_tokens" => Self::MaxOutputTokens,
+            "content_filter" => Self::ContentFilter,
+            "steered" => Self::Steered,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EventKind {
+    Created,
+    Completed,
+    Incomplete,
+    Failed,
+    Error,
+    OutputItemDone,
+    OutputTextDelta,
+    ReasoningSummaryDelta,
+    ReasoningDelta,
+    FunctionArgumentsDelta,
+    ToolInputDelta,
+    RefusalDelta,
+    Missing,
+    Unknown { sha256: String },
+}
+impl EventKind {
+    pub(super) fn from_provider(value: Option<&str>) -> Self {
+        match value {
+            Some("response.created") => Self::Created,
+            Some("response.completed") => Self::Completed,
+            Some("response.incomplete") => Self::Incomplete,
+            Some("response.failed") => Self::Failed,
+            Some("error") => Self::Error,
+            Some("response.output_item.done") => Self::OutputItemDone,
+            Some("response.output_text.delta") => Self::OutputTextDelta,
+            Some("response.reasoning_summary_text.delta") => Self::ReasoningSummaryDelta,
+            Some("response.reasoning_text.delta") => Self::ReasoningDelta,
+            Some("response.function_call_arguments.delta") => Self::FunctionArgumentsDelta,
+            Some("response.custom_tool_call_input.delta") => Self::ToolInputDelta,
+            Some("response.refusal.delta") => Self::RefusalDelta,
+            Some(value) => Self::Unknown {
+                sha256: format!("{:x}", Sha256::digest(value.as_bytes())),
+            },
+            None => Self::Missing,
+        }
+    }
+    fn recognized(&self) -> bool {
+        !matches!(self, Self::Unknown { .. } | Self::Missing)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResponseTerminal {
+    Completed,
+    ResponseFailed,
+    Error,
+    Incomplete {
+        response_id: String,
+        reason: Option<IncompleteReason>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseEnd {
+    CleanEof,
+    ReadFailed,
+    ProviderTerminal,
+    ProtocolError,
+    HttpRejected,
+    SendFailed,
+}
+
+/// Metadata is not response provenance or permission to retry. The Engine's
+/// retained provider items, operations and failure assessment own those facts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransportFailureSummary {
+    pub version: u8,
+    pub http_status: Option<u16>,
+    pub server_request_id: Option<String>,
+    pub content_type: Option<String>,
+    pub response_created_id: Option<String>,
+    pub body_elapsed_ms: u64,
+    pub first_byte_ms: Option<u64>,
+    pub received_bytes: Option<u64>,
+    pub received_chunks: Option<u64>,
+    pub framed_events: Option<u64>,
+    pub event_kind_tail: Vec<EventKind>,
+    pub sse_event_kind_tail: Vec<EventKind>,
+    pub last_recognized_event: Option<EventKind>,
+    pub unknown_event_count: u64,
+    pub unframed_line_bytes: u64,
+    pub unframed_data_bytes: u64,
+    pub unframed_event_name: bool,
+    pub metadata_truncated: bool,
+    pub terminal: Option<ResponseTerminal>,
+    pub end: ResponseEnd,
+}
+
+pub(super) fn metadata(value: &str, token: &str, account: &str) -> (String, bool) {
+    let mut value = http_error::redact(value, token, account);
+    let truncated = value.len() > METADATA_BYTES;
+    let mut end = value.len().min(METADATA_BYTES);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    (value, truncated)
+}
+
+fn push_kind(tail: &mut Vec<EventKind>, value: EventKind) {
+    if tail.len() == KIND_TAIL {
+        tail.remove(0);
+    }
+    tail.push(value);
+}
+
+impl TransportFailureSummary {
+    pub(super) fn new(end: ResponseEnd) -> Self {
+        Self {
+            version: 1,
+            http_status: None,
+            server_request_id: None,
+            content_type: None,
+            response_created_id: None,
+            body_elapsed_ms: 0,
+            first_byte_ms: None,
+            received_bytes: None,
+            received_chunks: None,
+            framed_events: None,
+            event_kind_tail: Vec::new(),
+            sse_event_kind_tail: Vec::new(),
+            last_recognized_event: None,
+            unknown_event_count: 0,
+            unframed_line_bytes: 0,
+            unframed_data_bytes: 0,
+            unframed_event_name: false,
+            metadata_truncated: false,
+            terminal: None,
+            end,
+        }
+    }
+    pub(super) fn response(response: &reqwest::Response, token: &str, account: &str) -> Self {
+        let mut value = Self::new(ResponseEnd::HttpRejected);
+        value.http_status = Some(response.status().as_u16());
+        for (name, destination) in [
+            ("x-request-id", &mut value.server_request_id),
+            ("content-type", &mut value.content_type),
+        ] {
+            if let Some(text) = response
+                .headers()
+                .get(name)
+                .and_then(|header| header.to_str().ok())
+            {
+                let (text, truncated) = metadata(text, token, account);
+                value.metadata_truncated |= truncated;
+                *destination = Some(text);
+            }
+        }
+        value
+    }
+    pub(super) fn event(&mut self, kind: EventKind) {
+        if kind.recognized() {
+            self.last_recognized_event = Some(kind.clone());
+        } else {
+            self.unknown_event_count = self.unknown_event_count.saturating_add(1);
+        }
+        push_kind(&mut self.event_kind_tail, kind);
+    }
+    pub(super) fn sse_event(&mut self, kind: EventKind) {
+        push_kind(&mut self.sse_event_kind_tail, kind);
+    }
+}

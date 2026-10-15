@@ -81,7 +81,7 @@ pub(super) fn diagnostic(
     (diagnostic != HttpDiagnostic::default()).then_some(diagnostic)
 }
 
-fn redact(text: &str, token: &str, account: &str) -> String {
+pub(super) fn redact(text: &str, token: &str, account: &str) -> String {
     let mut text = text.to_owned();
     for secret in [token, account] {
         if !secret.is_empty() {

@@ -56,6 +56,8 @@ pub enum OutputChannel {
 #[derive(Debug)]
 pub enum StreamEvent {
     CompletedItem(CompletedOutputItem),
+    /// Bounded diagnostics, never a completed output item or dispatch authority.
+    FailureSummary(super::TransportFailureSummary),
     Delta {
         item_id: String,
         channel: OutputChannel,
@@ -78,8 +80,23 @@ impl ResponseAssembly {
         token: &str,
         account: &str,
     ) -> Result<Option<StreamEvent>, TransportError> {
+        self.accept_observed(data, token, account, None)
+    }
+
+    pub(super) fn accept_observed(
+        &mut self,
+        data: &str,
+        token: &str,
+        account: &str,
+        mut observation: Option<&mut super::TransportFailureSummary>,
+    ) -> Result<Option<StreamEvent>, TransportError> {
         let event: Value = serde_json::from_str(data)
             .map_err(|_| TransportError::Stream("invalid SSE JSON".into()))?;
+        if let Some(observation) = observation.as_deref_mut() {
+            observation.event(super::EventKind::from_provider(
+                event.get("type").and_then(Value::as_str),
+            ));
+        }
         match event.get("type").and_then(Value::as_str) {
             Some("response.created") => {
                 let id = event
@@ -91,6 +108,11 @@ impl ResponseAssembly {
                     return Err(TransportError::Stream("response identity changed".into()));
                 }
                 self.response_id = Some(id.to_owned());
+                if let Some(observation) = observation.as_deref_mut() {
+                    let (id, truncated) = super::observation::metadata(id, token, account);
+                    observation.response_created_id = Some(id);
+                    observation.metadata_truncated |= truncated;
+                }
                 Ok(None)
             }
             Some("response.output_item.added") => {
@@ -226,6 +248,9 @@ impl ResponseAssembly {
                     }
                 }
                 let usage = response.get("usage").unwrap_or(&Value::Null);
+                if let Some(observation) = observation.as_deref_mut() {
+                    observation.terminal = Some(super::ResponseTerminal::Completed);
+                }
                 let details = usage.get("input_tokens_details").unwrap_or(&Value::Null);
                 let output_details = usage.get("output_tokens_details").unwrap_or(&Value::Null);
                 // Opt-in diagnostics expose only provider-returned mode and counters.
@@ -270,12 +295,49 @@ impl ResponseAssembly {
                 ));
                 Ok(None)
             }
+            Some("response.incomplete") => {
+                let response = event
+                    .get("response")
+                    .ok_or_else(|| TransportError::Stream("missing response".into()))?;
+                let id = response
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| TransportError::Stream("missing response id".into()))?;
+                if self.response_id.as_deref().is_some_and(|prior| prior != id) {
+                    return Err(TransportError::Stream("response identity changed".into()));
+                }
+                let reason = response
+                    .get("incomplete_details")
+                    .and_then(|details| details.get("reason"))
+                    .and_then(Value::as_str)
+                    .map(super::IncompleteReason::from_provider);
+                let (response_id, truncated) = super::observation::metadata(id, token, account);
+                if let Some(observation) = observation.as_deref_mut() {
+                    observation.metadata_truncated |= truncated;
+                    observation.terminal = Some(super::ResponseTerminal::Incomplete {
+                        response_id: response_id.clone(),
+                        reason,
+                    });
+                }
+                Err(TransportError::ResponseIncomplete {
+                    response_id,
+                    reason,
+                })
+            }
             Some(kind @ ("response.failed" | "error")) => {
                 let failure = if kind == "response.failed" {
                     ProviderStreamFailureEvent::ResponseFailed
                 } else {
                     ProviderStreamFailureEvent::Error
                 };
+                if let Some(observation) = observation.as_deref_mut() {
+                    observation.terminal = Some(match failure {
+                        ProviderStreamFailureEvent::ResponseFailed => {
+                            super::ResponseTerminal::ResponseFailed
+                        }
+                        ProviderStreamFailureEvent::Error => super::ResponseTerminal::Error,
+                    });
+                }
                 let nested_error = match failure {
                     ProviderStreamFailureEvent::ResponseFailed => event
                         .get("response")

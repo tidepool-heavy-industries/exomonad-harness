@@ -27,12 +27,23 @@ pub(crate) enum TransportFailureKind {
         event: super::ProviderStreamFailureEvent,
         diagnostic: Option<HttpDiagnostic>,
     },
+    ProviderIncomplete {
+        response_id: String,
+        reason: Option<super::IncompleteReason>,
+    },
     Other,
 }
 
 impl TransportError {
     pub(crate) fn failure_kind(&self) -> TransportFailureKind {
         match self {
+            Self::ResponseIncomplete {
+                response_id,
+                reason,
+            } => TransportFailureKind::ProviderIncomplete {
+                response_id: response_id.clone(),
+                reason: *reason,
+            },
             Self::Authentication => TransportFailureKind::Rejected(RequestFailure::Authentication),
             Self::Http { status, diagnostic } => {
                 TransportFailureKind::Rejected(RequestFailure::Http {
@@ -63,6 +74,7 @@ impl TransportError {
             TransportFailureKind::Rejected(failure) => Some(failure),
             TransportFailureKind::Interrupted(_)
             | TransportFailureKind::ProviderFailed { .. }
+            | TransportFailureKind::ProviderIncomplete { .. }
             | TransportFailureKind::Other => None,
         }
     }

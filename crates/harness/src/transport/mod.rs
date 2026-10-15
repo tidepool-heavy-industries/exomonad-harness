@@ -8,6 +8,10 @@ pub mod client;
 mod http_error;
 mod identity;
 pub use identity::SessionIdentity;
+mod observation;
+pub use observation::{
+    EventKind, IncompleteReason, ResponseEnd, ResponseTerminal, TransportFailureSummary,
+};
 mod request_failure;
 pub mod sse;
 mod usage;
@@ -185,6 +189,11 @@ pub struct ResponsesTurn {
 
 #[derive(Debug, Error)]
 pub enum TransportError {
+    #[error("provider response.incomplete ({response_id}, {reason:?})")]
+    ResponseIncomplete {
+        response_id: String,
+        reason: Option<IncompleteReason>,
+    },
     #[error("prepared provider selection does not match its owning transport or step")]
     PreparedSelectionMismatch,
     #[error("prepared transport contract does not match the selected replay turn")]
