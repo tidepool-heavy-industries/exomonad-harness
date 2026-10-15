@@ -54,6 +54,7 @@ export function appendOutput(outputs: ReadonlyMap<string, LiveOutput> | undefine
   const text = (restoring ? '' : old?.text ?? '') + (end > start ? decoder.decode(encoded.subarray(start, end)) : '')
   const item: LiveOutput = { ...delta, streaming:true, text,
     overflow: delta.overflow || prefix.length < incoming.length || end < encoded.length,
+    toolName: delta.toolName ?? old?.toolName,
     committedHash: old?.committedHash }
   retainedBytes.set(item, (bytes ?? 0) + end - start)
   next.set(key, item)

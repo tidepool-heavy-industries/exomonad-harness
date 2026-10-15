@@ -1,10 +1,12 @@
+import { useMemo } from 'react'
 import './ToolActivity.css'
 import { usePresentationChoice } from './presentation-state'
-import HistoryItem, { readable } from './HistoryItem'
-import { MessageContent } from './MessagePresentation'
+import HistoryItem, { readable, haskellSource } from './HistoryItem'
+import { MessageContent, useStreamingText } from './MessagePresentation'
 import { PresentationDetails, PresentationMemory } from './presentation-state'
 import type { MessageEntry, TimelineRow } from './chat-timeline'
 import type { HarnessViewModel } from './view-model'
+import type { LiveOutput } from './live-output'
 
 export type ExchangeObservation = Pick<HarnessViewModel['timeline'][number], 'id' | 'state' | 'detail' | 'failure' | 'startedAtMs' | 'endedAtMs'>
 export type ToolJobObservation = HarnessViewModel['timeline'][number]
@@ -15,11 +17,9 @@ export default function ToolActivity({ row, streamingActive, exchange, jobs = []
 }) {
   const entry = row.kind === 'activity' ? row.entry : undefined
   const view = entry ? readable(entry.item) : undefined
-  const parts = row.kind === 'live' ? row.live.map(item => ({ text: item.text, copyText: item.text,
-    label: item.channel === 'tool_input' ? 'Input' : 'Arguments', language: undefined })) : view?.texts ?? []
   const results = row.kind === 'activity' ? row.results : []
   const name = entry && typeof entry.item === 'object' && entry.item !== null && 'name' in entry.item && typeof entry.item.name === 'string'
-    ? entry.item.name : 'Tool call'
+    ? entry.item.name : row.kind === 'live' ? row.live.find(item => item.toolName)?.toolName ?? 'Tool call' : 'Tool call'
   const status = row.kind === 'live'
     ? row.live.some(item => item.streaming) && streamingActive ? 'Streaming input' : 'Input preview'
     : results.length ? 'Result retained' : entry?.tool ? 'No loaded result' : 'Operation ownership unavailable'
@@ -29,8 +29,10 @@ export default function ToolActivity({ row, streamingActive, exchange, jobs = []
   return <section className="tool-activity" aria-label={`${name} tool call`}>
     <header className="tool-heading"><h3>{name}</h3><span className="tool-status">{jobs.length ? `${jobs.map(job => `Tool ${job.state}`).join(' · ')} · ` : ''}{status}</span></header>
     {excerpt && <p className="tool-result-excerpt"><strong>Result excerpt:</strong> {excerpt}</p>}
-    <div className="tool-source" translate="no">{parts.map((part, index) => <MessageContent key={index} text={part.text} copyText={part.copyText} language={part.language}
-      label={part.label} memoryKey={`part:${index}`} bounded />)}</div>
+    <div className="tool-source" translate="no">{row.kind === 'live'
+      ? row.live.map((item, index) => <LiveToolContent key={index} item={item} streamingActive={streamingActive} index={index} />)
+      : view?.texts.map((part, index) => <MessageContent key={index} text={part.text} copyText={part.copyText} language={part.language}
+        label={part.label} memoryKey={`part:${index}`} bounded />)}</div>
     {entry && !view && <HistoryItem listItem={false} diagnostics={false} entry={{ position: entry.position, hash: entry.hash, byteLen: String(new TextEncoder().encode(JSON.stringify(entry.item)).length), item: entry.item }} />}
     {row.kind === 'live' && row.live.some(item => item.overflow) && <p className="hint">Partial live preview. Completed content will be available in retained history.</p>}
     {results.length > 0 && <div className="tool-results"><h4>Result</h4>{results.map(result => {
@@ -58,6 +60,16 @@ export default function ToolActivity({ row, streamingActive, exchange, jobs = []
       {results.map(result => <ToolEvidence key={result.sequence} entry={result} label="Result" />)}
     </PresentationDetails>
   </section>
+}
+
+function LiveToolContent({ item, streamingActive, index }: { item: LiveOutput; streamingActive: boolean; index: number }) {
+  const preview = useStreamingText(item.text, item.streaming && streamingActive)
+  const source = useMemo(() => haskellSource(item.toolName, item.channel === 'tool_input' ? 'custom_tool_call' : 'function_call', preview),
+  [preview, item.toolName, item.channel])
+  // Unidentified/incomplete JSON stays literal; only the ordinary parser extracts source.
+  const copy = item.channel === 'tool_input' || source === undefined || preview !== item.text ? item.text : source
+  return <MessageContent text={source ?? preview} copyText={copy} language={source !== undefined ? 'haskell' : undefined}
+    label={source !== undefined || item.channel === 'tool_input' ? 'Input' : 'Arguments'} memoryKey={`part:${index}`} bounded />
 }
 
 function ToolEvidence({ entry, label }: { entry: MessageEntry; label: 'Tool' | 'Result' }) {

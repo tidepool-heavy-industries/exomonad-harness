@@ -42,7 +42,8 @@ function presentJson(text: string): string {
   return structuredJson(text)?.text ?? text
 }
 
-function haskellSource(type: string, input: unknown): string | undefined {
+export function haskellSource(name: string | null | undefined, type: string, input: unknown): string | undefined {
+  if (name !== 'haskell' && name !== 'haskell_sync') return undefined
   // Custom input already is source. Parsing it would alter valid Haskell such as ["x"].
   if (type === 'custom_tool_call') return typeof input === 'string' ? input : undefined
   let argumentsValue = input
@@ -100,7 +101,7 @@ export function readable(value: unknown): ReadableItem | undefined {
     && typeof value.name === 'string' && typeof value.call_id === 'string') {
     const input = value.type === 'function_call' ? value.arguments : value.input
     if (typeof input !== 'string' && !(value.type === 'function_call' && object(input))) return undefined
-    const source = value.name === 'haskell' ? haskellSource(value.type, input) : undefined
+    const source = haskellSource(value.name, value.type, input)
     return { label: `Model tool call · ${value.name}`, kind: 'activity',
       metadata: toolMetadata(value, value.type, value.call_id),
       texts: [{ label: source !== undefined ? 'Input' : value.type === 'function_call' ? (typeof input === 'string' ? 'Arguments' : 'Arguments JSON') : 'Input',

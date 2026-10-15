@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import Markdown, { type Components } from 'react-markdown'
 import './MessagePresentation.css'
 import { PresentationDetails, usePresentationChoice } from './presentation-state'
@@ -57,6 +57,7 @@ export interface MessageContentProps {
   readonly copyText?: string
   readonly label: string
   readonly format?: 'markdown' | 'plain'
+  readonly streaming?: boolean
   readonly language?: CodeLanguage
   readonly copy?: boolean
   readonly bounded?: boolean
@@ -86,7 +87,8 @@ function MarkdownCode({ children, text, label, offset }: { children: ReactNode; 
 }
 
 /** Collapse the reading viewport, never the retained source or Markdown input. */
-export function MessageContent({ text, copyText = text, label, format = 'plain', language, copy = true, bounded = format === 'plain', memoryKey = label }: MessageContentProps) {
+export function MessageContent({ text, copyText = text, label, format = 'plain', language, streaming = false, copy = true, bounded = format === 'plain', memoryKey = label }: MessageContentProps) {
+  const preview = useStreamingText(text, streaming)
   const [expanded, setExpanded] = usePresentationChoice(`content:${memoryKey}`)
   const [overflowing, setOverflowing] = useState(false)
   const viewport = useRef<HTMLDivElement>(null)
@@ -122,11 +124,14 @@ export function MessageContent({ text, copyText = text, label, format = 'plain',
       return <MarkdownCode text={codeText} label={label} offset={node?.position?.start.offset ?? 0}>{children}</MarkdownCode>
     },
   }), [label])
+  const content = useMemo(() => format === 'markdown'
+    ? <Markdown skipHtml components={components}>{preview}</Markdown>
+    : <pre className="history-content" tabIndex={bounded ? 0 : undefined}>{language ? <Code text={preview} language={language} /> : preview}</pre>, [preview, format, components, bounded, language])
   return <div className={`message-content message-content-${format}`}>
     <div className={`message-content-viewport${expanded || !bounded ? ' message-content-expanded' : ''}`} ref={viewport}
       onFocusCapture={() => { if (overflowing) setExpanded(true) }}>
       <div id={id} ref={body} aria-label={label} className="message-content-body">
-        {format === 'markdown' ? <Markdown skipHtml components={components}>{text}</Markdown> : <pre className="history-content" tabIndex={bounded ? 0 : undefined}>{language ? <Code text={text} language={language} /> : text}</pre>}
+        {content}
       </div>
     </div>
     <div className="message-content-actions">
@@ -137,4 +142,20 @@ export function MessageContent({ text, copyText = text, label, format = 'plain',
     </div>
     {bounded && overflowing && <p className="message-content-note">{expanded ? 'Full content shown.' : 'Preview shown.'} Copy includes the full text.</p>}
   </div>
+}
+
+/** Coalesce live parsing/highlighting, whose inputs are bounded by the output owner.
+ * Copy always uses the latest source; completion renders immediately. A fixed
+ * cadence avoids re-tokenizing the accumulated prefix for every provider token.
+ */
+export function useStreamingText(text: string, streaming: boolean): string {
+  const [preview, setPreview] = useState(text)
+  const latest = useRef(text)
+  latest.current = text
+  useEffect(() => {
+    if (!streaming) return
+    const timer = window.setInterval(() => setPreview(latest.current), 80)
+    return () => window.clearInterval(timer)
+  }, [streaming])
+  return streaming ? preview : text
 }
