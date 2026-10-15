@@ -4,6 +4,7 @@ use crate::provider::{
     ProviderCompletion, ProviderError, RequestActivation,
 };
 use serde_json::json;
+use std::future::Future;
 use tokio::sync::{Notify, mpsc};
 
 struct Probe {
@@ -232,21 +233,25 @@ async fn claim_fences_concurrent_registration_and_preserves_successor() {
             })
         })
     };
-    entered.notified().await;
-    let late = {
-        let s = s.clone();
-        let a = a.clone();
-        tokio::spawn(async move {
-            s.start(a, CallId("late".into()), "domain".into(), json!({}))
-                .await
-        })
-    };
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("native claim callback entered");
+    let late = s.start(a.clone(), CallId("late".into()), "domain".into(), json!({}));
+    tokio::pin!(late);
+    // Registration's first suspension is the jobs lock. Polling it here proves
+    // actual contention while the native claim callback still holds that lock.
+    std::future::poll_fn(|cx| {
+        assert!(late.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(
+        rx.try_recv().is_err(),
+        "contending registration cannot dispatch"
+    );
     continue_tx.send(()).unwrap();
     let (_, terminal) = claim.await.unwrap().unwrap();
-    assert!(matches!(
-        late.await.unwrap(),
-        Err(JobError::RequestActivationClosed)
-    ));
+    assert!(matches!(late.await, Err(JobError::RequestActivationClosed)));
     let (b, mut brx) = probe();
     start(&s, b.clone(), "next", "domain").await;
     let next_b = next(&mut brx).await;
@@ -258,21 +263,50 @@ async fn claim_fences_concurrent_registration_and_preserves_successor() {
     cleanup(&s).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn registered_domain_wins_claim_and_runs_once() {
     let s = JobScheduler::new(4).unwrap();
     let (p, mut rx) = probe();
     start(&s, p.clone(), "reply", "reply").await;
-    let reply = next(&mut rx).await;
+    let admission = next(&mut rx).await.invocations.unwrap();
     let domain = queued(&s, p.clone(), "domain", "domain", "r").await;
-    assert_eq!(
-        reply.invocations.unwrap().try_admit_terminal(|inventory| {
-            assert_eq!(inventory[0].operation, domain);
-            Err::<(), _>("pending")
-        }),
-        Err(AdmissionError::Claim("pending"))
+    let entered = Arc::new(Notify::new());
+    let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+    let claim = {
+        let entered = entered.clone();
+        let domain = domain.clone();
+        tokio::task::spawn_blocking(move || {
+            admission.try_admit_terminal(|inventory| {
+                assert_eq!(inventory.len(), 1);
+                assert_eq!(inventory[0].operation, domain);
+                assert_eq!(inventory[0].state, InvocationState::Queued);
+                entered.notify_one();
+                continue_rx.recv().unwrap();
+                Err::<(), _>("pending")
+            })
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("native claim callback entered");
+    let release = s.release_operation(&domain, None);
+    tokio::pin!(release);
+    std::future::poll_fn(|cx| {
+        assert!(release.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(
+        rx.try_recv().is_err(),
+        "physical release cannot pass the pending guard"
     );
-    s.release_operation(&domain, None).await.unwrap();
+    continue_tx.send(()).unwrap();
+    assert_eq!(claim.await.unwrap(), Err(AdmissionError::Claim("pending")));
+    assert!(
+        !p.activation.is_closed(),
+        "refusal preserves domain admission"
+    );
+    release.await.unwrap();
     assert_eq!(next(&mut rx).await.operation.as_ref(), Some(&domain));
     assert!(matches!(
         s.release_operation(&domain, None).await,
@@ -379,5 +413,44 @@ async fn unconfirmed_cleanup_remains_pending_after_scheduler_terminal() {
         Err(AdmissionError::Claim("uncertain_cleanup"))
     );
     assert!(!p.activation.is_closed());
+    cleanup(&s).await;
+}
+
+#[tokio::test]
+async fn repeated_admission_never_invokes_callback_or_replaces_first_terminal() {
+    let s = JobScheduler::new(4).unwrap();
+    let (p, mut rx) = probe();
+    start(&s, p.clone(), "first", "reply").await;
+    let first = next(&mut rx).await;
+    let admission = first.invocations.unwrap();
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let (value, terminal) = admission
+        .try_admit_terminal(|inventory| {
+            assert!(inventory.is_empty());
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, ()>(String::from("first native claim"))
+        })
+        .unwrap();
+    assert_eq!(
+        admission.try_admit_terminal(|_| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, ()>(String::from("duplicate native claim"))
+        }),
+        Err(AdmissionError::AlreadyTerminated)
+    );
+    start(&s, p.clone(), "second", "reply").await;
+    let second = next(&mut rx).await;
+    assert_eq!(
+        second.invocations.unwrap().try_admit_terminal(|_| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, ()>(String::from("later native claim"))
+        }),
+        Err(AdmissionError::AlreadyTerminated)
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(value, "first native claim");
+    assert!(terminal.matches(first.operation.as_ref().unwrap(), &p.activation));
+    assert!(!terminal.matches(second.operation.as_ref().unwrap(), &p.activation));
+    assert_eq!(p.activation.state.terminal.get(), first.operation.as_ref());
     cleanup(&s).await;
 }

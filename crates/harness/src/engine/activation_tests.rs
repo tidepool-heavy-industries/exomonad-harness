@@ -151,6 +151,9 @@ impl Provider for Snapshot {
             });
         let (_, terminal) = match admitted {
             Ok(accepted) => accepted,
+            Err(crate::provider::InvocationAdmissionError::AlreadyTerminated) => {
+                return ProviderCompletion::unedited(Err("already_settled".into()));
+            }
             Err(error) => return ProviderCompletion::unedited(Err(format!("{error:?}").into())),
         };
         {

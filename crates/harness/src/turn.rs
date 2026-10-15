@@ -365,7 +365,8 @@ impl InvocationAdmission {
 
     /// The callback examines exact queued/running domain inventory and claims
     /// the native request atomically with respect to scheduler registration and
-    /// physical start. Refusal leaves admission open. A native terminal may
+    /// physical start. A closed activation refuses before invoking the callback;
+    /// callback refusal leaves admission open. A native terminal may
     /// refine a Running record whose ordinary provider waiter has not returned.
     pub fn try_admit_terminal<T, E>(
         &self,
@@ -385,6 +386,9 @@ impl InvocationAdmission {
         }
         if own.role != InvocationRole::Settlement {
             return Err(Error::NotSettlement);
+        }
+        if self.activation.is_closed() {
+            return Err(Error::AlreadyTerminated);
         }
         let mut pending = jobs
             .iter()
@@ -418,7 +422,7 @@ impl InvocationAdmission {
             .state
             .terminal
             .set(self.operation.clone())
-            .map_err(|_| Error::AlreadyTerminated)?;
+            .expect("activation fence is unchanged under its scheduler admission lock");
         Ok((
             result,
             crate::provider::InvocationTerminal {
