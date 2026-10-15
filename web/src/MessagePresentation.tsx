@@ -3,6 +3,7 @@ import Markdown, { type Components } from 'react-markdown'
 import './MessagePresentation.css'
 import { PresentationDetails, usePresentationChoice } from './presentation-state'
 import { copyText } from './clipboard'
+import Code, { type CodeLanguage } from './Code'
 
 export type MessageKind = 'assistant' | 'human' | 'reasoning' | 'activity'
 
@@ -56,6 +57,7 @@ export interface MessageContentProps {
   readonly copyText?: string
   readonly label: string
   readonly format?: 'markdown' | 'plain'
+  readonly language?: CodeLanguage
   readonly copy?: boolean
   readonly bounded?: boolean
   readonly memoryKey?: string
@@ -84,7 +86,7 @@ function MarkdownCode({ children, text, label, offset }: { children: ReactNode; 
 }
 
 /** Collapse the reading viewport, never the retained source or Markdown input. */
-export function MessageContent({ text, copyText = text, label, format = 'plain', copy = true, bounded = format === 'plain', memoryKey = label }: MessageContentProps) {
+export function MessageContent({ text, copyText = text, label, format = 'plain', language, copy = true, bounded = format === 'plain', memoryKey = label }: MessageContentProps) {
   const [expanded, setExpanded] = usePresentationChoice(`content:${memoryKey}`)
   const [overflowing, setOverflowing] = useState(false)
   const viewport = useRef<HTMLDivElement>(null)
@@ -109,6 +111,10 @@ export function MessageContent({ text, copyText = text, label, format = 'plain',
     h4: ({ children }) => <h6>{children}</h6>,
     h5: ({ children }) => <h6>{children}</h6>,
     h6: ({ children }) => <h6>{children}</h6>,
+    code({ children, className }) {
+      return typeof children === 'string' && /(?:^|\s)language-(?:haskell|hs)(?:\s|$)/.test(className ?? '')
+        ? <Code text={children} language="haskell" /> : <code className={className}>{children}</code>
+    },
     pre({ children, node }) {
       // Markdown's code text is the rendered block, including its final newline.
       const code = node?.children.find(child => child.type === 'element' && child.tagName === 'code')
@@ -120,7 +126,7 @@ export function MessageContent({ text, copyText = text, label, format = 'plain',
     <div className={`message-content-viewport${expanded || !bounded ? ' message-content-expanded' : ''}`} ref={viewport}
       onFocusCapture={() => { if (overflowing) setExpanded(true) }}>
       <div id={id} ref={body} aria-label={label} className="message-content-body">
-        {format === 'markdown' ? <Markdown skipHtml components={components}>{text}</Markdown> : <pre className="history-content" tabIndex={bounded ? 0 : undefined}>{text}</pre>}
+        {format === 'markdown' ? <Markdown skipHtml components={components}>{text}</Markdown> : <pre className="history-content" tabIndex={bounded ? 0 : undefined}>{language ? <Code text={text} language={language} /> : text}</pre>}
       </div>
     </div>
     <div className="message-content-actions">

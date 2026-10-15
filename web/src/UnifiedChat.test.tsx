@@ -41,7 +41,8 @@ describe('unified conversation pages', () => {
       item: { type: 'custom_tool_call', id: 'cell', name: 'haskell', call_id: 'call', input: 'observe value' } }]
     mounted.rerender(<UnifiedChat origin={origin} revision="2" modelOrigin={modelOrigin} ready active={false} liveOutput={[live]} />)
     await screen.findByRole('heading', { name: 'haskell' })
-    expect(screen.getByText('observe value')).toBeVisible()
+    expect(screen.getByLabelText('Input')).toBeVisible()
+    expect(screen.getByLabelText('Input').textContent).toBe('observe value')
     expect(screen.getByText('Tool evidence').closest('details')).toHaveAttribute('open')
     expect(screen.getByText('No loaded result')).toBeVisible()
     expect(screen.queryByText('Running')).toBeNull()

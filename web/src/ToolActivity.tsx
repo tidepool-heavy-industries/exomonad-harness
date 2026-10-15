@@ -16,7 +16,7 @@ export default function ToolActivity({ row, streamingActive, exchange, jobs = []
   const entry = row.kind === 'activity' ? row.entry : undefined
   const view = entry ? readable(entry.item) : undefined
   const parts = row.kind === 'live' ? row.live.map(item => ({ text: item.text, copyText: item.text,
-    label: item.channel === 'tool_input' ? 'Input' : 'Arguments' })) : view?.texts ?? []
+    label: item.channel === 'tool_input' ? 'Input' : 'Arguments', language: undefined })) : view?.texts ?? []
   const results = row.kind === 'activity' ? row.results : []
   const name = entry && typeof entry.item === 'object' && entry.item !== null && 'name' in entry.item && typeof entry.item.name === 'string'
     ? entry.item.name : 'Tool call'
@@ -29,7 +29,7 @@ export default function ToolActivity({ row, streamingActive, exchange, jobs = []
   return <section className="tool-activity" aria-label={`${name} tool call`}>
     <header className="tool-heading"><h3>{name}</h3><span className="tool-status">{jobs.length ? `${jobs.map(job => `Tool ${job.state}`).join(' · ')} · ` : ''}{status}</span></header>
     {excerpt && <p className="tool-result-excerpt"><strong>Result excerpt:</strong> {excerpt}</p>}
-    <div className="tool-source" translate="no">{parts.map((part, index) => <MessageContent key={index} text={part.text} copyText={part.copyText}
+    <div className="tool-source" translate="no">{parts.map((part, index) => <MessageContent key={index} text={part.text} copyText={part.copyText} language={part.language}
       label={part.label} memoryKey={`part:${index}`} bounded />)}</div>
     {entry && !view && <HistoryItem listItem={false} diagnostics={false} entry={{ position: entry.position, hash: entry.hash, byteLen: String(new TextEncoder().encode(JSON.stringify(entry.item)).length), item: entry.item }} />}
     {row.kind === 'live' && row.live.some(item => item.overflow) && <p className="hint">Partial live preview. Completed content will be available in retained history.</p>}

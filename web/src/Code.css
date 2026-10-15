@@ -1,0 +1,5 @@
+.code-source { font: inherit; white-space: inherit; overflow-wrap: inherit; word-break: inherit; }
+.code-source .token.keyword, .code-source .token.operator { color: var(--link); }
+.code-source .token.string, .code-source .token.char { color: var(--pending-text); }
+.code-source .token.comment { color: var(--muted); }
+.code-source .token.number, .code-source .token.boolean, .code-source .token.class-name { color: var(--accent); }

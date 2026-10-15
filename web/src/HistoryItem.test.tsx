@@ -5,6 +5,41 @@ import HistoryItem from './HistoryItem'
 const entry = (item: unknown) => ({ position: '7', hash: 'a'.repeat(64), byteLen: '123', item })
 const exact = '  λ 🐈\n"quoted" \\  <script>alert(1)</script>  '
 
+const haskellCode = '-- λ\nlet prompt = "literal \\n"\n  observe prompt\n'
+it.each([
+  { fields: { type: 'custom_tool_call', input: haskellCode }, source: haskellCode },
+  { fields: { type: 'custom_tool_call', input: '["a","b"]' }, source: '["a","b"]' },
+  { fields: { type: 'function_call', arguments: JSON.stringify({ code: haskellCode }) }, source: haskellCode },
+  { fields: { type: 'function_call', arguments: { code: haskellCode } }, source: haskellCode },
+  { fields: { type: 'function_call', arguments: JSON.stringify(haskellCode) }, source: haskellCode },
+])('presents the actual Haskell source and copies it exactly for $fields.type', async ({ fields, source }) => {
+  const item = { ...fields, name: 'haskell', call_id: 'cell' }
+  const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+  try {
+    const { container } = render(<HistoryItem entry={entry(item)} />)
+    expect(screen.getByLabelText('Input item 7').textContent).toBe(source)
+    expect(container.querySelector('code.language-haskell')).not.toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Copy Input item 7' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(source))
+    showRaw()
+    expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
+  } finally {
+    if (descriptor) Object.defineProperty(navigator, 'clipboard', descriptor)
+    else Reflect.deleteProperty(navigator, 'clipboard')
+  }
+})
+
+it('keeps unrelated code arguments and malformed Haskell envelopes visible without guessing a language', () => {
+  const { container, rerender } = render(<HistoryItem entry={entry({ type: 'function_call', name: 'shell', call_id: 'call', arguments: JSON.stringify({ code: 'let value = 42\nobserve value' }) })} />)
+  expect(container.querySelector('code.language-haskell')).toBeNull()
+  expect(screen.getByLabelText('Arguments item 7').textContent).toContain('"code"')
+  rerender(<HistoryItem entry={entry({ type: 'function_call', name: 'haskell', call_id: 'call', arguments: '{"code":' })} />)
+  expect(container.querySelector('code.language-haskell')).toBeNull()
+  expect(screen.getByLabelText('Arguments item 7').textContent).toBe('{"code":')
+})
+
 function showRaw() {
   fireEvent.click(screen.getByText('Message details'))
   fireEvent.click(screen.getByRole('button', { name: 'Show Raw item 7' }))

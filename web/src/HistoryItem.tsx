@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { PresentationDetails, usePresentationChoice } from './presentation-state'
 import type { HistoryEntry } from './history-client'
 import { MessageContent, MessagePresentation, type MessageKind } from './MessagePresentation'
+import type { CodeLanguage } from './Code'
 
 function object(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -10,7 +11,7 @@ function object(value: unknown): value is Record<string, unknown> {
 interface ReadableItem {
   readonly label: string
   readonly kind: MessageKind
-  readonly texts: readonly { label: string; text: string; kind: 'prose' | 'code'; format?: 'markdown' | 'plain'; copyText?: string }[]
+  readonly texts: readonly { label: string; text: string; kind: 'prose' | 'code'; format?: 'markdown' | 'plain'; copyText?: string; language?: CodeLanguage }[]
   readonly metadata?: readonly { label: string; value: string }[]
   readonly responseSummary?: string
   readonly unknownBlocks?: boolean
@@ -39,6 +40,17 @@ function structuredJson(text: string): { text: string; summary?: string } | unde
 
 function presentJson(text: string): string {
   return structuredJson(text)?.text ?? text
+}
+
+function haskellSource(type: string, input: unknown): string | undefined {
+  // Custom input already is source. Parsing it would alter valid Haskell such as ["x"].
+  if (type === 'custom_tool_call') return typeof input === 'string' ? input : undefined
+  let argumentsValue = input
+  if (typeof input === 'string') {
+    try { argumentsValue = JSON.parse(input) } catch { return undefined }
+  }
+  return typeof argumentsValue === 'string' ? argumentsValue
+    : object(argumentsValue) && typeof argumentsValue.code === 'string' ? argumentsValue.code : undefined
 }
 
 function toolMetadata(value: Record<string, unknown>, type: string, callId: string): { label: string; value: string }[] {
@@ -88,11 +100,12 @@ export function readable(value: unknown): ReadableItem | undefined {
     && typeof value.name === 'string' && typeof value.call_id === 'string') {
     const input = value.type === 'function_call' ? value.arguments : value.input
     if (typeof input !== 'string' && !(value.type === 'function_call' && object(input))) return undefined
+    const source = value.name === 'haskell' ? haskellSource(value.type, input) : undefined
     return { label: `Model tool call · ${value.name}`, kind: 'activity',
       metadata: toolMetadata(value, value.type, value.call_id),
-      texts: [{ label: value.type === 'function_call' ? (typeof input === 'string' ? 'Arguments' : 'Arguments JSON') : 'Input',
-        text: typeof input === 'string' ? presentJson(input) : JSON.stringify(input, null, 2),
-        copyText: typeof input === 'string' ? input : undefined, kind: 'code' }] }
+      texts: [{ label: source !== undefined ? 'Input' : value.type === 'function_call' ? (typeof input === 'string' ? 'Arguments' : 'Arguments JSON') : 'Input',
+        text: source ?? (typeof input === 'string' ? presentJson(input) : JSON.stringify(input, null, 2)),
+        copyText: source ?? (typeof input === 'string' ? input : undefined), kind: 'code', language: source !== undefined ? 'haskell' : undefined }] }
   }
   if ((value.type === 'function_call_output' || value.type === 'custom_tool_call_output')
     && typeof value.call_id === 'string' && typeof value.output === 'string') {
@@ -118,7 +131,7 @@ export default function HistoryItem({ entry, listItem = true, diagnostics = true
       <p>Sequence {publication.sequence} · exchange {publication.requestId} · position {entry.position}</p>
     </PresentationDetails> : null
   const texts = view?.texts.map((part, index, parts) => <div key={index} className={`history-${part.kind}`}>
-    <MessageContent text={part.text} copyText={part.copyText} format={part.format} bounded={part.kind === 'code'} memoryKey={`part:${index}`} label={`${part.label} item ${entry.position}${parts.length > 1 ? ` block ${index + 1}` : ''}`} />
+    <MessageContent text={part.text} copyText={part.copyText} format={part.format} language={part.language} bounded={part.kind === 'code'} memoryKey={`part:${index}`} label={`${part.label} item ${entry.position}${parts.length > 1 ? ` block ${index + 1}` : ''}`} />
   </div>)
   const rawContent = rawVisible && <MessageContent key="raw" text={raw ?? 'Raw data could not be represented as JSON.'} label={`Raw item ${entry.position}`} />
   return <MessagePresentation listItem={listItem} kind={view?.kind ?? 'activity'} title={view?.label ?? 'Unrecognized item · Raw data'} collapsed={view?.kind === 'reasoning' && view.texts.length > 0}

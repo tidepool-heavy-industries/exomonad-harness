@@ -3,6 +3,16 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import ToolActivity, { resultExcerpt } from './ToolActivity'
 import { PresentationMemory } from './presentation-state'
 
+it('keeps unnamed live tool input literal instead of guessing Haskell from its source', () => {
+  const text = '-- λ\nlet value = "unfinished'
+  const { container } = render(<ToolActivity row={{ kind: 'live', key: 'live', live: [{
+    origin: { kind: 'embedded', run: 'run', actor: '/root', incarnation: 'one' }, requestId: 'request', itemId: 'item', channel: 'tool_input', index: '0', version: '1',
+    text, streaming: true, overflow: false, committedHash: null,
+  }] }} streamingActive />)
+  expect(screen.getByLabelText('Input').textContent).toBe(text)
+  expect(container.querySelector('.token')).toBeNull()
+})
+
 describe('tool result excerpts and evidence', () => {
   it('uses the first nonempty literal result line without claiming an outcome', () => {
     expect(resultExcerpt({ output: '\n  \n  Tool failed: permission denied\nnext line' })).toBe('Tool failed: permission denied')
