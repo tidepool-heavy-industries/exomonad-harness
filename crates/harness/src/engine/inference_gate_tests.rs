@@ -1015,7 +1015,15 @@ fn generated_continuation_histories_preserve_budget_dedup_stop_and_restart() {
         .build()
         .unwrap();
     let strategy = proptest::collection::vec(0u8..8, 8..40);
-    TestRunner::new(Config{cases:32,..Config::default()}).run(&strategy,|actions|runtime.block_on(async {
+    let completed = std::cell::Cell::new(0usize);
+    let config = Config {
+        cases: 32,
+        source_file: Some(file!()),
+        ..Config::default()
+    };
+    let result = TestRunner::new(config).run(&strategy, |actions| {
+        runtime.block_on(async {
+
         let path=std::env::temp_dir().join(format!("continuation-model-{}.sqlite",uuid::Uuid::new_v4()));
         let mut store=Arc::new(Store::open(&path).unwrap());
         let identity=HostIdentity{run:"history".into(),actor:AgentPath("/root".into()),incarnation:"one".into()};
@@ -1064,6 +1072,14 @@ fn generated_continuation_histories_preserve_budget_dedup_stop_and_restart() {
             let unique:usize=store.lock().unwrap().query_row("SELECT COUNT(*) FROM embedded_inputs WHERE run_id=?1",[&identity.run],|r|r.get(0)).unwrap();
             prop_assert_eq!(unique,sends.len(),"duplicate command admitted input twice");
         }
-        std::fs::remove_file(path).unwrap();Ok(())
-    })).unwrap();
+        std::fs::remove_file(path).unwrap();
+        completed.set(completed.get() + 1);
+        Ok(())
+        })
+    });
+    eprintln!(
+        "generated continuation histories completed: {}",
+        completed.get()
+    );
+    result.unwrap();
 }
