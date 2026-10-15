@@ -856,6 +856,14 @@ impl Provider for BoundProvider {
 }
 #[async_trait]
 impl Provider for PinnedProvider {
+    fn request_activation(&self) -> Option<crate::provider::RequestActivation> {
+        self.surface.dispatcher.request_activation()
+    }
+
+    fn invocation_role(&self, name: &str) -> crate::provider::InvocationRole {
+        self.surface.dispatcher.invocation_role(name)
+    }
+
     fn request_instructions(&self) -> Option<&str> {
         self.surface.dispatcher.request_instructions()
     }

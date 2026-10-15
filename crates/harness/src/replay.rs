@@ -808,6 +808,7 @@ impl Provider for ReplayProvider {
                 ));
             };
             Ok(ProviderCompletion {
+                activation_terminal: None,
                 output: JobOutput::Completed(Ok(value.clone())),
                 full_success: true,
                 context: ContextDisposition::Replay(evidence),
@@ -1112,6 +1113,7 @@ mod tests {
             progress.clone(),
         );
         CallContext {
+            invocations: None,
             handle: JobHandle(format!("replay-{}", call_id.0)),
             operation: Some(crate::model::OperationId {
                 origin: crate::model::ConversationIdentity::Standalone {
@@ -2546,6 +2548,7 @@ mod tests {
             progress.clone(),
         );
         let context = CallContext {
+            invocations: None,
             handle: JobHandle("replay-cell".into()),
             operation: None,
             call_id,
@@ -2620,6 +2623,7 @@ mod tests {
             progress.clone(),
         );
         let context = CallContext {
+            invocations: None,
             handle: JobHandle("cancel-cell".into()),
             operation: None,
             call_id,

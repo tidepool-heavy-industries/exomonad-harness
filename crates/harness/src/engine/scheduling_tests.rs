@@ -432,6 +432,7 @@ impl Provider for ContextEditor {
             release.notified().await;
         }
         let mut completion = crate::provider::ProviderCompletion {
+            activation_terminal: None,
             output: if self.cancelled_receipt {
                 crate::turn::JobOutput::CancelledWithReceipt(Ok(json!({"prefix":name})))
             } else {

@@ -70,6 +70,7 @@ impl Provider for NativeHost {
             sources: vec![],
         });
         ProviderCompletion {
+            activation_terminal: None,
             output: crate::turn::JobOutput::Completed(Ok(json!({"real_edit_result":true}))),
             full_success: true,
             context: ContextDisposition::Draft(ContextDraft {

@@ -2338,7 +2338,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             // calls run in response order, and each terminal is committed before
             // the next call can inspect the canonical prefix.
             let had_sync_calls = pending.iter().any(|call| call.queued);
-            if let Err(error) = self
+            let activation_terminal = match self
                 .execute_sync_calls(
                     pending,
                     &mut parent,
@@ -2348,7 +2348,20 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 )
                 .await
             {
-                return Err(error);
+                Ok(terminal) => terminal,
+                Err(error) => return Err(error),
+            };
+            if activation_terminal {
+                // The native request owner already settled this exact
+                // activation. Retain ready output, but leave successor-activation
+                // inbox envelopes for the next owner-issued request snapshot.
+                self.persist_settled(pending, &parent).await?;
+                let transcript = self.read_history(&parent).await?;
+                return Ok(EngineCompletion {
+                    turn,
+                    transcript,
+                    head_request: parent,
+                });
             }
 
             let had_inline_wait = !inline_settled.is_empty();
@@ -3367,7 +3380,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         response: &[Item],
         cancellation: &mut watch::Receiver<bool>,
         admit_inbox: bool,
-    ) -> Result<(), EngineError> {
+    ) -> Result<bool, EngineError> {
         let operations = response
             .iter()
             .filter_map(|item| {
@@ -3384,6 +3397,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         {
             return Err(EngineError::InvalidFunctionCall);
         }
+        let mut activation_terminal = false;
         for operation in operations {
             let Some(index) = pending
                 .iter()
@@ -3430,6 +3444,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .expect("sync call retained");
             let completion = self.scheduler.invocation_completion(&operation).await?;
             self.retain_context_requirement(&operation, false).await?;
+            let terminal = completion.as_ref().is_some_and(|completion| {
+                completion.full_success && completion.activation_terminal.is_some()
+            }) && matches!(output, crate::turn::JobOutput::Completed(Ok(_)));
             let disposition = completion
                 .and_then(|completion| completion.full_success.then_some(completion.context))
                 .filter(|context| {
@@ -3503,11 +3520,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .await?;
             }
             pending.retain(|call| call.operation != operation);
-            if admit_inbox {
+            activation_terminal |= terminal;
+            if admit_inbox && !activation_terminal {
                 self.append_unread_envelopes(request).await?;
             }
         }
-        Ok(())
+        Ok(activation_terminal)
     }
 
     /// A synchronous fallback must finish before another model request or

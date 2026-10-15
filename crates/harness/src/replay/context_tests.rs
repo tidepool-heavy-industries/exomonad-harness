@@ -90,6 +90,7 @@ impl Provider for Editor {
             }
         }
         ProviderCompletion {
+            activation_terminal: None,
             output: JobOutput::Completed(Ok(
                 json!({"error":"a successful payload is still successful","changed":self.rewrite}),
             )),

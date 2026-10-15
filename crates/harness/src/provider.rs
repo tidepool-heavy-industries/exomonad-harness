@@ -9,6 +9,13 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+mod activation;
+pub use crate::turn::InvocationAdmission;
+pub use activation::{
+    InvocationAdmissionError, InvocationRole, InvocationState, InvocationTerminal,
+    PendingInvocation, RequestActivation,
+};
+
 mod failure;
 pub use failure::{MetadataOmission, ToolFailure};
 
@@ -65,6 +72,8 @@ pub struct CallContext {
     /// Exact invocation-local publication metadata, available even if the
     /// native owner's terminal precedes the ordinary provider waiter.
     pub completion: InvocationCompletionAuthority,
+    /// Exact request-scoped scheduler admission. Detached probes have none.
+    pub invocations: Option<InvocationAdmission>,
 }
 
 /// The exact invocation owner supplies immutable publication metadata after
@@ -159,6 +168,7 @@ impl CallContext {
                 progress,
                 context: None,
                 completion: InvocationCompletionAuthority::new(None),
+                invocations: None,
             },
             receiver,
         )
@@ -383,6 +393,8 @@ pub struct ProviderCompletion {
     pub output: crate::turn::JobOutput,
     pub full_success: bool,
     pub context: ContextDisposition,
+    /// Host-issued terminal authority, independent of the returned value.
+    pub activation_terminal: Option<InvocationTerminal>,
 }
 
 impl ProviderCompletion {
@@ -391,6 +403,7 @@ impl ProviderCompletion {
             full_success: result.is_ok(),
             output: crate::turn::JobOutput::Completed(result),
             context: ContextDisposition::Unedited,
+            activation_terminal: None,
         }
     }
 }
@@ -398,6 +411,17 @@ impl ProviderCompletion {
 /// A provider owns tool meaning; the harness owns scheduling and history.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Identity retained by this immutable host snapshot. Ordinary providers
+    /// have no native request activation and receive no settlement authority.
+    fn request_activation(&self) -> Option<RequestActivation> {
+        None
+    }
+
+    /// Pin role alongside the operation before any sibling may execute.
+    fn invocation_role(&self, _name: &str) -> InvocationRole {
+        InvocationRole::Domain
+    }
+
     /// Continuation bridges do not hold a scheduler slot while the host runs.
     fn holds_job_capacity(&self) -> bool {
         true

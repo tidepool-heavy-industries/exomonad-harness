@@ -183,6 +183,10 @@ pub enum JobError {
     AgentVerbRequiresFunction,
     #[error("finalize requires function-call input")]
     FinalizeRequiresFunction,
+    #[error("request activation belongs to another scheduler")]
+    ForeignRequestActivation,
+    #[error("request activation closed domain admission")]
+    RequestActivationClosed,
 }
 
 /// Inputs to the deterministic request priority policy: roots first, then
@@ -270,6 +274,9 @@ fn compare_priority(a: &(u64, RequestTicket), b: &(u64, RequestTicket)) -> Order
 
 struct Job {
     handle: JobHandle,
+    name: String,
+    activation: Option<crate::provider::RequestActivation>,
+    role: crate::provider::InvocationRole,
     started: bool,
     requires_publication: bool,
     cancellation_owner: Option<Arc<dyn crate::provider::CancellationOwner>>,
@@ -337,7 +344,91 @@ fn retain_progress(progress: &mut Vec<Value>, event: Value) {
 ///
 /// The semaphore bounds concurrent calls. The same registry can be shared by
 /// the request loop and the agent tree; it does not own durable persistence.
+/// Synchronous access to the existing jobs registry for one exact settlement
+/// invocation. The callback must not await or reenter the scheduler. Lock order
+/// is scheduler jobs, then the host's native request/operation admission owner.
+#[derive(Clone)]
+pub struct InvocationAdmission {
+    jobs: Arc<Mutex<HashMap<OperationId, Job>>>,
+    operation: OperationId,
+    activation: crate::provider::RequestActivation,
+}
+
+impl std::fmt::Debug for InvocationAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InvocationAdmission")
+            .field("operation", &self.operation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InvocationAdmission {
+    pub fn activation(&self) -> &crate::provider::RequestActivation {
+        &self.activation
+    }
+
+    /// The callback examines exact queued/running domain inventory and claims
+    /// the native request atomically with respect to scheduler registration and
+    /// physical start. Refusal leaves admission open. A native terminal may
+    /// refine a Running record whose ordinary provider waiter has not returned.
+    pub fn try_admit_terminal<T, E>(
+        &self,
+        claim: impl FnOnce(&[crate::provider::PendingInvocation]) -> Result<T, E>,
+    ) -> Result<
+        (T, crate::provider::InvocationTerminal),
+        crate::provider::InvocationAdmissionError<E>,
+    > {
+        use crate::provider::{
+            InvocationAdmissionError as Error, InvocationRole, InvocationState, PendingInvocation,
+        };
+        let jobs = self.jobs.try_lock().map_err(|_| Error::Unavailable)?;
+        let own = jobs.get(&self.operation).ok_or(Error::ForeignInvocation)?;
+        if own.activation.as_ref() != Some(&self.activation) || !own.started || own.output.is_some()
+        {
+            return Err(Error::ForeignInvocation);
+        }
+        if own.role != InvocationRole::Settlement {
+            return Err(Error::NotSettlement);
+        }
+        let mut pending = jobs
+            .iter()
+            .filter_map(|(operation, job)| {
+                (job.activation.as_ref() == Some(&self.activation)
+                    && job.role == InvocationRole::Domain
+                    && job.output.is_none())
+                .then(|| PendingInvocation {
+                    operation: operation.clone(),
+                    name: job.name.clone(),
+                    state: if job.started {
+                        InvocationState::Running
+                    } else {
+                        InvocationState::Queued
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        pending.sort_by(|a, b| {
+            (&a.operation.request.0, &a.operation.call.0)
+                .cmp(&(&b.operation.request.0, &b.operation.call.0))
+        });
+        let result = claim(&pending).map_err(Error::Claim)?;
+        self.activation
+            .state
+            .terminal
+            .set(self.operation.clone())
+            .map_err(|_| Error::AlreadyTerminated)?;
+        Ok((
+            result,
+            crate::provider::InvocationTerminal {
+                operation: self.operation.clone(),
+                activation: self.activation.clone(),
+            },
+        ))
+    }
+}
+
 pub struct JobScheduler {
+    owner: Arc<()>,
     capacity: Arc<Semaphore>,
     jobs: Arc<Mutex<HashMap<OperationId, Job>>>,
     events: broadcast::Sender<OperationId>,
@@ -376,6 +467,7 @@ impl JobScheduler {
         let (events, _) = broadcast::channel(64);
         let (legacy_events, _) = broadcast::channel(64);
         Ok(Self {
+            owner: Arc::new(()),
             capacity: Arc::new(Semaphore::new(capacity)),
             jobs: Arc::new(Mutex::new(HashMap::new())),
             events,
@@ -616,7 +708,17 @@ impl JobScheduler {
         if matches!(&input, ToolInput::Custom(_)) && name == crate::finalize::FINALIZE_TOOL_NAME {
             return Err(JobError::FinalizeRequiresFunction);
         }
+        let activation = provider.request_activation();
+        let role = provider.invocation_role(&name);
         let mut registry = self.jobs.lock().await;
+        if let Some(activation) = &activation {
+            if !activation.bind_scheduler(&self.owner) {
+                return Err(JobError::ForeignRequestActivation);
+            }
+            if role == crate::provider::InvocationRole::Domain && activation.is_closed() {
+                return Err(JobError::RequestActivationClosed);
+            }
+        }
         if registry.contains_key(&operation) {
             return Err(JobError::DuplicateCall);
         }
@@ -626,6 +728,9 @@ impl JobScheduler {
             operation.clone(),
             Job {
                 handle: handle.clone(),
+                name: name.clone(),
+                activation: activation.clone(),
+                role,
                 started: false,
                 requires_publication,
                 cancellation_owner: provider.cancellation_owner(),
@@ -676,6 +781,11 @@ impl JobScheduler {
             .expect("admitted job")
             .cancellation_intent
             .clone();
+        let task_admission = activation.map(|activation| InvocationAdmission {
+            jobs: self.jobs.clone(),
+            operation: operation.clone(),
+            activation,
+        });
         let verb_backend = provider.job_agent_service();
         let holds_capacity = provider.holds_job_capacity();
         let (launch, launch_gate) = tokio::sync::oneshot::channel();
@@ -734,7 +844,14 @@ impl JobScheduler {
             let cancelled_before_start = {
                 let mut registry = jobs.lock().await;
                 let job = registry.get_mut(&task_operation).expect("registered job");
-                if job.output.is_some() || task_cancel.is_cancelled() {
+                if job.output.is_some()
+                    || task_cancel.is_cancelled()
+                    || (job.role == crate::provider::InvocationRole::Domain
+                        && job
+                            .activation
+                            .as_ref()
+                            .is_some_and(|activation| activation.is_closed()))
+                {
                     true
                 } else {
                     job.started = true;
@@ -774,6 +891,7 @@ impl JobScheduler {
                 progress,
                 context: context_snapshot,
                 completion: task_completion,
+                invocations: task_admission,
             };
             let call = provider.complete_call(&name, input, context);
             tokio::pin!(call);
@@ -1024,14 +1142,24 @@ impl JobScheduler {
         key: &K,
     ) -> Result<Option<crate::provider::ProviderCompletion>, JobError> {
         let operation = key.operation(self);
-        Ok(self
-            .jobs
-            .lock()
-            .await
-            .get(&operation)
-            .ok_or(JobError::UnknownCall)?
-            .completion
-            .clone())
+        let jobs = self.jobs.lock().await;
+        let job = jobs.get(&operation).ok_or(JobError::UnknownCall)?;
+        let mut completion = job.completion.clone();
+        if let Some(completion) = &mut completion {
+            if completion
+                .activation_terminal
+                .as_ref()
+                .is_some_and(|terminal| {
+                    !job.activation
+                        .as_ref()
+                        .is_some_and(|activation| terminal.matches(&operation, activation))
+                })
+            {
+                completion.activation_terminal = None;
+                completion.full_success = false;
+            }
+        }
+        Ok(completion)
     }
 
     pub async fn progress<K: JobKey>(&self, call_id: &K) -> Result<Vec<Value>, JobError> {
