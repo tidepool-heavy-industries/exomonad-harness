@@ -26,3 +26,10 @@ Keep ongoing release mounts and their generated configuration untouched while
 comparing profiles. Use an idle checkout whose source and output ownership have
 been coordinated. The production profile remains the release qualification path;
 fast-dev execution establishes behavior only for the tested source and profile.
+
+# Authored message fixtures
+
+Use `Item::user_text` for ordinary authored user text in production and tests.
+Keep raw `Item` JSON for actual provider wire payloads and deliberate malformed
+controls. Exercise valid fixtures through the real context projection so item
+classification or provenance refusals cannot mask the invariant under test.
