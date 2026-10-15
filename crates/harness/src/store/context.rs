@@ -159,6 +159,8 @@ pub(crate) fn retained_history(
     head: &RequestId,
     boundaries: bool,
 ) -> Result<Vec<Occurrence>> {
+    // An empty existing request is valid; an absent lineage root is not.
+    branch(c, head)?;
     query_occurrences(c, "WITH RECURSIVE lineage(id,parent_id,depth) AS (
         SELECT id,parent_id,0 FROM requests WHERE id=?1
         UNION ALL SELECT r.id,r.parent_id,l.depth+1 FROM requests r JOIN lineage l ON r.id=l.parent_id

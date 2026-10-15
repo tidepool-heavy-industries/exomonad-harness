@@ -842,3 +842,28 @@ fn here_copy_carries_nearest_exact_terminal_claim_without_reviving_it() {
         }
     }
 }
+
+#[test]
+fn recovery_history_distinguishes_missing_and_empty_requests() {
+    let store = Store::memory().unwrap();
+    let missing = RequestId("absent-history-root".into());
+    for boundaries in [false, true] {
+        assert!(matches!(super::super::context::retained_history(
+            &store.lock().unwrap(), &missing, boundaries),
+            Err(StoreError::MissingRequest(id)) if id == missing.0));
+    }
+    assert!(matches!(store.recovery_history(&missing),
+        Err(StoreError::MissingRequest(id)) if id == missing.0));
+    let empty = RequestId("empty-history-root".into());
+    store
+        .write_request(&empty, None, "/root", &[], Default::default())
+        .unwrap();
+    assert!(store.recovery_history(&empty).unwrap().is_empty());
+    for boundaries in [false, true] {
+        assert!(
+            super::super::context::retained_history(&store.lock().unwrap(), &empty, boundaries)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
