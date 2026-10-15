@@ -45,13 +45,22 @@ impl Store {
         operation: ClientOperationId,
         accounts: &SavedAccounts,
     ) -> Result<CommandReceipt> {
+        // Validate current credential bytes before acquiring the Store writer.
+        // No refresh or network work is done by this observation.
+        let retained = self
+            .embedded_command(run, operation)?
+            .ok_or(StoreError::InvalidCommandState)?;
+        let HostCommand::SelectAccount { account_id, .. } = &retained.command else {
+            return Err(StoreError::InvalidCommandState);
+        };
+        let available = accounts.is_available(account_id);
         let mut c = self.lock()?;
         c.write_transaction(|tx| {
             let record = super::embedded_commands::read(tx, run, operation)?.ok_or(StoreError::InvalidCommandState)?;
             let HostCommand::SelectAccount { target, account_id } = &record.command else { return Err(StoreError::InvalidCommandState); };
             if let Some(receipt) = record.receipt { return Ok(receipt); }
             if target.run != run || record.state != super::EmbeddedCommandState::Dispatching { return Err(StoreError::InvalidCommandState); }
-            let (state, outcome) = if accounts.contains(account_id) && read(tx, run)?.is_some() {
+            let (state, outcome) = if available && accounts.contains(account_id) && read(tx, run)?.is_some() {
                 tx.execute("UPDATE session_state SET state=?2,updated_at=?3 WHERE session_id=?1",params![key(run),serde_json::to_string(account_id)?,utc_millis()])?;
                 ("account_selected", CommandReceiptOutcome::AccountSelected { target: target.clone(), account_id: account_id.clone() })
             } else {

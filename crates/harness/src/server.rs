@@ -367,6 +367,7 @@ pub struct ServerConfig {
     pub asset_root: PathBuf,
     browser_bundle: Option<Arc<VerifiedBrowserBundle>>,
     history_store: Option<Arc<Store>>,
+    account_auth: Option<crate::transport::auth::chatgpt::RunAccountAuth>,
     bearer_secret: Option<BearerSecret>,
     browser_auth: BrowserAuthentication,
     public_origin_scheme: String,
@@ -379,6 +380,7 @@ impl ServerConfig {
             asset_root,
             browser_bundle: None,
             history_store: None,
+            account_auth: None,
             bearer_secret: None,
             browser_auth: BrowserAuthentication::Disabled,
             public_origin_scheme: "http".into(),
@@ -395,6 +397,14 @@ impl ServerConfig {
     /// Without this attachment history endpoints must report unavailable.
     pub fn with_history_store(mut self, store: Arc<Store>) -> Self {
         self.history_store = Some(store);
+        self
+    }
+
+    pub fn with_account_auth(
+        mut self,
+        auth: crate::transport::auth::chatgpt::RunAccountAuth,
+    ) -> Self {
+        self.account_auth = Some(auth);
         self
     }
 
@@ -489,6 +499,7 @@ struct AppState {
     browser_bundle: Option<Arc<VerifiedBrowserBundle>>,
     snapshot: Arc<std::sync::RwLock<Snapshot>>,
     history_store: Option<Arc<Store>>,
+    account_auth: Option<crate::transport::auth::chatgpt::RunAccountAuth>,
     public_origin_scheme: Arc<str>,
     public_origin_authority: Option<Arc<str>>,
     auth: Arc<ApiAuthPolicy>,
@@ -853,6 +864,7 @@ pub fn server_with_config(
         asset_root,
         browser_bundle,
         history_store,
+        account_auth,
         bearer_secret,
         browser_auth,
         public_origin_scheme,
@@ -871,6 +883,7 @@ pub fn server_with_config(
         browser_bundle,
         snapshot: Arc::new(std::sync::RwLock::new(Snapshot::default())),
         history_store,
+        account_auth,
         public_origin_scheme: Arc::from(public_origin_scheme),
         public_origin_authority: public_origin_authority.map(Arc::from),
         auth: Arc::new(ApiAuthPolicy {
@@ -895,6 +908,7 @@ pub fn server_with_config(
     };
     let protected_api = Router::new()
         .route("/commands", post(submit_command))
+        .route("/account-selection", get(account_selection))
         .route("/commands/{operation_id}", get(command_status))
         .route("/events", get(event_stream))
         .route("/history/{request_id}", get(history::request_history))
@@ -960,7 +974,8 @@ async fn authorize(State(auth): State<ApiAuth>, request: Request, next: Next) ->
             "/commands" | "/actor-output/expand" | "/actor-form/submit" | "/actor-form/dismiss"
         );
     let command_lookup_with_origin = request.method() == axum::http::Method::GET
-        && request.uri().path().starts_with("/commands/")
+        && (request.uri().path().starts_with("/commands/")
+            || request.uri().path() == "/account-selection")
         && request.headers().contains_key(header::ORIGIN);
     if (submitting || command_lookup_with_origin)
         && ambient
@@ -973,6 +988,24 @@ async fn authorize(State(auth): State<ApiAuth>, request: Request, next: Next) ->
         return (StatusCode::FORBIDDEN, "same-origin request required").into_response();
     }
     next.run(request).await
+}
+
+async fn account_selection(State(state): State<AppState>) -> Response {
+    let Some(auth) = state.account_auth else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Saved accounts are unavailable.",
+        )
+            .into_response();
+    };
+    match tokio::task::spawn_blocking(move || auth.selection()).await {
+        Ok(Ok(selection)) => Json(selection).into_response(),
+        _ => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Saved accounts are unavailable.",
+        )
+            .into_response(),
+    }
 }
 
 async fn authenticate_request(

@@ -470,6 +470,38 @@ fn saved_account_selection_is_durable_idempotent_and_run_scoped() {
         actor: AgentPath("/root".into()),
         incarnation: "root-incarnation".into(),
     };
+    store.bind_embedded_actor(&target, None).unwrap();
+    store
+        .initialize_context_target(
+            &crate::model::ConversationIdentity::Embedded {
+                run: target.run.clone(),
+                actor: target.actor.clone(),
+                incarnation: target.incarnation.clone(),
+            },
+            &crate::context::ContextProjectionTarget {
+                model: "test".into(),
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
+        .unwrap();
+    let request = crate::model::RequestId("blocked-request".into());
+    let _attempt = store.begin_embedded_inference(&target, None).unwrap();
+    store
+        .write_embedded_request(&target, &request, None, &[], crate::store::Usage::default())
+        .unwrap();
+    store
+        .record_interrupted_model_request(
+            &request,
+            crate::transport::StreamInterruption::MissingCompletion,
+            Some((&target, None)),
+        )
+        .unwrap();
+    let blocked = store.embedded_inference_state(&target).unwrap();
+    assert!(matches!(
+        blocked,
+        crate::embedding::HostInferenceState::Blocked { .. }
+    ));
     let operation = ClientOperationId(uuid::Uuid::new_v4());
     let command = HostCommand::SelectAccount {
         target: target.clone(),
@@ -487,6 +519,16 @@ fn saved_account_selection_is_durable_idempotent_and_run_scoped() {
         receipt.outcome,
         CommandReceiptOutcome::AccountSelected { .. }
     ));
+    assert_eq!(store.embedded_inference_state(&target).unwrap(), blocked);
+    assert!(
+        store
+            .begin_embedded_inference(&target, Some(&request))
+            .is_err()
+    );
+    assert_eq!(
+        store.embedded_round_frontier(&target).unwrap().pending_head,
+        Some(request)
+    );
     assert_eq!(held_request_token, "test-account-a");
     for auth in [&root, &existing_child, &notebook, &root.clone()] {
         assert_eq!(auth.access().unwrap(), "test-account-b");
@@ -540,4 +582,100 @@ fn saved_account_selection_is_durable_idempotent_and_run_scoped() {
             .unwrap(),
         receipt
     );
+}
+
+#[test]
+fn run_auth_discovers_new_saved_accounts_and_refuses_removed_or_invalid_choices() {
+    use crate::{
+        embedding::{ClientOperationId, HostIdentity},
+        model::AgentPath,
+        server::{CommandReceiptOutcome, HostCommand},
+        store::Store,
+    };
+    let files = Temp::new();
+    let a = files.path();
+    let first = record(now().unwrap() + 600);
+    save(&a, &first).unwrap();
+    let store = Arc::new(Store::memory().unwrap());
+    let auth = RunAccountAuth::new(
+        store.clone(),
+        "run".into(),
+        SavedAccounts::beside(a.clone()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(auth.selection().unwrap().accounts.len(), 1);
+    let b = files.0.join("second.json");
+    let mut second = first.clone();
+    second.access_token = "second-token".into();
+    second.email = Some("second@example.test".into());
+    save(&b, &second).unwrap();
+    // Unrelated malformed/unsafe files do not hide a usable registration.
+    std::fs::write(files.0.join("broken.json"), "not credentials").unwrap();
+    std::os::unix::fs::symlink(&b, files.0.join("symlink.json")).unwrap();
+    for index in 0..130 {
+        std::fs::write(files.0.join(format!("unrelated-{index}")), "").unwrap();
+    }
+    let fresh = auth.accounts().unwrap();
+    let b_id = auth
+        .selection()
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|entry| entry.label == "second@example.test")
+        .unwrap()
+        .id;
+    let target = HostIdentity {
+        run: "run".into(),
+        actor: AgentPath("/root".into()),
+        incarnation: "first".into(),
+    };
+    for invalid in [false, true] {
+        let operation = ClientOperationId(uuid::Uuid::new_v4());
+        store
+            .enqueue_embedded_command(
+                operation,
+                &HostCommand::SelectAccount {
+                    target: target.clone(),
+                    account_id: b_id.clone(),
+                },
+            )
+            .unwrap();
+        store
+            .claim_embedded_command("run", operation)
+            .unwrap()
+            .unwrap();
+        if invalid {
+            save(&b, &second).unwrap();
+            std::fs::write(&b, "invalidated").unwrap();
+        } else {
+            std::fs::remove_file(&b).unwrap();
+        }
+        assert!(matches!(
+            store
+                .select_run_account("run", operation, &fresh)
+                .unwrap()
+                .outcome,
+            CommandReceiptOutcome::Refused { .. }
+        ));
+        assert_eq!(auth.access().unwrap(), first.access_token);
+    }
+    save(&b, &second).unwrap();
+    let operation = ClientOperationId(uuid::Uuid::new_v4());
+    store
+        .enqueue_embedded_command(
+            operation,
+            &HostCommand::SelectAccount {
+                target,
+                account_id: b_id,
+            },
+        )
+        .unwrap();
+    store
+        .claim_embedded_command("run", operation)
+        .unwrap()
+        .unwrap();
+    store
+        .select_run_account("run", operation, &auth.accounts().unwrap())
+        .unwrap();
+    assert_eq!(auth.access().unwrap(), "second-token");
 }

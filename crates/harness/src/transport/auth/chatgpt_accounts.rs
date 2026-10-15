@@ -37,6 +37,7 @@ pub struct AccountSelection {
 pub struct SavedAccounts {
     entries: Vec<(SavedAccount, PathBuf)>,
     launch: SavedAccountId,
+    launch_path: PathBuf,
 }
 impl SavedAccounts {
     /// The launch path is trusted configuration. Other entries must be safe,
@@ -50,11 +51,6 @@ impl SavedAccounts {
         match std::fs::read_dir(parent) {
             Ok(entries) => {
                 for entry in entries {
-                    // Bound filesystem discovery before loading records. This is a
-                    // startup work budget, not an account format constraint.
-                    if paths.len() >= 128 {
-                        return Err(LoginError::Storage);
-                    }
                     let entry = entry.map_err(|_| LoginError::Storage)?;
                     paths.push(entry.path());
                 }
@@ -73,6 +69,7 @@ impl SavedAccounts {
                 launch.clone(),
             )],
             launch: launch_id,
+            launch_path: launch.clone(),
         };
         for path in paths {
             if path == launch || path.extension().is_none_or(|ext| ext != "json") {
@@ -81,7 +78,7 @@ impl SavedAccounts {
             let record = match load(&path) {
                 Ok(Some(record)) => record,
                 Ok(None) | Err(LoginError::InvalidCredentials) => continue,
-                Err(error) => return Err(error),
+                Err(_) => continue,
             };
             let label = record
                 .email
@@ -107,6 +104,12 @@ impl SavedAccounts {
     pub fn contains(&self, id: &SavedAccountId) -> bool {
         self.entries.iter().any(|(entry, _)| &entry.id == id)
     }
+    pub fn is_available(&self, id: &SavedAccountId) -> bool {
+        self.entries
+            .iter()
+            .find(|(entry, _)| &entry.id == id)
+            .is_some_and(|(_, path)| matches!(load(path), Ok(Some(_))))
+    }
     pub fn projection(&self, selected_id: SavedAccountId) -> AccountSelection {
         AccountSelection {
             selected_id,
@@ -117,12 +120,24 @@ impl SavedAccounts {
                 .collect(),
         }
     }
-    fn auth(&self, id: &SavedAccountId) -> Result<ChatGptPlanAuth, TransportError> {
-        self.entries
-            .iter()
-            .find(|(entry, _)| &entry.id == id)
-            .map(|(_, path)| ChatGptPlanAuth::new(path.clone()))
-            .ok_or(TransportError::Authentication)
+    fn selected_auth(
+        launch: &Path,
+        id: &SavedAccountId,
+    ) -> Result<ChatGptPlanAuth, TransportError> {
+        if SavedAccountId::for_path(launch) == *id {
+            return Ok(ChatGptPlanAuth::new(launch.to_owned()));
+        }
+        let entries = std::fs::read_dir(launch.parent().ok_or(TransportError::Authentication)?)
+            .map_err(|_| TransportError::Authentication)?;
+        for entry in entries {
+            let path = entry.map_err(|_| TransportError::Authentication)?.path();
+            if path.extension().is_some_and(|ext| ext == "json")
+                && SavedAccountId::for_path(&path) == *id
+            {
+                return Ok(ChatGptPlanAuth::new(path));
+            }
+        }
+        Err(TransportError::Authentication)
     }
 }
 
@@ -132,7 +147,7 @@ impl SavedAccounts {
 pub struct RunAccountAuth {
     store: Arc<Store>,
     run: String,
-    accounts: SavedAccounts,
+    launch_path: PathBuf,
 }
 impl RunAccountAuth {
     pub fn new(
@@ -149,11 +164,11 @@ impl RunAccountAuth {
         Ok(Self {
             store,
             run,
-            accounts,
+            launch_path: accounts.launch_path.clone(),
         })
     }
-    pub fn accounts(&self) -> &SavedAccounts {
-        &self.accounts
+    pub fn accounts(&self) -> Result<SavedAccounts, TransportError> {
+        SavedAccounts::beside(self.launch_path.clone()).map_err(|_| TransportError::Authentication)
     }
     pub fn selection(&self) -> Result<AccountSelection, TransportError> {
         let id = self
@@ -161,7 +176,7 @@ impl RunAccountAuth {
             .run_account(&self.run)
             .map_err(|_| TransportError::Authentication)?
             .ok_or(TransportError::Authentication)?;
-        Ok(self.accounts.projection(id))
+        Ok(self.accounts()?.projection(id))
     }
 }
 impl Auth for RunAccountAuth {
@@ -171,6 +186,6 @@ impl Auth for RunAccountAuth {
             .run_account(&self.run)
             .map_err(|_| TransportError::Authentication)?
             .ok_or(TransportError::Authentication)?;
-        self.accounts.auth(&id)?.access()
+        SavedAccounts::selected_auth(&self.launch_path, &id)?.access()
     }
 }
