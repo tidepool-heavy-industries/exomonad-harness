@@ -94,7 +94,10 @@ impl From<&crate::server::HostCommand> for HostCommand {
     fn from(value: &crate::server::HostCommand) -> Self {
         use crate::server::HostCommand as N;
         match value {
-            N::SelectAccount { target, account_id } => Self::SelectAccount { target: target.clone(), account_id: account_id.clone() },
+            N::SelectAccount { target, account_id } => Self::SelectAccount {
+                target: target.clone(),
+                account_id: account_id.clone(),
+            },
             N::Input { target, text } => Self::Input {
                 target: target.clone(),
                 text: text.clone(),
@@ -124,7 +127,9 @@ impl From<&crate::server::HostCommand> for HostCommand {
 impl From<HostCommand> for crate::server::HostCommand {
     fn from(value: HostCommand) -> Self {
         match value {
-            HostCommand::SelectAccount { target, account_id } => Self::SelectAccount { target, account_id },
+            HostCommand::SelectAccount { target, account_id } => {
+                Self::SelectAccount { target, account_id }
+            }
             HostCommand::Input { target, text } => Self::Input { target, text },
             HostCommand::Interrupt {
                 target,
@@ -201,7 +206,10 @@ impl From<&super::CommandReceipt> for CommandReceipt {
     fn from(value: &super::CommandReceipt) -> Self {
         use super::CommandReceiptOutcome as N;
         let outcome = match &value.outcome {
-            N::AccountSelected { target, account_id } => CommandReceiptOutcome::AccountSelected { target: target.clone(), account_id: account_id.clone() },
+            N::AccountSelected { target, account_id } => CommandReceiptOutcome::AccountSelected {
+                target: target.clone(),
+                account_id: account_id.clone(),
+            },
             N::RecoveryAuthorized {
                 target,
                 block,

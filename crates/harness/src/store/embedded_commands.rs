@@ -30,7 +30,7 @@ pub struct EmbeddedCommandRecord {
     pub input_observation: Option<crate::embedding::InputObservation>,
 }
 
-pub(super) pub(super) fn read(
+pub(super) fn read(
     c: &Connection,
     run: &str,
     operation: ClientOperationId,

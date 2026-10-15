@@ -2027,6 +2027,7 @@ mod tests {
             actor_output_revisions: Vec::new(),
             actor_form_revisions: Vec::new(),
             host_run: Some("run-old".into()),
+            account_selection: None,
             command_receipts: vec![],
             actors: vec![old_actor.clone()],
             conversations: vec![fixture_conversation("conversation-old", "/root/worker")],

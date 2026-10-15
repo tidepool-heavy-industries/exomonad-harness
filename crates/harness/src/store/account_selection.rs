@@ -1,25 +1,50 @@
 //! Run-wide account selection and its terminal browser receipt commit together.
 use super::*;
-use crate::{embedding::ClientOperationId, server::{HostCommand, CommandReceipt, CommandReceiptOutcome}, transport::auth::chatgpt::{SavedAccountId, SavedAccounts}};
+use crate::{
+    embedding::ClientOperationId,
+    server::{CommandReceipt, CommandReceiptOutcome, HostCommand},
+    transport::auth::chatgpt::{SavedAccountId, SavedAccounts},
+};
 
-fn key(run: &str) -> String { format!("harness:run-account:{run}") }
+fn key(run: &str) -> String {
+    format!("harness:run-account:{run}")
+}
 fn read(c: &Connection, run: &str) -> Result<Option<SavedAccountId>> {
-    let state: Option<String> = c.query_row("SELECT state FROM session_state WHERE session_id=?1", [key(run)], |r| r.get(0)).optional()?;
-    state.map(|state| serde_json::from_str(&state).map_err(Into::into)).transpose()
+    let state: Option<String> = c
+        .query_row(
+            "SELECT state FROM session_state WHERE session_id=?1",
+            [key(run)],
+            |r| r.get(0),
+        )
+        .optional()?;
+    state
+        .map(|state| serde_json::from_str(&state).map_err(Into::into))
+        .transpose()
 }
 impl Store {
-    pub fn initialize_run_account(&self, run: &str, launch: &SavedAccountId) -> Result<SavedAccountId> {
+    pub fn initialize_run_account(
+        &self,
+        run: &str,
+        launch: &SavedAccountId,
+    ) -> Result<SavedAccountId> {
         let mut c = self.lock()?;
         c.write_transaction(|tx| {
             tx.execute("INSERT OR IGNORE INTO session_state(session_id,state,updated_at) VALUES (?1,?2,?3)",params![key(run),serde_json::to_string(launch)?,utc_millis()])?;
             read(tx, run)?.ok_or(StoreError::InvalidCommandState)
         })
     }
-    pub fn run_account(&self, run: &str) -> Result<Option<SavedAccountId>> { read(&*self.lock()?, run) }
+    pub fn run_account(&self, run: &str) -> Result<Option<SavedAccountId>> {
+        read(&*self.lock()?, run)
+    }
 
     /// Caller verifies the exact live root identity through host authority. The
     /// inventory owner supplies membership, never a browser-controlled path.
-    pub fn select_run_account(&self, run: &str, operation: ClientOperationId, accounts: &SavedAccounts) -> Result<CommandReceipt> {
+    pub fn select_run_account(
+        &self,
+        run: &str,
+        operation: ClientOperationId,
+        accounts: &SavedAccounts,
+    ) -> Result<CommandReceipt> {
         let mut c = self.lock()?;
         c.write_transaction(|tx| {
             let record = super::embedded_commands::read(tx, run, operation)?.ok_or(StoreError::InvalidCommandState)?;
