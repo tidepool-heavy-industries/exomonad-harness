@@ -102,10 +102,14 @@ facts. Refusal leaves domain admission open; acceptance fences that activation's
 new domain starts and returns an exact operation-bound `InvocationTerminal`.
 
 The native owner attaches that token to `ProviderCompletion::activation_terminal`
-only for its accepted settlement. Engine commits ordinary output and any context
-edit, executes remaining response-order controls, then returns before successor
+only for its accepted settlement. This authority is independent of `full_success`,
+which gates context edits: a native request transfer may intentionally discard
+those edits. Engine commits ordinary output and eligible context edits, executes
+remaining response-order controls, then returns before successor
 inference or further inbox admission. The reusable actor and a successor
-activation's queued input remain owned by the host. Output JSON, tool names,
+activation's queued input remain owned by the host. Unconfirmed transfer cleanup retains the existing cleanup obligations and stops
+inference. Activation-scoped settlement must use `BeforeNextInference`; async
+settlement is refused before claim or dispatch. Output JSON, tool names,
 schema equality, passive replay and Store reopen issue no terminal authority.
 
 ## Focused tests

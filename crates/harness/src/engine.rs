@@ -2900,6 +2900,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .copied()
             .unwrap_or_else(|| provider.tool_scheduling(&name));
         let scheduling = provider.operation_scheduling(&name, &operation, declared)?;
+        if provider.request_activation().is_some()
+            && provider.invocation_role(&name) == crate::provider::InvocationRole::Settlement
+            && scheduling != ToolScheduling::BeforeNextInference
+        {
+            // Native request settlement needs the completed-response context
+            // boundary; it cannot run while its issuing response is streaming.
+            return Err(EngineError::InvalidFunctionCall);
+        }
         let is_here_spawn = name == "spawn_agent"
             && matches!(&input, ToolInput::Function(args) if args["from"]["kind"].as_str() == Some("here"));
         if wait.is_some() {
@@ -3447,9 +3455,35 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .expect("sync call retained");
             let completion = self.scheduler.invocation_completion(&operation).await?;
             self.retain_context_requirement(&operation, false).await?;
-            let terminal = completion.as_ref().is_some_and(|completion| {
-                completion.full_success && completion.activation_terminal.is_some()
-            }) && matches!(output, crate::turn::JobOutput::Completed(Ok(_)));
+            let terminal = completion
+                .as_ref()
+                .is_some_and(|completion| completion.activation_terminal.is_some());
+            if terminal {
+                // Native request transfer and context-edit eligibility are
+                // separate authorities. A consumed request cannot infer again
+                // even when its transfer intentionally discards context edits.
+                match &output {
+                    crate::turn::JobOutput::Completed(_) => {}
+                    crate::turn::JobOutput::Cancelled
+                    | crate::turn::JobOutput::CancelledWithReceipt(_) => {
+                        return Err(EngineError::Cancelled {
+                            head_request: Some(request.clone()),
+                        });
+                    }
+                    crate::turn::JobOutput::CancellationUnconfirmed(detail) => {
+                        return Err(EngineError::UnconfirmedCancellation {
+                            operation: operation.clone(),
+                            detail: detail.clone(),
+                        });
+                    }
+                    crate::turn::JobOutput::Interrupted => {
+                        return Err(EngineError::UnconfirmedCancellation {
+                            operation: operation.clone(),
+                            detail: "native request transfer settlement is interrupted".into(),
+                        });
+                    }
+                }
+            }
             let disposition = completion
                 .and_then(|completion| completion.full_success.then_some(completion.context))
                 .filter(|context| {

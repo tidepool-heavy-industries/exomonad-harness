@@ -393,7 +393,9 @@ pub struct ProviderCompletion {
     pub output: crate::turn::JobOutput,
     pub full_success: bool,
     pub context: ContextDisposition,
-    /// Host-issued terminal authority, independent of the returned value.
+    /// Host-issued request-transfer authority, independent of the returned
+    /// value and `full_success` context-edit eligibility. A consumed activation
+    /// cannot infer again even when transfer intentionally discards edits.
     pub activation_terminal: Option<InvocationTerminal>,
 }
 

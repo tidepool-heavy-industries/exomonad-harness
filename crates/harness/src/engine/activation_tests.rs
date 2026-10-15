@@ -83,13 +83,18 @@ impl Provider for Snapshot {
     }
     fn invocation_role(&self, name: &str) -> InvocationRole {
         match name {
-            "reply" | "foreign_terminal" => InvocationRole::Settlement,
+            "reply" | "reply_no_context" | "reply_error" | "reply_uncertain" | "async_reply"
+            | "foreign_terminal" => InvocationRole::Settlement,
             "status" => InvocationRole::Observation,
             _ => InvocationRole::Domain,
         }
     }
-    fn tool_scheduling(&self, _: &str) -> ToolScheduling {
-        ToolScheduling::BeforeNextInference
+    fn tool_scheduling(&self, name: &str) -> ToolScheduling {
+        if name == "async_reply" {
+            ToolScheduling::Async
+        } else {
+            ToolScheduling::BeforeNextInference
+        }
     }
     async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
         unreachable!()
@@ -121,7 +126,10 @@ impl Provider for Snapshot {
                 self.host.facts.lock().unwrap().terminals.first().cloned();
             return completion;
         }
-        if name != "reply" {
+        if !matches!(
+            name,
+            "reply" | "reply_no_context" | "reply_error" | "reply_uncertain"
+        ) {
             // The same JSON on an ordinary domain tool cannot stop inference.
             return ProviderCompletion::unedited(Ok(json!({"status":"replied"})));
         }
@@ -165,6 +173,21 @@ impl Provider for Snapshot {
         let mut completion =
             ProviderCompletion::unedited(Ok(json!({"opaque":"native value carries no control"})));
         completion.activation_terminal = Some(terminal);
+        match name {
+            "reply_no_context" => completion.full_success = false,
+            "reply_error" => {
+                completion.output =
+                    crate::turn::JobOutput::Completed(Err("native settlement failure".into()));
+                completion.full_success = false;
+            }
+            "reply_uncertain" => {
+                completion.output = crate::turn::JobOutput::CancellationUnconfirmed(
+                    "native cleanup unknown".into(),
+                );
+                completion.full_success = false;
+            }
+            _ => {}
+        }
         if self.host.edit {
             let mut document = context.context.unwrap().document;
             document.blocks.push(crate::context::ContextBlock::Text {
@@ -225,7 +248,7 @@ fn engine(
 }
 async fn run(engine: &Engine<Offline, Host, Script>, head: Option<RequestId>) -> EngineCompletion {
     let (_cancel, cancelled) = watch::channel(false);
-    let (_mail, inbox) = tokio::sync::mpsc::unbounded_channel();
+    let (_mail, inbox) = tokio::sync::mpsc::unbounded_channel::<Envelope>();
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
         engine.run(head, vec![], cancelled, inbox),
@@ -379,4 +402,79 @@ async fn json_replied_and_foreign_terminal_cannot_stop_successor_activation() {
     assert_eq!(facts.lock().unwrap().settled.len(), 1);
     assert_eq!(output_count(&b, "foreign"), 1);
     assert_eq!(output_count(&b, "json-only"), 1);
+}
+
+#[tokio::test]
+async fn accepted_transfer_stops_without_context_commit_eligibility() {
+    let (engine, facts, store) = engine(
+        vec![vec![call("transfer", "reply_no_context")]],
+        false,
+        false,
+    );
+    let completion = run(&engine, None).await;
+    assert_eq!(engine.client.requests.lock().unwrap().len(), 1);
+    assert_eq!(facts.lock().unwrap().settled.len(), 1);
+    assert!(
+        store
+            .context_receipt(&facts.lock().unwrap().terminals[0].operation)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(output_count(&completion, "transfer"), 1);
+}
+
+#[tokio::test]
+async fn accepted_transfer_with_native_error_retains_error_without_another_inference() {
+    let (engine, facts, _) = engine(vec![vec![call("transfer", "reply_error")]], false, false);
+    let completion = run(&engine, None).await;
+    assert_eq!(engine.client.requests.lock().unwrap().len(), 1);
+    assert_eq!(facts.lock().unwrap().settled.len(), 1);
+    assert_eq!(output_count(&completion, "transfer"), 1);
+    assert!(
+        completion
+            .transcript
+            .iter()
+            .any(|item| item.0.to_string().contains("native settlement failure"))
+    );
+}
+
+#[tokio::test]
+async fn uncertain_transfer_preserves_cleanup_obligations_and_never_infers_again() {
+    let (engine, facts, _) = engine(
+        vec![vec![call("transfer", "reply_uncertain")]],
+        false,
+        false,
+    );
+    let (_cancel, cancelled) = watch::channel(false);
+    let (_mail, inbox) = tokio::sync::mpsc::unbounded_channel::<Envelope>();
+    let receipt = engine
+        .run_with_finalize_receipt(None, vec![], cancelled, inbox, None, false)
+        .await
+        .unwrap();
+    assert!(receipt.result.is_err());
+    assert_eq!(receipt.assessment().cleanup(), RoundCleanup::Unconfirmed);
+    assert_eq!(engine.client.requests.lock().unwrap().len(), 1);
+    assert_eq!(facts.lock().unwrap().settled.len(), 1);
+}
+
+#[tokio::test]
+async fn asynchronous_settlement_is_refused_before_claim_or_dispatch() {
+    let (engine, facts, store) = engine(vec![vec![call("bad", "async_reply")]], false, false);
+    let (_cancel, cancelled) = watch::channel(false);
+    let (_mail, inbox) = tokio::sync::mpsc::unbounded_channel::<Envelope>();
+    let receipt = engine
+        .run_with_finalize_receipt(None, vec![], cancelled, inbox, None, false)
+        .await
+        .unwrap();
+    assert!(matches!(
+        receipt.result,
+        Err(EngineError::InvalidFunctionCall)
+    ));
+    assert!(facts.lock().unwrap().calls.is_empty());
+    assert!(
+        store
+            .claims_on(receipt.head.as_ref().unwrap())
+            .unwrap()
+            .is_empty()
+    );
 }
