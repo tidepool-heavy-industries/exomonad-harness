@@ -49,6 +49,7 @@ impl Provider for Effects {
 struct Reply {
     body: String,
     short_read: bool,
+    buffered_tail: bool,
     barrier: Option<Arc<Notify>>,
 }
 impl Reply {
@@ -56,6 +57,7 @@ impl Reply {
         Self {
             body,
             short_read: false,
+            buffered_tail: false,
             barrier: None,
         }
     }
@@ -106,6 +108,7 @@ impl ResponsesTransport for HttpScript {
         let Reply {
             body,
             short_read,
+            buffered_tail,
             barrier,
         } = self
             .replies
@@ -132,7 +135,18 @@ impl ResponsesTransport for HttpScript {
             }
         });
         let response = reqwest::get(format!("http://{address}")).await.unwrap();
-        read_response(response, Some(sink), "", "").await
+        if buffered_tail {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+            let result = read_response(response, Some(tx), "", "").await;
+            // The real parser finishes before Engine sees any event. Forwarding
+            // these bounded facts and returning failure complete in one poll.
+            while let Ok(event) = rx.try_recv() {
+                sink.send(event).await.unwrap();
+            }
+            result
+        } else {
+            read_response(response, Some(sink), "", "").await
+        }
     }
 }
 type Runner = Engine<NoAuth, Effects, HttpScript>;
@@ -347,14 +361,20 @@ async fn http_explicit_incomplete_schema_and_completed_tail_veto_automatic_retry
     ] {
         let store = Arc::new(Store::memory().unwrap());
         let explicit = body.contains("response.incomplete");
-        let (runner, identity, script, effects) = setup(store.clone(), vec![Reply::eof(body)]);
+        let mut reply = Reply::eof(body);
+        reply.buffered_tail = !explicit && reply.body.contains("tail-call");
+        let (runner, identity, script, effects) = setup(store.clone(), vec![reply]);
         let (_cancel, cancellation) = watch::channel(false);
         runner
             .run_embedded(None, vec![], cancellation, mailbox())
             .await
             .unwrap_err();
         assert_eq!(script.requests.lock().unwrap().len(), 1);
-        assert!(effects.0.load(Ordering::SeqCst) <= 1);
+        assert_eq!(
+            effects.0.load(Ordering::SeqCst),
+            0,
+            "buffered completed tail must be retained without dispatch"
+        );
         if explicit {
             assert!(
                 matches!(block(&store,&identity).reason,InferenceBlockReason::ResponseIncomplete{response_id,..} if response_id=="incomplete-id")
@@ -371,6 +391,7 @@ async fn http_send_racing_failure_consumes_only_one_attempt_intent_without_effec
             json!({"type":"response.incomplete","response":{"id":"no-auto","incomplete_details":{"reason":"content_filter"}}}),
         ),
         short_read: false,
+        buffered_tail: false,
         barrier: Some(barrier.clone()),
     };
     let store = Arc::new(Store::memory().unwrap());

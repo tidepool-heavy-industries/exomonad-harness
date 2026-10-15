@@ -1010,16 +1010,11 @@ mod tests {
                 .outcome,
             CommandReceiptOutcome::ContinuationRefused { .. }
         ));
-        let op = OperationId {
-            origin: crate::model::ConversationIdentity::Embedded {
-                run: identity.run.clone(),
-                actor: identity.actor.clone(),
-                incarnation: identity.incarnation.clone(),
-            },
-            request: request.clone(),
-            call: CallId("uncertain".into()),
-        };
-        store.lock().unwrap().execute("INSERT INTO claims(origin,origin_request_id,call_id,request_id,state,terminal_json) VALUES(?1,?2,?3,?2,'settled',?4)", params![serde_json::to_string(&op.origin).unwrap(), request.0, op.call.0, serde_json::to_string(&super::super::TerminalOutcome::CancellationUnconfirmed("lost cleanup".into())).unwrap()]).unwrap();
+        store.append_items(&request, &[crate::item::Item(serde_json::json!({"type":"function_call","call_id":"uncertain","name":"effect","arguments":"{}"}))]).unwrap();
+        let operation = store.claim(&CallId("uncertain".into()), &request).unwrap();
+        store
+            .interrupt_operation_claim(&operation, &request)
+            .unwrap();
         let operation = recovery(&store, &identity, &block);
         let receipt = store
             .authorize_embedded_recovery(&identity, operation)
@@ -1123,7 +1118,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
     #[test]
-    fn legacy_pending_frontier_without_gate_cannot_use_queued_input_as_authority() {
+    fn legacy_pending_frontier_new_send_refuses_without_projection_authority() {
         for interrupted in [false, true] {
             let store = Store::memory().unwrap();
             let identity = identity();
@@ -1165,7 +1160,11 @@ mod tests {
                 panic!("legacy pending must block");
             };
             assert_eq!(block.request, request);
-            assert_eq!(block.generation, 1);
+            assert_eq!(block.generation, 2);
+            assert_eq!(
+                block.continuation_refusal,
+                Some(crate::embedding::ContinuationRefusal::ContinuityUnproven)
+            );
             assert_eq!(
                 block.reason,
                 if interrupted {

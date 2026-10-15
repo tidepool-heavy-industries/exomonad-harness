@@ -507,3 +507,108 @@ async fn cache_comparison_engine_issuance_and_replay_preserve_opt_in() {
     drop(restored);
     std::fs::remove_file(path).unwrap();
 }
+
+struct MetadataThenFailure;
+#[async_trait::async_trait]
+impl ResponsesTransport for MetadataThenFailure {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
+    }
+    async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
+        unreachable!()
+    }
+    async fn create_streaming(
+        &self,
+        _: PreparedProviderRequest,
+        sink: tokio::sync::mpsc::Sender<StreamEvent>,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let summary=serde_json::from_value(json!({"version":1,"body_elapsed_ms":0,"event_kind_tail":[],"sse_event_kind_tail":[],"unknown_event_count":0,"unframed_line_bytes":0,"unframed_data_bytes":0,"unframed_event_name":false,"metadata_truncated":false,"end":"provider_terminal"})).unwrap();
+        sink.send(StreamEvent::FailureSummary(summary))
+            .await
+            .unwrap();
+        // Let the observer receive metadata before the native failure. A failing
+        // diagnostic write must not replace the imminent provider outcome.
+        tokio::task::yield_now().await;
+        Err(TransportError::ResponseIncomplete {
+            response_id: "primary-incomplete".into(),
+            reason: Some(crate::transport::IncompleteReason::MaxOutputTokens),
+        })
+    }
+}
+#[tokio::test]
+async fn diagnostic_write_failure_preserves_provider_cause_in_inference_and_compaction() {
+    for compaction in [false, true] {
+        let store = Arc::new(Store::memory().unwrap());
+        // Explicit fault injection affects only diagnostic persistence.
+        store.lock().unwrap().execute_batch("CREATE TRIGGER diagnostic_failure BEFORE INSERT ON events WHEN NEW.kind='transport_failure_summary' BEGIN SELECT RAISE(FAIL,'injected diagnostic write failure'); END;").unwrap();
+        let runner = Engine::<Offline, _, _>::with_transport(
+            MetadataThenFailure,
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(NoEffects(AtomicUsize::new(0))),
+            EngineConfig {
+                instructions: "failure composition".into(),
+                tools: vec![],
+                model: "model".into(),
+                effort: Effort::Low,
+                session_id: "session".into(),
+                agent: AgentPath("/test".into()),
+            },
+        );
+        let (_cancel, cancellation) = watch::channel(false);
+        if compaction {
+            let source = RequestId("source".into());
+            store.create_request(&source, None, "/test").unwrap();
+            let prepared = runner
+                .prepare_compaction_submission(
+                    &source,
+                    ResponsesRequest {
+                        input: vec![],
+                        instructions: "fixed".into(),
+                        tools: vec![].into(),
+                        tools_allowed: None,
+                        model: "model".into(),
+                        pinned_effort: Effort::Low,
+                        session_id: "session".into(),
+                        prompt_cache_comparison: None,
+                    },
+                    vec![],
+                    ProviderRequestPurpose::ServerCompaction,
+                )
+                .await
+                .unwrap();
+            let error = runner
+                .execute_compaction_submission(prepared, cancellation, &source)
+                .await
+                .unwrap_err();
+            let EngineError::Secondary(failure) = error else {
+                panic!("missing retained diagnostic failure: {error:?}")
+            };
+            assert_eq!(failure.stage(), RoundFailureStage::ProviderTailRecording);
+            assert!(
+                matches!(failure.primary(),EngineError::Transport(TransportError::ResponseIncomplete{response_id,..}) if response_id=="primary-incomplete")
+            );
+            assert!(matches!(failure.source_error(), EngineError::Store(_)));
+        } else {
+            let receipt = runner
+                .run_with_finalize_receipt(
+                    None,
+                    vec![],
+                    cancellation,
+                    tokio::sync::mpsc::unbounded_channel::<Envelope>().1,
+                    None,
+                    false,
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(receipt.primary_error(),Some(EngineError::Transport(TransportError::ResponseIncomplete{response_id,..})) if response_id=="primary-incomplete")
+            );
+            assert_eq!(receipt.secondary_failures().len(), 1);
+            assert_eq!(
+                receipt.secondary_failures()[0].stage(),
+                RoundFailureStage::ProviderTailRecording
+            );
+        }
+    }
+}
