@@ -16,7 +16,7 @@ for (const width of [1280, 320]) {
       return entry
     })
     await openChat(page, request, chatEntries)
-    const blocks = [page.locator('.message-code-block pre'), page.locator('.tool-source pre'), page.locator('.tool-results pre')]
+    const blocks = [page.locator('.message-content-markdown .message-code-block pre'), page.locator('.tool-source pre'), page.locator('.tool-results pre')]
     for (const block of blocks) {
       await expect(block).toHaveCount(1)
       const layout = await block.evaluate(element => {
@@ -29,7 +29,7 @@ for (const width of [1280, 320]) {
       expect(await block.textContent()).toBe(source + (block === blocks[0] ? '\n' : ''))
     }
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
-    await page.locator('.message-code-block').getByRole('button', { name: /^Copy code from / }).click()
+    await page.locator('.message-content-markdown .message-code-block').getByRole('button', { name: /^Copy code from / }).click()
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(source + '\n')
     await page.locator('.tool-source').getByRole('button', { name: 'Copy Input', exact: true }).click()
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(source)

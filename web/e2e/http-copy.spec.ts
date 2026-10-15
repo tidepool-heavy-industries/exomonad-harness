@@ -21,12 +21,12 @@ test('HTTP chat copies exact source with keyboard and preserves selection and dr
     expect(await page.evaluate(() => ({ secure: window.isSecureContext, clipboard: typeof navigator.clipboard }))).toEqual({ secure: false, clipboard: 'undefined' })
     const composer = page.getByRole('textbox', { name: /^Message / })
     await composer.fill('Keep this draft')
-    const code = page.locator('.message-code-block pre code')
+    const code = page.locator('.message-content-markdown .message-code-block pre code')
     await code.evaluate(element => {
       const text = element.firstChild!
       document.getSelection()!.setBaseAndExtent(text, text.textContent!.length, text, 0)
     })
-    const copyCode = page.locator('.message-code-block').getByRole('button', { name: /^Copy code from / })
+    const copyCode = page.locator('.message-content-markdown .message-code-block').getByRole('button', { name: /^Copy code from / })
     await copyCode.focus()
     const selectedText = await page.evaluate(() => document.getSelection()?.toString())
     await page.keyboard.press('Enter')

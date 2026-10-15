@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MessageContent } from './MessagePresentation'
+import { PresentationMemory } from './presentation-state'
 
 const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
 afterEach(() => {
@@ -120,4 +121,46 @@ describe('message presentation', () => {
     expect(container.querySelector('pre code')?.textContent).toBe(code)
   })
 
+})
+
+it('shares the Markdown code frame for direct Haskell without interpreting backticks or HTML as Markdown', async () => {
+  const writeText = clipboard()
+  const source = '{- literal fence markers\n```\n-}\nlet prompt = "<script>λ</script>"\n  observe (`value`)\n'
+  const { container } = render(<>
+    <MessageContent text={source} label="Input" language="haskell" />
+    <MessageContent text={'````haskell\n' + source + '````'} label="Answer" format="markdown" />
+  </>)
+  const frames = container.querySelectorAll('.message-code-block')
+  expect(frames).toHaveLength(2)
+  for (const frame of frames) {
+    expect(frame.querySelectorAll('pre')).toHaveLength(1)
+    expect(frame.querySelector('code.language-haskell')?.textContent).toBe(source)
+    expect(frame.querySelectorAll('.message-code-actions')).toHaveLength(1)
+    expect(frame.querySelectorAll('button')).toHaveLength(1)
+  }
+  expect(screen.getByLabelText('Input').textContent).toBe(source)
+  expect(container.querySelector('script')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Copy Input' }))
+  await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(source))
+  fireEvent.click(screen.getByRole('button', { name: 'Copy code from Answer' }))
+  await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(source))
+})
+
+it('gives direct Haskell one code-owned expansion control and preserves the choice into retained rendering', () => {
+  overflowingViewport()
+  const source = 'let value = "' + 'λ'.repeat(1000) + '"\n'
+  const { container, rerender } = render(<PresentationMemory>
+    <MessageContent key="live" text={source} label="Input" language="haskell" memoryKey="part:0" />
+  </PresentationMemory>)
+  expect(screen.getAllByRole('button', { name: 'Expand Input' })).toHaveLength(1)
+  expect(screen.getAllByRole('button', { name: 'Copy Input' })).toHaveLength(1)
+  expect(container.querySelector('.message-content-viewport')).toHaveClass('message-content-expanded')
+  fireEvent.click(screen.getByRole('button', { name: 'Expand Input' }))
+  expect(screen.getByLabelText('Input')).toHaveClass('code-expanded')
+  rerender(<PresentationMemory>
+    <MessageContent key="retained" text={source + 'observe value\n'} label="Input" language="haskell" memoryKey="part:0" />
+  </PresentationMemory>)
+  expect(screen.getByLabelText('Input')).toHaveClass('code-expanded')
+  expect(screen.getByLabelText('Input').textContent).toBe(source + 'observe value\n')
+  expect(screen.getByRole('button', { name: 'Copy Input' })).toBeVisible()
 })

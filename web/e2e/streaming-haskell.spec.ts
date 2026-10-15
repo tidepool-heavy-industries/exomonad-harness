@@ -29,7 +29,7 @@ for (const width of [1280, 390]) {
     await expect.poll(() => named.locator('code').textContent()).toBe(source)
     await delta('fence', 'assistant', '```ha')
     await delta('fence', 'assistant', 'skell\n' + source)
-    const fence = page.locator('.message-code-block code.language-haskell')
+    const fence = page.locator('.message-content-markdown .message-code-block code.language-haskell')
     await expect.poll(() => fence.textContent()).toBe(source + '\n')
     await expect(fence.locator('.token.keyword').first()).toBeAttached()
     for (const call of [calls, named]) {

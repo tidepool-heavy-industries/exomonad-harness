@@ -64,38 +64,41 @@ export interface MessageContentProps {
   readonly memoryKey?: string
 }
 
-function MarkdownCode({ children, text, label, offset }: { children: ReactNode; text: string; label: string; offset: number }) {
-  const [expanded, setExpanded] = usePresentationChoice(`code:${offset}`)
+function CodeBlock({ children, text, copyText = text, label, memoryKey, copy = true, bounded = true, sourceLabel }: {
+  children: ReactNode; text: string; copyText?: string; label: string; memoryKey: string; copy?: boolean; bounded?: boolean; sourceLabel?: string
+}) {
+  const [expanded, setExpanded] = usePresentationChoice(memoryKey)
   const [overflowing, setOverflowing] = useState(false)
   const pre = useRef<HTMLPreElement>(null)
   const id = useId()
   useLayoutEffect(() => {
-    if (expanded) return
+    if (expanded || !bounded) return
     const measure = () => { if (pre.current) setOverflowing(pre.current.scrollHeight > pre.current.clientHeight + 1) }
     measure()
     const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure)
     if (pre.current) observer?.observe(pre.current)
     return () => observer?.disconnect()
-  }, [text, expanded])
+  }, [text, expanded, bounded])
   return <div className="message-code-block">
     <div className="message-code-actions">
-      {overflowing && <button type="button" aria-expanded={expanded} aria-controls={id} onClick={() => setExpanded(!expanded)}>{expanded ? 'Collapse code' : 'Expand code'}</button>}
-      <CopyButton text={text} label={`Copy code from ${label}`}>Copy code</CopyButton>
+      {bounded && overflowing && <button type="button" aria-expanded={expanded} aria-controls={id} onClick={() => setExpanded(!expanded)}>{expanded ? 'Collapse' : 'Expand'} {sourceLabel ?? 'code'}</button>}
+      {copy && <CopyButton text={copyText} label={sourceLabel ? `Copy ${sourceLabel}` : `Copy code from ${label}`}>Copy code</CopyButton>}
     </div>
-    <pre ref={pre} id={id} tabIndex={0} className={expanded ? 'code-expanded' : 'code-preview'} onFocus={() => { if (overflowing) setExpanded(true) }}>{children}</pre>
+    <pre ref={pre} id={id} tabIndex={0} aria-label={sourceLabel} className={expanded || !bounded ? 'code-expanded' : 'code-preview'} onFocus={() => { if (overflowing) setExpanded(true) }}>{children}</pre>
   </div>
 }
 
 /** Collapse the reading viewport, never the retained source or Markdown input. */
 export function MessageContent({ text, copyText = text, label, format = 'plain', language, streaming = false, copy = true, bounded = format === 'plain', memoryKey = label }: MessageContentProps) {
   const preview = useStreamingText(text, streaming)
+  const contentBounded = bounded && !language
   const [expanded, setExpanded] = usePresentationChoice(`content:${memoryKey}`)
   const [overflowing, setOverflowing] = useState(false)
   const viewport = useRef<HTMLDivElement>(null)
   const body = useRef<HTMLDivElement>(null)
   const id = useId()
   useLayoutEffect(() => {
-    if (expanded || !bounded) return
+    if (expanded || !contentBounded) return
     const measure = () => {
       const element = viewport.current
       if (element) setOverflowing(element.scrollHeight > element.clientHeight + 1)
@@ -105,7 +108,7 @@ export function MessageContent({ text, copyText = text, label, format = 'plain',
     if (body.current) observer?.observe(body.current)
     window.addEventListener('resize', measure)
     return () => { observer?.disconnect(); window.removeEventListener('resize', measure) }
-  }, [text, format, expanded, bounded])
+  }, [text, format, expanded, contentBounded])
   const components = useMemo<Components>(() => ({
     h1: ({ children }) => <h4>{children}</h4>,
     h2: ({ children }) => <h5>{children}</h5>,
@@ -121,26 +124,29 @@ export function MessageContent({ text, copyText = text, label, format = 'plain',
       // Markdown's code text is the rendered block, including its final newline.
       const code = node?.children.find(child => child.type === 'element' && child.tagName === 'code')
       const codeText = code?.type === 'element' ? code.children.map(child => child.type === 'text' ? child.value : '').join('') : ''
-      return <MarkdownCode text={codeText} label={label} offset={node?.position?.start.offset ?? 0}>{children}</MarkdownCode>
+      return <CodeBlock text={codeText} label={label} memoryKey={`code:${node?.position?.start.offset ?? 0}`}>{children}</CodeBlock>
     },
   }), [label])
+  const markdown = useMemo(() => format === 'markdown' ? <Markdown skipHtml components={components}>{preview}</Markdown> : null, [format, preview, components])
   const content = useMemo(() => format === 'markdown'
-    ? <Markdown skipHtml components={components}>{preview}</Markdown>
-    : <pre className="history-content" tabIndex={bounded ? 0 : undefined}>{language ? <Code text={preview} language={language} /> : preview}</pre>, [preview, format, components, bounded, language])
+    ? markdown
+    : language ? <CodeBlock text={preview} copyText={copyText} label={label} sourceLabel={label} memoryKey={`content:${memoryKey}`} bounded={bounded} copy={copy}>
+      <Code text={preview} language={language} />
+    </CodeBlock> : <pre className="history-content" tabIndex={bounded ? 0 : undefined}>{preview}</pre>, [preview, copyText, label, memoryKey, copy, format, markdown, bounded, language])
   return <div className={`message-content message-content-${format}`}>
-    <div className={`message-content-viewport${expanded || !bounded ? ' message-content-expanded' : ''}`} ref={viewport}
-      onFocusCapture={() => { if (overflowing) setExpanded(true) }}>
-      <div id={id} ref={body} aria-label={label} className="message-content-body">
+    <div className={`message-content-viewport${expanded || !contentBounded ? ' message-content-expanded' : ''}`} ref={viewport}
+      onFocusCapture={() => { if (contentBounded && overflowing) setExpanded(true) }}>
+      <div id={id} ref={body} aria-label={language ? undefined : label} className="message-content-body">
         {content}
       </div>
     </div>
-    <div className="message-content-actions">
-      {bounded && overflowing && <button type="button" aria-expanded={expanded} aria-controls={id} onClick={() => setExpanded(!expanded)}>
+    {!language && <div className="message-content-actions">
+      {contentBounded && overflowing && <button type="button" aria-expanded={expanded} aria-controls={id} onClick={() => setExpanded(!expanded)}>
         {expanded ? 'Collapse' : 'Expand'} {label}
       </button>}
       {copy && <CopyButton text={copyText} label={`Copy ${label}`}>Copy text</CopyButton>}
-    </div>
-    {bounded && overflowing && <p className="message-content-note">{expanded ? 'Full content shown.' : 'Preview shown.'} Copy includes the full text.</p>}
+    </div>}
+    {contentBounded && overflowing && <p className="message-content-note">{expanded ? 'Full content shown.' : 'Preview shown.'} Copy includes the full text.</p>}
   </div>
 }
 

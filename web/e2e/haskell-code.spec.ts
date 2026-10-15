@@ -41,7 +41,7 @@ for (const width of [1280, 390]) {
       await call.getByRole('button', { name: 'Copy Input', exact: true }).click()
       expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(source)
     }
-    const fence = page.locator('.message-code-block code.language-haskell')
+    const fence = page.locator('.message-content-markdown .message-code-block code.language-haskell')
     expect(await fence.textContent()).toBe(source)
     await expect(fence.locator('.token.keyword').first()).toBeAttached()
     await expect(page.getByRole('region', { name: 'other tool call', exact: true }).locator('.language-haskell')).toHaveCount(0)
