@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS embedded_commands (
  run_id TEXT NOT NULL, operation_id TEXT NOT NULL,
  target TEXT NOT NULL, action TEXT NOT NULL, payload TEXT NOT NULL,
  expected_round TEXT, command TEXT NOT NULL,
- state TEXT NOT NULL CHECK(state IN ('queued','dispatching','input_admitted','control_requested','recovery_authorized','refused','unconfirmed')),
+ state TEXT NOT NULL CHECK(state IN ('queued','dispatching','input_admitted','control_requested','recovery_authorized','account_selected','refused','unconfirmed')),
  envelope_id INTEGER REFERENCES envelopes(id), outcome TEXT,
  created_at INTEGER NOT NULL,
  PRIMARY KEY(run_id, operation_id)

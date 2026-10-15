@@ -12,6 +12,7 @@ pub enum EmbeddedCommandState {
     InputAdmitted,
     ControlRequested,
     RecoveryAuthorized,
+    AccountSelected,
     Refused,
     Unconfirmed,
 }
@@ -29,7 +30,7 @@ pub struct EmbeddedCommandRecord {
     pub input_observation: Option<crate::embedding::InputObservation>,
 }
 
-pub(super) fn read(
+pub(super) pub(super) fn read(
     c: &Connection,
     run: &str,
     operation: ClientOperationId,
@@ -149,6 +150,7 @@ impl Store {
                 }
                 HostCommand::Retire { .. } => ("retire", "", None),
                 HostCommand::Recover { .. } => ("recover", "", None),
+                HostCommand::SelectAccount { .. } => ("select_account", "", None),
             };
             tx.execute("INSERT INTO embedded_commands(run_id,operation_id,target,action,payload,expected_round,command,state,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,'queued',?8)",
                 params![run,operation.to_string(),serde_json::to_string(command.target())?,action,payload,round,serde_json::to_string(command)?,utc_millis()])?;
@@ -212,7 +214,8 @@ impl Store {
             CommandReceiptOutcome::Refused { .. } => "refused",
             CommandReceiptOutcome::Unconfirmed { .. } => "unconfirmed",
             CommandReceiptOutcome::Admitted { .. }
-            | CommandReceiptOutcome::RecoveryAuthorized { .. } => {
+            | CommandReceiptOutcome::RecoveryAuthorized { .. }
+            | CommandReceiptOutcome::AccountSelected { .. } => {
                 return Err(StoreError::InvalidCommandState);
             }
         };

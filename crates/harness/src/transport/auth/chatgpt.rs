@@ -679,3 +679,7 @@ fn credentials(path: &Path, service: &impl Service) -> Result<String, LoginError
 #[cfg(test)]
 #[path = "chatgpt_tests.rs"]
 mod tests;
+
+#[path = "chatgpt_accounts.rs"]
+mod accounts;
+pub use accounts::{AccountSelection, RunAccountAuth, SavedAccount, SavedAccountId, SavedAccounts};

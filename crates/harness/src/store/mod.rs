@@ -4,6 +4,7 @@ pub(crate) mod context;
 pub use context::{EmbeddedConversationHistory, EmbeddedModelResponseState};
 mod embedded;
 mod embedded_commands;
+mod account_selection;
 mod embedded_round;
 mod inference;
 pub(crate) use compaction::ServerCompactionResponse;

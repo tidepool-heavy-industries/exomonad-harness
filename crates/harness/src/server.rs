@@ -101,6 +101,10 @@ pub enum ClientCommand {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum HostCommand {
+    SelectAccount {
+        target: HostActorIdentity,
+        account_id: crate::transport::auth::chatgpt::SavedAccountId,
+    },
     Input {
         target: HostActorIdentity,
         text: String,
@@ -122,7 +126,8 @@ pub enum HostCommand {
 impl HostCommand {
     pub fn target(&self) -> &HostActorIdentity {
         match self {
-            Self::Input { target, .. }
+            Self::SelectAccount { target, .. }
+            | Self::Input { target, .. }
             | Self::Interrupt { target, .. }
             | Self::Retire { target }
             | Self::Recover { target, .. } => target,
@@ -579,6 +584,9 @@ impl ServerControl {
             event,
         };
         let mut snapshot = self.snapshot.write().expect("snapshot lock poisoned");
+        if let browser_contract::StateEvent::AccountSelectionUpsert(selection) = &event.event {
+            snapshot.account_selection = Some(selection.clone());
+        }
         if let browser_contract::StateEvent::ActorFormChanged(form) = &event.event {
             let revision = browser_contract::ActorOutputReference {
                 origin: form.opening.origin.clone(),
@@ -727,6 +735,9 @@ impl ServerControl {
             receipts.drain(..excess);
         }
         snapshot.command_receipts = receipts;
+        if snapshot.account_selection.is_none() {
+            snapshot.account_selection = current.account_selection.clone();
+        }
         snapshot.live_output = std::mem::take(&mut current.live_output);
         snapshot.history_revisions = std::mem::take(&mut current.history_revisions);
         snapshot.actor_output_revisions = std::mem::take(&mut current.actor_output_revisions);

@@ -1,6 +1,6 @@
 // Version 16 requires fixed FULL writer durability. Earlier writers refuse it
 // instead of reopening the database with NORMAL after its admission barrier.
-pub const VERSION: u32 = 17;
+pub const VERSION: u32 = 18;
 const FULL_DURABILITY_VERSION: u32 = 16;
 pub const SQL: &str = include_str!("schema.sql");
 const MODEL_REQUEST_INDEXES: &str = "
@@ -134,7 +134,7 @@ pub fn initialize(conn: &mut rusqlite::Connection) -> super::Result<()> {
     if legacy_inputs && version < 7 {
         tx.execute_batch("ALTER TABLE embedded_inputs RENAME TO legacy_embedded_inputs;")?;
     }
-    let migrate_commands = version < 17 && tx.query_row(
+    let migrate_commands = version < 18 && tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='embedded_commands')",
         [], |r| r.get::<_, bool>(0),
     )?;

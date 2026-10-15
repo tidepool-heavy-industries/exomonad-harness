@@ -92,6 +92,10 @@ pub struct CommandReceipt {
     rename_all_fields = "camelCase"
 )]
 pub enum CommandReceiptOutcome {
+    AccountSelected {
+        target: HostActorIdentity,
+        account_id: crate::transport::auth::chatgpt::SavedAccountId,
+    },
     RecoveryAuthorized {
         target: HostActorIdentity,
         block: crate::embedding::InferenceBlock,

@@ -527,6 +527,8 @@ pub enum StateEvent {
     ModelOutputRemove(OutputItem),
     #[serde(rename = "host_run.upsert")]
     HostRunUpsert(HostRun),
+    #[serde(rename = "account_selection.upsert")]
+    AccountSelectionUpsert(crate::transport::auth::chatgpt::AccountSelection),
     #[serde(rename = "command.receipt")]
     CommandReceipt(CommandReceipt),
     #[serde(rename = "actor.upsert")]
@@ -554,6 +556,7 @@ impl StateEvent {
             Self::ModelOutputCommitted(_) => "model.output.committed",
             Self::ModelOutputRemove(_) => "model.output.remove",
             Self::HostRunUpsert(_) => "host_run.upsert",
+            Self::AccountSelectionUpsert(_) => "account_selection.upsert",
             Self::CommandReceipt(_) => "command.receipt",
             Self::ActorUpsert(_) => "actor.upsert",
             Self::ConversationUpsert(_) => "conversation.upsert",
@@ -586,6 +589,8 @@ pub struct Snapshot {
     pub actor_form_revisions: Vec<ActorOutputReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_run: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_selection: Option<crate::transport::auth::chatgpt::AccountSelection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actors: Vec<HostActorProjection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -907,6 +912,7 @@ pub fn wire_samples() -> serde_json::Value {
                 version: u64::MAX.into(),
             }],
             host_run: Some(identity.run.clone()),
+            account_selection: None,
             actor_output_revisions: vec![output.reference.clone()],
             ..Snapshot::default()
         },

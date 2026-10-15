@@ -420,3 +420,55 @@ fn fifo_credential_paths_are_refused_without_blocking() {
     assert!(load(&path).is_err());
     assert!(save(&path, &record(now().unwrap() + 600)).is_err());
 }
+
+#[test]
+fn saved_account_selection_is_durable_idempotent_and_run_scoped() {
+    use crate::{embedding::{ClientOperationId, HostIdentity}, model::AgentPath, server::{HostCommand, CommandReceiptOutcome}, store::Store};
+    let files = Temp::new();
+    let a = files.path();
+    let b = files.0.join("second.json");
+    let mut first = record(now().unwrap() + 600);
+    first.access_token = "test-account-a".into();
+    save(&a, &first).unwrap();
+    let mut second = first.clone();
+    second.access_token = "test-account-b".into();
+    second.email = Some("second@example.test".into());
+    save(&b, &second).unwrap();
+    let accounts = SavedAccounts::beside(a.clone()).unwrap();
+    let choices = accounts.projection(accounts.launch_id().clone());
+    let b_id = choices.accounts.iter().find(|entry| entry.label == "second@example.test").unwrap().id.clone();
+    let encoded = serde_json::to_string(&choices).unwrap();
+    for secret in [&first.access_token, &first.refresh_token, &first.id_token, &second.access_token] { assert!(!encoded.contains(secret)); }
+    assert!(!encoded.contains(a.to_str().unwrap()));
+    let db = files.0.join("run.db");
+    let store = Arc::new(Store::open(&db).unwrap());
+    let root = RunAccountAuth::new(store.clone(), "run".into(), accounts.clone()).unwrap();
+    let existing_child = root.clone();
+    let notebook = root.clone();
+    let other_run = RunAccountAuth::new(store.clone(), "other".into(), accounts.clone()).unwrap();
+    let held_request_token = root.access().unwrap();
+    let target = HostIdentity { run: "run".into(), actor: AgentPath("/root".into()), incarnation: "root-incarnation".into() };
+    let operation = ClientOperationId(uuid::Uuid::new_v4());
+    let command = HostCommand::SelectAccount { target: target.clone(), account_id: b_id.clone() };
+    store.enqueue_embedded_command(operation, &command).unwrap();
+    store.claim_embedded_command("run", operation).unwrap().unwrap();
+    let receipt = store.select_run_account("run", operation, &accounts).unwrap();
+    assert!(matches!(receipt.outcome, CommandReceiptOutcome::AccountSelected { .. }));
+    assert_eq!(held_request_token, "test-account-a");
+    for auth in [&root, &existing_child, &notebook, &root.clone()] { assert_eq!(auth.access().unwrap(), "test-account-b"); }
+    assert_eq!(other_run.access().unwrap(), "test-account-a");
+    assert_eq!(store.select_run_account("run", operation, &accounts).unwrap(), receipt);
+    let changed = HostCommand::SelectAccount { target: target.clone(), account_id: accounts.launch_id().clone() };
+    assert!(store.enqueue_embedded_command(operation, &changed).is_err());
+    // A well-formed but unissued browser ID is a durable refusal.
+    let invalid_id = serde_json::from_value(serde_json::json!("0".repeat(64))).unwrap();
+    let invalid_op = ClientOperationId(uuid::Uuid::new_v4());
+    store.enqueue_embedded_command(invalid_op, &HostCommand::SelectAccount { target, account_id: invalid_id }).unwrap();
+    store.claim_embedded_command("run", invalid_op).unwrap().unwrap();
+    assert!(matches!(store.select_run_account("run", invalid_op, &accounts).unwrap().outcome, CommandReceiptOutcome::Refused { .. }));
+    assert_eq!(root.access().unwrap(), "test-account-b");
+    let reopened = Arc::new(Store::open(&db).unwrap());
+    let reopened_auth = RunAccountAuth::new(reopened.clone(), "run".into(), accounts.clone()).unwrap();
+    assert_eq!(reopened_auth.access().unwrap(), "test-account-b");
+    assert_eq!(reopened.embedded_command("run", operation).unwrap().unwrap().receipt.unwrap(), receipt);
+}
