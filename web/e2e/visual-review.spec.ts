@@ -101,11 +101,10 @@ test('visual review: recovery and realistic long content', async ({ page, reques
   const blocked = { ...data, actors: data.actors.map((actor, index) => index === 1 ? { ...actor, inference: { state: 'blocked', block } } : actor) }
   await openFixture(page, request, { snapshot: blocked, chatEntries: [message('1', 'Reviewing `/srv/swarm/checkouts/harness-execution-visibility-aggregate-20261012/web/src/ConversationContent.tsx`.\n\nAleksandra Wiśniewska-Kowalczyk — 検証結果を保持します。')] })
   await chooseWorker(page)
-  await page.getByText('Actor controls', { exact: true }).click()
-  await expect(page.getByRole('heading', { name: 'Recover inference', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Response interrupted', exact: true })).toBeVisible()
   await capture(page, info, 'recovery')
   await page.setViewportSize({ width: 320, height: 844 })
-  await page.getByRole('radio', { name: 'Retained visible history', exact: true }).scrollIntoViewIfNeeded()
+  await page.getByRole('button', { name: 'Retry', exact: true }).scrollIntoViewIfNeeded()
   await capture(page, info, 'recovery-narrow')
 })
 

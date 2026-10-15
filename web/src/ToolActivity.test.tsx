@@ -40,3 +40,17 @@ describe('tool result excerpts and evidence', () => {
     expect(JSON.parse(screen.getByLabelText('Raw result item').textContent!)).toEqual(result.item)
   })
 })
+
+it('retains partial failed tool arguments as observational input and never claims invocation or result', () => {
+  const text = '{"code":"unfinished'
+  render(<ToolActivity row={{ kind: 'live', key: 'partial', live: [{
+    origin: { kind: 'embedded', run: 'run', actor: '/root', incarnation: 'one' }, requestId: 'request', itemId: 'item', channel: 'tool_arguments', index: '0', version: '1',
+    text, streaming: false, overflow: false, committedHash: null,
+  }] }} streamingActive exchange={{ id: 'request', state: 'failed' }} />)
+  expect(screen.getByLabelText('Arguments').textContent).toBe(text)
+  expect(screen.getByText('Interrupted input preview')).toBeVisible()
+  fireEvent.click(screen.getByText('Tool evidence', { exact: true }))
+  expect(screen.getByText('Tool input preview; execution has not been established.')).toBeVisible()
+  expect(screen.queryByText('Tool input recorded.')).toBeNull()
+  expect(screen.queryByRole('heading', { name: 'Result' })).toBeNull()
+})

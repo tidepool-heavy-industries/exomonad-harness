@@ -238,7 +238,7 @@ export function sameHostCommand(left: HostCommand, right: HostCommand): boolean 
   }
 }
 export function sameInferenceBlock(left: InferenceBlock, right: InferenceBlock): boolean {
-  if (left.request !== right.request || left.generation !== right.generation || left.reason.kind !== right.reason.kind) return false;
+  if (left.request !== right.request || left.generation !== right.generation || (left.continuationRefusal ?? null) !== (right.continuationRefusal ?? null) || left.reason.kind !== right.reason.kind) return false;
   const a = left.reason, b = right.reason;
   switch (a.kind) {
     case 'stream_interrupted': return b.kind === a.kind && a.cause === b.cause;
@@ -249,6 +249,7 @@ export function sameInferenceBlock(left: InferenceBlock, right: InferenceBlock):
       if (b.failure.kind !== 'http' || a.failure.status !== b.failure.status) return false;
       return sameDiagnostic(a.failure.diagnostic, b.failure.diagnostic);
     }
+    case 'response_incomplete': return b.kind === a.kind && a.response_id === b.response_id && a.reason === b.reason;
     case 'continuity_unproven': case 'host_interrupted': return true;
   }
 }
@@ -271,7 +272,8 @@ export function isCommandReceipt(value: unknown): value is CommandReceipt {
   if (!isServerFrame(frame) || frame.type !== 'event' || frame.event.event.kind !== 'command.receipt') return false;
   const receipt = frame.event.event.value;
   return receipt.commandId.length > 0 && (receipt.target == null || isHostIdentity(receipt.target))
-    && (receipt.outcome !== 'recovery_authorized' || isInferenceBlock(receipt.block));
+    && ((receipt.outcome !== 'recovery_authorized' && receipt.outcome !== 'continuation_refused') || isInferenceBlock(receipt.block))
+    && (receipt.outcome !== 'admitted' || receipt.continuation == null || receipt.continuation.state === 'queued' || isInferenceBlock(receipt.continuation.block));
 }
 export function isCommandRefusal(value: unknown): value is HostCommandRefusal {
   return isObject(value) && isServerFrame({ ...value, type: 'command.refused' });
@@ -296,6 +298,8 @@ export function isEmbeddedCommandRecord(value: unknown): value is EmbeddedComman
     case 'admitted': return value.state === 'input_admitted' && value.command.action === 'input'
       && (value.envelopeId === null || value.envelopeId === receipt.envelopeId);
     case 'control_requested': return value.state === 'control_requested' && value.command.action === receipt.control;
+    case 'continuation_refused': return value.state === 'refused' && value.command.action === 'recover'
+      && sameInferenceBlock(value.command.expected_block, receipt.block);
     case 'refused': return value.state === 'refused';
     case 'unconfirmed': return value.state === 'unconfirmed';
   }

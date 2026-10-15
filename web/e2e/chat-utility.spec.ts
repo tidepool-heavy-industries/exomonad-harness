@@ -40,31 +40,20 @@ for (const width of [320, 390]) {
   })
 }
 
-test('composer recovery reveals the current block without authorizing and requires a fresh choice after changes', async ({ page, request }, info) => {
+test('composer Retry targets the current block without a separate input request', async ({ page, request }, info) => {
   const data = actorSnapshot()
   const block = { request: 'request-worker-1', generation: '3', reason: { kind: 'continuity_unproven' } }
   const blocked = (generation: string, seq: string) => ({ ...data, seq, actors: data.actors.map((actor, i) => i === 1 ? { ...actor, inference: { state: 'blocked', block: { ...block, generation } } } : actor) })
   await openFixture(page, request, { snapshot: blocked('3', '10'), chatEntries: entries })
   await chooseWorker(page)
-  await page.getByRole('button', { name: 'Review recovery options', exact: true }).click()
-  const recovery = page.getByRole('region', { name: 'Inference recovery' })
-  await expect(recovery).toBeFocused()
-  await expect(recovery.getByRole('radio', { name: 'Exact retained prefix' })).not.toBeChecked()
-  await expect(recovery.getByRole('button', { name: 'Authorize recovery' })).toBeDisabled()
+  const retry = page.getByRole('button', { name: 'Retry', exact: true })
+  await expect(retry).toBeVisible()
   expect((await observations(request)).commands).toHaveLength(0)
   await captureViewport(page, info, 'recovery-entry-viewport')
-  await recovery.getByRole('radio', { name: 'Exact retained prefix' }).check()
   await control(request, 'snapshot', blocked('4', '11'))
-  await expect(recovery.getByRole('button', { name: 'Authorize recovery' })).toBeDisabled()
-  await expect(recovery.getByRole('radio', { name: 'Exact retained prefix' })).not.toBeChecked()
-  await recovery.getByRole('radio', { name: 'Retained visible history' }).check()
-  await recovery.getByRole('button', { name: 'Authorize recovery' }).click()
+  await retry.click()
   await expect.poll(async () => (await observations(request)).commands.length).toBe(1)
-  const command = (await observations(request)).commands[0].command
-  expect(command.target).toEqual(target)
-  expect(command.action).toBe('recover')
-  expect(command.expected_block.generation).toBe('4')
-  expect(command.mode).toBe('visible_history')
+  expect((await observations(request)).commands[0].command).toEqual({ action: 'recover', target, expected_block: { ...block, generation: '4' }, mode: 'exact' })
 })
 
 test('unfocused form and composer boundaries meet contrast and diagnostics remain readable', async ({ page, request }, info) => {

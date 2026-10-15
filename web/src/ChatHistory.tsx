@@ -27,7 +27,8 @@ function FailedExchange({ request }: { request: RequestStatus }) {
   const failure = request.failure
   const diagnostic = failure?.kind === 'http' ? failure.diagnostic : undefined
   return <div className="error" role="alert" aria-label={`Failed exchange ${request.id}`}>
-    <strong>Exchange failed</strong>
+    <strong>Response interrupted</strong>
+    <details><summary>Response details</summary>
     <p className="meta">Exchange {request.id}</p>
     {failure?.kind === 'authentication' ? <p>Provider authentication failed. Check the host's provider credentials before sending a new reply.</p> :
       failure?.kind === 'http' ? <>
@@ -39,6 +40,7 @@ function FailedExchange({ request }: { request: RequestStatus }) {
             {diagnostic.param && <><dt>Parameter</dt><dd>{diagnostic.param}</dd></>}</dl>
         </>}
       </> : <p>{request.detail ?? 'The model request failed.'}</p>}
+    </details>
   </div>
 }
 

@@ -1,4 +1,5 @@
 import { actorIdentityKey, canonicalOperationId, sameInferenceBlock, type HostActorProjection, type HostCommand, type InferenceBlock } from './protocol'
+import type { BrowserCommandRecord } from './pending-commands'
 import type { HarnessViewModel } from './view-model'
 
 type ActorState = Pick<HostActorProjection, 'kind' | 'modelHeadRequest' | 'inference' | 'activeRound'> & { readonly lifecycle: string }
@@ -28,4 +29,17 @@ export function viewCommandIsCurrent(command: HostCommand, data: HarnessViewMode
   if (command.target.run !== data.hostRun) return false
   const actor = data.actors?.find(candidate => actorIdentityKey({ run: candidate.run, actor: candidate.name, incarnation: candidate.incarnation }) === actorIdentityKey(command.target))
   return commandIsCurrent(command, actor, operationId)
+}
+
+/** Only owner-issued refusal evidence for this exact live block permits fallback. */
+export function continuationRefusal(target: HostCommand['target'], block: InferenceBlock, records: readonly BrowserCommandRecord[]) {
+  if (block.continuationRefusal != null) return block.continuationRefusal
+  for (const record of [...records].reverse()) {
+    if (!['receipt', 'status'].includes(record.authority) || record.lookup || record.issues?.length || record.hostRun !== target.run
+      || actorIdentityKey(record.submission.command.target) !== actorIdentityKey(target)) continue
+    const receipt = record.receipt
+    const refused = receipt?.outcome === 'continuation_refused' ? receipt
+      : receipt?.outcome === 'admitted' && receipt.continuation?.state === 'refused' ? receipt.continuation : undefined
+    if (refused && sameInferenceBlock(refused.block, block)) return refused.reason
+  }
 }

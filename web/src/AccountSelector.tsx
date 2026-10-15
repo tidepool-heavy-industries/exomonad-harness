@@ -65,7 +65,7 @@ export default function AccountSelector({ selection: observedSelection, target, 
       }}>Apply account</button>
       <button type="button" disabled={!ready || !target || refreshing} onClick={refresh}>Refresh saved accounts</button>
     </div>
-    <p className="hint">Applies to this run. Recovery remains a separate action.</p>
+    <p className="hint">Applies to this run. Send or retry to continue an interrupted response.</p>
     {refreshing && <p role="status">Refreshing saved accounts…</p>}
     {refreshFailure && <p role="alert">{refreshFailure}</p>}
     {!selection.accounts.length && <p>No saved model accounts are available.</p>}

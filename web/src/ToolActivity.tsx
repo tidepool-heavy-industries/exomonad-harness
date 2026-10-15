@@ -21,7 +21,7 @@ export default function ToolActivity({ row, streamingActive, exchange, jobs = []
   const name = entry && typeof entry.item === 'object' && entry.item !== null && 'name' in entry.item && typeof entry.item.name === 'string'
     ? entry.item.name : row.kind === 'live' ? row.live.find(item => item.toolName)?.toolName ?? 'Tool call' : 'Tool call'
   const status = row.kind === 'live'
-    ? row.live.some(item => item.streaming) && streamingActive ? 'Streaming input' : 'Input preview'
+    ? exchange?.state === 'failed' ? 'Interrupted input preview' : row.live.some(item => item.streaming) && streamingActive ? 'Streaming input' : 'Input preview'
     : results.length ? 'Result retained' : entry?.tool ? 'No loaded result' : 'Operation ownership unavailable'
   const elapsed = exchange?.startedAtMs !== undefined && exchange.endedAtMs !== undefined && exchange.endedAtMs >= exchange.startedAtMs
     ? (exchange.endedAtMs - exchange.startedAtMs) / 1000 : undefined

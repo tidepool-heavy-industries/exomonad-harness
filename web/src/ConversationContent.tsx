@@ -19,7 +19,7 @@ export function TimelineContent({ row, streamingActive, requests, jobs, modelOri
   if (row.kind === 'live') return <div className="live-message">{row.live.map(item => <MessagePresentation key={outputKey(item)} listItem={false}
     kind={item.channel === 'reasoning' || item.channel === 'reasoning_summary' ? 'reasoning' : item.channel === 'tool_input' || item.channel === 'tool_arguments' ? 'activity' : 'assistant'}
     title={outputLabels[item.channel]} collapsed={item.channel === 'reasoning' || item.channel === 'reasoning_summary'}
-    status={item.committedHash ? 'Retained preview' : item.streaming && streamingActive ? 'Streaming' : 'Incomplete'}>
+    status={item.committedHash ? 'Retained preview' : requests?.get(item.requestId)?.state === 'failed' ? 'Interrupted preview' : item.streaming && streamingActive ? 'Streaming' : 'Incomplete'}>
     <MessageContent streaming={item.streaming && streamingActive} text={item.text} label={`${outputLabels[item.channel]} output`} memoryKey={`part:${row.live.indexOf(item)}`} bounded={item.channel === 'tool_input' || item.channel === 'tool_arguments'} format={item.channel === 'assistant' || item.channel === 'refusal' ? 'markdown' : 'plain'} />
     {item.overflow && <p role="status">Live preview is partial. Completed content remains available in retained history.</p>}
   </MessagePresentation>)}</div>

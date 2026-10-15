@@ -46,6 +46,8 @@ describe('embedded actor chat', () => {
     expect(notice).toHaveTextContent('invalid_request_error')
     expect(notice).toHaveTextContent('invalid_parameter')
     expect(notice).toHaveTextContent('tools[0]')
+    expect(within(notice).getByText('<b>Tool schema rejected</b>')).not.toBeVisible()
+    fireEvent.click(within(notice).getByText('Response details'))
     expect(within(notice).getByText('<b>Tool schema rejected</b>')).toBeVisible()
     expect(notice.querySelector('b')).toBeNull()
     expect(screen.queryByText('Unrelated child failure')).toBeNull()

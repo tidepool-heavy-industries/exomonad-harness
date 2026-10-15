@@ -186,7 +186,7 @@ function receiptState(receipt: CommandReceipt): EmbeddedCommandRecord['state'] {
     case 'recovery_authorized': return 'recovery_authorized'
     case 'admitted': return 'input_admitted'
     case 'control_requested': return 'control_requested'
-    case 'refused': return 'refused'
+    case 'continuation_refused': case 'refused': return 'refused'
     case 'unconfirmed': return 'unconfirmed'
   }
 }
@@ -197,6 +197,8 @@ function receiptMatches(record: BrowserCommandRecord, receipt: CommandReceipt): 
   if (receipt.target != null && !sameHostIdentity(receipt.target, record.submission.command.target)) return false
   switch (receipt.outcome) {
     case 'account_selected': return record.submission.command.action === 'select_account' && record.submission.command.account_id === receipt.accountId
+    case 'continuation_refused': return record.submission.command.action === 'recover'
+      && sameInferenceBlock(record.submission.command.expected_block, receipt.block)
     case 'recovery_authorized': return record.submission.command.action === 'recover'
       && record.submission.command.mode === receipt.mode && sameInferenceBlock(record.submission.command.expected_block, receipt.block)
     case 'admitted': return record.submission.command.action === 'input'
@@ -229,7 +231,9 @@ function mergeEvidence(record: BrowserCommandRecord, state: EmbeddedCommandRecor
       if (record.receipt.envelopeId !== receipt.envelopeId) return issue(record, 'Contradictory admitted envelope identity.')
       if (record.receipt.wakeError !== undefined && receipt.wakeError !== undefined && record.receipt.wakeError !== receipt.wakeError)
         return issue(record, 'Contradictory admitted wake observations.')
-      combined = { ...record.receipt, ...receipt, wakeError: receipt.wakeError ?? record.receipt.wakeError }
+      if (record.receipt.continuation != null && receipt.continuation != null
+        && !sameContinuation(record.receipt.continuation, receipt.continuation)) return issue(record, 'Contradictory continuation evidence.')
+      combined = { ...record.receipt, ...receipt, wakeError: receipt.wakeError ?? record.receipt.wakeError, continuation: receipt.continuation ?? record.receipt.continuation }
     } else if (receipt.outcome === 'recovery_authorized' && record.receipt.outcome === 'recovery_authorized'
       && (JSON.stringify(receipt.projection.omitted) !== JSON.stringify(record.receipt.projection.omitted)
         || JSON.stringify(receipt.projection.unknownResponseCompleteness) !== JSON.stringify(record.receipt.projection.unknownResponseCompleteness))) {
@@ -269,4 +273,10 @@ export function observeCommand(records: readonly BrowserCommandRecord[], hostRun
   return records.map((record) => record.hostRun === hostRun
     && canonicalOperationId(record.submission.operation_id) === canonicalOperationId(operationId)
     ? { ...record, ...observation } : record)
+}
+
+function sameContinuation(left: NonNullable<Extract<CommandReceipt, { outcome: 'admitted' }>['continuation']>, right: NonNullable<Extract<CommandReceipt, { outcome: 'admitted' }>['continuation']>): boolean {
+  if (left.state === 'queued') return right.state === 'queued'
+  return right.state === left.state && sameInferenceBlock(left.block, right.block)
+    && (left.state !== 'refused' || right.state === 'refused' && left.reason === right.reason)
 }

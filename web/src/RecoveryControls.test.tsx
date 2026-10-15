@@ -2,75 +2,86 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import RecoveryControls from './RecoveryControls'
 import type { InferenceBlock } from './protocol'
-
-const target = { run: 'run', actor: '/root', incarnation: 'one' }
+const target = { run: 'run', actor: '/root', incarnation: 'inc' }
 const block: InferenceBlock = { request: 'head', generation: '3', reason: { kind: 'continuity_unproven' } }
+const id = '11111111-1111-4111-8111-111111111111'
+function retained() { return { kind: 'retained', operationId: id, send: 'sent' } as const }
 
-it.each(['provider_stream_failure', 'request_rejected'] as const)('keeps quota recovery explicit after %s', kind => {
-  const diagnostic = { code: 'subscription_sharing_usage_limit_exceeded' }
-  const quota: InferenceBlock = { ...block, reason: kind === 'provider_stream_failure'
-    ? { kind, event: 'response_failed', diagnostic } : { kind, failure: { kind: 'http', status: 429, diagnostic } } }
-  const submit = vi.fn()
-  render(<RecoveryControls target={target} block={quota} ready submit={submit} onResult={vi.fn()} />)
-  expect(screen.getByRole('button', { name: 'Authorize recovery' })).toBeDisabled()
-  expect(submit).not.toHaveBeenCalled()
-  expect(screen.getAllByRole('radio')).toHaveLength(2)
-})
-
-describe('recovery decisions', () => {
-  it.each(['exact', 'visible_history'] as const)('sends %s only after explicit selection and authorization', mode => {
-    const submit = vi.fn().mockReturnValue({ kind: 'retained', operationId: 'operation', send: 'unknown' })
+describe('response continuation controls', () => {
+  it('requires one explicit Retry and never submits on reconnect or repeated activation', () => {
+    const submit = vi.fn(retained)
     const mounted = render(<RecoveryControls target={target} block={block} ready={false} submit={submit} onResult={vi.fn()} />)
-    expect(submit).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeDisabled()
     mounted.rerender(<RecoveryControls target={target} block={block} ready submit={submit} onResult={vi.fn()} />)
     expect(submit).not.toHaveBeenCalled()
-    expect(screen.getByRole('button')).toBeDisabled()
-    fireEvent.click(screen.getAllByRole('radio')[mode === 'exact' ? 0 : 1]!)
-    fireEvent.click(screen.getByRole('button'))
-    expect(submit).toHaveBeenCalledExactlyOnceWith({ action: 'recover', target, expected_block: block, mode })
-    fireEvent.click(screen.getByRole('button'))
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(submit).toHaveBeenCalledExactlyOnceWith({ action: 'recover', target, expected_block: block, mode: 'exact' })
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     expect(submit).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('radio')).toBeNull()
   })
-  it('invalidates a decision when the head or block generation changes', () => {
-    const submit = vi.fn()
-    const mounted = render(<RecoveryControls target={target} block={block} ready submit={submit} onResult={vi.fn()} />)
-    fireEvent.click(screen.getAllByRole('radio')[0]!)
-    expect(screen.getByRole('button')).toBeEnabled()
-    mounted.rerender(<RecoveryControls target={target} block={{ ...block, request: 'new-head', generation: '4' }} ready submit={submit} onResult={vi.fn()} />)
-    expect(screen.getByRole('button')).toBeDisabled()
-    expect(screen.getAllByRole('radio').every(radio => !(radio as HTMLInputElement).checked)).toBe(true)
+  it('requires confirmation before visible continuation and invalidates it when the block changes', () => {
+    const submit = vi.fn(retained)
+    const mounted = render(<RecoveryControls target={target} block={block} ready submit={submit} onResult={vi.fn()} continuationFailure="exact_projection_unavailable" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Review continuation' }))
+    expect(screen.getByRole('group', { name: 'Continue without some reasoning context?' })).toHaveFocus()
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.getByRole('button', { name: 'Review continuation' })).toHaveFocus()
     expect(submit).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Review continuation' }))
+    const next = { ...block, generation: '4' }
+    mounted.rerender(<RecoveryControls target={target} block={next} ready submit={submit} onResult={vi.fn()} continuationFailure="exact_projection_unavailable" />)
+    expect(screen.queryByRole('button', { name: 'Continue without this context' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Review continuation' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Continue without this context' }))
+    expect(submit).toHaveBeenCalledExactlyOnceWith({ action: 'recover', target, expected_block: next, mode: 'visible_history' })
+  })
+  it('never offers visible fallback without owner permission and keeps provider diagnostics in details', () => {
+    const diagnostic = { code: 'subscription_sharing_usage_limit_exceeded', message: 'Provider quota response' }
+    const quota: InferenceBlock = { ...block, reason: { kind: 'provider_stream_failure', event: 'response_failed', diagnostic } }
+    render(<RecoveryControls target={target} block={quota} ready submit={vi.fn()} onResult={vi.fn()} />)
+    expect(screen.queryByRole('button', { name: 'Review continuation' })).toBeNull()
+    expect(screen.getByText(/Select another saved model account/)).toBeVisible()
+    fireEvent.click(screen.getByText('Details'))
+    expect(screen.getByText(diagnostic.message)).toBeVisible()
   })
 })
 
-it('allows a new explicit decision after authoritative refusal without retrying automatically', () => {
-  const id = '11111111-1111-4111-8111-111111111111'
-  const submit = vi.fn().mockReturnValue({ kind: 'retained', operationId: id, send: 'sent' })
-  const mounted = render(<RecoveryControls target={target} block={block} ready submit={submit} onResult={vi.fn()} />)
-  fireEvent.click(screen.getAllByRole('radio')[0]!)
-  fireEvent.click(screen.getByRole('button'))
-  mounted.rerender(<RecoveryControls target={target} block={block} ready submit={submit} onResult={vi.fn()} operations={[{
-    hostRun: target.run, authority: 'receipt', state: 'refused',
-    submission: { operation_id: id, command: { action: 'recover', target, expected_block: block, mode: 'exact' } },
-    receipt: { commandId: id, target, outcome: 'refused', reason: 'Continuity unavailable' },
-  }]} />)
-  expect(submit).toHaveBeenCalledOnce()
-  fireEvent.click(screen.getAllByRole('radio')[1]!)
-  fireEvent.click(screen.getByRole('button'))
-  expect(submit).toHaveBeenLastCalledWith({ action: 'recover', target, expected_block: block, mode: 'visible_history' })
+it('cannot carry a context-loss confirmation across actor incarnation changes', () => {
+  const submit = vi.fn(retained)
+  const mounted = render(<RecoveryControls target={target} block={block} ready submit={submit} onResult={vi.fn()} continuationFailure="exact_projection_unavailable" />)
+  fireEvent.click(screen.getByRole('button', { name: 'Review continuation' }))
+  mounted.rerender(<RecoveryControls target={{ ...target, incarnation: 'new' }} block={block} ready submit={submit} onResult={vi.fn()} continuationFailure="exact_projection_unavailable" />)
+  expect(screen.queryByRole('button', { name: 'Continue without this context' })).toBeNull()
+  expect(submit).not.toHaveBeenCalled()
 })
 
-it('shows retained provider fields in recovery details and requires a fresh choice when they change', () => {
-  const diagnostic = { code: 'invalid_tools', error_type: 'invalid_request_error', param: 'tools[0]', message: 'schema refused [redacted]' }
-  const providerBlock: InferenceBlock = { ...block, reason: { kind: 'provider_stream_failure', event: 'response_failed', diagnostic } }
-  const submit = vi.fn()
-  const mounted = render(<RecoveryControls target={target} block={providerBlock} ready submit={submit} onResult={vi.fn()} />)
-  fireEvent.click(screen.getByText('Recovery details'))
-  for (const value of Object.values(diagnostic)) expect(screen.getByText(value)).toBeVisible()
-  expect(screen.getByText('Provider stream event: response.failed')).toBeVisible()
-  fireEvent.click(screen.getAllByRole('radio')[0]!)
-  mounted.rerender(<RecoveryControls target={target} block={{ ...providerBlock, reason: { kind: 'provider_stream_failure', event: 'response_failed' } }} ready submit={submit} onResult={vi.fn()} />)
-  expect(screen.queryByText(diagnostic.message)).not.toBeInTheDocument()
-  expect(screen.getByRole('button')).toBeDisabled()
+it.each(['uncertain_effects', 'continuity_unproven', 'stale'] as const)('never offers visible continuation for %s', continuationFailure => {
+  const submit = vi.fn(retained)
+  render(<RecoveryControls target={target} block={block} ready submit={submit} onResult={vi.fn()} continuationFailure={continuationFailure} />)
+  expect(screen.queryByRole('button', { name: 'Review continuation' })).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Continue without this context' })).toBeNull()
+  if (continuationFailure === 'uncertain_effects') expect(screen.getByRole('button', { name: 'Retry' })).toBeDisabled()
+  expect(submit).not.toHaveBeenCalled()
+})
+
+it('reuses an unresolved exact operation after reload and never routes ordinary Retry into a visible operation', () => {
+  const submit = vi.fn(retained)
+  const retry = vi.fn(retained)
+  const record = { hostRun: target.run, authority: 'local' as const, state: 'queued' as const,
+    submission: { operation_id: id, command: { action: 'recover' as const, target, expected_block: block, mode: 'exact' as const } } }
+  const mounted = render(<RecoveryControls target={target} block={block} ready submit={submit} retry={retry} onResult={vi.fn()} operations={[record]} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  expect(retry).toHaveBeenCalledExactlyOnceWith(record.submission)
+  expect(submit).not.toHaveBeenCalled()
+  const visible = { ...record, submission: { ...record.submission, command: { ...record.submission.command, mode: 'visible_history' as const } } }
+  mounted.unmount()
+  render(<RecoveryControls target={target} block={block} ready submit={submit} retry={retry} onResult={vi.fn()} operations={[visible]} continuationFailure="exact_projection_unavailable" />)
+  expect(screen.getByRole('button', { name: 'Retry' })).toBeDisabled()
+  expect(retry).toHaveBeenCalledOnce()
+  fireEvent.click(screen.getByRole('button', { name: 'Review continuation' }))
+  expect(retry).toHaveBeenCalledOnce()
+  fireEvent.click(screen.getByRole('button', { name: 'Continue without this context' }))
+  expect(retry).toHaveBeenLastCalledWith(visible.submission)
   expect(submit).not.toHaveBeenCalled()
 })
