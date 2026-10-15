@@ -4090,7 +4090,32 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let store = self.store.clone();
         let issued = issued.clone();
         let item = done.item().clone();
-        let inserted = blocking(move || store.append_provider_done(&issued, &done)).await?;
+        let observing = self.output_observer.is_some()
+            && issued.purpose() == crate::store::ProviderRequestPurpose::Inference;
+        let request_id = issued.request_id().clone();
+        let (inserted, publication) = blocking(move || {
+            let inserted = store.append_provider_done(&issued, &done)?;
+            let publication = if inserted && observing {
+                Some((
+                    store.request_output_origin(issued.request_id())?,
+                    Store::put_item_tx_hash(done.item())?,
+                ))
+            } else {
+                None
+            };
+            Ok((inserted, publication))
+        })
+        .await?;
+        if let (Some(observer), Some((origin, hash))) = (&self.output_observer, publication) {
+            observer.observe(ModelOutput {
+                origin,
+                request_id,
+                update: ModelOutputUpdate::Committed {
+                    item_id: item.0["id"].as_str().map(str::to_owned),
+                    hash,
+                },
+            });
+        }
         Ok((item, inserted))
     }
 

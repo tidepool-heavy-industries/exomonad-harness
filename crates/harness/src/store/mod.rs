@@ -1566,7 +1566,7 @@ impl Store {
         )?;
         Ok(ItemHash(hash))
     }
-    fn put_item_tx_hash(item: &Item) -> Result<ItemHash> {
+    pub(crate) fn put_item_tx_hash(item: &Item) -> Result<ItemHash> {
         Ok(ItemHash(
             blake3::hash(&serde_json::to_vec(item)?)
                 .to_hex()

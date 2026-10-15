@@ -33,6 +33,9 @@ pub(crate) struct IssuedProviderRequest {
 }
 
 impl IssuedProviderRequest {
+    pub(crate) fn request_id(&self) -> &RequestId {
+        &self.request
+    }
     pub(crate) fn purpose(&self) -> super::ProviderRequestPurpose {
         self.issued
             .record
