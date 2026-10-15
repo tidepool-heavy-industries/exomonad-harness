@@ -65,6 +65,22 @@ as unavailable because the previous parser synthesized them for missing fields;
 positive historical counts remain observed. Input/output `reported` does not
 establish cache-counter availability. Existing records are never rewritten.
 
+Native response failures carry bounded metadata through the existing provider
+event stream into `transport_failure_summary` Store events (version 1). These
+records contain allowlisted headers, diagnostic IDs, event counts and kinds,
+terminal disposition, and unfinished-frame byte lengths. Unknown event labels
+are hashed; bodies and opaque content are excluded. Diagnostic IDs may be
+redacted or truncated and never establish replay provenance. Missing historical
+summary events mean unavailable observations, not zero activity. The new event
+is additive and does not rewrite existing events.
+
+`response.incomplete` is a typed explicit terminal with an ID and reason,
+distinct from clean EOF and HTTP body-read failure. Neither it nor metadata
+authorizes inference. The Engine's existing failure assessment, retained items,
+operation cleanup and Store continuation grant own that decision. Body timings
+start after response headers arrive. An unfinished SSE event is discarded at
+EOF; its bytes are never promoted into a completed message or tool invocation.
+
 ## Focused tests
 
 ### Native Buck2 on x86_64 Linux
