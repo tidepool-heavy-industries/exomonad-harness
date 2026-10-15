@@ -67,6 +67,25 @@ enum PendingCompletion {
     PreserveForFollowup,
 }
 
+#[derive(Default)]
+struct SettledCalls {
+    operations: Vec<OperationId>,
+    requires_observation: bool,
+}
+
+impl SettledCalls {
+    fn extend(&mut self, other: Self) {
+        self.operations.extend(other.operations);
+        self.requires_observation |= other.requires_observation;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WaitSelection {
+    AllResults,
+    BlockingResults,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PendingCustody {
     Unstarted,
@@ -2222,7 +2241,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             // Retained builtin output follows every model Item and the ready
             // job drain, matching the live wait boundary's history order.
             for (operation, continuation, barrier, commit) in inline_settled {
-                if commit.is_some() && settled_this_turn != barrier.before {
+                if commit.is_some() && settled_this_turn.operations != barrier.before {
                     return Err(EngineError::ClaimRecoveryConflict(operation.call.0.clone()));
                 }
                 let item = match self
@@ -2269,7 +2288,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
                 match self.persist_settled(pending, &parent).await {
                     Ok(settled) => {
-                        if recorded_wait && settled != barrier.after {
+                        if recorded_wait && settled.operations != barrier.after {
                             return Err(EngineError::ClaimRecoveryConflict(
                                 operation.call.0.clone(),
                             ));
@@ -2281,14 +2300,19 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
 
             if let Some(wait_call_id) = wait_call {
-                let result = if let Some(call_id) = settled_this_turn.first() {
+                let result = if let Some(call_id) = settled_this_turn.operations.first() {
                     WaitAgentResultExact {
                         call_outputs: Vec::new(),
                         resumed_by: WaitResumeExact::Job(call_id.clone()),
                     }
                 } else {
                     match self
-                        .wait_for_resume(pending, &mut envelopes, &mut cancellation)
+                        .wait_for_resume(
+                            pending,
+                            &mut envelopes,
+                            &mut cancellation,
+                            WaitSelection::AllResults,
+                        )
                         .await
                     {
                         Ok(result) => result,
@@ -2307,7 +2331,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         &parent,
                         Some(&wait_operation),
                         result,
-                        &settled_this_turn,
+                        &settled_this_turn.operations,
                         admit_inbox,
                     )
                     .await
@@ -2324,10 +2348,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 && pending
                     .iter()
                     .any(|call| call.completion == PendingCompletion::BlocksCompletion)
-                && settled_this_turn.is_empty()
+                && !settled_this_turn.requires_observation
             {
                 let result = match self
-                    .wait_for_resume(pending, &mut envelopes, &mut cancellation)
+                    .wait_for_resume(
+                        pending,
+                        &mut envelopes,
+                        &mut cancellation,
+                        WaitSelection::BlockingResults,
+                    )
                     .await
                 {
                     Ok(result) => result,
@@ -2346,6 +2375,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
             } else if !had_inline_wait
                 && !had_sync_calls
+                && !settled_this_turn.requires_observation
                 && is_final(&turn, finalize_schema.is_some())
                 && !pending
                     .iter()
@@ -2376,7 +2406,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     transcript,
                     head_request: parent,
                 });
-            } else if turn_call_ids.is_empty() && pending.is_empty() {
+            } else if turn_call_ids.is_empty()
+                && pending.is_empty()
+                && !settled_this_turn.requires_observation
+            {
                 return Err(EngineError::MissingFinal);
             }
 
@@ -3347,14 +3380,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         &self,
         pending: &mut Vec<PendingCall>,
         request: &RequestId,
-    ) -> Result<Vec<OperationId>, EngineError> {
+    ) -> Result<SettledCalls, EngineError> {
         let calls: Vec<_> = pending
             .iter()
             .filter(|call| call.wait.is_none() && call.scheduling == ToolScheduling::Async)
             .map(|call| call.operation.clone())
             .collect();
         let outputs = outputs_in_operation_order(&self.scheduler, &calls).await?;
-        let mut settled = Vec::with_capacity(outputs.len());
+        let mut settled = SettledCalls {
+            operations: Vec::with_capacity(outputs.len()),
+            requires_observation: false,
+        };
         for (operation, output) in outputs {
             let call = pending
                 .iter()
@@ -3375,8 +3411,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 )
                 .await?;
             }
+            settled.requires_observation |= call.completion == PendingCompletion::BlocksCompletion;
             pending.retain(|call| call.operation != operation);
-            settled.push(operation);
+            settled.operations.push(operation);
         }
         Ok(settled)
     }
@@ -3603,10 +3640,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         pending: &[PendingCall],
         envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<MailboxSignal>,
         cancellation: &mut watch::Receiver<bool>,
+        selection: WaitSelection,
     ) -> Result<WaitAgentResultExact, EngineError> {
         let calls: Vec<_> = pending
             .iter()
-            .filter(|call| call.wait.is_none() && call.scheduling == ToolScheduling::Async)
+            .filter(|call| {
+                call.wait.is_none()
+                    && call.scheduling == ToolScheduling::Async
+                    && (matches!(selection, WaitSelection::AllResults)
+                        || call.completion == PendingCompletion::BlocksCompletion)
+            })
             .map(|call| call.operation.clone())
             .collect();
         let deadline = pending.iter().find_map(|call| match &call.wait {
@@ -6654,6 +6697,11 @@ mod tests {
             .await
             .unwrap();
         let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "already observed output does not force another model request"
+        );
         let first_input = &requests[0].input;
         let output_position = first_input.iter().position(|item| {
             item.0["type"] == "function_call_output"
@@ -6964,6 +7012,33 @@ mod tests {
         started: Arc<Notify>,
         response_finished: Arc<Notify>,
         second_request: Arc<Notify>,
+        ready: Option<ReadySettlement>,
+    }
+
+    struct ReadySettlement {
+        response: usize,
+        final_answer: bool,
+        scheduler: Arc<JobScheduler>,
+        store: Arc<Store>,
+        release: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    }
+
+    impl ReadySettlement {
+        async fn finish(&self, response: usize) {
+            if response == self.response {
+                self.release
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .unwrap();
+                let operation = self.store.claims(&CallId("late-call".into())).unwrap()[0]
+                    .operation
+                    .clone();
+                self.scheduler.wait(&operation).await.unwrap();
+            }
+        }
     }
     #[async_trait::async_trait]
     impl ResponsesTransport for LateFinal {
@@ -7004,10 +7079,10 @@ mod tests {
             };
             if index == 0 {
                 let call = Item(json!({
-                    "type":"function_call","call_id":"late-call","name":"slow","arguments":"{}"
+                    "type":"function_call","call_id":"late-call","name":"slow","async":true,"arguments":"{}"
                 }));
                 let final_item = Item(json!({
-                    "type":"message","role":"assistant","phase":"final_answer","content":"provisional"
+                    "type":"message","role":"assistant","phase": if self.ready.as_ref().is_some_and(|ready| ready.response == 1) { "commentary" } else { "final_answer" },"content":"provisional"
                 }));
                 sink.send({
                     let event = crate::transport::sse::ResponseAssembly::default().accept(
@@ -7028,12 +7103,17 @@ mod tests {
                 tokio::time::timeout(std::time::Duration::from_secs(2), self.started.notified())
                     .await
                     .map_err(|_| TransportError::Stream("slow provider never began".into()))?;
+                if let Some(ready) = &self.ready {
+                    ready.finish(index).await;
+                }
                 self.response_finished.notify_one();
                 Ok(turn("late-provisional", vec![call, final_item]))
-            } else if index == 1 {
+            } else if index == 1
+                || (index == 2 && self.ready.as_ref().is_some_and(|ready| ready.response == 1))
+            {
                 self.second_request.notify_one();
                 let final_item = Item(json!({
-                    "type":"message","role":"assistant","phase":"final_answer","content":"continued"
+                    "type":"message","role":"assistant","phase": if self.ready.as_ref().is_some_and(|ready| ready.response == index && !ready.final_answer) { "commentary" } else { "final_answer" },"content":"continued"
                 }));
                 sink.send({
                     let event = crate::transport::sse::ResponseAssembly::default().accept(
@@ -7043,7 +7123,17 @@ mod tests {
                 })
                     .await
                     .map_err(|_| TransportError::Stream("engine event receiver closed".into()))?;
-                Ok(turn("late-continued", vec![final_item]))
+                if let Some(ready) = &self.ready {
+                    ready.finish(index).await;
+                }
+                Ok(turn(
+                    if final_item.0["phase"] == "final_answer" {
+                        "late-continued"
+                    } else {
+                        "late-intermediate"
+                    },
+                    vec![final_item],
+                ))
             } else {
                 Err(TransportError::Stream("unexpected replay request".into()))
             }
@@ -7500,7 +7590,7 @@ mod tests {
             engine
                 .run(
                     None,
-                    vec![Item(json!({"role":"user","content":"go"}))],
+                    vec![Item(json!({"type":"message","role":"user","content":"go"}))],
                     cancel_rx,
                     empty_mailbox(),
                 )
@@ -8982,7 +9072,7 @@ mod tests {
         engine
             .run(
                 None,
-                vec![Item(json!({"role":"user","content":"go"}))],
+                vec![Item(json!({"type":"message","role":"user","content":"go"}))],
                 cancel_rx,
                 empty_mailbox(),
             )
@@ -9241,7 +9331,7 @@ mod tests {
             engine
                 .run(
                     None,
-                    vec![Item(json!({"role":"user","content":"go"}))],
+                    vec![Item(json!({"type":"message","role":"user","content":"go"}))],
                     cancel_rx,
                     empty_mailbox(),
                 )
@@ -9324,7 +9414,7 @@ mod tests {
             engine
                 .run(
                     None,
-                    vec![Item(json!({"role":"user","content":"go"}))],
+                    vec![Item(json!({"type":"message","role":"user","content":"go"}))],
                     cancel_rx,
                     empty_mailbox(),
                 )
@@ -9373,7 +9463,7 @@ mod tests {
             engine
                 .run(
                     None,
-                    vec![Item(json!({"role":"user","content":"go"}))],
+                    vec![Item(json!({"type":"message","role":"user","content":"go"}))],
                     cancel_rx,
                     empty_mailbox(),
                 )
@@ -9467,7 +9557,7 @@ mod tests {
             engine
                 .run(
                     None,
-                    vec![Item(json!({"role":"user","content":"go"}))],
+                    vec![Item(json!({"type":"message","role":"user","content":"go"}))],
                     cancel_rx,
                     empty_mailbox(),
                 )
@@ -9513,6 +9603,7 @@ mod tests {
                 started: started.clone(),
                 response_finished: response_finished.clone(),
                 second_request: second_request.clone(),
+                ready: None,
             },
             store,
             Arc::new(JobScheduler::new(1).unwrap()),
@@ -9535,7 +9626,7 @@ mod tests {
             engine
                 .run(
                     None,
-                    vec![Item(json!({"role":"user","content":"go"}))],
+                    vec![Item(json!({"type":"message","role":"user","content":"go"}))],
                     cancel_rx,
                     empty_mailbox(),
                 )
@@ -9570,6 +9661,217 @@ mod tests {
         assert_eq!(requests[1].input[4].0["call_id"], "late-call");
     }
 
+    async fn check_ready_settlement(response: usize, final_answer: bool) {
+        let started = Arc::new(Notify::new());
+        let (release, released) = tokio::sync::oneshot::channel();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let store = Arc::new(Store::memory().unwrap());
+        let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+        let engine = Engine::<FakeAuth, SlowProvider, _>::with_transport(
+            LateFinal {
+                requests: requests.clone(),
+                started: started.clone(),
+                response_finished: Arc::new(Notify::new()),
+                second_request: Arc::new(Notify::new()),
+                ready: Some(ReadySettlement {
+                    response,
+                    final_answer,
+                    scheduler: scheduler.clone(),
+                    store: store.clone(),
+                    release: Mutex::new(Some(release)),
+                }),
+            },
+            store,
+            scheduler,
+            Arc::new(SlowProvider {
+                started,
+                release: tokio::sync::Mutex::new(Some(released)),
+                released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }),
+            EngineConfig {
+                instructions: "instruction".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "session".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let (_cancel, cancellation) = watch::channel(false);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            engine.run(
+                None,
+                vec![Item(json!({"type":"message","role":"user","content":"go"}))],
+                cancellation,
+                empty_mailbox(),
+            ),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("response={response}, final_answer={final_answer}: timeout {error:?}")
+        })
+        .unwrap_or_else(|error| {
+            panic!("response={response}, final_answer={final_answer}: {error:?}")
+        });
+        assert_eq!(result.turn.response_id, "late-continued");
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            response + 2,
+            "exactly one successor observes the newly published result"
+        );
+        for (index, request) in requests.iter().enumerate() {
+            let outputs = request
+                .input
+                .iter()
+                .filter(|item| {
+                    item.0["type"] == "function_call_output" && item.0["call_id"] == "late-call"
+                })
+                .count();
+            assert_eq!(
+                outputs,
+                usize::from(index > response),
+                "receipt observation at request {index}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_settlement_during_final_response_wakes_continuation() {
+        check_ready_settlement(0, true).await;
+        check_ready_settlement(1, true).await;
+        check_ready_settlement(1, false).await;
+    }
+
+    #[tokio::test]
+    async fn mixed_settlement_policies_preserve_foreign_followup() {
+        for ready_blocker in [false, true] {
+            let (store, source, snapshot, inherited) = inherited_claim_fixture().await;
+            let scheduler = Arc::new(JobScheduler::new(2).unwrap());
+            let operation = store.operation_for_request(&source, &inherited).unwrap();
+            let (foreign_release, foreign_released) = tokio::sync::oneshot::channel();
+            scheduler
+                .register_engine_operation(
+                    Arc::new(SlowProvider {
+                        started: Arc::new(Notify::new()),
+                        release: tokio::sync::Mutex::new(Some(foreign_released)),
+                        released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    }),
+                    operation.clone(),
+                    AgentPath("/root".into()),
+                    Some(source.clone()),
+                    "slow".into(),
+                    json!({}),
+                    true,
+                )
+                .await
+                .unwrap();
+            scheduler
+                .claim_exact(
+                    &operation,
+                    store.standalone_identity(AgentPath("/root".into())),
+                )
+                .await
+                .unwrap();
+            scheduler.release_operation(&operation, None).await.unwrap();
+            let started = Arc::new(Notify::new());
+            let finished = Arc::new(Notify::new());
+            let (release, released) = tokio::sync::oneshot::channel();
+            let mut external_release = Some(release);
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let engine = Engine::<FakeAuth, SlowProvider, _>::with_transport(
+                LateFinal {
+                    requests: requests.clone(),
+                    started: started.clone(),
+                    response_finished: finished.clone(),
+                    second_request: Arc::new(Notify::new()),
+                    ready: ready_blocker.then(|| ReadySettlement {
+                        response: 0,
+                        final_answer: true,
+                        scheduler: scheduler.clone(),
+                        store: store.clone(),
+                        release: Mutex::new(external_release.take()),
+                    }),
+                },
+                store.clone(),
+                scheduler.clone(),
+                Arc::new(SlowProvider {
+                    started,
+                    release: tokio::sync::Mutex::new(Some(released)),
+                    released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                }),
+                EngineConfig {
+                    instructions: "child".into(),
+                    tools: vec![],
+                    model: "test".into(),
+                    effort: Effort::Low,
+                    session_id: "child".into(),
+                    agent: AgentPath("/root/child".into()),
+                },
+            );
+            let (_cancel, cancellation) = watch::channel(false);
+            let run = tokio::spawn(async move {
+                engine
+                    .run(Some(snapshot), vec![], cancellation, empty_mailbox())
+                    .await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(2), finished.notified())
+                .await
+                .unwrap();
+            if !ready_blocker {
+                foreign_release.send(()).unwrap();
+                let output = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        if let Some(output) =
+                            scheduler.unpublished_output(&operation).await.unwrap()
+                        {
+                            break output;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                store
+                    .write_job_output(&operation, ToolKind::Function, &output)
+                    .unwrap();
+                store
+                    .append_operation_output(&operation, &source, &source)
+                    .unwrap();
+                scheduler.mark_output_committed(&operation).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                assert_eq!(
+                    requests.lock().unwrap().len(),
+                    1,
+                    "foreign readiness cannot resume implicit final waiting for its blocker"
+                );
+                external_release.take().unwrap().send(()).unwrap();
+            }
+            let completion = tokio::time::timeout(std::time::Duration::from_secs(2), run)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(completion.turn.response_id, "late-continued");
+            assert_eq!(
+                requests.lock().unwrap().len(),
+                2,
+                "one successor observes the blocker without waiting for preserved work"
+            );
+            assert!(
+                requests.lock().unwrap()[1]
+                    .input
+                    .iter()
+                    .any(|item| item.0["type"] == "function_call_output"
+                        && item.0["call_id"] == "late-call")
+            );
+            if ready_blocker {
+                scheduler.cancel(&operation).await.unwrap();
+            }
+        }
+    }
+
     #[tokio::test]
     async fn wait_agent_resumes_on_envelope_after_any_ready_job_outputs() {
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -9596,7 +9898,7 @@ mod tests {
             engine
                 .run(
                     None,
-                    vec![Item(json!({"role":"user","content":"go"}))],
+                    vec![Item(json!({"type":"message","role":"user","content":"go"}))],
                     cancel_rx,
                     envelope_rx,
                 )
