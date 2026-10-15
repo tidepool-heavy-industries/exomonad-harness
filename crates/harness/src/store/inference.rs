@@ -654,7 +654,8 @@ impl Store {
         &self,
         envelope: i64,
     ) -> Result<Option<crate::embedding::InputContinuation>> {
-        read_input_continuation(&self.lock()?, envelope)
+        let c = self.lock()?;
+        read_input_continuation(&c, envelope)
     }
 
     /// Consume only intent bound to this attempt. Included or successfully
