@@ -10,6 +10,7 @@ use crate::{
     transport::{ResponsesProtocol, ResponsesRoute, StreamInterruption, sse::ResponseAssembly},
 };
 use proptest::prelude::*;
+use rusqlite::OptionalExtension;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -331,20 +332,22 @@ async fn run_history(
             .unwrap()
             .expect("original terminal receipt retained");
         let mut queued_text = vec![];
-        let mut last_envelope = 0;
+        let last_envelope = 0;
         for (index, action) in [0_u8, 1, 2, 3, 4, 5].iter().chain(actions).enumerate() {
             match action % 6 {
                 0 => {
-                    let text = format!("queued-text-{index}");
-                    last_envelope = store
-                        .admit_embedded_input(
-                            &identity,
-                            &format!("input-{index}"),
-                            "human",
-                            &Item(json!({"type":"message","role":"user","content":text})),
+                    // Queuing a command is observation/work scheduling. Only
+                    // the claimed Store admission below can grant continuation.
+                    let operation = ClientOperationId(uuid::Uuid::new_v4());
+                    store
+                        .enqueue_embedded_command(
+                            operation,
+                            &HostCommand::Input {
+                                target: identity.clone(),
+                                text: format!("not-admitted-{index}"),
+                            },
                         )
                         .unwrap();
-                    queued_text.push(text);
                 }
                 1 | 2 => {
                     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -383,7 +386,10 @@ async fn run_history(
                         .authorize_embedded_recovery(&target, operation)
                         .unwrap();
                     prop_assert!(
-                        matches!(receipt.outcome, CommandReceiptOutcome::Refused { .. }),
+                        matches!(
+                            receipt.outcome,
+                            CommandReceiptOutcome::ContinuationRefused { .. }
+                        ),
                         "stale recovery was accepted"
                     );
                     prop_assert_eq!(
@@ -457,7 +463,6 @@ async fn run_history(
                 return Err(TestCaseError::fail("startup failed to revoke grant"));
             };
             prop_assert_eq!(new.generation, block.generation + 1);
-            block = new;
             prop_assert_eq!(
                 store.authorize_embedded_recovery(&identity, old).unwrap(),
                 receipt
@@ -480,12 +485,58 @@ async fn run_history(
             );
             prop_assert_eq!(requests.lock().unwrap().len(), 1);
         }
-        let mode = if queued {
-            RecoveryMode::VisibleHistory
-        } else {
-            RecoveryMode::Exact
+        let input_operation = ClientOperationId(uuid::Uuid::new_v4());
+        let text = "actually admitted Send";
+        queued_text.push(text.to_owned());
+        store
+            .enqueue_embedded_command(
+                input_operation,
+                &HostCommand::Input {
+                    target: identity.clone(),
+                    text: text.into(),
+                },
+            )
+            .unwrap();
+        store
+            .claim_embedded_command(&identity.run, input_operation)
+            .unwrap()
+            .unwrap();
+        let admitted = match store
+            .admit_embedded_command_input(&identity, input_operation, text)
+            .unwrap()
+        {
+            crate::store::CommandInputAdmission::New(receipt) => receipt,
+            _ => return Err(TestCaseError::fail("first Send was not new")),
         };
-        let operation = command(&store, &identity, &block, mode);
+        let duplicate = match store
+            .admit_embedded_command_input(&identity, input_operation, text)
+            .unwrap()
+        {
+            crate::store::CommandInputAdmission::Retained(receipt) => receipt,
+            _ => return Err(TestCaseError::fail("duplicate Send was not retained")),
+        };
+        prop_assert_eq!(admitted, duplicate);
+        let HostInferenceState::Blocked { block: updated } =
+            store.embedded_inference_state(&identity).unwrap()
+        else {
+            // Settled native operation can continue exactly without replay.
+            let completed = runner
+                .run_recovering_embedded(None, vec![], cancellation, mailbox())
+                .await
+                .map_err(|error| TestCaseError::fail(format!("Send continuation: {error:?}")))?;
+            prop_assert_eq!(requests.lock().unwrap().len(), 2);
+            prop_assert_eq!(effects.calls.load(Ordering::SeqCst), expected_effects);
+            let observed = requests.lock().unwrap();
+            prop_assert_eq!(observed[1].body.to_string().matches(text).count(), 1);
+            prop_assert!(store.request(&completed.head_request).unwrap().is_some());
+            return Ok(());
+        };
+        block = updated;
+        prop_assert_eq!(
+            block.continuation_refusal,
+            Some(crate::embedding::ContinuationRefusal::ExactProjectionUnavailable)
+        );
+        let operation = command(&store, &identity, &block, RecoveryMode::VisibleHistory);
         let receipt = store
             .authorize_embedded_recovery(&identity, operation)
             .unwrap();
@@ -494,7 +545,7 @@ async fn run_history(
                 receipt.outcome,
                 CommandReceiptOutcome::RecoveryAuthorized { .. }
             ),
-            "valid recovery refused: {:?}",
+            "explicit visible recovery refused: {:?}",
             receipt
         );
         let completed = runner
@@ -833,4 +884,186 @@ async fn completed_receipt_with_issued_block_preserves_both_during_projection() 
 #[tokio::test]
 async fn post_completion_failure_retains_full_action_and_flat_secondary() {
     continuity_refusal_preserves_action(false, false, true).await;
+}
+
+#[derive(Clone)]
+struct EmptyInterrupted(Arc<AtomicUsize>);
+#[async_trait::async_trait]
+impl ResponsesTransport for EmptyInterrupted {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        Ok((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard))
+    }
+    async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
+        unreachable!()
+    }
+    async fn create_streaming(
+        &self,
+        _: PreparedProviderRequest,
+        _: tokio::sync::mpsc::Sender<StreamEvent>,
+    ) -> Result<ResponsesTurn, TransportError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(TransportError::IncompleteResponse(
+            StreamInterruption::MissingCompletion,
+        ))
+    }
+}
+async fn one_empty_interruption(
+    store: Arc<Store>,
+    identity: &HostIdentity,
+    requests: Arc<AtomicUsize>,
+) {
+    let effects = Arc::new(EffectCounter {
+        store: store.clone(),
+        queued: false,
+        calls: AtomicUsize::new(0),
+        operations: Mutex::new(vec![]),
+        committed: Notify::new(),
+    });
+    let runner = Engine::<Offline, _, _>::with_transport(
+        EmptyInterrupted(requests),
+        store.clone(),
+        Arc::new(JobScheduler::new(1).unwrap()),
+        effects,
+        EngineConfig {
+            instructions: "model history".into(),
+            tools: vec![],
+            model: "test".into(),
+            effort: Effort::Low,
+            session_id: "model-history".into(),
+            agent: identity.actor.clone(),
+        },
+    )
+    .with_origin(ConversationIdentity::Embedded {
+        run: identity.run.clone(),
+        actor: identity.actor.clone(),
+        incarnation: identity.incarnation.clone(),
+    });
+    store
+        .initialize_context_target(
+            &runner.origin,
+            &crate::context::ContextProjectionTarget {
+                model: "test".into(),
+                route: ResponsesRoute::ChatGptPlan,
+                protocol: ResponsesProtocol::Standard,
+            },
+        )
+        .unwrap();
+    let frontier = store.embedded_round_frontier(identity).unwrap();
+    let attempt = store
+        .begin_embedded_inference(identity, frontier.settled_head.as_ref())
+        .unwrap();
+    let (_cancel, cancellation) = watch::channel(false);
+    let mut inbox = tokio::sync::mpsc::unbounded_channel().1;
+    let mut receipt = runner
+        .run_loop(
+            frontier.settled_head,
+            vec![],
+            cancellation,
+            &mut inbox,
+            true,
+            None,
+            true,
+        )
+        .await;
+    runner.settle_inference_attempt(&attempt, &mut receipt);
+    assert_eq!(
+        receipt.assessment().execution(),
+        RoundExecution::Interrupted
+    );
+    assert!(receipt.secondary_failures().is_empty());
+}
+fn admitted_send(
+    store: &Store,
+    identity: &HostIdentity,
+    operation: ClientOperationId,
+    text: &str,
+) -> crate::server::CommandReceipt {
+    store
+        .enqueue_embedded_command(
+            operation,
+            &HostCommand::Input {
+                target: identity.clone(),
+                text: text.into(),
+            },
+        )
+        .unwrap();
+    if let Some(receipt) = store
+        .embedded_command(&identity.run, operation)
+        .unwrap()
+        .and_then(|r| r.receipt)
+    {
+        return receipt;
+    }
+    store
+        .claim_embedded_command(&identity.run, operation)
+        .unwrap()
+        .unwrap();
+    match store
+        .admit_embedded_command_input(identity, operation, text)
+        .unwrap()
+    {
+        crate::store::CommandInputAdmission::New(receipt)
+        | crate::store::CommandInputAdmission::Retained(receipt) => receipt,
+    }
+}
+
+#[test]
+fn generated_continuation_histories_preserve_budget_dedup_stop_and_restart() {
+    use proptest::test_runner::{Config, TestRunner};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let strategy = proptest::collection::vec(0u8..8, 8..40);
+    TestRunner::new(Config{cases:32,..Config::default()}).run(&strategy,|actions|runtime.block_on(async {
+        let path=std::env::temp_dir().join(format!("continuation-model-{}.sqlite",uuid::Uuid::new_v4()));
+        let mut store=Arc::new(Store::open(&path).unwrap());
+        let identity=HostIdentity{run:"history".into(),actor:AgentPath("/root".into()),incarnation:"one".into()};
+        store.bind_embedded_actor(&identity,None).unwrap();
+        let requests=Arc::new(AtomicUsize::new(0));
+        one_empty_interruption(store.clone(),&identity,requests.clone()).await;
+        let mut used=0u8; // Independent oracle: only reservation increments this budget.
+        let mut reservation=None;
+        let mut sends=vec![];
+        for (index,action) in [0,2,5,3,6,4,2,6,0,1,7,4].into_iter().chain(actions).enumerate() {
+            match action {
+                0=>{
+                    if let HostInferenceState::Blocked{block}=store.embedded_inference_state(&identity).unwrap() {
+                        let eligible=matches!(block.reason,crate::embedding::InferenceBlockReason::StreamInterrupted{..})&&block.continuation_refusal.is_none()&&used<2;
+                        let actual=store.reserve_automatic_retry(&identity,&block).unwrap();
+                        prop_assert_eq!(actual.is_some(),eligible,"budget={}; step={}",used,index);
+                        if let Some(actual)=actual {used+=1;prop_assert_eq!(actual.attempt,used);reservation=Some(actual);}
+                    }
+                }
+                1=>{if let Some(retry)=reservation.as_ref(){let _=store.activate_automatic_retry(&identity,retry).unwrap();}}
+                2=>{
+                    let operation=ClientOperationId(uuid::Uuid::new_v4());let text=format!("send-{index}");
+                    let receipt=admitted_send(&store,&identity,operation,&text);sends.push((operation,text,receipt));
+                }
+                3=>{for (operation,text,receipt) in &sends {prop_assert_eq!(admitted_send(&store,&identity,*operation,text),receipt.clone());}}
+                4=>{
+                    store=Arc::new(Store::open(&path).unwrap());
+                    store.recover_embedded_inference_after_host_loss(&identity.run).unwrap();
+                    if let Some(retry)=reservation.as_ref(){prop_assert!(!store.activate_automatic_retry(&identity,retry).unwrap(),"startup revived old timer");}
+                }
+                5=>{
+                    if let Some(retry)=reservation.as_ref(){store.cancel_automatic_retry(&identity,retry).unwrap();
+                        prop_assert!(!matches!(store.embedded_inference_state(&identity).unwrap(),HostInferenceState::Recovering{block,..} if block==retry.block),"Stop retained pre-Stop Send grant");}
+                }
+                6=>{if matches!(store.embedded_inference_state(&identity).unwrap(),HostInferenceState::Recovering{..}|HostInferenceState::Idle){one_empty_interruption(store.clone(),&identity,requests.clone()).await;}}
+                _=>{
+                    if matches!(store.embedded_inference_state(&identity).unwrap(),HostInferenceState::Recovering{..}) {
+                        let frontier=store.embedded_round_frontier(&identity).unwrap();
+                        let attempt=store.begin_embedded_inference(&identity,frontier.settled_head.as_ref()).unwrap();
+                        store.finish_embedded_inference(&attempt,crate::store::InferenceAttemptDisposition::Cancelled).unwrap();
+                    }
+                }
+            }
+            let actual:u8=store.lock().unwrap().query_row("SELECT attempts FROM embedded_retry_lineage WHERE run_id=?1 AND agent_path=?2",rusqlite::params![identity.run,identity.actor.0],|r|r.get(0)).optional().unwrap().unwrap_or(0);
+            prop_assert_eq!(actual,used,"budget reset without success at step {}",index);
+            let unique:usize=store.lock().unwrap().query_row("SELECT COUNT(*) FROM embedded_inputs WHERE run_id=?1",[&identity.run],|r|r.get(0)).unwrap();
+            prop_assert_eq!(unique,sends.len(),"duplicate command admitted input twice");
+        }
+        std::fs::remove_file(path).unwrap();Ok(())
+    })).unwrap();
 }

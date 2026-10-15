@@ -510,7 +510,7 @@ async fn embedded_compaction_retains_terminal_claims_before_fresh_recovery() {
                 );
                 assert!(matches!(
                     receipt.outcome,
-                    crate::server::CommandReceiptOutcome::Refused { .. }
+                    crate::server::CommandReceiptOutcome::ContinuationRefused { .. }
                 ));
                 assert!(requests.lock().unwrap().is_empty());
                 assert!(matches!(

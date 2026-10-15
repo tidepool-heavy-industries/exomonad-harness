@@ -4,6 +4,18 @@ use crate::embedding::{
     HostIdentity,
 };
 
+enum InputAdmission {
+    New(i64),
+    Retained(i64),
+}
+impl InputAdmission {
+    fn envelope(&self) -> i64 {
+        match self {
+            Self::New(id) | Self::Retained(id) => *id,
+        }
+    }
+}
+
 pub(crate) enum CommandInputAdmission {
     New(crate::server::CommandReceipt),
     Retained(crate::server::CommandReceipt),
@@ -456,24 +468,28 @@ impl Store {
         }
         let mut connection = self.lock()?;
         connection.write_transaction(|tx| {
-            let envelope = Self::admit_embedded_input_tx(tx, identity, operation_id, sender, item)?;
-            super::inference::admit_input_continuation_tx(
-                tx,
-                identity,
-                envelope,
-                crate::embedding::ClientOperationId(uuid::Uuid::new_v4()),
-                &self.store_id,
-            )?;
+            let admission =
+                Self::admit_embedded_input_tx(tx, identity, operation_id, sender, item)?;
+            let envelope = admission.envelope();
+            if matches!(admission, InputAdmission::New(_)) {
+                super::inference::admit_input_continuation_tx(
+                    tx,
+                    identity,
+                    envelope,
+                    crate::embedding::ClientOperationId(uuid::Uuid::new_v4()),
+                    &self.store_id,
+                )?;
+            }
             Ok(envelope)
         })
     }
-    pub(super) fn admit_embedded_input_tx(
+    fn admit_embedded_input_tx(
         tx: &Transaction<'_>,
         identity: &HostIdentity,
         operation_id: &str,
         sender: &str,
         item: &Item,
-    ) -> std::result::Result<i64, EmbeddedError> {
+    ) -> std::result::Result<InputAdmission, EmbeddedError> {
         if !matches_binding(tx, identity)? {
             return Err(EmbeddedError::Binding(
                 "input target is not bound to this host".into(),
@@ -485,12 +501,12 @@ impl Store {
             if hash.0 != previous_hash || sender != previous_sender {
                 return Err(EmbeddedError::ConflictingInput);
             }
-            return Ok(id);
+            return Ok(InputAdmission::Retained(id));
         }
         tx.execute("INSERT INTO envelopes(sender,recipient,class,item_hash,delivered_request,created_at) VALUES (?1,?2,'user',?3,NULL,?4)", params![sender,identity.actor.0,hash.0,utc_millis()])?;
         let envelope = tx.last_insert_rowid();
         tx.execute("INSERT INTO embedded_inputs(run_id,agent_path,incarnation,operation_id,envelope_id,item_hash) VALUES (?1,?2,?3,?4,?5,?6)", params![identity.run,identity.actor.0,identity.incarnation,operation_id,envelope,hash.0])?;
-        Ok(envelope)
+        Ok(InputAdmission::New(envelope))
     }
 
     pub(crate) fn admit_embedded_command_input(
@@ -524,18 +540,22 @@ impl Store {
                 return Err(StoreError::InvalidCommandState.into());
             }
             let item = Item::user_text(text);
-            let envelope = Self::admit_embedded_input_tx(
+            let admission = Self::admit_embedded_input_tx(
                 tx,
                 identity,
                 &operation.to_string(),
                 "operator",
                 &item,
             )?;
-            let continuation = super::inference::admit_input_continuation_tx(tx, identity, envelope, operation, &self.store_id)?;
+            let envelope = admission.envelope();
+            let continuation = match admission {
+                InputAdmission::New(_) => Some(super::inference::admit_input_continuation_tx(tx, identity, envelope, operation, &self.store_id)?),
+                InputAdmission::Retained(_) => super::inference::read_input_continuation(tx, envelope)?,
+            };
             let receipt = CommandReceipt {
                 command_id: operation.to_string(),
                 outcome: CommandReceiptOutcome::Admitted {
-                    continuation: Some(continuation),
+                    continuation,
                     target: Some(identity.clone()),
                     envelope_id: envelope.into(),
                     wake_error: None,

@@ -269,7 +269,10 @@ async fn provider_failure_diagnostic_survives_engine_block_reopen_and_recovery_r
                 .unwrap();
             assert!(matches!(
                 receipt.outcome,
-                CommandReceiptOutcome::Refused { .. }
+                CommandReceiptOutcome::ContinuationRefused {
+                    reason: crate::embedding::ContinuationRefusal::Stale,
+                    ..
+                }
             ));
             assert_eq!(
                 reopened.embedded_inference_state(&identity).unwrap(),

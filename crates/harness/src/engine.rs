@@ -1108,7 +1108,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         } else if released
             && (receipt.result.is_ok() || assessment.execution() == RoundExecution::Cancelled)
         {
-            if let Err(source) = self.store.finish_embedded_inference(attempt) {
+            if let Err(source) = self.store.finish_embedded_inference(
+                attempt,
+                if receipt.result.is_ok() {
+                    crate::store::InferenceAttemptDisposition::Completed
+                } else {
+                    crate::store::InferenceAttemptDisposition::Cancelled
+                },
+            ) {
                 receipt.add_failure(RoundFailureStage::InferenceAttemptSettlement, source.into());
             } else {
                 return;
@@ -3327,7 +3334,24 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     ),
                 }
             }
-            TransportFailureKind::Other => primary,
+            TransportFailureKind::Other => match self.embedded_identity() {
+                Some(identity) => match self.store.block_embedded_inference(
+                    &identity,
+                    request,
+                    crate::embedding::InferenceBlockReason::ContinuityUnproven,
+                ) {
+                    Ok(block) => EngineError::BlockedAction(EngineBlockedAction {
+                        primary: Box::new(primary),
+                        block,
+                        head_settlement: None,
+                    }),
+                    Err(persistence) => EngineError::InferenceBlockPersistence {
+                        primary: Box::new(primary),
+                        persistence,
+                    },
+                },
+                None => primary,
+            },
         };
         OrderedProviderFailure {
             cause,
@@ -4458,6 +4482,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let create = self.client.create_streaming(prepared, tx);
         tokio::pin!(create);
         let mut stream_open = true;
+        let mut failure_summary = None;
         let result = loop {
             if *cancellation.borrow() || cancellation.has_changed().is_err() {
                 break Err(EngineError::Cancelled {
@@ -4477,19 +4502,27 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             break Err(error);
                         }
                     }
-                    Some(StreamEvent::FailureSummary(summary)) => self.retain_transport_failure_summary(&request, summary).await?,
+                    Some(StreamEvent::FailureSummary(summary)) => failure_summary = Some(summary),
                     Some(StreamEvent::Delta { .. }) => {}
                     None => stream_open = false,
                 }
             }
         };
         let retained_tail = self.retain_provider_tail(&issued, &request, &mut rx).await;
+        let retained_summary = match failure_summary {
+            Some(summary) => {
+                self.retain_transport_failure_summary(&request, summary)
+                    .await
+            }
+            None => Ok(()),
+        };
         match result {
             Ok(turn) => {
                 let store = self.store.clone();
                 let recorded = turn.clone();
                 blocking(move || store.record_provider_turn(&issued, &recorded)).await?;
                 retained_tail?;
+                retained_summary?;
                 Ok(turn)
             }
             Err(error) => {
@@ -4511,6 +4544,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     blocking(move || store.stop_provider_response(&stopped_request, state)).await;
                 let mut cause = error;
                 if let Err(source) = retained_tail {
+                    cause = cause.with_secondary(
+                        RoundFailureStage::ProviderTailRecording,
+                        Some(request.clone()),
+                        source,
+                    );
+                }
+                if let Err(source) = retained_summary {
                     cause = cause.with_secondary(
                         RoundFailureStage::ProviderTailRecording,
                         Some(request.clone()),

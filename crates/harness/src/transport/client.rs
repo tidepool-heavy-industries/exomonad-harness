@@ -41,6 +41,10 @@ mod portability_tests;
 #[path = "client_provider_failure_tests.rs"]
 mod provider_failure_tests;
 
+#[cfg(test)]
+#[path = "client_continuation_tests.rs"]
+mod continuation_tests;
+
 /// Only this transport builds the backend request; the stable session id is
 /// shared with prompt_cache_key, while caller controls the complete stateless
 /// item window. Never send previous_response_id or store:true.

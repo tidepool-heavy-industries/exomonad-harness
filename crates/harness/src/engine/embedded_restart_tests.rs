@@ -291,7 +291,7 @@ async fn embedded_restart_refuses_unvalidated_finalize_with_same_name() {
     assert!(
         matches!(
             receipt.outcome,
-            crate::server::CommandReceiptOutcome::Refused { .. }
+            crate::server::CommandReceiptOutcome::ContinuationRefused { .. }
         ),
         "{receipt:?}"
     );

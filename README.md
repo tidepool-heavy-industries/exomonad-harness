@@ -53,10 +53,18 @@ Embedded inference uses a durable Store gate independently of actor lifetime.
 Messages can queue while blocked. An explicit `Recover` command names the exact
 run, incarnation, request and block generation; its checked projection, once-only
 authorization and receipt commit together in the existing command journal.
-Recovery refuses uncertain affected work and never reexecutes effects. Visible
-history recovery records exact omissions while preserving canonical history and
-operation identities. Exclusive host startup fences earlier attempts and unused
-grants; passive Store reopen, input and wake notifications grant no inference.
+Recovery refuses uncertain affected work and never reexecutes effects. Send
+atomically admits text once and requests exact continuation; queued input carries
+one intent bound to the running attempt. Projection refusal keeps that text queued
+and reports a typed reason. Visible history continuation requires an explicit
+operator command and records omissions while preserving canonical history and
+operation identities. Only transient EOF/read failures without completed current
+items or dispatched tools receive automatic retries after one and three seconds;
+the Store retains this two-retry budget across restart and manual continuation.
+Stop fences scheduled retries and existing grants. Exclusive host startup fences
+earlier attempts and unused grants; passive Store reopen and wake notifications
+grant no inference. Schema 19 retains retry lineage and input continuation intents;
+older bundles refuse the newer schema.
 
 Usage observations serialize as version 2. Cache read/write counters are
 independently optional: `null` means unavailable, while zero means the provider

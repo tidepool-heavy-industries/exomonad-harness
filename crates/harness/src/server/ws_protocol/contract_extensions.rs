@@ -44,8 +44,11 @@ impl From<InferenceBlock> for native::InferenceBlock {
 pub enum HostInferenceState {
     AutoRetry {
         block: InferenceBlock,
+        #[schemars(schema_with = "retry_count_schema")]
         attempt: u8,
+        #[schemars(schema_with = "retry_count_schema")]
         maximum: u8,
+        #[schemars(schema_with = "retry_delay_schema")]
         delay_ms: u32,
     },
     Idle,
@@ -57,6 +60,12 @@ pub enum HostInferenceState {
         operation_id: native::ClientOperationId,
         block: InferenceBlock,
     },
+}
+fn retry_count_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type":"integer", "minimum":1, "maximum":2})
+}
+fn retry_delay_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type":"integer", "enum":[1000,3000]})
 }
 impl From<&native::HostInferenceState> for HostInferenceState {
     fn from(value: &native::HostInferenceState) -> Self {

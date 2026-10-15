@@ -48,6 +48,12 @@ pub(crate) struct EmbeddedRoundSnapshot {
     pub(crate) first_envelope: Option<i64>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum InferenceAttemptDisposition {
+    Completed,
+    Cancelled,
+}
+
 pub(crate) struct InferenceAttempt {
     identity: HostIdentity,
     attempt: String,
@@ -395,6 +401,20 @@ fn checked_exact_grant(
     }
 }
 
+pub(super) fn read_input_continuation(
+    c: &Connection,
+    envelope: i64,
+) -> Result<Option<crate::embedding::InputContinuation>> {
+    c.query_row(
+        "SELECT outcome FROM embedded_input_continuations WHERE envelope_id=?1",
+        [envelope],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|v| Ok(serde_json::from_str(&v)?))
+    .transpose()
+}
+
 /// Shared by native input and journaled browser Send. The input envelope and
 /// its once-only intent commit together; duplicate admission observes this receipt.
 pub(super) fn admit_input_continuation_tx(
@@ -541,7 +561,11 @@ impl Store {
         })
     }
 
-    pub(crate) fn finish_embedded_inference(&self, attempt: &InferenceAttempt) -> Result<()> {
+    pub(crate) fn finish_embedded_inference(
+        &self,
+        attempt: &InferenceAttempt,
+        disposition: InferenceAttemptDisposition,
+    ) -> Result<()> {
         let mut c = self.lock()?;
         c.write_transaction(|tx| {
             let (generation, state) = initialize(tx, &attempt.identity)?;
@@ -550,10 +574,12 @@ impl Store {
                     incarnation,
                     attempt: current,
                 } if incarnation == attempt.identity.incarnation && current == attempt.attempt => {
-                    tx.execute(
-                        "DELETE FROM embedded_retry_lineage WHERE run_id=?1 AND agent_path=?2",
-                        params![attempt.identity.run, attempt.identity.actor.0],
-                    )?;
+                    if matches!(disposition, InferenceAttemptDisposition::Completed) {
+                        tx.execute(
+                            "DELETE FROM embedded_retry_lineage WHERE run_id=?1 AND agent_path=?2",
+                            params![attempt.identity.run, attempt.identity.actor.0],
+                        )?;
+                    }
                     expire_intents(tx, &attempt.identity, &attempt.attempt)?;
                     write(tx, &attempt.identity, generation, &Gate::Idle)
                 }
@@ -628,15 +654,7 @@ impl Store {
         &self,
         envelope: i64,
     ) -> Result<Option<crate::embedding::InputContinuation>> {
-        self.lock()?
-            .query_row(
-                "SELECT outcome FROM embedded_input_continuations WHERE envelope_id=?1",
-                [envelope],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?
-            .map(|v| Ok(serde_json::from_str(&v)?))
-            .transpose()
+        read_input_continuation(&self.lock()?, envelope)
     }
 
     /// Consume only intent bound to this attempt. Included or successfully
@@ -701,6 +719,7 @@ impl Store {
         let mut c = self.lock()?;
         c.write_transaction(|tx| {
             let (_, state) = initialize(tx, identity)?;
+            if matches!(&state, Gate::Recovering { incarnation, block, .. } if incarnation == &identity.incarnation && block == &retry.block) { return Ok(true); }
             if !matches!(&state, Gate::AutoRetry { incarnation, block, attempt, .. } if incarnation == &identity.incarnation && block == &retry.block && *attempt == retry.attempt) { return Ok(false); }
             Ok(matches!(checked_exact_grant(tx, identity, &retry.block, ClientOperationId(uuid::Uuid::new_v4()), &self.store_id)?, crate::embedding::InputContinuation::Granted { .. }))
         })
@@ -714,7 +733,8 @@ impl Store {
         let mut c = self.lock()?;
         c.write_transaction(|tx| {
             let (_, state) = initialize(tx, identity)?;
-            if matches!(&state, Gate::AutoRetry { block, attempt, .. } if block == &retry.block && *attempt == retry.attempt) {
+            if matches!(&state, Gate::AutoRetry { block, attempt, .. } if block == &retry.block && *attempt == retry.attempt)
+                || matches!(&state, Gate::Recovering { incarnation, block, .. } if incarnation == &identity.incarnation && block == &retry.block) {
                 block_tx(tx, identity, &retry.block.request, InferenceBlockReason::HostInterrupted)?;
             }
             Ok(())
@@ -737,6 +757,7 @@ impl Store {
             if record.state != super::EmbeddedCommandState::Dispatching { return Err(StoreError::InvalidCommandState); }
             tx.execute_batch("SAVEPOINT inference_recovery")?;
             let result = (|| {
+                if !matches!(initialize(tx, identity)?.1, Gate::Blocked { .. }) { return Err(StoreError::StaleInferenceRecovery); }
                 let block = expected_block.clone();
                 let receipt = grant_tx(tx, identity, &block, operation, *mode, &self.store_id)?;
                 Ok(CommandReceiptOutcome::RecoveryAuthorized { target: identity.clone(), block, mode: *mode, projection: receipt })
@@ -926,29 +947,18 @@ mod tests {
     }
 
     #[test]
-    fn eof_input_and_wake_cannot_authorize_and_duplicate_recovery_is_once_only() {
+    fn eof_wakes_cannot_authorize_and_duplicate_recovery_is_once_only() {
         let store = Store::memory().unwrap();
         let identity = identity();
         ready(&store, &identity);
         let request = RequestId("request".into());
         let block = interrupt(&store, &identity, None, &request);
-        store
-            .admit_embedded_input(
-                &identity,
-                "queued",
-                "human",
-                &crate::item::Item(
-                    serde_json::json!({"type":"message","role":"user","content":"new input"}),
-                ),
-            )
-            .unwrap();
         for _ in 0..3 {
             assert!(matches!(
                 store.begin_embedded_inference(&identity, None),
                 Err(StoreError::InferenceBlocked { .. })
             ));
         }
-        assert_eq!(store.unread("/root").unwrap().len(), 1);
         let operation = recovery(&store, &identity, &block);
         let receipt = store
             .authorize_embedded_recovery(&identity, operation)
@@ -969,7 +979,6 @@ mod tests {
             store.begin_embedded_inference(&identity, None),
             Err(StoreError::InferenceRunning)
         ));
-        assert_eq!(store.unread("/root").unwrap().len(), 1);
     }
     #[test]
     fn stale_block_wrong_incarnation_and_uncertain_terminal_refuse_atomically() {
@@ -986,7 +995,7 @@ mod tests {
                 .authorize_embedded_recovery(&identity, operation)
                 .unwrap()
                 .outcome,
-            CommandReceiptOutcome::Refused { .. }
+            CommandReceiptOutcome::ContinuationRefused { .. }
         ));
         let foreign = HostIdentity {
             incarnation: "other".into(),
@@ -998,7 +1007,7 @@ mod tests {
                 .authorize_embedded_recovery(&foreign, operation)
                 .unwrap()
                 .outcome,
-            CommandReceiptOutcome::Refused { .. }
+            CommandReceiptOutcome::ContinuationRefused { .. }
         ));
         let op = OperationId {
             origin: crate::model::ConversationIdentity::Embedded {
@@ -1016,11 +1025,19 @@ mod tests {
             .unwrap();
         assert!(matches!(
             receipt.outcome,
-            CommandReceiptOutcome::Refused { .. }
+            CommandReceiptOutcome::ContinuationRefused { .. }
         ));
+        let HostInferenceState::Blocked { block: observed } =
+            store.embedded_inference_state(&identity).unwrap()
+        else {
+            panic!("blocked");
+        };
+        assert_eq!(observed.request, block.request);
+        assert_eq!(observed.reason, block.reason);
+        assert_eq!(observed.generation, block.generation + 1);
         assert_eq!(
-            store.embedded_inference_state(&identity).unwrap(),
-            HostInferenceState::Blocked { block }
+            observed.continuation_refusal,
+            Some(crate::embedding::ContinuationRefusal::UncertainEffects)
         );
         assert_eq!(
             store
