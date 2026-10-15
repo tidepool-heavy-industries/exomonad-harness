@@ -403,6 +403,84 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn incomplete_terminal_retains_typed_reason_and_refuses_changed_identity() {
+        for (reason, expected) in [
+            (
+                json!("max_output_tokens"),
+                Some(super::super::IncompleteReason::MaxOutputTokens),
+            ),
+            (
+                json!("content_filter"),
+                Some(super::super::IncompleteReason::ContentFilter),
+            ),
+            (
+                json!("steered"),
+                Some(super::super::IncompleteReason::Steered),
+            ),
+            (
+                json!("private unknown reason"),
+                Some(super::super::IncompleteReason::Unknown),
+            ),
+            (Value::Null, None),
+        ] {
+            let mut assembly = ResponseAssembly::default();
+            assembly
+                .accept(r#"{"type":"response.created","response":{"id":"original"}}"#)
+                .unwrap();
+            let error = assembly.accept(&json!({"type":"response.incomplete","response":{"id":"original","incomplete_details":{"reason":reason}}}).to_string()).unwrap_err();
+            assert!(
+                matches!(error, TransportError::ResponseIncomplete { response_id, reason } if response_id == "original" && reason == expected)
+            );
+            assert!(!assembly.is_complete());
+        }
+        let mut assembly = ResponseAssembly::default();
+        assembly
+            .accept(r#"{"type":"response.created","response":{"id":"original"}}"#)
+            .unwrap();
+        assert!(matches!(
+            assembly.accept(r#"{"type":"response.incomplete","response":{"id":"changed"}}"#),
+            Err(TransportError::Stream(_))
+        ));
+    }
+
+    #[test]
+    fn incomplete_diagnostics_bound_utf8_bytes_and_exclude_provider_content() {
+        let token = "active-request-secret";
+        let account = "active-account-secret";
+        let id = format!("{token} {account} {}", "λ".repeat(200));
+        let packet = json!({"type":"response.incomplete", "response":{
+            "id":id, "incomplete_details":{"reason":"private unknown reason"},
+            "encrypted_content":"private reasoning", "output":"private body",
+        }});
+        let mut summary =
+            super::super::TransportFailureSummary::new(super::super::ResponseEnd::ProviderTerminal);
+        let error = ResponseAssembly::default()
+            .accept_observed(&packet.to_string(), token, account, Some(&mut summary))
+            .unwrap_err();
+        let TransportError::ResponseIncomplete {
+            response_id,
+            reason,
+        } = error
+        else {
+            panic!("wrong terminal");
+        };
+        assert_eq!(reason, Some(super::super::IncompleteReason::Unknown));
+        assert!(response_id.len() <= 128);
+        assert!(summary.metadata_truncated);
+        let encoded = serde_json::to_string(&summary).unwrap();
+        for excluded in [
+            token,
+            account,
+            "private unknown reason",
+            "private reasoning",
+            "private body",
+            "encrypted_content",
+        ] {
+            assert!(!encoded.contains(excluded));
+        }
+    }
+
+    #[test]
     fn indexed_items_require_positions_and_conflicting_duplicates_refuse() {
         let mut assembly = ResponseAssembly::default();
         assert!(matches!(

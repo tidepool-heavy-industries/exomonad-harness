@@ -755,3 +755,7 @@ mod tests {
 #[cfg(test)]
 #[path = "client_plan_tests.rs"]
 mod plan_tests;
+
+#[cfg(test)]
+#[path = "client_terminal_tests.rs"]
+mod terminal_tests;

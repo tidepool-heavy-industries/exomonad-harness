@@ -191,6 +191,7 @@ pub struct ResponsesTurn {
 pub enum TransportError {
     #[error("provider response.incomplete ({response_id}, {reason:?})")]
     ResponseIncomplete {
+        /// Bounded/redacted diagnostic ID, not exact provider replay provenance.
         response_id: String,
         reason: Option<IncompleteReason>,
     },
