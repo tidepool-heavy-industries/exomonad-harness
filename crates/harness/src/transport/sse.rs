@@ -269,7 +269,9 @@ impl ResponseAssembly {
                     event: failure,
                     diagnostic: super::http_error::diagnostic(
                         field("code"),
-                        nested_error.and_then(|error| error.get("type")?.as_str()),
+                        nested_error
+                            .and_then(|error| error.get("type")?.as_str())
+                            .or_else(|| field("error_type")),
                         field("param"),
                         field("message"),
                         token,
@@ -451,6 +453,47 @@ mod tests {
             assert_eq!(
                 serde_json::from_value::<Usage>(serde_json::to_value(&usage).unwrap()).unwrap(),
                 usage
+            );
+        }
+    }
+
+    #[test]
+    fn quota_failure_type_aliases_preserve_the_provider_failure_boundary() {
+        let code = "subscription_sharing_usage_limit_exceeded";
+        for (packet, expected_type) in [
+            (
+                json!({"type":"error","code":code,"error_type":"invalid_request_error"}),
+                Some("invalid_request_error"),
+            ),
+            (
+                json!({"type":"error","error":{"code":code,"error_type":"invalid_request_error"}}),
+                Some("invalid_request_error"),
+            ),
+            (
+                json!({"type":"error","error":{"code":code,"type":"invalid_request_error","error_type":"alias"}}),
+                Some("invalid_request_error"),
+            ),
+            (
+                json!({"type":"response.failed","response":{"error":{"code":code,"error_type":"invalid_request_error"}}}),
+                Some("invalid_request_error"),
+            ),
+            (json!({"type":"error","code":code}), None),
+        ] {
+            let error = ResponseAssembly::default()
+                .accept(&packet.to_string())
+                .unwrap_err();
+            let TransportError::ProviderStreamFailure {
+                diagnostic: Some(diagnostic),
+                ..
+            } = &error
+            else {
+                panic!("quota event lost its provider failure boundary: {error:?}");
+            };
+            assert_eq!(diagnostic.code.as_deref(), Some(code));
+            assert_eq!(diagnostic.error_type.as_deref(), expected_type);
+            assert!(
+                error.request_failure().is_none(),
+                "quota does not prove pre-response rejection"
             );
         }
     }

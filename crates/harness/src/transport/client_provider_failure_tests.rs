@@ -53,14 +53,27 @@ impl ResponsesTransport for SseFailure {
 
 #[tokio::test]
 async fn provider_failure_diagnostic_survives_engine_block_reopen_and_recovery_receipt() {
-    for (event, with_diagnostic) in [
-        (ProviderStreamFailureEvent::ResponseFailed, true),
-        (ProviderStreamFailureEvent::Error, true),
-        (ProviderStreamFailureEvent::ResponseFailed, false),
-        (ProviderStreamFailureEvent::Error, false),
+    for (event, with_diagnostic, code) in [
+        (
+            ProviderStreamFailureEvent::ResponseFailed,
+            true,
+            "invalid_tools",
+        ),
+        (ProviderStreamFailureEvent::Error, true, "invalid_tools"),
+        (
+            ProviderStreamFailureEvent::ResponseFailed,
+            false,
+            "invalid_tools",
+        ),
+        (ProviderStreamFailureEvent::Error, false, "invalid_tools"),
+        (
+            ProviderStreamFailureEvent::Error,
+            true,
+            "subscription_sharing_usage_limit_exceeded",
+        ),
     ] {
         let diagnostic = json!({
-            "code":"invalid_tools", "type":"invalid_request_error", "param":"tools[0].parameters",
+            "code":code, "type":"invalid_request_error", "param":"tools[0].parameters",
             "message":format!("schema refused {TOKEN} {ACCOUNT} Bearer other-secret sk-other acct_other {}", "λ".repeat(2048)),
         });
         let payload = if with_diagnostic {
@@ -149,7 +162,7 @@ async fn provider_failure_diagnostic_survives_engine_block_reopen_and_recovery_r
         assert_eq!(*actual, event);
         if with_diagnostic {
             let diagnostic = diagnostic.as_ref().expect("sanitized provider fields");
-            assert_eq!(diagnostic.code.as_deref(), Some("invalid_tools"));
+            assert_eq!(diagnostic.code.as_deref(), Some(code));
             assert_eq!(
                 diagnostic.error_type.as_deref(),
                 Some("invalid_request_error")

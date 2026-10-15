@@ -52,7 +52,7 @@ fn parse(body: &[u8], token: &str, account: &str) -> Option<HttpDiagnostic> {
     let field = |name: &str| error?.get(name)?.as_str();
     diagnostic(
         field("code"),
-        field("type"),
+        field("type").or_else(|| field("error_type")),
         field("param"),
         field("message").or_else(|| document.get("detail")?.as_str()),
         token,
@@ -130,6 +130,25 @@ mod tests {
     use super::*;
     use futures_util::stream;
     use serde_json::json;
+
+    #[test]
+    fn quota_error_type_alias_uses_the_shared_bounded_diagnostic() {
+        let body = br#"{"error":{"code":"subscription_sharing_usage_limit_exceeded","error_type":"invalid_request_error","message":"limit reached"}}"#;
+        let diagnostic = parse(body, "", "").unwrap();
+        assert_eq!(
+            diagnostic.code.as_deref(),
+            Some("subscription_sharing_usage_limit_exceeded")
+        );
+        assert_eq!(
+            diagnostic.error_type.as_deref(),
+            Some("invalid_request_error")
+        );
+        let both = br#"{"error":{"type":"canonical","error_type":"alias"}}"#;
+        assert_eq!(
+            parse(both, "", "").unwrap().error_type.as_deref(),
+            Some("canonical")
+        );
+    }
 
     #[test]
     fn diagnostics_read_observed_codex_account_model_detail_without_unknown_fields() {
