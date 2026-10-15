@@ -456,7 +456,15 @@ impl Store {
         }
         let mut connection = self.lock()?;
         connection.write_transaction(|tx| {
-            Self::admit_embedded_input_tx(tx, identity, operation_id, sender, item)
+            let envelope = Self::admit_embedded_input_tx(tx, identity, operation_id, sender, item)?;
+            super::inference::admit_input_continuation_tx(
+                tx,
+                identity,
+                envelope,
+                crate::embedding::ClientOperationId(uuid::Uuid::new_v4()),
+                &self.store_id,
+            )?;
+            Ok(envelope)
         })
     }
     pub(super) fn admit_embedded_input_tx(
@@ -515,7 +523,7 @@ impl Store {
             if state != "dispatching" {
                 return Err(StoreError::InvalidCommandState.into());
             }
-            let item = Item(serde_json::json!({"type":"message","role":"user","content":text}));
+            let item = Item::user_text(text);
             let envelope = Self::admit_embedded_input_tx(
                 tx,
                 identity,
@@ -523,9 +531,11 @@ impl Store {
                 "operator",
                 &item,
             )?;
+            let continuation = super::inference::admit_input_continuation_tx(tx, identity, envelope, operation, &self.store_id)?;
             let receipt = CommandReceipt {
                 command_id: operation.to_string(),
                 outcome: CommandReceiptOutcome::Admitted {
+                    continuation: Some(continuation),
                     target: Some(identity.clone()),
                     envelope_id: envelope.into(),
                     wake_error: None,

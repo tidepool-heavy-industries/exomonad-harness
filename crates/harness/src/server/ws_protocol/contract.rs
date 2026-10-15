@@ -790,6 +790,7 @@ pub fn wire_samples() -> serde_json::Value {
     let receipt = CommandReceipt {
         command_id: uuid::Uuid::nil().to_string(),
         outcome: CommandReceiptOutcome::Admitted {
+            continuation: None,
             target: Some(identity.clone()),
             envelope_id: i64::MAX.into(),
             wake_error: None,
@@ -944,6 +945,7 @@ pub fn wire_samples() -> serde_json::Value {
         reason: "Owner has changed".into(),
     });
     let recovery_block = InferenceBlock {
+        continuation_refusal: None,
         request: "request/root".into(),
         generation: u64::MAX.into(),
         reason: crate::embedding::InferenceBlockReason::ContinuityUnproven,

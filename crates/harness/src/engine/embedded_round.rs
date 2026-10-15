@@ -403,6 +403,7 @@ impl EngineError {
                         RoundExecution::Rejected
                     }
                     crate::embedding::InferenceBlockReason::ProviderStreamFailure { .. }
+                    | crate::embedding::InferenceBlockReason::ResponseIncomplete { .. }
                     | crate::embedding::InferenceBlockReason::ContinuityUnproven
                     | crate::embedding::InferenceBlockReason::HostInterrupted => {
                         RoundExecution::Failed
@@ -434,7 +435,8 @@ impl EngineError {
                         crate::provider::CancellationCause::ProviderFailureCleanup;
                     facts.execution = RoundExecution::Rejected
                 }
-                crate::transport::TransportFailureKind::ProviderFailed { .. } => {
+                crate::transport::TransportFailureKind::ProviderFailed { .. }
+                | crate::transport::TransportFailureKind::ProviderIncomplete { .. } => {
                     facts.cleanup_intent =
                         crate::provider::CancellationCause::ProviderFailureCleanup;
                 }
@@ -773,7 +775,8 @@ impl<A: super::Auth, P: super::Provider + 'static, C: super::ResponsesTransport>
             .select_embedded_round(&self.identity)
             .map_err(|source| EmbeddedRoundFailure::refused(source.into(), None))?;
         let wait = match &snapshot.inference {
-            crate::embedding::HostInferenceState::Blocked { block } => {
+            crate::embedding::HostInferenceState::Blocked { block }
+            | crate::embedding::HostInferenceState::AutoRetry { block, .. } => {
                 Some(EmbeddedRoundWait::RecoveryRequired {
                     block: block.clone(),
                 })

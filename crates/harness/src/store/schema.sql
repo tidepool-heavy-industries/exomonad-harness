@@ -128,3 +128,13 @@ CREATE TABLE IF NOT EXISTS actor_media (
 
 CREATE INDEX IF NOT EXISTS events_chat_messages ON events(request_id,id) WHERE kind='chat_message';
 CREATE INDEX IF NOT EXISTS events_actor_form_history ON events(json_extract(payload,'$.origin.run'),json_extract(payload,'$.origin.nativeActor'),json_extract(payload,'$.origin.incarnation'),id) WHERE kind='actor_form_open';
+
+CREATE TABLE IF NOT EXISTS embedded_retry_lineage (
+ run_id TEXT NOT NULL, agent_path TEXT NOT NULL REFERENCES agents(path),
+ lineage TEXT NOT NULL REFERENCES requests(id), attempts INTEGER NOT NULL CHECK(attempts BETWEEN 0 AND 2),
+ PRIMARY KEY(run_id,agent_path)
+);
+CREATE TABLE IF NOT EXISTS embedded_input_continuations (
+ run_id TEXT NOT NULL, agent_path TEXT NOT NULL REFERENCES agents(path), incarnation TEXT NOT NULL,
+ envelope_id INTEGER PRIMARY KEY REFERENCES envelopes(id), attempt TEXT, outcome TEXT NOT NULL
+);

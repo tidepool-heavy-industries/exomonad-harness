@@ -677,9 +677,17 @@ async fn continuity_refusal_preserves_action(
         .unwrap();
     let attempt = store.begin_embedded_inference(&identity, None).unwrap();
     let (_cancel, cancellation) = watch::channel(cancelled);
-    let (_incoming, envelopes) = tokio::sync::mpsc::unbounded_channel();
+    let (_incoming, mut envelopes) = tokio::sync::mpsc::unbounded_channel();
     let mut receipt = runner
-        .run_loop(None, vec![], cancellation, envelopes, true, None, false)
+        .run_loop(
+            None,
+            vec![],
+            cancellation,
+            &mut envelopes,
+            true,
+            None,
+            false,
+        )
         .await;
     let expected = if cancelled {
         RoundExecution::Cancelled

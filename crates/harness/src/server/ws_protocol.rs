@@ -102,7 +102,14 @@ pub enum CommandReceiptOutcome {
         mode: crate::embedding::RecoveryMode,
         projection: crate::context::RecoveryProjectionReceipt,
     },
+    ContinuationRefused {
+        target: HostActorIdentity,
+        block: crate::embedding::InferenceBlock,
+        reason: crate::embedding::ContinuationRefusal,
+    },
     Admitted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuation: Option<crate::embedding::InputContinuation>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<HostActorIdentity>,
         envelope_id: WireI64,
@@ -356,6 +363,7 @@ mod tests {
         let admitted = CommandReceipt {
             command_id: "cmd-1".into(),
             outcome: CommandReceiptOutcome::Admitted {
+                continuation: None,
                 target: Some(identity.clone()),
                 envelope_id: 9i64.into(),
                 wake_error: None,
@@ -417,6 +425,7 @@ mod host_wire_tests {
                     let command = HostCommand::Recover {
                         target: target.clone(),
                         expected_block: InferenceBlock {
+                            continuation_refusal: None,
                             request: crate::model::RequestId("request λ".into()),
                             generation: observed,
                             reason: reason.clone(),

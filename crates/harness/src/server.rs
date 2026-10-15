@@ -2130,6 +2130,7 @@ mod tests {
         let receipt = CommandReceipt {
             command_id: "cmd-1".into(),
             outcome: CommandReceiptOutcome::Admitted {
+                continuation: None,
                 target: Some(target.clone()),
                 envelope_id: 4i64.into(),
                 wake_error: None,

@@ -215,6 +215,7 @@ impl Store {
             CommandReceiptOutcome::Unconfirmed { .. } => "unconfirmed",
             CommandReceiptOutcome::Admitted { .. }
             | CommandReceiptOutcome::RecoveryAuthorized { .. }
+            | CommandReceiptOutcome::ContinuationRefused { .. }
             | CommandReceiptOutcome::AccountSelected { .. } => {
                 return Err(StoreError::InvalidCommandState);
             }

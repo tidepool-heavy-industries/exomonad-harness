@@ -14,6 +14,12 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "state", rename_all = "snake_case")]
 enum Gate {
     Idle,
+    AutoRetry {
+        incarnation: String,
+        block: InferenceBlock,
+        attempt: u8,
+        due_ms: i64,
+    },
     Running {
         incarnation: String,
         attempt: String,
@@ -79,9 +85,9 @@ fn initialize(tx: &Transaction<'_>, identity: &HostIdentity) -> Result<(u64, Gat
     }
     if let Some((generation, state)) = read(tx, identity)? {
         let old_owner = match &state {
-            Gate::Running { incarnation, .. } | Gate::Recovering { incarnation, .. } => {
-                incarnation != &identity.incarnation
-            }
+            Gate::Running { incarnation, .. }
+            | Gate::Recovering { incarnation, .. }
+            | Gate::AutoRetry { incarnation, .. } => incarnation != &identity.incarnation,
             _ => false,
         };
         if old_owner {
@@ -93,6 +99,7 @@ fn initialize(tx: &Transaction<'_>, identity: &HostIdentity) -> Result<(u64, Gat
                         .ok_or(StoreError::StaleInferenceRecovery)?;
                     let state = Gate::Blocked {
                         block: InferenceBlock {
+                            continuation_refusal: None,
                             request,
                             generation,
                             reason: InferenceBlockReason::HostInterrupted,
@@ -114,6 +121,7 @@ fn initialize(tx: &Transaction<'_>, identity: &HostIdentity) -> Result<(u64, Gat
             1,
             Gate::Blocked {
                 block: InferenceBlock {
+                    continuation_refusal: None,
                     request,
                     generation: 1,
                     reason: frontier
@@ -155,6 +163,7 @@ pub(super) fn block_tx(
         .checked_add(1)
         .ok_or(StoreError::StaleInferenceRecovery)?;
     let block = InferenceBlock {
+        continuation_refusal: None,
         request: request.clone(),
         generation,
         reason,
@@ -172,6 +181,12 @@ pub(super) fn block_tx(
 
 fn projection(state: Gate) -> HostInferenceState {
     match state {
+        Gate::AutoRetry { block, attempt, .. } => HostInferenceState::AutoRetry {
+            block,
+            attempt,
+            maximum: 2,
+            delay_ms: retry_delay(attempt),
+        },
         Gate::Idle => HostInferenceState::Idle,
         Gate::Running { .. } => HostInferenceState::Running,
         Gate::Blocked { block } => HostInferenceState::Blocked { block },
@@ -246,6 +261,179 @@ fn selected_snapshot(
     })
 }
 
+fn retry_delay(attempt: u8) -> u32 {
+    if attempt == 1 { 1_000 } else { 3_000 }
+}
+
+fn expire_intents(tx: &Transaction<'_>, identity: &HostIdentity, attempt: &str) -> Result<()> {
+    tx.execute("UPDATE embedded_input_continuations SET attempt=NULL WHERE run_id=?1 AND agent_path=?2 AND incarnation=?3 AND attempt=?4", params![identity.run,identity.actor.0,identity.incarnation,attempt])?;
+    Ok(())
+}
+
+fn refusal(error: &StoreError) -> Option<crate::embedding::ContinuationRefusal> {
+    use crate::embedding::ContinuationRefusal as R;
+    if matches!(
+        error,
+        StoreError::Context(crate::context::ContextError::OpaqueModel)
+            | StoreError::IncompleteProviderPrefix { .. }
+    ) {
+        return Some(R::ExactProjectionUnavailable);
+    }
+    if error.is_inference_projection_refusal() {
+        return Some(R::ContinuityUnproven);
+    }
+    match error {
+        StoreError::InferenceRecoveryUncertain { .. } => Some(R::UncertainEffects),
+        StoreError::StaleInferenceRecovery | StoreError::InvalidEmbeddedBinding => Some(R::Stale),
+        StoreError::ConflictingReplayOutcome { .. }
+        | StoreError::UnsupportedReplayOutcome { .. } => Some(R::ContinuityUnproven),
+        _ => None,
+    }
+}
+
+fn grant_tx(
+    tx: &Transaction<'_>,
+    identity: &HostIdentity,
+    expected: &InferenceBlock,
+    operation: ClientOperationId,
+    mode: crate::embedding::RecoveryMode,
+    store_id: &str,
+) -> Result<crate::context::RecoveryProjectionReceipt> {
+    let (generation, state) = initialize(tx, identity)?;
+    let block = match state {
+        Gate::Blocked { block } | Gate::AutoRetry { block, .. } => block,
+        _ => return Err(StoreError::StaleInferenceRecovery),
+    };
+    let frontier = embedded_round::frontier(tx, identity)?;
+    if block != *expected
+        || frontier
+            .pending_head
+            .as_ref()
+            .or(frontier.settled_head.as_ref())
+            != Some(&block.request)
+    {
+        return Err(StoreError::StaleInferenceRecovery);
+    }
+    validate_cleanup(tx, identity, &block.request)?;
+    let (resume_head, receipt) =
+        super::context::publish_recovery_projection(tx, identity, &block.request, mode, store_id)?;
+    write(
+        tx,
+        identity,
+        generation,
+        &Gate::Recovering {
+            incarnation: identity.incarnation.clone(),
+            operation,
+            block,
+            resume_head,
+        },
+    )?;
+    Ok(receipt)
+}
+
+fn mark_continuation_refusal(
+    tx: &Transaction<'_>,
+    identity: &HostIdentity,
+    expected: &InferenceBlock,
+    reason: crate::embedding::ContinuationRefusal,
+) -> Result<InferenceBlock> {
+    let (generation, state) = initialize(tx, identity)?;
+    if let Gate::Blocked { mut block } | Gate::AutoRetry { mut block, .. } = state {
+        if block == *expected && block.continuation_refusal != Some(reason) {
+            block.continuation_refusal = Some(reason);
+            block.generation = generation
+                .checked_add(1)
+                .ok_or(StoreError::StaleInferenceRecovery)?;
+            write(
+                tx,
+                identity,
+                block.generation,
+                &Gate::Blocked {
+                    block: block.clone(),
+                },
+            )?;
+        }
+        return Ok(block);
+    }
+    Ok(expected.clone())
+}
+
+fn checked_exact_grant(
+    tx: &Transaction<'_>,
+    identity: &HostIdentity,
+    block: &InferenceBlock,
+    operation: ClientOperationId,
+    store_id: &str,
+) -> Result<crate::embedding::InputContinuation> {
+    use crate::embedding::{InputContinuation, RecoveryMode};
+    tx.execute_batch("SAVEPOINT input_continuation")?;
+    match grant_tx(
+        tx,
+        identity,
+        block,
+        operation,
+        RecoveryMode::Exact,
+        store_id,
+    ) {
+        Ok(_) => {
+            tx.execute_batch("RELEASE input_continuation")?;
+            Ok(InputContinuation::Granted {
+                block: block.clone(),
+            })
+        }
+        Err(error) => {
+            let Some(reason) = refusal(&error) else {
+                return Err(error);
+            };
+            tx.execute_batch("ROLLBACK TO input_continuation; RELEASE input_continuation")?;
+            let observed = mark_continuation_refusal(tx, identity, block, reason)?;
+            Ok(InputContinuation::Refused {
+                block: observed,
+                reason,
+            })
+        }
+    }
+}
+
+/// Shared by native input and journaled browser Send. The input envelope and
+/// its once-only intent commit together; duplicate admission observes this receipt.
+pub(super) fn admit_input_continuation_tx(
+    tx: &Transaction<'_>,
+    identity: &HostIdentity,
+    envelope: i64,
+    operation: ClientOperationId,
+    store_id: &str,
+) -> Result<crate::embedding::InputContinuation> {
+    use crate::embedding::InputContinuation;
+    if let Some(outcome) = tx
+        .query_row(
+            "SELECT outcome FROM embedded_input_continuations WHERE envelope_id=?1",
+            [envelope],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        return Ok(serde_json::from_str(&outcome)?);
+    }
+    let (_, state) = initialize(tx, identity)?;
+    let (attempt, outcome) = match state {
+        Gate::Running { attempt, .. } => (Some(attempt), InputContinuation::Queued),
+        Gate::Blocked { block } | Gate::AutoRetry { block, .. } => (
+            None,
+            checked_exact_grant(tx, identity, &block, operation, store_id)?,
+        ),
+        Gate::Idle | Gate::Recovering { .. } => (None, InputContinuation::Queued),
+    };
+    tx.execute("INSERT INTO embedded_input_continuations(run_id,agent_path,incarnation,envelope_id,attempt,outcome) VALUES(?1,?2,?3,?4,?5,?6)", params![identity.run,identity.actor.0,identity.incarnation,envelope,attempt,serde_json::to_string(&outcome)?])?;
+    Ok(outcome)
+}
+
+pub(crate) struct AutomaticRetry {
+    pub(crate) block: InferenceBlock,
+    pub(crate) attempt: u8,
+    pub(crate) delay_ms: u32,
+}
+
 impl Store {
     pub fn embedded_inference_state(&self, identity: &HostIdentity) -> Result<HostInferenceState> {
         let mut c = self.lock()?;
@@ -313,7 +501,9 @@ impl Store {
             let recovering = matches!(state, Gate::Recovering { .. });
             match state {
                 Gate::Idle => {}
-                Gate::Blocked { block } => return Err(StoreError::InferenceBlocked { block }),
+                Gate::Blocked { block } | Gate::AutoRetry { block, .. } => {
+                    return Err(StoreError::InferenceBlocked { block });
+                }
                 Gate::Running { .. } => return Err(StoreError::InferenceRunning),
                 Gate::Recovering {
                     incarnation,
@@ -360,6 +550,11 @@ impl Store {
                     incarnation,
                     attempt: current,
                 } if incarnation == attempt.identity.incarnation && current == attempt.attempt => {
+                    tx.execute(
+                        "DELETE FROM embedded_retry_lineage WHERE run_id=?1 AND agent_path=?2",
+                        params![attempt.identity.run, attempt.identity.actor.0],
+                    )?;
+                    expire_intents(tx, &attempt.identity, &attempt.attempt)?;
                     write(tx, &attempt.identity, generation, &Gate::Idle)
                 }
                 Gate::Blocked { .. } => Ok(()),
@@ -404,8 +599,10 @@ impl Store {
             for identity in identities {
                 let (_, state) = initialize(tx, &identity)?;
                 let frontier = embedded_round::frontier(tx, &identity)?;
-                if matches!(state, Gate::Running { .. } | Gate::Recovering { .. })
-                    || (matches!(state, Gate::Idle) && frontier.pending_head.is_some())
+                if matches!(
+                    state,
+                    Gate::Running { .. } | Gate::Recovering { .. } | Gate::AutoRetry { .. }
+                ) || (matches!(state, Gate::Idle) && frontier.pending_head.is_some())
                 {
                     if let Some(request) = frontier.pending_head.or(frontier.settled_head) {
                         block_tx(
@@ -427,6 +624,103 @@ impl Store {
         })
     }
 
+    pub(crate) fn embedded_input_continuation(
+        &self,
+        envelope: i64,
+    ) -> Result<Option<crate::embedding::InputContinuation>> {
+        self.lock()?
+            .query_row(
+                "SELECT outcome FROM embedded_input_continuations WHERE envelope_id=?1",
+                [envelope],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|v| Ok(serde_json::from_str(&v)?))
+            .transpose()
+    }
+
+    /// Consume only intent bound to this attempt. Included or successfully
+    /// completed input can never grant a later unrelated interruption.
+    pub(crate) fn continue_queued_input(&self, attempt: &InferenceAttempt) -> Result<bool> {
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let identity = &attempt.identity;
+            let (_, state) = initialize(tx, identity)?;
+            let eligible: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM embedded_input_continuations i JOIN envelopes e ON e.id=i.envelope_id WHERE i.run_id=?1 AND i.agent_path=?2 AND i.incarnation=?3 AND i.attempt=?4 AND e.delivered_request IS NULL)", params![identity.run,identity.actor.0,identity.incarnation,attempt.attempt], |r| r.get(0))?;
+            expire_intents(tx, identity, &attempt.attempt)?;
+            if !eligible { return Ok(false); }
+            let Gate::Blocked { block } = state else { return Ok(false); };
+            Ok(matches!(checked_exact_grant(tx, identity, &block, ClientOperationId(uuid::Uuid::new_v4()), &self.store_id)?, crate::embedding::InputContinuation::Granted { .. }))
+        })
+    }
+
+    /// Called only after Engine has drained the provider tail and confirmed all
+    /// cleanup and persistence obligations. Store independently vetoes escaped
+    /// completed items/claims and persists reservation before any wait.
+    pub(crate) fn reserve_automatic_retry(
+        &self,
+        identity: &HostIdentity,
+        expected: &InferenceBlock,
+    ) -> Result<Option<AutomaticRetry>> {
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let (generation, state) = initialize(tx, identity)?;
+            let Gate::Blocked { block } = state else { return Ok(None); };
+            if block != *expected || !matches!(block.reason, InferenceBlockReason::StreamInterrupted { .. }) || block.continuation_refusal.is_some() { return Ok(None); }
+            let escaped: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_items WHERE request_id=?1) OR EXISTS(SELECT 1 FROM claims WHERE request_id=?1) OR NOT EXISTS(SELECT 1 FROM provider_requests WHERE request_id=?1 AND state='interrupted')", [&block.request.0], |r| r.get(0))?;
+            if escaped { return Ok(None); }
+            validate_cleanup(tx, identity, &block.request)?;
+            let used: u8 = tx.query_row("SELECT attempts FROM embedded_retry_lineage WHERE run_id=?1 AND agent_path=?2", params![identity.run,identity.actor.0], |r| r.get(0)).optional()?.unwrap_or(0);
+            if used >= 2 { return Ok(None); }
+            // Preflight through the same exact projection owner; no new grant.
+            tx.execute_batch("SAVEPOINT retry_preflight")?;
+            let preflight = super::context::publish_recovery_projection(tx, identity, &block.request, crate::embedding::RecoveryMode::Exact, &self.store_id);
+            tx.execute_batch("ROLLBACK TO retry_preflight; RELEASE retry_preflight")?;
+            if let Err(error) = preflight {
+                if let Some(reason) = refusal(&error) {
+                    let mut refused = block.clone(); refused.continuation_refusal = Some(reason);
+                    refused.generation = generation.checked_add(1).ok_or(StoreError::StaleInferenceRecovery)?;
+                    write(tx, identity, refused.generation, &Gate::Blocked { block: refused })?;
+                    return Ok(None);
+                }
+                return Err(error);
+            }
+            let attempt = used + 1;
+            let delay_ms = retry_delay(attempt);
+            tx.execute("INSERT INTO embedded_retry_lineage(run_id,agent_path,lineage,attempts) VALUES(?1,?2,?3,?4) ON CONFLICT(run_id,agent_path) DO UPDATE SET attempts=excluded.attempts", params![identity.run,identity.actor.0,block.request.0,attempt])?;
+            write(tx, identity, generation, &Gate::AutoRetry { incarnation: identity.incarnation.clone(), block: block.clone(), attempt, due_ms: super::utc_millis() + i64::from(delay_ms) })?;
+            Ok(Some(AutomaticRetry { block, attempt, delay_ms }))
+        })
+    }
+
+    pub(crate) fn activate_automatic_retry(
+        &self,
+        identity: &HostIdentity,
+        retry: &AutomaticRetry,
+    ) -> Result<bool> {
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let (_, state) = initialize(tx, identity)?;
+            if !matches!(&state, Gate::AutoRetry { incarnation, block, attempt, .. } if incarnation == &identity.incarnation && block == &retry.block && *attempt == retry.attempt) { return Ok(false); }
+            Ok(matches!(checked_exact_grant(tx, identity, &retry.block, ClientOperationId(uuid::Uuid::new_v4()), &self.store_id)?, crate::embedding::InputContinuation::Granted { .. }))
+        })
+    }
+
+    pub(crate) fn cancel_automatic_retry(
+        &self,
+        identity: &HostIdentity,
+        retry: &AutomaticRetry,
+    ) -> Result<()> {
+        let mut c = self.lock()?;
+        c.write_transaction(|tx| {
+            let (_, state) = initialize(tx, identity)?;
+            if matches!(&state, Gate::AutoRetry { block, attempt, .. } if block == &retry.block && *attempt == retry.attempt) {
+                block_tx(tx, identity, &retry.block.request, InferenceBlockReason::HostInterrupted)?;
+            }
+            Ok(())
+        })
+    }
+
     /// Projection publication, once-only authorization and command receipt share
     /// one existing Store transaction. A duplicate observes its prior outcome.
     pub(crate) fn authorize_embedded_recovery(
@@ -443,15 +737,8 @@ impl Store {
             if record.state != super::EmbeddedCommandState::Dispatching { return Err(StoreError::InvalidCommandState); }
             tx.execute_batch("SAVEPOINT inference_recovery")?;
             let result = (|| {
-                let (generation, state) = initialize(tx, identity)?;
-                let Gate::Blocked { block } = state else { return Err(StoreError::StaleInferenceRecovery); };
-                let frontier = embedded_round::frontier(tx, identity)?;
-                if block != *expected_block || frontier.pending_head.as_ref().or(frontier.settled_head.as_ref()) != Some(&block.request) {
-                    return Err(StoreError::StaleInferenceRecovery);
-                }
-                validate_cleanup(tx, identity, &block.request)?;
-                let (resume_head, receipt) = super::context::publish_recovery_projection(tx, identity, &block.request, *mode, &self.store_id)?;
-                write(tx, identity, generation, &Gate::Recovering { incarnation: identity.incarnation.clone(), operation, block: block.clone(), resume_head })?;
+                let block = expected_block.clone();
+                let receipt = grant_tx(tx, identity, &block, operation, *mode, &self.store_id)?;
                 Ok(CommandReceiptOutcome::RecoveryAuthorized { target: identity.clone(), block, mode: *mode, projection: receipt })
             })();
             let (state, outcome) = match result {
@@ -459,10 +746,13 @@ impl Store {
                     tx.execute_batch("RELEASE inference_recovery")?;
                     ("recovery_authorized", outcome)
                 },
-                Err(error) if error.is_inference_projection_refusal() || matches!(&error, StoreError::StaleInferenceRecovery | StoreError::InvalidEmbeddedBinding | StoreError::InferenceRecoveryUncertain { .. }
-                    | StoreError::ConflictingReplayOutcome { .. } | StoreError::UnsupportedReplayOutcome { .. }) => {
+                Err(error) if refusal(&error).is_some() => {
                     tx.execute_batch("ROLLBACK TO inference_recovery; RELEASE inference_recovery")?;
-                    ("refused", CommandReceiptOutcome::Refused { target: Some(identity.clone()), reason: error.to_string() })
+                    let reason = refusal(&error).expect("classified refusal");
+                    if reason != crate::embedding::ContinuationRefusal::Stale {
+                        mark_continuation_refusal(tx, identity, expected_block, reason)?;
+                    }
+                    ("refused", CommandReceiptOutcome::ContinuationRefused { target: identity.clone(), block: expected_block.clone(), reason })
                 },
                 Err(error) => return Err(error),
             };

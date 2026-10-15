@@ -96,6 +96,8 @@ pub struct InferenceBlock {
     pub request: RequestId,
     pub generation: u64,
     pub reason: InferenceBlockReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_refusal: Option<ContinuationRefusal>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -111,6 +113,10 @@ pub enum InferenceBlockReason {
     },
     RequestRejected {
         failure: crate::transport::RequestFailure,
+    },
+    ResponseIncomplete {
+        response_id: String,
+        reason: Option<crate::transport::IncompleteReason>,
     },
     ContinuityUnproven,
     HostInterrupted,
@@ -130,6 +136,12 @@ pub enum RecoveryMode {
     rename_all_fields = "camelCase"
 )]
 pub enum HostInferenceState {
+    AutoRetry {
+        block: InferenceBlock,
+        attempt: u8,
+        maximum: u8,
+        delay_ms: u32,
+    },
     Idle,
     Running,
     Blocked {
@@ -139,6 +151,29 @@ pub enum HostInferenceState {
         operation_id: ClientOperationId,
         block: InferenceBlock,
     },
+}
+
+/// The input remains admitted even when its exact continuation is refused.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum InputContinuation {
+    Queued,
+    Granted {
+        block: InferenceBlock,
+    },
+    Refused {
+        block: InferenceBlock,
+        reason: ContinuationRefusal,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationRefusal {
+    ExactProjectionUnavailable,
+    ContinuityUnproven,
+    UncertainEffects,
+    Stale,
 }
 
 /// Native composition retains an admitted startup intent and the run lease.
@@ -373,6 +408,7 @@ impl ToolSurface {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputReceipt {
+    pub continuation: Option<InputContinuation>,
     pub envelope_id: i64,
     /// Delivery failure does not revoke the durable admission.
     pub wake_error: Option<String>,
@@ -569,6 +605,7 @@ impl Conversation {
             InputObservation::Included(_) => None,
         };
         Ok(InputReceipt {
+            continuation: self.store.embedded_input_continuation(envelope_id)?,
             envelope_id,
             wake_error,
         })

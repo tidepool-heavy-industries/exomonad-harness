@@ -11,6 +11,8 @@ pub struct InferenceBlock {
     pub request: String,
     pub generation: WireU64,
     pub reason: native::InferenceBlockReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_refusal: Option<native::ContinuationRefusal>,
 }
 impl From<&native::InferenceBlock> for InferenceBlock {
     fn from(value: &native::InferenceBlock) -> Self {
@@ -18,6 +20,7 @@ impl From<&native::InferenceBlock> for InferenceBlock {
             request: value.request.0.clone(),
             generation: value.generation.into(),
             reason: value.reason.clone(),
+            continuation_refusal: value.continuation_refusal,
         }
     }
 }
@@ -27,6 +30,7 @@ impl From<InferenceBlock> for native::InferenceBlock {
             request: crate::model::RequestId(value.request),
             generation: value.generation.get(),
             reason: value.reason,
+            continuation_refusal: value.continuation_refusal,
         }
     }
 }
@@ -38,6 +42,12 @@ impl From<InferenceBlock> for native::InferenceBlock {
     deny_unknown_fields
 )]
 pub enum HostInferenceState {
+    AutoRetry {
+        block: InferenceBlock,
+        attempt: u8,
+        maximum: u8,
+        delay_ms: u32,
+    },
     Idle,
     Running,
     Blocked {
@@ -51,6 +61,17 @@ pub enum HostInferenceState {
 impl From<&native::HostInferenceState> for HostInferenceState {
     fn from(value: &native::HostInferenceState) -> Self {
         match value {
+            native::HostInferenceState::AutoRetry {
+                block,
+                attempt,
+                maximum,
+                delay_ms,
+            } => Self::AutoRetry {
+                block: block.into(),
+                attempt: *attempt,
+                maximum: *maximum,
+                delay_ms: *delay_ms,
+            },
             native::HostInferenceState::Idle => Self::Idle,
             native::HostInferenceState::Running => Self::Running,
             native::HostInferenceState::Blocked { block } => Self::Blocked {
@@ -165,6 +186,32 @@ pub struct CommandReceipt {
     pub outcome: CommandReceiptOutcome,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum InputContinuation {
+    Queued,
+    Granted {
+        block: InferenceBlock,
+    },
+    Refused {
+        block: InferenceBlock,
+        reason: native::ContinuationRefusal,
+    },
+}
+impl From<&native::InputContinuation> for InputContinuation {
+    fn from(value: &native::InputContinuation) -> Self {
+        match value {
+            native::InputContinuation::Queued => Self::Queued,
+            native::InputContinuation::Granted { block } => Self::Granted {
+                block: block.into(),
+            },
+            native::InputContinuation::Refused { block, reason } => Self::Refused {
+                block: block.into(),
+                reason: *reason,
+            },
+        }
+    }
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(
     tag = "outcome",
     rename_all = "snake_case",
@@ -181,7 +228,14 @@ pub enum CommandReceiptOutcome {
         mode: native::RecoveryMode,
         projection: RecoveryProjectionReceipt,
     },
+    ContinuationRefused {
+        target: HostActorIdentity,
+        block: InferenceBlock,
+        reason: native::ContinuationRefusal,
+    },
     Admitted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuation: Option<InputContinuation>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<HostActorIdentity>,
         envelope_id: WireI64,
@@ -232,11 +286,22 @@ impl From<&super::CommandReceipt> for CommandReceipt {
                         .collect(),
                 },
             },
+            N::ContinuationRefused {
+                target,
+                block,
+                reason,
+            } => CommandReceiptOutcome::ContinuationRefused {
+                target: target.clone(),
+                block: block.into(),
+                reason: *reason,
+            },
             N::Admitted {
+                continuation,
                 target,
                 envelope_id,
                 wake_error,
             } => CommandReceiptOutcome::Admitted {
+                continuation: continuation.as_ref().map(Into::into),
                 target: target.clone(),
                 envelope_id: *envelope_id,
                 wake_error: wake_error.clone(),
@@ -616,6 +681,7 @@ mod tests {
     #[test]
     fn recovery_generation_and_form_revisions_are_exact_decimal_observations() {
         let native = native::InferenceBlock {
+            continuation_refusal: None,
             request: crate::model::RequestId("request".into()),
             generation: u64::MAX,
             reason: native::InferenceBlockReason::ContinuityUnproven,

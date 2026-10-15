@@ -688,14 +688,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .map(crate::finalize::tool_schema_from_result_schema)
             .transpose()?;
         let (_cancel, cancellation) = watch::channel(false);
-        let (_incoming, envelopes) = tokio::sync::mpsc::unbounded_channel();
+        let (_incoming, mut envelopes) = tokio::sync::mpsc::unbounded_channel();
         let span = tracing::debug_span!(target: "harness::runtime_cost", "engine_run",
             actor = %self.config.agent.0, recovering = false, initial_items = initial.len());
         self.run_loop(
             None,
             initial,
             cancellation,
-            envelopes,
+            &mut envelopes,
             false,
             schema.as_ref(),
             false,
@@ -901,7 +901,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 protocol,
             },
         )?;
-        let inference_attempt = match self.embedded_identity() {
+        let mut inference_attempt = match self.embedded_identity() {
             Some(identity) => match match selected {
                 Some(snapshot) => self
                     .store
@@ -922,7 +922,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             || inference_attempt
                 .as_ref()
                 .is_some_and(|attempt| attempt.recovering);
-        let (envelope_tx, envelopes) = tokio::sync::mpsc::unbounded_channel();
+        let (envelope_tx, mut envelopes) = tokio::sync::mpsc::unbounded_channel();
         if let Some(envelope_id) = selected.and_then(|snapshot| snapshot.first_envelope) {
             envelope_tx
                 .send(DurableMailboxWake { envelope_id }.into())
@@ -938,23 +938,133 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         });
         let span = tracing::debug_span!(target: "harness::runtime_cost", "engine_run",
             actor = %self.config.agent.0, recovering, initial_items = new_items.len());
-        let mut receipt = self
-            .run_loop(
-                head,
-                new_items,
-                cancellation,
-                envelopes,
-                true,
-                finalize_schema.as_ref(),
-                recovering,
-            )
-            .instrument(span)
-            .await;
+        let mut current_head = head;
+        let mut current_items = new_items;
+        let mut recovering = recovering;
+        let mut cancellation = cancellation;
+        let receipt = loop {
+            let mut receipt = self
+                .run_loop(
+                    current_head,
+                    current_items,
+                    cancellation.clone(),
+                    &mut envelopes,
+                    true,
+                    finalize_schema.as_ref(),
+                    recovering,
+                )
+                .instrument(span.clone())
+                .await;
+            if let Some(attempt) = &inference_attempt {
+                self.settle_inference_attempt(attempt, &mut receipt);
+            }
+            let assessment = receipt.assessment();
+            let safe = receipt.result.is_err()
+                && assessment.execution() != RoundExecution::Cancelled
+                && assessment.secondary_failure_stages().is_empty()
+                && assessment.store_continuation() == StoreContinuation::NoReopenRequired
+                && assessment.cleanup() == RoundCleanup::Confirmed
+                && !*cancellation.borrow();
+            let Some(attempt) = inference_attempt.as_ref().filter(|_| safe) else {
+                break receipt;
+            };
+            let identity = self
+                .embedded_identity()
+                .expect("embedded inference attempt");
+            let mut granted = match self.store.continue_queued_input(attempt) {
+                Ok(granted) => granted,
+                Err(source) => {
+                    receipt
+                        .add_failure(RoundFailureStage::InferenceAttemptSettlement, source.into());
+                    break receipt;
+                }
+            };
+            if !granted {
+                let block = assessment
+                    .inference_obligations()
+                    .iter()
+                    .find_map(|obligation| match obligation {
+                        InferenceObligation::RecoverBlock { block }
+                            if matches!(
+                                block.reason,
+                                crate::embedding::InferenceBlockReason::StreamInterrupted { .. }
+                            ) =>
+                        {
+                            Some(block)
+                        }
+                        _ => None,
+                    });
+                let retry = match block
+                    .map(|block| self.store.reserve_automatic_retry(&identity, block))
+                    .transpose()
+                {
+                    Ok(retry) => retry.flatten(),
+                    Err(source) => {
+                        receipt.add_failure(
+                            RoundFailureStage::InferenceAttemptSettlement,
+                            source.into(),
+                        );
+                        break receipt;
+                    }
+                };
+                let Some(retry) = retry else {
+                    break receipt;
+                };
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(u64::from(retry.delay_ms))) => {},
+                    _ = cancellation.changed() => {
+                        if let Err(source) = self.store.cancel_automatic_retry(&identity, &retry) { receipt.add_failure(RoundFailureStage::InferenceAttemptSettlement, source.into()); }
+                        break receipt;
+                    }
+                }
+                if *cancellation.borrow() {
+                    if let Err(source) = self.store.cancel_automatic_retry(&identity, &retry) {
+                        receipt.add_failure(
+                            RoundFailureStage::InferenceAttemptSettlement,
+                            source.into(),
+                        );
+                    }
+                    break receipt;
+                }
+                granted = match self.store.activate_automatic_retry(&identity, &retry) {
+                    Ok(granted) => granted,
+                    Err(source) => {
+                        receipt.add_failure(
+                            RoundFailureStage::InferenceAttemptSettlement,
+                            source.into(),
+                        );
+                        break receipt;
+                    }
+                };
+            }
+            if !granted {
+                break receipt;
+            }
+            let frontier = match self.store.embedded_round_frontier(&identity) {
+                Ok(frontier) => frontier,
+                Err(source) => {
+                    receipt
+                        .add_failure(RoundFailureStage::InferenceAttemptSettlement, source.into());
+                    break receipt;
+                }
+            };
+            current_head = frontier.settled_head;
+            inference_attempt = match self
+                .store
+                .begin_embedded_inference(&identity, current_head.as_ref())
+            {
+                Ok(attempt) => Some(attempt),
+                Err(source) => {
+                    receipt
+                        .add_failure(RoundFailureStage::InferenceAttemptSettlement, source.into());
+                    break receipt;
+                }
+            };
+            current_items = Vec::new();
+            recovering = true;
+        };
         drop(keepalive);
         forwarder.abort();
-        if let Some(attempt) = &inference_attempt {
-            self.settle_inference_attempt(attempt, &mut receipt);
-        }
         Ok(receipt)
     }
 
@@ -1025,7 +1135,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         head: Option<RequestId>,
         initial: Vec<Item>,
         cancellation: watch::Receiver<bool>,
-        envelopes: tokio::sync::mpsc::UnboundedReceiver<MailboxSignal>,
+        envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<MailboxSignal>,
         admit_inbox: bool,
         finalize_schema: Option<&serde_json::Value>,
         recovering: bool,
@@ -1112,7 +1222,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         head: Option<RequestId>,
         initial: Vec<Item>,
         mut cancellation: watch::Receiver<bool>,
-        mut envelopes: tokio::sync::mpsc::UnboundedReceiver<MailboxSignal>,
+        envelopes: &mut tokio::sync::mpsc::UnboundedReceiver<MailboxSignal>,
         admit_inbox: bool,
         finalize_schema: Option<&serde_json::Value>,
         recovering: bool,
@@ -1820,6 +1930,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let mut persisted_items = Vec::<Item>::new();
             let mut event_stream_open = true;
             let mut deferred_dispatch_error = None;
+            let mut failure_summary = None;
             let turn = loop {
                 tokio::select! {
                     settlement = settlements.recv(), if settlements_open => {
@@ -1837,6 +1948,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         Err(error) => {
                             output_lifetime.stop();
                             let retained_tail = self.retain_provider_tail(&provider_request, &parent, &mut event_rx).await;
+                            let retained_summary = match failure_summary.take() { Some(summary) => self.retain_transport_failure_summary(&parent, summary).await, None => Ok(()) };
                             let state = if matches!(error, TransportError::IncompleteResponse(_)) { crate::store::ProviderResponseState::Interrupted } else if error.request_failure().is_some() { crate::store::ProviderResponseState::Rejected } else { crate::store::ProviderResponseState::Failed };
                             let store = self.store.clone();
                             let stopped_request = parent.clone();
@@ -1848,6 +1960,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             });
                             let mut cause = failure.cause;
                             if let Err(source) = retained_tail {
+                                cause = cause.with_secondary(RoundFailureStage::ProviderTailRecording,
+                                    Some(parent.clone()), source);
+                            }
+                            if let Err(source) = retained_summary {
                                 cause = cause.with_secondary(RoundFailureStage::ProviderTailRecording,
                                     Some(parent.clone()), source);
                             }
@@ -1938,6 +2054,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                     Err(error) => deferred_dispatch_error = Some(error),
                                 }
                             }
+                            Some(StreamEvent::FailureSummary(summary)) => { failure_summary = Some(summary); }
                             Some(StreamEvent::Delta {item_id, channel, index, text, tool_name}) => {
                                 self.observe_delta(&parent, item_id, channel, index, text, tool_name);
                             }
@@ -1963,6 +2080,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             };
             // A completed response can race the buffered final item events.
             while let Ok(event) = event_rx.try_recv() {
+                if let StreamEvent::FailureSummary(summary) = event {
+                    self.retain_transport_failure_summary(&parent, summary)
+                        .await?;
+                    continue;
+                }
                 if let StreamEvent::Delta {
                     item_id,
                     channel,
@@ -2314,7 +2436,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     match self
                         .wait_for_resume(
                             pending,
-                            &mut envelopes,
+                            envelopes,
                             &mut cancellation,
                             WaitSelection::AllResults,
                         )
@@ -2358,7 +2480,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 let result = match self
                     .wait_for_resume(
                         pending,
-                        &mut envelopes,
+                        envelopes,
                         &mut cancellation,
                         WaitSelection::BlockingResults,
                     )
@@ -3051,6 +3173,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 error,
             },
             TransportFailureKind::Interrupted(_)
+            | TransportFailureKind::ProviderIncomplete { .. }
             | TransportFailureKind::ProviderFailed { .. }
             | TransportFailureKind::Other => EngineError::Transport(error),
         };
@@ -3073,6 +3196,30 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             };
         }
         let cause = match kind {
+            TransportFailureKind::ProviderIncomplete {
+                response_id,
+                reason,
+            } => match self.embedded_identity() {
+                Some(identity) => match self.store.block_embedded_inference(
+                    &identity,
+                    request,
+                    crate::embedding::InferenceBlockReason::ResponseIncomplete {
+                        response_id,
+                        reason,
+                    },
+                ) {
+                    Ok(block) => EngineError::BlockedAction(EngineBlockedAction {
+                        primary: Box::new(primary),
+                        block,
+                        head_settlement: None,
+                    }),
+                    Err(persistence) => EngineError::InferenceBlockPersistence {
+                        primary: Box::new(primary),
+                        persistence,
+                    },
+                },
+                None => primary,
+            },
             TransportFailureKind::ProviderFailed { event, diagnostic } => {
                 match self.embedded_identity() {
                     Some(identity) => match self.store.block_embedded_inference(
@@ -3845,6 +3992,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let mut failure = None;
         while let Ok(event) = events.try_recv() {
             let result = match event {
+                StreamEvent::FailureSummary(summary) => {
+                    self.retain_transport_failure_summary(request, summary)
+                        .await
+                }
                 StreamEvent::CompletedItem(done) => {
                     async {
                         let (item, inserted) = self.retain_provider_item(issued, done).await?;
@@ -3886,6 +4037,25 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
         }
         failure.map_or(Ok(()), Err)
+    }
+
+    async fn retain_transport_failure_summary(
+        &self,
+        request: &RequestId,
+        summary: crate::transport::TransportFailureSummary,
+    ) -> Result<(), EngineError> {
+        let store = self.store.clone();
+        let request = request.clone();
+        blocking(move || {
+            store
+                .record_event(
+                    Some(&request),
+                    "transport_failure_summary",
+                    &serde_json::to_value(summary)?,
+                )
+                .map(|_| ())
+        })
+        .await
     }
 
     async fn retain_provider_item(
@@ -4307,6 +4477,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             break Err(error);
                         }
                     }
+                    Some(StreamEvent::FailureSummary(summary)) => self.retain_transport_failure_summary(&request, summary).await?,
                     Some(StreamEvent::Delta { .. }) => {}
                     None => stream_open = false,
                 }
