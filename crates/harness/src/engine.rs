@@ -7592,7 +7592,7 @@ mod tests {
             engine
                 .run(
                     None,
-                    vec![Item(json!({"type":"message","role":"user","content":"go"}))],
+                    vec![Item::user_text("go")],
                     cancel_rx,
                     empty_mailbox(),
                 )
@@ -8551,7 +8551,7 @@ mod tests {
         let result = engine
             .run(
                 None,
-                vec![Item(json!({"type":"message","role":"user","content":"go"}))],
+                vec![Item::user_text("go")],
                 cancel_rx,
                 empty_mailbox(),
             )
@@ -8659,7 +8659,7 @@ mod tests {
     #[tokio::test]
     async fn successful_run_returns_complete_ordered_transcript_once() {
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let initial = Item(json!({"role":"user","content":"start"}));
+        let initial = Item::user_text("start");
         let call = Item(json!({
             "type":"function_call","call_id":"transcript-call","name":"echo","arguments":"{\"n\":7}"
         }));
@@ -8733,7 +8733,7 @@ mod tests {
             std::env::temp_dir().join(format!("harness-engine-head-{}.db", uuid::Uuid::new_v4()));
         let store = Arc::new(Store::open(&path).unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let prefix = Item(json!({"role":"user","content":"old prefix"}));
+        let prefix = Item::user_text("old prefix");
         let parent = RequestId("existing-head".into());
         store
             .write_request(
@@ -8744,11 +8744,11 @@ mod tests {
                 StoredUsage::default(),
             )
             .unwrap();
-        let first_new = Item(json!({"role":"user","content":"first new"}));
+        let first_new = Item::user_text("first new");
         let first_answer = Item(json!({
             "type":"message","role":"assistant","phase":"final_answer","content":"answer one"
         }));
-        let second_new = Item(json!({"role":"user","content":"second new"}));
+        let second_new = Item::user_text("second new");
         let second_answer = Item(json!({
             "type":"message","role":"assistant","phase":"final_answer","content":"answer two"
         }));
@@ -8872,7 +8872,7 @@ mod tests {
                 agent: AgentPath("/root".into()),
             },
         );
-        let new_item = Item(json!({"role":"user","content":"only this"}));
+        let new_item = Item::user_text("only this");
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         engine
             .run(None, vec![new_item.clone()], cancel_rx, empty_mailbox())
@@ -8912,7 +8912,7 @@ mod tests {
             engine
                 .run(
                     Some(RequestId("no-such-head".into())),
-                    vec![Item(json!({"role":"user","content":"new"}))],
+                    vec![Item::user_text("new")],
                     cancel_rx,
                     empty_mailbox(),
                 )
@@ -9104,7 +9104,7 @@ mod tests {
         engine
             .run(
                 None,
-                vec![Item(json!({"type":"message","role":"user","content":"go"}))],
+                vec![Item::user_text("go")],
                 cancel_rx,
                 empty_mailbox(),
             )
@@ -9146,7 +9146,7 @@ mod tests {
             engine
                 .run(
                     None,
-                    vec![Item(json!({"role":"user","content":"go"}))],
+                    vec![Item::user_text("go")],
                     cancel_rx,
                     empty_mailbox(),
                 )
@@ -9363,7 +9363,7 @@ mod tests {
             engine
                 .run(
                     None,
-                    vec![Item(json!({"type":"message","role":"user","content":"go"}))],
+                    vec![Item::user_text("go")],
                     cancel_rx,
                     empty_mailbox(),
                 )
@@ -9446,7 +9446,7 @@ mod tests {
             engine
                 .run(
                     None,
-                    vec![Item(json!({"type":"message","role":"user","content":"go"}))],
+                    vec![Item::user_text("go")],
                     cancel_rx,
                     empty_mailbox(),
                 )
@@ -9495,7 +9495,7 @@ mod tests {
             engine
                 .run(
                     None,
-                    vec![Item(json!({"type":"message","role":"user","content":"go"}))],
+                    vec![Item::user_text("go")],
                     cancel_rx,
                     empty_mailbox(),
                 )
@@ -9589,7 +9589,7 @@ mod tests {
             engine
                 .run(
                     None,
-                    vec![Item(json!({"type":"message","role":"user","content":"go"}))],
+                    vec![Item::user_text("go")],
                     cancel_rx,
                     empty_mailbox(),
                 )
@@ -9658,7 +9658,7 @@ mod tests {
             engine
                 .run(
                     None,
-                    vec![Item(json!({"type":"message","role":"user","content":"go"}))],
+                    vec![Item::user_text("go")],
                     cancel_rx,
                     empty_mailbox(),
                 )
@@ -9928,12 +9928,7 @@ mod tests {
         let (envelope_tx, envelope_rx) = tokio::sync::mpsc::unbounded_channel();
         let run = tokio::spawn(async move {
             engine
-                .run(
-                    None,
-                    vec![Item(json!({"type":"message","role":"user","content":"go"}))],
-                    cancel_rx,
-                    envelope_rx,
-                )
+                .run(None, vec![Item::user_text("go")], cancel_rx, envelope_rx)
                 .await
         });
         let wait_call = CallId("wait-envelope".into());
@@ -10222,7 +10217,7 @@ mod tests {
         let (completion, reply) = engine
             .run_finalized::<FinalReply>(
                 None,
-                vec![Item(json!({"role":"user","content":"go"}))],
+                vec![Item::user_text("go")],
                 cancel_rx,
                 empty_mailbox(),
             )
@@ -10303,7 +10298,7 @@ mod tests {
         let completion = engine
             .run_with_reply_schema(
                 None,
-                vec![Item(json!({"role":"user","content":"go"}))],
+                vec![Item::user_text("go")],
                 cancel_rx,
                 empty_mailbox(),
                 json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}),
@@ -10388,7 +10383,7 @@ mod tests {
             let error = engine
                 .run_with_reply_schema(
                     None,
-                    vec![Item(json!({"role":"user","content":"go"}))],
+                    vec![Item::user_text("go")],
                     cancel_rx,
                     empty_mailbox(),
                     json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}),
@@ -10433,9 +10428,7 @@ mod tests {
         let turn = engine
             .run(
                 None,
-                vec![Item(
-                    json!({"role":"user","content":"Reply exactly ENGINE_OK"}),
-                )],
+                vec![Item::user_text("Reply exactly ENGINE_OK")],
                 cancel_rx,
                 empty_mailbox(),
             )

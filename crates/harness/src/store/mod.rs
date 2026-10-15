@@ -2751,9 +2751,7 @@ mod tests {
             "type":"function_call_output","call_id":call.0,"output":"{\"result\":\"snowman ☃\"}"
         }));
         let model_request = ResponsesRequest {
-            input: vec![item(
-                serde_json::json!({"role":"user","content":"run cell"}),
-            )],
+            input: vec![Item::user_text("run cell")],
             instructions: "reply by tool".into(),
             tools: vec![serde_json::json!({"type":"function","name":"cell"})].into(),
             tools_allowed: None,

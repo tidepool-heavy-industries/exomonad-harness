@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn request_is_stateless_and_pins_effort() {
         let request = ResponsesRequest {
-            input: vec![Item(json!({"role":"user","content":"hello"}))],
+            input: vec![Item::user_text("hello")],
             instructions: "fixed".into(),
             tools: vec![].into(),
             tools_allowed: None,
@@ -607,9 +607,7 @@ mod tests {
         let auth = ChatGptPlanAuth::new(ChatGptPlanAuth::default_path().expect("auth path"));
         let client = ResponsesClient::new(auth);
         let request = ResponsesRequest {
-            input: vec![Item(
-                json!({"role":"user","content":"Reply with exactly: TRANSPORT_OK"}),
-            )],
+            input: vec![Item::user_text("Reply with exactly: TRANSPORT_OK")],
             instructions: "This is a transport smoke test. Reply briefly.".into(),
             tools: vec![].into(),
             tools_allowed: None,

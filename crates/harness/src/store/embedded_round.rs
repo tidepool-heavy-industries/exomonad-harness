@@ -621,7 +621,7 @@ mod tests {
                 let identity = identity();
                 let pending = RequestId("pending".into());
                 let settled = has_head.then(|| RequestId("settled".into()));
-                let input = Item(serde_json::json!({"role":"user","content":"retained input"}));
+                let input = Item::user_text("retained input");
                 {
                     let store = Store::open(&path).unwrap();
                     store.bind_embedded_actor(&identity, None).unwrap();
