@@ -2611,6 +2611,9 @@ fn safe_transport_error(error: &TransportError) -> String {
         | harness::transport::TransportError::IncompleteOutputIndices { .. } => {
             "API request or response failed".into()
         }
+        harness::transport::TransportError::ResponseIncomplete { .. } => {
+            "API response incomplete".into()
+        }
         harness::transport::TransportError::IncompleteResponse(cause) => {
             format!("API response interrupted: {cause}")
         }
