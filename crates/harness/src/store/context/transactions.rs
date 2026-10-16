@@ -2,9 +2,8 @@
 use super::*;
 use crate::context::{
     ContextChange, ContextInspection, ContextPatch, ContextProblem, ContextProblemCode,
-    ContextTransaction, ContextTransactionDraft, ContextTransactionReceipt,
-    ContextTransactionStatus, check_context_patch, context_digest, context_has_reference,
-    inspect_context,
+    ContextTransaction, ContextTransactionDraft, ContextTransactionStatus, check_context_patch,
+    context_digest, context_has_reference, inspect_context,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -569,7 +568,7 @@ impl Store {
                 ContextTransactionStatus::Cancelled
             } else {
                 ContextTransactionStatus::Rejected(vec![problem(
-                    ContextProblemCode::InvalidPatch,
+                    ContextProblemCode::Ineligible,
                     None,
                     "context candidate was discarded before publication",
                 )])
