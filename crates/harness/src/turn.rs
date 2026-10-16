@@ -94,7 +94,7 @@ pub enum JobOutput {
     Cancelled,
     CancelledWithReceipt(Result<Value, ToolFailure>),
     Interrupted,
-    CancellationUnconfirmed(String),
+    CancellationUnconfirmed(ToolFailure),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1335,7 +1335,7 @@ impl JobScheduler {
                         JobOutput::Completed(result.clone())
                     }
                     crate::provider::CancellationAcknowledgment::Unconfirmed(detail) => {
-                        JobOutput::CancellationUnconfirmed(detail.clone())
+                        JobOutput::CancellationUnconfirmed(detail.clone().into())
                     }
                 };
                 job.output = Some(output.clone());

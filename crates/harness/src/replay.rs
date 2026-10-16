@@ -282,15 +282,42 @@ impl ReplayProvider {
                 .into(),
             )
         })?;
+        // Canonical evidence belongs to the immutable Item; terminal metadata
+        // retains classification without repeating the full semantic payload.
+        let canonical_body = if !matches!(terminal, TerminalOutcome::Success) {
+            match &value {
+                serde_json::Value::String(text) => Some(
+                    serde_json::from_str::<serde_json::Value>(text)
+                        .map_err(|error| ProviderError::Tool(error.to_string().into()))?,
+                ),
+                value => Some(value.clone()),
+            }
+        } else {
+            None
+        };
+        let restore =
+            |failure: crate::provider::ToolFailure, body: Option<&serde_json::Value>| match body
+                .and_then(|value| value.get("result"))
+            {
+                Some(receipt) => failure.with_result_receipt(receipt.clone()),
+                None => failure,
+            };
         let restored = match terminal {
-            TerminalOutcome::Failure(failure) => JobOutput::Completed(Err(failure)),
+            TerminalOutcome::Failure(failure) => {
+                JobOutput::Completed(Err(restore(failure, canonical_body.as_ref())))
+            }
             TerminalOutcome::Cancelled => JobOutput::Cancelled,
             TerminalOutcome::CancelledWithReceipt(receipt) => {
-                JobOutput::CancelledWithReceipt(receipt)
+                JobOutput::CancelledWithReceipt(receipt.map_err(|failure| {
+                    restore(
+                        failure,
+                        canonical_body.as_ref().and_then(|body| body.get("receipt")),
+                    )
+                }))
             }
             TerminalOutcome::NotStarted | TerminalOutcome::Interrupted => JobOutput::Interrupted,
             TerminalOutcome::CancellationUnconfirmed(detail) => {
-                JobOutput::CancellationUnconfirmed(detail)
+                JobOutput::CancellationUnconfirmed(restore(detail, canonical_body.as_ref()))
             }
             TerminalOutcome::Success => {
                 let decoded = match (kind, value) {
@@ -845,7 +872,7 @@ impl Provider for ReplayProvider {
                 NonValueTerminal::Interrupted,
             )),
             JobOutput::CancellationUnconfirmed(detail) => Err(ProviderError::NonValueTerminal(
-                NonValueTerminal::CancellationUnconfirmed(detail),
+                NonValueTerminal::CancellationUnconfirmed(detail.message().to_owned()),
             )),
         }
     }
@@ -875,7 +902,7 @@ impl Provider for ReplayProvider {
                 NonValueTerminal::Interrupted,
             )),
             JobOutput::CancellationUnconfirmed(detail) => Err(ProviderError::NonValueTerminal(
-                NonValueTerminal::CancellationUnconfirmed(detail),
+                NonValueTerminal::CancellationUnconfirmed(detail.message().to_owned()),
             )),
         }
     }
@@ -1819,7 +1846,7 @@ mod tests {
                     ))
                 )),
                 JobOutput::CancellationUnconfirmed(detail) => assert!(
-                    matches!(direct, Err(ProviderError::NonValueTerminal(NonValueTerminal::CancellationUnconfirmed(saved))) if saved == detail)
+                    matches!(direct, Err(ProviderError::NonValueTerminal(NonValueTerminal::CancellationUnconfirmed(saved))) if saved == detail.message())
                 ),
             }
         }

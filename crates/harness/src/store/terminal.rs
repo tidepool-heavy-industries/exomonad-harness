@@ -19,19 +19,23 @@ pub enum TerminalOutcome {
     Cancelled,
     CancelledWithReceipt(std::result::Result<serde_json::Value, ToolFailure>),
     Interrupted,
-    CancellationUnconfirmed(String),
+    CancellationUnconfirmed(ToolFailure),
 }
 
 impl From<&JobOutput> for TerminalOutcome {
     fn from(output: &JobOutput) -> Self {
         match output {
             JobOutput::Completed(Ok(_)) => Self::Success,
-            JobOutput::Completed(Err(failure)) => Self::Failure(failure.clone()),
+            JobOutput::Completed(Err(failure)) => {
+                Self::Failure(failure.clone().without_result_receipt())
+            }
             JobOutput::Cancelled => Self::Cancelled,
-            JobOutput::CancelledWithReceipt(receipt) => Self::CancelledWithReceipt(receipt.clone()),
+            JobOutput::CancelledWithReceipt(receipt) => Self::CancelledWithReceipt(
+                receipt.clone().map_err(ToolFailure::without_result_receipt),
+            ),
             JobOutput::Interrupted => Self::Interrupted,
             JobOutput::CancellationUnconfirmed(detail) => {
-                Self::CancellationUnconfirmed(detail.clone())
+                Self::CancellationUnconfirmed(detail.clone().without_result_receipt())
             }
         }
     }

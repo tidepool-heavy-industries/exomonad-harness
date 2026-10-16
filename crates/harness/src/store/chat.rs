@@ -103,6 +103,8 @@ pub enum ChatEntry {
         position: i64,
         hash: String,
         item: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model_item: Option<Value>,
         tool: Option<ChatTool>,
         input_operation: Option<ChatInputOperation>,
         provider_item_id: Option<String>,
@@ -271,6 +273,7 @@ impl Store {
                             position,
                             hash,
                             item: serde_json::from_str(&raw)?,
+                            model_item: None,
                             tool: None,
                             provider_item_id: None,
                         }
@@ -519,6 +522,7 @@ fn project_tools(c: &Connection, entries: &mut [ChatEntry]) -> Result<()> {
                 position,
                 hash,
                 item,
+                model_item,
                 tool,
                 ..
             },
@@ -536,6 +540,17 @@ fn project_tools(c: &Connection, entries: &mut [ChatEntry]) -> Result<()> {
                 || issued.occurrence.hash.0 != *hash)
             {
                 return Err(StoreError::InvalidActorOutput);
+            }
+            if matches!(
+                item["type"].as_str(),
+                Some("function_call_output" | "custom_tool_call_output")
+            ) {
+                *model_item = super::result_inspection::model_output_projection(
+                    c,
+                    &operation,
+                    &crate::item::Item(item.clone()),
+                )?
+                .map(|candidate| candidate.item.0);
             }
             *tool = Some(ChatTool {
                 operation,
@@ -852,6 +867,111 @@ mod tests {
             matches!(&result.entries[0], ChatEntry::Message { tool: Some(tool), .. } if tool.operation == operation_b && tool.invocation.request == second.0)
         );
     }
+    #[test]
+    fn chat_and_history_share_certified_projection_and_retain_canonical_output() {
+        let store = Store::memory().unwrap();
+        let request = RequestId("projected-result".into());
+        let call = CallId("native-result".into());
+        let invocation =
+            Item(json!({"type":"function_call","name":"run","call_id":call.0,"arguments":"{}"}));
+        store
+            .write_request(&request, None, "/root", &[invocation], Usage::default())
+            .unwrap();
+        let operation = store.claim(&call, &request).unwrap();
+        store
+            .write_job_output(
+                &operation,
+                crate::item::ToolKind::Function,
+                &crate::turn::JobOutput::Completed(Ok(json!({"canonical":"full native result"}))),
+            )
+            .unwrap();
+        store
+            .append_operation_output(&operation, &request, &request)
+            .unwrap();
+        let original = store
+            .history_page(&request, 0, 100)
+            .unwrap()
+            .items
+            .pop()
+            .unwrap()
+            .item;
+        let projected = store
+            .publish_model_output_projection(&operation, json!("authored presentation"))
+            .unwrap();
+        let history = store.history_page(&request, 0, 100).unwrap();
+        let result = history.items.last().unwrap();
+        assert_eq!(result.item, original);
+        assert_eq!(result.model_item.as_ref(), Some(&projected.item));
+        assert!(history.items.first().unwrap().model_item.is_none());
+        let chat = store
+            .chat_page_before(&origin(), Some(&request), None, 100)
+            .unwrap();
+        assert!(
+            matches!(chat.entries.last().unwrap(), ChatEntry::Message { item, model_item: Some(model_item), tool: Some(tool), .. }
+            if item == &original.0 && model_item == &projected.item.0 && tool.operation == operation)
+        );
+        let wire = crate::server::browser_contract::HistoryPage::from(&history);
+        let wire = serde_json::to_value(wire).unwrap();
+        assert_eq!(wire["items"][1]["item"], original.0);
+        assert_eq!(wire["items"][1]["modelItem"], projected.item.0);
+    }
+
+    #[test]
+    fn history_projection_bytes_are_bounded_without_changing_canonical_lengths() {
+        let store = Store::memory().unwrap();
+        let request = RequestId("projection-wire-budget".into());
+        let calls = [CallId("one".into()), CallId("two".into())];
+        let invocations = calls
+            .iter()
+            .map(|call| {
+                Item(json!({"type":"function_call","name":"run","call_id":call.0,"arguments":"{}"}))
+            })
+            .collect::<Vec<_>>();
+        store
+            .write_request(&request, None, "/root", &invocations, Usage::default())
+            .unwrap();
+        let mut operations = Vec::new();
+        for call in &calls {
+            let operation = store.claim(call, &request).unwrap();
+            store
+                .write_job_output(
+                    &operation,
+                    crate::item::ToolKind::Function,
+                    &crate::turn::JobOutput::Completed(Ok(json!({"canonical":call.0}))),
+                )
+                .unwrap();
+            store
+                .append_operation_output(&operation, &request, &request)
+                .unwrap();
+            store
+                .publish_model_output_projection(&operation, json!("x".repeat(150_000)))
+                .unwrap();
+            operations.push(operation);
+        }
+        let page = store.history_page(&request, 0, 100).unwrap();
+        assert_eq!(page.items.len(), 3);
+        assert_eq!(page.next_offset, Some(3));
+        assert!(serde_json::to_vec(&page).unwrap().len() <= MAX_HISTORY_BYTES);
+        assert!(
+            page.items
+                .iter()
+                .all(|item| item.byte_len == serde_json::to_vec(&item.item).unwrap().len())
+        );
+        let next = store.history_page(&request, 3, 100).unwrap();
+        assert_eq!(next.items.len(), 1);
+        assert!(next.next_offset.is_none());
+        store
+            .publish_model_output_projection(
+                &operations[0],
+                json!("x".repeat(MAX_HISTORY_BYTES + 1)),
+            )
+            .unwrap();
+        assert!(matches!(
+            store.history_page(&request, 2, 1),
+            Err(StoreError::InvalidActorOutput)
+        ));
+    }
+
     #[test]
     fn publication_interleaves_exact_occurrences_and_pages_without_hash_dedup() {
         let store = Store::memory().unwrap();

@@ -120,12 +120,17 @@ export function readable(value: unknown): ReadableItem | undefined {
   return undefined
 }
 
+/** Store supplies the same certified item used for model context; the browser never parses result policy. */
+export function ordinaryItem(entry: { readonly item: unknown; readonly modelItem?: unknown }): unknown {
+  return entry.modelItem === undefined ? entry.item : entry.modelItem
+}
+
 /** Presentation never replaces the wire item; raw formatting happens only on inspection. */
 export default function HistoryItem({ entry, listItem = true, diagnostics = true, publication }: { readonly entry: HistoryEntry; readonly listItem?: boolean; readonly diagnostics?: boolean; readonly publication?: { sequence: string; requestId: string } }) {
-  const view = useMemo(() => readable(entry.item), [entry.item])
+  const view = useMemo(() => readable(ordinaryItem(entry)), [entry.item, entry.modelItem])
   const [showRaw, setShowRaw] = usePresentationChoice('raw-item')
   const rawVisible = showRaw || !view
-  const raw = useMemo(() => rawVisible ? JSON.stringify(entry.item, null, 2) : undefined, [entry.item, rawVisible])
+  const raw = useMemo(() => rawVisible ? JSON.stringify(showRaw ? entry.item : ordinaryItem(entry), null, 2) : undefined, [entry.item, entry.modelItem, showRaw, rawVisible])
   // Empty or opaque-only reasoning adds no chat content; unfamiliar blocks remain inspectable.
   if (object(entry.item) && entry.item.type === 'reasoning' && view?.texts.length === 0 && !view.unknownBlocks) return publication
     ? <PresentationDetails memoryKey="evidence" className="chat-message-details" summary="Publication details">
@@ -140,7 +145,7 @@ export default function HistoryItem({ entry, listItem = true, diagnostics = true
       {publication && <p className="meta">Sequence {publication.sequence} · exchange {publication.requestId}</p>}
       <p className="meta">Item {entry.position} · hash {entry.hash} · {entry.byteLen} bytes</p>
       {view?.metadata?.map(({ label, value }) => <p className="meta" key={label}>{label}: <span className="mono">{value}</span></p>)}
-      {view && <><button type="button" aria-expanded={showRaw} onClick={() => setShowRaw(!showRaw)}>{showRaw ? 'Hide' : 'Show'} Raw item {entry.position}</button>{rawContent}</>}
+      {(view || entry.modelItem !== undefined) && <><button type="button" aria-expanded={showRaw} onClick={() => setShowRaw(!showRaw)}>{showRaw ? 'Hide' : 'Show'} Raw item {entry.position}</button>{rawContent}</>}
     </> : undefined}>
     {view ? <>
       {view.responseSummary ? <details className="history-tool-response"><summary>{view.responseSummary}</summary>{texts}</details> : texts}

@@ -181,6 +181,8 @@ pub struct HistoryItem {
     pub byte_len: WireU64,
     /// Opaque provider item body inside a typed retained-history observation.
     pub item: JsonValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_item: Option<JsonValue>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -216,6 +218,7 @@ impl From<&crate::store::history::HistoryPage> for HistoryPage {
                     hash: item.hash.clone(),
                     byte_len: (item.byte_len as u64).into(),
                     item: item.item.0.clone().into(),
+                    model_item: item.model_item.as_ref().map(|item| item.0.clone().into()),
                 })
                 .collect(),
             next_offset: page.next_offset.map(Into::into),
@@ -885,6 +888,7 @@ pub fn wire_samples() -> serde_json::Value {
             parent_id: None,
             branch: "/root".into(),
             items: vec![HistoryItem {
+                model_item: None,
                 position: 9_007_199_254_740_993u64.into(),
                 hash: "a".repeat(64),
                 byte_len: (serde_json::to_vec(value).unwrap().len() as u64).into(),

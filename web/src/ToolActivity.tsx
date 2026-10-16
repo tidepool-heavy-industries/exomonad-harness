@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import './ToolActivity.css'
 import { usePresentationChoice } from './presentation-state'
-import HistoryItem, { readable, haskellSource } from './HistoryItem'
+import HistoryItem, { readable, haskellSource, ordinaryItem } from './HistoryItem'
 import { MessageContent, useStreamingText } from './MessagePresentation'
 import { PresentationDetails, PresentationMemory } from './presentation-state'
 import type { MessageEntry, TimelineRow } from './chat-timeline'
@@ -25,7 +25,7 @@ export default function ToolActivity({ row, streamingActive, exchange, jobs = []
     : results.length ? 'Result retained' : entry?.tool ? 'No loaded result' : 'Operation ownership unavailable'
   const elapsed = exchange?.startedAtMs !== undefined && exchange.endedAtMs !== undefined && exchange.endedAtMs >= exchange.startedAtMs
     ? (exchange.endedAtMs - exchange.startedAtMs) / 1000 : undefined
-  const excerpt = results.map(result => resultExcerpt(result.item)).find(Boolean)
+  const excerpt = results.map(result => resultExcerpt(ordinaryItem(result))).find(Boolean)
   return <section className="tool-activity" aria-label={`${name} tool call`}>
     <header className="tool-heading"><h3>{name}</h3><span className="tool-status">{jobs.length ? `${jobs.map(job => `Tool ${job.state}`).join(' · ')} · ` : ''}{status}</span></header>
     {excerpt && <p className="tool-result-excerpt"><strong>Result excerpt:</strong> {excerpt}</p>}
@@ -36,10 +36,10 @@ export default function ToolActivity({ row, streamingActive, exchange, jobs = []
     {entry && !view && <HistoryItem listItem={false} diagnostics={false} entry={{ position: entry.position, hash: entry.hash, byteLen: String(new TextEncoder().encode(JSON.stringify(entry.item)).length), item: entry.item }} />}
     {row.kind === 'live' && row.live.some(item => item.overflow) && <p className="hint">Partial live preview. Completed content will be available in retained history.</p>}
     {results.length > 0 && <div className="tool-results"><h4>Result</h4>{results.map(result => {
-      const resultView = readable(result.item)
+      const resultView = readable(ordinaryItem(result))
       return <PresentationMemory key={result.sequence} namespace={`result:${result.sequence}`}>{resultView ? resultView.texts.map((part, index) =>
         <MessageContent key={index} text={part.text} copyText={part.copyText} label={`Result ${result.sequence}`} memoryKey={`result:${index}`} bounded />)
-        : <HistoryItem listItem={false} diagnostics={false} entry={{ position: result.position, hash: result.hash, byteLen: String(new TextEncoder().encode(JSON.stringify(result.item)).length), item: result.item }} />}
+        : <HistoryItem listItem={false} diagnostics={false} entry={{ position: result.position, hash: result.hash, byteLen: String(new TextEncoder().encode(JSON.stringify(result.item)).length), item: result.item, modelItem: result.modelItem }} />}
       </PresentationMemory>
     })}</div>}
     <PresentationDetails memoryKey="execution" className="execution-log" summary="Tool evidence">

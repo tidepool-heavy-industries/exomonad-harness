@@ -265,15 +265,19 @@ impl Provider for CallbackProvider {
         &self,
         request: &RequestId,
         item: &Item,
-    ) -> Option<crate::provider::ModelVisibleItemCandidate> {
+    ) -> Result<Option<crate::provider::ModelVisibleItemCandidate>, ProviderError> {
         if item.0["type"] != "function_call_output" {
-            return None;
+            return Ok(None);
         }
-        self.projections
+        Ok(self
+            .projections
             .lock()
             .unwrap()
-            .get(&(request.clone(), item.0["call_id"].as_str()?.to_owned()))
-            .cloned()
+            .get(&(
+                request.clone(),
+                item.0["call_id"].as_str().unwrap_or("").to_owned(),
+            ))
+            .cloned())
     }
     async fn output_committed(
         &self,

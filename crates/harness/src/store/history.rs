@@ -16,6 +16,8 @@ pub struct HistoryItem {
     pub hash: String,
     pub byte_len: usize,
     pub item: Item,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_item: Option<Item>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -269,16 +271,41 @@ impl Store {
                     row.get(0)
                 })?;
             let item: Item = serde_json::from_str(&raw)?;
+            let operation: Option<String> = c.query_row(
+                "SELECT output_operation FROM request_items WHERE request_id=?1 AND position=?2 AND item_hash=?3",
+                params![id.0, position as i64, hash], |row| row.get(0),
+            )?;
+            let model_item = operation
+                .map(|raw| -> Result<_> {
+                    let operation = serde_json::from_str(&raw)?;
+                    Ok(
+                        super::result_inspection::model_output_projection(&c, &operation, &item)?
+                            .map(|candidate| candidate.item),
+                    )
+                })
+                .transpose()?
+                .flatten();
             used += byte_len;
             page.items.push(HistoryItem {
                 position,
                 hash: hash.clone(),
                 byte_len,
                 item,
+                model_item,
             });
         }
         if page.next_offset.is_none() && metadata.len() > limit {
             page.next_offset = u64::try_from(metadata[limit].0).ok();
+        }
+        // The canonical byte length remains evidence about the retained item.
+        // Certified model items also consume the HTTP envelope's wire budget.
+        while serde_json::to_vec(&page)?.len() > MAX_HISTORY_BYTES {
+            let omitted = page.items.pop().ok_or(StoreError::InvalidActorOutput)?;
+            page.next_offset = Some(omitted.position);
+            page.oversized_item = None;
+            if page.items.is_empty() {
+                return Err(StoreError::InvalidActorOutput);
+            }
         }
         Ok(page)
     }

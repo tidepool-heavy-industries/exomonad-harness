@@ -506,6 +506,8 @@ pub enum ChatEntry {
         position: WireI64,
         hash: String,
         item: JsonValue,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_item: Option<JsonValue>,
         tool: Option<ChatTool>,
         input_operation: Option<ChatInputOperation>,
         provider_item_id: Option<String>,
@@ -549,6 +551,7 @@ impl From<&crate::store::chat::ChatPage> for ChatPage {
                     position,
                     hash,
                     item,
+                    model_item,
                     tool,
                     input_operation,
                     provider_item_id,
@@ -558,6 +561,7 @@ impl From<&crate::store::chat::ChatPage> for ChatPage {
                     position: (*position).into(),
                     hash: hash.clone(),
                     item: item.clone().into(),
+                    model_item: model_item.as_ref().map(|item| item.clone().into()),
                     provider_item_id: provider_item_id.clone(),
                     input_operation: input_operation.as_ref().map(|input| ChatInputOperation {
                         envelope_id: input.envelope_id.into(),
@@ -653,6 +657,7 @@ pub(super) fn extension_samples() -> serde_json::Value {
                 form: form.clone(),
             },
             ChatEntry::Message {
+                model_item: None,
                 sequence: i64::MAX.into(),
                 request_id: "request".into(),
                 position: i64::MAX.into(),
@@ -798,6 +803,7 @@ mod chat_bounds_tests {
         let mut page: ChatPage =
             serde_json::from_value(extension_samples()["chat"][0].clone()).unwrap();
         let message = |sequence: i64| ChatEntry::Message {
+            model_item: None,
             sequence: sequence.into(),
             request_id: "request".into(),
             position: i64::MAX.into(),

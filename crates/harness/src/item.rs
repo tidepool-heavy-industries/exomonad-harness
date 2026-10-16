@@ -130,7 +130,12 @@ impl Item {
             }),
             JobOutput::Interrupted => json!({ "error": "job interrupted" }),
             JobOutput::CancellationUnconfirmed(detail) => {
-                json!({ "error": "cancellation unconfirmed", "detail": detail })
+                let mut value =
+                    json!({ "error": "cancellation unconfirmed", "detail": detail.message() });
+                if let Some(receipt) = detail.result_receipt() {
+                    value["result"] = receipt.clone();
+                }
+                value
             }
         };
         match kind {

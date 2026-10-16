@@ -54,3 +54,17 @@ it('retains partial failed tool arguments as observational input and never claim
   expect(screen.queryByText('Tool input recorded.')).toBeNull()
   expect(screen.queryByRole('heading', { name: 'Result' })).toBeNull()
 })
+
+it('uses only the Store-certified result for excerpts and ordinary content, retaining exact raw evidence', () => {
+  const entry = { kind: 'message' as const, sequence: '1', requestId: 'req', position: '0', hash: 'a'.repeat(64), providerItemId: null, inputOperation: null, tool: null,
+    item: { type: 'custom_tool_call', name: 'haskell', call_id: 'c', input: 'observe value' } }
+  const item = { type: 'custom_tool_call_output', call_id: 'c', output: JSON.stringify({ nativePayload: 'canonical evidence only', presentation: 'not interpreted by browser' }) }
+  const result = { ...entry, sequence: '2', position: '1', item, modelItem: { ...item, output: 'Authored presentation\nnext line' } }
+  render(<PresentationMemory><ToolActivity row={{ kind: 'activity', key: 'tool', entry, results: [result] }} streamingActive={false} /></PresentationMemory>)
+  expect(screen.getByText('Result excerpt:').parentElement).toHaveTextContent('Authored presentation')
+  expect(screen.getByLabelText('Result 2').textContent).toBe('Authored presentation\nnext line')
+  expect(screen.queryByText(/canonical evidence only/)).toBeNull()
+  fireEvent.click(screen.getByText('Tool evidence', { exact: true }))
+  fireEvent.click(screen.getByRole('button', { name: 'Show raw result item' }))
+  expect(screen.getByLabelText('Raw result item').textContent).toBe(JSON.stringify(item, null, 2))
+})

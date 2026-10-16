@@ -1701,7 +1701,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .enumerate()
             {
                 if self.bounded_invocation {
-                    if let Some(candidate) = request_provider.model_visible_item(&request, &item) {
+                    if let Some(candidate) = request_provider.model_visible_item(&request, &item)? {
                         let Some(occurrence) = input_occurrences
                             .get(index)
                             .and_then(Option::as_ref)
@@ -3097,7 +3097,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         if let crate::turn::JobOutput::CancellationUnconfirmed(detail) = &output {
                             failures.push(EngineError::UnconfirmedCancellation {
                                 operation: call.operation.clone(),
-                                detail: detail.clone(),
+                                detail: detail.message().to_owned(),
                             });
                         }
                         let retention = async {
@@ -3473,7 +3473,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     crate::turn::JobOutput::CancellationUnconfirmed(detail) => {
                         return Err(EngineError::UnconfirmedCancellation {
                             operation: operation.clone(),
-                            detail: detail.clone(),
+                            detail: detail.message().to_owned(),
                         });
                     }
                     crate::turn::JobOutput::Interrupted => {

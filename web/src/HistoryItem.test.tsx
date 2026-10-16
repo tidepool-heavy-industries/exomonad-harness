@@ -223,3 +223,40 @@ describe('retained Item presentation', () => {
   })
 
 })
+
+it('uses the Store-certified model item for ordinary output and copies while preserving canonical evidence', async () => {
+  const output = JSON.stringify({ result: { privateEvidence: 'canonical native payload' }, presentation: 'not a browser policy' })
+  const item = { type: 'custom_tool_call_output', call_id: 'native', output }
+  const modelItem = { ...item, output: 'Authored result only' }
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+  try {
+    render(<HistoryItem entry={{ ...entry(item), modelItem }} />)
+    expect(screen.getByLabelText('Result item 7')).toHaveTextContent('Authored result only')
+    expect(screen.queryByText(/canonical native payload/)).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Copy Result item 7' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith('Authored result only'))
+    showRaw()
+    expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
+  } finally {
+    if (descriptor) Object.defineProperty(navigator, 'clipboard', descriptor)
+    else Reflect.deleteProperty(navigator, 'clipboard')
+  }
+})
+
+it('does not infer an authored presentation from uncertified canonical JSON', () => {
+  const output = JSON.stringify({ result: 42, presentation: 'do not extract this field' })
+  render(<HistoryItem entry={entry({ type: 'custom_tool_call_output', call_id: 'native', output })} />)
+  expect(screen.getByLabelText('Result item 7').textContent).toBe(JSON.stringify(JSON.parse(output), null, 2))
+})
+
+it('keeps unfamiliar certified items inspectable without falling back to canonical output', () => {
+  const item = { type: 'custom_tool_call_output', call_id: 'native', output: 'canonical secret' }
+  const modelItem = { type: 'future_item', authored: 'projected value' }
+  render(<HistoryItem entry={{ ...entry(item), modelItem }} />)
+  expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(modelItem, null, 2))
+  expect(screen.queryByText(/canonical secret/)).toBeNull()
+  showRaw()
+  expect(screen.getAllByLabelText('Raw item 7')[0].textContent).toBe(JSON.stringify(item, null, 2))
+})

@@ -27,6 +27,7 @@ pub use prepared_request::PreparedProviderRequest;
 pub(crate) use prepared_request::ProviderRequestPurpose;
 pub(crate) mod provider_response;
 mod replay;
+pub(super) mod result_inspection;
 pub mod schema;
 mod schema_migration;
 mod terminal;

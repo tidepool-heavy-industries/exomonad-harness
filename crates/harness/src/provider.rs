@@ -331,7 +331,7 @@ pub enum CancellationAcknowledgment {
     StoppedWithReceipt(Result<Value, ToolFailure>),
     /// The owner observed the operation's terminal result before cancellation won.
     Completed(Result<Value, ToolFailure>),
-    Unconfirmed(String),
+    Unconfirmed(ToolFailure),
 }
 
 /// Intent forwarded by the cleanup/request owner, not proof of a native winner.
@@ -447,8 +447,8 @@ pub trait Provider: Send + Sync {
         &self,
         _request: &crate::model::RequestId,
         _item: &crate::item::Item,
-    ) -> Option<ModelVisibleItemCandidate> {
-        None
+    ) -> Result<Option<ModelVisibleItemCandidate>, ProviderError> {
+        Ok(None)
     }
 
     /// Acknowledge a provider-issued operation after its real terminal output is durable.

@@ -19,6 +19,8 @@ pub struct ToolFailure {
     provider_context: bool,
     metadata: Option<Value>,
     metadata_omitted: Option<MetadataOmission>,
+    // Canonical operation evidence is independent of bounded diagnostic metadata.
+    result_receipt: Option<Value>,
 }
 
 impl ToolFailure {
@@ -47,6 +49,22 @@ impl ToolFailure {
         failure
     }
 
+    /// Retain canonical operation evidence without changing this failure's
+    /// terminal classification. Model hosts present it through Store projection.
+    pub fn with_result_receipt(mut self, receipt: Value) -> Self {
+        self.result_receipt = Some(receipt);
+        self
+    }
+
+    pub(crate) fn without_result_receipt(mut self) -> Self {
+        self.result_receipt = None;
+        self
+    }
+
+    pub fn result_receipt(&self) -> Option<&Value> {
+        self.result_receipt.as_ref()
+    }
+
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -67,6 +85,9 @@ impl ToolFailure {
         } else if let Some(reason) = self.metadata_omitted {
             output["failure"] = serde_json::json!({ "metadata_omitted": reason });
         }
+        if let Some(receipt) = &self.result_receipt {
+            output["result"] = receipt.clone();
+        }
         output
     }
 }
@@ -78,6 +99,7 @@ impl From<String> for ToolFailure {
             provider_context: false,
             metadata: None,
             metadata_omitted: None,
+            result_receipt: None,
         }
     }
 }
@@ -108,12 +130,18 @@ enum FailureWire {
         metadata: Option<Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata_omitted: Option<MetadataOmission>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result_receipt: Option<Value>,
     },
 }
 
 impl Serialize for ToolFailure {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if !self.provider_context && self.metadata.is_none() && self.metadata_omitted.is_none() {
+        if !self.provider_context
+            && self.metadata.is_none()
+            && self.metadata_omitted.is_none()
+            && self.result_receipt.is_none()
+        {
             self.message.serialize(serializer)
         } else {
             FailureWire::Structured {
@@ -121,6 +149,7 @@ impl Serialize for ToolFailure {
                 provider_context: self.provider_context,
                 metadata: self.metadata.clone(),
                 metadata_omitted: self.metadata_omitted,
+                result_receipt: self.result_receipt.clone(),
             }
             .serialize(serializer)
         }
@@ -135,10 +164,12 @@ impl<'de> Deserialize<'de> for ToolFailure {
                 message,
                 provider_context,
                 metadata: Some(metadata),
+                result_receipt,
                 ..
             } => {
                 let mut failure = Self::with_metadata(message, metadata);
                 failure.provider_context = provider_context;
+                failure.result_receipt = result_receipt;
                 failure
             }
             FailureWire::Structured {
@@ -146,11 +177,13 @@ impl<'de> Deserialize<'de> for ToolFailure {
                 provider_context,
                 metadata: None,
                 metadata_omitted,
+                result_receipt,
             } => Self {
                 message,
                 provider_context,
                 metadata: None,
                 metadata_omitted,
+                result_receipt,
             },
         })
     }
@@ -271,5 +304,43 @@ mod tests {
             .unwrap(),
             terminal
         );
+    }
+}
+
+#[cfg(test)]
+mod result_receipt_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_receipt_survives_serde_independently_of_diagnostic_admission() {
+        let receipt = serde_json::json!({"semantic":"λ".repeat(100_000)});
+        let failure = ToolFailure::with_metadata(
+            "presentation interrupted",
+            serde_json::json!({"detail":"x".repeat(20_000)}),
+        )
+        .with_result_receipt(receipt.clone());
+        assert!(failure.metadata().is_none());
+        let restored: ToolFailure =
+            serde_json::from_slice(&serde_json::to_vec(&failure).unwrap()).unwrap();
+        assert_eq!(restored.result_receipt(), Some(&receipt));
+        assert_eq!(restored.message(), "presentation interrupted");
+        let job = crate::turn::JobOutput::CancellationUnconfirmed(restored);
+        let terminal = crate::store::TerminalOutcome::from(&job);
+        let crate::store::TerminalOutcome::CancellationUnconfirmed(detail) = terminal else {
+            panic!("cleanup uncertainty lost")
+        };
+        assert!(
+            detail.result_receipt().is_none(),
+            "terminal classification must reference canonical Item evidence"
+        );
+        let item = crate::item::Item::tool_output(
+            &crate::model::CallId("c".into()),
+            crate::item::ToolKind::Function,
+            &job,
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(item.0["output"].as_str().unwrap()).unwrap();
+        assert_eq!(body["result"], receipt);
+        assert_eq!(body["error"], "cancellation unconfirmed");
     }
 }
