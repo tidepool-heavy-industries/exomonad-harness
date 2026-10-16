@@ -391,6 +391,33 @@ mod tests {
                 Err(StoreError::OperationOriginMismatch)
             ));
         }
+        // A genuine second issuing request may reuse the call ID, but its
+        // operation is not a member of this actor's current retained lineage.
+        let other_request = RequestId("unretained-request".into());
+        store
+            .write_request(
+                &other_request,
+                None,
+                &host.actor.0,
+                &[Item(
+                    serde_json::json!({"type":"function_call", "call_id":operation.call.0,
+                "name":"read", "arguments":"{}"}),
+                )],
+                Usage::default(),
+            )
+            .unwrap();
+        let other = store.claim(&operation.call, &other_request).unwrap();
+        store
+            .write_job_output(
+                &other,
+                crate::item::ToolKind::Function,
+                &crate::turn::JobOutput::Completed(Ok(serde_json::json!({"other":true}))),
+            )
+            .unwrap();
+        assert!(matches!(
+            store.inspect_embedded_result(&host, &other),
+            Err(StoreError::OperationOriginMismatch)
+        ));
         let absent = OperationId {
             request: RequestId("absent".into()),
             ..operation.clone()
@@ -400,5 +427,19 @@ mod tests {
             store.inspect_embedded_result(&host, &operation).unwrap(),
             Some(original)
         );
+    }
+
+    #[test]
+    fn result_inspection_refuses_corrupt_canonical_output() {
+        let store = Store::memory().unwrap();
+        let (host, operation, original) = settled(&store, false);
+        let mut corrupt = original.0;
+        corrupt["call_id"] = serde_json::json!("different-call");
+        // Corrupt the retained Item only; no replacement authority is issued.
+        store.lock().unwrap().execute(
+            "UPDATE items SET json=?1 WHERE hash=(SELECT output_hash FROM claims WHERE origin_request_id=?2 AND call_id=?3 AND state='settled')",
+            params![serde_json::to_string(&corrupt).unwrap(), operation.request.0, operation.call.0],
+        ).unwrap();
+        assert!(store.inspect_embedded_result(&host, &operation).is_err());
     }
 }
