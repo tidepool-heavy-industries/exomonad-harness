@@ -301,7 +301,17 @@ mod tests {
 
     #[test]
     fn native_format_survives_reopen_for_all_receipt_terminals_and_refuses_disagreement() {
-        let path = path();
+        struct Directory(std::path::PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory = Directory(
+            std::env::temp_dir().join(format!("harness-terminal-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir(&directory.0).unwrap();
+        let path = directory.0.join("store.sqlite");
         let store = Store::open(&path).unwrap();
         let body = json!({"nativeResult":{"version":1,"opaque":"λ".repeat(50000)}});
         let mut retained = Vec::new();

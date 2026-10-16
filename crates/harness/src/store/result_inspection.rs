@@ -291,10 +291,18 @@ mod tests {
 
     #[test]
     fn canonical_result_and_projection_survive_reopen_and_exact_binding_transfer() {
-        let path = std::env::temp_dir().join(format!(
-            "harness-result-inspection-{}.sqlite",
+        struct Directory(std::path::PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory = Directory(std::env::temp_dir().join(format!(
+            "harness-result-inspection-{}",
             uuid::Uuid::new_v4()
-        ));
+        )));
+        std::fs::create_dir(&directory.0).unwrap();
+        let path = directory.0.join("store.sqlite");
         let store = Store::open(&path).unwrap();
         let (host, operation, original) = settled(&store, true);
         store
@@ -355,10 +363,18 @@ mod tests {
 
     #[test]
     fn projection_is_retained_before_history_and_retry_is_idempotent() {
-        let path = std::env::temp_dir().join(format!(
-            "harness-result-inspection-{}.sqlite",
+        struct Directory(std::path::PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory = Directory(std::env::temp_dir().join(format!(
+            "harness-result-inspection-{}",
             uuid::Uuid::new_v4()
-        ));
+        )));
+        std::fs::create_dir(&directory.0).unwrap();
+        let path = directory.0.join("store.sqlite");
         let store = Store::open(&path).unwrap();
         let (host, operation, original) = settled(&store, false);
         let replacement = serde_json::json!({"output":"authored presentation"});
