@@ -25,6 +25,7 @@ enum Mode {
     Committed,
     Rejected,
     Discarded,
+    AbortFailed,
 }
 struct Host {
     store: Arc<Store>,
@@ -60,7 +61,7 @@ impl Provider for Host {
             changes: vec![ContextChange::ReplaceContextText {
                 reference: target.reference,
                 selector: target.selector,
-                expected: if matches!(self.mode, Mode::Rejected) {
+                expected: if matches!(self.mode, Mode::Rejected | Mode::AbortFailed) {
                     crate::context::context_digest(b"stale text")
                 } else {
                     target.digest
@@ -94,6 +95,11 @@ impl Provider for Host {
     }
     async fn output_aborted(&self, _: &OperationId) -> Result<(), ProviderError> {
         self.aborted.fetch_add(1, Ordering::SeqCst);
+        if matches!(self.mode, Mode::AbortFailed) {
+            return Err(ProviderError::Tool(
+                "unpublished continuation cleanup failed".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -157,18 +163,50 @@ async fn exercise(mode: Mode) {
     );
     let (_cancel, cancel) = watch::channel(false);
     let (_mail, mail) = mpsc::unbounded_channel::<Envelope>();
-    tokio::time::timeout(
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs(3),
         engine.run(None, vec![Item::user_text("original")], cancel, mail),
     )
     .await
-    .unwrap()
     .unwrap();
+    if matches!(mode, Mode::AbortFailed) {
+        fn cleanup_error(error: &EngineError) -> bool {
+            match error {
+                EngineError::ProviderCall(ProviderError::Tool(message)) => {
+                    message == "unpublished continuation cleanup failed"
+                }
+                EngineError::Secondary(error) => {
+                    cleanup_error(error.primary()) || cleanup_error(error.source_error())
+                }
+                EngineError::BlockedAction(error) => cleanup_error(error.primary()),
+                _ => false,
+            }
+        }
+        assert!(cleanup_error(&result.unwrap_err()));
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "unconfirmed context cleanup must prevent next inference"
+        );
+        assert_eq!(host.committed.load(Ordering::SeqCst), 0);
+        assert!(host.aborted.load(Ordering::SeqCst) >= 1);
+        let (operation, handle) = host.handle.lock().unwrap().clone().unwrap();
+        assert!(matches!(
+            store
+                .context_transaction_status(&operation.origin, &handle)
+                .unwrap(),
+            ContextTransactionStatus::Rejected(_)
+        ));
+        assert!(store.has_completed_output(&operation).unwrap());
+        return;
+    }
+    result.unwrap();
     let (operation, handle) = host.handle.lock().unwrap().clone().unwrap();
     let status = store
         .context_transaction_status(&operation.origin, &handle)
         .unwrap();
     match mode {
+        Mode::AbortFailed => unreachable!("failed abort handled above"),
         Mode::Committed => {
             assert!(matches!(status, ContextTransactionStatus::Committed(_)));
             assert_eq!(host.committed.load(Ordering::SeqCst), 1);
@@ -217,4 +255,9 @@ async fn rejected_transaction_aborts_unpublished_context_and_continues_inference
 #[tokio::test]
 async fn discarded_transaction_retains_candidate_aborts_and_continues_inference() {
     exercise(Mode::Discarded).await;
+}
+
+#[tokio::test]
+async fn rejected_transaction_cleanup_failure_blocks_next_inference() {
+    exercise(Mode::AbortFailed).await;
 }
