@@ -208,9 +208,13 @@ fn project_tool_call(object: &Map<String, Value>, custom: bool) -> Result<(Value
 fn project_tool_output(object: &Map<String, Value>) -> Result<(Value, bool)> {
     validate_fields(
         object,
-        &["type", "call_id", "output", "id", "status"],
+        &["type", "call_id", "output", "output_format", "id", "status"],
         "tool_output",
     )?;
+    if let Some(format) = object.get("output_format") {
+        serde_json::from_value::<crate::provider::OutputFormat>(format.clone())
+            .map_err(|_| invalid("tool_output", "output_format"))?;
+    }
     required_nonempty_string(object, "call_id")?;
     let output = object
         .get("output")
@@ -223,6 +227,8 @@ fn project_tool_output(object: &Map<String, Value>) -> Result<(Value, bool)> {
     };
     let mut projected = object.clone();
     strip_metadata(&mut projected);
+    // The note references canonical evidence; it does not issue native receipt interpretation.
+    projected.remove("output_format");
     Ok((Value::Object(projected), visible))
 }
 
