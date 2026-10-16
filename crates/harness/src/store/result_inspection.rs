@@ -74,13 +74,20 @@ impl Store {
             let frontier = embedded_round::frontier(tx, host)?;
             let head = frontier.pending_head.as_ref().or(frontier.settled_head.as_ref())
                 .ok_or(StoreError::OperationOriginMismatch)?;
-            let history = context::history(tx, head, true)?;
-            context::validate_canonical_history(tx, &history)?;
             let call = context::original_call(tx, operation)?;
-            let owned = history.iter().any(|item| {
-                item.origin == call || item.output_operation.as_ref() == Some(operation)
-            });
-            if !owned {
+            // Inspect only exact retained membership. Decoding every historical
+            // result here would make one terminal publication grow with all prior
+            // semantic payloads in the conversation.
+            let membership = context::query_occurrences(tx, "WITH RECURSIVE lineage(id,parent_id) AS (
+                SELECT id,parent_id FROM requests WHERE id=?1
+                UNION ALL SELECT r.id,r.parent_id FROM requests r JOIN lineage l ON r.id=l.parent_id
+                WHERE NOT EXISTS(SELECT 1 FROM session_state s WHERE s.session_id='harness:compaction:'||l.id)
+            ) SELECT ri.request_id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note,ri.context_overlays,ri.output_operation
+            FROM lineage l JOIN request_items ri ON ri.request_id=l.id JOIN items i ON i.hash=ri.item_hash
+            WHERE (COALESCE(ri.source_request,ri.request_id)=?2 AND COALESCE(ri.source_position,ri.position)=?3 AND ri.item_hash=?4)
+               OR ri.output_operation=?5", params![head.0, call.request.0, call.position, call.hash.0, serde_json::to_string(operation)?])?;
+            context::validate_canonical_history(tx, &membership)?;
+            if membership.is_empty() {
                 return Err(StoreError::OperationOriginMismatch);
             }
             let raw: Option<String> = tx.query_row(

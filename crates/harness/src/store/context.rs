@@ -256,7 +256,7 @@ pub(super) fn occurrences_for_requests(
     Ok(occurrences)
 }
 
-fn query_occurrences(
+pub(super) fn query_occurrences(
     c: &Connection,
     sql: &str,
     bindings: impl rusqlite::Params,
