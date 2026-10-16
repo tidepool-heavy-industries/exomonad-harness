@@ -668,10 +668,14 @@ impl crate::embedding::HostActor for EmbeddedHost {
     async fn tool_surface(
         &self,
     ) -> Result<Arc<crate::embedding::ToolSurface>, crate::embedding::EmbeddedError> {
-        Ok(Arc::new(crate::embedding::ToolSurface::new(
-            "native-projection".into(),
+        let manifest = crate::embedding::EmbeddedToolManifest::with_scheduling(
             vec![json!({"type":"function","name":"cell","strict":true,
                 "parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}})],
+            HashMap::from([("cell".into(), ToolScheduling::BeforeNextInference)]),
+        )?;
+        Ok(Arc::new(crate::embedding::ToolSurface::from_manifest(
+            "native-projection".into(),
+            Arc::new(manifest),
             self.dispatcher.clone(),
         )?))
     }
