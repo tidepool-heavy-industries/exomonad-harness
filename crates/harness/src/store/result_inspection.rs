@@ -47,7 +47,7 @@ impl Store {
             {
                 OperationDelivery::InHistory
             } else {
-                OperationDelivery::Pending
+                OperationDelivery::NotInCurrentHistory
             };
             Ok(OperationObservation {
                 operation: operation.clone(),
@@ -364,6 +364,62 @@ mod tests {
                     ));
                 }
             }
+            // A compacted current window may omit an already delivered output.
+            // Retain exact call occurrences through the production owner rather
+            // than mistaking current absence for an unfinished delivery.
+            let head = previous.as_ref().unwrap();
+            let canonical = store
+                .replay_output_operation(&operations[0])
+                .unwrap()
+                .unwrap();
+            let issued = store.history_occurrences(head).unwrap();
+            let retained: Vec<_> = issued
+                .iter()
+                .filter(|item| item.output_operation.as_ref() != Some(&operations[0]))
+                .cloned()
+                .enumerate()
+                .collect();
+            let items = retained
+                .iter()
+                .map(|(_, item)| item.item.clone())
+                .collect::<Vec<_>>();
+            let compact = RequestId(format!("current-window-{seed}"));
+            store
+                .write_compaction_request_with_evidence(
+                    &compact,
+                    head,
+                    &host.actor.0,
+                    &items,
+                    &retained,
+                    &[],
+                    &issued.into_iter().map(Some).collect::<Vec<_>>(),
+                    &[],
+                    Some(&host),
+                    None,
+                )
+                .unwrap();
+            assert!(
+                store
+                    .advance_agent_head(&host.actor, Some(head), Some(&compact))
+                    .unwrap()
+            );
+            let observed = store
+                .observe_embedded_operation(&host, &operations[0])
+                .unwrap();
+            assert_eq!(observed.history_head, compact);
+            assert_eq!(observed.delivery, Delivery::NotInCurrentHistory);
+            assert!(matches!(observed.settlement, Settlement::Retained { .. }));
+            assert_eq!(
+                store
+                    .observe_embedded_operation(&host, &operations[1])
+                    .unwrap()
+                    .delivery,
+                Delivery::InHistory
+            );
+            assert_eq!(
+                store.replay_output_operation(&operations[0]).unwrap(),
+                Some(canonical)
+            );
             let foreign = HostIdentity {
                 incarnation: "other".into(),
                 ..host.clone()

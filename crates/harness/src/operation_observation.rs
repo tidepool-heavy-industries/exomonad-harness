@@ -80,7 +80,8 @@ pub enum OperationSettlement {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum OperationDelivery {
-    Pending,
+    /// Absent from the observed current history, not proof of never being delivered.
+    NotInCurrentHistory,
     /// Present in this observer's effective input history; not proof of attention.
     InHistory,
 }

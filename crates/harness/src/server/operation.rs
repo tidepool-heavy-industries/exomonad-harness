@@ -185,7 +185,7 @@ mod tests {
         let result: OperationObservation = response.json().await.unwrap();
         assert_eq!(result.operation, operation);
         assert_eq!(result.settlement, OperationSettlement::Pending);
-        assert_eq!(result.delivery, OperationDelivery::Pending);
+        assert_eq!(result.delivery, OperationDelivery::NotInCurrentHistory);
         let mut foreign = input.clone();
         foreign["observer"]["incarnation"] = json!("other");
         assert_eq!(
