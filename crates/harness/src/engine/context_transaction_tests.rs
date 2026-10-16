@@ -827,22 +827,28 @@ async fn exercise_embedded_projection(mode: Mode) {
         .unwrap()
         .item;
     if matches!(mode, Mode::ForgedProjection) {
-        let failure = result.unwrap_err();
+        let settlement = result.unwrap();
+        assert_eq!(settlement.assessment().execution(), RoundExecution::Failed);
         assert!(
             matches!(
-                failure.primary_error(),
+                settlement.issue(),
                 Some(EngineError::Store(StoreError::Context(
                     crate::context::ContextError::Replay(
                         crate::context::ContextReplayRejection::InvalidMembership
                     )
                 )))
             ),
-            "unexpected failure: {failure:?}"
+            "unexpected settlement: {settlement:?}"
         );
         assert_eq!(requests.lock().unwrap().len(), 1);
         assert_eq!(bodies.lock().unwrap().len(), 1);
     } else {
-        result.unwrap();
+        let settlement = result.unwrap();
+        assert_eq!(
+            settlement.assessment().execution(),
+            RoundExecution::Completed
+        );
+        assert!(settlement.issue().is_none());
         let requests = requests.lock().unwrap();
         let bodies = bodies.lock().unwrap();
         assert_eq!(requests.len(), 2);
