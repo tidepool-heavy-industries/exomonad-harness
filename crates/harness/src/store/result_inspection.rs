@@ -286,6 +286,12 @@ mod tests {
             .unwrap()
             .unwrap()
             .item;
+        let reflected = store.embedded_conversation_history(&host).unwrap();
+        assert_eq!(reflected.history.last().unwrap().2, before);
+        assert_eq!(
+            store.inspect_embedded_result(&host, &operation).unwrap(),
+            Some(original.clone())
+        );
         drop(store);
         let store = Store::open(&path).unwrap();
         assert_eq!(

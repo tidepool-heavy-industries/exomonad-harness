@@ -1817,8 +1817,14 @@ impl Store {
             Some(head) => {
                 let retained = history(tx, head, true)?;
                 retained.iter().map(|occurrence| {
-                    let item = project_context_note(occurrence)?;
-                    let hash = if occurrence.note || !occurrence.overlays.is_empty() {
+                    let model_item = occurrence.output_operation.as_ref().map(|operation| {
+                        super::result_inspection::model_output_projection(tx, operation, &occurrence.item)
+                    }).transpose()?.flatten();
+                    let item = match model_item {
+                        Some(candidate) => candidate.item,
+                        None => project_context_note(occurrence)?,
+                    };
+                    let hash = if item != occurrence.item {
                         Store::put_item_tx(tx, &item)?
                     } else {
                         occurrence.hash.clone()
