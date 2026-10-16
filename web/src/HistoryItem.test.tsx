@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import HistoryItem from './HistoryItem'
 
 const entry = (item: unknown) => ({ position: '7', hash: 'a'.repeat(64), byteLen: '123', item })
@@ -251,16 +251,29 @@ it('does not infer an authored presentation from uncertified canonical JSON', ()
   expect(screen.getByLabelText('Result item 7').textContent).toBe(JSON.stringify(JSON.parse(output), null, 2))
 })
 
-it('keeps unfamiliar certified items inspectable without falling back to canonical output', () => {
+it('keeps unfamiliar certified items inspectable without falling back to canonical output', async () => {
   const item = { type: 'custom_tool_call_output', call_id: 'native', output: 'canonical secret' }
   const modelItem = { type: 'future_item', authored: 'projected value' }
-  render(<HistoryItem entry={{ ...entry(item), modelItem }} />)
-  const ordinary = screen.getAllByLabelText('Raw item 7').find(element => element.closest('details') === null)
-  expect(ordinary).toBeVisible()
-  expect(ordinary?.textContent).toBe(JSON.stringify(modelItem, null, 2))
-  expect(screen.queryByText(/canonical secret/)).toBeNull()
-  showRaw()
-  const canonical = screen.getAllByLabelText('Raw item 7').find(element => element.closest('details')?.open)
-  expect(canonical).toBeVisible()
-  expect(canonical?.textContent).toBe(JSON.stringify(item, null, 2))
+  const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+  try {
+    render(<HistoryItem entry={{ ...entry(item), modelItem }} />)
+    const body = within(screen.getByRole('listitem').querySelector<HTMLElement>('.chat-message-body')!)
+    expect(body.getByLabelText('Raw item 7')).toBeVisible()
+    expect(body.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(modelItem, null, 2))
+    expect(screen.queryByText(/canonical secret/)).toBeNull()
+    showRaw()
+    const details = within(screen.getByText('Message details').closest('details')!)
+    expect(details.getByLabelText('Raw item 7')).toBeVisible()
+    expect(details.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(item, null, 2))
+    expect(body.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(modelItem, null, 2))
+    fireEvent.click(body.getByRole('button', { name: 'Copy Raw item 7' }))
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(JSON.stringify(modelItem, null, 2)))
+    fireEvent.click(details.getByRole('button', { name: 'Copy Raw item 7' }))
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(JSON.stringify(item, null, 2)))
+  } finally {
+    if (descriptor) Object.defineProperty(navigator, 'clipboard', descriptor)
+    else Reflect.deleteProperty(navigator, 'clipboard')
+  }
 })
