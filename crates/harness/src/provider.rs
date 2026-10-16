@@ -454,7 +454,9 @@ pub trait Provider: Send + Sync {
     }
 
     /// Optional projection of one durable item for model input. The durable
-    /// request identity prevents a replacement from affecting another call.
+    /// request is the original issuing request for an authenticated operation
+    /// output, even when its occurrence belongs to a successor request. Store
+    /// validates any candidate against that exact output occurrence.
     fn model_visible_item(
         &self,
         _request: &crate::model::RequestId,

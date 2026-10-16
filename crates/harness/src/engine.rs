@@ -1705,7 +1705,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .zip(history.provenance)
                 .enumerate()
             {
-                if let Some(candidate) = request_provider.model_visible_item(&request, &item)? {
+                let issuing_request = input_occurrences
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .and_then(|occurrence| occurrence.output_operation.as_ref())
+                    .map_or(&request, |operation| &operation.request);
+                if let Some(candidate) =
+                    request_provider.model_visible_item(issuing_request, &item)?
+                {
                     let Some(occurrence) = input_occurrences
                         .get(index)
                         .and_then(Option::as_ref)
