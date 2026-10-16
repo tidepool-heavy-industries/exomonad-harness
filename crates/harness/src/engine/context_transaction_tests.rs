@@ -481,7 +481,7 @@ async fn exercise_formatted_with_profile(mode: Mode, native: bool, bounded: bool
         .context_transaction_status(&operation.origin, &handle)
         .unwrap();
     match mode {
-        Mode::AbortFailed | Mode::ChoiceOnly | Mode::Unconfirmed => {
+        Mode::AbortFailed | Mode::ChoiceOnly | Mode::Unconfirmed | Mode::ForgedProjection => {
             unreachable!("special result handled above")
         }
         Mode::Committed => {
