@@ -1300,9 +1300,17 @@ impl JobScheduler {
             // The native terminal can precede the ordinary result waiter. Its
             // publication metadata must be retained before waking the Engine.
             // Projection calls the invocation owner outside the scheduler lock.
-            let completion = if let crate::provider::CancellationAcknowledgment::Completed(value) =
-                &ack
-            {
+            let projected_output = match &ack {
+                crate::provider::CancellationAcknowledgment::Completed(value) => {
+                    Some(JobOutput::Completed(value.clone()))
+                }
+                crate::provider::CancellationAcknowledgment::Stopped => Some(JobOutput::Cancelled),
+                crate::provider::CancellationAcknowledgment::StoppedWithReceipt(receipt) => {
+                    Some(JobOutput::CancelledWithReceipt(receipt.clone()))
+                }
+                crate::provider::CancellationAcknowledgment::Unconfirmed(_) => None,
+            };
+            let completion = if let Some(output) = projected_output {
                 let (authority, required, retained) = {
                     let jobs = self.jobs.lock().await;
                     let job = jobs.get(&call_id).ok_or(JobError::UnknownCall)?;
@@ -1312,20 +1320,31 @@ impl JobScheduler {
                         job.completion.clone(),
                     )
                 };
-                let output = JobOutput::Completed(value.clone());
                 let mut completion = retained
                     .or_else(|| authority.project(output.clone()))
                     .unwrap_or_else(|| {
-                        let mut completion =
-                            crate::provider::ProviderCompletion::unedited(value.clone());
+                        let mut completion = crate::provider::ProviderCompletion {
+                            output: output.clone(),
+                            full_success: !required
+                                && matches!(output, JobOutput::Completed(Ok(_))),
+                            context: crate::provider::ContextDisposition::Unedited,
+                            activation_terminal: None,
+                        };
                         if required {
-                            completion.full_success = false;
                             completion.context = crate::provider::ContextDisposition::Unavailable;
                         }
                         completion
                     });
-                completion.output = output;
-                completion.full_success &= value.is_ok();
+                completion.output = output.clone();
+                completion.full_success &= matches!(output, JobOutput::Completed(Ok(_)));
+                if !completion.full_success {
+                    if let crate::provider::ContextDisposition::Transaction(draft) =
+                        &completion.context
+                    {
+                        completion.context =
+                            crate::provider::ContextDisposition::Discarded(draft.clone());
+                    }
+                }
                 Some(completion)
             } else {
                 None
@@ -1416,6 +1435,23 @@ impl JobScheduler {
                     publish_event = true;
                 }
             }
+        }
+        let authority = {
+            let jobs = self.jobs.lock().await;
+            jobs.get(&call_id)
+                .ok_or(JobError::UnknownCall)?
+                .completion_authority
+                .clone()
+        };
+        if let Some(mut completion) = authority.project(JobOutput::Cancelled) {
+            completion.output = JobOutput::Cancelled;
+            completion.full_success = false;
+            if let crate::provider::ContextDisposition::Transaction(draft) = &completion.context {
+                completion.context = crate::provider::ContextDisposition::Discarded(draft.clone());
+            }
+            let mut jobs = self.jobs.lock().await;
+            let job = jobs.get_mut(&call_id).ok_or(JobError::UnknownCall)?;
+            job.completion = Some(completion);
         }
         if publish_event {
             let _ = self.events.send(call_id.clone());

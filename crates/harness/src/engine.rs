@@ -159,6 +159,8 @@ enum DispatchResult {
 struct ContextDispositionRecord {
     operation: OperationId,
     requires_context_commit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transaction: Option<crate::context::ContextTransactionDraft>,
 }
 
 enum ReplayBarrierStage {
@@ -169,6 +171,9 @@ enum ReplayBarrierStage {
 #[cfg(test)]
 #[path = "engine/cancellation_gate_tests.rs"]
 mod cancellation_gate_tests;
+#[cfg(test)]
+#[path = "engine/context_transaction_tests.rs"]
+mod context_transaction_tests;
 #[cfg(test)]
 #[path = "engine/inference_gate_tests.rs"]
 mod inference_gate_tests;
@@ -3489,12 +3494,71 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .as_ref()
                 .map(|completion| completion.output_format)
                 .unwrap_or_default();
+            let transaction =
+                completion
+                    .as_ref()
+                    .and_then(|completion| match &completion.context {
+                        crate::provider::ContextDisposition::Transaction(draft) => {
+                            Some((draft.clone(), !completion.full_success))
+                        }
+                        crate::provider::ContextDisposition::Discarded(draft) => {
+                            Some((draft.clone(), true))
+                        }
+                        _ => None,
+                    });
             let disposition = completion
                 .and_then(|completion| completion.full_success.then_some(completion.context))
                 .filter(|context| {
                     !matches!(context, crate::provider::ContextDisposition::Unedited)
                 });
-            if let Some(disposition) =
+            if let Some((draft, discarded)) = transaction {
+                let store = self.store.clone();
+                let pending_operations = pending
+                    .iter()
+                    .filter(|call| call.operation != operation)
+                    .map(|call| call.operation.clone())
+                    .collect::<Vec<_>>();
+                let terminal_output = output.clone();
+                let cancelled = cancellation.clone();
+                let invocation = operation.clone();
+                let current_head = request.clone();
+                let head = blocking(move || {
+                    if discarded {
+                        store.discard_context_transaction_at(
+                            &snapshot,
+                            &current_head,
+                            &draft,
+                            &terminal_output,
+                        )?;
+                    } else {
+                        store.commit_context_transaction_at_guarded(
+                            &snapshot,
+                            &current_head,
+                            &draft,
+                            &terminal_output,
+                            &pending_operations,
+                            || *cancelled.borrow() || cancelled.has_changed().is_err(),
+                        )?;
+                    }
+                    store.context_transaction_head(&invocation)?.ok_or_else(|| {
+                        StoreError::Context(crate::context::ContextError::UnsupportedState)
+                    })
+                })
+                .await;
+                let head = match head {
+                    Err(EngineError::Store(StoreError::Context(
+                        crate::context::ContextError::Cancelled,
+                    ))) => {
+                        return Err(EngineError::Cancelled {
+                            head_request: Some(request.clone()),
+                        });
+                    }
+                    other => other?,
+                };
+                *request = head;
+                self.scheduler.mark_output_committed(&operation).await?;
+                self.acknowledge_output(&operation).await?;
+            } else if let Some(disposition) =
                 disposition.filter(|_| matches!(output, crate::turn::JobOutput::Completed(Ok(_))))
             {
                 let store = self.store.clone();
@@ -3527,8 +3591,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 &pending_operations,
                                 is_cancelled,
                             ),
-                        crate::provider::ContextDisposition::Unedited => {
-                            unreachable!("unedited disposition filtered")
+                        crate::provider::ContextDisposition::Unedited
+                        | crate::provider::ContextDisposition::Transaction(_)
+                        | crate::provider::ContextDisposition::Discarded(_) => {
+                            unreachable!("unedited and targeted dispositions handled separately")
                         }
                         crate::provider::ContextDisposition::Unavailable => Err(
                             StoreError::Context(crate::context::ContextError::Ineligible),
@@ -3690,6 +3756,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         request: &RequestId,
         claim_request: &RequestId,
     ) -> Result<(), EngineError> {
+        self.retain_context_requirement(operation, false).await?;
         let call_id = &operation.call;
         let output_format = match self.scheduler.invocation_completion(operation).await {
             Ok(Some(completion)) if completion.output == *output => completion.output_format,
@@ -3702,8 +3769,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let request = request.clone();
         let claimed_at = claim_request.clone();
         let terminal_output = output.clone();
+        let transaction = self.retained_context_transaction(operation)?;
         let terminal = blocking(move || {
-            store.write_job_output_with_format(&call, kind, &terminal_output, output_format)?;
+            if let Some(draft) = transaction {
+                store.retain_context_transaction_output(
+                    &call,
+                    &draft,
+                    &terminal_output,
+                    &claimed_at,
+                )?;
+            } else {
+                store.write_job_output_with_format(&call, kind, &terminal_output, output_format)?;
+            }
             let claim = store
                 .claims_for_operation(&call)?
                 .into_iter()
@@ -3777,8 +3854,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let call = operation.clone();
         let claimed_at = claim_request.clone();
         let terminal_output = output.clone();
+        let transaction = self.retained_context_transaction(operation)?;
         let terminal = blocking(move || {
-            store.write_job_output_with_format(&call, kind, &terminal_output, output_format)?;
+            if let Some(draft) = transaction {
+                store.retain_context_transaction_output(
+                    &call,
+                    &draft,
+                    &terminal_output,
+                    &claimed_at,
+                )?;
+            } else {
+                store.write_job_output_with_format(&call, kind, &terminal_output, output_format)?;
+            }
             let claim = store
                 .claims_for_operation(&call)?
                 .into_iter()
@@ -3816,38 +3903,91 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         if operation.origin != self.origin {
             return Ok(false);
         }
-        let required = self
+        let records = self
             .store
             .events(Some(&operation.request))?
             .into_iter()
             .filter(|event| event.kind == "context_disposition")
             .map(|event| serde_json::from_str::<ContextDispositionRecord>(&event.payload))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(StoreError::from)?
+            .map_err(StoreError::from)?;
+        let required = records
             .iter()
-            .any(|event| event.requires_context_commit && event.operation == *operation);
-        let scheduled_draft = self
+            .any(|record| record.requires_context_commit && record.operation == *operation);
+        let retained_transaction = records
+            .iter()
+            .filter(|record| record.operation == *operation)
+            .find_map(|record| record.transaction.as_ref());
+        let completion = self
             .scheduler
             .invocation_completion(operation)
             .await
             .ok()
-            .flatten()
-            .is_some_and(|completion| {
-                !matches!(
-                    completion.context,
-                    crate::provider::ContextDisposition::Unedited
-                )
+            .flatten();
+        let scheduled_draft = completion.as_ref().is_some_and(|completion| {
+            !matches!(
+                completion.context,
+                crate::provider::ContextDisposition::Unedited
+            )
+        });
+        let transaction = completion
+            .as_ref()
+            .and_then(|completion| match &completion.context {
+                crate::provider::ContextDisposition::Transaction(draft)
+                | crate::provider::ContextDisposition::Discarded(draft) => Some(draft.clone()),
+                _ => None,
             });
-        if (scheduled_draft || abort_unpublished) && !required {
+        if retained_transaction.is_some()
+            && transaction
+                .as_ref()
+                .is_some_and(|draft| Some(draft) != retained_transaction)
+        {
+            return Err(StoreError::ConflictingReplayOutcome {
+                operation: operation.clone(),
+            }
+            .into());
+        }
+        if ((scheduled_draft || abort_unpublished) && !required)
+            || (transaction.is_some() && retained_transaction.is_none())
+        {
             let required = serde_json::to_value(ContextDispositionRecord {
                 operation: operation.clone(),
                 requires_context_commit: true,
+                transaction,
             })
             .map_err(StoreError::from)?;
             self.store
                 .record_event(Some(&operation.request), "context_disposition", &required)?;
         }
         Ok(required || scheduled_draft || abort_unpublished)
+    }
+
+    fn retained_context_transaction(
+        &self,
+        operation: &OperationId,
+    ) -> Result<Option<crate::context::ContextTransactionDraft>, EngineError> {
+        let mut retained = None;
+        for event in self
+            .store
+            .events(Some(&operation.request))?
+            .into_iter()
+            .filter(|event| event.kind == "context_disposition")
+        {
+            let record: ContextDispositionRecord =
+                serde_json::from_str(&event.payload).map_err(StoreError::from)?;
+            if record.operation == *operation {
+                if let Some(draft) = record.transaction {
+                    if retained.as_ref().is_some_and(|previous| previous != &draft) {
+                        return Err(StoreError::ConflictingReplayOutcome {
+                            operation: operation.clone(),
+                        }
+                        .into());
+                    }
+                    retained = Some(draft);
+                }
+            }
+        }
+        Ok(retained)
     }
 
     async fn acknowledge_output(&self, operation: &OperationId) -> Result<(), EngineError> {

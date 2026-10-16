@@ -277,6 +277,7 @@ async fn history(boundaries: &[Boundary], published: &[bool]) -> Vec<(OperationI
                     &serde_json::to_value(ContextDispositionRecord {
                         operation: operation.clone(),
                         requires_context_commit: true,
+                        transaction: None,
                     })
                     .unwrap(),
                 )

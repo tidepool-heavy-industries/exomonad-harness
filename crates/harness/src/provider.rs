@@ -381,6 +381,9 @@ pub enum ContextDisposition {
     /// The terminal is retained, but staged state and children must be aborted.
     Unavailable,
     Draft(crate::context::ContextDraft),
+    Transaction(crate::context::ContextTransactionDraft),
+    /// A staged candidate whose invocation cannot publish context edits.
+    Discarded(crate::context::ContextTransactionDraft),
     Replay(crate::context::ContextCommitEvidence),
 }
 

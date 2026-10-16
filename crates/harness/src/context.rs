@@ -285,3 +285,358 @@ pub enum ContextError {
     #[error("context model must be a nonempty resolved model name")]
     InvalidModel,
 }
+
+/// Content versions describe visible content, independently of snapshot generation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextTextVersion {
+    pub reference: ContextReference,
+    pub selector: ContextTextSelector,
+    pub digest: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextUnitVersion {
+    pub reference: ContextReference,
+    pub digest: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextInspection {
+    pub document: ContextDocument,
+    pub text_versions: Vec<ContextTextVersion>,
+    pub unit_versions: Vec<ContextUnitVersion>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextPatch {
+    pub changes: Vec<ContextChange>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ContextChange {
+    ReplaceContextText {
+        reference: ContextReference,
+        selector: ContextTextSelector,
+        expected: String,
+        text: String,
+    },
+    RemoveContextUnit {
+        reference: ContextReference,
+        expected: String,
+    },
+    AppendContextNote {
+        text: String,
+        sources: Vec<ContextReference>,
+    },
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextProblemCode {
+    Stale,
+    Missing,
+    Ambiguous,
+    Denied,
+    InvalidPatch,
+    Ineligible,
+    AlreadyStaged,
+    UnsupportedSelector,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextProblem {
+    pub code: ContextProblemCode,
+    pub reference: Option<ContextReference>,
+    pub detail: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextTransaction {
+    pub raw: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextTransactionReceipt {
+    pub head: RequestId,
+    pub generation: u64,
+    pub changed: bool,
+    pub appended: Vec<ContextReference>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", content = "detail", rename_all = "snake_case")]
+pub enum ContextTransactionStatus {
+    Staged,
+    Committed(ContextTransactionReceipt),
+    Rejected(Vec<ContextProblem>),
+    Cancelled,
+    Unknown(String),
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextTransactionDraft {
+    pub patch: ContextPatch,
+    pub next_model: Option<String>,
+    pub next_effort: Option<Effort>,
+}
+
+pub(crate) fn context_digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Inspect supported editable bodies and removable units without granting authority.
+pub fn inspect_context(document: &ContextDocument) -> ContextInspection {
+    let mut text_versions = Vec::new();
+    let mut unit_versions = Vec::new();
+    for block in &document.blocks {
+        match block {
+            ContextBlock::Text {
+                reference: Some(reference),
+                text,
+                ..
+            } => {
+                let digest = context_digest(text.as_bytes());
+                text_versions.push(ContextTextVersion {
+                    reference: reference.clone(),
+                    selector: ContextTextSelector::MessageText { part: 0 },
+                    digest: digest.clone(),
+                });
+                unit_versions.push(ContextUnitVersion {
+                    reference: reference.clone(),
+                    digest,
+                });
+            }
+            ContextBlock::Native {
+                reference,
+                protected,
+                kind,
+                texts,
+                ..
+            } => {
+                if !protected && *kind == ContextNativeKind::CompletedExchange {
+                    unit_versions.push(ContextUnitVersion {
+                        reference: reference.clone(),
+                        digest: context_digest(
+                            &serde_json::to_vec(&(
+                                reference,
+                                texts
+                                    .iter()
+                                    .map(|field| (&field.reference, &field.selector, &field.text))
+                                    .collect::<Vec<_>>(),
+                            ))
+                            .expect("context serialization"),
+                        ),
+                    });
+                }
+                for field in texts {
+                    let digest = context_digest(field.text.as_bytes());
+                    if field.editable {
+                        text_versions.push(ContextTextVersion {
+                            reference: field.reference.clone(),
+                            selector: field.selector.clone(),
+                            digest: digest.clone(),
+                        });
+                    }
+                    if field.removable {
+                        unit_versions.push(ContextUnitVersion {
+                            reference: field.reference.clone(),
+                            digest,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    ContextInspection {
+        document: document.clone(),
+        text_versions,
+        unit_versions,
+    }
+}
+
+/// Validate one immutable batch against one document; errors never return partial edits.
+/// Store independently checks the issuing cut and current structural authority.
+pub fn check_context_patch(
+    document: &ContextDocument,
+    patch: &ContextPatch,
+) -> Result<ContextDocument, Vec<ContextProblem>> {
+    use std::collections::HashSet;
+    let inspection = inspect_context(document);
+    let mut result = document.clone();
+    let mut problems = Vec::new();
+    let mut texts = HashSet::new();
+    let mut removals = HashSet::new();
+    for change in &patch.changes {
+        let (reference, matches, expected) = match change {
+            ContextChange::ReplaceContextText {
+                reference,
+                selector,
+                expected,
+                ..
+            } => {
+                if !texts.insert((reference.clone(), selector.clone())) {
+                    problems.push(ContextProblem {
+                        code: ContextProblemCode::InvalidPatch,
+                        reference: Some(reference.clone()),
+                        detail: "text target occurs more than once in the batch".into(),
+                    });
+                }
+                (
+                    reference,
+                    inspection
+                        .text_versions
+                        .iter()
+                        .filter(|v| &v.reference == reference && &v.selector == selector)
+                        .map(|v| &v.digest)
+                        .collect::<Vec<_>>(),
+                    expected,
+                )
+            }
+            ContextChange::RemoveContextUnit {
+                reference,
+                expected,
+            } => {
+                if !removals.insert(reference.clone()) {
+                    problems.push(ContextProblem {
+                        code: ContextProblemCode::InvalidPatch,
+                        reference: Some(reference.clone()),
+                        detail: "unit target occurs more than once in the batch".into(),
+                    });
+                }
+                (
+                    reference,
+                    inspection
+                        .unit_versions
+                        .iter()
+                        .filter(|v| &v.reference == reference)
+                        .map(|v| &v.digest)
+                        .collect::<Vec<_>>(),
+                    expected,
+                )
+            }
+            ContextChange::AppendContextNote { sources, .. } => {
+                for source in sources {
+                    if !context_has_reference(document, source) {
+                        problems.push(ContextProblem {
+                            code: ContextProblemCode::Denied,
+                            reference: Some(source.clone()),
+                            detail: "note source is outside the inspected context".into(),
+                        });
+                    }
+                }
+                continue;
+            }
+        };
+        if expected.len() != 64
+            || !expected
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            problems.push(ContextProblem {
+                code: ContextProblemCode::InvalidPatch,
+                reference: Some(reference.clone()),
+                detail: "expected version must be an owner-issued SHA-256 digest".into(),
+            });
+            continue;
+        }
+        let code = match matches.as_slice() {
+            [] if context_has_reference(document, reference) => Some(ContextProblemCode::Denied),
+            [] => Some(ContextProblemCode::Missing),
+            [actual] if *actual != expected => Some(ContextProblemCode::Stale),
+            [_] => None,
+            _ => Some(ContextProblemCode::Ambiguous),
+        };
+        if let Some(code) = code {
+            problems.push(ContextProblem {
+                code,
+                reference: Some(reference.clone()),
+                detail: "target version or editable authority does not match".into(),
+            });
+        }
+    }
+    for (reference, _) in &texts {
+        if removals.contains(reference) || document.blocks.iter().any(|b| matches!(b, ContextBlock::Native {reference: group, texts: fields, ..} if removals.contains(group) && fields.iter().any(|f| &f.reference == reference))) {
+            problems.push(ContextProblem { code: ContextProblemCode::InvalidPatch, reference: Some(reference.clone()), detail: "batch both edits and removes the same unit".into() });
+        }
+    }
+    for block in &document.blocks {
+        if let ContextBlock::Native {
+            reference, texts, ..
+        } = block
+        {
+            if removals.contains(reference)
+                && texts.iter().any(|field| {
+                    field.reference != *reference && removals.contains(&field.reference)
+                })
+            {
+                problems.push(ContextProblem {
+                    code: ContextProblemCode::InvalidPatch,
+                    reference: Some(reference.clone()),
+                    detail: "batch removes both a unit and one of its members".into(),
+                });
+            }
+        }
+    }
+    if !problems.is_empty() {
+        return Err(problems);
+    }
+    for change in &patch.changes {
+        match change {
+            ContextChange::ReplaceContextText {
+                reference,
+                selector,
+                text,
+                ..
+            } => {
+                for block in &mut result.blocks {
+                    match block {
+                        ContextBlock::Text {
+                            reference: Some(r),
+                            text: body,
+                            ..
+                        } if r == reference => *body = text.clone(),
+                        ContextBlock::Native { texts, .. } => {
+                            for field in texts {
+                                if field.reference == *reference && field.selector == *selector {
+                                    field.text = text.clone();
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            ContextChange::RemoveContextUnit { reference, .. } => {
+                result.blocks.retain(|b| !matches!(b, ContextBlock::Text {reference:Some(r),..} | ContextBlock::Native {reference:r,..} if r == reference));
+                for block in &mut result.blocks {
+                    if let ContextBlock::Native { texts, .. } = block {
+                        texts.retain(|field| &field.reference != reference);
+                    }
+                }
+            }
+            ContextChange::AppendContextNote { text, sources } => {
+                result.blocks.push(ContextBlock::Text {
+                    reference: None,
+                    role: ContextRole::Assistant,
+                    text: text.clone(),
+                    sources: sources.clone(),
+                })
+            }
+        }
+    }
+    Ok(result)
+}
+
+pub(crate) fn context_has_reference(
+    document: &ContextDocument,
+    reference: &ContextReference,
+) -> bool {
+    document.blocks.iter().any(|block| match block {
+        ContextBlock::Text {
+            reference: Some(r),
+            sources,
+            ..
+        } => r == reference || sources.contains(reference),
+        ContextBlock::Native {
+            reference: r,
+            texts,
+            ..
+        } => r == reference || texts.iter().any(|f| &f.reference == reference),
+        _ => false,
+    })
+}
