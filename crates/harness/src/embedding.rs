@@ -283,6 +283,11 @@ pub trait HostActor: Send + Sync {
     }
     /// A request to the host owner, not proof that retirement has completed.
     async fn control(&self, control: HostControl) -> Result<Value, HostControlError>;
+    /// Canonical output is durable; publish its ordinary presentation without
+    /// acknowledging native execution or cleanup.
+    async fn output_retained(&self, _operation: &crate::model::OperationId) -> Result<(), String> {
+        Ok(())
+    }
     /// The owning conversation has durably retained this operation's real result.
     /// Retried acknowledgments must not repeat execution or lifecycle admission.
     async fn output_committed(&self, _operation: &crate::model::OperationId) -> Result<(), String> {
@@ -788,6 +793,24 @@ impl PinnedProvider {
 }
 #[async_trait]
 impl Provider for BoundProvider {
+    async fn output_retained(
+        &self,
+        operation: &crate::model::OperationId,
+    ) -> Result<(), ProviderError> {
+        let identity = self.host.identity();
+        match &operation.origin {
+            ConversationIdentity::Embedded { run, actor, .. }
+                if run == &identity.run && actor == &identity.actor =>
+            {
+                self.host
+                    .output_retained(operation)
+                    .await
+                    .map_err(|error| ProviderError::Tool(error.into()))
+            }
+            _ => Ok(()),
+        }
+    }
+
     async fn output_committed(
         &self,
         operation: &crate::model::OperationId,
@@ -856,6 +879,14 @@ impl Provider for BoundProvider {
 }
 #[async_trait]
 impl Provider for PinnedProvider {
+    fn model_visible_item(
+        &self,
+        request: &crate::model::RequestId,
+        item: &crate::item::Item,
+    ) -> Result<Option<crate::provider::ModelVisibleItemCandidate>, ProviderError> {
+        self.surface.dispatcher.model_visible_item(request, item)
+    }
+
     fn request_activation(&self) -> Option<crate::provider::RequestActivation> {
         self.surface.dispatcher.request_activation()
     }
@@ -1026,6 +1057,46 @@ mod tests {
         assert_eq!(second.request_instructions(), Some("B"));
         assert_eq!(first.tool_surface_version(), Some("A"));
         assert_eq!(second.tool_surface_version(), Some("B"));
+    }
+
+    #[test]
+    fn pinned_native_provider_forwards_the_model_projection() {
+        struct Projection;
+        #[async_trait]
+        impl Provider for Projection {
+            fn model_visible_item(
+                &self,
+                _: &RequestId,
+                _: &Item,
+            ) -> Result<Option<crate::provider::ModelVisibleItemCandidate>, ProviderError>
+            {
+                Ok(Some(crate::provider::ModelVisibleItemCandidate {
+                    item: Item(
+                        json!({"type":"function_call_output","call_id":"c","output":"authored presentation"}),
+                    ),
+                    result_event: 7,
+                    annotation_event: 8,
+                }))
+            }
+            async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+                panic!("projection must not execute the tool")
+            }
+        }
+        let provider = PinnedProvider {
+            store: Arc::new(Store::memory().unwrap()),
+            host: seed_host(),
+            surface: Arc::new(
+                ToolSurface::new("source".into(), vec![], Arc::new(Projection)).unwrap(),
+            ),
+        };
+        let original =
+            Item(json!({"type":"function_call_output","call_id":"c","output":"canonical result"}));
+        let candidate = provider
+            .model_visible_item(&RequestId("r".into()), &original)
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.item.0["output"], "authored presentation");
+        assert_eq!(original.0["output"], "canonical result");
     }
 
     struct PendingAdmissionHost {

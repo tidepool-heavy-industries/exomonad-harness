@@ -22,7 +22,10 @@ impl Store {
             crate::item::ToolKind::Function,
             &crate::turn::JobOutput::Completed(Ok(replacement.clone())),
         );
-        if let Some(existing) = self.model_output_projection(operation)? {
+        if let Some(existing) = retained_candidates(&self.lock()?, operation, &original)?
+            .into_iter()
+            .next()
+        {
             if existing.item == candidate {
                 return Ok(existing);
             }
@@ -98,21 +101,68 @@ impl Store {
 
 /// Recover a durable projection and authenticate it through the same owner used
 /// by provider requests. GUI and model readers share this exact projection.
-pub(super) fn model_output_projection(
+fn retained_candidates(
     connection: &Connection,
     operation: &OperationId,
     canonical: &Item,
-) -> Result<Option<ModelVisibleItemCandidate>> {
+) -> Result<Vec<ModelVisibleItemCandidate>> {
     let mut query = connection.prepare(
-        "SELECT r.id,a.id,a.payload FROM events a JOIN events r ON r.id=json_extract(a.payload,'$.ordinal') WHERE a.kind='model_tool_annotation' AND r.kind='model_tool_result' AND r.request_id=?1 AND a.request_id=r.request_id AND json_extract(r.payload,'$.operation.call')=?2 ORDER BY a.id DESC"
+        "SELECT r.id,a.id,r.payload,a.payload FROM events a JOIN events r ON r.id=json_extract(a.payload,'$.ordinal') WHERE a.kind='model_tool_annotation' AND r.kind='model_tool_result' AND r.request_id=?1 AND a.request_id=r.request_id AND json_extract(r.payload,'$.operation.call')=?2 ORDER BY a.id DESC"
     )?;
     let rows = query.query_map(params![operation.request.0, operation.call.0], |row| {
         Ok((
             row.get::<_, i64>(0)?,
             row.get::<_, i64>(1)?,
             row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
         ))
     })?;
+    #[derive(serde::Deserialize)]
+    struct Original {
+        operation: OperationId,
+        output: Item,
+    }
+    #[derive(serde::Deserialize)]
+    struct Annotation {
+        ordinal: i64,
+        annotation: crate::invocation::HookAnnotation,
+    }
+    let mut candidates = Vec::new();
+    for row in rows {
+        let (result_event, annotation_event, original, annotation) = row?;
+        let original: Original = serde_json::from_str(&original)?;
+        let annotation: Annotation = serde_json::from_str(&annotation)?;
+        if original.operation != *operation
+            || original.output != *canonical
+            || annotation.ordinal != result_event
+        {
+            continue;
+        }
+        if let crate::invocation::HookAnnotation::Pruned { replacement, .. } = annotation.annotation
+        {
+            candidates.push(ModelVisibleItemCandidate {
+                item: Item::tool_output(
+                    &operation.call,
+                    crate::item::ToolKind::Function,
+                    &crate::turn::JobOutput::Completed(Ok(replacement)),
+                ),
+                result_event,
+                annotation_event,
+            });
+        }
+    }
+    Ok(candidates)
+}
+
+pub(super) fn model_output_projection(
+    connection: &Connection,
+    operation: &OperationId,
+    canonical: &Item,
+) -> Result<Option<ModelVisibleItemCandidate>> {
+    let candidates = retained_candidates(connection, operation, canonical)?;
+    if candidates.is_empty() {
+        return Ok(None);
+    }
     let published_request: Option<String> = connection.query_row(
         "SELECT request_id FROM request_items WHERE output_operation=?1 ORDER BY request_id,position LIMIT 1",
         [serde_json::to_string(operation)?], |row| row.get(0),
@@ -124,33 +174,15 @@ pub(super) fn model_output_projection(
         .into_iter()
         .find(|item| item.output_operation.as_ref() == Some(operation) && item.item == *canonical);
     let Some(occurrence) = occurrence else {
-        return Ok(None);
+        return Err(StoreError::OperationOriginMismatch);
     };
-    for row in rows {
-        let (result_event, annotation_event, raw) = row?;
-        #[derive(serde::Deserialize)]
-        struct Annotation {
-            annotation: crate::invocation::HookAnnotation,
-        }
-        let annotation: Annotation = serde_json::from_str(&raw)?;
-        if let crate::invocation::HookAnnotation::Pruned { replacement, .. } = annotation.annotation
-        {
-            let candidate = ModelVisibleItemCandidate {
-                item: Item::tool_output(
-                    &operation.call,
-                    crate::item::ToolKind::Function,
-                    &crate::turn::JobOutput::Completed(Ok(replacement)),
-                ),
-                result_event,
-                annotation_event,
-            };
-            match context::qualify_model_visible_item(connection, &occurrence, &candidate) {
-                Ok(_) => return Ok(Some(candidate)),
-                Err(StoreError::Context(crate::context::ContextError::Replay(
-                    crate::context::ContextReplayRejection::InvalidMembership,
-                ))) => continue,
-                Err(error) => return Err(error),
-            }
+    for candidate in candidates {
+        match context::qualify_model_visible_item(connection, &occurrence, &candidate) {
+            Ok(_) => return Ok(Some(candidate)),
+            Err(StoreError::Context(crate::context::ContextError::Replay(
+                crate::context::ContextReplayRejection::InvalidMembership,
+            ))) => continue,
+            Err(error) => return Err(error),
         }
     }
     Ok(None)
@@ -188,7 +220,7 @@ mod tests {
         }
     }
 
-    fn settled(store: &Store) -> (HostIdentity, OperationId, Item) {
+    fn settled(store: &Store, attach: bool) -> (HostIdentity, OperationId, Item) {
         let host = HostIdentity {
             run: "result-test".into(),
             actor: AgentPath("/root".into()),
@@ -218,9 +250,11 @@ mod tests {
                 )),
             )
             .unwrap();
-        store
-            .append_operation_output(&operation, &request, &request)
-            .unwrap();
+        if attach {
+            store
+                .append_operation_output(&operation, &request, &request)
+                .unwrap();
+        }
         assert!(
             store
                 .advance_agent_head(&host.actor, None, Some(&request))
@@ -235,7 +269,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store.sqlite");
         let store = Store::open(&path).unwrap();
-        let (host, operation, original) = settled(&store);
+        let (host, operation, original) = settled(&store, true);
         store
             .publish_model_output_projection(&operation, serde_json::json!({"output":"done"}))
             .unwrap();
@@ -278,9 +312,60 @@ mod tests {
     }
 
     #[test]
+    fn projection_is_retained_before_history_and_retry_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.sqlite");
+        let store = Store::open(&path).unwrap();
+        let (host, operation, original) = settled(&store, false);
+        let replacement = serde_json::json!({"output":"authored presentation"});
+        let first = store
+            .publish_model_output_projection(&operation, replacement.clone())
+            .unwrap();
+        let retry = store
+            .publish_model_output_projection(&operation, replacement.clone())
+            .unwrap();
+        assert_eq!(first.result_event, retry.result_event);
+        assert!(store.model_output_projection(&operation).unwrap().is_none());
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let successor = HostIdentity {
+            incarnation: "2".into(),
+            ..host
+        };
+        let predecessor = HostIdentity {
+            incarnation: "1".into(),
+            ..successor.clone()
+        };
+        store
+            .transfer_embedded_binding(&predecessor, &successor, &Transfer)
+            .unwrap();
+        assert_eq!(
+            store
+                .inspect_embedded_result(&successor, &operation)
+                .unwrap(),
+            Some(original)
+        );
+        let resumed = store
+            .publish_model_output_projection(&operation, replacement)
+            .unwrap();
+        assert_eq!(resumed.result_event, first.result_event);
+        store
+            .append_operation_output(&operation, &operation.request, &operation.request)
+            .unwrap();
+        assert_eq!(
+            store
+                .model_output_projection(&operation)
+                .unwrap()
+                .unwrap()
+                .item,
+            first.item
+        );
+    }
+
+    #[test]
     fn result_inspection_refuses_foreign_origins_and_reused_call_ids() {
         let store = Store::memory().unwrap();
-        let (host, operation, original) = settled(&store);
+        let (host, operation, original) = settled(&store, true);
         for origin in [
             crate::model::ConversationIdentity::Embedded {
                 run: "foreign".into(),

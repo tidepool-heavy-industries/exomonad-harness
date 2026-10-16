@@ -2757,6 +2757,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         operation: &OperationId,
         claimant: &RequestId,
     ) -> Result<Item, EngineError> {
+        self.provider.output_retained(operation).await?;
         let store = self.store.clone();
         let operation = operation.clone();
         let call_id = operation.call.0.clone();
@@ -3711,6 +3712,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         {
             return Err(EngineError::ClaimRecoveryConflict(call_id.0.clone()));
         }
+        self.provider.output_retained(operation).await?;
         self.publish_operation_output(&request, operation, claim_request)
             .await?;
         if operation.origin == self.origin {
@@ -3780,6 +3782,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         {
             return Err(EngineError::ClaimRecoveryConflict(call_id.0.clone()));
         }
+        self.provider.output_retained(operation).await?;
         if operation.origin == self.origin {
             match self.scheduler.mark_output_committed(operation).await {
                 Ok(()) | Err(JobError::UnknownCall) => {}

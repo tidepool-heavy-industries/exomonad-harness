@@ -451,6 +451,13 @@ pub trait Provider: Send + Sync {
         Ok(None)
     }
 
+    /// The canonical result is durable, before ordinary history publication.
+    /// This notification may publish a presentation; it grants no cleanup or
+    /// execution authority and applies to every terminal kind.
+    async fn output_retained(&self, _operation: &OperationId) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
     /// Acknowledge a provider-issued operation after its real terminal output is durable.
     /// Engine-owned waits settle without a provider completion notification.
     /// Recovery can repeat this notification; implementations must be idempotent.
