@@ -1150,15 +1150,30 @@ impl JobScheduler {
         key: &K,
     ) -> Result<Option<crate::provider::ProviderCompletion>, JobError> {
         let operation = key.operation(self);
-        let jobs = self.jobs.lock().await;
-        let job = jobs.get(&operation).ok_or(JobError::UnknownCall)?;
-        let mut completion = job.completion.clone();
+        let (mut completion, authority, output, activation) = {
+            let jobs = self.jobs.lock().await;
+            let job = jobs.get(&operation).ok_or(JobError::UnknownCall)?;
+            (
+                job.completion.clone(),
+                job.completion_authority.clone(),
+                job.output.clone(),
+                job.activation.clone(),
+            )
+        };
+        if let Some(output) = output {
+            if completion
+                .as_ref()
+                .is_none_or(|completion| completion.output != output)
+            {
+                completion = authority.project(output);
+            }
+        }
         if let Some(completion) = &mut completion {
             if completion
                 .activation_terminal
                 .as_ref()
                 .is_some_and(|terminal| {
-                    !job.activation
+                    !activation
                         .as_ref()
                         .is_some_and(|activation| terminal.matches(&operation, activation))
                 })

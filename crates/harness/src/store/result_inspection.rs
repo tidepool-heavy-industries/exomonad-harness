@@ -3,6 +3,14 @@
 use super::*;
 use crate::{embedding::HostIdentity, provider::ModelVisibleItemCandidate};
 
+pub(super) fn output_kind(item: &Item) -> Result<crate::item::ToolKind> {
+    match item.0["type"].as_str() {
+        Some("function_call_output") => Ok(crate::item::ToolKind::Function),
+        Some("custom_tool_call_output") => Ok(crate::item::ToolKind::Custom),
+        _ => Err(StoreError::OperationOriginMismatch),
+    }
+}
+
 impl Store {
     /// Publish an alternate model body for one already durable exact operation.
     /// The canonical output remains the operation's immutable settlement.
@@ -14,12 +22,10 @@ impl Store {
         let original = self
             .replay_output_operation(operation)?
             .ok_or(StoreError::OperationOriginMismatch)?;
-        if original.0["type"] != "function_call_output" {
-            return Err(StoreError::OperationOriginMismatch);
-        }
+        let kind = output_kind(&original)?;
         let candidate = Item::tool_output(
             &operation.call,
-            crate::item::ToolKind::Function,
+            kind,
             &crate::turn::JobOutput::Completed(Ok(replacement.clone())),
         );
         let result = serde_json::to_string(&serde_json::json!({
@@ -97,6 +103,11 @@ impl Store {
                 let kind = invocation_kind(tx, &operation.request, &operation.call)?
                     .ok_or(StoreError::OperationOriginMismatch)?;
                 validate_replay_output(&operation.call, kind, &item)?;
+                let format = terminal::exact_terminal(tx, operation)?
+                    .ok_or(StoreError::OperationOriginMismatch)?.2;
+                if item.output_format()? != format {
+                    return Err(StoreError::ConflictingReplayOutcome { operation: operation.clone() });
+                }
                 Ok(item)
             }).transpose()
         })
@@ -147,7 +158,7 @@ fn retained_candidates(
             candidates.push(ModelVisibleItemCandidate {
                 item: Item::tool_output(
                     &operation.call,
-                    crate::item::ToolKind::Function,
+                    output_kind(canonical)?,
                     &crate::turn::JobOutput::Completed(Ok(replacement)),
                 ),
                 result_event,
@@ -163,16 +174,25 @@ pub(super) fn model_output_projection(
     operation: &OperationId,
     canonical: &Item,
 ) -> Result<Option<ModelVisibleItemCandidate>> {
+    let unprojected = || {
+        if canonical.output_format()? == crate::provider::OutputFormat::NativeReceiptV1 {
+            Err(StoreError::MissingModelOutputProjection {
+                operation: operation.clone(),
+            })
+        } else {
+            Ok(None)
+        }
+    };
     let candidates = retained_candidates(connection, operation, canonical)?;
     if candidates.is_empty() {
-        return Ok(None);
+        return unprojected();
     }
     let published_request: Option<String> = connection.query_row(
         "SELECT request_id FROM request_items WHERE output_operation=?1 ORDER BY request_id,position LIMIT 1",
         [serde_json::to_string(operation)?], |row| row.get(0),
     ).optional()?;
     let Some(published_request) = published_request else {
-        return Ok(None);
+        return unprojected();
     };
     let occurrence = context::request_occurrences(connection, &RequestId(published_request))?
         .into_iter()
@@ -189,7 +209,7 @@ pub(super) fn model_output_projection(
             Err(error) => return Err(error),
         }
     }
-    Ok(None)
+    unprojected()
 }
 
 impl Store {
@@ -432,6 +452,58 @@ mod tests {
         assert_eq!(
             store.inspect_embedded_result(&host, &operation).unwrap(),
             Some(original)
+        );
+    }
+
+    #[test]
+    fn marked_native_output_requires_certified_projection_without_losing_inspection() {
+        let store = Store::memory().unwrap();
+        let host = HostIdentity {
+            run: "guard".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "1".into(),
+        };
+        store.bind_embedded_actor(&host, None).unwrap();
+        let request = RequestId("guard-request".into());
+        let call = CallId("guard-call".into());
+        store.write_request(&request,None,&host.actor.0,&[Item(serde_json::json!({"type":"function_call","call_id":call.0,"name":"read","arguments":"{}"}))],Usage::default()).unwrap();
+        let operation = store.claim(&call, &request).unwrap();
+        store
+            .write_job_output_with_format(
+                &operation,
+                crate::item::ToolKind::Function,
+                &crate::turn::JobOutput::Completed(Ok(
+                    serde_json::json!({"canonical":"λ".repeat(50000)}),
+                )),
+                crate::provider::OutputFormat::NativeReceiptV1,
+            )
+            .unwrap();
+        store
+            .append_operation_output(&operation, &request, &request)
+            .unwrap();
+        store
+            .advance_agent_head(&host.actor, None, Some(&request))
+            .unwrap();
+        assert!(matches!(
+            store.model_output_projection(&operation),
+            Err(StoreError::MissingModelOutputProjection { .. })
+        ));
+        assert!(
+            store
+                .inspect_embedded_result(&host, &operation)
+                .unwrap()
+                .is_some()
+        );
+        let candidate = store
+            .publish_model_output_projection(&operation, serde_json::json!({"output":"done"}))
+            .unwrap();
+        assert_eq!(
+            store
+                .model_output_projection(&operation)
+                .unwrap()
+                .unwrap()
+                .item,
+            candidate.item
         );
     }
 

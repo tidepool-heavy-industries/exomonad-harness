@@ -177,6 +177,8 @@ pub enum StoreError {
     },
     #[error("operation origin does not match its issuing request and Store binding")]
     OperationOriginMismatch,
+    #[error("native operation {operation:?} has no certified ordinary presentation")]
+    MissingModelOutputProjection { operation: OperationId },
     #[error("invalid canonical agent path: {0}")]
     InvalidAgentPath(String),
     #[error("agent parent does not exist: {0}")]
@@ -296,6 +298,7 @@ impl StoreError {
             | Self::InconsistentOutputPublication { .. }
             | Self::CompactionOwnership { .. }
             | Self::OperationOriginMismatch
+            | Self::MissingModelOutputProjection { .. }
             | Self::InvalidAgentPath(..)
             | Self::MissingAgentParent(..)
             | Self::MissingActiveSpawnCall { .. }
@@ -1415,10 +1418,26 @@ impl Store {
         kind: ToolKind,
         output: &crate::turn::JobOutput,
     ) -> Result<usize> {
-        self.settle_claims(
+        self.write_job_output_with_format(
             operation,
-            &Item::tool_output(&operation.call, kind, output),
+            kind,
+            output,
+            crate::provider::OutputFormat::LegacyOpaque,
+        )
+    }
+
+    pub(crate) fn write_job_output_with_format(
+        &self,
+        operation: &OperationId,
+        kind: ToolKind,
+        output: &crate::turn::JobOutput,
+        format: crate::provider::OutputFormat,
+    ) -> Result<usize> {
+        self.settle_claims_with_format(
+            operation,
+            &Item::tool_output_with_format(&operation.call, kind, output, format),
             TerminalOutcome::from(output),
+            format,
         )
     }
     /// Crash recovery exposes all still-pending durable claims for the caller's resumption policy.
@@ -2456,6 +2475,26 @@ impl Store {
         output: &Item,
         terminal: TerminalOutcome,
     ) -> Result<usize> {
+        self.settle_claims_with_format(
+            operation,
+            output,
+            terminal,
+            crate::provider::OutputFormat::LegacyOpaque,
+        )
+    }
+
+    fn settle_claims_with_format(
+        &self,
+        operation: &OperationId,
+        output: &Item,
+        terminal: TerminalOutcome,
+        format: crate::provider::OutputFormat,
+    ) -> Result<usize> {
+        if output.output_format()? != format {
+            return Err(StoreError::ConflictingReplayOutcome {
+                operation: operation.clone(),
+            });
+        }
         let kind = self
             .tool_invocation_kind(&operation.request, &operation.call)?
             .ok_or_else(|| StoreError::MissingCheckpointCall {
@@ -2466,9 +2505,9 @@ impl Store {
         let mut c = self.lock()?;
         c.write_transaction(|tx| {
             let h = Self::put_item_tx(&tx, output)?;
-            if let Some((previous_hash, previous_terminal)) = terminal::exact_terminal(&tx, operation)?
+            if let Some((previous_hash, previous_terminal, previous_format)) = terminal::exact_terminal(&tx, operation)?
             {
-                if previous_hash != h || previous_terminal != terminal {
+                if previous_hash != h || previous_terminal != terminal || previous_format != format {
                     return Err(StoreError::ConflictingReplayOutcome {
                         operation: operation.clone(),
                     });
@@ -2477,7 +2516,7 @@ impl Store {
             let origin = serde_json::to_string(&operation.origin)?;
             let n = tx.execute(
                 "UPDATE claims SET state='settled',output_hash=?4,terminal_json=?5 WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND state='pending'",
-                params![origin,operation.request.0,operation.call.0,h.0,serde_json::to_string(&terminal)?],
+                params![origin,operation.request.0,operation.call.0,h.0,terminal::encode_terminal(&terminal, format)?],
             )?;
 
             Ok(n)

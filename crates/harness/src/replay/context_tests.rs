@@ -90,6 +90,7 @@ impl Provider for Editor {
             }
         }
         ProviderCompletion {
+            output_format: crate::provider::OutputFormat::LegacyOpaque,
             activation_terminal: None,
             output: JobOutput::Completed(Ok(
                 json!({"error":"a successful payload is still successful","changed":self.rewrite}),

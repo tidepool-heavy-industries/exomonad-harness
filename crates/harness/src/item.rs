@@ -115,6 +115,30 @@ impl Item {
         }))
     }
 
+    /// Settlement provenance is separate from the body and never inferred from it.
+    pub fn output_format(&self) -> Result<crate::provider::OutputFormat, serde_json::Error> {
+        self.0
+            .get("output_format")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map(|format| format.unwrap_or_default())
+    }
+
+    pub(crate) fn tool_output_with_format(
+        call_id: &CallId,
+        kind: ToolKind,
+        output: &JobOutput,
+        format: crate::provider::OutputFormat,
+    ) -> Self {
+        let mut item = Self::tool_output(call_id, kind, output);
+        if format != crate::provider::OutputFormat::LegacyOpaque {
+            item.0["output_format"] =
+                serde_json::to_value(format).expect("output format is serializable");
+        }
+        item
+    }
+
     /// The call kind must come from the persisted invocation, including recovery.
     pub fn tool_output(call_id: &CallId, kind: ToolKind, output: &JobOutput) -> Self {
         let value = match output {

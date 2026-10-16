@@ -384,12 +384,20 @@ pub enum ContextDisposition {
     Replay(crate::context::ContextCommitEvidence),
 }
 
-/// Exact provider-future completion. Embedded runtimes derive `full_success`
-/// from their typed exit and confirmed cleanup, independently from value JSON.
-/// The owner supplies the terminal kind even when cancellation is observed
-/// through the ordinary reply waiter before its cancellation acknowledgment.
+/// Durable payload interpretation is issued by its completion owner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputFormat {
+    #[default]
+    LegacyOpaque,
+    NativeReceiptV1,
+}
+
+/// Exact provider completion, including format and cleanup/context evidence.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProviderCompletion {
+    /// Issued by the completion owner, independently of payload contents.
+    pub output_format: OutputFormat,
     pub output: crate::turn::JobOutput,
     pub full_success: bool,
     pub context: ContextDisposition,
@@ -402,6 +410,7 @@ pub struct ProviderCompletion {
 impl ProviderCompletion {
     pub fn unedited(result: Result<Value, ToolFailure>) -> Self {
         Self {
+            output_format: OutputFormat::LegacyOpaque,
             full_success: result.is_ok(),
             output: crate::turn::JobOutput::Completed(result),
             context: ContextDisposition::Unedited,

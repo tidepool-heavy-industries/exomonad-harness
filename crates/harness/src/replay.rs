@@ -258,6 +258,7 @@ impl ReplayProvider {
                 )
             })?;
         let recorded_item = output.item;
+        let output_format = output.output_format;
         let terminal = output.terminal;
         let output = &recorded_item;
         let expected_type = match kind {
@@ -307,6 +308,17 @@ impl ReplayProvider {
                 JobOutput::Completed(Err(restore(failure, canonical_body.as_ref())))
             }
             TerminalOutcome::Cancelled => JobOutput::Cancelled,
+            TerminalOutcome::CancelledWithValueReceipt => {
+                JobOutput::CancelledWithReceipt(Ok(canonical_body
+                    .as_ref()
+                    .and_then(|body| body.get("receipt"))
+                    .cloned()
+                    .ok_or_else(|| {
+                        ProviderError::Tool(
+                            "canonical cancellation value receipt is missing".into(),
+                        )
+                    })?))
+            }
             TerminalOutcome::CancelledWithReceipt(receipt) => {
                 JobOutput::CancelledWithReceipt(receipt.map_err(|failure| {
                     restore(
@@ -340,7 +352,9 @@ impl ReplayProvider {
                 JobOutput::Completed(Ok(decoded))
             }
         };
-        if crate::item::Item::tool_output(&local.call, *kind, &restored) != recorded_item {
+        if crate::item::Item::tool_output_with_format(&local.call, *kind, &restored, output_format)
+            != recorded_item
+        {
             return Err(ProviderError::Tool(
                 "recorded terminal does not match its immutable output item".into(),
             ));
@@ -835,6 +849,7 @@ impl Provider for ReplayProvider {
                 ));
             };
             Ok(ProviderCompletion {
+                output_format: crate::provider::OutputFormat::LegacyOpaque,
                 activation_terminal: None,
                 output: JobOutput::Completed(Ok(value.clone())),
                 full_success: true,

@@ -400,6 +400,13 @@ fn project_bodies(occurrence: &Occurrence) -> Result<Item> {
             return Err(ContextError::InvalidReference.into());
         }
         set_text_body(&mut item, &overlay.selector, &overlay.text)?;
+        if matches!(overlay.selector, ContextTextSelector::ToolResultText) {
+            // Format provenance describes the immutable canonical settlement,
+            // not a derived provider-facing text body.
+            if let Some(fields) = item.0.as_object_mut() {
+                fields.remove("output_format");
+            }
+        }
     }
     Ok(item)
 }
@@ -472,9 +479,7 @@ pub(super) fn qualify_model_visible_item(
     }
     let refused = || ContextError::Replay(ContextReplayRejection::InvalidMembership);
     let operation = occurrence.output_operation.as_ref().ok_or_else(refused)?;
-    if occurrence.item.0["type"] != "function_call_output" {
-        return Err(refused().into());
-    }
+    let kind = super::result_inspection::output_kind(&occurrence.item).map_err(|_| refused())?;
     validate_canonical_history(connection, std::slice::from_ref(occurrence))?;
     let mut query = connection.prepare(
         "SELECT r.id,r.payload,a.payload FROM events a JOIN events r \
@@ -505,7 +510,7 @@ pub(super) fn qualify_model_visible_item(
         };
         let authorized = Item::tool_output(
             &operation.call,
-            crate::item::ToolKind::Function,
+            kind,
             &JobOutput::Completed(Ok(replacement)),
         );
         if authorized != candidate.item {
@@ -1373,7 +1378,7 @@ fn validate_portable_output(
         return Err(ContextError::OpaqueModel.into());
     }
     if Some(operation) != completing
-        && terminal::exact_terminal(c, &operation)?.is_none_or(|(hash, _)| hash != output.hash)
+        && terminal::exact_terminal(c, &operation)?.is_none_or(|(hash, _, _)| hash != output.hash)
     {
         return Err(ContextError::OpaqueModel.into());
     }
@@ -1954,7 +1959,12 @@ impl Store {
     }
 
     pub fn commit_context(&self, commit: ContextCommit<'_>) -> Result<ContextCommitReceipt> {
-        self.commit_context_inner(commit, None, &|| false)
+        self.commit_context_inner(
+            commit,
+            None,
+            crate::provider::OutputFormat::LegacyOpaque,
+            &|| false,
+        )
     }
 
     pub fn commit_context_guarded(
@@ -1962,7 +1972,21 @@ impl Store {
         commit: ContextCommit<'_>,
         cancelled: impl Fn() -> bool,
     ) -> Result<ContextCommitReceipt> {
-        self.commit_context_inner(commit, None, &cancelled)
+        self.commit_context_inner(
+            commit,
+            None,
+            crate::provider::OutputFormat::LegacyOpaque,
+            &cancelled,
+        )
+    }
+
+    pub(crate) fn commit_context_guarded_formatted(
+        &self,
+        commit: ContextCommit<'_>,
+        format: crate::provider::OutputFormat,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<ContextCommitReceipt> {
+        self.commit_context_inner(commit, None, format, &cancelled)
     }
 
     pub fn restore_context_commit_guarded(
@@ -1986,6 +2010,7 @@ impl Store {
                 pending,
             },
             Some(evidence),
+            crate::provider::OutputFormat::LegacyOpaque,
             &cancelled,
         )
     }
@@ -2010,6 +2035,7 @@ impl Store {
                 pending,
             },
             Some(evidence),
+            crate::provider::OutputFormat::LegacyOpaque,
             &|| false,
         )
     }
@@ -2023,7 +2049,7 @@ impl Store {
             return Ok(None);
         };
         if !matches!(record.version, 2 | 3 | 4)
-            || terminal::exact_terminal(&c, operation)?
+            || terminal::exact_terminal(&c, operation)?.map(|(hash, outcome, _)| (hash, outcome))
                 != Some((record.output.clone(), TerminalOutcome::Success))
         {
             return Err(ContextError::UnsupportedState.into());
@@ -2101,6 +2127,7 @@ impl Store {
         &self,
         commit: ContextCommit<'_>,
         replay: Option<&ContextCommitEvidence>,
+        format: crate::provider::OutputFormat,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<ContextCommitReceipt> {
         let ContextCommit {
@@ -2128,7 +2155,7 @@ impl Store {
                 &snapshot.operation.call,
             )?
             .ok_or(ContextError::MissingCall)?;
-            let output_item = Item::tool_output(&snapshot.operation.call, call.input.kind(), output);
+            let output_item = Item::tool_output_with_format(&snapshot.operation.call, call.input.kind(), output, format);
             let output_hash = Self::put_item_tx(&tx, &output_item)?;
             if let Some(evidence) = replay {
                 if evidence.version >= 4 && evidence.prefix_origins.as_ref()
@@ -2868,14 +2895,19 @@ fn freeze_committed_context(
 }
 
 fn settle_success(tx: &Transaction<'_>, operation: &OperationId, hash: &ItemHash) -> Result<()> {
-    if let Some((old, terminal)) = terminal::exact_terminal(tx, operation)?
-        && (old != *hash || terminal != TerminalOutcome::Success)
+    let raw: String = tx.query_row("SELECT json FROM items WHERE hash=?1", [&hash.0], |row| {
+        row.get(0)
+    })?;
+    let item: Item = serde_json::from_str(&raw)?;
+    let format = item.output_format()?;
+    if let Some((old, terminal, old_format)) = terminal::exact_terminal(tx, operation)?
+        && (old != *hash || terminal != TerminalOutcome::Success || format != old_format)
     {
         return Err(StoreError::ConflictingReplayOutcome {
             operation: operation.clone(),
         });
     }
-    let n=tx.execute("UPDATE claims SET state='settled',output_hash=?4,terminal_json=?5 WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND state='pending'",params![serde_json::to_string(&operation.origin)?,operation.request.0,operation.call.0,hash.0,serde_json::to_string(&TerminalOutcome::Success)?])?;
+    let n=tx.execute("UPDATE claims SET state='settled',output_hash=?4,terminal_json=?5 WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND state='pending'",params![serde_json::to_string(&operation.origin)?,operation.request.0,operation.call.0,hash.0,terminal::encode_terminal(&TerminalOutcome::Success, format)?])?;
     if n == 0 {
         return Err(ContextError::Conflict.into());
     }

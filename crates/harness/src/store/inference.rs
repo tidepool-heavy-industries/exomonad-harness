@@ -237,6 +237,7 @@ fn validate_cleanup(c: &Connection, identity: &HostIdentity, head: &RequestId) -
                         | super::TerminalOutcome::Failure(_)
                         | super::TerminalOutcome::Cancelled
                         | super::TerminalOutcome::CancelledWithReceipt(_)
+                        | super::TerminalOutcome::CancelledWithValueReceipt
                 ));
                 true
             }

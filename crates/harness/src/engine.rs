@@ -3485,6 +3485,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                 }
             }
+            let completion_format = completion
+                .as_ref()
+                .map(|completion| completion.output_format)
+                .unwrap_or_default();
             let disposition = completion
                 .and_then(|completion| completion.full_success.then_some(completion.context))
                 .filter(|context| {
@@ -3505,13 +3509,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     let is_cancelled = || *cancelled.borrow() || cancelled.has_changed().is_err();
                     match disposition {
                         crate::provider::ContextDisposition::Draft(draft) => store
-                            .commit_context_guarded(
+                            .commit_context_guarded_formatted(
                                 crate::context::ContextCommit {
                                     snapshot: &snapshot,
                                     draft: &draft,
                                     output: &terminal,
                                     pending: &pending_operations,
                                 },
+                                completion_format,
                                 is_cancelled,
                             ),
                         crate::provider::ContextDisposition::Replay(evidence) => store
@@ -3542,6 +3547,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     other => other?,
                 };
                 *request = receipt.head;
+                self.provider.output_retained(&operation).await?;
                 self.scheduler.mark_output_committed(&operation).await?;
                 // Context, model and exact terminal are durable together. Even
                 // cancellation or a lost acknowledgment now reconciles that
@@ -3685,14 +3691,19 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         claim_request: &RequestId,
     ) -> Result<(), EngineError> {
         let call_id = &operation.call;
-        let item = Item::tool_output(call_id, kind, output);
+        let output_format = match self.scheduler.invocation_completion(operation).await {
+            Ok(Some(completion)) if completion.output == *output => completion.output_format,
+            Ok(_) | Err(JobError::UnknownCall) => crate::provider::OutputFormat::LegacyOpaque,
+            Err(error) => return Err(error.into()),
+        };
+        let item = Item::tool_output_with_format(call_id, kind, output, output_format);
         let store = self.store.clone();
         let call = operation.clone();
         let request = request.clone();
         let claimed_at = claim_request.clone();
         let terminal_output = output.clone();
         let terminal = blocking(move || {
-            store.write_job_output(&call, kind, &terminal_output)?;
+            store.write_job_output_with_format(&call, kind, &terminal_output, output_format)?;
             let claim = store
                 .claims_for_operation(&call)?
                 .into_iter()
@@ -3756,13 +3767,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         // acknowledge a completed editing operation as an unedited success.
         self.retain_context_requirement(operation, false).await?;
         let call_id = &operation.call;
-        let item = Item::tool_output(call_id, kind, output);
+        let output_format = match self.scheduler.invocation_completion(operation).await {
+            Ok(Some(completion)) if completion.output == *output => completion.output_format,
+            Ok(_) | Err(JobError::UnknownCall) => crate::provider::OutputFormat::LegacyOpaque,
+            Err(error) => return Err(error.into()),
+        };
+        let item = Item::tool_output_with_format(call_id, kind, output, output_format);
         let store = self.store.clone();
         let call = operation.clone();
         let claimed_at = claim_request.clone();
         let terminal_output = output.clone();
         let terminal = blocking(move || {
-            store.write_job_output(&call, kind, &terminal_output)?;
+            store.write_job_output_with_format(&call, kind, &terminal_output, output_format)?;
             let claim = store
                 .claims_for_operation(&call)?
                 .into_iter()
@@ -4810,6 +4826,184 @@ mod tests {
     impl Auth for FakeAuth {
         fn access(&self) -> Result<String, TransportError> {
             Ok("unused".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_retains_completion_issued_format_without_reclassifying_body() {
+        struct Formatted(Arc<std::sync::atomic::AtomicUsize>);
+        #[async_trait]
+        impl Provider for Formatted {
+            async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+                unreachable!()
+            }
+            fn tools(&self) -> Vec<Value> {
+                vec![]
+            }
+            async fn complete_call(
+                &self,
+                _: &str,
+                _: crate::item::ToolInput,
+                _: crate::provider::CallContext,
+            ) -> crate::provider::ProviderCompletion {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut completion = crate::provider::ProviderCompletion::unedited(Ok(
+                    json!({"nativeResult":{"opaque":"issuer-owned"}}),
+                ));
+                completion.output_format = crate::provider::OutputFormat::NativeReceiptV1;
+                completion
+            }
+        }
+        let store = Arc::new(Store::memory().unwrap());
+        let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let request = RequestId("format-engine".into());
+        let invocation = Item(
+            json!({"type":"function_call","call_id":"format-call","name":"formatted","arguments":"{}"}),
+        );
+        store
+            .write_request(
+                &request,
+                None,
+                "/root",
+                &[invocation.clone()],
+                Usage::default(),
+            )
+            .unwrap();
+        let engine = Engine::<FakeAuth, Formatted, _>::with_transport(
+            Replay {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                turns: Mutex::new(Default::default()),
+            },
+            store.clone(),
+            scheduler.clone(),
+            Arc::new(Formatted(count.clone())),
+            EngineConfig {
+                instructions: "test".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "formats".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        let mut pending = Vec::new();
+        engine
+            .dispatch_completed_item(invocation, &request, &mut pending)
+            .await
+            .unwrap();
+        let operation = pending.first().unwrap().operation.clone();
+        let output = scheduler.wait(&operation).await.unwrap();
+        engine
+            .persist_output(&operation, ToolKind::Function, &output, &request, &request)
+            .await
+            .unwrap();
+        let recorded = store
+            .replay_tool_output_operation(&operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recorded.output_format,
+            crate::provider::OutputFormat::NativeReceiptV1
+        );
+        assert_eq!(
+            recorded.item.output_format().unwrap(),
+            recorded.output_format
+        );
+        assert_eq!(
+            engine
+                .read_settled_output(&operation, &request)
+                .await
+                .unwrap(),
+            recorded.item
+        );
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_publication_and_reopen_preserve_opaque_legacy_outputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("opaque.sqlite");
+        let store = Arc::new(Store::open(&path).unwrap());
+        let mut retained = Vec::new();
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            Replay {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                turns: Mutex::new(Default::default()),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "test".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "opaque".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        for (index, output) in [
+            crate::turn::JobOutput::Completed(Ok(json!("plain result"))),
+            crate::turn::JobOutput::Completed(Ok(
+                json!({"result":{"secret":1},"items":[1,2],"receipt":"ordinary data"}),
+            )),
+            crate::turn::JobOutput::Completed(Err("plain refusal".into())),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let request = RequestId(format!("opaque-{index}"));
+            let call = CallId(format!("call-{index}"));
+            store.write_request(&request,None,"/root",&[Item(json!({"type":"function_call","call_id":call.0,"name":"echo","arguments":"{}"}))],Usage::default()).unwrap();
+            let operation = store.claim(&call, &request).unwrap();
+            engine
+                .persist_output(&operation, ToolKind::Function, &output, &request, &request)
+                .await
+                .unwrap();
+            let original = Item::tool_output(&call, ToolKind::Function, &output);
+            assert_eq!(
+                engine
+                    .read_settled_output(&operation, &request)
+                    .await
+                    .unwrap(),
+                original
+            );
+            assert_eq!(
+                store.retained_output_format(&operation).unwrap(),
+                Some(crate::provider::OutputFormat::LegacyOpaque)
+            );
+            retained.push((operation, original));
+        }
+        drop(engine);
+        drop(store);
+        let store = Arc::new(Store::open(&path).unwrap());
+        let engine = Engine::<FakeAuth, Echo, _>::with_transport(
+            Replay {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                turns: Mutex::new(Default::default()),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            Arc::new(Echo),
+            EngineConfig {
+                instructions: "test".into(),
+                tools: vec![],
+                model: "test".into(),
+                effort: Effort::Low,
+                session_id: "reopen".into(),
+                agent: AgentPath("/root".into()),
+            },
+        );
+        for (operation, original) in retained {
+            assert_eq!(
+                engine
+                    .read_settled_output(&operation, &operation.request)
+                    .await
+                    .unwrap(),
+                original
+            );
+            assert!(store.model_output_projection(&operation).unwrap().is_none());
         }
     }
 

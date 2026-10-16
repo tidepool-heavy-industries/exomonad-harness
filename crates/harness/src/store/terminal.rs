@@ -17,7 +17,10 @@ pub enum TerminalOutcome {
     Success,
     Failure(ToolFailure),
     Cancelled,
+    /// Legacy encoding may contain an inline receipt. New value receipts keep
+    /// their payload only in the canonical Item.
     CancelledWithReceipt(std::result::Result<serde_json::Value, ToolFailure>),
+    CancelledWithValueReceipt,
     Interrupted,
     CancellationUnconfirmed(ToolFailure),
 }
@@ -30,9 +33,10 @@ impl From<&JobOutput> for TerminalOutcome {
                 Self::Failure(failure.clone().without_result_receipt())
             }
             JobOutput::Cancelled => Self::Cancelled,
-            JobOutput::CancelledWithReceipt(receipt) => Self::CancelledWithReceipt(
-                receipt.clone().map_err(ToolFailure::without_result_receipt),
-            ),
+            JobOutput::CancelledWithReceipt(Ok(_)) => Self::CancelledWithValueReceipt,
+            JobOutput::CancelledWithReceipt(Err(failure)) => {
+                Self::CancelledWithReceipt(Err(failure.clone().without_result_receipt()))
+            }
             JobOutput::Interrupted => Self::Interrupted,
             JobOutput::CancellationUnconfirmed(detail) => {
                 Self::CancellationUnconfirmed(detail.clone().without_result_receipt())
@@ -45,12 +49,35 @@ impl From<&JobOutput> for TerminalOutcome {
 pub struct RecordedToolOutput {
     pub item: Item,
     pub terminal: TerminalOutcome,
+    pub output_format: crate::provider::OutputFormat,
+}
+
+pub(super) fn encode_terminal(
+    terminal: &TerminalOutcome,
+    format: crate::provider::OutputFormat,
+) -> Result<String> {
+    let mut value = serde_json::to_value(terminal)?;
+    if format != crate::provider::OutputFormat::LegacyOpaque {
+        value["output_format"] = serde_json::to_value(format)?;
+    }
+    Ok(serde_json::to_string(&value)?)
+}
+
+fn decode_terminal(raw: &str) -> Result<(TerminalOutcome, crate::provider::OutputFormat)> {
+    let value: serde_json::Value = serde_json::from_str(raw)?;
+    let format = value
+        .get("output_format")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    Ok((serde_json::from_value(value)?, format))
 }
 
 pub(super) fn exact_terminal(
     c: &Connection,
     operation: &OperationId,
-) -> Result<Option<(ItemHash, TerminalOutcome)>> {
+) -> Result<Option<(ItemHash, TerminalOutcome, crate::provider::OutputFormat)>> {
     let origin = serde_json::to_string(&operation.origin)?;
     let mut query = c.prepare(
         "SELECT output_hash,terminal_json FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND state='settled' ORDER BY request_id",
@@ -72,10 +99,29 @@ pub(super) fn exact_terminal(
                 operation: operation.clone(),
             });
         };
-        let candidate = (
-            ItemHash(hash),
-            serde_json::from_str::<TerminalOutcome>(&terminal)?,
-        );
+        let (terminal, format) = decode_terminal(&terminal)?;
+        let raw_format: Option<String> = c
+            .query_row(
+                "SELECT json_extract(json,'$.output_format') FROM items WHERE hash=?1",
+                [&hash],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::MissingReplayItem(hash.clone()))?;
+        let item_format = raw_format
+            .map(|format| {
+                serde_json::from_value::<crate::provider::OutputFormat>(serde_json::Value::String(
+                    format,
+                ))
+            })
+            .transpose()?
+            .unwrap_or_default();
+        if item_format != format {
+            return Err(StoreError::ConflictingReplayOutcome {
+                operation: operation.clone(),
+            });
+        }
+        let candidate = (ItemHash(hash), terminal, format);
         if found
             .as_ref()
             .is_some_and(|previous| previous != &candidate)
@@ -101,12 +147,13 @@ pub(super) fn operation_cleanup_evidence(
     c: &Connection,
     operation: &OperationId,
 ) -> Result<OperationCleanupEvidence> {
-    if let Some((_, terminal)) = exact_terminal(c, operation)? {
+    if let Some((_, terminal, _)) = exact_terminal(c, operation)? {
         return Ok(match terminal {
             TerminalOutcome::Success
             | TerminalOutcome::Failure(_)
             | TerminalOutcome::Cancelled
-            | TerminalOutcome::CancelledWithReceipt(_) => {
+            | TerminalOutcome::CancelledWithReceipt(_)
+            | TerminalOutcome::CancelledWithValueReceipt => {
                 OperationCleanupEvidence::Terminal(terminal)
             }
             TerminalOutcome::NotStarted
@@ -158,6 +205,13 @@ impl Store {
     ) -> Result<OperationCleanupEvidence> {
         operation_cleanup_evidence(&*self.lock()?, operation)
     }
+    pub fn retained_output_format(
+        &self,
+        operation: &OperationId,
+    ) -> Result<Option<crate::provider::OutputFormat>> {
+        Ok(exact_terminal(&self.lock()?, operation)?.map(|(_, _, format)| format))
+    }
+
     /// Exact original operation; inherited claimants must retain identical evidence.
     pub fn replay_tool_output_operation(
         &self,
@@ -181,12 +235,14 @@ impl Store {
         {
             return Ok(false);
         }
-        Ok(exact_terminal(&c, operation)?.is_some_and(|(_, outcome)| {
-            matches!(
-                outcome,
-                TerminalOutcome::Success | TerminalOutcome::Failure(_)
-            )
-        }))
+        Ok(
+            exact_terminal(&c, operation)?.is_some_and(|(_, outcome, _)| {
+                matches!(
+                    outcome,
+                    TerminalOutcome::Success | TerminalOutcome::Failure(_)
+                )
+            }),
+        )
     }
 }
 
@@ -203,13 +259,14 @@ pub(super) fn replay_claim(
             return Ok(Some(RecordedToolOutput {
                 item: Item::tool_output(&operation.call, kind, &JobOutput::Interrupted),
                 terminal: TerminalOutcome::Interrupted,
+                output_format: crate::provider::OutputFormat::LegacyOpaque,
             }));
         }
         Some(super::ClaimState::Settled) => {}
         Some(super::ClaimState::Pending) | None => return Ok(None),
     }
     let terminal = exact_terminal(c, operation)?;
-    let Some((hash, terminal)) = terminal else {
+    let Some((hash, terminal, output_format)) = terminal else {
         return Ok(None);
     };
     let raw: Option<String> = c
@@ -220,7 +277,16 @@ pub(super) fn replay_claim(
     let raw = raw.ok_or_else(|| StoreError::MissingReplayItem(hash.0))?;
     let item: Item = serde_json::from_str(&raw)?;
     super::validate_replay_output(&operation.call, kind, &item)?;
-    Ok(Some(RecordedToolOutput { item, terminal }))
+    if item.output_format()? != output_format {
+        return Err(StoreError::ConflictingReplayOutcome {
+            operation: operation.clone(),
+        });
+    }
+    Ok(Some(RecordedToolOutput {
+        item,
+        terminal,
+        output_format,
+    }))
 }
 
 #[cfg(test)]
@@ -231,6 +297,71 @@ mod tests {
         model::{CallId, RequestId},
     };
     use serde_json::json;
+
+    #[test]
+    fn native_format_survives_reopen_for_all_receipt_terminals_and_refuses_disagreement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("formats.sqlite");
+        let store = Store::open(&path).unwrap();
+        let body = json!({"nativeResult":{"version":1,"opaque":"λ".repeat(50000)}});
+        let mut retained = Vec::new();
+        for (index, output) in [
+            JobOutput::Completed(Ok(body.clone())),
+            JobOutput::Completed(Err(
+                ToolFailure::from("failed").with_result_receipt(body.clone())
+            )),
+            JobOutput::CancelledWithReceipt(Ok(body.clone())),
+            JobOutput::CancelledWithReceipt(Err(
+                ToolFailure::from("cancelled").with_result_receipt(body.clone())
+            )),
+            JobOutput::CancellationUnconfirmed(
+                ToolFailure::from("unconfirmed").with_result_receipt(body.clone()),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let operation = operation(&store, &format!("format-{index}"));
+            store
+                .write_job_output_with_format(
+                    &operation,
+                    ToolKind::Function,
+                    &output,
+                    crate::provider::OutputFormat::NativeReceiptV1,
+                )
+                .unwrap();
+            let record = store
+                .replay_tool_output_operation(&operation)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                record.output_format,
+                crate::provider::OutputFormat::NativeReceiptV1
+            );
+            assert_eq!(record.item.output_format().unwrap(), record.output_format);
+            let metadata: String = store.lock().unwrap().query_row("SELECT terminal_json FROM claims WHERE origin_request_id=?1 AND state='settled'",[&operation.request.0],|row|row.get(0)).unwrap();
+            assert!(
+                metadata.len() < 1024,
+                "terminal metadata must not duplicate canonical payload"
+            );
+            assert!(!metadata.contains("opaque"));
+            retained.push((operation, record));
+        }
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        for (operation, record) in &retained {
+            assert_eq!(
+                store.replay_tool_output_operation(operation).unwrap(),
+                Some(record.clone())
+            );
+        }
+        let operation = &retained[0].0;
+        store.lock().unwrap().execute("UPDATE claims SET terminal_json=json_remove(terminal_json,'$.output_format') WHERE origin_request_id=?1",[&operation.request.0]).unwrap();
+        assert!(matches!(
+            store.replay_tool_output_operation(operation),
+            Err(StoreError::ConflictingReplayOutcome { .. })
+        ));
+    }
 
     fn operation(store: &Store, request: &str) -> OperationId {
         let request = RequestId(request.into());

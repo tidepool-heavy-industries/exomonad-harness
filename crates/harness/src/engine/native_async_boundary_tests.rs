@@ -70,6 +70,7 @@ impl Provider for NativeHost {
             sources: vec![],
         });
         ProviderCompletion {
+            output_format: crate::provider::OutputFormat::LegacyOpaque,
             activation_terminal: None,
             output: crate::turn::JobOutput::Completed(Ok(json!({"real_edit_result":true}))),
             full_success: true,

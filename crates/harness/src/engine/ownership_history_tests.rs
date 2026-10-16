@@ -72,9 +72,7 @@ impl Terminal {
             Self::Success | Self::WaitCancelled => TerminalOutcome::Success,
             Self::Failure => TerminalOutcome::Failure("yield failed".into()),
             Self::Cancelled => TerminalOutcome::Cancelled,
-            Self::CancellationReceipt => {
-                TerminalOutcome::CancelledWithReceipt(Ok(json!({"done":true})))
-            }
+            Self::CancellationReceipt => TerminalOutcome::CancelledWithValueReceipt,
             Self::Unconfirmed => TerminalOutcome::CancellationUnconfirmed("still running".into()),
         }
     }
