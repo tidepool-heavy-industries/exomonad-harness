@@ -887,7 +887,9 @@ fn saved_context_restores_owned_prior_text_and_native_group_preserving_suffix() 
             .any(|(_, _, i)| i.0["call_id"] == "done" && i.0["type"] == "function_call_output")
     );
     assert!(items.iter().any(|(_, _, i)| i.0["content"] == "late"));
-    assert!(items.iter().any(|(_,_,i)|i.0["call_id"]=="second" && i.0["type"]=="custom_tool_call_output"));
+    assert!(items
+        .iter()
+        .any(|(_, _, i)| i.0["call_id"] == "second" && i.0["type"] == "custom_tool_call_output"));
 }
 
 #[test]
@@ -2291,9 +2293,11 @@ fn legacy_v3_replay_retry_retains_the_exact_committed_receipt() {
 fn context_replay_preserves_native_format_only_for_the_exact_original_operation() {
     use crate::provider::OutputFormat;
     for format in [OutputFormat::LegacyOpaque, OutputFormat::NativeReceiptV1] {
-        let directory = tempfile::tempdir().unwrap();
-        let source_path = directory.path().join("source.sqlite");
-        let same_path = directory.path().join("same-owner.sqlite");
+        let source_path = std::env::temp_dir().join(format!(
+            "context-replay-source-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let same_path = source_path.with_extension("same-owner.sqlite");
         let original = Store::open(&source_path).unwrap();
         let (head, operation) = setup(&original);
         original
