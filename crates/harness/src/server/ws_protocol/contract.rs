@@ -192,6 +192,10 @@ pub struct OversizedHistoryItem {
     pub hash: String,
     pub byte_len: WireU64,
     pub skip_offset: WireU64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_item: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_operation: Option<ChatOperation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -230,6 +234,14 @@ impl From<&crate::store::history::HistoryPage> for HistoryPage {
                     hash: item.hash.clone(),
                     byte_len: (item.byte_len as u64).into(),
                     skip_offset: item.skip_offset.into(),
+                    model_item: item.model_item.as_ref().map(|item| item.0.clone().into()),
+                    output_operation: item.output_operation.as_ref().map(|operation| {
+                        ChatOperation {
+                            origin: operation.origin.clone(),
+                            request: operation.request.0.clone(),
+                            call: operation.call.0.clone(),
+                        }
+                    }),
                 }),
         }
     }

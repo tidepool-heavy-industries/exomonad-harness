@@ -526,6 +526,10 @@ pub enum ChatEntry {
         position: WireI64,
         hash: String,
         byte_len: WireU64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_item: Option<JsonValue>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_operation: Option<ChatOperation>,
     },
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -595,12 +599,20 @@ impl From<&crate::store::chat::ChatPage> for ChatPage {
                     position,
                     hash,
                     byte_len,
+                    model_item,
+                    output_operation,
                 } => ChatEntry::Oversized {
                     sequence: (*sequence).into(),
                     request_id: request_id.clone(),
                     position: (*position).into(),
                     hash: hash.clone(),
                     byte_len: (*byte_len as u64).into(),
+                    model_item: model_item.as_ref().map(|item| item.clone().into()),
+                    output_operation: output_operation.as_ref().map(|operation| ChatOperation {
+                        origin: operation.origin.clone(),
+                        request: operation.request.0.clone(),
+                        call: operation.call.0.clone(),
+                    }),
                 },
             })
             .collect();

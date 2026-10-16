@@ -1,3 +1,4 @@
+import OversizedOutput from './OversizedOutput'
 import { useEffect, useRef, useState } from 'react'
 import { visibleOutput, outputKey, outputLabels, type LiveOutput, type HistoryRevision } from './live-output'
 import HistoryItem from './HistoryItem'
@@ -170,8 +171,8 @@ export default function ChatHistory({ requestId, requests, refreshKey, ready, on
       </div>)}
     </div>}
     {!loading && !error && pages.length > 0 && pages.every(({ page }) => page.items.length === 0) && <p>No retained messages in this slice.</p>}
-    {paged?.page.oversizedItem && <p role="status">Item {paged.page.oversizedItem.position} ({paged.page.oversizedItem.hash}) is too large to display ({paged.page.oversizedItem.byteLen} bytes).
-      <button disabled={!ready || loading} onClick={() => go({ requestId: paged.page.requestId, offset: paged.page.oversizedItem!.skipOffset })}>Skip large item</button></p>}
+    {paged?.page.oversizedItem && <div><OversizedOutput entry={paged.page.oversizedItem} />
+      <button disabled={!ready || loading} onClick={() => go({ requestId: paged.page.requestId, offset: paged.page.oversizedItem!.skipOffset })}>Skip large item</button></div>}
     <div className="history-controls">
       {paged && !paged.page.oversizedItem && <button disabled={!ready || loading} onClick={() => go({ requestId: paged.page.requestId, offset: paged.page.nextOffset! })}>More items in this exchange</button>}
     </div>

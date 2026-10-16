@@ -1,3 +1,4 @@
+import OversizedOutput from './OversizedOutput'
 import { useState } from 'react'
 import HistoryItem from './HistoryItem'
 import { MessageContent, MessagePresentation } from './MessagePresentation'
@@ -25,7 +26,7 @@ export function TimelineContent({ row, streamingActive, requests, jobs, modelOri
   </MessagePresentation>)}</div>
   if (row.kind === 'result') return row.invocationKey ? <div className="tool-result-marker"><span>Tool result retained</span><button type="button" onClick={() => onRevealActivity(row.invocationKey!)}>Show tool activity</button></div> : <div className="message tool-activity"><h3>Tool result</h3><p className="meta">{row.entry.tool ? 'The exact invocation is outside the loaded window.' : 'Operation ownership is unavailable for this historical result.'}</p><HistoryItem listItem={false} publication={row.entry} entry={historyEntry(row.entry)} /></div>
   if (row.entry.kind === 'message') return <HistoryItem listItem={false} publication={row.entry} entry={historyEntry(row.entry)} />
-  if (row.entry.kind === 'oversized') return <p role="status">Message {row.entry.position} is too large to display ({row.entry.byteLen} bytes).</p>
+  if (row.entry.kind === 'oversized') return <OversizedOutput entry={row.entry} />
   return null
 }
 function historyEntry(entry: Extract<UnifiedEntry, { kind: 'message' }>): HistoryEntry { return { position: entry.position, hash: entry.hash, byteLen: String(new TextEncoder().encode(JSON.stringify(entry.item)).length), item: entry.item, modelItem: entry.modelItem } }

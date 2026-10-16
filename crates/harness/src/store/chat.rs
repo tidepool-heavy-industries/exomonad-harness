@@ -123,6 +123,10 @@ pub enum ChatEntry {
         position: i64,
         hash: String,
         byte_len: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model_item: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_operation: Option<OperationId>,
     },
 }
 impl ChatEntry {
@@ -258,13 +262,39 @@ impl Store {
                         })?;
                     let request_id = request.ok_or(StoreError::InvalidActorOutput)?;
                     if raw.len() > MAX_HISTORY_BYTES - 8192 {
-                        ChatEntry::Oversized {
+                        let operation: Option<String> = c.query_row(
+                            "SELECT output_operation FROM request_items WHERE request_id=?1 AND position=?2 AND item_hash=?3",
+                            params![request_id, position, hash], |row| row.get(0),
+                        )?;
+                        let output_operation: Option<OperationId> = operation
+                            .map(|raw| serde_json::from_str(&raw))
+                            .transpose()?;
+                        let model_item = output_operation
+                            .as_ref()
+                            .map(|operation| -> Result<_> {
+                                let canonical = serde_json::from_str(&raw)?;
+                                Ok(super::result_inspection::model_output_projection(
+                                    &c, operation, &canonical,
+                                )?
+                                .map(|candidate| candidate.item.0))
+                            })
+                            .transpose()?
+                            .flatten();
+                        let mut oversized = ChatEntry::Oversized {
                             sequence,
                             request_id,
                             position,
                             hash,
                             byte_len: raw.len(),
+                            model_item,
+                            output_operation,
+                        };
+                        if serde_json::to_vec(&oversized)?.len() > MAX_HISTORY_BYTES - 8192 {
+                            if let ChatEntry::Oversized { model_item, .. } = &mut oversized {
+                                *model_item = None;
+                            }
                         }
+                        oversized
                     } else {
                         ChatEntry::Message {
                             sequence,
@@ -914,6 +944,84 @@ mod tests {
         let wire = serde_json::to_value(wire).unwrap();
         assert_eq!(wire["items"][1]["item"], original.0);
         assert_eq!(wire["items"][1]["modelItem"], projected.item.0);
+    }
+
+    #[test]
+    fn oversized_canonical_outputs_keep_only_bounded_certified_presentations() {
+        for projection_bytes in [None, Some(16), Some(MAX_HISTORY_BYTES + 1)] {
+            let store = Store::memory().unwrap();
+            let request = RequestId("oversized-canonical".into());
+            let call = CallId("large".into());
+            let invocation = Item(
+                json!({"type":"function_call","name":"run","call_id":call.0,"arguments":"{}"}),
+            );
+            store
+                .write_request(&request, None, "/root", &[invocation], Usage::default())
+                .unwrap();
+            let operation = store.claim(&call, &request).unwrap();
+            store
+                .write_job_output(
+                    &operation,
+                    crate::item::ToolKind::Function,
+                    &crate::turn::JobOutput::Completed(Ok(
+                        json!({"canonical":"x".repeat(MAX_HISTORY_BYTES * 2)}),
+                    )),
+                )
+                .unwrap();
+            store
+                .append_operation_output(&operation, &request, &request)
+                .unwrap();
+            let projected = projection_bytes.map(|size| {
+                store
+                    .publish_model_output_projection(&operation, json!("p".repeat(size)))
+                    .unwrap()
+            });
+            let expected = projected
+                .as_ref()
+                .filter(|_| projection_bytes.unwrap() < MAX_HISTORY_BYTES);
+            let canonical = store.replay_output_operation(&operation).unwrap().unwrap();
+            let page = store.history_page(&request, 1, 100).unwrap();
+            assert!(page.items.is_empty());
+            let oversized = page.oversized_item.as_ref().unwrap();
+            assert_eq!(
+                oversized.byte_len,
+                serde_json::to_vec(&canonical).unwrap().len()
+            );
+            assert_eq!(oversized.output_operation.as_ref(), Some(&operation));
+            assert_eq!(
+                oversized.model_item.as_ref(),
+                expected.map(|item| &item.item)
+            );
+            assert!(serde_json::to_vec(&page).unwrap().len() <= MAX_HISTORY_BYTES);
+            let chat = store
+                .chat_page_before(&origin(), Some(&request), None, 100)
+                .unwrap();
+            assert!(
+                matches!(chat.entries.last().unwrap(), ChatEntry::Oversized { model_item, output_operation: Some(owner), byte_len, .. }
+                if model_item.as_ref() == expected.map(|item| &item.item.0) && owner == &operation
+                    && *byte_len == serde_json::to_vec(&canonical).unwrap().len())
+            );
+            assert!(serde_json::to_vec(&chat).unwrap().len() <= MAX_HISTORY_BYTES);
+            let wire_history =
+                serde_json::to_value(crate::server::browser_contract::HistoryPage::from(&page))
+                    .unwrap();
+            let wire_chat =
+                serde_json::to_value(crate::server::browser_contract::ChatPage::from(&chat))
+                    .unwrap();
+            let expected_item = expected
+                .map(|item| item.item.0.clone())
+                .unwrap_or(Value::Null);
+            assert_eq!(wire_history["oversizedItem"]["modelItem"], expected_item);
+            assert_eq!(wire_chat["entries"][1]["modelItem"], expected_item);
+            assert_eq!(
+                wire_history["oversizedItem"]["outputOperation"]["call"],
+                call.0
+            );
+            assert_eq!(
+                wire_chat["entries"][1]["outputOperation"]["request"],
+                request.0
+            );
+        }
     }
 
     #[test]

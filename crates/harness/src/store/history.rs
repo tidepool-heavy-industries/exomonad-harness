@@ -28,6 +28,10 @@ pub struct OversizedItem {
     pub byte_len: usize,
     /// The client must explicitly request this offset to omit the large Item.
     pub skip_offset: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_item: Option<Item>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_operation: Option<crate::model::OperationId>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -257,12 +261,39 @@ impl Store {
             if byte_len > ITEM_BUDGET.saturating_sub(used) {
                 page.next_offset = Some(position);
                 if byte_len > ITEM_BUDGET {
-                    page.oversized_item = Some(OversizedItem {
+                    let operation: Option<String> = c.query_row(
+                        "SELECT output_operation FROM request_items WHERE request_id=?1 AND position=?2 AND item_hash=?3",
+                        params![id.0, position as i64, hash], |row| row.get(0),
+                    )?;
+                    let mut oversized = OversizedItem {
                         position,
                         hash: hash.clone(),
                         byte_len,
                         skip_offset: position + 1,
-                    });
+                        model_item: None,
+                        output_operation: None,
+                    };
+                    if let Some(operation) = operation {
+                        let operation = serde_json::from_str(&operation)?;
+                        let raw: String =
+                            c.query_row("SELECT json FROM items WHERE hash=?1", [hash], |row| {
+                                row.get(0)
+                            })?;
+                        let canonical = serde_json::from_str(&raw)?;
+                        oversized.model_item = super::result_inspection::model_output_projection(
+                            &c, &operation, &canonical,
+                        )?
+                        .map(|candidate| candidate.item);
+                        oversized.output_operation = Some(operation);
+                    }
+                    if serde_json::to_vec(&oversized)?.len() > ITEM_BUDGET {
+                        oversized.model_item = None;
+                    }
+                    page.oversized_item = Some(oversized);
+                    if serde_json::to_vec(&page)?.len() > MAX_HISTORY_BYTES {
+                        // Retry this occurrence on the next page rather than omit its presentation.
+                        page.oversized_item = None;
+                    }
                 }
                 break;
             }

@@ -1,3 +1,4 @@
+import OversizedOutput from './OversizedOutput'
 import { useEffect, useRef, useState } from 'react'
 import type { NodeWindowProps } from './client-contract'
 import HistoryItem from './HistoryItem'
@@ -104,11 +105,10 @@ export default function NodeWindow({ requestId, conversationId, hostRun, refresh
     <div role="list" aria-label="Retained request items" className="rows">
       {page?.items.map((entry) => <HistoryItem key={`${context}:${loaded?.offset}:${entry.position}:${entry.hash}`} entry={entry} />)}
     </div>
-    {page?.oversizedItem && <p role="status">
-      Item {page.oversizedItem.position} is too large to show ({page.oversizedItem.byteLen} bytes; hash {page.oversizedItem.hash}).
-      Full large-item retrieval is unavailable in this view.
+    {page?.oversizedItem && <div>
+      <OversizedOutput entry={page.oversizedItem} />
       <button type="button" disabled={loading} onClick={() => next(page.oversizedItem!.skipOffset)}>Skip this item</button>
-    </p>}
+    </div>}
     <div className="history-controls">
       <button type="button" disabled={loading || !loaded?.previous} onClick={previous}>Previous page</button>
       {!page?.oversizedItem && page?.nextOffset !== null && page?.nextOffset !== undefined &&
