@@ -18,6 +18,7 @@ pub enum OperationExecution {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum NativeOperationExecution {
     Unknown,
+    Unavailable,
     Pending,
     Terminal,
     Unconfirmed,

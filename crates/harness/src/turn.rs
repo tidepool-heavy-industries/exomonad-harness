@@ -1903,6 +1903,15 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(
+            scheduler
+                .observe_operation(&operation)
+                .await
+                .unwrap()
+                .execution,
+            OperationExecution::Queued
+        );
+        scheduler.release_operation(&operation, None).await.unwrap();
         gate.entered.notified().await;
         for _ in 0..8 {
             let observed = scheduler.observe_operation(&operation).await.unwrap();
