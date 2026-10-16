@@ -411,8 +411,39 @@ fn empty_here_child_without_source_remains_a_valid_frozen_context() {
 
 #[test]
 fn cross_model_frozen_child_projects_without_losing_source_occurrences_or_claims() {
+    cross_model_frozen_child_with_format(crate::provider::OutputFormat::LegacyOpaque);
+}
+
+#[test]
+fn cross_model_frozen_child_retains_native_output_format_and_terminal() {
+    cross_model_frozen_child_with_format(crate::provider::OutputFormat::NativeReceiptV1);
+}
+
+fn cross_model_frozen_child_with_format(format: crate::provider::OutputFormat) {
     let (store, _, operation, snapshot) = setup(vec![]);
-    let receipt = switch(&store, &snapshot).unwrap();
+    let receipt = store
+        .commit_context_guarded_formatted(
+            ContextCommit {
+                snapshot: &snapshot,
+                draft: &ContextDraft {
+                    document: snapshot.document.clone(),
+                    next_model: Some("model-b".into()),
+                    next_effort: None,
+                },
+                output: &output(),
+                pending: &[],
+            },
+            format,
+            || false,
+        )
+        .unwrap();
+    let retained = store
+        .replay_tool_output_operation(&operation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.output_format, format);
+    assert_eq!(retained.item.output_format().unwrap(), format);
+    assert_eq!(retained.terminal, crate::store::TerminalOutcome::Success);
     store
         .admit_agent(
             &AgentPath("/root".into()),
@@ -459,6 +490,14 @@ fn cross_model_frozen_child_projects_without_losing_source_occurrences_or_claims
             .is_some_and(|t| t.contains("real successful result"))
     }));
     assert_eq!(store.context_history(&child_head).unwrap(), raw_before);
+    assert_eq!(
+        store
+            .replay_tool_output_operation(&operation)
+            .unwrap()
+            .unwrap(),
+        retained
+    );
+    assert!(raw_before.iter().any(|(_, _, item)| item == &retained.item));
     assert!(raw_before.iter().any(|(_, _, i)| i == &reasoning()));
     assert!(
         store

@@ -479,6 +479,63 @@ mod tests {
     }
 
     #[test]
+    fn tool_output_format_is_validated_without_changing_canonical_payload() {
+        for kind in ["function_call_output", "custom_tool_call_output"] {
+            for format in [
+                None,
+                Some(json!("legacy_opaque")),
+                Some(json!("native_receipt_v1")),
+            ] {
+                let mut item = json!({"type":kind,"call_id":"c","output":"canonical body λ"});
+                if let Some(format) = format {
+                    item["output_format"] = format;
+                }
+                let original = Item(item);
+                let before = original.clone();
+                let (projected, visible) = project_item(&original).unwrap();
+                assert!(visible);
+                assert_eq!(original, before);
+                assert_eq!(projected["type"], kind);
+                assert_eq!(projected["call_id"], "c");
+                assert_eq!(projected["output"], "canonical body λ");
+                assert!(projected.get("output_format").is_none());
+            }
+            for format in [
+                json!(null),
+                json!(false),
+                json!(1),
+                json!({}),
+                json!("native_receipt_v2"),
+            ] {
+                let item = Item(
+                    json!({"type":kind,"call_id":"c","output":"canonical body","output_format":format}),
+                );
+                assert!(matches!(
+                    project_item(&item),
+                    Err(crate::store::StoreError::Context(
+                        ContextError::Portability(ContextPortabilityRejection::InvalidField {
+                            item: "tool_output",
+                            field: "output_format"
+                        })
+                    ))
+                ));
+            }
+            let item = Item(
+                json!({"type":kind,"call_id":"c","output":"body","output_format":"native_receipt_v1","future_format":true}),
+            );
+            assert!(matches!(
+                project_item(&item),
+                Err(crate::store::StoreError::Context(
+                    ContextError::Portability(ContextPortabilityRejection::UnsupportedField {
+                        item: "tool_output",
+                        ..
+                    })
+                ))
+            ));
+        }
+    }
+
+    #[test]
     fn accepts_empty_reasoning_only_when_the_group_has_visible_content() {
         let reasoning = occurrence(json!({"type":"reasoning","encrypted_content":"opaque"}), 0);
         assert!(matches!(
