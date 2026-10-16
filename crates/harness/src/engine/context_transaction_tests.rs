@@ -161,19 +161,26 @@ impl Provider for Host {
     }
     fn model_visible_item(
         &self,
-        _: &RequestId,
+        request: &RequestId,
         item: &Item,
     ) -> Result<Option<crate::provider::ModelVisibleItemCandidate>, ProviderError> {
         if self.native {
-            if let Some(operation) = self.last_operation.lock().unwrap().as_ref() {
+            let Some(call) = item.0["call_id"].as_str() else {
+                return Ok(None);
+            };
+            if let Some(operation) = self
+                .store
+                .recorded_operation_for_request(request, &crate::model::CallId(call.into()))
+                .unwrap()
+            {
                 if self
                     .store
-                    .replay_output_operation(operation)
+                    .replay_output_operation(&operation)
                     .unwrap()
                     .as_ref()
                     == Some(item)
                 {
-                    let mut candidate = self.store.model_output_projection(operation).unwrap();
+                    let mut candidate = self.store.model_output_projection(&operation).unwrap();
                     if matches!(self.mode, Mode::ForgedProjection) {
                         candidate.as_mut().unwrap().item.0["output"] =
                             json!("not the issued model presentation");
@@ -315,6 +322,10 @@ async fn exercise_formatted_with_profile(mode: Mode, native: bool, bounded: bool
     .await
     .unwrap();
     if matches!(mode, Mode::ForgedProjection) {
+        assert!(
+            result.is_err(),
+            "an unissued presentation must stop inference"
+        );
         let error = result.unwrap_err();
         assert!(
             matches!(
