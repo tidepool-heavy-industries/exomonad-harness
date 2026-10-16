@@ -88,7 +88,7 @@ pub(super) fn operation_for_occurrence(
     Ok(Some(operation))
 }
 
-fn recorded_operation(
+pub(super) fn recorded_operation(
     c: &Connection,
     request: &RequestId,
     call: &CallId,

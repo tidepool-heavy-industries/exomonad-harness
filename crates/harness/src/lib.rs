@@ -16,6 +16,7 @@ pub mod lifecycle;
 pub mod mailbox;
 pub mod model;
 pub mod observation;
+pub mod operation_observation;
 pub mod protocol;
 pub mod provider;
 pub mod replay;

@@ -13,7 +13,9 @@ pub use bundle::{
     browser_schema_sha256, verify_browser_bundle,
 };
 pub mod history;
+mod operation;
 mod output;
+pub use operation::{OperationInspection, OperationObserver};
 mod ws_protocol;
 pub use output::{HistoryRevision, LiveOutput};
 
@@ -489,6 +491,7 @@ impl ServerConfig {
 
 #[derive(Clone)]
 struct AppState {
+    operation_observer: Arc<std::sync::OnceLock<operation::OperationObserver>>,
     #[cfg(test)]
     websocket_test_hooks: Arc<std::sync::OnceLock<Arc<WebSocketTestHooks>>>,
     actor_display_expander: Arc<std::sync::OnceLock<actor_output::ActorDisplayExpander>>,
@@ -539,6 +542,7 @@ pub struct QueuedCommand {
 /// Producer-side API given to the scheduler.
 #[derive(Clone)]
 pub struct ServerControl {
+    operation_observer: Arc<std::sync::OnceLock<operation::OperationObserver>>,
     input_bridge: HostInputBridge,
     #[cfg(test)]
     websocket_test_hooks: Arc<std::sync::OnceLock<Arc<WebSocketTestHooks>>>,
@@ -567,6 +571,7 @@ impl ServerControl {
 
     fn for_app(state: &AppState) -> Self {
         Self {
+            operation_observer: state.operation_observer.clone(),
             input_bridge: HostInputBridge::for_app(state),
             #[cfg(test)]
             websocket_test_hooks: state.websocket_test_hooks.clone(),
@@ -873,6 +878,7 @@ pub fn server_with_config(
     let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (events, _) = broadcast::channel(EVENT_CAPACITY);
     let state = AppState {
+        operation_observer: Arc::new(std::sync::OnceLock::new()),
         #[cfg(test)]
         websocket_test_hooks: Arc::new(std::sync::OnceLock::new()),
         actor_display_expander: Arc::new(std::sync::OnceLock::new()),
@@ -893,6 +899,7 @@ pub fn server_with_config(
     };
     let snapshot = state.snapshot.clone();
     let control = ServerControl {
+        operation_observer: state.operation_observer.clone(),
         input_bridge: HostInputBridge::for_app(&state),
         #[cfg(test)]
         websocket_test_hooks: Arc::clone(&state.websocket_test_hooks),
@@ -907,6 +914,7 @@ pub fn server_with_config(
         public_origin_authority: state.public_origin_authority.clone(),
     };
     let protected_api = Router::new()
+        .route("/operation", post(operation::inspect))
         .route("/commands", post(submit_command))
         .route("/account-selection", get(account_selection))
         .route("/commands/{operation_id}", get(command_status))

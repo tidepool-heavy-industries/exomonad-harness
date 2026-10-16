@@ -468,6 +468,37 @@ impl From<Value> for ToolInput {
 }
 
 impl JobScheduler {
+    /// Observe the exact retained job without waiting, publishing or acknowledging.
+    pub async fn observe_operation(
+        &self,
+        operation: &OperationId,
+    ) -> Option<crate::operation_observation::ScheduledOperationObservation> {
+        use crate::operation_observation::OperationExecution as State;
+        let (execution, owner, handle) = {
+            let jobs = self.jobs.lock().await;
+            let job = jobs.get(operation)?;
+            let execution = match publication_observation(job) {
+                Ok(FollowupPublicationState::Admitted) => State::Queued,
+                Ok(FollowupPublicationState::Running) => State::Running,
+                Ok(
+                    FollowupPublicationState::TerminalUnpublished
+                    | FollowupPublicationState::Published,
+                ) => State::Terminal,
+                Ok(FollowupPublicationState::Unconfirmed) | Err(_) => State::Unconfirmed,
+            };
+            (
+                execution,
+                job.cancellation_owner.clone(),
+                job.handle.clone(),
+            )
+        };
+        // Never call an external owner while holding the scheduler lock.
+        let native = owner.map_or_else(Default::default, |owner| {
+            owner.observe_operation(operation, &handle)
+        });
+        Some(crate::operation_observation::ScheduledOperationObservation { execution, native })
+    }
+
     pub fn new(capacity: usize) -> Result<Self, JobError> {
         if capacity == 0 {
             return Err(JobError::ZeroCapacity);
@@ -1835,6 +1866,91 @@ mod tests {
     use crate::provider::ProviderError;
     use async_trait::async_trait;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn exact_operation_observation_does_not_wait_publish_or_cancel() {
+        use crate::operation_observation::*;
+        struct Gate {
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        #[async_trait]
+        impl Provider for Gate {
+            fn tools(&self) -> Vec<Value> {
+                Vec::new()
+            }
+            async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+                self.entered.notify_one();
+                self.release.notified().await;
+                Ok(json!(42))
+            }
+        }
+        let scheduler = JobScheduler::new(1).unwrap();
+        let gate = Arc::new(Gate {
+            entered: Default::default(),
+            release: Default::default(),
+        });
+        let operation = scheduler.detached_operation(&CallId("exact-observation".into()));
+        scheduler
+            .register_engine_operation(
+                gate.clone(),
+                operation.clone(),
+                AgentPath("/root".into()),
+                Some(operation.request.clone()),
+                "gate".into(),
+                json!({}),
+                true,
+            )
+            .await
+            .unwrap();
+        gate.entered.notified().await;
+        for _ in 0..8 {
+            let observed = scheduler.observe_operation(&operation).await.unwrap();
+            assert_eq!(observed.execution, OperationExecution::Running);
+            assert_eq!(observed.native, NativeOperationObservation::default());
+            assert_eq!(scheduler.output(&operation).await.unwrap(), None);
+            assert!(
+                scheduler
+                    .cancellation_acknowledgment(&operation)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let foreign = OperationId {
+            request: RequestId("other".into()),
+            ..operation.clone()
+        };
+        assert!(scheduler.observe_operation(&foreign).await.is_none());
+        let mut settled = scheduler.operation_settlements();
+        gate.release.notify_one();
+        assert_eq!(settled.recv().await.unwrap(), operation);
+        assert_eq!(
+            scheduler
+                .observe_operation(&operation)
+                .await
+                .unwrap()
+                .execution,
+            OperationExecution::Terminal
+        );
+        assert!(
+            scheduler
+                .provider_completion(&operation)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            scheduler.output(&operation).await.unwrap(),
+            None,
+            "terminal execution alone must not publish"
+        );
+        scheduler.mark_output_committed(&operation).await.unwrap();
+        assert_eq!(
+            scheduler.output(&operation).await.unwrap(),
+            Some(JobOutput::Completed(Ok(json!(42))))
+        );
+    }
     struct Slow;
     #[async_trait]
     impl Provider for Slow {

@@ -12,6 +12,61 @@ pub(super) fn output_kind(item: &Item) -> Result<crate::item::ToolKind> {
 }
 
 impl Store {
+    /// Observe retained settlement and delivery under one current binding. This
+    /// reads existing evidence and never settles claims or publishes output.
+    pub fn observe_embedded_operation(
+        &self,
+        host: &HostIdentity,
+        operation: &OperationId,
+    ) -> Result<crate::operation_observation::OperationObservation> {
+        use crate::operation_observation::*;
+        let mut connection = self.lock()?;
+        connection.write_transaction(|tx| {
+            let (history_head, membership) = operation_membership(tx, host, operation)?;
+            let settlement = match terminal::exact_terminal(tx, operation)? {
+                None => OperationSettlement::Pending,
+                Some((_, terminal, _)) => {
+                    use super::TerminalOutcome as T;
+                    let outcome = match terminal {
+                        T::NotStarted => OperationOutcome::NotStarted,
+                        T::Success => OperationOutcome::Success,
+                        T::Failure(_) => OperationOutcome::Failure,
+                        T::Cancelled => OperationOutcome::Cancelled,
+                        T::CancelledWithReceipt(_) | T::CancelledWithValueReceipt => {
+                            OperationOutcome::CancelledWithReceipt
+                        }
+                        T::Interrupted => OperationOutcome::Interrupted,
+                        T::CancellationUnconfirmed(_) => OperationOutcome::CancellationUnconfirmed,
+                    };
+                    OperationSettlement::Retained { outcome }
+                }
+            };
+            let delivery = if membership
+                .iter()
+                .any(|item| item.output_operation.as_ref() == Some(operation))
+            {
+                OperationDelivery::InHistory
+            } else {
+                OperationDelivery::Pending
+            };
+            Ok(OperationObservation {
+                operation: operation.clone(),
+                observer: host.clone(),
+                execution: OperationExecution::Unknown,
+                native_execution: NativeOperationExecution::Unknown,
+                finalization: OperationFinalization::Unknown,
+                settlement,
+                delivery,
+                history_head,
+                provenance: OperationObservationProvenance {
+                    store: true,
+                    scheduler: false,
+                    native: false,
+                },
+            })
+        })
+    }
+
     /// Publish an alternate model body for one already durable exact operation.
     /// The canonical output remains the operation's immutable settlement.
     pub fn publish_model_output_projection(
@@ -69,30 +124,7 @@ impl Store {
     ) -> Result<Option<RecordedToolOutput>> {
         let mut connection = self.lock()?;
         connection.write_transaction(|tx| {
-            match &operation.origin {
-                crate::model::ConversationIdentity::Embedded { run, actor, .. }
-                    if run == &host.run && actor == &host.actor => {},
-                _ => return Err(StoreError::OperationOriginMismatch),
-            }
-            let frontier = embedded_round::frontier(tx, host)?;
-            let head = frontier.pending_head.as_ref().or(frontier.settled_head.as_ref())
-                .ok_or(StoreError::OperationOriginMismatch)?;
-            let call = context::original_call(tx, operation)?;
-            // Inspect only exact retained membership. Decoding every historical
-            // result here would make one terminal publication grow with all prior
-            // semantic payloads in the conversation.
-            let membership = context::query_occurrences(tx, "WITH RECURSIVE lineage(id,parent_id) AS (
-                SELECT id,parent_id FROM requests WHERE id=?1
-                UNION ALL SELECT r.id,r.parent_id FROM requests r JOIN lineage l ON r.id=l.parent_id
-                WHERE NOT EXISTS(SELECT 1 FROM session_state s WHERE s.session_id='harness:compaction:'||l.id)
-            ) SELECT ri.request_id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note,ri.context_overlays,ri.output_operation
-            FROM lineage l JOIN request_items ri ON ri.request_id=l.id JOIN items i ON i.hash=ri.item_hash
-            WHERE (COALESCE(ri.source_request,ri.request_id)=?2 AND COALESCE(ri.source_position,ri.position)=?3 AND ri.item_hash=?4)
-               OR ri.output_operation=?5", params![head.0, call.request.0, call.position, call.hash.0, serde_json::to_string(operation)?])?;
-            context::validate_canonical_history(tx, &membership)?;
-            if membership.is_empty() {
-                return Err(StoreError::OperationOriginMismatch);
-            }
+            let _ = operation_membership(tx, host, operation)?;
             let raw: Option<String> = tx.query_row(
                 "SELECT i.json FROM claims c JOIN items i ON i.hash=c.output_hash WHERE c.origin=?1 AND c.origin_request_id=?2 AND c.call_id=?3 AND c.state='settled' LIMIT 1",
                 params![serde_json::to_string(&operation.origin)?, operation.request.0, operation.call.0],
@@ -242,6 +274,104 @@ mod tests {
             _: &HostIdentity,
         ) -> std::result::Result<bool, String> {
             Ok(true)
+        }
+    }
+
+    #[test]
+    fn operation_observation_histories_keep_settlement_delivery_and_exact_call_ownership_separate()
+    {
+        use crate::operation_observation::{
+            OperationDelivery as Delivery, OperationSettlement as Settlement,
+        };
+        for seed in 0..64 {
+            let store = Store::memory().unwrap();
+            let host = HostIdentity {
+                run: format!("observation-{seed}"),
+                actor: AgentPath("/root".into()),
+                incarnation: "1".into(),
+            };
+            store.bind_embedded_actor(&host, None).unwrap();
+            let mut previous = None;
+            let mut operations = Vec::new();
+            for index in 0..2 {
+                let request = RequestId(format!("request-{index}"));
+                store.write_request(&request, previous.as_ref(), "/root", &[Item(serde_json::json!({
+                    "type":"function_call", "call_id":"same-call", "name":"read", "arguments":"{}"
+                }))], Usage::default()).unwrap();
+                operations.push(store.claim(&CallId("same-call".into()), &request).unwrap());
+                assert!(
+                    store
+                        .advance_agent_head(&host.actor, previous.as_ref(), Some(&request))
+                        .unwrap()
+                );
+                previous = Some(request);
+            }
+            let mut retained = [false; 2];
+            let mut delivered = [false; 2];
+            // Generated orders and repeated reads use an independent two-bit oracle.
+            for step in 0..8 {
+                let index = ((seed >> (step % 6)) ^ step) & 1;
+                if !retained[index] {
+                    store
+                        .write_job_output(
+                            &operations[index],
+                            crate::item::ToolKind::Function,
+                            &crate::turn::JobOutput::Completed(Ok(
+                                serde_json::json!({"value":index}),
+                            )),
+                        )
+                        .unwrap();
+                    retained[index] = true;
+                } else if !delivered[index] {
+                    store
+                        .append_operation_output(
+                            &operations[index],
+                            &operations[index].request,
+                            &operations[index].request,
+                        )
+                        .unwrap();
+                    delivered[index] = true;
+                }
+                for (index, operation) in operations.iter().enumerate() {
+                    let claims = store.claims_for_operation(operation).unwrap();
+                    let observation = store.observe_embedded_operation(&host, operation).unwrap();
+                    assert_eq!(
+                        matches!(observation.settlement, Settlement::Retained { .. }),
+                        retained[index]
+                    );
+                    assert_eq!(
+                        observation.delivery == Delivery::InHistory,
+                        delivered[index]
+                    );
+                    assert_eq!(&observation.operation, operation);
+                    assert_eq!(observation.history_head, previous.clone().unwrap());
+                    assert_eq!(
+                        store.claims_for_operation(operation).unwrap(),
+                        claims,
+                        "inspection must not acknowledge or settle"
+                    );
+                    let forged = OperationId {
+                        origin: crate::model::ConversationIdentity::Embedded {
+                            run: host.run.clone(),
+                            actor: host.actor.clone(),
+                            incarnation: "other".into(),
+                        },
+                        ..operation.clone()
+                    };
+                    assert!(matches!(
+                        store.observe_embedded_operation(&host, &forged),
+                        Err(StoreError::OperationOriginMismatch)
+                    ));
+                }
+            }
+            let foreign = HostIdentity {
+                incarnation: "other".into(),
+                ..host.clone()
+            };
+            assert!(matches!(
+                store.observe_embedded_operation(&foreign, &operations[0]),
+                Err(StoreError::InvalidEmbeddedBinding)
+            ));
         }
     }
 
@@ -676,4 +806,47 @@ mod tests {
                 .is_err()
         );
     }
+}
+
+/// The same current-binding and exact retained-call proof gates result reads
+/// and pre-result observation. Output membership is separate from call membership.
+fn operation_membership(
+    connection: &Connection,
+    host: &HostIdentity,
+    operation: &OperationId,
+) -> Result<(crate::model::RequestId, Vec<crate::context::Occurrence>)> {
+    match &operation.origin {
+        crate::model::ConversationIdentity::Embedded { run, actor, .. }
+            if run == &host.run && actor == &host.actor => {}
+        _ => return Err(StoreError::OperationOriginMismatch),
+    }
+    let frontier = embedded_round::frontier(connection, host)?;
+    if super::validation::recorded_operation(connection, &operation.request, &operation.call)?
+        .as_ref()
+        != Some(operation)
+    {
+        return Err(StoreError::OperationOriginMismatch);
+    }
+    let head = frontier
+        .pending_head
+        .as_ref()
+        .or(frontier.settled_head.as_ref())
+        .ok_or(StoreError::OperationOriginMismatch)?;
+    let call = context::original_call(connection, operation)?;
+    // Inspect only exact retained membership. Decoding every historical
+    // result here would make one terminal publication grow with all prior
+    // semantic payloads in the conversation.
+    let membership = context::query_occurrences(connection, "WITH RECURSIVE lineage(id,parent_id) AS (
+        SELECT id,parent_id FROM requests WHERE id=?1
+        UNION ALL SELECT r.id,r.parent_id FROM requests r JOIN lineage l ON r.id=l.parent_id
+        WHERE NOT EXISTS(SELECT 1 FROM session_state s WHERE s.session_id='harness:compaction:'||l.id)
+    ) SELECT ri.request_id,ri.position,ri.item_hash,i.json,COALESCE(ri.source_request,ri.request_id),COALESCE(ri.source_position,ri.position),ri.context_sources,ri.context_note,ri.context_overlays,ri.output_operation
+    FROM lineage l JOIN request_items ri ON ri.request_id=l.id JOIN items i ON i.hash=ri.item_hash
+    WHERE (COALESCE(ri.source_request,ri.request_id)=?2 AND COALESCE(ri.source_position,ri.position)=?3 AND ri.item_hash=?4)
+       OR ri.output_operation=?5", params![head.0, call.request.0, call.position, call.hash.0, serde_json::to_string(operation)?])?;
+    context::validate_canonical_history(connection, &membership)?;
+    if membership.is_empty() {
+        return Err(StoreError::OperationOriginMismatch);
+    }
+    Ok((head.clone(), membership))
 }

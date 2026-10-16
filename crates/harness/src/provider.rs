@@ -348,6 +348,16 @@ pub enum CancellationCause {
 
 #[async_trait]
 pub trait CancellationOwner: Send + Sync {
+    /// Inspect this exact native operation. This must not signal cancellation,
+    /// acknowledge completion, or wait for work. Unsupported owners stay unknown.
+    fn observe_operation(
+        &self,
+        _operation: &OperationId,
+        _handle: &JobHandle,
+    ) -> crate::operation_observation::NativeOperationObservation {
+        Default::default()
+    }
+
     /// Choose who owns the cancellation observation's lifetime. OwnerSettlement
     /// requires an independently retained terminal or owner-loss outcome and
     /// idempotent cancellation of the exact operation. Dropping this observer
