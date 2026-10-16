@@ -29,6 +29,7 @@ enum Mode {
     RejectedWithChoices,
     ChoiceOnly,
     Unconfirmed,
+    ForgedProjection,
 }
 struct Host {
     store: Arc<Store>,
@@ -172,7 +173,12 @@ impl Provider for Host {
                     .as_ref()
                     == Some(item)
                 {
-                    return Ok(self.store.model_output_projection(operation).unwrap());
+                    let mut candidate = self.store.model_output_projection(operation).unwrap();
+                    if matches!(self.mode, Mode::ForgedProjection) {
+                        candidate.as_mut().unwrap().item.0["output"] =
+                            json!("not the issued model presentation");
+                    }
+                    return Ok(candidate);
                 }
             }
         }
@@ -308,6 +314,46 @@ async fn exercise_formatted_with_profile(mode: Mode, native: bool, bounded: bool
     )
     .await
     .unwrap();
+    if matches!(mode, Mode::ForgedProjection) {
+        let error = result.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                EngineError::Store(StoreError::Context(crate::context::ContextError::Replay(
+                    crate::context::ContextReplayRejection::InvalidMembership
+                )))
+            ),
+            "unexpected projection failure: {error:?}"
+        );
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        let operation = host.last_operation.lock().unwrap().clone().unwrap();
+        let canonical = store
+            .replay_tool_output_operation(&operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            canonical.item,
+            Item::tool_output_with_format(
+                &operation.call,
+                crate::item::ToolKind::Function,
+                &host.authored_output(),
+                crate::provider::OutputFormat::NativeReceiptV1,
+            )
+        );
+        let issued = store.model_output_projection(&operation).unwrap().unwrap();
+        assert_eq!(
+            issued.item.0["output"],
+            json!({"authored":"compact native presentation"}).to_string()
+        );
+        assert_eq!(
+            Store::open(&path)
+                .unwrap()
+                .replay_tool_output_operation(&operation)
+                .unwrap(),
+            Some(canonical)
+        );
+        return;
+    }
     if matches!(mode, Mode::Unconfirmed) {
         fn unconfirmed(error: &EngineError) -> bool {
             match error {
@@ -580,6 +626,11 @@ async fn unbounded_native_results_use_the_issued_model_projection() {
     ] {
         exercise_formatted_with_profile(mode, true, false).await;
     }
+}
+
+#[tokio::test]
+async fn unbounded_native_model_projection_refuses_an_unissued_replacement() {
+    exercise_formatted_with_profile(Mode::ForgedProjection, true, false).await;
 }
 
 #[tokio::test]
