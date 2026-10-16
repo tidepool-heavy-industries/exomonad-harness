@@ -314,10 +314,13 @@ async fn exercise_formatted(mode: Mode, native: bool) {
                     unconfirmed(error.primary()) || unconfirmed(error.source_error())
                 }
                 EngineError::BlockedAction(error) => unconfirmed(error.primary()),
+                EngineError::Cleanup { primary, .. } => unconfirmed(primary),
+                EngineError::CleanupFailures(errors) => errors.iter().any(unconfirmed),
                 _ => false,
             }
         }
-        assert!(unconfirmed(&result.unwrap_err()));
+        let error = result.unwrap_err();
+        assert!(unconfirmed(&error), "unexpected failure: {error:?}");
         assert_eq!(requests.lock().unwrap().len(), 1);
         assert_eq!(host.committed.load(Ordering::SeqCst), 0);
         assert_eq!(host.aborted.load(Ordering::SeqCst), 0);

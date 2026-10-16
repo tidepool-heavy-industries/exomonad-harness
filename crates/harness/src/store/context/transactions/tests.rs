@@ -917,16 +917,6 @@ fn patch_only_publication_preserves_selected_model_effort_and_pending_choice() {
     use crate::model::Effort;
     let store = Store::memory().unwrap();
     let (head, first, _) = fixture(&store);
-    store
-        .initialize_context_target(
-            &first.operation.origin,
-            &ContextProjectionTarget {
-                model: "selected-model".into(),
-                route: crate::transport::ResponsesRoute::ChatGptPlan,
-                protocol: crate::transport::ResponsesProtocol::Standard,
-            },
-        )
-        .unwrap();
     store.set_effort(&head, Effort::High).unwrap();
     store
         .save_pending_effort(first.operation.origin.actor(), Effort::Medium)
@@ -947,7 +937,7 @@ fn patch_only_publication_preserves_selected_model_effort_and_pending_choice() {
             .context_model(&first.operation.origin)
             .unwrap()
             .as_deref(),
-        Some("selected-model")
+        Some("model-a")
     );
     let history = store.context_history(&receipt.head).unwrap();
     assert_eq!(
