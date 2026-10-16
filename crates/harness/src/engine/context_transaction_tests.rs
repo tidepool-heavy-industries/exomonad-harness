@@ -252,6 +252,10 @@ async fn exercise(mode: Mode) {
 }
 
 async fn exercise_formatted(mode: Mode, native: bool) {
+    exercise_formatted_with_profile(mode, native, native).await;
+}
+
+async fn exercise_formatted_with_profile(mode: Mode, native: bool, bounded: bool) {
     struct Directory(std::path::PathBuf);
     impl Drop for Directory {
         fn drop(&mut self) {
@@ -291,7 +295,7 @@ async fn exercise_formatted(mode: Mode, native: bool) {
             agent: AgentPath("/root".into()),
         },
     );
-    let engine = if native {
+    let engine = if bounded {
         engine.bounded_invocation()
     } else {
         engine
@@ -563,6 +567,18 @@ async fn native_results_survive_context_commit_rejection_and_discard_before_clea
         Mode::ChoiceOnly,
     ] {
         exercise_formatted(mode, true).await;
+    }
+}
+
+#[tokio::test]
+async fn unbounded_native_results_use_the_issued_model_projection() {
+    for mode in [
+        Mode::Committed,
+        Mode::Rejected,
+        Mode::Discarded,
+        Mode::ChoiceOnly,
+    ] {
+        exercise_formatted_with_profile(mode, true, false).await;
     }
 }
 
