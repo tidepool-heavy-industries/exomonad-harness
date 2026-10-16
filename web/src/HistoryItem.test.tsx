@@ -255,8 +255,12 @@ it('keeps unfamiliar certified items inspectable without falling back to canonic
   const item = { type: 'custom_tool_call_output', call_id: 'native', output: 'canonical secret' }
   const modelItem = { type: 'future_item', authored: 'projected value' }
   render(<HistoryItem entry={{ ...entry(item), modelItem }} />)
-  expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(modelItem, null, 2))
+  const ordinary = screen.getAllByLabelText('Raw item 7').find(element => element.closest('details') === null)
+  expect(ordinary).toBeVisible()
+  expect(ordinary?.textContent).toBe(JSON.stringify(modelItem, null, 2))
   expect(screen.queryByText(/canonical secret/)).toBeNull()
   showRaw()
-  expect(screen.getAllByLabelText('Raw item 7')[0]?.textContent).toBe(JSON.stringify(item, null, 2))
+  const canonical = screen.getAllByLabelText('Raw item 7').find(element => element.closest('details')?.open)
+  expect(canonical).toBeVisible()
+  expect(canonical?.textContent).toBe(JSON.stringify(item, null, 2))
 })

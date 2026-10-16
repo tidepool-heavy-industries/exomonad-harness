@@ -236,7 +236,7 @@ describe('embedded actor chat', () => {
     await screen.findByText('First slice')
     expect(readHistoryPage).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByRole('button', { name: 'More items in this exchange' }))
-    await screen.findByText(/too large to display/)
+    await screen.findByText(/too large to show/)
     expect(readHistoryPage).toHaveBeenLastCalledWith('latest', '1', expect.any(AbortSignal))
     fireEvent.click(screen.getByRole('button', { name: 'Skip large item' }))
     await screen.findByText('After oversized item')

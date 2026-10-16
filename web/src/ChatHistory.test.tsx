@@ -90,7 +90,7 @@ describe('bounded retained Chat slices', () => {
         : page(id, offset)
     })
     render(chat('one'))
-    const notice = await screen.findByText(new RegExp(oversized.hash))
+    const notice = await screen.findByText(/Canonical item 0 is too large to show/)
     expect(notice).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: 'Skip large item' }))
     await screen.findByText('skip unavailable')
