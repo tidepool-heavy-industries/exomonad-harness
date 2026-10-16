@@ -93,6 +93,130 @@ fn public_production_request_preserves_async_and_full_history() {
 }
 
 #[test]
+fn provider_http_body_omits_durable_output_format_without_changing_retained_results() {
+    use crate::{
+        item::ToolKind,
+        model::{CallId, RequestId},
+        provider::{OutputFormat, ToolFailure},
+        store::Store,
+        turn::JobOutput,
+    };
+    struct Directory(std::path::PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let directory = Directory(std::env::temp_dir().join(format!(
+        "harness-provider-output-format-{}",
+        uuid::Uuid::new_v4()
+    )));
+    std::fs::create_dir(&directory.0).unwrap();
+    let path = directory.0.join("store.sqlite");
+    let store = Store::open(&path).unwrap();
+    let receipt = json!({"nativeResult":{"version":1,"output_format":"user payload λ"}});
+    let terminals = [
+        JobOutput::Completed(Ok(receipt.clone())),
+        JobOutput::Completed(Err(
+            ToolFailure::from("failed").with_result_receipt(receipt.clone())
+        )),
+        JobOutput::CancelledWithReceipt(Ok(receipt.clone())),
+        JobOutput::CancellationUnconfirmed(
+            ToolFailure::from("unconfirmed").with_result_receipt(receipt.clone()),
+        ),
+    ];
+    let mut records = Vec::new();
+    let mut request = plan_request();
+    request.input = vec![
+        Item::user_text("Keep output_format inside ordinary text"),
+        Item(json!({"type":"reasoning","summary":[],"encrypted_content":"opaque continuity"})),
+        Item::configuration_update(Effort::High),
+    ];
+    for kind in [ToolKind::Function, ToolKind::Custom] {
+        for format in [OutputFormat::NativeReceiptV1, OutputFormat::LegacyOpaque] {
+            for (index, terminal) in terminals.iter().enumerate() {
+                let id = format!("{kind:?}-{format:?}-{index}");
+                let parent = RequestId(id.clone());
+                let call = CallId(id);
+                store.create_request(&parent, None, "/root").unwrap();
+                let invocation = Item(match kind {
+                    ToolKind::Function => {
+                        json!({"type":"function_call","call_id":call.0,"name":"probe","arguments":"{}"})
+                    }
+                    ToolKind::Custom => {
+                        json!({"type":"custom_tool_call","call_id":call.0,"name":"probe","input":"raw Haskell λ","async":true})
+                    }
+                });
+                store.append_items(&parent, &[invocation.clone()]).unwrap();
+                let operation = store.claim(&call, &parent).unwrap();
+                store
+                    .write_job_output_with_format(&operation, kind, terminal, format)
+                    .unwrap();
+                let recorded = store
+                    .replay_tool_output_operation(&operation)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(recorded.output_format, format);
+                assert_eq!(recorded.item.output_format().unwrap(), format);
+                request.input.push(invocation);
+                request.input.push(recorded.item.clone());
+                records.push((operation, recorded));
+            }
+        }
+    }
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    let canonical = serde_json::to_value(&request).unwrap();
+    let normalized = normalize_for_dispatch(
+        &request,
+        (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
+    )
+    .unwrap();
+    let wire = http_request(
+        &reqwest::Client::new(),
+        &request,
+        normalized.into_bytes(),
+        "fixture-token",
+    )
+    .build()
+    .unwrap();
+    let compressed = wire.body().unwrap().as_bytes().unwrap();
+    let body: Value =
+        serde_json::from_slice(&zstd::stream::decode_all(compressed).unwrap()).unwrap();
+    let projected = body["input"].as_array().unwrap();
+    let expected = request
+        .input
+        .iter()
+        .filter(|item| !item.is_configuration_update())
+        .collect::<Vec<_>>();
+    assert_eq!(projected.len(), expected.len());
+    for (wire, retained) in projected.iter().zip(expected) {
+        if matches!(
+            retained.0["type"].as_str(),
+            Some("function_call_output" | "custom_tool_call_output")
+        ) {
+            assert!(
+                wire.get("output_format").is_none(),
+                "internal format reached provider input"
+            );
+            assert_eq!(wire["type"], retained.0["type"]);
+            assert_eq!(wire["call_id"], retained.0["call_id"]);
+            assert_eq!(wire["output"], retained.0["output"]);
+            assert!(wire["output"].as_str().unwrap().contains("user payload λ"));
+        } else {
+            assert_eq!(wire, &retained.0);
+        }
+    }
+    assert_eq!(serde_json::to_value(&request).unwrap(), canonical);
+    for (operation, recorded) in records {
+        assert_eq!(
+            store.replay_tool_output_operation(&operation).unwrap(),
+            Some(recorded)
+        );
+    }
+}
+
+#[test]
 fn public_route_enforces_its_wire_contract_and_allowed_host_tools() {
     let mut request = plan_request();
     request.tools_allowed = Some(vec!["yield".into()]);
