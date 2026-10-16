@@ -364,6 +364,33 @@ mod tests {
                     ));
                 }
             }
+            // Generated prefixes may leave one operation untouched. Establish
+            // both actual deliveries before exercising history removal.
+            for (index, operation) in operations.iter().enumerate() {
+                if !retained[index] {
+                    store
+                        .write_job_output(
+                            operation,
+                            crate::item::ToolKind::Function,
+                            &crate::turn::JobOutput::Completed(Ok(
+                                serde_json::json!({"value":index}),
+                            )),
+                        )
+                        .unwrap();
+                }
+                if !delivered[index] {
+                    store
+                        .append_operation_output(operation, &operation.request, &operation.request)
+                        .unwrap();
+                }
+                assert_eq!(
+                    store
+                        .observe_embedded_operation(&host, operation)
+                        .unwrap()
+                        .delivery,
+                    Delivery::InHistory
+                );
+            }
             // A compacted current window may omit an already delivered output.
             // Retain exact call occurrences through the production owner rather
             // than mistaking current absence for an unfinished delivery.
