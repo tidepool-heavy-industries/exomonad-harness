@@ -2293,11 +2293,18 @@ fn legacy_v3_replay_retry_retains_the_exact_committed_receipt() {
 fn context_replay_preserves_native_format_only_for_the_exact_original_operation() {
     use crate::provider::OutputFormat;
     for format in [OutputFormat::LegacyOpaque, OutputFormat::NativeReceiptV1] {
-        let source_path = std::env::temp_dir().join(format!(
-            "context-replay-source-{}.sqlite",
-            uuid::Uuid::new_v4()
-        ));
-        let same_path = source_path.with_extension("same-owner.sqlite");
+        struct Directory(std::path::PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory = Directory(
+            std::env::temp_dir().join(format!("context-replay-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir(&directory.0).unwrap();
+        let source_path = directory.0.join("source.sqlite");
+        let same_path = directory.0.join("same-owner.sqlite");
         let original = Store::open(&source_path).unwrap();
         let (head, operation) = setup(&original);
         original

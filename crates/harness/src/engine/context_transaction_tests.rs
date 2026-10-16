@@ -252,10 +252,17 @@ async fn exercise(mode: Mode) {
 }
 
 async fn exercise_formatted(mode: Mode, native: bool) {
-    let path = std::env::temp_dir().join(format!(
-        "context-native-results-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
+    struct Directory(std::path::PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let directory = Directory(
+        std::env::temp_dir().join(format!("context-native-results-{}", uuid::Uuid::new_v4())),
+    );
+    std::fs::create_dir(&directory.0).unwrap();
+    let path = directory.0.join("context-native-results.sqlite");
     let store = Arc::new(Store::open(&path).unwrap());
     let host = Arc::new(Host {
         store: store.clone(),
