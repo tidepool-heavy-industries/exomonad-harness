@@ -848,8 +848,11 @@ impl Provider for ReplayProvider {
                     "recorded context completion has no successful terminal".into(),
                 ));
             };
+            let output_format = evidence
+                .replay_output_format(local)
+                .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
             Ok(ProviderCompletion {
-                output_format: crate::provider::OutputFormat::LegacyOpaque,
+                output_format,
                 activation_terminal: None,
                 output: JobOutput::Completed(Ok(value.clone())),
                 full_success: true,

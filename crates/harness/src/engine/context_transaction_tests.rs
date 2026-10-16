@@ -28,14 +28,54 @@ enum Mode {
     AbortFailed,
     RejectedWithChoices,
     ChoiceOnly,
+    Unconfirmed,
 }
 struct Host {
     store: Arc<Store>,
     mode: Mode,
+    native: bool,
+    retained: AtomicUsize,
     last_operation: Mutex<Option<OperationId>>,
     handle: Mutex<Option<(OperationId, ContextTransaction)>>,
     committed: AtomicUsize,
     aborted: AtomicUsize,
+}
+impl Host {
+    fn authored_output(&self) -> JobOutput {
+        let body = if self.native {
+            json!({"nativeResult":{"version":1,"semantic":"λ".repeat(50_000)}})
+        } else {
+            json!({"authored":"success"})
+        };
+        if matches!(self.mode, Mode::Unconfirmed) {
+            JobOutput::CancellationUnconfirmed(
+                crate::provider::ToolFailure::from("cleanup unconfirmed").with_result_receipt(body),
+            )
+        } else {
+            JobOutput::Completed(Ok(body))
+        }
+    }
+
+    fn assert_retained_before_cleanup(&self, operation: &OperationId) {
+        if self.native {
+            assert!(self.retained.load(Ordering::SeqCst) > 0);
+            let recorded = self
+                .store
+                .replay_tool_output_operation(operation)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                recorded.output_format,
+                crate::provider::OutputFormat::NativeReceiptV1
+            );
+            assert!(
+                self.store
+                    .model_output_projection(operation)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    }
 }
 #[async_trait::async_trait]
 impl Provider for Host {
@@ -62,7 +102,12 @@ impl Provider for Host {
         *self.last_operation.lock().unwrap() = Some(snapshot.operation.clone());
         if matches!(self.mode, Mode::ChoiceOnly) {
             return ProviderCompletion {
-                output: JobOutput::Completed(Ok(json!({"authored":"success"}))),
+                output: self.authored_output(),
+                output_format: if self.native {
+                    crate::provider::OutputFormat::NativeReceiptV1
+                } else {
+                    crate::provider::OutputFormat::LegacyOpaque
+                },
                 full_success: true,
                 context: ContextDisposition::Draft(ContextDraft {
                     document: snapshot.document,
@@ -98,9 +143,14 @@ impl Provider for Host {
             next_effort: matches!(self.mode, Mode::RejectedWithChoices).then_some(Effort::High),
         };
         ProviderCompletion {
-            output: JobOutput::Completed(Ok(json!({"authored":"success"}))),
-            full_success: !matches!(self.mode, Mode::Discarded),
-            context: if matches!(self.mode, Mode::Discarded) {
+            output: self.authored_output(),
+            output_format: if self.native {
+                crate::provider::OutputFormat::NativeReceiptV1
+            } else {
+                crate::provider::OutputFormat::LegacyOpaque
+            },
+            full_success: !matches!(self.mode, Mode::Discarded | Mode::Unconfirmed),
+            context: if matches!(self.mode, Mode::Discarded | Mode::Unconfirmed) {
                 ContextDisposition::Discarded(draft)
             } else {
                 ContextDisposition::Transaction(draft)
@@ -108,11 +158,54 @@ impl Provider for Host {
             activation_terminal: None,
         }
     }
-    async fn output_committed(&self, _: &OperationId) -> Result<(), ProviderError> {
+    fn model_visible_item(
+        &self,
+        _: &RequestId,
+        item: &Item,
+    ) -> Result<Option<crate::provider::ModelVisibleItemCandidate>, ProviderError> {
+        if self.native {
+            if let Some(operation) = self.last_operation.lock().unwrap().as_ref() {
+                if self
+                    .store
+                    .replay_output_operation(operation)
+                    .unwrap()
+                    .as_ref()
+                    == Some(item)
+                {
+                    return Ok(self.store.model_output_projection(operation).unwrap());
+                }
+            }
+        }
+        Ok(None)
+    }
+    async fn output_retained(&self, operation: &OperationId) -> Result<(), ProviderError> {
+        if self.native {
+            let recorded = self
+                .store
+                .replay_tool_output_operation(operation)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                recorded.output_format,
+                crate::provider::OutputFormat::NativeReceiptV1
+            );
+            self.store
+                .publish_model_output_projection(
+                    operation,
+                    json!({"authored":"compact native presentation"}),
+                )
+                .unwrap();
+            self.retained.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+    async fn output_committed(&self, operation: &OperationId) -> Result<(), ProviderError> {
+        self.assert_retained_before_cleanup(operation);
         self.committed.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn output_aborted(&self, _: &OperationId) -> Result<(), ProviderError> {
+    async fn output_aborted(&self, operation: &OperationId) -> Result<(), ProviderError> {
+        self.assert_retained_before_cleanup(operation);
         self.aborted.fetch_add(1, Ordering::SeqCst);
         if matches!(self.mode, Mode::AbortFailed) {
             return Err(ProviderError::Tool(
@@ -155,10 +248,18 @@ impl ResponsesTransport for Script {
     }
 }
 async fn exercise(mode: Mode) {
-    let store = Arc::new(Store::memory().unwrap());
+    exercise_formatted(mode, false).await;
+}
+
+async fn exercise_formatted(mode: Mode, native: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("context-native-results.sqlite");
+    let store = Arc::new(Store::open(&path).unwrap());
     let host = Arc::new(Host {
         store: store.clone(),
         mode,
+        native,
+        retained: AtomicUsize::new(0),
         last_operation: Mutex::new(None),
         handle: Mutex::new(None),
         committed: AtomicUsize::new(0),
@@ -181,6 +282,11 @@ async fn exercise(mode: Mode) {
             agent: AgentPath("/root".into()),
         },
     );
+    let engine = if native {
+        engine.bounded_invocation()
+    } else {
+        engine
+    };
     let (_cancel, cancel) = watch::channel(false);
     let (_mail, mail) = mpsc::unbounded_channel::<Envelope>();
     let result = tokio::time::timeout(
@@ -189,6 +295,65 @@ async fn exercise(mode: Mode) {
     )
     .await
     .unwrap();
+    if matches!(mode, Mode::Unconfirmed) {
+        fn unconfirmed(error: &EngineError) -> bool {
+            match error {
+                EngineError::UnconfirmedCancellation { detail, .. } => {
+                    detail == "cleanup unconfirmed"
+                }
+                EngineError::Secondary(error) => {
+                    unconfirmed(error.primary()) || unconfirmed(error.source_error())
+                }
+                EngineError::BlockedAction(error) => unconfirmed(error.primary()),
+                _ => false,
+            }
+        }
+        assert!(unconfirmed(&result.unwrap_err()));
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert_eq!(host.committed.load(Ordering::SeqCst), 0);
+        assert_eq!(host.aborted.load(Ordering::SeqCst), 0);
+        assert!(host.retained.load(Ordering::SeqCst) >= 1);
+        let (operation, handle) = host.handle.lock().unwrap().clone().unwrap();
+        assert!(matches!(
+            store
+                .context_transaction_status(&operation.origin, &handle)
+                .unwrap(),
+            ContextTransactionStatus::Unknown(_)
+        ));
+        assert!(
+            store
+                .context_transaction_head(&operation)
+                .unwrap()
+                .is_none()
+        );
+        let canonical = store
+            .replay_tool_output_operation(&operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            canonical.output_format,
+            crate::provider::OutputFormat::NativeReceiptV1
+        );
+        assert_eq!(
+            canonical.item,
+            Item::tool_output_with_format(
+                &operation.call,
+                crate::item::ToolKind::Function,
+                &host.authored_output(),
+                canonical.output_format
+            )
+        );
+        assert!(matches!(
+            &canonical.terminal,
+            crate::store::TerminalOutcome::CancellationUnconfirmed(_)
+        ));
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened.replay_tool_output_operation(&operation).unwrap(),
+            Some(canonical)
+        );
+        return;
+    }
     if matches!(mode, Mode::AbortFailed) {
         fn cleanup_error(error: &EngineError) -> bool {
             match error {
@@ -254,7 +419,9 @@ async fn exercise(mode: Mode) {
         .context_transaction_status(&operation.origin, &handle)
         .unwrap();
     match mode {
-        Mode::AbortFailed | Mode::ChoiceOnly => unreachable!("special result handled above"),
+        Mode::AbortFailed | Mode::ChoiceOnly | Mode::Unconfirmed => {
+            unreachable!("special result handled above")
+        }
         Mode::Committed => {
             assert!(matches!(status, ContextTransactionStatus::Committed(_)));
             assert_eq!(host.committed.load(Ordering::SeqCst), 1);
@@ -283,12 +450,58 @@ async fn exercise(mode: Mode) {
         "low",
         "patch publication must preserve the existing effort"
     );
-    assert!(requests[1].input.iter().any(|item| item
-        == &Item::tool_output(
-            &operation.call,
-            crate::item::ToolKind::Function,
-            &JobOutput::Completed(Ok(json!({"authored":"success"})))
-        )));
+    if native {
+        let canonical = store
+            .replay_tool_output_operation(&operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            canonical.output_format,
+            crate::provider::OutputFormat::NativeReceiptV1
+        );
+        assert_eq!(
+            canonical.item,
+            Item::tool_output_with_format(
+                &operation.call,
+                crate::item::ToolKind::Function,
+                &host.authored_output(),
+                canonical.output_format
+            )
+        );
+        assert!(!requests[1].input.contains(&canonical.item));
+        let projection = store
+            .model_output_projection(&operation)
+            .unwrap()
+            .unwrap()
+            .item;
+        assert!(requests[1].input.contains(&projection));
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened.replay_tool_output_operation(&operation).unwrap(),
+            Some(canonical)
+        );
+        assert_eq!(
+            reopened
+                .model_output_projection(&operation)
+                .unwrap()
+                .unwrap()
+                .item,
+            projection
+        );
+        assert!(matches!(
+            reopened
+                .context_transaction_status(&operation.origin, &handle)
+                .unwrap(),
+            ContextTransactionStatus::Committed(_) | ContextTransactionStatus::Rejected(_)
+        ));
+    } else {
+        assert!(requests[1].input.iter().any(|item| item
+            == &Item::tool_output(
+                &operation.call,
+                crate::item::ToolKind::Function,
+                &JobOutput::Completed(Ok(json!({"authored":"success"})))
+            )));
+    }
     let expected = if matches!(mode, Mode::Committed) {
         "replacement"
     } else {
@@ -327,4 +540,21 @@ async fn rejected_patch_does_not_publish_explicit_model_or_effort_choices() {
 #[tokio::test]
 async fn choice_only_legacy_draft_publishes_independently_of_transactions() {
     exercise(Mode::ChoiceOnly).await;
+}
+
+#[tokio::test]
+async fn native_results_survive_context_commit_rejection_and_discard_before_cleanup() {
+    for mode in [
+        Mode::Committed,
+        Mode::Rejected,
+        Mode::Discarded,
+        Mode::ChoiceOnly,
+    ] {
+        exercise_formatted(mode, true).await;
+    }
+}
+
+#[tokio::test]
+async fn unconfirmed_context_cleanup_retains_native_receipt_without_confirming_context() {
+    exercise_formatted(Mode::Unconfirmed, true).await;
 }

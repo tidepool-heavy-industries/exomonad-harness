@@ -2014,7 +2014,7 @@ impl Store {
                 pending,
             },
             Some(evidence),
-            crate::provider::OutputFormat::LegacyOpaque,
+            evidence.replay_output_format(&snapshot.operation)?,
             &cancelled,
         )
     }
@@ -2039,7 +2039,7 @@ impl Store {
                 pending,
             },
             Some(evidence),
-            crate::provider::OutputFormat::LegacyOpaque,
+            evidence.replay_output_format(&snapshot.operation)?,
             &|| false,
         )
     }
@@ -2135,7 +2135,9 @@ impl Store {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<ContextCommitReceipt> {
         let mut c = self.lock()?;
-        c.write_transaction(|tx| self.commit_context_tx(tx, commit, replay, format, cancelled, None))
+        c.write_transaction(|tx| {
+            self.commit_context_tx(tx, commit, replay, format, cancelled, None)
+        })
     }
 
     fn commit_context_tx(
@@ -2171,7 +2173,12 @@ impl Store {
             &snapshot.operation.call,
         )?
         .ok_or(ContextError::MissingCall)?;
-        let output_item = Item::tool_output_with_format(&snapshot.operation.call, call.input.kind(), output, format);
+        let output_item = Item::tool_output_with_format(
+            &snapshot.operation.call,
+            call.input.kind(),
+            output,
+            format,
+        );
         let output_hash = Self::put_item_tx(&tx, &output_item)?;
         if let Some(evidence) = replay {
             if evidence.version >= 4
@@ -2196,6 +2203,13 @@ impl Store {
             }
             let mut expected = evidence.output.clone();
             expected.0["call_id"] = json!(snapshot.operation.call.0);
+            if snapshot.operation != evidence.original_operation {
+                expected
+                    .0
+                    .as_object_mut()
+                    .ok_or(ContextError::UnsupportedState)?
+                    .remove("output_format");
+            }
             if expected != output_item {
                 return Err(ContextError::Ineligible.into());
             }

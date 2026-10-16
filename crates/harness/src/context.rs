@@ -225,6 +225,20 @@ impl ContextCommitEvidence {
     pub fn original_operation(&self) -> &OperationId {
         &self.original_operation
     }
+
+    /// A copied result does not reissue the original native operation's format.
+    /// Validate the sealed marker even when the receiving identity requires demotion.
+    pub(crate) fn replay_output_format(
+        &self,
+        operation: &OperationId,
+    ) -> Result<crate::provider::OutputFormat, serde_json::Error> {
+        let format = self.output.output_format()?;
+        Ok(if operation == &self.original_operation {
+            format
+        } else {
+            crate::provider::OutputFormat::LegacyOpaque
+        })
+    }
 }
 
 #[derive(Clone, Debug)]

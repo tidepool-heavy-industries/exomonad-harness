@@ -3512,6 +3512,24 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     !matches!(context, crate::provider::ContextDisposition::Unedited)
                 });
             if let Some((draft, discarded)) = transaction {
+                if matches!(
+                    output,
+                    crate::turn::JobOutput::Interrupted
+                        | crate::turn::JobOutput::CancellationUnconfirmed(_)
+                ) {
+                    self.retain_output(&operation, call.tool_kind, &output, &call.claim_request)
+                        .await?;
+                    let detail = match &output {
+                        crate::turn::JobOutput::CancellationUnconfirmed(failure) => {
+                            failure.message().to_owned()
+                        }
+                        _ => "context invocation settlement is interrupted".into(),
+                    };
+                    return Err(EngineError::UnconfirmedCancellation {
+                        operation: operation.clone(),
+                        detail,
+                    });
+                }
                 let store = self.store.clone();
                 let pending_operations = pending
                     .iter()
@@ -3524,19 +3542,21 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 let current_head = request.clone();
                 let head = blocking(move || {
                     if discarded {
-                        store.discard_context_transaction_at(
+                        store.discard_context_transaction_at_formatted(
                             &snapshot,
                             &current_head,
                             &draft,
                             &terminal_output,
+                            completion_format,
                         )?;
                     } else {
-                        store.commit_context_transaction_at_guarded(
+                        store.commit_context_transaction_at_guarded_formatted(
                             &snapshot,
                             &current_head,
                             &draft,
                             &terminal_output,
                             &pending_operations,
+                            completion_format,
                             || *cancelled.borrow() || cancelled.has_changed().is_err(),
                         )?;
                     }
@@ -3556,6 +3576,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     other => other?,
                 };
                 *request = head;
+                self.provider.output_retained(&operation).await?;
                 self.scheduler.mark_output_committed(&operation).await?;
                 self.acknowledge_output(&operation).await?;
             } else if let Some(disposition) =
@@ -3777,6 +3798,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     &draft,
                     &terminal_output,
                     &claimed_at,
+                    output_format,
                 )?;
             } else {
                 store.write_job_output_with_format(&call, kind, &terminal_output, output_format)?;
@@ -3862,6 +3884,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     &draft,
                     &terminal_output,
                     &claimed_at,
+                    output_format,
                 )?;
             } else {
                 store.write_job_output_with_format(&call, kind, &terminal_output, output_format)?;

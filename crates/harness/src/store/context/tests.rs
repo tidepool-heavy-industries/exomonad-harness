@@ -2286,3 +2286,71 @@ fn legacy_v3_replay_retry_retains_the_exact_committed_receipt() {
         3
     );
 }
+
+#[test]
+fn context_replay_preserves_native_format_only_for_the_exact_original_operation() {
+    use crate::provider::OutputFormat;
+    for format in [OutputFormat::LegacyOpaque, OutputFormat::NativeReceiptV1] {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("source.sqlite");
+        let same_path = directory.path().join("same-owner.sqlite");
+        let original = Store::open(&source_path).unwrap();
+        let (head, operation) = setup(&original);
+        original
+            .lock()
+            .unwrap()
+            .execute("VACUUM INTO ?1", [same_path.to_str().unwrap()])
+            .unwrap();
+        let snapshot = original.begin_context(&operation, &head).unwrap();
+        original
+            .commit_context_guarded_formatted(
+                ContextCommit {
+                    snapshot: &snapshot,
+                    draft: &edited(&snapshot),
+                    output: &output(),
+                    pending: &[],
+                },
+                format,
+                || false,
+            )
+            .unwrap();
+        let evidence = original
+            .context_commit_evidence(&operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(evidence.replay_output_format(&operation).unwrap(), format);
+
+        let same = Store::open(&same_path).unwrap();
+        let same_snapshot = same.begin_context(&operation, &head).unwrap();
+        same.restore_context_commit(&same_snapshot, &evidence, &output(), &[])
+            .unwrap();
+        let same_output = same
+            .replay_tool_output_operation(&operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(same_output.output_format, format);
+        assert_eq!(same_output.item, evidence.output);
+
+        let remapped = Store::memory().unwrap();
+        let (local_head, local_operation) = setup(&remapped);
+        assert_ne!(local_operation, operation);
+        let local_snapshot = remapped
+            .begin_context(&local_operation, &local_head)
+            .unwrap();
+        remapped
+            .restore_context_commit_guarded(&local_snapshot, &evidence, &output(), &[], || false)
+            .unwrap();
+        let remapped_output = remapped
+            .replay_tool_output_operation(&local_operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(remapped_output.output_format, OutputFormat::LegacyOpaque);
+        let mut expected = evidence.output.clone();
+        expected.0["call_id"] = json!(local_operation.call.0);
+        expected.0.as_object_mut().unwrap().remove("output_format");
+        assert_eq!(remapped_output.item, expected);
+        let mut malformed = evidence.clone();
+        malformed.output.0["output_format"] = json!("unknown_format");
+        assert!(malformed.replay_output_format(&local_operation).is_err());
+    }
+}

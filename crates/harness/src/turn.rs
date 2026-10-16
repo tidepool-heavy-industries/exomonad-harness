@@ -1321,10 +1321,12 @@ impl JobScheduler {
                     )
                 };
                 let mut completion = retained
+                    .filter(|completion| completion.output == output)
                     .or_else(|| authority.project(output.clone()))
                     .unwrap_or_else(|| {
                         let mut completion = crate::provider::ProviderCompletion {
                             output: output.clone(),
+                            output_format: crate::provider::OutputFormat::LegacyOpaque,
                             full_success: !required
                                 && matches!(output, JobOutput::Completed(Ok(_))),
                             context: crate::provider::ContextDisposition::Unedited,

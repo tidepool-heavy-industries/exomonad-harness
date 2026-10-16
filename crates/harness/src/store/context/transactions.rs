@@ -40,7 +40,7 @@ pub(super) fn validate_record(c: &Connection, record: &ReceiptRecord) -> Result<
     if transaction.patch_digest != patch_digest(&draft.patch) {
         return Err(ContextError::UnsupportedState.into());
     }
-    let Some((hash, terminal)) = terminal::exact_terminal(c, &record.operation)? else {
+    let Some((hash, terminal, _)) = terminal::exact_terminal(c, &record.operation)? else {
         return Err(ContextError::UnsupportedState.into());
     };
     if hash != record.output {
@@ -62,7 +62,9 @@ pub(super) fn validate_record(c: &Connection, record: &ReceiptRecord) -> Result<
         }
         ContextTransactionStatus::Cancelled => matches!(
             terminal,
-            TerminalOutcome::Cancelled | TerminalOutcome::CancelledWithReceipt(_)
+            TerminalOutcome::Cancelled
+                | TerminalOutcome::CancelledWithReceipt(_)
+                | TerminalOutcome::CancelledWithValueReceipt
         ),
         _ => false,
     };
@@ -244,6 +246,7 @@ fn record_unapplied(
     head: &RequestId,
     draft: &ContextTransactionDraft,
     output: &JobOutput,
+    format: crate::provider::OutputFormat,
     status: ContextTransactionStatus,
     publish: bool,
 ) -> Result<ContextTransactionStatus> {
@@ -253,18 +256,19 @@ fn record_unapplied(
         &snapshot.operation.call,
     )?
     .ok_or(ContextError::MissingCall)?;
-    let output_item = Item::tool_output(&snapshot.operation.call, call.input.kind(), output);
+    let output_item =
+        Item::tool_output_with_format(&snapshot.operation.call, call.input.kind(), output, format);
     let hash = Store::put_item_tx(tx, &output_item)?;
     let terminal = TerminalOutcome::from(output);
     let previous_terminal = terminal::exact_terminal(tx, &snapshot.operation)?;
-    if let Some((old, old_terminal)) = &previous_terminal {
-        if *old != hash || *old_terminal != terminal {
+    if let Some((old, old_terminal, old_format)) = &previous_terminal {
+        if *old != hash || *old_terminal != terminal || *old_format != format {
             return Err(StoreError::ConflictingReplayOutcome {
                 operation: snapshot.operation.clone(),
             });
         }
     }
-    let settled = tx.execute("UPDATE claims SET state='settled',output_hash=?4,terminal_json=?5 WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND state='pending'",params![serde_json::to_string(&snapshot.operation.origin)?,snapshot.operation.request.0,snapshot.operation.call.0,hash.0,serde_json::to_string(&terminal)?])?;
+    let settled = tx.execute("UPDATE claims SET state='settled',output_hash=?4,terminal_json=?5 WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND state='pending'",params![serde_json::to_string(&snapshot.operation.origin)?,snapshot.operation.request.0,snapshot.operation.call.0,hash.0,terminal::encode_terminal(&terminal, format)?])?;
     if settled == 0 && previous_terminal.is_none() {
         return Err(StoreError::UnsupportedReplayOutcome {
             operation: snapshot.operation.clone(),
@@ -556,8 +560,29 @@ impl Store {
         pending: &[OperationId],
         cancelled: impl Fn() -> bool,
     ) -> Result<ContextTransactionStatus> {
+        self.commit_context_transaction_at_guarded_formatted(
+            snapshot,
+            head,
+            draft,
+            output,
+            pending,
+            crate::provider::OutputFormat::LegacyOpaque,
+            cancelled,
+        )
+    }
+
+    pub(crate) fn commit_context_transaction_at_guarded_formatted(
+        &self,
+        snapshot: &ContextSnapshot,
+        head: &RequestId,
+        draft: &ContextTransactionDraft,
+        output: &JobOutput,
+        pending: &[OperationId],
+        format: crate::provider::OutputFormat,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<ContextTransactionStatus> {
         self.settle_context_transaction_guarded(
-            snapshot, head, draft, output, pending, false, cancelled,
+            snapshot, head, draft, output, pending, format, false, cancelled,
         )
     }
 
@@ -583,7 +608,33 @@ impl Store {
         draft: &ContextTransactionDraft,
         output: &JobOutput,
     ) -> Result<ContextTransactionStatus> {
-        self.settle_context_transaction_guarded(snapshot, head, draft, output, &[], true, || false)
+        self.discard_context_transaction_at_formatted(
+            snapshot,
+            head,
+            draft,
+            output,
+            crate::provider::OutputFormat::LegacyOpaque,
+        )
+    }
+
+    pub(crate) fn discard_context_transaction_at_formatted(
+        &self,
+        snapshot: &ContextSnapshot,
+        head: &RequestId,
+        draft: &ContextTransactionDraft,
+        output: &JobOutput,
+        format: crate::provider::OutputFormat,
+    ) -> Result<ContextTransactionStatus> {
+        self.settle_context_transaction_guarded(
+            snapshot,
+            head,
+            draft,
+            output,
+            &[],
+            format,
+            true,
+            || false,
+        )
     }
 
     pub(crate) fn retain_context_transaction_output(
@@ -592,14 +643,28 @@ impl Store {
         draft: &ContextTransactionDraft,
         output: &JobOutput,
         head: &RequestId,
+        format: crate::provider::OutputFormat,
     ) -> Result<ContextTransactionStatus> {
+        if matches!(
+            output,
+            JobOutput::Interrupted | JobOutput::CancellationUnconfirmed(_)
+        ) {
+            let kind = self
+                .tool_invocation_kind(&operation.request, &operation.call)?
+                .ok_or(ContextError::MissingCall)?;
+            self.write_job_output_with_format(operation, kind, output, format)?;
+            return Ok(ContextTransactionStatus::Unknown(
+                "execution evidence retained; context publication remains unconfirmed".into(),
+            ));
+        }
         let mut c = self.lock()?;
         c.write_transaction(|tx| {
             validate_identity(tx, &self.store_id, &operation.origin)?;
             let call =
                 super::super::validation::invocation_item(tx, &operation.request, &operation.call)?
                     .ok_or(ContextError::MissingCall)?;
-            let item = Item::tool_output(&operation.call, call.input.kind(), output);
+            let item =
+                Item::tool_output_with_format(&operation.call, call.input.kind(), output, format);
             let hash = Self::put_item_tx(tx, &item)?;
             if let Some(record) = receipt(tx, operation)? {
                 if record.candidate != serde_json::to_string(draft)? || record.output != hash {
@@ -611,12 +676,6 @@ impl Store {
                     .transaction
                     .map(|record| record.status)
                     .ok_or_else(|| ContextError::UnsupportedState.into());
-            }
-            if matches!(
-                output,
-                JobOutput::Interrupted | JobOutput::CancellationUnconfirmed(_)
-            ) {
-                return Err(ContextError::Ineligible.into());
             }
             let generation = state(tx, &operation.origin)?.generation;
             let snapshot = ContextSnapshot {
@@ -645,7 +704,7 @@ impl Store {
                     "context candidate was discarded before publication",
                 )])
             };
-            record_unapplied(tx, &snapshot, head, draft, output, status, false)
+            record_unapplied(tx, &snapshot, head, draft, output, format, status, false)
         })
     }
 
@@ -656,6 +715,7 @@ impl Store {
         draft: &ContextTransactionDraft,
         output: &JobOutput,
         pending: &[OperationId],
+        format: crate::provider::OutputFormat,
         discarded: bool,
         cancelled: impl Fn() -> bool,
     ) -> Result<ContextTransactionStatus> {
@@ -670,8 +730,12 @@ impl Store {
                 &snapshot.operation.call,
             )?
             .ok_or(ContextError::MissingCall)?;
-            let output_item =
-                Item::tool_output(&snapshot.operation.call, call.input.kind(), output);
+            let output_item = Item::tool_output_with_format(
+                &snapshot.operation.call,
+                call.input.kind(),
+                output,
+                format,
+            );
             let hash = Store::put_item_tx(tx, &output_item)?;
             // Idempotence precedes current content, cancellation and frontier checks.
             if let Some(record) = receipt(tx, &snapshot.operation)? {
@@ -696,6 +760,7 @@ impl Store {
                     head,
                     draft,
                     output,
+                    format,
                     ContextTransactionStatus::Cancelled,
                     true,
                 );
@@ -713,6 +778,7 @@ impl Store {
                     head,
                     draft,
                     output,
+                    format,
                     ContextTransactionStatus::Rejected(vec![problem(
                         ContextProblemCode::Ineligible,
                         None,
@@ -736,6 +802,7 @@ impl Store {
                             head,
                             draft,
                             output,
+                            format,
                             ContextTransactionStatus::Rejected(vec![error]),
                             true,
                         );
@@ -756,6 +823,7 @@ impl Store {
                         head,
                         draft,
                         output,
+                        format,
                         ContextTransactionStatus::Rejected(problems),
                         true,
                     );
@@ -776,6 +844,7 @@ impl Store {
                     pending,
                 },
                 None,
+                format,
                 &cancelled,
                 Some(draft),
             );
@@ -803,6 +872,7 @@ impl Store {
                         head,
                         draft,
                         output,
+                        format,
                         ContextTransactionStatus::Rejected(vec![error]),
                         true,
                     )
