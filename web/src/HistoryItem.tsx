@@ -129,8 +129,8 @@ export function ordinaryItem(entry: { readonly item: unknown; readonly modelItem
 export default function HistoryItem({ entry, listItem = true, diagnostics = true, publication }: { readonly entry: HistoryEntry; readonly listItem?: boolean; readonly diagnostics?: boolean; readonly publication?: { sequence: string; requestId: string } }) {
   const view = useMemo(() => readable(ordinaryItem(entry)), [entry.item, entry.modelItem])
   const [showRaw, setShowRaw] = usePresentationChoice('raw-item')
-  const rawVisible = showRaw || !view
-  const raw = useMemo(() => rawVisible ? JSON.stringify(showRaw ? entry.item : ordinaryItem(entry), null, 2) : undefined, [entry.item, entry.modelItem, showRaw, rawVisible])
+  const ordinaryRaw = useMemo(() => !view ? JSON.stringify(ordinaryItem(entry), null, 2) : undefined, [entry.item, entry.modelItem, view])
+  const raw = useMemo(() => showRaw ? JSON.stringify(entry.item, null, 2) : undefined, [entry.item, showRaw])
   // Empty or opaque-only reasoning adds no chat content; unfamiliar blocks remain inspectable.
   if (object(entry.item) && entry.item.type === 'reasoning' && view?.texts.length === 0 && !view.unknownBlocks) return publication
     ? <PresentationDetails memoryKey="evidence" className="chat-message-details" summary="Publication details">
@@ -139,7 +139,7 @@ export default function HistoryItem({ entry, listItem = true, diagnostics = true
   const texts = view?.texts.map((part, index, parts) => <div key={index} className={`history-${part.kind}`}>
     <MessageContent text={part.text} copyText={part.copyText} format={part.format} language={part.language} bounded={part.kind === 'code'} memoryKey={`part:${index}`} label={`${part.label} item ${entry.position}${parts.length > 1 ? ` block ${index + 1}` : ''}`} />
   </div>)
-  const rawContent = rawVisible && <MessageContent key="raw" text={raw ?? 'Raw data could not be represented as JSON.'} label={`Raw item ${entry.position}`} />
+  const rawContent = showRaw && <MessageContent key="raw" text={raw ?? 'Raw data could not be represented as JSON.'} label={`Raw item ${entry.position}`} />
   return <MessagePresentation listItem={listItem} kind={view?.kind ?? 'activity'} title={view?.label ?? 'Unrecognized item · Raw data'} collapsed={view?.kind === 'reasoning' && view.texts.length > 0}
     details={diagnostics ? <>
       {publication && <p className="meta">Sequence {publication.sequence} · exchange {publication.requestId}</p>}
@@ -150,6 +150,6 @@ export default function HistoryItem({ entry, listItem = true, diagnostics = true
     {view ? <>
       {view.responseSummary ? <details className="history-tool-response"><summary>{view.responseSummary}</summary>{texts}</details> : texts}
       {view.unknownBlocks && <p className="message-content-note">Unknown content is retained. Open Raw to inspect all blocks.</p>}
-    </> : rawContent}
+    </> : <MessageContent text={ordinaryRaw ?? 'Raw data could not be represented as JSON.'} label={`Raw item ${entry.position}`} />}
   </MessagePresentation>
 }
