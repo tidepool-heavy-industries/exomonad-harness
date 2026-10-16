@@ -258,5 +258,5 @@ it('keeps unfamiliar certified items inspectable without falling back to canonic
   expect(screen.getByLabelText('Raw item 7').textContent).toBe(JSON.stringify(modelItem, null, 2))
   expect(screen.queryByText(/canonical secret/)).toBeNull()
   showRaw()
-  expect(screen.getAllByLabelText('Raw item 7')[0].textContent).toBe(JSON.stringify(item, null, 2))
+  expect(screen.getAllByLabelText('Raw item 7')[0]?.textContent).toBe(JSON.stringify(item, null, 2))
 })
