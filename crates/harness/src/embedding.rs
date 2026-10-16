@@ -1064,6 +1064,10 @@ mod tests {
         struct Projection;
         #[async_trait]
         impl Provider for Projection {
+            fn tools(&self) -> Vec<Value> {
+                vec![]
+            }
+
             fn model_visible_item(
                 &self,
                 _: &RequestId,

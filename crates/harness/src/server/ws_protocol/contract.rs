@@ -185,7 +185,7 @@ pub struct HistoryItem {
     pub model_item: Option<JsonValue>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OversizedHistoryItem {
     pub position: WireU64,

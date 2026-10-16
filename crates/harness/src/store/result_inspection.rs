@@ -221,7 +221,8 @@ impl Store {
         let Some(canonical) = self.replay_output_operation(operation)? else {
             return Ok(None);
         };
-        model_output_projection(&self.lock()?, operation, &canonical)
+        let connection = self.lock()?;
+        model_output_projection(&connection, operation, &canonical)
     }
 }
 
@@ -290,8 +291,10 @@ mod tests {
 
     #[test]
     fn canonical_result_and_projection_survive_reopen_and_exact_binding_transfer() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store.sqlite");
+        let path = std::env::temp_dir().join(format!(
+            "harness-result-inspection-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
         let store = Store::open(&path).unwrap();
         let (host, operation, original) = settled(&store, true);
         store
@@ -352,8 +355,10 @@ mod tests {
 
     #[test]
     fn projection_is_retained_before_history_and_retry_is_idempotent() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("store.sqlite");
+        let path = std::env::temp_dir().join(format!(
+            "harness-result-inspection-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
         let store = Store::open(&path).unwrap();
         let (host, operation, original) = settled(&store, false);
         let replacement = serde_json::json!({"output":"authored presentation"});

@@ -209,7 +209,8 @@ impl Store {
         &self,
         operation: &OperationId,
     ) -> Result<Option<crate::provider::OutputFormat>> {
-        Ok(exact_terminal(&self.lock()?, operation)?.map(|(_, _, format)| format))
+        let connection = self.lock()?;
+        Ok(exact_terminal(&connection, operation)?.map(|(_, _, format)| format))
     }
 
     /// Exact original operation; inherited claimants must retain identical evidence.
@@ -300,8 +301,7 @@ mod tests {
 
     #[test]
     fn native_format_survives_reopen_for_all_receipt_terminals_and_refuses_disagreement() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("formats.sqlite");
+        let path = path();
         let store = Store::open(&path).unwrap();
         let body = json!({"nativeResult":{"version":1,"opaque":"λ".repeat(50000)}});
         let mut retained = Vec::new();

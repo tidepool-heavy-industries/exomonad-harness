@@ -5030,7 +5030,7 @@ mod tests {
                 None,
                 "/root",
                 &[invocation.clone()],
-                Usage::default(),
+                StoredUsage::default(),
             )
             .unwrap();
         let engine = Engine::<FakeAuth, Formatted, _>::with_transport(
@@ -5085,8 +5085,10 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_publication_and_reopen_preserve_opaque_legacy_outputs() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("opaque.sqlite");
+        let path = std::env::temp_dir().join(format!(
+            "harness-opaque-result-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
         let store = Arc::new(Store::open(&path).unwrap());
         let mut retained = Vec::new();
         let engine = Engine::<FakeAuth, Echo, _>::with_transport(
@@ -5118,7 +5120,7 @@ mod tests {
         {
             let request = RequestId(format!("opaque-{index}"));
             let call = CallId(format!("call-{index}"));
-            store.write_request(&request,None,"/root",&[Item(json!({"type":"function_call","call_id":call.0,"name":"echo","arguments":"{}"}))],Usage::default()).unwrap();
+            store.write_request(&request,None,"/root",&[Item(json!({"type":"function_call","call_id":call.0,"name":"echo","arguments":"{}"}))],StoredUsage::default()).unwrap();
             let operation = store.claim(&call, &request).unwrap();
             engine
                 .persist_output(&operation, ToolKind::Function, &output, &request, &request)
