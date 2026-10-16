@@ -583,10 +583,11 @@ mod tests {
         store.bind_embedded_actor(&host, None).unwrap();
         let request = RequestId("original-result".into());
         let call = CallId("inherited-call".into());
-        store.write_request(&request,None,&host.actor.0,&[Item(serde_json::json!({"type":"function_call","call_id":call.0,"name":"read","arguments":"{}"}))],Usage::default()).unwrap();
+        store.create_request(&request, None, &host.actor.0).unwrap();
         store
             .set_effort(&request, crate::model::Effort::Medium)
             .unwrap();
+        store.append_items(&request, &[Item(serde_json::json!({"type":"function_call","call_id":call.0,"name":"read","arguments":"{}"}))]).unwrap();
         let operation = store.claim(&call, &request).unwrap();
         store
             .advance_agent_head(&host.actor, None, Some(&request))

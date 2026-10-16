@@ -1038,7 +1038,6 @@ mod tests {
         store
             .write_request(&request, None, "/root", &invocations, Usage::default())
             .unwrap();
-        let mut operations = Vec::new();
         for call in &calls {
             let operation = store.claim(call, &request).unwrap();
             store
@@ -1054,7 +1053,6 @@ mod tests {
             store
                 .publish_model_output_projection(&operation, json!("x".repeat(150_000)))
                 .unwrap();
-            operations.push(operation);
         }
         let page = store.history_page(&request, 0, 100).unwrap();
         assert_eq!(page.items.len(), 3);
@@ -1068,14 +1066,36 @@ mod tests {
         let next = store.history_page(&request, 3, 100).unwrap();
         assert_eq!(next.items.len(), 1);
         assert!(next.next_offset.is_none());
+        let oversized_request = RequestId("oversized-projection-wire-budget".into());
+        let oversized_call = CallId("oversized".into());
+        store
+            .write_request(
+                &oversized_request,
+                None,
+                "/root",
+                &[Item(json!({"type":"function_call","name":"run","call_id":oversized_call.0,"arguments":"{}"}))],
+                Usage::default(),
+            )
+            .unwrap();
+        let oversized_operation = store.claim(&oversized_call, &oversized_request).unwrap();
+        store
+            .write_job_output(
+                &oversized_operation,
+                crate::item::ToolKind::Function,
+                &crate::turn::JobOutput::Completed(Ok(json!({"canonical":"oversized"}))),
+            )
+            .unwrap();
+        store
+            .append_operation_output(&oversized_operation, &oversized_request, &oversized_request)
+            .unwrap();
         store
             .publish_model_output_projection(
-                &operations[0],
+                &oversized_operation,
                 json!("x".repeat(MAX_HISTORY_BYTES + 1)),
             )
             .unwrap();
         assert!(matches!(
-            store.history_page(&request, 2, 1),
+            store.history_page(&oversized_request, 1, 1),
             Err(StoreError::InvalidActorOutput)
         ));
     }
