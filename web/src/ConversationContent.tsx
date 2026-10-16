@@ -8,7 +8,7 @@ import type { UnifiedEntry } from './conversation-client'
 import { outputKey, outputLabels, originKey, type OutputOrigin } from './live-output'
 import type { TimelineRow } from './chat-timeline'
 import { RichViewRenderer } from './rich-view'
-import ToolActivity, { type ExchangeObservation, type ToolJobObservation } from './ToolActivity'
+import ToolActivity, { toolCallName, type ExchangeObservation, type ToolJobObservation } from './ToolActivity'
 
 export function TimelineContent({ row, streamingActive, requests, jobs, modelOrigin, onRevealActivity }: { row: TimelineRow; streamingActive: boolean; requests?: ReadonlyMap<string, ExchangeObservation>; jobs: readonly ToolJobObservation[]; modelOrigin?: OutputOrigin; onRevealActivity: (key: string) => void }) {
   if (row.kind === 'activity' || row.kind === 'live' && row.live.every(item => item.channel === 'tool_input' || item.channel === 'tool_arguments')) {
@@ -24,7 +24,7 @@ export function TimelineContent({ row, streamingActive, requests, jobs, modelOri
     <MessageContent streaming={item.streaming && streamingActive} text={item.text} label={`${outputLabels[item.channel]} output`} memoryKey={`part:${row.live.indexOf(item)}`} bounded={item.channel === 'tool_input' || item.channel === 'tool_arguments'} format={item.channel === 'assistant' || item.channel === 'refusal' ? 'markdown' : 'plain'} />
     {item.overflow && <p role="status">Live preview is partial. Completed content remains available in retained history.</p>}
   </MessagePresentation>)}</div>
-  if (row.kind === 'result') return row.invocationKey ? <div className="tool-result-marker"><span>Tool result retained</span><button type="button" onClick={() => onRevealActivity(row.invocationKey!)}>Show tool activity</button></div> : <div className="message tool-activity"><h3>Tool result</h3><p className="meta">{row.entry.tool ? 'The exact invocation is outside the loaded window.' : 'Operation ownership is unavailable for this historical result.'}</p><HistoryItem listItem={false} publication={row.entry} entry={historyEntry(row.entry)} /></div>
+  if (row.kind === 'result') return row.invocationKey ? <div className="tool-result-marker"><span>Result retained{row.invocation && <> for <strong>{toolCallName(row.invocation)}</strong> · call {row.invocation.sequence}</>}</span><button type="button" onClick={() => onRevealActivity(row.invocationKey!)}>Show tool activity</button></div> : <div className="message tool-activity"><h3>Tool result</h3><p className="meta">{row.entry.tool ? 'The exact invocation is outside the loaded window.' : 'Operation ownership is unavailable for this historical result.'}</p><HistoryItem listItem={false} publication={row.entry} entry={historyEntry(row.entry)} /></div>
   if (row.entry.kind === 'message') return <HistoryItem listItem={false} publication={row.entry} entry={historyEntry(row.entry)} />
   if (row.entry.kind === 'oversized') return <OversizedOutput entry={row.entry} />
   return null

@@ -15,3 +15,6 @@
 @media (max-width: 700px) { .tool-heading, .tool-source, .tool-results, .execution-log { padding-inline: 12px; } }
 
 .tool-result-excerpt { margin: 12px 16px 0; max-width: var(--prose-measure); }
+
+.tool-call-identity { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; min-width: 0; }
+.tool-call-reference { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }

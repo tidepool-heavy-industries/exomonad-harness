@@ -25,3 +25,10 @@
 .tool-sequence[open] > summary { border-bottom: 1px solid var(--line); }
 
 .tool-sequence-action { margin-inline-start: 12px; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+
+.tool-sequence-input { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 8px; color: var(--ink); }
+.tool-sequence-input strong, .tool-sequence-result strong { font-family: var(--mono); font-weight: 500; }
+.tool-sequence-input code { flex-basis: 100%; color: var(--muted); font: 12px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-sequence-result .tool-call-reference { color: inherit; }
+
+.tool-sequence-job { display: inline-block; margin-inline-start: 12px; }

@@ -44,6 +44,13 @@ test('chat groups exact issued tools while result markers keep interleaving chro
     { sequence: '4', kind: 'message', requestId: 'claimant-other', position: '0', hash, tool: other, providerItemId: null, inputOperation: null, item: { type: 'custom_tool_call_output', call_id: 'same', output: 'other issuance' } },
   ] satisfies ChatEntry[]
   await openChat(page, request, entries)
+  const groups = page.getByLabel('Tool activity group', { exact: true })
+  await expect(groups).toHaveCount(2)
+  await expect(groups.nth(0).locator('summary').first()).toContainText('Call 1')
+  await expect(groups.nth(0).locator('summary').first()).not.toContainText('exact result')
+  await expect(groups.nth(1).locator('summary').first()).toContainText('Result for call 1')
+  await groups.nth(0).locator('summary').first().click()
+  await groups.nth(1).locator('summary').first().click()
   const activity = page.locator('.tool-activity').filter({ has: page.getByRole('heading', { name: /Compile/ }) })
   await expect(activity).toContainText('Result retained')
   await activity.getByText('Tool evidence', { exact: true }).click()
@@ -54,6 +61,7 @@ test('chat groups exact issued tools while result markers keep interleaving chro
   expect(JSON.parse((await activity.getByLabel('Raw result item', { exact: true }).textContent())!)).toMatchObject({ call_id: 'same', output: 'exact result' })
   await expect(page.getByText('The exact invocation is outside the loaded window.', { exact: true })).toBeVisible()
   await expect(page.locator('.tool-result-marker')).toHaveCount(1)
+  await expect(page.locator('.tool-result-marker')).toContainText('Compile · call 1')
   expect((await observations(request)).commands).toHaveLength(0)
 })
 

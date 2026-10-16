@@ -12,6 +12,7 @@ for (const width of [1280, 390]) {
     await openChat(page, request)
     const report = page.locator('[data-sequence="1"] .message-content-viewport').first()
     expect(await report.evaluate(element => element.clientHeight >= element.scrollHeight - 1)).toBe(true)
+    await page.getByLabel('Tool activity group', { exact: true }).locator('summary').first().click()
     const cell = page.getByRole('region', { name: 'haskell tool call' })
     await cell.getByRole('button', { name: 'Expand Input', exact: true }).click()
     await expect(cell.getByRole('button', { name: 'Collapse Input', exact: true })).toHaveAttribute('aria-expanded', 'true')

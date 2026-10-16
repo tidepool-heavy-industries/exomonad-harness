@@ -24,6 +24,12 @@ This brief records the operator's choices for the usability pass based on
   results collapse into keyboard-accessible groups between prose, displays, and
   forms. Literal result excerpts and observed failures remain in each summary;
   expanding a group exposes the original calls, results, and execution evidence.
+  Call labels use the input publication sequence so repeated tool names stay
+  distinguishable. Group summaries count and preview result publications at their
+  chronological location; a later result attached to an earlier call remains
+  available inside that call without appearing twice in collapsed summaries.
+  Ordinary excerpts use the Store-certified model item; raw envelopes belong
+  only in evidence disclosures.
   Code/arguments and results remain visible together inside each expanded cell. An expandable log
   beneath each cell shows observed publication and exactly correlated job state
   and timing. Missing results never imply completion or ongoing execution. Compiler

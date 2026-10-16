@@ -10,7 +10,7 @@ for (const width of [1280, 390]) {
     const group = page.getByLabel('Tool activity group', { exact: true })
     await expect(group).toHaveCount(1)
     await expect(group).not.toHaveAttribute('open')
-    await expect(group.getByText('Result: Compilation failed')).toBeVisible()
+    await expect(group.locator(':scope > summary').getByText(/: Compilation failed$/)).toBeVisible()
     await expect(page.getByRole('textbox', { name: 'Project name' })).toBeVisible()
     const composer = page.getByRole('textbox', { name: /^Message / })
     await composer.fill('Keep this draft')

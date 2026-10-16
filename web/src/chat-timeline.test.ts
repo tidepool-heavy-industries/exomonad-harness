@@ -34,7 +34,7 @@ describe('timeline projection evidence', () => {
     const rows = projectTimeline(origin, entries, [], modelOrigin)
     expect(rows.map(row => row.kind)).toEqual(['activity', 'entry', 'result'])
     expect(rows[0]).toMatchObject({ results: [entries[2]] })
-    expect(rows[2]).toMatchObject({ invocationKey: rows[0]!.key })
+    expect(rows[2]).toMatchObject({ invocationKey: rows[0]!.key, invocation: entries[0] })
     expect(rows.map(row => 'entry' in row ? row.entry.sequence : null)).toEqual(['1', '2', '3'])
   })
   it('does not attach an unloaded or historical unbound result by wire call ID or hash', () => {

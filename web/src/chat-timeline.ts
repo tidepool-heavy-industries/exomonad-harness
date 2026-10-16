@@ -11,7 +11,7 @@ export type TimelineRow =
   | { kind: 'entry'; key: string; entry: UnifiedEntry }
   | { kind: 'live'; key: string; live: readonly LiveOutput[] }
   | { kind: 'activity'; key: string; entry: MessageEntry; results: readonly MessageEntry[] }
-  | { kind: 'result'; key: string; entry: MessageEntry; invocationKey?: string }
+  | { kind: 'result'; key: string; entry: MessageEntry; invocationKey?: string; invocation?: MessageEntry }
 
 const object = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 export function operationKey(operation: ToolOperation): string { return JSON.stringify([originKey(operation.origin), operation.request, operation.call]) }
@@ -96,7 +96,7 @@ export function projectTimeline(origin: ActorOutputOrigin, entries: readonly Uni
       const invocationKey = invocation ? modelOrigin && invocationId && invocationIdentity && providerCounts.get(invocationIdentity) === 1
         ? JSON.stringify(['model-item', originKey(modelOrigin), invocation.requestId, invocationId])
         : JSON.stringify(['publication', actorOutputKey(origin), invocation.sequence]) : undefined
-      return { kind: 'result', key, entry, invocationKey }
+      return { kind: 'result', key, entry, invocationKey, invocation }
     }
     return { kind: 'entry', key, entry }
   })

@@ -13,7 +13,7 @@ it('keeps result excerpts and typed failures visible when closed and preserves a
   const jobs: ToolJobObservation[] = [{ id: 'job', kind: 'job', nodeId: 'conv', requestId: 'req', callId: 'call', label: 'job', state: 'failed' }]
   const renderRow = (row: TimelineRow) => <div key={row.key}>{row.key} source</div>
   const mounted = render(<ToolSequence rows={rows} renderRow={renderRow} requests={new Map()} jobs={jobs} modelOrigin={origin} streamingActive />)
-  expect(screen.getByText('Result: Compilation failed')).toBeVisible()
+  expect(screen.getByText(/: Compilation failed$/)).toBeVisible()
   expect(screen.getByText('1 failed job')).toBeVisible()
   expect(screen.getByText('call source')).not.toBeVisible()
   fireEvent.click(screen.getByText('1 tool call · 1 result'))
@@ -39,7 +39,7 @@ it('bounds literal result previews while retaining every result in the disclosur
   render(<ToolSequence rows={many} renderRow={row => <div key={row.key}>{row.kind === 'result' ? `Retained result ${Number(row.entry.sequence) - 1}` : ''}</div>} jobs={[]} streamingActive />)
   expect(screen.getByText('Tool results · 50 results')).toBeVisible()
   expect(screen.getByText('47 earlier result excerpts inside')).toBeVisible()
-  expect(screen.getAllByText(/^Result: Retained result/)).toHaveLength(3)
+  expect(screen.getAllByText(/: Retained result/)).toHaveLength(3)
   expect(screen.getByText('Retained result 0')).not.toBeVisible()
 })
 it('selects latest result publications independently of invocation completion order', () => {
@@ -47,6 +47,36 @@ it('selects latest result publications independently of invocation completion or
   const calls: TimelineRow[] = sequences.map((sequence, index) => ({ kind: 'activity', key: `call-${index}`, entry: { ...entry, sequence: String(index + 1) }, results: [{ ...result, sequence, item: { ...result.item, output: `Publication ${sequence}` } }] }))
   const results: TimelineRow[] = [...sequences].sort().map(sequence => ({ kind: 'result', key: sequence, entry: { ...result, sequence, item: { ...result.item, output: `Publication ${sequence}` } }, invocationKey: 'call' }))
   render(<ToolSequence rows={[...calls, ...results]} renderRow={() => null} jobs={[]} streamingActive />)
-  expect(screen.queryByText('Result: Publication 9007199254740995')).toBeNull()
-  expect(screen.getAllByText(/^Result: Publication/).map(element => element.textContent)).toEqual(['Result: Publication 9007199254740996', 'Result: Publication 9007199254740997', 'Result: Publication 9007199254740999'])
+  expect(screen.queryByText(/: Publication 9007199254740995$/)).toBeNull()
+  expect(screen.getAllByText(/: Publication/).map(element => element.textContent)).toEqual(['Result 9007199254740996: Publication 9007199254740996', 'Result 9007199254740997: Publication 9007199254740997', 'Result 9007199254740999: Publication 9007199254740999'])
+})
+
+it('separates a future attached result from the group where it is actually published', () => {
+  const renderRow = () => null
+  const mounted = render(<ToolSequence rows={[rows[0]!]} renderRow={renderRow} jobs={[]} streamingActive={false} />)
+  expect(screen.getByText('1 tool call')).toBeVisible()
+  expect(screen.getByText('Call 1')).toBeVisible()
+  expect(screen.getByText('haskell')).toBeVisible()
+  expect(screen.getByText('observe value')).toBeVisible()
+  expect(screen.queryByText(/Compilation failed/)).toBeNull()
+  mounted.rerender(<ToolSequence rows={[{ ...rows[1]!, invocation: entry } as TimelineRow]} renderRow={renderRow} jobs={[]} streamingActive={false} />)
+  expect(screen.getByText('Tool results · 1 result')).toBeVisible()
+  expect(screen.getByText('Result for call 1')).toBeVisible()
+  expect(screen.getByText(/: Compilation failed$/)).toBeVisible()
+})
+it('uses certified model output for closed result previews and keeps raw envelopes out of ordinary reading', () => {
+  const nativeResult = { ...result, item: { ...result.item, output: 'canonical native envelope' }, modelItem: { ...result.item, output: 'Readable authored result' } }
+  render(<ToolSequence rows={[{ kind: 'result', key: 'native', entry: nativeResult }]} renderRow={() => null} jobs={[]} streamingActive={false} />)
+  expect(screen.getByText(/: Readable authored result$/)).toBeVisible()
+  expect(screen.queryByText(/canonical native envelope/)).toBeNull()
+})
+it('shows only observed job states for an exact operation and never guesses pending from missing output', () => {
+  const callRows = [rows[0]!]
+  const jobs: ToolJobObservation[] = [{ id: 'job', kind: 'job', nodeId: 'conv', requestId: 'req', callId: 'call', label: 'job', state: 'running' }]
+  const mounted = render(<ToolSequence rows={callRows} renderRow={() => null} jobs={[]} modelOrigin={origin} streamingActive />)
+  expect(screen.queryByText(/running job/)).toBeNull()
+  mounted.rerender(<ToolSequence rows={callRows} renderRow={() => null} jobs={jobs} modelOrigin={{ ...origin, incarnation: 'other' }} streamingActive />)
+  expect(screen.queryByText(/running job/)).toBeNull()
+  mounted.rerender(<ToolSequence rows={callRows} renderRow={() => null} jobs={jobs} modelOrigin={origin} streamingActive />)
+  expect(screen.getByText('1 running job')).toBeVisible()
 })

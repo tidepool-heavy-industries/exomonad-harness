@@ -18,8 +18,7 @@ export default function ToolActivity({ row, streamingActive, exchange, jobs = []
   const entry = row.kind === 'activity' ? row.entry : undefined
   const view = entry ? readable(entry.item) : undefined
   const results = row.kind === 'activity' ? row.results : []
-  const name = entry && typeof entry.item === 'object' && entry.item !== null && 'name' in entry.item && typeof entry.item.name === 'string'
-    ? entry.item.name : row.kind === 'live' ? row.live.find(item => item.toolName)?.toolName ?? 'Tool call' : 'Tool call'
+  const name = entry ? toolCallName(entry) : row.kind === 'live' ? row.live.find(item => item.toolName)?.toolName ?? 'Tool call' : 'Tool call'
   const status = row.kind === 'live'
     ? exchange?.state === 'failed' ? 'Interrupted input preview' : row.live.some(item => item.streaming) && streamingActive ? 'Streaming input' : 'Input preview'
     : results.length ? 'Result retained' : entry?.tool ? 'No loaded result' : 'Operation ownership unavailable'
@@ -27,7 +26,7 @@ export default function ToolActivity({ row, streamingActive, exchange, jobs = []
     ? (exchange.endedAtMs - exchange.startedAtMs) / 1000 : undefined
   const excerpt = results.map(result => resultExcerpt(ordinaryItem(result))).find(Boolean)
   return <section className="tool-activity" aria-label={`${name} tool call`}>
-    <header className="tool-heading"><h3>{name}</h3><span className="tool-status">{jobs.length ? `${jobs.map(job => `Tool ${job.state}`).join(' · ')} · ` : ''}{status}</span></header>
+    <header className="tool-heading"><div className="tool-call-identity"><h3>{name}</h3>{entry && <span className="tool-call-reference">Call {entry.sequence}</span>}</div><span className="tool-status">{jobs.length ? `${jobs.map(job => `Tool ${job.state.replaceAll('_', ' ')}`).join(' · ')} · ` : ''}{status}</span></header>
     {excerpt && <p className="tool-result-excerpt"><strong>Result excerpt:</strong> {excerpt}</p>}
     <div className="tool-source" translate="no">{row.kind === 'live'
       ? row.live.map((item, index) => <LiveToolContent key={index} item={item} streamingActive={streamingActive} index={index} />)
@@ -83,6 +82,12 @@ function ToolEvidence({ entry, label }: { entry: MessageEntry; label: 'Tool' | '
   </div>
 }
 
+/** Call references use the input's publication sequence, not an inferred execution order. */
+export function toolCallName(entry: MessageEntry): string {
+  const item = ordinaryItem(entry)
+  return item && typeof item === 'object' && 'name' in item && typeof item.name === 'string' ? item.name : 'Tool call'
+}
+
 /** Literal excerpt only: publication never establishes an execution outcome. */
 export function resultExcerpt(item: unknown): string | undefined {
   if (!item || typeof item !== 'object' || !('output' in item)) return undefined
@@ -90,9 +95,14 @@ export function resultExcerpt(item: unknown): string | undefined {
   const texts = typeof output === 'string' ? [output] : Array.isArray(output)
     ? output.flatMap(block => block && typeof block === 'object' && ['text', 'output_text'].includes(block.type) && typeof block.text === 'string' ? [block.text] : []) : []
   for (const text of texts) {
-    // Scan without allocating an array for every line of a large retained result.
-    const line = /\S[^\r\n]*/.exec(text)?.[0]?.trim()
-    if (line) return line.length > 180 ? `${line.slice(0, 180).replace(/[\uD800-\uDBFF]$/, '')}…` : line
+    const excerpt = literalExcerpt(text)
+    if (excerpt) return excerpt
   }
   return undefined
+}
+
+/** Keep previews literal and bounded without splitting a retained multi-line value. */
+export function literalExcerpt(text: string): string | undefined {
+  const line = /\S[^\r\n]*/.exec(text)?.[0]?.trim()
+  return line ? line.length > 180 ? `${line.slice(0, 180).replace(/[\uD800-\uDBFF]$/, '')}…` : line : undefined
 }
