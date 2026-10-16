@@ -1705,33 +1705,30 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .zip(history.provenance)
                 .enumerate()
             {
-                if self.bounded_invocation {
-                    if let Some(candidate) = request_provider.model_visible_item(&request, &item)? {
-                        let Some(occurrence) = input_occurrences
-                            .get(index)
-                            .and_then(Option::as_ref)
-                            .cloned()
-                        else {
-                            return Err(StoreError::Context(crate::context::ContextError::Replay(
-                                crate::context::ContextReplayRejection::InvalidMembership,
-                            ))
-                            .into());
-                        };
-                        let store = self.store.clone();
-                        let projected = blocking(move || {
-                            store.qualify_model_visible_item(&occurrence, &candidate)
-                        })
-                        .await;
-                        let projected = match projected {
-                            Ok(projected) => projected,
-                            Err(error) => return Err(error),
-                        };
-                        let (item, occurrence) = projected.into_parts();
-                        input_occurrences[index] = Some(occurrence);
-                        input_hashes.push(None);
-                        model_input.push(item);
-                        continue;
-                    }
+                if let Some(candidate) = request_provider.model_visible_item(&request, &item)? {
+                    let Some(occurrence) = input_occurrences
+                        .get(index)
+                        .and_then(Option::as_ref)
+                        .cloned()
+                    else {
+                        return Err(StoreError::Context(crate::context::ContextError::Replay(
+                            crate::context::ContextReplayRejection::InvalidMembership,
+                        ))
+                        .into());
+                    };
+                    let store = self.store.clone();
+                    let projected =
+                        blocking(move || store.qualify_model_visible_item(&occurrence, &candidate))
+                            .await;
+                    let projected = match projected {
+                        Ok(projected) => projected,
+                        Err(error) => return Err(error),
+                    };
+                    let (item, occurrence) = projected.into_parts();
+                    input_occurrences[index] = Some(occurrence);
+                    input_hashes.push(None);
+                    model_input.push(item);
+                    continue;
                 }
                 input_hashes.push(Some(hash));
                 model_input.push(item);
