@@ -66,7 +66,7 @@ impl Store {
         &self,
         host: &HostIdentity,
         operation: &OperationId,
-    ) -> Result<Option<Item>> {
+    ) -> Result<Option<RecordedToolOutput>> {
         let mut connection = self.lock()?;
         connection.write_transaction(|tx| {
             match &operation.origin {
@@ -103,12 +103,12 @@ impl Store {
                 let kind = invocation_kind(tx, &operation.request, &operation.call)?
                     .ok_or(StoreError::OperationOriginMismatch)?;
                 validate_replay_output(&operation.call, kind, &item)?;
-                let format = terminal::exact_terminal(tx, operation)?
-                    .ok_or(StoreError::OperationOriginMismatch)?.2;
-                if item.output_format()? != format {
+                let (_, terminal, output_format) = terminal::exact_terminal(tx, operation)?
+                    .ok_or(StoreError::OperationOriginMismatch)?;
+                if item.output_format()? != output_format {
                     return Err(StoreError::ConflictingReplayOutcome { operation: operation.clone() });
                 }
-                Ok(item)
+                Ok(RecordedToolOutput { item, terminal, output_format })
             }).transpose()
         })
     }
@@ -298,7 +298,10 @@ mod tests {
             .publish_model_output_projection(&operation, serde_json::json!({"output":"done"}))
             .unwrap();
         assert_eq!(
-            store.inspect_embedded_result(&host, &operation).unwrap(),
+            store
+                .inspect_embedded_result(&host, &operation)
+                .map(|record| record.map(|record| record.item))
+                .unwrap(),
             Some(original.clone())
         );
         let before = store
@@ -309,7 +312,10 @@ mod tests {
         let reflected = store.embedded_conversation_history(&host).unwrap();
         assert_eq!(reflected.history.last().unwrap().2, before);
         assert_eq!(
-            store.inspect_embedded_result(&host, &operation).unwrap(),
+            store
+                .inspect_embedded_result(&host, &operation)
+                .map(|record| record.map(|record| record.item))
+                .unwrap(),
             Some(original.clone())
         );
         drop(store);
@@ -332,11 +338,14 @@ mod tests {
         assert_eq!(
             store
                 .inspect_embedded_result(&successor, &operation)
+                .map(|record| record.map(|record| record.item))
                 .unwrap(),
             Some(original)
         );
         assert!(matches!(
-            store.inspect_embedded_result(&host, &operation),
+            store
+                .inspect_embedded_result(&host, &operation)
+                .map(|record| record.map(|record| record.item)),
             Err(StoreError::InvalidEmbeddedBinding)
         ));
     }
@@ -372,6 +381,7 @@ mod tests {
         assert_eq!(
             store
                 .inspect_embedded_result(&successor, &operation)
+                .map(|record| record.map(|record| record.item))
                 .unwrap(),
             Some(original)
         );
@@ -413,7 +423,9 @@ mod tests {
                 ..operation.clone()
             };
             assert!(matches!(
-                store.inspect_embedded_result(&host, &foreign),
+                store
+                    .inspect_embedded_result(&host, &foreign)
+                    .map(|record| record.map(|record| record.item)),
                 Err(StoreError::OperationOriginMismatch)
             ));
         }
@@ -441,16 +453,26 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            store.inspect_embedded_result(&host, &other),
+            store
+                .inspect_embedded_result(&host, &other)
+                .map(|record| record.map(|record| record.item)),
             Err(StoreError::OperationOriginMismatch)
         ));
         let absent = OperationId {
             request: RequestId("absent".into()),
             ..operation.clone()
         };
-        assert!(store.inspect_embedded_result(&host, &absent).is_err());
+        assert!(
+            store
+                .inspect_embedded_result(&host, &absent)
+                .map(|record| record.map(|record| record.item))
+                .is_err()
+        );
         assert_eq!(
-            store.inspect_embedded_result(&host, &operation).unwrap(),
+            store
+                .inspect_embedded_result(&host, &operation)
+                .map(|record| record.map(|record| record.item))
+                .unwrap(),
             Some(original)
         );
     }
@@ -511,6 +533,7 @@ mod tests {
             assert!(
                 store
                     .inspect_embedded_result(&host, &operation)
+                    .map(|record| record.map(|record| record.item))
                     .unwrap()
                     .is_some()
             );
@@ -529,6 +552,91 @@ mod tests {
     }
 
     #[test]
+    fn exact_inspection_keeps_real_settlement_when_original_claim_is_interrupted() {
+        let store = Store::memory().unwrap();
+        let host = HostIdentity {
+            run: "inherited".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "1".into(),
+        };
+        store.bind_embedded_actor(&host, None).unwrap();
+        let request = RequestId("original-result".into());
+        let call = CallId("inherited-call".into());
+        store.write_request(&request,None,&host.actor.0,&[Item(serde_json::json!({"type":"function_call","call_id":call.0,"name":"read","arguments":"{}"}))],Usage::default()).unwrap();
+        store
+            .set_effort(&request, crate::model::Effort::Medium)
+            .unwrap();
+        let operation = store.claim(&call, &request).unwrap();
+        store
+            .advance_agent_head(&host.actor, None, Some(&request))
+            .unwrap();
+        let cuts = store
+            .capture_checkpoint_cuts(&operation, &serde_json::json!({}), std::sync::Arc::new(()))
+            .unwrap();
+        let (child, _) = store
+            .attach_checkpoint_child(
+                cuts.deferred(),
+                crate::checkpoint::CheckpointChild {
+                    path: &AgentPath("/root/reader".into()),
+                    parent: &host.actor,
+                    contract: &serde_json::json!({}),
+                    checkout: &serde_json::json!({}),
+                    task: None,
+                    target: &crate::context::ContextProjectionTarget {
+                        model: "test".into(),
+                        route: crate::transport::ResponsesRoute::ChatGptPlan,
+                        protocol: crate::transport::ResponsesProtocol::Standard,
+                    },
+                },
+            )
+            .unwrap();
+        let child_request = child.head_request.unwrap();
+        assert_eq!(
+            store.claims_on(&child_request).unwrap()[0].operation,
+            operation
+        );
+        store
+            .interrupt_operation_claim(&operation, &request)
+            .unwrap();
+        let output =
+            crate::turn::JobOutput::Completed(Ok(serde_json::json!({"semantic":"committed once"})));
+        store
+            .write_job_output_with_format(
+                &operation,
+                crate::item::ToolKind::Function,
+                &output,
+                crate::provider::OutputFormat::NativeReceiptV1,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .replay_tool_output_operation(&operation)
+                .unwrap()
+                .unwrap()
+                .terminal,
+            TerminalOutcome::Interrupted
+        );
+        let inspected = store
+            .inspect_embedded_result(&host, &operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(inspected.terminal, TerminalOutcome::Success);
+        assert_eq!(
+            inspected.output_format,
+            crate::provider::OutputFormat::NativeReceiptV1
+        );
+        assert_eq!(
+            inspected.item,
+            Item::tool_output_with_format(
+                &call,
+                crate::item::ToolKind::Function,
+                &output,
+                crate::provider::OutputFormat::NativeReceiptV1
+            )
+        );
+    }
+
+    #[test]
     fn result_inspection_refuses_corrupt_canonical_output() {
         let store = Store::memory().unwrap();
         let (host, operation, original) = settled(&store, false);
@@ -539,6 +647,11 @@ mod tests {
             "UPDATE items SET json=?1 WHERE hash=(SELECT output_hash FROM claims WHERE origin_request_id=?2 AND call_id=?3 AND state='settled')",
             params![serde_json::to_string(&corrupt).unwrap(), operation.request.0, operation.call.0],
         ).unwrap();
-        assert!(store.inspect_embedded_result(&host, &operation).is_err());
+        assert!(
+            store
+                .inspect_embedded_result(&host, &operation)
+                .map(|record| record.map(|record| record.item))
+                .is_err()
+        );
     }
 }
