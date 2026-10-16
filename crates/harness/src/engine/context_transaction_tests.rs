@@ -648,3 +648,223 @@ async fn unbounded_native_model_projection_refuses_an_unissued_replacement() {
 async fn unconfirmed_context_cleanup_retains_native_receipt_without_confirming_context() {
     exercise_formatted(Mode::Unconfirmed, true).await;
 }
+
+struct EmbeddedHost {
+    identity: crate::embedding::HostIdentity,
+    dispatcher: Arc<Host>,
+}
+struct EmbeddedAdmission;
+impl crate::embedding::AdmissionGuard for EmbeddedAdmission {}
+#[async_trait::async_trait]
+impl crate::embedding::HostActor for EmbeddedHost {
+    fn identity(&self) -> &crate::embedding::HostIdentity {
+        &self.identity
+    }
+    async fn admit(
+        &self,
+    ) -> Result<Box<dyn crate::embedding::AdmissionGuard>, crate::embedding::EmbeddedError> {
+        Ok(Box::new(EmbeddedAdmission))
+    }
+    async fn tool_surface(
+        &self,
+    ) -> Result<Arc<crate::embedding::ToolSurface>, crate::embedding::EmbeddedError> {
+        Ok(Arc::new(crate::embedding::ToolSurface::new(
+            "native-projection".into(),
+            vec![json!({"type":"function","name":"cell","strict":true,
+                "parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}})],
+            self.dispatcher.clone(),
+        )?))
+    }
+    async fn wake(&self, _: i64) -> Result<(), String> {
+        Ok(())
+    }
+    async fn control(
+        &self,
+        _: crate::embedding::HostControl,
+    ) -> Result<serde_json::Value, crate::embedding::HostControlError> {
+        unreachable!("projection does not control the host")
+    }
+    async fn output_retained(&self, operation: &OperationId) -> Result<(), String> {
+        self.dispatcher
+            .output_retained(operation)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    async fn output_committed(&self, operation: &OperationId) -> Result<(), String> {
+        self.dispatcher
+            .output_committed(operation)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    async fn output_aborted(&self, operation: &OperationId) -> Result<(), String> {
+        self.dispatcher
+            .output_aborted(operation)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+struct EmbeddedScript {
+    script: Script,
+    bodies: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+#[async_trait::async_trait]
+impl ResponsesTransport for EmbeddedScript {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        self.script.response_contract()
+    }
+    async fn create(
+        &self,
+        request: PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        self.bodies
+            .lock()
+            .unwrap()
+            .push(serde_json::from_slice(request.wire_body()).unwrap());
+        self.script.create(request).await
+    }
+}
+
+#[tokio::test]
+async fn embedded_round_projects_native_receipt_in_prepared_input_and_wire_body() {
+    exercise_embedded_projection(Mode::Committed).await;
+}
+
+#[tokio::test]
+async fn embedded_round_refuses_unissued_projection_before_next_provider_request() {
+    exercise_embedded_projection(Mode::ForgedProjection).await;
+}
+
+async fn exercise_embedded_projection(mode: Mode) {
+    let store = Arc::new(Store::memory().unwrap());
+    let dispatcher = Arc::new(Host {
+        store: store.clone(),
+        mode,
+        native: true,
+        retained: AtomicUsize::new(0),
+        last_operation: Mutex::new(None),
+        handle: Mutex::new(None),
+        committed: AtomicUsize::new(0),
+        aborted: AtomicUsize::new(0),
+    });
+    let host = Arc::new(EmbeddedHost {
+        identity: crate::embedding::HostIdentity {
+            run: "native-projection".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "original".into(),
+        },
+        dispatcher: dispatcher.clone(),
+    });
+    let conversation = crate::embedding::Conversation::attach(store.clone(), host.clone(), None)
+        .await
+        .unwrap();
+    store
+        .admit_embedded_input(
+            &host.identity,
+            "first",
+            "human",
+            &Item::user_text("original"),
+        )
+        .unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let engine = conversation
+        .engine::<Offline, _>(
+            EmbeddedScript {
+                script: Script {
+                    requests: requests.clone(),
+                },
+                bodies: bodies.clone(),
+            },
+            Arc::new(JobScheduler::new(1).unwrap()),
+            EngineConfig {
+                instructions: "embedded native projection".into(),
+                tools: vec![],
+                model: "model-a".into(),
+                effort: Effort::Low,
+                session_id: "embedded-native-projection".into(),
+                agent: host.identity.actor.clone(),
+            },
+            std::num::NonZeroU64::new(1_000_000).unwrap(),
+        )
+        .unwrap();
+    assert!(!engine.bounded_invocation);
+    let mut driver = engine.into_embedded_rounds().unwrap();
+    let EmbeddedRoundReadiness::Selected(selection) = driver.next_round().unwrap() else {
+        panic!("admitted input selects the embedded round");
+    };
+    let (_cancel, cancel) = watch::channel(false);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        driver.run_round(selection, cancel, mpsc::unbounded_channel().1),
+    )
+    .await
+    .unwrap();
+    let operation = dispatcher.last_operation.lock().unwrap().clone().unwrap();
+    let canonical = store
+        .replay_tool_output_operation(&operation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        canonical.output_format,
+        crate::provider::OutputFormat::NativeReceiptV1
+    );
+    assert_eq!(
+        canonical.item,
+        Item::tool_output_with_format(
+            &operation.call,
+            crate::item::ToolKind::Function,
+            &dispatcher.authored_output(),
+            canonical.output_format
+        )
+    );
+    let projection = store
+        .model_output_projection(&operation)
+        .unwrap()
+        .unwrap()
+        .item;
+    if matches!(mode, Mode::ForgedProjection) {
+        let failure = result.unwrap_err();
+        assert!(
+            matches!(
+                failure.primary_error(),
+                Some(EngineError::Store(StoreError::Context(
+                    crate::context::ContextError::Replay(
+                        crate::context::ContextReplayRejection::InvalidMembership
+                    )
+                )))
+            ),
+            "unexpected failure: {failure:?}"
+        );
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert_eq!(bodies.lock().unwrap().len(), 1);
+    } else {
+        result.unwrap();
+        let requests = requests.lock().unwrap();
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(bodies.len(), 2);
+        assert!(requests[1].input.contains(&projection));
+        assert!(!requests[1].input.contains(&canonical.item));
+        let wire_output = bodies[1]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "function_call_output")
+            .unwrap();
+        assert_eq!(wire_output, &projection.0);
+        assert_ne!(wire_output["output"], canonical.item.0["output"]);
+        assert!(wire_output.get("output_format").is_none());
+    }
+    assert_eq!(
+        store.replay_tool_output_operation(&operation).unwrap(),
+        Some(canonical)
+    );
+    assert_eq!(
+        store
+            .model_output_projection(&operation)
+            .unwrap()
+            .unwrap()
+            .item,
+        projection
+    );
+}
