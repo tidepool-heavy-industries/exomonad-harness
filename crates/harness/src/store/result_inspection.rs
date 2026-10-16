@@ -22,20 +22,17 @@ impl Store {
             crate::item::ToolKind::Function,
             &crate::turn::JobOutput::Completed(Ok(replacement.clone())),
         );
-        if let Some(existing) = retained_candidates(&self.lock()?, operation, &original)?
-            .into_iter()
-            .next()
-        {
-            if existing.item == candidate {
-                return Ok(existing);
-            }
-            return Err(StoreError::OperationOriginMismatch);
-        }
         let result = serde_json::to_string(&serde_json::json!({
             "operation": operation, "output": original,
         }))?;
         let mut connection = self.lock()?;
         connection.write_transaction(|tx| {
+            if let Some(existing) = retained_candidates(tx, operation, &original)?.into_iter().next() {
+                if existing.item == candidate {
+                    return Ok(existing);
+                }
+                return Err(StoreError::OperationOriginMismatch);
+            }
             tx.execute(
                 "INSERT INTO events(request_id,kind,payload,created_at) VALUES (?1,'model_tool_result',?2,?3)",
                 params![operation.request.0, result, utc_millis()],
