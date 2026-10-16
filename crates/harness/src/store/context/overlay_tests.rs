@@ -1440,3 +1440,132 @@ fn authored_note_histories_match_provider_projection() {
     })
     .unwrap();
 }
+
+#[test]
+fn inspection_authorship_follows_canonical_native_fields_and_legacy_user_notes() {
+    use crate::context::{ContextTextAuthor, inspect_context};
+    let fixture = fixture(Store::memory().unwrap());
+    let native = fixture.store.inspect_context(&fixture.snapshot).unwrap();
+    assert!(
+        inspect_context(&fixture.snapshot.document)
+            .authorship
+            .is_empty()
+    );
+    assert_eq!(
+        native.text_versions,
+        inspect_context(&fixture.snapshot.document).text_versions
+    );
+    assert_eq!(
+        native.unit_versions,
+        inspect_context(&fixture.snapshot.document).unit_versions
+    );
+    let mut expected = Vec::new();
+    for block in &fixture.snapshot.document.blocks {
+        if let ContextBlock::Native { texts, .. } = block {
+            for field in texts {
+                let occurrence = fixture
+                    .snapshot
+                    .prefix
+                    .iter()
+                    .find(|item| reference(std::slice::from_ref(*item)) == field.reference)
+                    .unwrap();
+                let author = if occurrence.item.0["type"] == "message" {
+                    ContextTextAuthor::Assistant
+                } else {
+                    ContextTextAuthor::Tool
+                };
+                expected.push((
+                    field.reference.clone(),
+                    field.selector.clone(),
+                    author,
+                    false,
+                ));
+            }
+        }
+    }
+    assert!(!expected.is_empty());
+    assert_eq!(
+        native
+            .authorship
+            .iter()
+            .map(|field| (
+                field.reference.clone(),
+                field.selector.clone(),
+                field.author,
+                field.authored_note
+            ))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    let assistant = native
+        .authorship
+        .iter()
+        .filter(|field| field.author == ContextTextAuthor::Assistant)
+        .collect::<Vec<_>>();
+    assert_eq!(assistant.len(), 2);
+    assert_eq!(assistant[0].reference, assistant[1].reference);
+    assert_ne!(assistant[0].selector, assistant[1].selector);
+    assert!(
+        native
+            .authorship
+            .iter()
+            .any(|field| field.author == ContextTextAuthor::Tool
+                && field.selector == ContextTextSelector::ToolResultText)
+    );
+    assert!(fixture.snapshot.document.blocks.iter().any(|block| matches!(block, ContextBlock::Native { protected:true, texts, .. } if texts.iter().any(|text| native.authorship.iter().any(|field| field.reference == text.reference && field.selector == text.selector)))));
+    let mut legacy = note_draft(&fixture.snapshot, None, None);
+    legacy.document.blocks.push(ContextBlock::Text {
+        reference: None,
+        role: ContextRole::User,
+        text: "legacy authored user note".into(),
+        sources: vec![],
+    });
+    let receipt = fixture
+        .store
+        .commit_context(ContextCommit {
+            snapshot: &fixture.snapshot,
+            draft: &legacy,
+            output: &output(),
+            pending: std::slice::from_ref(&fixture.pending),
+        })
+        .unwrap();
+    let (_, _, snapshot) = next_note_editor(&fixture.store, &receipt.head, 9001);
+    let reread = fixture.store.inspect_context(&snapshot).unwrap();
+    let note = snapshot
+        .prefix
+        .iter()
+        .find(|item| item.note && item.item.0["role"] == "user")
+        .unwrap();
+    let note_reference = reference(std::slice::from_ref(note));
+    assert!(
+        reread
+            .authorship
+            .iter()
+            .any(|field| field.reference == note_reference
+                && field.author == ContextTextAuthor::User
+                && field.authored_note)
+    );
+    for original in &native.authorship {
+        assert!(reread.authorship.contains(original));
+    }
+    let draft = draft(
+        &snapshot,
+        "verbose answer",
+        "changed visible assistant field",
+    );
+    let receipt = fixture
+        .store
+        .commit_context(ContextCommit {
+            snapshot: &snapshot,
+            draft: &draft,
+            output: &output(),
+            pending: std::slice::from_ref(&fixture.pending),
+        })
+        .unwrap();
+    let (_, _, after) = next_note_editor(&fixture.store, &receipt.head, 9002);
+    let after = fixture.store.inspect_context(&after).unwrap();
+    for original in &reread.authorship {
+        assert!(after.authorship.contains(original));
+    }
+    assert!(after.document.blocks.iter().any(|block| matches!(block, ContextBlock::Native { texts, .. } if texts.iter().any(|field| field.text == "changed visible assistant field"))));
+}

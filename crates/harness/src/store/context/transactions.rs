@@ -2,8 +2,9 @@
 use super::*;
 use crate::context::{
     ContextChange, ContextInspection, ContextPatch, ContextProblem, ContextProblemCode,
-    ContextTransaction, ContextTransactionDraft, ContextTransactionStatus, check_context_patch,
-    context_digest, context_has_reference, inspect_context,
+    ContextTextAuthor, ContextTextAuthorship, ContextTransaction, ContextTransactionDraft,
+    ContextTransactionStatus, check_context_patch, context_digest, context_has_reference,
+    inspect_context,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -305,12 +306,83 @@ fn record_unapplied(
     Ok(status)
 }
 
+fn canonical_author(item: &Item) -> ContextTextAuthor {
+    match item.0["type"].as_str() {
+        Some("function_call_output" | "custom_tool_call_output") => ContextTextAuthor::Tool,
+        Some("message") => match item.0["role"].as_str() {
+            Some("user") => ContextTextAuthor::User,
+            Some("assistant") => ContextTextAuthor::Assistant,
+            Some("system") => ContextTextAuthor::System,
+            Some("developer") => ContextTextAuthor::Developer,
+            _ => ContextTextAuthor::Unknown,
+        },
+        _ => ContextTextAuthor::Unknown,
+    }
+}
+
+/// Enumerate only already-visible exact fields. Versions and editability remain
+/// owned by ordinary inspection; these facts describe their canonical issuer.
+fn canonical_authorship(
+    snapshot: &ContextSnapshot,
+    document: &ContextDocument,
+) -> Result<Vec<ContextTextAuthorship>> {
+    let mut owners = HashMap::<ContextReference, &Occurrence>::new();
+    for occurrence in &snapshot.prefix {
+        let reference = reference(std::slice::from_ref(occurrence));
+        if let Some(previous) = owners.insert(reference, occurrence) {
+            if previous.origin != occurrence.origin
+                || previous.item != occurrence.item
+                || previous.note != occurrence.note
+            {
+                return Err(ContextError::UnsupportedState.into());
+            }
+        }
+    }
+    let mut fields = Vec::new();
+    let mut seen = HashSet::new();
+    for block in &document.blocks {
+        let keys = match block {
+            ContextBlock::Text {
+                reference: Some(reference),
+                ..
+            } => vec![(
+                reference.clone(),
+                ContextTextSelector::MessageText { part: 0 },
+            )],
+            ContextBlock::Native { texts, .. } => texts
+                .iter()
+                .map(|field| (field.reference.clone(), field.selector.clone()))
+                .collect(),
+            _ => Vec::new(),
+        };
+        for (reference, selector) in keys {
+            let occurrence = owners
+                .get(&reference)
+                .ok_or(ContextError::InvalidReference)?;
+            if text_body(&occurrence.item, &selector).is_none() {
+                return Err(ContextError::UnsupportedState.into());
+            }
+            if seen.insert((reference.clone(), selector.clone())) {
+                fields.push(ContextTextAuthorship {
+                    reference,
+                    selector,
+                    author: canonical_author(&occurrence.item),
+                    authored_note: occurrence.note,
+                });
+            }
+        }
+    }
+    Ok(fields)
+}
+
 impl Store {
     pub fn inspect_context(&self, snapshot: &ContextSnapshot) -> Result<ContextInspection> {
         validate_snapshot(self, snapshot)?;
         let c = self.lock()?;
         validate_identity(&c, &self.store_id, &snapshot.operation.origin)?;
-        Ok(inspect_context(&authorized_document(snapshot)))
+        let mut inspection = inspect_context(&authorized_document(snapshot));
+        inspection.authorship = canonical_authorship(snapshot, &inspection.document)?;
+        Ok(inspection)
     }
 
     /// Handles contain exact identity, not authority or a second staging registry.

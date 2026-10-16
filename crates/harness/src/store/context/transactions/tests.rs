@@ -132,6 +132,10 @@ fn targeted_batch_rejects_stale_all_or_nothing_and_retains_authored_output() {
             .unwrap(),
     )
     .head;
+    store.set_effort(&head, crate::model::Effort::Low).unwrap();
+    store
+        .save_pending_effort(first.operation.origin.actor(), crate::model::Effort::Medium)
+        .unwrap();
     let handle = store.context_transaction(&first, &stale.patch).unwrap();
     let status = store
         .commit_context_transaction_at_guarded(&first, &head, &stale, &output(), &[], || false)
@@ -156,6 +160,32 @@ fn targeted_batch_rejects_stale_all_or_nothing_and_retains_authored_output() {
             .unwrap()
             .as_deref(),
         Some("model-a")
+    );
+    let efforts = store
+        .context_history(&head)
+        .unwrap()
+        .iter()
+        .filter_map(|(_, _, item)| item.configuration_effort())
+        .collect::<Vec<_>>();
+    assert_eq!(efforts, vec![crate::model::Effort::Low]);
+    let next = RequestId("after-rejection".into());
+    store
+        .write_request(&next, Some(&head), "/root", &[], Usage::default())
+        .unwrap();
+    assert!(
+        store
+            .apply_pending_effort(first.operation.origin.actor(), &next)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        store
+            .items(&next)
+            .unwrap()
+            .last()
+            .unwrap()
+            .configuration_effort(),
+        Some(crate::model::Effort::Medium)
     );
     let terminal = store
         .replay_tool_output_operation(&first.operation)
@@ -880,4 +910,213 @@ fn pure_preview_refuses_nested_unit_removal_in_either_batch_order() {
                 .any(|problem| problem.code == ContextProblemCode::InvalidPatch)
         );
     }
+}
+
+#[test]
+fn patch_only_publication_preserves_selected_model_effort_and_pending_choice() {
+    use crate::model::Effort;
+    let store = Store::memory().unwrap();
+    let (head, first, _) = fixture(&store);
+    store
+        .initialize_context_target(
+            &first.operation.origin,
+            &ContextProjectionTarget {
+                model: "selected-model".into(),
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
+        .unwrap();
+    store.set_effort(&head, Effort::High).unwrap();
+    store
+        .save_pending_effort(first.operation.origin.actor(), Effort::Medium)
+        .unwrap();
+    let receipt = committed(
+        store
+            .commit_context_transaction_guarded(
+                &first,
+                &draft(vec![replacement(&first, "alpha", "edited")]),
+                &output(),
+                &[],
+                || false,
+            )
+            .unwrap(),
+    );
+    assert_eq!(
+        store
+            .context_model(&first.operation.origin)
+            .unwrap()
+            .as_deref(),
+        Some("selected-model")
+    );
+    let history = store.context_history(&receipt.head).unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .filter_map(|(_, _, item)| item.configuration_effort())
+            .collect::<Vec<_>>(),
+        vec![Effort::High]
+    );
+    let next = RequestId("after-patch-only".into());
+    store
+        .write_request(&next, Some(&receipt.head), "/root", &[], Usage::default())
+        .unwrap();
+    assert!(
+        store
+            .apply_pending_effort(first.operation.origin.actor(), &next)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        store
+            .items(&next)
+            .unwrap()
+            .last()
+            .unwrap()
+            .configuration_effort(),
+        Some(Effort::Medium)
+    );
+}
+
+#[test]
+fn choice_only_legacy_commit_does_not_require_or_issue_a_patch_transaction() {
+    use crate::model::Effort;
+    let store = Store::memory().unwrap();
+    let head = RequestId("choice-only".into());
+    store
+        .write_request(
+            &head,
+            None,
+            "/root",
+            &[Item::user_text("alpha"), invocation("choice-only")],
+            Usage::default(),
+        )
+        .unwrap();
+    let operation = store.claim(&CallId("choice-only".into()), &head).unwrap();
+    store
+        .initialize_context_target(
+            &operation.origin,
+            &ContextProjectionTarget {
+                model: "model-a".into(),
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+            },
+        )
+        .unwrap();
+    let first = store.begin_context(&operation, &head).unwrap();
+    let draft = ContextDraft {
+        document: first.document.clone(),
+        next_model: Some("selected-model".into()),
+        next_effort: Some(Effort::High),
+    };
+    let receipt = store
+        .commit_context(ContextCommit {
+            snapshot: &first,
+            draft: &draft,
+            output: &output(),
+            pending: &[],
+        })
+        .unwrap();
+    assert_eq!(receipt.head, head);
+    assert!(receipt.changed);
+    assert_eq!(receipt.model.as_deref(), Some("selected-model"));
+    assert!(
+        store
+            .context_transaction_head(&first.operation)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.context_receipt(&first.operation).unwrap(),
+        Some(receipt)
+    );
+    let history = store.context_history(&head).unwrap();
+    assert_eq!(
+        history.last().unwrap().2.configuration_effort(),
+        Some(Effort::High)
+    );
+    assert_eq!(
+        history[history.len() - 2].2,
+        Item::tool_output(&first.operation.call, ToolKind::Custom, &output())
+    );
+    assert!(visible(&store, &head, &first.operation.origin).contains(&"alpha".into()));
+}
+
+#[test]
+fn inspection_authorship_deduplicates_identical_origins_and_refuses_conflicting_copies() {
+    let store = Store::memory().unwrap();
+    let (_, snapshot, _) = fixture(&store);
+    let original = store.inspect_context(&snapshot).unwrap();
+    let mut repeated = snapshot.clone();
+    repeated.prefix.push(snapshot.prefix[0].clone());
+    repeated.blocks.push(snapshot.blocks[0].clone());
+    assert_eq!(
+        store.inspect_context(&repeated).unwrap().authorship,
+        original.authorship
+    );
+    let mut readonly = snapshot.clone();
+    let reference = super::super::reference(&snapshot.prefix[..1]);
+    let text = message(&snapshot.prefix[0].item).unwrap().1;
+    readonly.blocks[0].block = ContextBlock::Native {
+        reference: reference.clone(),
+        kind: ContextNativeKind::Pending,
+        preview: "protected visible text".into(),
+        protected: true,
+        texts: vec![ContextVisibleText {
+            reference,
+            selector: ContextTextSelector::MessageText { part: 0 },
+            text,
+            editable: false,
+            removable: false,
+        }],
+    };
+    let inspected = store.inspect_context(&readonly).unwrap();
+    assert_eq!(inspected.authorship, original.authorship);
+    assert_eq!(
+        inspected.text_versions.len() + 1,
+        original.text_versions.len()
+    );
+    for conflict in [false, true] {
+        let mut conflicting = repeated.clone();
+        let duplicate = conflicting.prefix.last_mut().unwrap();
+        if conflict {
+            duplicate.item.0["role"] = json!("assistant");
+        } else {
+            duplicate.note = !duplicate.note;
+        }
+        assert!(matches!(
+            store.inspect_context(&conflicting),
+            Err(StoreError::Context(ContextError::UnsupportedState))
+        ));
+    }
+}
+
+#[test]
+fn canonical_authorship_reads_raw_owner_role_and_type_without_selector_inference() {
+    for (role, expected) in [
+        ("user", ContextTextAuthor::User),
+        ("assistant", ContextTextAuthor::Assistant),
+        ("system", ContextTextAuthor::System),
+        ("developer", ContextTextAuthor::Developer),
+        ("unknown", ContextTextAuthor::Unknown),
+    ] {
+        assert_eq!(
+            canonical_author(&Item(
+                json!({"type":"message","role":role,"content":"visible"})
+            )),
+            expected
+        );
+    }
+    for kind in ["function_call_output", "custom_tool_call_output"] {
+        assert_eq!(
+            canonical_author(&Item(
+                json!({"type":kind,"role":"assistant","output":"visible"})
+            )),
+            ContextTextAuthor::Tool
+        );
+    }
+    assert_eq!(
+        canonical_author(&Item(json!({"type":"reasoning","role":"assistant"}))),
+        ContextTextAuthor::Unknown
+    );
 }

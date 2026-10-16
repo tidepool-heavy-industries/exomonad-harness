@@ -2,7 +2,7 @@ use super::*;
 use crate::turn::JobOutput;
 use crate::{
     context::{
-        ContextChange, ContextPatch, ContextProblemCode, ContextTransaction,
+        ContextChange, ContextDraft, ContextPatch, ContextProblemCode, ContextTransaction,
         ContextTransactionDraft, ContextTransactionStatus, inspect_context,
     },
     provider::{CallContext, ContextDisposition, ProviderCompletion, ProviderError},
@@ -26,10 +26,13 @@ enum Mode {
     Rejected,
     Discarded,
     AbortFailed,
+    RejectedWithChoices,
+    ChoiceOnly,
 }
 struct Host {
     store: Arc<Store>,
     mode: Mode,
+    last_operation: Mutex<Option<OperationId>>,
     handle: Mutex<Option<(OperationId, ContextTransaction)>>,
     committed: AtomicUsize,
     aborted: AtomicUsize,
@@ -56,12 +59,28 @@ impl Provider for Host {
         context: CallContext,
     ) -> ProviderCompletion {
         let snapshot = context.context.unwrap();
+        *self.last_operation.lock().unwrap() = Some(snapshot.operation.clone());
+        if matches!(self.mode, Mode::ChoiceOnly) {
+            return ProviderCompletion {
+                output: JobOutput::Completed(Ok(json!({"authored":"success"}))),
+                full_success: true,
+                context: ContextDisposition::Draft(ContextDraft {
+                    document: snapshot.document,
+                    next_model: Some("model-b".into()),
+                    next_effort: Some(Effort::High),
+                }),
+                activation_terminal: None,
+            };
+        }
         let target = inspect_context(&snapshot.document).text_versions[0].clone();
         let patch = ContextPatch {
             changes: vec![ContextChange::ReplaceContextText {
                 reference: target.reference,
                 selector: target.selector,
-                expected: if matches!(self.mode, Mode::Rejected | Mode::AbortFailed) {
+                expected: if matches!(
+                    self.mode,
+                    Mode::Rejected | Mode::AbortFailed | Mode::RejectedWithChoices
+                ) {
                     crate::context::context_digest(b"stale text")
                 } else {
                     target.digest
@@ -75,8 +94,8 @@ impl Provider for Host {
         ));
         let draft = ContextTransactionDraft {
             patch,
-            next_model: None,
-            next_effort: None,
+            next_model: matches!(self.mode, Mode::RejectedWithChoices).then(|| "model-b".into()),
+            next_effort: matches!(self.mode, Mode::RejectedWithChoices).then_some(Effort::High),
         };
         ProviderCompletion {
             output: JobOutput::Completed(Ok(json!({"authored":"success"}))),
@@ -140,6 +159,7 @@ async fn exercise(mode: Mode) {
     let host = Arc::new(Host {
         store: store.clone(),
         mode,
+        last_operation: Mutex::new(None),
         handle: Mutex::new(None),
         committed: AtomicUsize::new(0),
         aborted: AtomicUsize::new(0),
@@ -201,20 +221,48 @@ async fn exercise(mode: Mode) {
         return;
     }
     result.unwrap();
+    if matches!(mode, Mode::ChoiceOnly) {
+        let operation = host.last_operation.lock().unwrap().clone().unwrap();
+        assert!(host.handle.lock().unwrap().is_none());
+        let receipt = store.context_receipt(&operation).unwrap().unwrap();
+        assert_eq!(receipt.model.as_deref(), Some("model-b"));
+        assert!(receipt.changed);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].model, "model-a");
+        assert_eq!(requests[1].model, "model-b");
+        assert_eq!(
+            crate::transport::client::request_body(&requests[0]).unwrap()["reasoning"]["effort"],
+            "low"
+        );
+        assert_eq!(
+            crate::transport::client::request_body(&requests[1]).unwrap()["reasoning"]["effort"],
+            "high"
+        );
+        assert!(
+            requests[1]
+                .input
+                .iter()
+                .any(|item| item == &Item::user_text("original"))
+        );
+        assert_eq!(host.committed.load(Ordering::SeqCst), 1);
+        assert_eq!(host.aborted.load(Ordering::SeqCst), 0);
+        return;
+    }
     let (operation, handle) = host.handle.lock().unwrap().clone().unwrap();
     let status = store
         .context_transaction_status(&operation.origin, &handle)
         .unwrap();
     match mode {
-        Mode::AbortFailed => unreachable!("failed abort handled above"),
+        Mode::AbortFailed | Mode::ChoiceOnly => unreachable!("special result handled above"),
         Mode::Committed => {
             assert!(matches!(status, ContextTransactionStatus::Committed(_)));
             assert_eq!(host.committed.load(Ordering::SeqCst), 1);
             assert_eq!(host.aborted.load(Ordering::SeqCst), 0);
         }
-        Mode::Rejected | Mode::Discarded => {
+        Mode::Rejected | Mode::Discarded | Mode::RejectedWithChoices => {
             assert!(
-                matches!(status, ContextTransactionStatus::Rejected(problems) if problems.iter().any(|problem| problem.code == if matches!(mode, Mode::Rejected) { ContextProblemCode::Stale } else { ContextProblemCode::Ineligible }))
+                matches!(status, ContextTransactionStatus::Rejected(problems) if problems.iter().any(|problem| problem.code == if matches!(mode, Mode::Rejected | Mode::RejectedWithChoices) { ContextProblemCode::Stale } else { ContextProblemCode::Ineligible }))
             );
             assert_eq!(host.committed.load(Ordering::SeqCst), 0);
             assert_eq!(host.aborted.load(Ordering::SeqCst), 1);
@@ -225,6 +273,15 @@ async fn exercise(mode: Mode) {
         requests.len(),
         2,
         "normal rejection must continue inference"
+    );
+    assert_eq!(
+        requests[1].model, "model-a",
+        "patch publication must not reset or publish rejected model choices"
+    );
+    assert_eq!(
+        crate::transport::client::request_body(&requests[1]).unwrap()["reasoning"]["effort"],
+        "low",
+        "patch publication must preserve the existing effort"
     );
     assert!(requests[1].input.iter().any(|item| item
         == &Item::tool_output(
@@ -260,4 +317,14 @@ async fn discarded_transaction_retains_candidate_aborts_and_continues_inference(
 #[tokio::test]
 async fn rejected_transaction_cleanup_failure_blocks_next_inference() {
     exercise(Mode::AbortFailed).await;
+}
+
+#[tokio::test]
+async fn rejected_patch_does_not_publish_explicit_model_or_effort_choices() {
+    exercise(Mode::RejectedWithChoices).await;
+}
+
+#[tokio::test]
+async fn choice_only_legacy_draft_publishes_independently_of_transactions() {
+    exercise(Mode::ChoiceOnly).await;
 }

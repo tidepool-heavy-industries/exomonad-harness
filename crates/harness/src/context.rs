@@ -298,11 +298,33 @@ pub struct ContextUnitVersion {
     pub reference: ContextReference,
     pub digest: String,
 }
+/// Canonical authorship comes from Store's retained occurrence, independently
+/// of its current visible overlay or editing authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextTextAuthor {
+    User,
+    Assistant,
+    Tool,
+    System,
+    Developer,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextTextAuthorship {
+    pub reference: ContextReference,
+    pub selector: ContextTextSelector,
+    pub author: ContextTextAuthor,
+    pub authored_note: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextInspection {
     pub document: ContextDocument,
     pub text_versions: Vec<ContextTextVersion>,
     pub unit_versions: Vec<ContextUnitVersion>,
+    pub authorship: Vec<ContextTextAuthorship>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -379,6 +401,7 @@ pub(crate) fn context_digest(bytes: &[u8]) -> String {
 }
 
 /// Inspect supported editable bodies and removable units without granting authority.
+/// Authorship is empty here; only Store can issue it from canonical occurrences.
 pub fn inspect_context(document: &ContextDocument) -> ContextInspection {
     let mut text_versions = Vec::new();
     let mut unit_versions = Vec::new();
@@ -446,6 +469,7 @@ pub fn inspect_context(document: &ContextDocument) -> ContextInspection {
         document: document.clone(),
         text_versions,
         unit_versions,
+        authorship: Vec::new(),
     }
 }
 
