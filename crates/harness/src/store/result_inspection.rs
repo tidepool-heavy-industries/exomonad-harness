@@ -457,54 +457,75 @@ mod tests {
 
     #[test]
     fn marked_native_output_requires_certified_projection_without_losing_inspection() {
-        let store = Store::memory().unwrap();
-        let host = HostIdentity {
-            run: "guard".into(),
-            actor: AgentPath("/root".into()),
-            incarnation: "1".into(),
-        };
-        store.bind_embedded_actor(&host, None).unwrap();
-        let request = RequestId("guard-request".into());
-        let call = CallId("guard-call".into());
-        store.write_request(&request,None,&host.actor.0,&[Item(serde_json::json!({"type":"function_call","call_id":call.0,"name":"read","arguments":"{}"}))],Usage::default()).unwrap();
-        let operation = store.claim(&call, &request).unwrap();
-        store
-            .write_job_output_with_format(
-                &operation,
-                crate::item::ToolKind::Function,
-                &crate::turn::JobOutput::Completed(Ok(
-                    serde_json::json!({"canonical":"λ".repeat(50000)}),
-                )),
-                crate::provider::OutputFormat::NativeReceiptV1,
-            )
-            .unwrap();
-        store
-            .append_operation_output(&operation, &request, &request)
-            .unwrap();
-        store
-            .advance_agent_head(&host.actor, None, Some(&request))
-            .unwrap();
-        assert!(matches!(
-            store.model_output_projection(&operation),
-            Err(StoreError::MissingModelOutputProjection { .. })
-        ));
-        assert!(
+        for kind in [
+            crate::item::ToolKind::Function,
+            crate::item::ToolKind::Custom,
+        ] {
+            let store = Store::memory().unwrap();
+            let host = HostIdentity {
+                run: "guard".into(),
+                actor: AgentPath("/root".into()),
+                incarnation: "1".into(),
+            };
+            store.bind_embedded_actor(&host, None).unwrap();
+            let request = RequestId("guard-request".into());
+            let call = CallId("guard-call".into());
+            let invocation = match kind {
+                crate::item::ToolKind::Function => {
+                    serde_json::json!({"type":"function_call","call_id":call.0,"name":"read","arguments":"{}"})
+                }
+                crate::item::ToolKind::Custom => {
+                    serde_json::json!({"type":"custom_tool_call","call_id":call.0,"name":"read","input":"read once"})
+                }
+            };
             store
-                .inspect_embedded_result(&host, &operation)
-                .unwrap()
-                .is_some()
-        );
-        let candidate = store
-            .publish_model_output_projection(&operation, serde_json::json!({"output":"done"}))
-            .unwrap();
-        assert_eq!(
+                .write_request(
+                    &request,
+                    None,
+                    &host.actor.0,
+                    &[Item(invocation)],
+                    Usage::default(),
+                )
+                .unwrap();
+            let operation = store.claim(&call, &request).unwrap();
             store
-                .model_output_projection(&operation)
-                .unwrap()
-                .unwrap()
-                .item,
-            candidate.item
-        );
+                .write_job_output_with_format(
+                    &operation,
+                    kind,
+                    &crate::turn::JobOutput::Completed(Ok(
+                        serde_json::json!({"canonical":"λ".repeat(50000)}),
+                    )),
+                    crate::provider::OutputFormat::NativeReceiptV1,
+                )
+                .unwrap();
+            store
+                .append_operation_output(&operation, &request, &request)
+                .unwrap();
+            store
+                .advance_agent_head(&host.actor, None, Some(&request))
+                .unwrap();
+            assert!(matches!(
+                store.model_output_projection(&operation),
+                Err(StoreError::MissingModelOutputProjection { .. })
+            ));
+            assert!(
+                store
+                    .inspect_embedded_result(&host, &operation)
+                    .unwrap()
+                    .is_some()
+            );
+            let candidate = store
+                .publish_model_output_projection(&operation, serde_json::json!("done"))
+                .unwrap();
+            assert_eq!(
+                store
+                    .model_output_projection(&operation)
+                    .unwrap()
+                    .unwrap()
+                    .item,
+                candidate.item
+            );
+        }
     }
 
     #[test]
