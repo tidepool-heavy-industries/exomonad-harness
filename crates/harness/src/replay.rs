@@ -1799,6 +1799,18 @@ mod tests {
                 json!({"error":"legitimate data", "failure":{"class":"user"}}),
             )),
             JobOutput::Completed(Err("old plain failure".into())),
+            JobOutput::Completed(Err(crate::provider::ToolFailure::from(
+                "captured semantic failure",
+            )
+            .with_result_receipt(json!({"semantic":"λ".repeat(50_000)})))),
+            JobOutput::CancelledWithReceipt(Err(crate::provider::ToolFailure::from(
+                "captured semantic cancellation",
+            )
+            .with_result_receipt(json!({"semantic":"λ".repeat(50_000)})))),
+            JobOutput::CancellationUnconfirmed(
+                crate::provider::ToolFailure::from("captured semantic uncertainty")
+                    .with_result_receipt(json!({"semantic":"λ".repeat(50_000)})),
+            ),
             JobOutput::Cancelled,
             JobOutput::CancelledWithReceipt(Ok(json!({
                 "items": [{"status":"committed","output":"prefix"}], "nextIndex": 1
