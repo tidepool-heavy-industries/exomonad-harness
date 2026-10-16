@@ -113,7 +113,19 @@ fn normalized_request(request: &ResponsesRequest) -> Result<RequestBody<'_>, Tra
             .input
             .iter()
             .filter(|item| !item.is_configuration_update())
-            .cloned()
+            .map(|item| {
+                let mut item = item.clone();
+                if let Some(fields) = item.0.as_object_mut() {
+                    if matches!(
+                        fields.get("type").and_then(Value::as_str),
+                        Some("function_call_output" | "custom_tool_call_output")
+                    ) {
+                        // Settlement provenance is durable metadata, outside the provider item schema.
+                        fields.remove("output_format");
+                    }
+                }
+                item
+            })
             .collect(),
     );
     let mut tools = Vec::new();
