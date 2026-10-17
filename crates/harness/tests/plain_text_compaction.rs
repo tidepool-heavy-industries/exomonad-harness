@@ -22,8 +22,10 @@ struct OfflineAuth;
 impl Auth for OfflineAuth {
     fn admission(
         &self,
-    ) -> std::result::Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError>
-    {
+    ) -> std::result::Result<
+        harness::transport::NativeTransportAdmission,
+        harness::transport::TransportError,
+    > {
         harness::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
             "/offline/synthetic-credential",
         ))
@@ -248,7 +250,8 @@ async fn failed_summary_keeps_history_and_does_not_retry_without_growth() {
         event["error"]
             .as_str()
             .unwrap()
-            .contains("authentication expired")
+            .contains(&TransportError::Authentication.to_string()),
+        "{event}"
     );
 }
 
