@@ -62,6 +62,14 @@ fn annotation_item(
     {
         return Err(invalid(result_event));
     }
+    let published: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.output_operation=?1 AND i.json=?2)",
+        params![serde_json::to_string(operation)?, serde_json::to_string(&output)?],
+        |row| row.get(0),
+    )?;
+    if !published {
+        return Err(invalid(result_event));
+    }
     let annotation = event(annotation_event, "model_tool_annotation")?;
     if annotation["ordinal"].as_i64() != Some(result_event) || annotation_event <= result_event {
         return Err(invalid(annotation_event));
