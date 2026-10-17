@@ -1897,15 +1897,17 @@ impl Store {
             let head = head.ok_or(ContextError::UnsupportedState)?.map(RequestId);
             let current = state(tx, identity)?;
             let items = match &head {
-                Some(head) => context_request_state_tx(
+                Some(head) => checked_projection(
                     tx,
                     head,
-                    identity,
+                    &history(tx, head, true)?,
+                    current.model.as_deref(),
+                    None,
                     current.route.zip(current.protocol),
                 )?
-                .history
+                .into_items()
                 .into_iter()
-                .map(|(_, _, item)| item)
+                .map(|(_, _, item, _)| item)
                 .collect::<Vec<_>>(),
                 None => Vec::new(),
             };
