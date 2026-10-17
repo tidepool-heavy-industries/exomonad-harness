@@ -576,6 +576,7 @@ impl Conversation {
                 model: config.model.clone(),
                 route,
                 protocol,
+                native_transport: None,
             },
         )?;
         Ok(crate::engine::Engine::with_transport(
@@ -1383,6 +1384,7 @@ mod tests {
                 model: "luna".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )?;
         let snapshot = store.begin_context(&operation, &head)?;

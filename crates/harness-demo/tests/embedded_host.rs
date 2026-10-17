@@ -24,11 +24,11 @@ use std::sync::{
 };
 
 fn projection_target() -> harness::context::ContextProjectionTarget {
-    harness::context::ContextProjectionTarget {
-        model: "offline".into(),
-        route: ResponsesRoute::ChatGptPlan,
-        protocol: ResponsesProtocol::Standard,
-    }
+    harness::context::ContextProjectionTarget::component(
+        "offline",
+        ResponsesRoute::ChatGptPlan,
+        ResponsesProtocol::Standard,
+    )
 }
 
 struct Permit;

@@ -51,6 +51,11 @@ struct InferenceState {
     route: Option<crate::transport::ResponsesRoute>,
     #[serde(default)]
     protocol: Option<crate::transport::ResponsesProtocol>,
+    // Additive evidence in the existing v2 state envelope. Older/legacy state
+    // has no profile and grants no plaintext reasoning edit authority. Older
+    // readers may ignore this field; this is not a downgrade protection scheme.
+    #[serde(default)]
+    native_transport: Option<crate::transport::NativeTransportContract>,
 }
 
 fn state_key(identity: &ConversationIdentity) -> Result<String> {
@@ -75,7 +80,16 @@ fn state(c: &Connection, identity: &ConversationIdentity) -> Result<InferenceSta
             if value["version"] != 1 && value["version"] != 2 {
                 return Err(ContextError::UnsupportedState.into());
             }
-            Ok(serde_json::from_value(value["state"].clone())?)
+            let state: InferenceState = serde_json::from_value(value["state"].clone())?;
+            if let Some(native) = &state.native_transport {
+                native.validate().map_err(StoreError::ProviderAdmission)?;
+                if (Some(native.route), Some(native.protocol)) != (state.route, state.protocol) {
+                    return Err(StoreError::ProviderAdmission(
+                        crate::transport::TransportError::InvalidAdmission,
+                    ));
+                }
+            }
+            Ok(state)
         }
     }
 }
@@ -907,7 +921,7 @@ fn reasoning_editable_origins(
     let Some(target) = target else {
         return HashSet::new();
     };
-    if !target.route.supports_plaintext_reasoning_edits() {
+    if !target.route.supports_plaintext_reasoning_edits() || target.native_transport.is_none() {
         return HashSet::new();
     }
     let positions = occurrence_positions(all);
@@ -925,6 +939,7 @@ fn reasoning_editable_origins(
                 && envelope.model == target.model
                 && envelope.route == Some(target.route)
                 && envelope.protocol == Some(target.protocol)
+                && envelope.native_transport.as_ref() == target.native_transport.as_ref()
                 && envelope.origins.iter().all(|origin| {
                     let Some(indices) = positions.get(origin) else {
                         return false;
@@ -980,6 +995,7 @@ fn optional_projection_target(
             model,
             route,
             protocol,
+            native_transport: current.native_transport,
         }),
         _ => None,
     })
@@ -1238,7 +1254,16 @@ pub(super) fn checked_projection(
         crate::transport::ResponsesRoute,
         crate::transport::ResponsesProtocol,
     )>,
+    native_transport: Option<&crate::transport::NativeTransportContract>,
 ) -> Result<CheckedContextProjection> {
+    if let Some(native) = native_transport {
+        native.validate().map_err(StoreError::ProviderAdmission)?;
+        if transport != Some((native.route, native.protocol)) {
+            return Err(StoreError::ProviderAdmission(
+                crate::transport::TransportError::InvalidAdmission,
+            ));
+        }
+    }
     let ordered = ordered_occurrences(c, all)?;
     let all = ordered.as_slice();
     validate_canonical_history(c, all)?;
@@ -1267,6 +1292,7 @@ pub(super) fn checked_projection(
             model: model.into(),
             route,
             protocol,
+            native_transport: native_transport.cloned(),
         });
     let reasoning_editable = reasoning_editable_origins(all, all.len(), &evidence, target.as_ref());
     if all.iter().any(|occurrence| {
@@ -1566,10 +1592,7 @@ fn context_request_state_tx(
     tx: &Transaction<'_>,
     head: &RequestId,
     identity: &ConversationIdentity,
-    transport: Option<(
-        crate::transport::ResponsesRoute,
-        crate::transport::ResponsesProtocol,
-    )>,
+    transport: Option<&crate::transport::PreparedTransportSelection>,
 ) -> Result<ContextRequestState> {
     let current = state(tx, identity)?;
     let canonical = {
@@ -1587,7 +1610,16 @@ fn context_request_state_tx(
             &canonical,
             current.model.as_deref(),
             None,
-            transport.or_else(|| current.route.zip(current.protocol)),
+            transport
+                .map(|selection| selection.response_contract())
+                .or_else(|| current.route.zip(current.protocol)),
+            transport
+                .map(|selection| {
+                    selection
+                        .native_admission()
+                        .map(|admission| admission.contract())
+                })
+                .unwrap_or(current.native_transport.as_ref()),
         )?
         .into_items()
     };
@@ -1625,6 +1657,7 @@ pub(crate) fn preflight_target(
         Some(&target.model),
         None,
         Some((target.route, target.protocol)),
+        target.native_transport.as_ref(),
     )
     .map(drop)
 }
@@ -1642,6 +1675,7 @@ pub(super) fn current_projection_target(
         protocol: current.protocol.ok_or(ContextError::Replay(
             ContextReplayRejection::IncompatibleTransport,
         ))?,
+        native_transport: current.native_transport,
     })
 }
 
@@ -1658,6 +1692,7 @@ pub(super) fn preflight_current(
         current.model.as_deref(),
         None,
         current.route.zip(current.protocol),
+        current.native_transport.as_ref(),
     )
     .map(drop)
 }
@@ -1676,6 +1711,15 @@ pub(crate) fn save_target(
     }
     current.route = Some(target.route);
     current.protocol = Some(target.protocol);
+    if let Some(native) = &target.native_transport {
+        native.validate().map_err(StoreError::ProviderAdmission)?;
+        if (native.route, native.protocol) != (target.route, target.protocol) {
+            return Err(StoreError::ProviderAdmission(
+                crate::transport::TransportError::InvalidAdmission,
+            ));
+        }
+    }
+    current.native_transport = target.native_transport.clone();
     save_state(tx, identity, &current)
 }
 
@@ -1783,6 +1827,7 @@ pub(super) fn publish_recovery_projection(
         Some(&target.model),
         None,
         Some((target.route, target.protocol)),
+        target.native_transport.as_ref(),
     )?;
     insert_snapshot_request(tx, &replacement, Some(head), &identity.actor.0)?;
     tx.execute("UPDATE requests SET embedded_run=?2,embedded_incarnation=?3,round_phase='pending' WHERE id=?1",
@@ -1929,6 +1974,7 @@ impl Store {
                     current.model.as_deref(),
                     None,
                     current.route.zip(current.protocol),
+                    current.native_transport.as_ref(),
                 )?
                 .into_items()
                 .into_iter()
@@ -1963,10 +2009,7 @@ impl Store {
         &self,
         head: &RequestId,
         identity: &ConversationIdentity,
-        transport: (
-            crate::transport::ResponsesRoute,
-            crate::transport::ResponsesProtocol,
-        ),
+        transport: &crate::transport::PreparedTransportSelection,
     ) -> Result<ContextRequestState> {
         self.context_request_state_with_transport(head, identity, Some(transport))
     }
@@ -1975,10 +2018,7 @@ impl Store {
         &self,
         head: &RequestId,
         identity: &ConversationIdentity,
-        transport: Option<(
-            crate::transport::ResponsesRoute,
-            crate::transport::ResponsesProtocol,
-        )>,
+        transport: Option<&crate::transport::PreparedTransportSelection>,
     ) -> Result<ContextRequestState> {
         let _projection =
             tracing::debug_span!(target: "harness::runtime_cost", "context_request_state",
@@ -2893,6 +2933,7 @@ impl Store {
             selected_model,
             Some(&snapshot.operation),
             current.route.zip(current.protocol),
+            current.native_transport.as_ref(),
         )?;
         if cancelled() {
             return Err(ContextError::Cancelled.into());

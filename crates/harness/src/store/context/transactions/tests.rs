@@ -32,6 +32,7 @@ fn fixture(store: &Store) -> (RequestId, ContextSnapshot, ContextSnapshot) {
                 model: "model-a".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -760,6 +761,7 @@ fn shared_reference_multipart_edits_keep_selectors_and_canonical_native_bytes() 
                 model: "model-a".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -990,6 +992,7 @@ fn choice_only_legacy_commit_does_not_require_or_issue_a_patch_transaction() {
                 model: "model-a".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();

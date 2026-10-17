@@ -65,6 +65,7 @@ fn target(kind: u8) -> ContextProjectionTarget {
         model: if kind == 1 { "luna" } else { "astra" }.into(),
         route: ResponsesRoute::ChatGptPlan,
         protocol: ResponsesProtocol::Standard,
+        native_transport: None,
     }
 }
 

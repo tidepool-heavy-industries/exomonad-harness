@@ -239,6 +239,7 @@ pub(super) fn source_response_envelope(
         completeness: super::replay::ResponseCompleteness::Completed,
         route: Some(serde_json::from_str(&route)?),
         protocol: Some(serde_json::from_str(&protocol)?),
+        native_transport: None,
     }))
 }
 
@@ -323,6 +324,7 @@ pub(super) fn response_envelopes(
         completeness: super::replay::ResponseCompleteness::Completed,
         route: None,
         protocol: None,
+        native_transport: None,
     }])
 }
 

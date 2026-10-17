@@ -482,6 +482,7 @@ fn saved_account_selection_is_durable_idempotent_and_run_scoped() {
                 model: "test".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();

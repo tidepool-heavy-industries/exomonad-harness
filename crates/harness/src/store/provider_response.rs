@@ -323,6 +323,9 @@ pub(super) fn response_envelopes(
         return Ok(None);
     };
     let issued: IssuedRequestRecord = serde_json::from_str(&issued)?;
+    if let Some(native) = &issued.native_transport {
+        native.validate().map_err(StoreError::ProviderAdmission)?;
+    }
     if issued.model.trim().is_empty() {
         return Err(StoreError::InvalidProviderEvidence(request.clone()));
     }
@@ -343,6 +346,13 @@ pub(super) fn response_envelopes(
     }
     let route = Some(serde_json::from_str(&route)?);
     let protocol = Some(serde_json::from_str(&protocol)?);
+    if issued
+        .native_transport
+        .as_ref()
+        .is_some_and(|native| Some(native.route) != route || Some(native.protocol) != protocol)
+    {
+        return Err(StoreError::InvalidProviderEvidence(request.clone()));
+    }
     let state = parse_state(&state, request)?;
     let rows = {
         let mut q = c.prepare("SELECT p.output_index,p.occurrence_position,p.item_hash,i.item_hash FROM provider_items p JOIN request_items i ON i.request_id=p.request_id AND i.position=p.occurrence_position WHERE p.request_id=?1 ORDER BY p.output_index")?;
@@ -384,6 +394,7 @@ pub(super) fn response_envelopes(
         },
         route,
         protocol,
+        native_transport: issued.native_transport,
     });
     Ok(Some(
         envelope

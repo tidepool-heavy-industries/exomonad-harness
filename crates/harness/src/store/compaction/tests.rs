@@ -35,6 +35,7 @@ fn record_response(store: &Store, source: &RequestId, raw: &[Item]) -> ServerCom
                 model: "actual-model".into(),
                 route: ResponsesRoute::ChatGptPlan,
                 protocol: ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -289,6 +290,7 @@ fn legacy_boundary_does_not_infer_the_selected_model() {
                 model: "actual-model".into(),
                 route: ResponsesRoute::ChatGptPlan,
                 protocol: ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();

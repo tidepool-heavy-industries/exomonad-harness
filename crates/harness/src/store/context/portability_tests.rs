@@ -97,6 +97,7 @@ fn setup_with_provenance(
                 model: "model-a".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -393,6 +394,7 @@ fn empty_here_child_without_source_remains_a_valid_frozen_context() {
                 model: "gpt-6-luna".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -478,6 +480,7 @@ fn cross_model_frozen_child_with_format(format: crate::provider::OutputFormat) {
                 model: "model-b".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -573,6 +576,7 @@ fn replay_collision_fixture(
                 model: "model-a".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -901,6 +905,7 @@ fn try_cut_fixture_with_reasoning(
                 model: "model-b".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         },
     )?;
@@ -912,6 +917,7 @@ fn try_cut_fixture_with_reasoning(
                 model: "model-b".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -1006,6 +1012,7 @@ fn authenticated_cut_survives_commit_freeze_and_deferred_child_without_later_arr
                     model: "model-b".into(),
                     route: crate::transport::ResponsesRoute::ChatGptPlan,
                     protocol: crate::transport::ResponsesProtocol::Standard,
+                    native_transport: None,
                 },
             },
         )
@@ -1018,6 +1025,7 @@ fn authenticated_cut_survives_commit_freeze_and_deferred_child_without_later_arr
                 model: "model-b".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -1175,6 +1183,7 @@ fn captured_prefix_keeps_prior_pending_call_and_deferred_boundary_refusals() {
                 model: "model-b".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         },
     );
@@ -1254,6 +1263,7 @@ fn authenticated_metadata_only_cut_is_omitted_but_full_or_malformed_groups_refus
                 model: "model-b".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -1297,7 +1307,8 @@ fn genuine_saved_reference_from_unrelated_checkpoint_cannot_authorize_model_swit
                 Some((
                     crate::transport::ResponsesRoute::ChatGptPlan,
                     crate::transport::ResponsesProtocol::Standard
-                ))
+                )),
+                None,
             )
             .is_ok()
         );
@@ -1313,7 +1324,8 @@ fn genuine_saved_reference_from_unrelated_checkpoint_cannot_authorize_model_swit
                 Some((
                     crate::transport::ResponsesRoute::ChatGptPlan,
                     crate::transport::ResponsesProtocol::Standard
-                ))
+                )),
+                None,
             ),
             Err(StoreError::Context(ContextError::Replay(_)))
         ));
@@ -1326,6 +1338,7 @@ fn genuine_saved_reference_from_unrelated_checkpoint_cannot_authorize_model_swit
                 model: "model-a".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();

@@ -15,6 +15,7 @@ fn target(model: &str) -> ContextProjectionTarget {
         model: model.into(),
         route: ResponsesRoute::ChatGptPlan,
         protocol: ResponsesProtocol::Standard,
+        native_transport: None,
     }
 }
 
@@ -122,6 +123,7 @@ fn equal_item_bytes_have_distinct_issued_positions_and_portable_sources() {
         Some("luna"),
         None,
         Some((ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard)),
+        None,
     )
     .unwrap()
     .into_items();

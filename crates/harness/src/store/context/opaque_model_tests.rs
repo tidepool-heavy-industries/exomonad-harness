@@ -126,6 +126,7 @@ fn prepare(provenance: Provenance<'_>, selected: &str) -> Restoration {
                 model: initial.into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -476,6 +477,7 @@ fn historical_compaction_without_issuing_evidence_stays_protected() {
                 model: "model-a".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -578,6 +580,7 @@ fn current_opaque_retention_refuses_unknown_issuing_provenance() {
                 model: "model-a".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();

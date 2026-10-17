@@ -91,6 +91,7 @@ pub(super) struct ResponseEnvelope {
     pub(super) completeness: ResponseCompleteness,
     pub(super) route: Option<crate::transport::ResponsesRoute>,
     pub(super) protocol: Option<crate::transport::ResponsesProtocol>,
+    pub(super) native_transport: Option<crate::transport::NativeTransportContract>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +160,15 @@ pub(super) fn response_envelopes(
     let mut unknown = HashSet::new();
     for payload in payloads {
         let raw: serde_json::Value = serde_json::from_str(&payload)?;
+        if let Some(native) = raw
+            .get("issued")
+            .and_then(|issued| issued.get("native_transport"))
+            .filter(|native| !native.is_null())
+        {
+            let native: crate::transport::NativeTransportContract =
+                serde_json::from_value(native.clone())?;
+            native.validate().map_err(StoreError::ProviderAdmission)?;
+        }
         let hashes = raw["response"]["items"]
             .as_array()
             .into_iter()
@@ -190,6 +200,7 @@ pub(super) fn response_envelopes(
             completeness: ResponseCompleteness::Completed,
             route: None,
             protocol: None,
+            native_transport: None,
         });
     }
     envelopes.extend(super::compaction::response_envelopes(c, request)?);

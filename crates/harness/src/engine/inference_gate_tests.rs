@@ -730,6 +730,7 @@ async fn continuity_refusal_preserves_action(
                 model: runner.config.model.clone(),
                 route,
                 protocol,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -952,6 +953,7 @@ async fn one_empty_interruption(
                 model: "test".into(),
                 route: ResponsesRoute::ChatGptPlan,
                 protocol: ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();

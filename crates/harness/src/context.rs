@@ -13,6 +13,43 @@ pub struct ContextProjectionTarget {
     pub model: String,
     pub route: crate::transport::ResponsesRoute,
     pub protocol: crate::transport::ResponsesProtocol,
+    /// Nonsecret selection retained from the issuing transport owner. Absence
+    /// preserves legacy/component inspection without plaintext edit authority.
+    pub(crate) native_transport: Option<crate::transport::NativeTransportContract>,
+}
+
+impl ContextProjectionTarget {
+    /// An intent without native admission. Existing non-reasoning portability
+    /// rules remain available; plaintext reasoning stays read-only.
+    pub fn component(
+        model: impl Into<String>,
+        route: crate::transport::ResponsesRoute,
+        protocol: crate::transport::ResponsesProtocol,
+    ) -> Self {
+        Self {
+            model: model.into(),
+            route,
+            protocol,
+            native_transport: None,
+        }
+    }
+
+    /// Retain the exact selection issued by the transport owner. Captured or
+    /// deserialized contract data cannot construct a prepared selection.
+    pub fn for_transport(
+        model: impl Into<String>,
+        selection: &crate::transport::PreparedTransportSelection,
+    ) -> Self {
+        let (route, protocol) = selection.response_contract();
+        Self {
+            model: model.into(),
+            route,
+            protocol,
+            native_transport: selection
+                .native_admission()
+                .map(|admission| admission.contract().clone()),
+        }
+    }
 }
 
 /// Resolved current inference choices observed together at the owning head.

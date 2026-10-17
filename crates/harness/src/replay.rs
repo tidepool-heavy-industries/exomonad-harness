@@ -1940,6 +1940,7 @@ mod tests {
                         model: "test-model".into(),
                         route: crate::transport::ResponsesRoute::ChatGptPlan,
                         protocol: crate::transport::ResponsesProtocol::Standard,
+                        native_transport: None,
                     },
                 },
             )

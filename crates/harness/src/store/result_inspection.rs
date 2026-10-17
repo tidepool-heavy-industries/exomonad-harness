@@ -821,6 +821,7 @@ mod tests {
                         model: "test".into(),
                         route: crate::transport::ResponsesRoute::ChatGptPlan,
                         protocol: crate::transport::ResponsesProtocol::Standard,
+                        native_transport: None,
                     },
                 },
             )

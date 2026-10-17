@@ -935,6 +935,7 @@ mod tests {
                         model: "test".into(),
                         route: crate::transport::ResponsesRoute::ChatGptPlan,
                         protocol: crate::transport::ResponsesProtocol::Standard,
+                        native_transport: None,
                     },
                 },
             )
@@ -952,6 +953,7 @@ mod tests {
                         model: "test".into(),
                         route: crate::transport::ResponsesRoute::ChatGptPlan,
                         protocol: crate::transport::ResponsesProtocol::Standard,
+                        native_transport: None,
                     },
                 },
             )
@@ -1071,7 +1073,8 @@ mod tests {
                     target: &crate::context::ContextProjectionTarget {
                         model: "test".into(),
                         route: crate::transport::ResponsesRoute::ChatGptPlan,
-                        protocol: crate::transport::ResponsesProtocol::Standard
+                        protocol: crate::transport::ResponsesProtocol::Standard,
+                        native_transport: None,
                     },
                 }
             ),
@@ -1227,6 +1230,7 @@ mod tests {
                         model: "test".into(),
                         route: crate::transport::ResponsesRoute::ChatGptPlan,
                         protocol: crate::transport::ResponsesProtocol::Standard,
+                        native_transport: None,
                     },
                 },
             )
@@ -1470,6 +1474,7 @@ mod tests {
                         model: "test".into(),
                         route: crate::transport::ResponsesRoute::ChatGptPlan,
                         protocol: crate::transport::ResponsesProtocol::Standard,
+                        native_transport: None,
                     },
                 },
             )

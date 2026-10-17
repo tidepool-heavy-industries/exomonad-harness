@@ -908,14 +908,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         recovering: bool,
         selected: Option<&crate::store::EmbeddedRoundSnapshot>,
     ) -> Result<embedded_round::EngineRunReceipt, EngineError> {
-        let (route, protocol) = self.client.response_contract()?;
+        let selection = self.client.prepare_submission()?;
         self.store.initialize_context_target(
             &self.origin,
-            &crate::context::ContextProjectionTarget {
-                model: self.config.model.clone(),
-                route,
-                protocol,
-            },
+            &crate::context::ContextProjectionTarget::for_transport(
+                self.config.model.clone(),
+                &selection,
+            ),
         )?;
         let mut inference_attempt = match self.embedded_identity() {
             Some(identity) => match match selected {
@@ -4460,11 +4459,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let identity = self.origin.clone();
         let contract = self.client.prepare_submission()?;
         blocking(move || {
-            let state = store.context_request_state_for_transport(
-                &request,
-                &identity,
-                contract.response_contract(),
-            )?;
+            let state =
+                store.context_request_state_for_transport(&request, &identity, &contract)?;
             tracing::Span::current().record("output_items", state.history.len());
             let mut items = Vec::with_capacity(state.history.len());
             let mut provenance = Vec::with_capacity(state.history.len());

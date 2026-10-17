@@ -153,6 +153,7 @@ fn pruning_requires_the_exact_durable_operation_and_preserves_native_ownership()
                 crate::transport::ResponsesRoute::ChatGptPlan,
                 crate::transport::ResponsesProtocol::Standard,
             )),
+            None,
         )
         .unwrap()
     };

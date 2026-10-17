@@ -124,6 +124,7 @@ pub(super) fn authorize_restart(
                 model: "test".into(),
                 route: ResponsesRoute::ChatGptPlan,
                 protocol: ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -837,7 +838,10 @@ async fn embedded_restart_preserves_committed_model_for_retained_opaque_history(
         store.context_request_state_for_transport(
             &opaque_head,
             &next_origin,
-            (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
+            &crate::transport::PreparedTransportSelection::component((
+                ResponsesRoute::ChatGptPlan,
+                ResponsesProtocol::Standard
+            )),
         ),
         Err(StoreError::Context(crate::context::ContextError::Replay(
             crate::context::ContextReplayRejection::IncompatibleTransport,
@@ -847,7 +851,10 @@ async fn embedded_restart_preserves_committed_model_for_retained_opaque_history(
         .context_request_state_for_transport(
             &completion.head_request,
             &next_origin,
-            (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
+            &crate::transport::PreparedTransportSelection::component((
+                ResponsesRoute::ChatGptPlan,
+                ResponsesProtocol::Standard,
+            )),
         )
         .unwrap();
     assert_eq!(state.model.as_deref(), Some("model-b"));

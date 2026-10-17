@@ -10,7 +10,71 @@ fn call(id: &str) -> Item {
     Item(json!({"type":"function_call","call_id":id,"name":"edit","arguments":"{}"}))
 }
 
+fn selection() -> crate::transport::PreparedTransportSelection {
+    use crate::transport::{
+        CredentialReference, InferenceLimits, NativeTransportAdmission, NativeTransportContract,
+        PreparedTransportSelection,
+    };
+    PreparedTransportSelection::native(
+        NativeTransportAdmission::rehydrate(NativeTransportContract {
+            route: ResponsesRoute::DeepSeek,
+            protocol: ResponsesProtocol::Standard,
+            endpoint: crate::transport::client::DEEPSEEK_ENDPOINT.into(),
+            credential: CredentialReference::Env {
+                name: "OFFLINE_REASONING_FIXTURE".into(),
+            },
+            limits: InferenceLimits::deepseek_default(),
+        })
+        .unwrap(),
+    )
+}
+
+fn target() -> ContextProjectionTarget {
+    ContextProjectionTarget::for_transport("deepseek-flash", &selection())
+}
+
 fn record(store: &Store, head: &RequestId, items: Vec<Item>, route: ResponsesRoute) {
+    if route != ResponsesRoute::DeepSeek {
+        record_legacy(store, head, items, route);
+        return;
+    }
+    let prepared = prepare_native(store, head);
+    store
+        .record_provider_turn(
+            prepared.issuer(),
+            &ResponsesTurn {
+                response_id: head.0.clone(),
+                items,
+                usage: Default::default(),
+            },
+        )
+        .unwrap();
+}
+
+fn prepare_native(store: &Store, head: &RequestId) -> crate::store::PreparedProviderRequest {
+    store
+        .prepare_provider_request(
+            head,
+            head,
+            ResponsesRequest {
+                input: vec![],
+                instructions: "fixture".into(),
+                tools: vec![].into(),
+                tools_allowed: None,
+                model: "deepseek-flash".into(),
+                pinned_effort: Effort::High,
+                session_id: "fixture".into(),
+                prompt_cache_comparison: None,
+            },
+            &[],
+            None,
+            selection(),
+            crate::store::ProviderRequestPurpose::Inference,
+        )
+        .unwrap()
+}
+
+fn record_legacy(store: &Store, head: &RequestId, items: Vec<Item>, route: ResponsesRoute) {
     store
         .record_replay_turn_for_target(
             head,
@@ -19,7 +83,12 @@ fn record(store: &Store, head: &RequestId, items: Vec<Item>, route: ResponsesRou
                 instructions: "fixture".into(),
                 tools: vec![].into(),
                 tools_allowed: None,
-                model: "fixture-model".into(),
+                model: if route == ResponsesRoute::DeepSeek {
+                    "deepseek-flash"
+                } else {
+                    "fixture-model"
+                }
+                .into(),
                 pinned_effort: Effort::High,
                 session_id: "fixture".into(),
                 prompt_cache_comparison: None,
@@ -36,11 +105,21 @@ fn record(store: &Store, head: &RequestId, items: Vec<Item>, route: ResponsesRou
 }
 
 fn fixture(store: &Store, reasoning: Item, route: ResponsesRoute) -> (ContextSnapshot, Item) {
+    fixture_with_source_contract(store, reasoning, route, true)
+}
+
+fn fixture_with_source_contract(
+    store: &Store,
+    reasoning: Item,
+    route: ResponsesRoute,
+    known: bool,
+) -> (ContextSnapshot, Item) {
     let previous = RequestId("response".into());
     store
         .write_request(&previous, None, "/root", &[], Usage::default())
         .unwrap();
-    record(
+    let record_source = if known { record } else { record_legacy };
+    record_source(
         store,
         &previous,
         vec![
@@ -60,10 +139,15 @@ fn fixture(store: &Store, reasoning: Item, route: ResponsesRoute) -> (ContextSna
     store
         .initialize_context_target(
             &edit.origin,
-            &ContextProjectionTarget {
-                model: "fixture-model".into(),
-                route,
-                protocol: ResponsesProtocol::Standard,
+            &if route == ResponsesRoute::DeepSeek {
+                target()
+            } else {
+                ContextProjectionTarget {
+                    model: "fixture-model".into(),
+                    route,
+                    protocol: ResponsesProtocol::Standard,
+                    native_transport: None,
+                }
             },
         )
         .unwrap();
@@ -178,6 +262,207 @@ fn reasoning_rewrite_preserves_original_and_projects_only_selected_part() {
     );
 }
 
+fn prepared_projection(
+    store: &Store,
+    head: &RequestId,
+    identity: &ConversationIdentity,
+    selected: crate::transport::PreparedTransportSelection,
+) -> Result<crate::store::PreparedProviderRequest, crate::store::PrepareProviderError> {
+    let projected = store.context_request_state_for_transport(head, identity, &selected)?;
+    let local = RequestId(uuid::Uuid::new_v4().to_string());
+    store.create_request(&local, Some(head), "/root")?;
+    store.prepare_provider_request(
+        head,
+        &local,
+        ResponsesRequest {
+            input: projected
+                .history
+                .into_iter()
+                .map(|(_, _, item)| item)
+                .collect(),
+            instructions: "fixture".into(),
+            tools: vec![].into(),
+            tools_allowed: None,
+            model: "deepseek-flash".into(),
+            pinned_effort: Effort::High,
+            session_id: "fixture".into(),
+            prompt_cache_comparison: None,
+        },
+        &projected.occurrences,
+        None,
+        selected,
+        crate::store::ProviderRequestPurpose::Inference,
+    )
+}
+
+#[test]
+fn reasoning_qualification_requires_exact_issued_native_contract() {
+    use crate::transport::{
+        CredentialReference, NativeTransportAdmission, PreparedTransportSelection,
+    };
+    let original = Item(
+        json!({"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"canonical"}]}),
+    );
+    let base = selection().native_admission().unwrap().contract().clone();
+    let mut alternatives = vec![];
+    let mut endpoint = base.clone();
+    endpoint.endpoint = "http://127.0.0.1:40001/responses".into();
+    alternatives.push(endpoint);
+    let mut credential = base.clone();
+    credential.credential = CredentialReference::Env {
+        name: "DIFFERENT_OFFLINE_REFERENCE".into(),
+    };
+    alternatives.push(credential);
+    let mut limits = base.clone();
+    limits.limits.max_output_tokens = Some(1024);
+    alternatives.push(limits);
+    let mut connect = base.clone();
+    connect.limits.connect_timeout_secs += 1;
+    alternatives.push(connect);
+    let mut timeout = base.clone();
+    timeout.limits.total_timeout_secs += 1;
+    alternatives.push(timeout);
+    let mut concurrency = base.clone();
+    concurrency.limits.max_inflight += 1;
+    alternatives.push(concurrency);
+    for alternative in alternatives {
+        let selected = PreparedTransportSelection::native(
+            NativeTransportAdmission::rehydrate(alternative).unwrap(),
+        );
+        let store = Store::memory().unwrap();
+        let (snapshot, _) = fixture(&store, original.clone(), ResponsesRoute::DeepSeek);
+        let field = fields(&snapshot).remove(0);
+        assert!(field.editable);
+        store
+            .initialize_context_target(
+                &snapshot.operation.origin,
+                &ContextProjectionTarget::for_transport("deepseek-flash", &selected),
+            )
+            .unwrap();
+        let changed = store
+            .begin_context(&snapshot.operation, &snapshot.head)
+            .unwrap();
+        let observed = fields(&changed);
+        assert_eq!(observed[0].text, "canonical");
+        assert!(!observed[0].editable);
+        // Commit requalifies the prior editable snapshot against the current owner target.
+        let draft = ContextTransactionDraft {
+            patch: ContextPatch {
+                changes: vec![ContextChange::ReplaceContextText {
+                    reference: field.reference,
+                    selector: field.selector,
+                    expected: crate::context::context_digest(b"canonical"),
+                    text: "revised".into(),
+                }],
+            },
+            next_model: None,
+            next_effort: None,
+        };
+        assert!(matches!(
+            store
+                .commit_context_transaction_guarded(
+                    &snapshot,
+                    &draft,
+                    &JobOutput::Completed(Ok(json!("done"))),
+                    &[],
+                    || false,
+                )
+                .unwrap(),
+            ContextTransactionStatus::Rejected(_)
+        ));
+        // Existing overlays must fail final projection under the different contract as well.
+        let store = Store::memory().unwrap();
+        let (snapshot, _) = fixture(&store, original.clone(), ResponsesRoute::DeepSeek);
+        let receipt = rewrite(&store, &snapshot, &fields(&snapshot)[0], "revised");
+        assert!(matches!(
+            prepared_projection(&store, &receipt.head, &snapshot.operation.origin, selected),
+            Err(crate::store::PrepareProviderError::Store(
+                StoreError::Context(ContextError::NativeEdit)
+            ))
+        ));
+        let prepared = prepared_projection(
+            &store,
+            &receipt.head,
+            &snapshot.operation.origin,
+            selection(),
+        )
+        .unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(prepared.wire_body()).unwrap();
+        assert!(wire.to_string().contains("revised"));
+        assert_eq!(
+            store
+                .context_history(&RequestId("response".into()))
+                .unwrap()
+                .iter()
+                .find(|(_, _, item)| item.0["type"] == "reasoning")
+                .unwrap()
+                .2,
+            original
+        );
+    }
+}
+
+#[test]
+fn malformed_retained_native_contract_is_not_unknown_continuity() {
+    for malformed in [json!("not a contract"), json!({"route":"deep_seek"})] {
+        let store = Store::memory().unwrap();
+        let original = Item(
+            json!({"type":"reasoning","content":[{"type":"reasoning_text","text":"canonical"}]}),
+        );
+        let (snapshot, _) = fixture(&store, original, ResponsesRoute::DeepSeek);
+        // Corrupt an otherwise genuinely issued capture; this is not an authority fixture.
+        store.lock().unwrap().execute("UPDATE provider_requests SET issued_json=json_set(issued_json,'$.native_transport',json(?1)) WHERE request_id='response'", [malformed.to_string()]).unwrap();
+        assert!(matches!(
+            store.begin_context(&snapshot.operation, &snapshot.head),
+            Err(StoreError::Json(_))
+        ));
+    }
+    let store = Store::memory().unwrap();
+    let original =
+        Item(json!({"type":"reasoning","content":[{"type":"reasoning_text","text":"canonical"}]}));
+    let (snapshot, _) = fixture(&store, original, ResponsesRoute::DeepSeek);
+    store.lock().unwrap().execute("UPDATE provider_requests SET issued_json=json_set(issued_json,'$.native_transport.endpoint','https://unqualified.invalid/responses') WHERE request_id='response'", []).unwrap();
+    assert!(matches!(
+        store.begin_context(&snapshot.operation, &snapshot.head),
+        Err(StoreError::ProviderAdmission(
+            crate::transport::TransportError::InvalidAdmission
+        ))
+    ));
+}
+
+#[test]
+fn reasoning_historical_absence_does_not_become_same_contract() {
+    let store = Store::memory().unwrap();
+    let original =
+        Item(json!({"type":"reasoning","content":[{"type":"reasoning_text","text":"legacy"}]}));
+    let (snapshot, _) =
+        fixture_with_source_contract(&store, original, ResponsesRoute::DeepSeek, false);
+    let observed = fields(&snapshot);
+    assert_eq!(observed[0].text, "legacy");
+    assert!(!observed[0].editable);
+    let store = Store::memory().unwrap();
+    let original = Item(
+        json!({"type":"reasoning","content":[{"type":"reasoning_text","text":"known source"}]}),
+    );
+    let (snapshot, _) = fixture(&store, original, ResponsesRoute::DeepSeek);
+    store
+        .initialize_context_target(
+            &snapshot.operation.origin,
+            &ContextProjectionTarget::component(
+                "deepseek-flash",
+                ResponsesRoute::DeepSeek,
+                ResponsesProtocol::Standard,
+            ),
+        )
+        .unwrap();
+    let snapshot = store
+        .begin_context(&snapshot.operation, &snapshot.head)
+        .unwrap();
+    let observed = fields(&snapshot);
+    assert_eq!(observed[0].text, "known source");
+    assert!(!observed[0].editable);
+}
+
 #[test]
 fn reasoning_is_readable_but_not_editable_for_other_routes_or_unknown_continuity() {
     for (route, extra) in [
@@ -289,6 +574,7 @@ fn reasoning_overlay_reopens_resets_and_refuses_a_different_model_contract() {
                         model: "different-model".into(),
                         route: ResponsesRoute::DeepSeek,
                         protocol: ResponsesProtocol::Standard,
+                        native_transport: None,
                     }
                 )
                 .is_err()
@@ -354,25 +640,10 @@ fn interrupted_plaintext_reasoning_is_readable_without_edit_authority() {
     let store = Store::memory().unwrap();
     let previous = RequestId("interrupted".into());
     store.create_request(&previous, None, "/root").unwrap();
-    let request = ResponsesRequest {
-        input: vec![],
-        instructions: "fixture".into(),
-        tools: vec![].into(),
-        tools_allowed: None,
-        model: "fixture-model".into(),
-        pinned_effort: Effort::High,
-        session_id: "fixture".into(),
-        prompt_cache_comparison: None,
-    };
-    let issued = store
-        .issue_provider_request(
-            &previous,
-            store.seal_replay_request(&request).unwrap(),
-            (ResponsesRoute::DeepSeek, ResponsesProtocol::Standard),
-        )
-        .unwrap();
+    let prepared = prepare_native(&store, &previous);
+    let issued = prepared.issuer();
     let Some(StreamEvent::CompletedItem(done)) = ResponseAssembly::default().accept(&json!({"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"partial response"}]}}).to_string()).unwrap() else { panic!("completed item") };
-    store.append_provider_done(&issued, &done).unwrap();
+    store.append_provider_done(issued, &done).unwrap();
     store
         .stop_provider_response(&previous, ProviderResponseState::Interrupted)
         .unwrap();
@@ -383,14 +654,7 @@ fn interrupted_plaintext_reasoning_is_readable_without_edit_authority() {
     record(&store, &head, vec![call("edit")], ResponsesRoute::DeepSeek);
     let operation = store.claim(&CallId("edit".into()), &head).unwrap();
     store
-        .initialize_context_target(
-            &operation.origin,
-            &ContextProjectionTarget {
-                model: "fixture-model".into(),
-                route: ResponsesRoute::DeepSeek,
-                protocol: ResponsesProtocol::Standard,
-            },
-        )
+        .initialize_context_target(&operation.origin, &target())
         .unwrap();
     let snapshot = store.begin_context(&operation, &head).unwrap();
     let observed = fields(&snapshot);
@@ -436,6 +700,7 @@ fn effective_selection_reads_current_owner_head_and_final_positional_pin() {
                 model: "selected".into(),
                 route: ResponsesRoute::DeepSeek,
                 protocol: ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -506,6 +771,7 @@ fn effective_selection_uses_pending_embedded_frontier_before_and_after_settlemen
                         model: "child-admitted-model".into(),
                         route: ResponsesRoute::DeepSeek,
                         protocol: ResponsesProtocol::Standard,
+                        native_transport: None,
                     },
                 )
                 .unwrap();

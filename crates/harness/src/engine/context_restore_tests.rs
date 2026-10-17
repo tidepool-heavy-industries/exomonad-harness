@@ -269,6 +269,7 @@ async fn checkpoint_child_context_rewrite_preserves_consuming_claim_through_reco
                             model: "test".into(),
                             route: crate::transport::ResponsesRoute::ChatGptPlan,
                             protocol: crate::transport::ResponsesProtocol::Standard,
+                            native_transport: None,
                         },
                     },
                 )

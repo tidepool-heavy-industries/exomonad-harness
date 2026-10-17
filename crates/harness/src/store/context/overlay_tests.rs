@@ -90,6 +90,7 @@ fn fixture(store: Store) -> Fixture {
                 model: "model-a".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -602,6 +603,7 @@ fn message_fixture(first: &str, second: &str) -> (Store, ContextSnapshot) {
                 model: "model-a".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();

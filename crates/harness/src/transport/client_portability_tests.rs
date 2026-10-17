@@ -254,6 +254,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
                     model: "gpt-6-luna".into(),
                     route: crate::transport::ResponsesRoute::ChatGptPlan,
                     protocol: crate::transport::ResponsesProtocol::Standard,
+                    native_transport: None,
                 },
             },
         )
@@ -266,7 +267,10 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         .context_request_state_for_transport(
             child.head_request.as_ref().unwrap(),
             &identity,
-            (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
+            &crate::transport::PreparedTransportSelection::component((
+                ResponsesRoute::ChatGptPlan,
+                ResponsesProtocol::Standard,
+            )),
         )
         .unwrap();
     let destination_occurrences = state.occurrences.clone();
@@ -387,6 +391,7 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
                             model: "gpt-6-luna".into(),
                             route: crate::transport::ResponsesRoute::ChatGptPlan,
                             protocol: crate::transport::ResponsesProtocol::Standard,
+                            native_transport: None,
                         },
                     },
                 )
@@ -420,7 +425,10 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         .context_request_state_for_transport(
             grandchild_head,
             &grandchild_identity,
-            (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
+            &crate::transport::PreparedTransportSelection::component((
+                ResponsesRoute::ChatGptPlan,
+                ResponsesProtocol::Standard,
+            )),
         )
         .unwrap();
     let visible = serde_json::to_string(&state.history).unwrap();
@@ -482,7 +490,10 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         store.context_request_state_for_transport(
             &wrong_head,
             &grandchild_identity,
-            (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard)
+            &crate::transport::PreparedTransportSelection::component((
+                ResponsesRoute::ChatGptPlan,
+                ResponsesProtocol::Standard
+            ))
         ),
         Err(crate::store::StoreError::Context(
             crate::context::ContextError::Replay(
@@ -515,7 +526,10 @@ async fn captured_history(coissued: bool, descendant: Descendant) {
         .context_request_state_for_transport(
             grandchild_head,
             &grandchild_identity,
-            (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
+            &crate::transport::PreparedTransportSelection::component((
+                ResponsesRoute::ChatGptPlan,
+                ResponsesProtocol::Standard,
+            )),
         )
         .unwrap();
     assert_eq!(state.history, repeated.history);

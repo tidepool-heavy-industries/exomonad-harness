@@ -219,6 +219,7 @@ fn captured_cut_preserves_multicall_order_and_exact_earlier_dependencies() {
                         model: "test".into(),
                         route: crate::transport::ResponsesRoute::ChatGptPlan,
                         protocol: crate::transport::ResponsesProtocol::Standard,
+                        native_transport: None,
                     },
                 },
             )
@@ -614,6 +615,7 @@ async fn captured_cut_two_child_engines_finish_while_original_provider_call_is_p
                         model: "test".into(),
                         route: crate::transport::ResponsesRoute::ChatGptPlan,
                         protocol: crate::transport::ResponsesProtocol::Standard,
+                        native_transport: None,
                     },
                 },
             )
@@ -684,6 +686,7 @@ async fn captured_cut_two_child_engines_finish_while_original_provider_call_is_p
                     model: "test".into(),
                     route: crate::transport::ResponsesRoute::ChatGptPlan,
                     protocol: crate::transport::ResponsesProtocol::Standard,
+                    native_transport: None,
                 },
             },
         )

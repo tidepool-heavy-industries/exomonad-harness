@@ -73,6 +73,7 @@ fn claim_edit(store: &Store, head: &RequestId) -> OperationId {
                 model: "luna".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -390,6 +391,7 @@ fn model_state_is_exact_incarnation_owned() {
                 model: "luna".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -666,6 +668,7 @@ fn deferred_child_inherits_committed_context_and_terminal_before_call_stays_froz
                 model: "luna".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();
@@ -718,6 +721,7 @@ fn deferred_child_inherits_committed_context_and_terminal_before_call_stays_froz
                     model: "sol".into(),
                     route: crate::transport::ResponsesRoute::ChatGptPlan,
                     protocol: crate::transport::ResponsesProtocol::Standard,
+                    native_transport: None,
                 },
             },
         )
@@ -764,6 +768,7 @@ fn deferred_child_inherits_committed_context_and_terminal_before_call_stays_froz
                     model: "sol".into(),
                     route: crate::transport::ResponsesRoute::ChatGptPlan,
                     protocol: crate::transport::ResponsesProtocol::Standard,
+                    native_transport: None,
                 },
             },
         )
@@ -1357,6 +1362,7 @@ fn closed_opaque_response_conversion_is_rejected_preserving_raw_evidence() {
                 model: "luna".into(),
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
                 protocol: crate::transport::ResponsesProtocol::Standard,
+                native_transport: None,
             },
         )
         .unwrap();

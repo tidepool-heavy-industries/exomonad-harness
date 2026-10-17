@@ -1748,6 +1748,7 @@ async fn driver_foreign_followup_retains_observation_while_parent_sync_completes
                     model: "model-old".into(),
                     route: ResponsesRoute::ChatGptPlan,
                     protocol: ResponsesProtocol::Standard,
+                    native_transport: None,
                 },
             },
             &identity,

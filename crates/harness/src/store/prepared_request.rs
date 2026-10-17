@@ -122,6 +122,9 @@ impl Store {
                 Some(&request.model),
                 None,
                 Some(contract),
+                selection
+                    .native_admission()
+                    .map(|admission| admission.contract()),
             )?;
             let expected = projected
                 .items()

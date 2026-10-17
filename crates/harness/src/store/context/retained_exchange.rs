@@ -285,6 +285,7 @@ mod tests {
                     model: "fixture".into(),
                     route: crate::transport::ResponsesRoute::DeepSeek,
                     protocol: crate::transport::ResponsesProtocol::Standard,
+                    native_transport: None,
                 },
             )
             .unwrap();
