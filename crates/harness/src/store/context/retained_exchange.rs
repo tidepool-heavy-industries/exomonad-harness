@@ -419,5 +419,28 @@ mod tests {
             store.replay_tool_output_operation(&operation).unwrap(),
             before
         );
+        let evidence = store
+            .context_commit_evidence(&third.operation)
+            .unwrap()
+            .unwrap();
+        let fourth = editor(&store, &restored.head, "fourth-editor");
+        let replayed = store
+            .restore_context_commit(&fourth, &evidence, &success(), &[])
+            .unwrap();
+        let replayed_history = store
+            .context_request_state(&replayed.head, &fourth.operation.origin)
+            .unwrap();
+        assert_eq!(
+            replayed_history
+                .history
+                .iter()
+                .filter(|(_, _, item)| item.0["call_id"] == "source")
+                .count(),
+            2
+        );
+        assert_eq!(
+            store.replay_tool_output_operation(&operation).unwrap(),
+            before
+        );
     }
 }
