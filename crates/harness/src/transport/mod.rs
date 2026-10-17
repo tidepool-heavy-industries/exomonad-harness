@@ -282,6 +282,14 @@ fn diagnostic_suffix(diagnostic: Option<&HttpDiagnostic>) -> String {
 pub enum ResponsesRoute {
     #[default]
     ChatGptPlan,
+    DeepSeek,
+}
+
+impl ResponsesRoute {
+    /// The implemented wire profile, independent of requested model spelling.
+    pub const fn supports_plaintext_reasoning_edits(self) -> bool {
+        matches!(self, Self::DeepSeek)
+    }
 }
 
 /// Public-plan token source. A 401 requires operator sign-in; tokens never enter

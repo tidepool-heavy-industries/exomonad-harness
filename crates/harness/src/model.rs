@@ -43,7 +43,9 @@ pub struct OperationId {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
+    None,
     Low,
     Medium,
     High,
+    Max,
 }
