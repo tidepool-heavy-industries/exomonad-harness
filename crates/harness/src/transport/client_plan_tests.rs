@@ -278,7 +278,7 @@ fn issued_identity_binds_root_child_fork_and_retry_headers_to_cache_affinity() {
                 caller.clone(),
                 &[],
                 None,
-                crate::transport::PreparedTransportSelection::native(contract),
+                crate::transport::PreparedTransportSelection::component(contract),
                 crate::store::ProviderRequestPurpose::Inference,
             )
             .unwrap();
@@ -319,7 +319,7 @@ fn issued_identity_binds_root_child_fork_and_retry_headers_to_cache_affinity() {
                 restored,
                 &[],
                 None,
-                crate::transport::PreparedTransportSelection::native(contract),
+                crate::transport::PreparedTransportSelection::component(contract),
                 crate::store::ProviderRequestPurpose::Inference,
             )
             .unwrap();
@@ -384,6 +384,9 @@ async fn missing_plan_credentials_are_refused_before_traffic() {
     #[derive(Clone)]
     struct WrongAuthority;
     impl Auth for WrongAuthority {
+    fn admission(&self) -> Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError> {
+        crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from("/offline/synthetic-credential"))
+    }
         fn access(&self) -> Result<String, TransportError> {
             Err(TransportError::Authentication)
         }

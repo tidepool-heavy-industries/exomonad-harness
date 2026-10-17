@@ -59,10 +59,34 @@ pub enum LoginError {
 #[derive(Clone)]
 pub struct ChatGptPlanAuth {
     path: PathBuf,
+    admission:
+        std::sync::Arc<std::sync::OnceLock<Result<super::super::NativeTransportAdmission, ()>>>,
 }
 impl ChatGptPlanAuth {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            admission: Default::default(),
+        }
+    }
+    pub fn from_admission(
+        admission: super::super::NativeTransportAdmission,
+    ) -> Result<Self, TransportError> {
+        admission.contract().validate()?;
+        if admission.contract().route != super::super::ResponsesRoute::ChatGptPlan {
+            return Err(TransportError::InvalidAdmission);
+        }
+        let super::super::CredentialReference::File { path } = &admission.contract().credential
+        else {
+            return Err(TransportError::InvalidAdmission);
+        };
+        let path = path.clone();
+        let selected = std::sync::OnceLock::new();
+        let _ = selected.set(Ok(admission));
+        Ok(Self {
+            path,
+            admission: std::sync::Arc::new(selected),
+        })
     }
     pub fn default_path() -> Result<PathBuf, TransportError> {
         config_root()
@@ -71,6 +95,15 @@ impl ChatGptPlanAuth {
     }
 }
 impl Auth for ChatGptPlanAuth {
+    fn admission(&self) -> Result<super::super::NativeTransportAdmission, TransportError> {
+        self.admission
+            .get_or_init(|| {
+                super::super::NativeTransportAdmission::chatgpt_plan(self.path.clone())
+                    .map_err(|_| ())
+            })
+            .clone()
+            .map_err(|_| TransportError::InvalidAdmission)
+    }
     fn access(&self) -> Result<String, TransportError> {
         credentials(&self.path, &OfficialService).map_err(|_| TransportError::Authentication)
     }

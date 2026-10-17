@@ -1,8 +1,12 @@
 //! Streaming Responses transport with provider-bound credential sources.
 //!
 //! Stateless requests, protected native authentication, and SSE item assembly.
-//! One public ChatGPT-plan credential and Standard Responses HTTP contract.
+//! Explicit ChatGPT-plan and DeepSeek credentials under Standard Responses.
 
+mod admission;
+pub use admission::{
+    CredentialReference, InferenceLimits, NativeTransportAdmission, NativeTransportContract,
+};
 pub mod auth;
 pub mod client;
 mod http_error;
@@ -152,31 +156,43 @@ pub struct PreparedTransportSelection(PreparedTransportEvidence);
 
 #[derive(Clone)]
 enum PreparedTransportEvidence {
-    Native(ResponsesRoute, ResponsesProtocol),
+    Component(ResponsesRoute, ResponsesProtocol),
+    Native(NativeTransportAdmission),
     Replay(crate::replay::PreparedReplayStep),
 }
 
 impl PreparedTransportSelection {
-    pub(crate) fn native(contract: (ResponsesRoute, ResponsesProtocol)) -> Self {
-        Self(PreparedTransportEvidence::Native(contract.0, contract.1))
+    pub(crate) fn component(contract: (ResponsesRoute, ResponsesProtocol)) -> Self {
+        Self(PreparedTransportEvidence::Component(contract.0, contract.1))
+    }
+    pub(crate) fn native(admission: NativeTransportAdmission) -> Self {
+        Self(PreparedTransportEvidence::Native(admission))
+    }
+    pub(crate) fn native_admission(&self) -> Option<&NativeTransportAdmission> {
+        match &self.0 {
+            PreparedTransportEvidence::Native(admission) => Some(admission),
+            _ => None,
+        }
     }
     pub(crate) fn replay(step: crate::replay::PreparedReplayStep) -> Self {
         Self(PreparedTransportEvidence::Replay(step))
     }
     pub fn response_contract(&self) -> (ResponsesRoute, ResponsesProtocol) {
         match &self.0 {
-            PreparedTransportEvidence::Native(route, protocol) => (*route, *protocol),
+            PreparedTransportEvidence::Component(route, protocol) => (*route, *protocol),
+            PreparedTransportEvidence::Native(admission) => {
+                (admission.contract().route, admission.contract().protocol)
+            }
             PreparedTransportEvidence::Replay(step) => step.response_contract(),
         }
     }
     pub(crate) fn replay_step(&self) -> Option<&crate::replay::PreparedReplayStep> {
         match &self.0 {
             PreparedTransportEvidence::Replay(step) => Some(step),
-            PreparedTransportEvidence::Native(..) => None,
+            PreparedTransportEvidence::Native(..) | PreparedTransportEvidence::Component(..) => {
+                None
+            }
         }
-    }
-    pub(crate) fn is_native(&self) -> bool {
-        matches!(self.0, PreparedTransportEvidence::Native(..))
     }
 }
 
@@ -195,6 +211,10 @@ pub enum TransportError {
         response_id: String,
         reason: Option<IncompleteReason>,
     },
+    #[error("invalid native transport admission contract")]
+    InvalidAdmission,
+    #[error("unsupported provider request semantics: {0}")]
+    UnsupportedSemantics(UnsupportedSemantics),
     #[error("prepared provider selection does not match its owning transport or step")]
     PreparedSelectionMismatch,
     #[error("prepared transport contract does not match the selected replay turn")]
@@ -209,6 +229,13 @@ pub enum TransportError {
     IncompleteOutputIndices { index: u64 },
     #[error("native ChatGPT plan sign-in required; private Codex credentials are unsupported")]
     Authentication,
+    #[error("{route:?} credentials unavailable: {reason}")]
+    CredentialUnavailable {
+        route: ResponsesRoute,
+        reason: CredentialFailure,
+    },
+    #[error("{route:?} authentication rejected")]
+    ProviderAuthentication { route: ResponsesRoute },
     #[error("terminal HTTP status {status}{suffix}", suffix = diagnostic_suffix(.diagnostic.as_ref()))]
     Http {
         status: u16,
@@ -225,6 +252,40 @@ pub enum TransportError {
     IncompleteResponse(StreamInterruption),
     #[error("replay request {request:?} already has a recorded owner")]
     ReplayRequestReuse { request: crate::model::RequestId },
+}
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Error, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum UnsupportedSemantics {
+    #[error("reasoning effort")]
+    ReasoningEffort,
+    #[error("tool declaration")]
+    ToolDeclaration,
+    #[error("input item")]
+    InputItem,
+    #[error("message role or content")]
+    Message,
+    #[error("encrypted reasoning or reasoning summary")]
+    ReasoningContent,
+    #[error("cache comparison")]
+    CacheComparison,
+}
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Error, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialFailure {
+    #[error("selected source is missing")]
+    Missing,
+    #[error("selected source cannot be read")]
+    Unreadable,
+    #[error("selected source is unsafe")]
+    Unsafe,
+    #[error("selected value is invalid")]
+    Invalid,
 }
 
 /// An explicit provider failure event, distinct from local framing or schema
@@ -276,8 +337,39 @@ fn diagnostic_suffix(diagnostic: Option<&HttpDiagnostic>) -> String {
     })
 }
 
-/// Retained provenance for the single public provider endpoint.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+/// The tool encoding implemented by an admitted provider route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolEncodingProfile {
+    Native,
+    FunctionOnlyExplicitDelivery,
+}
+impl ToolEncodingProfile {
+    /// Validate the actual retained call before parsing can erase wire fields.
+    pub fn validate_invocation_item(self, item: &Item) -> Result<(), TransportError> {
+        if self == Self::Native {
+            return Ok(());
+        }
+        let name = item.0["name"].as_str().unwrap_or("");
+        if item.0["type"] != "function_call"
+            || item.0.get("namespace").is_some()
+            || item.0.get("async").is_some()
+            || name.is_empty()
+            || name.len() > 128
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        {
+            return Err(TransportError::UnsupportedSemantics(
+                UnsupportedSemantics::InputItem,
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponsesRoute {
     #[default]
@@ -286,6 +378,12 @@ pub enum ResponsesRoute {
 }
 
 impl ResponsesRoute {
+    pub const fn tool_encoding_profile(self) -> ToolEncodingProfile {
+        match self {
+            Self::ChatGptPlan => ToolEncodingProfile::Native,
+            Self::DeepSeek => ToolEncodingProfile::FunctionOnlyExplicitDelivery,
+        }
+    }
     /// The implemented wire profile, independent of requested model spelling.
     pub const fn supports_plaintext_reasoning_edits(self) -> bool {
         matches!(self, Self::DeepSeek)
@@ -295,6 +393,7 @@ impl ResponsesRoute {
 /// Public-plan token source. A 401 requires operator sign-in; tokens never enter
 /// retained requests or diagnostic formatting.
 pub trait Auth: Send + Sync {
+    fn admission(&self) -> Result<NativeTransportAdmission, TransportError>;
     fn access(&self) -> Result<String, TransportError>;
 }
 
@@ -307,21 +406,37 @@ pub enum ResponsesProtocol {
 }
 
 pub struct ResponsesClient<A: Auth> {
-    pub auth: A,
+    auth: A,
+    admission: Result<NativeTransportAdmission, ()>,
     http: std::sync::OnceLock<Result<reqwest::Client, &'static str>>,
 }
 
 impl<A: Auth + Clone + 'static> ResponsesClient<A> {
     pub fn new(auth: A) -> Self {
         Self {
+            admission: auth.admission().map_err(|_| ()),
             auth,
             http: std::sync::OnceLock::new(),
         }
     }
 
+    pub fn admission(&self) -> Result<&NativeTransportAdmission, TransportError> {
+        self.admission
+            .as_ref()
+            .map_err(|_| TransportError::InvalidAdmission)
+    }
+
     fn http(&self) -> Result<reqwest::Client, TransportError> {
         self.http
-            .get_or_init(|| client::http_client().map_err(|_| "HTTP client initialization failed"))
+            .get_or_init(|| {
+                client::http_client_with_limits(
+                    self.admission()
+                        .map_err(|_| "invalid native admission")?
+                        .contract()
+                        .limits,
+                )
+                .map_err(|_| "HTTP client initialization failed")
+            })
             .clone()
             .map_err(|message| TransportError::Stream(message.into()))
     }
@@ -330,7 +445,14 @@ impl<A: Auth + Clone + 'static> ResponsesClient<A> {
         &self,
         request: PreparedProviderRequest,
     ) -> Result<ResponsesTurn, TransportError> {
-        client::execute(self.auth.clone(), self.http()?, request, None).await
+        client::execute(
+            self.auth.clone(),
+            self.admission()?.clone(),
+            self.http()?,
+            request,
+            None,
+        )
+        .await
     }
 
     /// Sends completed items as they arrive; text deltas are best-effort.
@@ -340,6 +462,13 @@ impl<A: Auth + Clone + 'static> ResponsesClient<A> {
         request: PreparedProviderRequest,
         sink: tokio::sync::mpsc::Sender<sse::StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
-        client::execute(self.auth.clone(), self.http()?, request, Some(sink)).await
+        client::execute(
+            self.auth.clone(),
+            self.admission()?.clone(),
+            self.http()?,
+            request,
+            Some(sink),
+        )
+        .await
     }
 }

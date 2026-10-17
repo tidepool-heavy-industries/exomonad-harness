@@ -6,6 +6,9 @@ use tokio::sync::Semaphore;
 
 struct Offline;
 impl Auth for Offline {
+    fn admission(&self) -> Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError> {
+        crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from("/offline/synthetic-credential"))
+    }
     fn access(&self) -> Result<String, TransportError> {
         panic!("offline test")
     }
@@ -714,7 +717,7 @@ async fn issued_prompt_generation_survives_publication_and_replay_retry() {
                 restored,
                 &occurrences,
                 None,
-                crate::transport::PreparedTransportSelection::native((
+                crate::transport::PreparedTransportSelection::component((
                     ResponsesRoute::ChatGptPlan,
                     ResponsesProtocol::Standard,
                 )),

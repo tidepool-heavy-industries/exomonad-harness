@@ -7,6 +7,13 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RequestFailure {
     Authentication,
+    CredentialUnavailable {
+        route: super::ResponsesRoute,
+        reason: super::CredentialFailure,
+    },
+    ProviderAuthentication {
+        route: super::ResponsesRoute,
+    },
     Http {
         #[schemars(schema_with = "http_status_schema")]
         status: u16,
@@ -44,6 +51,17 @@ impl TransportError {
                 response_id: response_id.clone(),
                 reason: *reason,
             },
+            Self::CredentialUnavailable { route, reason } => {
+                TransportFailureKind::Rejected(RequestFailure::CredentialUnavailable {
+                    route: *route,
+                    reason: *reason,
+                })
+            }
+            Self::ProviderAuthentication { route } => {
+                TransportFailureKind::Rejected(RequestFailure::ProviderAuthentication {
+                    route: *route,
+                })
+            }
             Self::Authentication => TransportFailureKind::Rejected(RequestFailure::Authentication),
             Self::Http { status, diagnostic } => {
                 TransportFailureKind::Rejected(RequestFailure::Http {
@@ -58,7 +76,9 @@ impl TransportError {
                     diagnostic: diagnostic.clone(),
                 }
             }
-            Self::PreparedSelectionMismatch
+            Self::InvalidAdmission
+            | Self::UnsupportedSemantics(_)
+            | Self::PreparedSelectionMismatch
             | Self::ReplayContractMismatch
             | Self::UnprovenResponseContract
             | Self::MissingOutputIndex

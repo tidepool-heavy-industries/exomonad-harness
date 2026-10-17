@@ -63,7 +63,7 @@ fn record_response(store: &Store, source: &RequestId, raw: &[Item]) -> ServerCom
             request,
             &occurrences.into_iter().map(Some).collect::<Vec<_>>(),
             None,
-            PreparedTransportSelection::native((
+            PreparedTransportSelection::component((
                 ResponsesRoute::ChatGptPlan,
                 ResponsesProtocol::Standard,
             )),

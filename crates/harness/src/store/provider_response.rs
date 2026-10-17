@@ -45,6 +45,28 @@ impl IssuedProviderRequest {
 }
 
 impl Store {
+    /// Retained source selection; historical absence remains unknown. This is
+    /// evidence for startup validation, not permission to resume inference.
+    pub fn native_transport_contract(
+        &self,
+        request: &RequestId,
+    ) -> Result<Option<crate::transport::NativeTransportContract>> {
+        let encoded: Option<Option<String>> = self.lock()?.query_row(
+            "SELECT json_extract(issued_json,'$.native_transport') FROM provider_requests WHERE request_id=?1",
+            [&request.0], |row| row.get(0),
+        ).optional()?;
+        let contract = encoded
+            .flatten()
+            .map(|encoded| {
+                serde_json::from_str::<crate::transport::NativeTransportContract>(&encoded)
+            })
+            .transpose()?;
+        if let Some(contract) = &contract {
+            contract.validate().map_err(StoreError::ProviderAdmission)?;
+        }
+        Ok(contract)
+    }
+
     pub(crate) fn provider_request_purpose(
         &self,
         request: &RequestId,

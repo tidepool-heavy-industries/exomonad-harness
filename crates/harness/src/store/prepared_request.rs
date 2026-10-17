@@ -153,7 +153,7 @@ impl Store {
             }
             projected
         };
-        let body = client::normalize_for_dispatch(&request, contract)?;
+        let body = client::normalize_for_selection(&request, &selection)?;
         let hashes = request
             .input
             .iter()
@@ -178,6 +178,7 @@ impl Store {
             projection,
         )?;
         sealed.record.purpose = Some(purpose);
+        sealed.record.native_transport = selection.native_admission().map(|a| a.contract().clone());
         let issued = self.issue_provider_request(local, sealed, contract)?;
         Ok(PreparedProviderRequest {
             request,
@@ -229,7 +230,7 @@ mod tests {
                 dto.clone(),
                 &[None],
                 None,
-                PreparedTransportSelection::native(contract),
+                PreparedTransportSelection::component(contract),
                 ProviderRequestPurpose::Inference,
             )
             .unwrap();
@@ -256,7 +257,7 @@ mod tests {
                 invalid,
                 &[None],
                 None,
-                PreparedTransportSelection::native((
+                PreparedTransportSelection::component((
                     ResponsesRoute::ChatGptPlan,
                     ResponsesProtocol::Standard
                 )),
@@ -284,7 +285,7 @@ mod tests {
                     dto,
                     &[None],
                     None,
-                    PreparedTransportSelection::native((
+                    PreparedTransportSelection::component((
                         ResponsesRoute::ChatGptPlan,
                         ResponsesProtocol::Standard
                     )),
@@ -307,7 +308,7 @@ mod tests {
                 request(),
                 &[None],
                 None,
-                PreparedTransportSelection::native((
+                PreparedTransportSelection::component((
                     ResponsesRoute::ChatGptPlan,
                     ResponsesProtocol::Standard
                 )),

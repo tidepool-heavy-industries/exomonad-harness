@@ -23,13 +23,43 @@ impl NormalizedProviderBody {
 
 pub(crate) fn normalize_for_dispatch(
     request: &ResponsesRequest,
-    _contract: (ResponsesRoute, ResponsesProtocol),
+    contract: (ResponsesRoute, ResponsesProtocol),
 ) -> Result<NormalizedProviderBody, TransportError> {
-    let body = normalized_request(request)?;
+    let body = match contract.0 {
+        ResponsesRoute::ChatGptPlan => serde_json::to_value(normalized_request(request)?)
+            .map_err(|_| TransportError::InvalidAdmission)?,
+        ResponsesRoute::DeepSeek => {
+            deepseek_request(request, super::InferenceLimits::deepseek_default())?
+        }
+    };
     let bytes = serde_json::to_vec(&body)
         .map_err(|_| TransportError::Stream("request serialization failed".into()))?;
     Ok(NormalizedProviderBody(bytes))
 }
+
+pub(crate) fn normalize_for_selection(
+    request: &ResponsesRequest,
+    selection: &super::PreparedTransportSelection,
+) -> Result<NormalizedProviderBody, TransportError> {
+    if let Some(admission) = selection.native_admission() {
+        let contract = admission.contract();
+        contract.validate()?;
+        let mut body = match contract.route {
+            ResponsesRoute::DeepSeek => deepseek_request(request, contract.limits)?,
+            ResponsesRoute::ChatGptPlan => serde_json::to_value(normalized_request(request)?)
+                .map_err(|_| TransportError::InvalidAdmission)?,
+        };
+        if let Some(limit) = contract.limits.max_output_tokens {
+            body["max_output_tokens"] = Value::from(limit);
+        }
+        return serde_json::to_vec(&body)
+            .map(NormalizedProviderBody)
+            .map_err(|_| TransportError::InvalidAdmission);
+    }
+    normalize_for_dispatch(request, selection.response_contract())
+}
+
+pub const DEEPSEEK_ENDPOINT: &str = "https://api.deepseek.com/responses";
 
 pub const CHATGPT_PLAN_ENDPOINT: &str = "https://api.openai.com/v1/responses";
 
@@ -88,6 +118,14 @@ struct Reasoning {
 struct ToolChoice(&'static str);
 
 fn normalized_request(request: &ResponsesRequest) -> Result<RequestBody<'_>, TransportError> {
+    if matches!(
+        effective_effort(request),
+        crate::model::Effort::None | crate::model::Effort::Max
+    ) {
+        return Err(TransportError::UnsupportedSemantics(
+            super::UnsupportedSemantics::ReasoningEffort,
+        ));
+    }
     if request.model.is_empty() || !request.session_id.valid() {
         return Err(TransportError::Stream(
             "empty model or invalid session identity headers".into(),
@@ -160,6 +198,128 @@ fn normalized_request(request: &ResponsesRequest) -> Result<RequestBody<'_>, Tra
         prompt_cache_options: request.prompt_cache_comparison.as_ref(),
         include: ["reasoning.encrypted_content"],
     })
+}
+
+fn effective_effort(request: &ResponsesRequest) -> crate::model::Effort {
+    request
+        .input
+        .iter()
+        .rev()
+        .find_map(crate::item::Item::configuration_effort)
+        .unwrap_or(request.pinned_effort)
+}
+
+fn deepseek_request(
+    request: &ResponsesRequest,
+    limits: super::InferenceLimits,
+) -> Result<Value, TransportError> {
+    use super::UnsupportedSemantics as Unsupported;
+    let refuse = |kind| TransportError::UnsupportedSemantics(kind);
+    if request.model.is_empty() || !request.session_id.valid() {
+        return Err(TransportError::InvalidAdmission);
+    }
+    if effective_effort(request) == crate::model::Effort::Medium {
+        return Err(refuse(Unsupported::ReasoningEffort));
+    }
+    if request.prompt_cache_comparison.is_some() {
+        return Err(refuse(Unsupported::CacheComparison));
+    }
+    request.tools.strict_tools()?;
+    if request.tools.has_duplicate_names() {
+        return Err(refuse(Unsupported::ToolDeclaration));
+    }
+    let mut tools = Vec::new();
+    for tool in request.tools.iter() {
+        let name = tool["name"]
+            .as_str()
+            .ok_or_else(|| refuse(Unsupported::ToolDeclaration))?;
+        if tool["type"] != "function"
+            || name.is_empty()
+            || name.len() > 128
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            || tool.get("namespace").is_some()
+            || tool.get("async").is_some()
+        {
+            return Err(refuse(Unsupported::ToolDeclaration));
+        }
+        if request
+            .tools_allowed
+            .as_ref()
+            .is_none_or(|allowed| allowed.iter().any(|allowed| allowed == name))
+        {
+            tools.push(tool.clone());
+        }
+    }
+    let mut input = Vec::new();
+    for original in &request.input {
+        if original.is_configuration_update() {
+            continue;
+        }
+        let mut item = original.0.clone();
+        match item["type"].as_str() {
+            Some("message") => {
+                let role = item["role"]
+                    .as_str()
+                    .ok_or_else(|| refuse(Unsupported::Message))?;
+                if !matches!(role, "system" | "developer" | "user" | "assistant") {
+                    return Err(refuse(Unsupported::Message));
+                }
+                let valid_content = item["content"].is_string()
+                    || item["content"].as_array().is_some_and(|parts| {
+                        parts.iter().all(|part| {
+                            (matches!(part["type"].as_str(), Some("input_text" | "output_text"))
+                                && part["text"].is_string())
+                                || (role == "user" && part["type"] == "input_image")
+                        })
+                    });
+                if !valid_content {
+                    return Err(refuse(Unsupported::Message));
+                }
+                // DeepSeek treats developer as user. Keep authored policy at its
+                // original position by explicitly selecting the supported system role.
+                if role == "developer" {
+                    item["role"] = Value::String("system".into());
+                }
+            }
+            Some("function_call" | "function_call_output") => {
+                if item.get("namespace").is_some() || item.get("async").is_some() {
+                    return Err(refuse(Unsupported::InputItem));
+                }
+                if let Some(fields) = item.as_object_mut() {
+                    fields.remove("output_format");
+                }
+            }
+            Some("reasoning") => {
+                if item.get("encrypted_content").is_some_and(|v| !v.is_null())
+                    || item
+                        .get("summary")
+                        .is_some_and(|v| !v.is_null() && v.as_array().is_none_or(|a| !a.is_empty()))
+                {
+                    return Err(refuse(Unsupported::ReasoningContent));
+                }
+                if !item["content"].as_array().is_some_and(|parts| {
+                    parts
+                        .iter()
+                        .all(|part| part["type"] == "reasoning_text" && part["text"].is_string())
+                }) {
+                    return Err(refuse(Unsupported::ReasoningContent));
+                }
+            }
+            _ => return Err(refuse(Unsupported::InputItem)),
+        }
+        input.push(item);
+    }
+    let mut body = serde_json::json!({"model":request.model,"input":input,"stream":true,"max_output_tokens":limits.max_output_tokens,"reasoning":{"effort":effective_effort(request)}});
+    if !request.instructions.is_empty() {
+        body["instructions"] = Value::String(request.instructions.clone());
+    }
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(tools);
+        body["tool_choice"] = Value::String("auto".into());
+    }
+    Ok(body)
 }
 
 /// A small SSE framer for the public Responses endpoint. We keep it here rather than
@@ -282,9 +442,14 @@ fn http_request(
 }
 
 pub(super) fn http_client() -> Result<reqwest::Client, TransportError> {
+    http_client_with_limits(super::InferenceLimits::chatgpt_default())
+}
+pub(super) fn http_client_with_limits(
+    limits: super::InferenceLimits,
+) -> Result<reqwest::Client, TransportError> {
     reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(300))
+        .connect_timeout(Duration::from_secs(limits.connect_timeout_secs))
+        .timeout(Duration::from_secs(limits.total_timeout_secs))
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| TransportError::Stream("HTTP client initialization failed".into()))
@@ -295,18 +460,35 @@ pub(super) fn http_client() -> Result<reqwest::Client, TransportError> {
 /// is included in errors, traces, stored items, or returned data.
 pub(super) async fn execute<A: Auth + Clone + 'static>(
     auth: A,
+    admission: super::NativeTransportAdmission,
     http: reqwest::Client,
     prepared: super::PreparedProviderRequest,
     sink: Option<tokio::sync::mpsc::Sender<StreamEvent>>,
 ) -> Result<ResponsesTurn, TransportError> {
-    if !prepared.selection().is_native() {
+    if prepared
+        .selection()
+        .native_admission()
+        .map(|a| a.contract())
+        != Some(admission.contract())
+    {
         return Err(TransportError::PreparedSelectionMismatch);
     }
+    // Queue cancellation drops this future before any credential access or send.
+    // The permit remains owned until terminal response processing or cancellation.
+    let _permit = admission.acquire().await?;
     let (request, body, _) = prepared.into_dispatch_parts();
     let token = tokio::task::spawn_blocking(move || auth.access())
         .await
         .map_err(|_| TransportError::Authentication)??;
-    let call = http_request(&http, &request, body, &token);
+    let call = match admission.contract().route {
+        ResponsesRoute::ChatGptPlan => http_request(&http, &request, body, &token),
+        ResponsesRoute::DeepSeek => http
+            .post(&admission.contract().endpoint)
+            .bearer_auth(&token)
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body),
+    };
     let response = match call.send().await {
         Ok(response) => response,
         Err(_) => {
@@ -321,7 +503,11 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
     let status = response.status().as_u16();
     if status == 401 {
         let summary = super::TransportFailureSummary::response(&response, &token, "");
-        return failure_summary(&sink, summary, TransportError::Authentication).await;
+        let error = match admission.contract().route {
+            ResponsesRoute::ChatGptPlan => TransportError::Authentication,
+            route => TransportError::ProviderAuthentication { route },
+        };
+        return failure_summary(&sink, summary, error).await;
     }
     if status != 200 {
         let summary = super::TransportFailureSummary::response(&response, &token, "");
@@ -586,6 +772,14 @@ mod tests {
         #[derive(Clone)]
         struct NoAuth;
         impl Auth for NoAuth {
+            fn admission(
+                &self,
+            ) -> Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError>
+            {
+                crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
+                    "/offline/synthetic-credential",
+                ))
+            }
             fn access(&self) -> Result<String, TransportError> {
                 panic!("invalid schema must be refused before authentication");
             }

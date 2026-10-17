@@ -149,6 +149,7 @@ pub struct RunAccountAuth {
     run: String,
     launch_path: PathBuf,
     selection_writer: Arc<Mutex<()>>,
+    admission: super::super::NativeTransportAdmission,
 }
 impl RunAccountAuth {
     pub fn new(
@@ -162,7 +163,20 @@ impl RunAccountAuth {
         if !accounts.contains(&selected) {
             return Err(TransportError::Authentication);
         }
+        let admission = super::super::NativeTransportAdmission::rehydrate(
+            super::super::NativeTransportContract {
+                route: super::super::ResponsesRoute::ChatGptPlan,
+                protocol: super::super::ResponsesProtocol::Standard,
+                endpoint: super::super::client::CHATGPT_PLAN_ENDPOINT.into(),
+                credential: super::super::CredentialReference::RunAccount {
+                    launch_path: accounts.launch_path.clone(),
+                    run: run.clone(),
+                },
+                limits: super::super::InferenceLimits::chatgpt_default(),
+            },
+        )?;
         Ok(Self {
+            admission,
             store,
             run,
             launch_path: accounts.launch_path.clone(),
@@ -232,6 +246,9 @@ impl RunAccountAuth {
     }
 }
 impl Auth for RunAccountAuth {
+    fn admission(&self) -> Result<super::super::NativeTransportAdmission, TransportError> {
+        Ok(self.admission.clone())
+    }
     fn access(&self) -> Result<String, TransportError> {
         let id = self
             .store

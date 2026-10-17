@@ -28,6 +28,9 @@ use tokio::{
 #[derive(Clone)]
 struct NoAuth;
 impl Auth for NoAuth {
+    fn admission(&self) -> Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError> {
+        crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from("/offline/synthetic-credential"))
+    }
     fn access(&self) -> Result<String, TransportError> {
         panic!("loopback never authenticates")
     }

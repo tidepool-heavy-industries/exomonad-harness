@@ -23,6 +23,9 @@ async fn exchange(
     #[derive(Clone)]
     struct FixtureAuth;
     impl Auth for FixtureAuth {
+    fn admission(&self) -> Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError> {
+        crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from("/offline/synthetic-credential"))
+    }
         fn access(&self) -> Result<String, TransportError> {
             unreachable!("fixture exchange supplies local HTTP credentials")
         }

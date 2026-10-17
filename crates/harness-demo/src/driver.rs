@@ -126,6 +126,9 @@ mod tests {
     #[derive(Clone)]
     struct ReplayAuth;
     impl Auth for ReplayAuth {
+    fn admission(&self) -> Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError> {
+        harness::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from("/offline/synthetic-credential"))
+    }
         fn access(&self) -> Result<String, TransportError> {
             Err(TransportError::Authentication)
         }

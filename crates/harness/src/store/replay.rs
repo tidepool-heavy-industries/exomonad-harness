@@ -26,6 +26,8 @@ pub struct IssuedReplayRequest {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct IssuedRequestRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) native_transport: Option<crate::transport::NativeTransportContract>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) purpose: Option<super::ProviderRequestPurpose>,
     input: Vec<ItemHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -532,6 +534,7 @@ impl Store {
             }
             let issued = IssuedReplayRequest {
                 record: IssuedRequestRecord {
+                    native_transport: None,
                     purpose: Some(super::ProviderRequestPurpose::Inference),
                     input,
                     outputs,
