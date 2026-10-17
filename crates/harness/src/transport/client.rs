@@ -80,6 +80,10 @@ pub const DEEPSEEK_ENDPOINT: &str = "https://api.deepseek.com/responses";
 pub const CHATGPT_PLAN_ENDPOINT: &str = "https://api.openai.com/v1/responses";
 
 #[cfg(test)]
+#[path = "client_deepseek_tests.rs"]
+mod deepseek_tests;
+
+#[cfg(test)]
 #[path = "client_portability_tests.rs"]
 mod portability_tests;
 
