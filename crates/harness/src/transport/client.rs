@@ -508,6 +508,7 @@ struct ObservationGuard {
     started: Option<std::time::Instant>,
     body_started: Option<std::time::Instant>,
     queued: Option<std::time::Instant>,
+    framer: SseFramer,
 }
 impl ObservationGuard {
     fn new(
@@ -535,6 +536,7 @@ impl ObservationGuard {
             started,
             body_started: None,
             queued: None,
+            framer: SseFramer::new(),
         }
     }
     fn summary(&mut self) -> &mut super::TransportObservation {
@@ -586,6 +588,7 @@ impl ObservationGuard {
         let Some(mut summary) = self.observation.take() else {
             return;
         };
+        self.framer.observe_tail(&mut summary);
         if let Some(started) = self.started {
             summary.total_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
             summary.completed_at_unix_ms = observed_utc_ms();
@@ -718,7 +721,6 @@ async fn read_response_observed(
     observation.summary().received_chunks = Some(0);
     observation.summary().framed_events = Some(0);
     let mut stream = response.bytes_stream();
-    let mut framer = SseFramer::new();
     let mut assembly = ResponseAssembly::default();
     let (result, end) = 'body: loop {
         let Some(chunk) = stream.next().await else {
@@ -747,7 +749,7 @@ async fn read_response_observed(
         }
         *observation.summary().received_bytes.as_mut().unwrap() += chunk.len() as u64;
         *observation.summary().received_chunks.as_mut().unwrap() += 1;
-        let (events, framing_error) = framer.push(&chunk);
+        let (events, framing_error) = observation.framer.push(&chunk);
         for frame in events {
             if observation.summary().first_event_ms.is_none() {
                 observation.summary().first_event_ms = observation.elapsed_ms();
@@ -785,7 +787,6 @@ async fn read_response_observed(
         }
     };
     observation.summary().end = end;
-    framer.observe_tail(observation.summary());
     result
 }
 

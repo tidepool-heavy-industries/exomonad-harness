@@ -483,11 +483,15 @@ pub trait ResponsesTransport: Send + Sync {
         TransportError,
     >;
 
+    /// Completion releases the consumed prepared request and any diagnostic
+    /// publisher. Diagnostic receipt closure is allowed for component clients;
+    /// keeping an active producer after returning is not a settled request.
     async fn create(
         &self,
         request: PreparedProviderRequest,
     ) -> Result<ResponsesTurn, TransportError>;
 
+    /// The same prepared-request/publisher lifetime contract as `create` applies.
     async fn create_streaming(
         &self,
         request: PreparedProviderRequest,

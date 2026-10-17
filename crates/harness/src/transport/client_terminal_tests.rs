@@ -241,7 +241,21 @@ async fn capacity_one_data_stream_preserves_items_and_independent_observation() 
 
 #[tokio::test]
 async fn dropped_held_stream_retains_observed_partial_facts_without_completion() {
-    let (response, release, server) = response(visible_then_terminal(false), false, true).await;
+    // One deterministic body chunk establishes exactly which partial bytes were
+    // consumed before the pending next chunk. HTTP framing is covered by the
+    // capacity-one test; this control isolates cancellation of the real reader.
+    let unfinished = b"data: {\"private-partial-arguments\":";
+    let mut body = visible_then_terminal(false);
+    body.extend_from_slice(unfinished);
+    let expected_bytes = body.len() as u64;
+    let stream = futures_util::stream::once(async move { Ok::<_, std::io::Error>(body) })
+        .chain(futures_util::stream::pending());
+    let response = reqwest::Response::from(
+        axum::http::Response::builder()
+            .status(200)
+            .body(reqwest::Body::wrap_stream(stream))
+            .unwrap(),
+    );
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let (observation_tx, observation_rx) = tokio::sync::oneshot::channel();
     let mut reader = Box::pin(read_response(
@@ -271,12 +285,17 @@ async fn dropped_held_stream_retains_observed_partial_facts_without_completion()
         observed.last_recognized_event,
         Some(EventKind::OutputItemDone)
     );
-    assert!(observed.received_bytes.unwrap() > 0);
+    assert_eq!(observed.received_bytes, Some(expected_bytes));
     assert_eq!(observed.framed_events, Some(2));
+    assert_eq!(observed.unframed_line_bytes, unfinished.len() as u64);
+    assert_eq!(observed.unframed_data_bytes, 0);
+    assert!(
+        !serde_json::to_string(&observed)
+            .unwrap()
+            .contains("private-partial-arguments")
+    );
     assert_eq!(observed.usage, None);
     assert!(rx.recv().await.is_none());
-    let _ = release.send(());
-    server.await.unwrap();
 }
 
 #[derive(Debug, PartialEq, Eq)]
