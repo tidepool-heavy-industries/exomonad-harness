@@ -447,7 +447,7 @@ async fn cancellation_of_synchronous_barrier_uses_owned_job_cleanup() {
 #[tokio::test]
 async fn synchronous_results_settle_before_compaction_requests() {
     let mut first = turn(vec![call("slow", false, Some(false))]);
-    first.usage.input_tokens = 3;
+    first.usage.input_tokens = Some(3);
     let (engine, host, mut started, requests, mut requested) = setup(vec![
         first,
         turn(vec![Item(
@@ -740,7 +740,7 @@ async fn server_and_text_compaction_capture_published_prompt_generation() {
         let requests = Arc::new(Mutex::new(vec![]));
         let store = Arc::new(Store::memory().unwrap());
         let mut first = turn(vec![call("capture", false, Some(false))]);
-        first.usage.input_tokens = 3;
+        first.usage.input_tokens = Some(3);
         let compact = if text_summary {
             final_turn()
         } else {

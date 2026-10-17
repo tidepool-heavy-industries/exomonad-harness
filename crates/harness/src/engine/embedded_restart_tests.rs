@@ -328,9 +328,8 @@ async fn embedded_seed_is_included_once_when_explicit_input_starts_inference() {
         crate::store::Usage::default()
     );
     let usage = Usage {
-        input_tokens: 17,
-        output_tokens: 5,
-        reported: true,
+        input_tokens: Some(17),
+        output_tokens: Some(5),
         ..Usage::default()
     };
     let mut turn = final_turn();
@@ -1010,7 +1009,7 @@ impl ResponsesTransport for Arc<CutAfterCompaction> {
                     "type":"function_call","call_id":"completed-effect","name":"effect","arguments":"{}"
                 }))],
                 usage: Usage {
-                    input_tokens: 1000,
+                    input_tokens: Some(1000),
                     ..Usage::default()
                 },
             });

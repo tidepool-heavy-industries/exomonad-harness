@@ -663,11 +663,11 @@ mod tests {
             response_id: "SENTINEL_RESPONSE_ID".into(),
             items: vec![Item(json!({"text":"SENTINEL_RESPONSE_TEXT"}))],
             usage: Usage {
-                reported: true,
-                input_tokens: 2,
-                output_tokens: 3,
+                input_tokens: Some(2),
+                output_tokens: Some(3),
                 cached_tokens: Some(1),
                 cache_write_tokens: Some(0),
+                ..Usage::default()
             },
         };
         let path = std::env::temp_dir().join(format!(
@@ -690,7 +690,7 @@ mod tests {
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0]["usage"]["version"], 2);
+        assert_eq!(events[0]["usage"]["version"], 3);
         assert_eq!(events[0]["usage"]["cached_tokens"], 1);
         assert_eq!(events[0]["usage"]["cache_write_tokens"], 0);
         assert!(events[1]["usage"]["cached_tokens"].is_null());

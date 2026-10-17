@@ -2315,9 +2315,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             if let Some(error) = deferred_dispatch_error {
                 return Err(error);
             }
+            // Legacy SQL aggregates retain only known token subtotals. The
+            // versioned responses_usage event below owns completeness/raw facts;
+            // its absent counters and absent bill must never be inferred here.
             let usage_for_store = StoredUsage {
-                input_tokens: i64::try_from(turn.usage.input_tokens).unwrap_or(i64::MAX),
-                output_tokens: i64::try_from(turn.usage.output_tokens).unwrap_or(i64::MAX),
+                input_tokens: i64::try_from(turn.usage.input_tokens.unwrap_or(0))
+                    .unwrap_or(i64::MAX),
+                output_tokens: i64::try_from(turn.usage.output_tokens.unwrap_or(0))
+                    .unwrap_or(i64::MAX),
                 cost_micros: 0,
             };
             let store = self.store.clone();
@@ -2344,9 +2349,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 return Err(error);
             }
             previous_usage = turn.usage.clone();
-            compact_due = self
-                .compact_at_input_tokens
-                .is_some_and(|threshold| turn.usage.input_tokens >= threshold);
+            compact_due = self.compact_at_input_tokens.is_some_and(|threshold| {
+                turn.usage
+                    .input_tokens
+                    .is_some_and(|input| input >= threshold)
+            });
 
             // Typed completion belongs to Engine, not the job scheduler. Seal
             // its validated occurrence before a synchronous context copy needs
@@ -8220,11 +8227,11 @@ mod tests {
             response_id: id.into(),
             items,
             usage: Usage {
-                reported: true,
-                input_tokens: 3,
-                output_tokens: 2,
+                input_tokens: Some(3),
+                output_tokens: Some(2),
                 cached_tokens: Some(1),
                 cache_write_tokens: Some(0),
+                ..Usage::default()
             },
         }
     }
@@ -8960,7 +8967,7 @@ mod tests {
                     "arguments":"{}"
                 }))],
             );
-            before_compact.usage.input_tokens = 10;
+            before_compact.usage.input_tokens = Some(10);
             let replay = Replay {
                 requests: requests.clone(),
                 turns: Mutex::new(
@@ -9074,7 +9081,7 @@ mod tests {
                 "type":"message","role":"assistant","phase":"final_answer","content":"before output"
             }))],
         );
-        provisional.usage.input_tokens = 0;
+        provisional.usage.input_tokens = Some(0);
         let replay = Replay {
             requests: requests.clone(),
             turns: Mutex::new(

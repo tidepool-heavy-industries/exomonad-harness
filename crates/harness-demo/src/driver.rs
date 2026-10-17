@@ -199,7 +199,7 @@ mod tests {
                 response_id: format!("replay-{key}"),
                 items,
                 usage: TurnUsage {
-                    input_tokens,
+                    input_tokens: Some(input_tokens),
                     ..TurnUsage::default()
                 },
             })

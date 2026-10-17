@@ -2898,7 +2898,16 @@ async fn main() {
                         println!("{text}");
                         eprintln!(
                             "usage (final response): {} input / {} output tokens",
-                            completion.turn.usage.input_tokens, completion.turn.usage.output_tokens
+                            completion
+                                .turn
+                                .usage
+                                .input_tokens
+                                .map_or_else(|| "unknown".to_owned(), |count| count.to_string()),
+                            completion
+                                .turn
+                                .usage
+                                .output_tokens
+                                .map_or_else(|| "unknown".to_owned(), |count| count.to_string())
                         );
                     }
                     Err(error) => {
@@ -2921,7 +2930,16 @@ async fn main() {
                     println!("{text}");
                     eprintln!(
                         "usage (final response): {} input / {} output tokens",
-                        completion.turn.usage.input_tokens, completion.turn.usage.output_tokens
+                        completion
+                            .turn
+                            .usage
+                            .input_tokens
+                            .map_or_else(|| "unknown".to_owned(), |count| count.to_string()),
+                        completion
+                            .turn
+                            .usage
+                            .output_tokens
+                            .map_or_else(|| "unknown".to_owned(), |count| count.to_string())
                     );
                 }
                 Err(error) => {
@@ -3890,11 +3908,11 @@ mod tests {
                     "content":[{"type":"output_text","text":"offline engine answer"}]
                 }))],
                 usage: Usage {
-                    reported: true,
-                    input_tokens: 12,
-                    output_tokens: 4,
+                    input_tokens: Some(12),
+                    output_tokens: Some(4),
                     cached_tokens: Some(0),
                     cache_write_tokens: Some(0),
+                    ..Usage::default()
                 },
             })
         }
@@ -4764,8 +4782,8 @@ mod tests {
             final_text(&turn.turn.items).as_deref(),
             Some("offline engine answer")
         );
-        assert_eq!(turn.turn.usage.input_tokens, 12);
-        assert_eq!(turn.turn.usage.output_tokens, 4);
+        assert_eq!(turn.turn.usage.input_tokens, Some(12));
+        assert_eq!(turn.turn.usage.output_tokens, Some(4));
         let _ = std::fs::remove_dir_all(root);
     }
 

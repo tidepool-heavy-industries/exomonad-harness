@@ -95,7 +95,7 @@ fn turn(id: &str, items: Vec<Item>) -> Result<ResponsesTurn, TransportError> {
         response_id: id.into(),
         items,
         usage: Usage {
-            input_tokens: 500,
+            input_tokens: Some(500),
             ..Default::default()
         },
     })
@@ -324,7 +324,7 @@ async fn pending_custom_call_survives_handoff_and_receives_late_output() {
         json!({"type":"custom_tool_call","call_id":"custom-1","name":"custom","input":"echo raw","opaque":"exact"}),
     );
     let mut provisional = turn("provisional", vec![final_answer()]).unwrap();
-    provisional.usage.input_tokens = 0;
+    provisional.usage.input_tokens = Some(0);
     let replay = Replay {
         requests: requests.clone(),
         turns: Mutex::new(vec![

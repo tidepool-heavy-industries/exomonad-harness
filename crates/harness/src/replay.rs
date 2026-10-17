@@ -1357,7 +1357,8 @@ mod tests {
             Arc::new(
                 move |request: &ResponsesRequest, turn: &mut ResponsesTurn, ordinal: usize| {
                     observed.lock().unwrap().push((request.clone(), ordinal));
-                    turn.usage.input_tokens = request.input.len() as u64 * 10 + ordinal as u64;
+                    turn.usage.input_tokens =
+                        Some(request.input.len() as u64 * 10 + ordinal as u64);
                 },
             )
         };
@@ -1398,7 +1399,7 @@ mod tests {
         assert_eq!(observed.lock().unwrap()[1].1, 2);
         assert!(!running.is_finished());
         replay.release_next();
-        assert_eq!(running.await.unwrap(), [11, 22]);
+        assert_eq!(running.await.unwrap(), [Some(11), Some(22)]);
     }
 
     #[tokio::test]

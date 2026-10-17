@@ -274,25 +274,7 @@ impl ResponseAssembly {
                     cache_write_tokens = ?details["cache_write_tokens"].as_u64(),
                     "provider completion diagnostics"
                 );
-                self.completed = Some((
-                    id.to_owned(),
-                    Usage {
-                        reported: usage.get("input_tokens").and_then(Value::as_u64).is_some()
-                            && usage.get("output_tokens").and_then(Value::as_u64).is_some(),
-                        input_tokens: usage
-                            .get("input_tokens")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0),
-                        output_tokens: usage
-                            .get("output_tokens")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0),
-                        cached_tokens: details.get("cached_tokens").and_then(Value::as_u64),
-                        cache_write_tokens: details
-                            .get("cache_write_tokens")
-                            .and_then(Value::as_u64),
-                    },
-                ));
+                self.completed = Some((id.to_owned(), Usage::from_response_usage(response)));
                 Ok(None)
             }
             Some("response.incomplete") => {
@@ -561,8 +543,8 @@ mod tests {
         assert_eq!(turn.items.len(), 1);
         assert_eq!(turn.items[0].0["phase"], "final_answer");
         assert_eq!(turn.response_id, "resp_1");
-        assert_eq!(turn.usage.input_tokens, 12);
-        assert_eq!(turn.usage.output_tokens, 2);
+        assert_eq!(turn.usage.input_tokens, Some(12));
+        assert_eq!(turn.usage.output_tokens, Some(2));
         assert_eq!(turn.usage.cached_tokens, Some(3));
         assert_eq!(turn.usage.cache_write_tokens, Some(4));
     }
@@ -578,9 +560,15 @@ mod tests {
             let mut assembly = ResponseAssembly::default();
             assembly.accept(&json!({"type":"response.completed","response":{"id":"usage-proof","output":[],"usage":usage}}).to_string()).unwrap();
             let turn = assembly.finish().unwrap();
-            assert_eq!(turn.usage.reported, reported);
-            assert_eq!(turn.usage.input_tokens, 0);
-            assert_eq!(turn.usage.output_tokens, 0);
+            assert_eq!(turn.usage.has_reported_totals(), reported);
+            assert_eq!(
+                turn.usage.input_tokens,
+                usage.get("input_tokens").and_then(Value::as_u64)
+            );
+            assert_eq!(
+                turn.usage.output_tokens,
+                usage.get("output_tokens").and_then(Value::as_u64)
+            );
         }
     }
 
@@ -614,7 +602,7 @@ mod tests {
                 )
                 .unwrap();
             let usage = assembly.finish().unwrap().usage;
-            assert!(usage.reported);
+            assert!(usage.has_reported_totals());
             assert_eq!(usage.cached_tokens, cached);
             assert_eq!(usage.cache_write_tokens, written);
             assert_eq!(

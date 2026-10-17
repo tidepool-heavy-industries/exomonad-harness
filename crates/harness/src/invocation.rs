@@ -57,8 +57,8 @@ impl Counts {
         if let Some(usage) = usage {
             self.reported_tokens = self
                 .reported_tokens
-                .saturating_add(usage.input_tokens.saturating_add(usage.output_tokens));
-            if !usage.reported {
+                .saturating_add(usage.known_token_subtotal());
+            if !usage.has_reported_totals() {
                 self.unknown_usage_requests += 1;
             }
         } else {
@@ -974,9 +974,8 @@ mod tests {
             response_id: uuid::Uuid::new_v4().to_string(),
             items,
             usage: Usage {
-                reported: true,
-                input_tokens: 2,
-                output_tokens: 1,
+                input_tokens: Some(2),
+                output_tokens: Some(1),
                 ..Usage::default()
             },
         }
@@ -1436,9 +1435,8 @@ mod tests {
         assert_eq!(receipt.counts.unknown_usage_requests, 1);
         assert_eq!(receipt.counts.reported_tokens, 0);
         let mut partial = final_turn();
-        partial.usage.reported = false;
-        partial.usage.input_tokens = 7;
-        partial.usage.output_tokens = 0;
+        partial.usage.input_tokens = Some(7);
+        partial.usage.output_tokens = None;
         let mut invocation = start(
             Arc::new(Store::memory().unwrap()),
             Arc::new(JobScheduler::new(1).unwrap()),
