@@ -149,7 +149,7 @@ pub struct RunAccountAuth {
     run: String,
     launch_path: PathBuf,
     selection_writer: Arc<Mutex<()>>,
-    admission: super::super::NativeTransportAdmission,
+    admission: crate::transport::NativeTransportAdmission,
 }
 impl RunAccountAuth {
     pub fn new(
@@ -163,16 +163,16 @@ impl RunAccountAuth {
         if !accounts.contains(&selected) {
             return Err(TransportError::Authentication);
         }
-        let admission = super::super::NativeTransportAdmission::rehydrate(
-            super::super::NativeTransportContract {
-                route: super::super::ResponsesRoute::ChatGptPlan,
-                protocol: super::super::ResponsesProtocol::Standard,
-                endpoint: super::super::client::CHATGPT_PLAN_ENDPOINT.into(),
-                credential: super::super::CredentialReference::RunAccount {
+        let admission = crate::transport::NativeTransportAdmission::rehydrate(
+            crate::transport::NativeTransportContract {
+                route: crate::transport::ResponsesRoute::ChatGptPlan,
+                protocol: crate::transport::ResponsesProtocol::Standard,
+                endpoint: crate::transport::client::CHATGPT_PLAN_ENDPOINT.into(),
+                credential: crate::transport::CredentialReference::RunAccount {
                     launch_path: accounts.launch_path.clone(),
                     run: run.clone(),
                 },
-                limits: super::super::InferenceLimits::chatgpt_default(),
+                limits: crate::transport::InferenceLimits::chatgpt_default(),
             },
         )?;
         Ok(Self {
@@ -246,7 +246,7 @@ impl RunAccountAuth {
     }
 }
 impl Auth for RunAccountAuth {
-    fn admission(&self) -> Result<super::super::NativeTransportAdmission, TransportError> {
+    fn admission(&self) -> Result<crate::transport::NativeTransportAdmission, TransportError> {
         Ok(self.admission.clone())
     }
     fn access(&self) -> Result<String, TransportError> {
