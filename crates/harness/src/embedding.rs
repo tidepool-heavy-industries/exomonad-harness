@@ -569,15 +569,13 @@ impl Conversation {
             actor: self.identity().actor.clone(),
             incarnation: self.identity().incarnation.clone(),
         };
-        let (route, protocol) = transport.response_contract()?;
+        let selected = transport.prepare_submission()?;
         self.store.initialize_context_target(
             &origin,
-            &crate::context::ContextProjectionTarget {
-                model: config.model.clone(),
-                route,
-                protocol,
-                native_transport: None,
-            },
+            &crate::context::ContextProjectionTarget::for_transport(
+                config.model.clone(),
+                &selected,
+            ),
         )?;
         Ok(crate::engine::Engine::with_transport(
             transport,

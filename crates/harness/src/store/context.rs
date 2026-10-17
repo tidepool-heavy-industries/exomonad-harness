@@ -51,9 +51,8 @@ struct InferenceState {
     route: Option<crate::transport::ResponsesRoute>,
     #[serde(default)]
     protocol: Option<crate::transport::ResponsesProtocol>,
-    // Additive evidence in the existing v2 state envelope. Older/legacy state
-    // has no profile and grants no plaintext reasoning edit authority. Older
-    // readers may ignore this field; this is not a downgrade protection scheme.
+    // Version 3 retains exact selected transport evidence. Versions 1/2 have
+    // no profile and cannot grant plaintext reasoning edit authority.
     #[serde(default)]
     native_transport: Option<crate::transport::NativeTransportContract>,
 }
@@ -77,7 +76,7 @@ fn state(c: &Connection, identity: &ConversationIdentity) -> Result<InferenceSta
         None => Ok(InferenceState::default()),
         Some(raw) => {
             let value: serde_json::Value = serde_json::from_str(&raw)?;
-            if value["version"] != 1 && value["version"] != 2 {
+            if value["version"] != 1 && value["version"] != 2 && value["version"] != 3 {
                 return Err(ContextError::UnsupportedState.into());
             }
             let state: InferenceState = serde_json::from_value(value["state"].clone())?;
@@ -89,6 +88,9 @@ fn state(c: &Connection, identity: &ConversationIdentity) -> Result<InferenceSta
                     ));
                 }
             }
+            if value["version"] != 3 && state.native_transport.is_some() {
+                return Err(ContextError::UnsupportedState.into());
+            }
             Ok(state)
         }
     }
@@ -99,7 +101,7 @@ fn save_state(
     identity: &ConversationIdentity,
     state: &InferenceState,
 ) -> Result<()> {
-    tx.execute("INSERT INTO session_state(session_id,state,updated_at) VALUES(?1,?2,?3) ON CONFLICT(session_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at", params![state_key(identity)?, json!({"version":2,"state":state}).to_string(),utc_millis()])?;
+    tx.execute("INSERT INTO session_state(session_id,state,updated_at) VALUES(?1,?2,?3) ON CONFLICT(session_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at", params![state_key(identity)?, json!({"version":3,"state":state}).to_string(),utc_millis()])?;
     Ok(())
 }
 

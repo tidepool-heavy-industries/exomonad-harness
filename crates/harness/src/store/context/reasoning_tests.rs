@@ -832,3 +832,246 @@ fn effective_selection_uses_pending_embedded_frontier_before_and_after_settlemen
         std::fs::remove_file(path).unwrap();
     }
 }
+
+#[tokio::test]
+async fn conversation_engine_setup_retains_reasoning_profile_before_run_and_after_reopen() {
+    use crate::{
+        embedding::{
+            AdmissionGuard, Conversation, EmbeddedError, HostActor, HostControl, HostControlError,
+            HostIdentity, ToolSurface,
+        },
+        engine::{EngineConfig, ResponsesTransport},
+        transport::{Auth, NativeTransportAdmission, ResponsesClient, TransportError},
+        turn::JobScheduler,
+    };
+    use std::{num::NonZeroU64, sync::Arc};
+    struct Host(HostIdentity);
+    struct Guard;
+    impl AdmissionGuard for Guard {}
+    #[async_trait::async_trait]
+    impl HostActor for Host {
+        fn identity(&self) -> &HostIdentity {
+            &self.0
+        }
+        async fn admit(&self) -> std::result::Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+            Ok(Box::new(Guard))
+        }
+        async fn tool_surface(&self) -> std::result::Result<Arc<ToolSurface>, EmbeddedError> {
+            panic!("setup must not submit inference")
+        }
+        async fn wake(&self, _: i64) -> std::result::Result<(), String> {
+            panic!("setup must not wake")
+        }
+        async fn control(
+            &self,
+            _: HostControl,
+        ) -> std::result::Result<serde_json::Value, HostControlError> {
+            panic!("setup must not control")
+        }
+    }
+    #[derive(Clone)]
+    struct Offline(NativeTransportAdmission);
+    impl Auth for Offline {
+        fn admission(&self) -> std::result::Result<NativeTransportAdmission, TransportError> {
+            Ok(self.0.clone())
+        }
+        fn access(&self) -> std::result::Result<String, TransportError> {
+            panic!("setup must not access credentials")
+        }
+    }
+    let path = std::env::temp_dir().join(format!(
+        "conversation-reasoning-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let host = Arc::new(Host(HostIdentity {
+        run: "profile-run".into(),
+        actor: AgentPath("/root".into()),
+        incarnation: "profile-incarnation".into(),
+    }));
+    let config = || EngineConfig {
+        instructions: "offline".into(),
+        tools: vec![],
+        model: "deepseek-flash".into(),
+        effort: Effort::High,
+        session_id: "profile-session".into(),
+        agent: host.0.actor.clone(),
+    };
+    let client = || ResponsesClient::new(Offline(selection().native_admission().unwrap().clone()));
+    let original = Item(
+        json!({"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"canonical"}]}),
+    );
+    let (head, identity) = {
+        let store = Arc::new(Store::open(&path).unwrap());
+        let conversation = Conversation::attach(store.clone(), host.clone(), None)
+            .await
+            .unwrap();
+        let transport = client();
+        assert!(
+            transport
+                .prepare_submission()
+                .unwrap()
+                .native_admission()
+                .is_some()
+        );
+        let engine = conversation
+            .engine::<Offline, _>(
+                transport,
+                Arc::new(JobScheduler::new(1).unwrap()),
+                config(),
+                NonZeroU64::new(10000).unwrap(),
+            )
+            .unwrap();
+        let response = RequestId("conversation-source".into());
+        store
+            .write_embedded_request(&host.0, &response, None, &[], Usage::default())
+            .unwrap();
+        record(
+            &store,
+            &response,
+            vec![original.clone()],
+            ResponsesRoute::DeepSeek,
+        );
+        let editor = RequestId("conversation-editor".into());
+        store
+            .write_embedded_request(&host.0, &editor, Some(&response), &[], Usage::default())
+            .unwrap();
+        record(
+            &store,
+            &editor,
+            vec![call("edit")],
+            ResponsesRoute::DeepSeek,
+        );
+        let operation = store.claim(&CallId("edit".into()), &editor).unwrap();
+        let snapshot = store.begin_context(&operation, &editor).unwrap();
+        let observed = fields(&snapshot);
+        assert_eq!(observed[0].text, "canonical");
+        assert!(
+            observed[0].editable,
+            "Conversation::engine must install the actual profile before run"
+        );
+        let receipt = rewrite(&store, &snapshot, &observed[0], "authored");
+        drop(engine);
+        (receipt.head, operation.origin)
+    };
+    let store = Arc::new(Store::open(&path).unwrap());
+    let conversation = Conversation::attach(store.clone(), host.clone(), None)
+        .await
+        .unwrap();
+    let engine = conversation
+        .engine::<Offline, _>(
+            client(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            config(),
+            NonZeroU64::new(10000).unwrap(),
+        )
+        .unwrap();
+    let projected = store.context_request_state(&head, &identity).unwrap();
+    assert_eq!(
+        projected
+            .history
+            .iter()
+            .find(|(_, _, item)| item.0["type"] == "reasoning")
+            .unwrap()
+            .2
+            .0["content"][0]["text"],
+        "authored"
+    );
+    let editor = RequestId("reopened-editor".into());
+    store
+        .write_embedded_request(&host.0, &editor, Some(&head), &[], Usage::default())
+        .unwrap();
+    record(
+        &store,
+        &editor,
+        vec![call("reopened-edit")],
+        ResponsesRoute::DeepSeek,
+    );
+    let operation = store
+        .claim(&CallId("reopened-edit".into()), &editor)
+        .unwrap();
+    let snapshot = store.begin_context(&operation, &editor).unwrap();
+    let observed = fields(&snapshot);
+    assert_eq!(observed[0].text, "authored");
+    assert!(observed[0].editable);
+    assert_eq!(
+        store
+            .original_context_text(&snapshot, &observed[0].reference, &observed[0].selector)
+            .unwrap()
+            .as_deref(),
+        Some("canonical")
+    );
+    drop(engine);
+    drop(conversation);
+    drop(store);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn context_state_v3_preserves_unknown_legacy_profiles() {
+    for version in [1, 2] {
+        let store = Store::memory().unwrap();
+        let original = Item(
+            json!({"type":"reasoning","content":[{"type":"reasoning_text","text":"canonical"}]}),
+        );
+        let (snapshot, _) = fixture(&store, original, ResponsesRoute::DeepSeek);
+        let key = state_key(&snapshot.operation.origin).unwrap();
+        let encoded: String = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT state FROM session_state WHERE session_id=?1",
+                [&key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut legacy: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(legacy["version"], 3);
+        legacy["version"] = json!(version);
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE session_state SET state=?2 WHERE session_id=?1",
+                rusqlite::params![key, legacy.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.begin_context(&snapshot.operation, &snapshot.head),
+            Err(StoreError::Context(ContextError::UnsupportedState))
+        ));
+        legacy["state"]
+            .as_object_mut()
+            .unwrap()
+            .remove("native_transport");
+        // Removing new evidence models an actual pre-v3 serialized state.
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE session_state SET state=?2 WHERE session_id=?1",
+                rusqlite::params![key, legacy.to_string()],
+            )
+            .unwrap();
+        let observed = fields(
+            &store
+                .begin_context(&snapshot.operation, &snapshot.head)
+                .unwrap(),
+        );
+        assert_eq!(observed[0].text, "canonical");
+        assert!(!observed[0].editable);
+        let encoded: String = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT state FROM session_state WHERE session_id=?1",
+                [&key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&encoded).unwrap(),
+            legacy,
+            "reading must not retrofit authority"
+        );
+    }
+}
