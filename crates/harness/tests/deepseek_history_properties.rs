@@ -364,7 +364,7 @@ async fn round(
     tokio::pin!(running);
     let first = tokio::select! {
         result = &mut running => panic!("round ended before its first actual HTTP request: {result:?}"),
-        request = server.next() => request,
+        request = tokio::time::timeout(Duration::from_secs(5), server.next()) => request.expect("actual first HTTP request must arrive within the round observation deadline"),
     };
     assert_eq!(first.captured.json()["model"], "deepseek-flash");
     assert_eq!(first.captured.json()["reasoning"]["effort"], "high");
@@ -372,7 +372,7 @@ async fn round(
     if let Some(expected) = expected_projection {
         let next = tokio::select! {
             result = &mut running => panic!("round ended before its post-transaction HTTP request: {result:?}"),
-            request = server.next() => request,
+            request = tokio::time::timeout(Duration::from_secs(5), server.next()) => request.expect("actual post-transaction HTTP request must arrive within the round observation deadline"),
         };
         assert_eq!(next.captured.json()["reasoning"]["effort"], "high");
         expected.assert_input(&next.captured.json());
@@ -627,8 +627,9 @@ impl Provider for ExchangeEditor {
                     .unit_versions
                     .iter()
                     .find(|version| version.reference == authority.group)
-                    // Reusing an actually issued earlier version when the unit
-                    // is inactive deliberately exercises typed denial, not a skipped action.
+                    // This real earlier version is outside the new private
+                    // editable cut when inactive; submitting it tests scoped
+                    // denial, not a stale-digest comparison or skipped action.
                     .unwrap_or(&authority.removal);
                 vec![ContextChange::RemoveContextUnit {
                     reference: version.reference.clone(),
@@ -670,9 +671,21 @@ async fn http_exchange_transactions_reinsert_exact_success_without_reexecution()
         (ExchangeEdit::Append, true),
     ])
     .await;
+    // Deterministic support for both nonchanging partitions; the random cases
+    // need not happen to generate either one in a small sixteen-case campaign.
+    run_exchange_history(&[
+        (ExchangeEdit::Remove, false),
+        (ExchangeEdit::Remove, true),
+        (ExchangeEdit::AppendTwice, true),
+        (ExchangeEdit::Append, true),
+        (ExchangeEdit::Remove, false),
+        (ExchangeEdit::Append, true),
+    ])
+    .await;
 }
 
 async fn run_exchange_history(actions: &[(ExchangeEdit, bool)]) {
+    eprintln!("retained HTTP history start: {actions:?}");
     let mut server = LocalResponses::start().await;
     let files = Files::new();
     let auth = files.auth(&server.endpoint);
@@ -776,6 +789,9 @@ async fn run_exchange_history(actions: &[(ExchangeEdit, bool)]) {
             transitions[4] += 1;
         }
         let was_present = present;
+        eprintln!(
+            "retained HTTP step {index}: {action:?}, expected_present_before={was_present}, second_view={second_view}"
+        );
         match action {
             ExchangeEdit::Remove => {
                 transitions[usize::from(!present)] += 1;
@@ -879,6 +895,11 @@ async fn run_exchange_history(actions: &[(ExchangeEdit, bool)]) {
         Some(original_terminal)
     );
     transitions[4] += 1;
+    assert_eq!(
+        *editor.source_effects.lock().unwrap(),
+        vec![source_operation],
+        "second-reader observations cannot execute the source"
+    );
     eprintln!(
         "retained HTTP history {actions:?}: remove={}, denied_remove={}, restore={}, active_append={}, second_reader={}",
         transitions[0], transitions[1], transitions[2], transitions[3], transitions[4]
@@ -945,7 +966,7 @@ fn assert_active_pair(
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 16, max_shrink_iters: 128, failure_persistence: None, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: 16, ..ProptestConfig::default() })]
     #[test]
     fn http_retained_exchange_generated_histories(
         actions in prop::collection::vec((prop_oneof![Just(ExchangeEdit::Remove), Just(ExchangeEdit::Append), Just(ExchangeEdit::AppendTwice)], any::<bool>()), 1..7)
@@ -953,7 +974,7 @@ proptest! {
         // Fresh ordinary application/HTTP/Store issuers for every generated or
         // shrunk history. Output is scripted reasoning-free under EffortHigh;
         // this does not request thinking-off or claim process restart recovery.
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(run_exchange_history(&actions));
     }
 }
