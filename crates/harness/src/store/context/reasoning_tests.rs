@@ -246,3 +246,133 @@ proptest::proptest! {
         }
     }
 }
+
+#[test]
+fn reasoning_overlay_reopens_resets_and_refuses_a_different_model_contract() {
+    let path =
+        std::env::temp_dir().join(format!("reasoning-overlay-{}.sqlite", uuid::Uuid::new_v4()));
+    let original = Item(
+        json!({"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"canonical"}]}),
+    );
+    let (head, identity) = {
+        let store = Store::open(&path).unwrap();
+        let (snapshot, _) = fixture(&store, original.clone(), ResponsesRoute::DeepSeek);
+        let observed = fields(&snapshot);
+        let receipt = rewrite(&store, &snapshot, &observed[0], "authored");
+        assert!(
+            store
+                .preflight_context_target(
+                    &receipt.head,
+                    &snapshot.operation.origin,
+                    &ContextProjectionTarget {
+                        model: "different-model".into(),
+                        route: ResponsesRoute::DeepSeek,
+                        protocol: ResponsesProtocol::Standard,
+                    }
+                )
+                .is_err()
+        );
+        (receipt.head, snapshot.operation.origin)
+    };
+    let store = Store::open(&path).unwrap();
+    let projected = store.context_request_state(&head, &identity).unwrap();
+    assert_eq!(
+        projected
+            .history
+            .iter()
+            .find(|(_, _, item)| item.0["type"] == "reasoning")
+            .unwrap()
+            .2
+            .0["content"][0]["text"],
+        "authored"
+    );
+    let next = RequestId("reset".into());
+    store
+        .write_request(&next, Some(&head), "/root", &[], Usage::default())
+        .unwrap();
+    record(&store, &next, vec![call("reset")], ResponsesRoute::DeepSeek);
+    let operation = store.claim(&CallId("reset".into()), &next).unwrap();
+    let snapshot = store.begin_context(&operation, &next).unwrap();
+    let observed = fields(&snapshot);
+    assert_eq!(observed[0].text, "authored");
+    assert_eq!(
+        store
+            .original_context_text(&snapshot, &observed[0].reference, &observed[0].selector)
+            .unwrap()
+            .unwrap(),
+        "canonical"
+    );
+    let receipt = rewrite(&store, &snapshot, &observed[0], "canonical");
+    let projected = store
+        .context_request_state(&receipt.head, &identity)
+        .unwrap();
+    assert_eq!(
+        projected
+            .history
+            .iter()
+            .find(|(_, _, item)| item.0["type"] == "reasoning")
+            .unwrap()
+            .2,
+        original
+    );
+    let occurrences = store.history_occurrences(&receipt.head).unwrap();
+    assert!(
+        occurrences
+            .iter()
+            .filter(|item| item.item.0["type"] == "reasoning")
+            .all(|item| item.overlays.is_empty())
+    );
+    drop(store);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn interrupted_plaintext_reasoning_is_readable_without_edit_authority() {
+    use crate::store::provider_response::ProviderResponseState;
+    use crate::transport::sse::{ResponseAssembly, StreamEvent};
+    let store = Store::memory().unwrap();
+    let previous = RequestId("interrupted".into());
+    store.create_request(&previous, None, "/root").unwrap();
+    let request = ResponsesRequest {
+        input: vec![],
+        instructions: "fixture".into(),
+        tools: vec![].into(),
+        tools_allowed: None,
+        model: "fixture-model".into(),
+        pinned_effort: Effort::High,
+        session_id: "fixture".into(),
+        prompt_cache_comparison: None,
+    };
+    let issued = store
+        .issue_provider_request(
+            &previous,
+            store.seal_replay_request(&request).unwrap(),
+            (ResponsesRoute::DeepSeek, ResponsesProtocol::Standard),
+        )
+        .unwrap();
+    let Some(StreamEvent::CompletedItem(done)) = ResponseAssembly::default().accept(&json!({"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"partial response"}]}}).to_string()).unwrap() else { panic!("completed item") };
+    store.append_provider_done(&issued, &done).unwrap();
+    store
+        .stop_provider_response(&previous, ProviderResponseState::Interrupted)
+        .unwrap();
+    let head = RequestId("editor".into());
+    store
+        .write_request(&head, Some(&previous), "/root", &[], Usage::default())
+        .unwrap();
+    record(&store, &head, vec![call("edit")], ResponsesRoute::DeepSeek);
+    let operation = store.claim(&CallId("edit".into()), &head).unwrap();
+    store
+        .initialize_context_target(
+            &operation.origin,
+            &ContextProjectionTarget {
+                model: "fixture-model".into(),
+                route: ResponsesRoute::DeepSeek,
+                protocol: ResponsesProtocol::Standard,
+            },
+        )
+        .unwrap();
+    let snapshot = store.begin_context(&operation, &head).unwrap();
+    let observed = fields(&snapshot);
+    assert_eq!(observed[0].text, "partial response");
+    assert!(!observed[0].editable);
+}
