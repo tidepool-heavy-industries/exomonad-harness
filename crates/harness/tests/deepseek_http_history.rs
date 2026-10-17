@@ -102,6 +102,20 @@ async fn finished(invocation: &mut Invocation) -> Receipt {
     receipt
 }
 
+async fn next_http(
+    server: &mut LocalResponses,
+    invocation: &mut Invocation,
+) -> http_fixture::PendingRequest {
+    tokio::select! {
+        step = invocation.next() => match step {
+            Step::Finished(receipt) => panic!("invocation ended before its expected HTTP request: {:?}", receipt.outcome),
+            Step::Callback(callback) => panic!("unexpected callback before the next HTTP response: {}", callback.name),
+            Step::HookRequested(_) => panic!("unexpected hook before the next HTTP response"),
+        },
+        request = server.next() => request,
+    }
+}
+
 fn reasoning() -> Value {
     // Includes the empty summary present in the official response example.
     json!({"type":"reasoning","id":"reasoning-1","status":"completed","summary":[],
@@ -186,7 +200,7 @@ async fn documented_plaintext_completion_survives_http_fragmentation_and_durable
     let expected_contract = auth.admission().unwrap().contract().clone();
     let store = Arc::new(Store::open(files.0.join("history.sqlite")).unwrap());
     let mut invocation = no_tools(auth, store.clone(), "answer without tools");
-    let request = server.next().await;
+    let request = next_http(&mut server, &mut invocation).await;
     let body = assert_deepseek_request(&request.captured);
     assert_eq!(
         body["input"].as_array().unwrap().last().unwrap()["role"],
@@ -259,7 +273,7 @@ async fn bounded_invocation_dispatches_exact_unicode_then_replays_canonical_func
         InvocationOptions::default(),
     )
     .unwrap();
-    let first = server.next().await;
+    let first = next_http(&mut server, &mut invocation).await;
     let body = assert_deepseek_request(&first.captured);
     let echo = body["tools"]
         .as_array()
@@ -286,7 +300,7 @@ async fn bounded_invocation_dispatches_exact_unicode_then_replays_canonical_func
     assert_eq!(callback.arguments, json!({"source":UNICODE}));
     let operation = callback.operation.clone();
     callback.complete(Ok(json!({"echo":UNICODE}))).unwrap();
-    let second = server.next().await;
+    let second = next_http(&mut server, &mut invocation).await;
     let body = assert_deepseek_request(&second.captured);
     let input = body["input"].as_array().unwrap();
     assert_eq!(
@@ -348,7 +362,7 @@ async fn http_rejections_retain_typed_causes_without_retry_or_effects() {
             store.clone(),
             "do not retry a rejection",
         );
-        let request = server.next().await;
+        let request = next_http(&mut server, &mut invocation).await;
         assert_deepseek_request(&request.captured);
         request.respond(HttpReply::json(axum::http::StatusCode::from_u16(status).unwrap(),
             json!({"error":{"code":"offline_rejected", "message":format!("refused {SYNTHETIC_KEY}")}})));
@@ -404,7 +418,7 @@ async fn completed_terminal_releases_client_before_http_eof() {
     let files = Files::new();
     let store = Arc::new(Store::memory().unwrap());
     let mut invocation = no_tools(files.auth(&server.endpoint), store, "complete before EOF");
-    let request = server.next().await;
+    let request = next_http(&mut server, &mut invocation).await;
     assert_deepseek_request(&request.captured);
     let (response, chunks) = HttpReply::controlled_sse();
     request.respond(response);
