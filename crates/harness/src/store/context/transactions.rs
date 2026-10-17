@@ -86,7 +86,7 @@ fn problem(
     }
 }
 
-fn validate_snapshot(store: &Store, snapshot: &ContextSnapshot) -> Result<()> {
+pub(super) fn validate_snapshot(store: &Store, snapshot: &ContextSnapshot) -> Result<()> {
     if snapshot.store_id != store.store_id
         || snapshot.operation != snapshot.seal.operation
         || snapshot.head != snapshot.seal.head
@@ -128,6 +128,7 @@ fn patch_authority(snapshot: &ContextSnapshot, patch: &ContextPatch) -> Vec<Cont
                 .iter()
                 .any(|version| &version.reference == reference))
             .then_some(std::slice::from_ref(reference)),
+            ContextChange::AppendRetainedExchange { .. } => None,
             ContextChange::AppendContextNote { sources, .. } => {
                 for reference in sources {
                     if !context_has_reference(&document, reference) {

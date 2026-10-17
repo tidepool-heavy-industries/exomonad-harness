@@ -85,7 +85,7 @@ pub enum ContextNativeKind {
 }
 
 /// Closed selectors for provider-visible bodies. Invocation inputs and opaque
-/// reasoning never grant editable text authority.
+/// reasoning need provider-qualified authority.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContextTextSelector {
@@ -221,6 +221,7 @@ pub struct ContextCommitEvidence {
     pub(crate) original_operation: OperationId,
     pub(crate) prefix: Vec<(Item, Vec<ContextReference>, bool, Vec<ContextTextOverlay>)>,
     pub(crate) prefix_origins: Option<Vec<Origin>>,
+    pub(crate) retained_exchanges: Vec<RetainedExchangeReference>,
     pub(crate) output: Item,
     pub(crate) invocation: Item,
     pub(crate) model: Option<String>,
@@ -346,6 +347,36 @@ pub struct ContextInspection {
     pub unit_versions: Vec<ContextUnitVersion>,
     pub authorship: Vec<ContextTextAuthorship>,
 }
+/// An exact retained exchange identity. Store revalidates authority at use.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RetainedExchangeReference(pub(crate) String);
+
+impl RetainedExchangeReference {
+    pub fn from_raw(raw: String) -> Self {
+        Self(raw)
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", content = "detail", rename_all = "snake_case")]
+pub enum RetainedExchangeObservation {
+    Available(RetainedExchangeReference),
+    Missing,
+    Denied,
+    Pending,
+    Unpublished,
+    NotStarted,
+    Failure,
+    Cancelled,
+    CancelledWithReceipt,
+    Interrupted,
+    CancellationUnconfirmed,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextPatch {
@@ -367,6 +398,9 @@ pub enum ContextChange {
     AppendContextNote {
         text: String,
         sources: Vec<ContextReference>,
+    },
+    AppendRetainedExchange {
+        source: RetainedExchangeReference,
     },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -553,6 +587,7 @@ pub fn check_context_patch(
                     expected,
                 )
             }
+            ContextChange::AppendRetainedExchange { .. } => continue,
             ContextChange::AppendContextNote { sources, .. } => {
                 for source in sources {
                     if !context_has_reference(document, source) {
@@ -653,6 +688,7 @@ pub fn check_context_patch(
                     }
                 }
             }
+            ContextChange::AppendRetainedExchange { .. } => {}
             ContextChange::AppendContextNote { text, sources } => {
                 result.blocks.push(ContextBlock::Text {
                     reference: None,

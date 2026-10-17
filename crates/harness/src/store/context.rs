@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 
 mod compaction_reconciliation;
 mod portability_note;
+mod retained_exchange;
 mod transactions;
 pub(super) use compaction_reconciliation::{CompactionItem, reconcile as reconcile_compaction};
 
@@ -2252,6 +2253,23 @@ impl Store {
                         .collect::<std::result::Result<Vec<_>, _>>()
                 })
                 .transpose()?,
+            retained_exchanges: if record.transaction.is_some() {
+                let transaction: crate::context::ContextTransactionDraft =
+                    serde_json::from_str(&record.candidate)?;
+                transaction
+                    .patch
+                    .changes
+                    .into_iter()
+                    .filter_map(|change| match change {
+                        crate::context::ContextChange::AppendRetainedExchange { source } => {
+                            Some(source)
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
             output,
             invocation: load(&original_call(&c, operation)?.hash)?,
             model: record.receipt.model,
@@ -2505,6 +2523,18 @@ impl Store {
         let mut last_native = None;
         let mut last_historical_native = None;
         if let Some(evidence) = replay {
+            for source in &evidence.retained_exchanges {
+                let items = retained_exchange::qualified_items(tx, snapshot, source)?;
+                let identity = reference(&items);
+                if !available.iter().any(|block| matches!(&block.block, ContextBlock::Native {reference, ..} if reference == &identity)) {
+                    let output_owners = HashMap::from([(items[1].origin.clone(), &items[0])]);
+                    let texts = visible_texts(tx, &output_owners, &items, &HashSet::new())?;
+                    available.push(StoredBlock {
+                        block: ContextBlock::Native { reference: identity, kind: ContextNativeKind::CompletedExchange, preview: preview(&items)?, protected: false, texts },
+                        items, opaque: false, mandatory: false,
+                    });
+                }
+            }
             let mut native = HashMap::<ItemHash, Vec<&StoredBlock>>::new();
             let mut text = HashMap::<ItemHash, Vec<&Occurrence>>::new();
             let replay_available = available
@@ -2759,6 +2789,9 @@ impl Store {
                     return Err(ContextError::ProtectedGroup.into());
                 }
             }
+        }
+        if let Some(transaction) = transaction {
+            retained_exchange::append_changes(tx, snapshot, &transaction.patch, &mut rewritten)?;
         }
         if let Some(model) = &draft.next_model {
             if model.trim().is_empty() {

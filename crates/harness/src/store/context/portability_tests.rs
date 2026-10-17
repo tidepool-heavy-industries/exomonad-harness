@@ -609,6 +609,7 @@ fn replay_collision_fixture(
     let legacy = ContextCommitEvidence {
         version: 2,
         prefix_origins: None,
+        retained_exchanges: Vec::new(),
         original_operation: drop_operation.clone(),
         prefix: snapshot
             .blocks

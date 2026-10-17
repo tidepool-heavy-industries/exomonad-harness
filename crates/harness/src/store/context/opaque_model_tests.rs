@@ -149,6 +149,7 @@ fn prepare(provenance: Provenance<'_>, selected: &str) -> Restoration {
     let legacy = ContextCommitEvidence {
         version: 2,
         prefix_origins: None,
+        retained_exchanges: Vec::new(),
         original_operation: first.clone(),
         prefix: vec![(
             Item(json!({"type":"message","role":"user","content":"discovery note"})),
