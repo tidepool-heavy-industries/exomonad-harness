@@ -157,12 +157,20 @@ impl RunAccountAuth {
         run: String,
         accounts: SavedAccounts,
     ) -> Result<Self, TransportError> {
-        let selected = store
-            .initialize_run_account(&run, accounts.launch_id())
-            .map_err(|_| TransportError::Authentication)?;
-        if !accounts.contains(&selected) {
-            return Err(TransportError::Authentication);
-        }
+        Self::new_with_limits(
+            store,
+            run,
+            accounts,
+            crate::transport::InferenceLimits::chatgpt_default(),
+        )
+    }
+
+    pub fn new_with_limits(
+        store: Arc<Store>,
+        run: String,
+        accounts: SavedAccounts,
+        limits: crate::transport::InferenceLimits,
+    ) -> Result<Self, TransportError> {
         let admission = crate::transport::NativeTransportAdmission::rehydrate(
             crate::transport::NativeTransportContract {
                 route: crate::transport::ResponsesRoute::ChatGptPlan,
@@ -172,9 +180,15 @@ impl RunAccountAuth {
                     launch_path: accounts.launch_path.clone(),
                     run: run.clone(),
                 },
-                limits: crate::transport::InferenceLimits::chatgpt_default(),
+                limits,
             },
         )?;
+        let selected = store
+            .initialize_run_account(&run, accounts.launch_id())
+            .map_err(|_| TransportError::Authentication)?;
+        if !accounts.contains(&selected) {
+            return Err(TransportError::Authentication);
+        }
         Ok(Self {
             admission,
             store,
