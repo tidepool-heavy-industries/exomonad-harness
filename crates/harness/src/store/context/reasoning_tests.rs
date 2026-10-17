@@ -267,7 +267,8 @@ fn prepared_projection(
     head: &RequestId,
     identity: &ConversationIdentity,
     selected: crate::transport::PreparedTransportSelection,
-) -> Result<crate::store::PreparedProviderRequest, crate::store::PrepareProviderError> {
+) -> std::result::Result<crate::store::PreparedProviderRequest, crate::store::PrepareProviderError>
+{
     let projected = store.context_request_state_for_transport(head, identity, &selected)?;
     let local = RequestId(uuid::Uuid::new_v4().to_string());
     store.create_request(&local, Some(head), "/root")?;
@@ -997,8 +998,8 @@ async fn conversation_engine_setup_retains_reasoning_profile_before_run_and_afte
         store
             .original_context_text(&snapshot, &observed[0].reference, &observed[0].selector)
             .unwrap()
-            .as_deref(),
-        Some("canonical")
+            .unwrap(),
+        "canonical"
     );
     drop(engine);
     drop(conversation);
