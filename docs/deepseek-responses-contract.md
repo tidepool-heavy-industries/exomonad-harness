@@ -11,7 +11,12 @@ The DeepSeek route selects https://api.deepseek.com/responses with JSON bearer
 requests, flat function tools, plaintext reasoning and stateless full history.
 It does not inherit the ChatGPT route's namespace wrapper, zstd compression,
 private headers, encrypted-reasoning include, cache comparison or cache key.
-The endpoint is fixed by route; redirects are disabled. Unsupported semantics
+The endpoint is the official URL by default. An explicitly selected canonical
+numeric-loopback HTTP endpoint with a nonzero port and exact /responses path
+is also admitted for a local provider; it is retained and matched exactly.
+DNS names, URL credentials, query/fragment, noncanonical addresses and other
+remote endpoints are refused. ChatGPT keeps its original fixed endpoint.
+Redirects are disabled; no host configuration endpoint override is introduced. Unsupported semantics
 are refused locally rather than relying on the service's silent ignores.
 
 The official Responses guide limits custom tools to apply_patch. This initial

@@ -285,3 +285,75 @@ fn deepseek_http_builder_uses_plain_json_without_openai_headers() {
         assert!(!wire.headers().contains_key(absent), "unexpected {absent}");
     }
 }
+
+#[tokio::test]
+async fn deepseek_loopback_is_canonical_bound_and_cannot_reinterpret_prepared_requests() {
+    let selected = admission("/offline/selected-key");
+    for endpoint in [
+        "http://127.0.0.1:12345/responses",
+        "http://[::1]:12345/responses",
+    ] {
+        let mut contract = selected.contract().clone();
+        contract.endpoint = endpoint.into();
+        let encoded = serde_json::to_value(&contract).unwrap();
+        assert_eq!(encoded["endpoint"], endpoint);
+        let restored =
+            NativeTransportAdmission::rehydrate(serde_json::from_value(encoded).unwrap()).unwrap();
+        assert_eq!(restored.contract(), &contract);
+    }
+    for endpoint in [
+        "http://localhost:12345/responses",
+        "http://127.1:12345/responses",
+        "http://2130706433:12345/responses",
+        "http://127.0.0.1:0/responses",
+        "http://127.0.0.1/responses",
+        "http://127.0.0.1:80/responses",
+        "http://[::01]:12345/responses",
+        "http://192.0.2.1:12345/responses",
+        "http://127.0.0.1:12345/other",
+        "http://127.0.0.1:12345/responses?x=1",
+        "http://127.0.0.1:12345/responses#x",
+        "http://token@127.0.0.1:12345/responses",
+        "https://127.0.0.1:12345/responses",
+    ] {
+        let mut contract = selected.contract().clone();
+        contract.endpoint = endpoint.into();
+        assert!(
+            matches!(
+                NativeTransportAdmission::rehydrate(contract),
+                Err(TransportError::InvalidAdmission)
+            ),
+            "accepted {endpoint}"
+        );
+    }
+    let mut local = selected.contract().clone();
+    local.endpoint = "http://127.0.0.1:12345/responses".into();
+    let local = NativeTransportAdmission::rehydrate(local).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let receiver = ResponsesClient::new(CountingAuth {
+        admission: selected,
+        calls: calls.clone(),
+    });
+    let store = Store::memory().unwrap();
+    let head = RequestId("endpoint-swap".into());
+    store.create_request(&head, None, "/root").unwrap();
+    let prepared = prepare(&store, &head, request(), local.clone());
+    assert_eq!(
+        store.native_transport_contract(&head).unwrap().as_ref(),
+        Some(local.contract())
+    );
+    assert!(matches!(
+        receiver.create(prepared).await,
+        Err(TransportError::PreparedSelectionMismatch)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let mut openai = NativeTransportAdmission::chatgpt_plan("/offline/openai".into())
+        .unwrap()
+        .contract()
+        .clone();
+    openai.endpoint = "http://127.0.0.1:12345/responses".into();
+    assert!(matches!(
+        NativeTransportAdmission::rehydrate(openai),
+        Err(TransportError::InvalidAdmission)
+    ));
+}

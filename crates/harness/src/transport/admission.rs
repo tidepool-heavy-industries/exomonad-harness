@@ -76,7 +76,10 @@ impl NativeTransportContract {
             ResponsesRoute::ChatGptPlan => super::client::CHATGPT_PLAN_ENDPOINT,
             ResponsesRoute::DeepSeek => super::client::DEEPSEEK_ENDPOINT,
         };
-        if self.endpoint != expected {
+        if self.endpoint != expected
+            && !(self.route == ResponsesRoute::DeepSeek
+                && numeric_loopback_endpoint(&self.endpoint))
+        {
             return Err(TransportError::InvalidAdmission);
         }
         let path = match &self.credential {
@@ -140,4 +143,29 @@ impl NativeTransportAdmission {
             .await
             .map_err(|_| TransportError::InvalidAdmission)
     }
+}
+
+// An explicitly selected local provider can exercise the same HTTP contract.
+// No hostname resolution, credential-bearing URL, redirect or endpoint rebinding
+// is admitted; the exact canonical URL remains part of durable equality.
+fn numeric_loopback_endpoint(endpoint: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(endpoint) else {
+        return false;
+    };
+    let host = url.host_str().unwrap_or("");
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    url.scheme() == "http"
+        && url.as_str() == endpoint
+        && url.port().is_some_and(|port| port != 0)
+        && host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|host| host.is_loopback())
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path() == "/responses"
+        && url.query().is_none()
+        && url.fragment().is_none()
 }
