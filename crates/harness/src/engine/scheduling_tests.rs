@@ -8,7 +8,10 @@ struct Offline;
 impl Auth for Offline {
     fn admission(
         &self,
-    ) -> std::result::Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError> {
+    ) -> std::result::Result<
+        crate::transport::NativeTransportAdmission,
+        crate::transport::TransportError,
+    > {
         crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
             "/offline/synthetic-credential",
         ))
@@ -1607,7 +1610,11 @@ async fn child_final_completes_while_parent_sync_waits_for_child() {
         crate::turn::FollowupPublicationState::Running
     );
     let mut completed = receipt.into_result().unwrap();
-    assert!(is_final(&completed.turn, false));
+    assert!(is_final(
+        &completed.turn,
+        false,
+        crate::transport::ResponseFinality::ExplicitPhase
+    ));
     assert_eq!(parent.scheduler.output(&operation).await.unwrap(), None);
     let claims = parent.store.claims_for_operation(&operation).unwrap();
     assert_eq!(claims.len(), 2);
@@ -1808,7 +1815,11 @@ async fn driver_foreign_followup_retains_observation_while_parent_sync_completes
     assert!(assessment.inference_obligations().is_empty());
     assert!(receipt.secondary_failures().is_empty());
     let mut completed = receipt.original_completion().unwrap().clone();
-    assert!(is_final(&completed.turn, false));
+    assert!(is_final(
+        &completed.turn,
+        false,
+        crate::transport::ResponseFinality::ExplicitPhase
+    ));
     assert_eq!(parent.scheduler.output(&operation).await.unwrap(), None);
     let claims = parent.store.claims_for_operation(&operation).unwrap();
     assert_eq!(claims.len(), 3);
