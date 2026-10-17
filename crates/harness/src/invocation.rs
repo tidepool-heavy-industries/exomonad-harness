@@ -810,9 +810,13 @@ impl Invocation {
                                     .turn
                                     .items
                                     .iter()
+                                    .filter(|item| {
+                                        item.0["type"] == "message" && item.0["role"] == "assistant"
+                                    })
                                     .flat_map(|item| {
                                         item.0["content"].as_array().into_iter().flatten()
                                     })
+                                    .filter(|part| part["type"] == "output_text")
                                     .filter_map(|part| part["text"].as_str())
                                     .collect::<Vec<_>>()
                                     .join(""),
@@ -938,8 +942,10 @@ mod tests {
     impl Auth for TestAuth {
         fn admission(
             &self,
-        ) -> std::result::Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError>
-        {
+        ) -> std::result::Result<
+            crate::transport::NativeTransportAdmission,
+            crate::transport::TransportError,
+        > {
             crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
                 "/offline/synthetic-credential",
             ))
@@ -1030,6 +1036,44 @@ mod tests {
             }
         }
     }
+    #[tokio::test]
+    async fn text_result_projects_only_ordered_assistant_output_and_retains_transcript() {
+        let items = vec![
+            Item(
+                json!({"type":"reasoning","content":[{"type":"reasoning_text","text":"private reasoning λ"}]}),
+            ),
+            Item(
+                json!({"type":"message","role":"user","content":[{"type":"output_text","text":"wrong role"}]}),
+            ),
+            Item(
+                json!({"type":"message","role":"assistant","phase":"final_answer","content":[
+                    {"type":"reasoning_text","text":"not output"},
+                    {"type":"output_text","text":"  first λ\n"},
+                    {"type":"output_text","text":"second  "}
+                ]}),
+            ),
+            Item(
+                json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"third"}]}),
+            ),
+        ];
+        let mut invocation = start(
+            Arc::new(Store::memory().unwrap()),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            CellBudget::new(Limits::default()),
+            vec![turn(items.clone())],
+            false,
+        );
+        let receipt = finish(&mut invocation).await;
+        assert!(
+            matches!(&receipt.outcome, Outcome::Text(text) if text == "  first λ\nsecond  third"),
+            "{:?}",
+            receipt.outcome
+        );
+        for item in items {
+            assert!(receipt.transcript.contains(&item));
+        }
+    }
+
     #[tokio::test]
     async fn function_only_bounded_callback_keeps_original_arguments_and_receipt() {
         struct FunctionOnly {
