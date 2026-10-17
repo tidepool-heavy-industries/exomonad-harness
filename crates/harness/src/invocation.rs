@@ -1063,7 +1063,9 @@ mod tests {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let mut invocation = Invocation::start::<TestAuth, _>(
             FunctionOnly {
-                turns: Mutex::new(vec![turn(vec![call("bounded-function")]), final_turn()].into()),
+                turns: Mutex::new(vec![turn(vec![call("bounded-function")]), turn(vec![Item(json!({
+                    "type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]
+                }))])].into()),
                 requests: requests.clone(),
             },
             store.clone(),
