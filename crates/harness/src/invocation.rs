@@ -1115,7 +1115,7 @@ mod tests {
             assert!(note.overlays.is_empty());
             let body = bodies.lock().unwrap()[1].clone();
             let expected_role = if route == ResponsesRoute::DeepSeek {
-                "user"
+                "system"
             } else {
                 "developer"
             };
@@ -1192,8 +1192,15 @@ mod tests {
                 crate::store::ProviderRequestPurpose::Inference,
             );
             assert!(
-                result.is_err(),
-                "identical unproved occurrence must not acquire hook authorship"
+                matches!(
+                    result,
+                    Err(crate::store::PrepareProviderError::Transport(
+                        TransportError::UnsupportedSemantics(
+                            crate::transport::UnsupportedSemantics::Message
+                        )
+                    ))
+                ),
+                "identical unproved occurrence must reach the developer provenance refusal"
             );
         }
     }
