@@ -363,11 +363,11 @@ impl Provider for CallbackProvider {
                 &json!({"ordinal":ordinal,"annotation":annotation}),
             )
             .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
-        let text = match annotation {
-            HookAnnotation::Annotated(text) => Some(text),
+        match annotation {
+            HookAnnotation::Annotated(_) => {}
             HookAnnotation::Pruned {
                 replacement,
-                annotation,
+                annotation: _,
             } => {
                 let projected = Item::tool_output(
                     &operation.call,
@@ -382,14 +382,12 @@ impl Provider for CallbackProvider {
                         annotation_event,
                     },
                 );
-                Some(annotation)
             }
-            HookAnnotation::NoAnnotation | HookAnnotation::Abstained(_) => None,
-        };
-        if let Some(text) = text.filter(|text| !text.is_empty()) {
-            self.store.append_items(&operation.request,&[Item(json!({"type":"message","role":"developer","content":[{"type":"input_text","text":text}]}))])
-                .map_err(|error|ProviderError::Tool(error.to_string().into()))?;
+            HookAnnotation::NoAnnotation | HookAnnotation::Abstained(_) => {}
         }
+        self.store
+            .append_model_tool_annotation(operation, ordinal, annotation_event)
+            .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
         self.acknowledged.lock().unwrap().insert(operation.clone());
         Ok(())
     }
@@ -1036,6 +1034,170 @@ mod tests {
             }
         }
     }
+    #[tokio::test]
+    async fn hook_authorship_normalizes_without_changing_protected_note_policy() {
+        struct HookScript {
+            route: ResponsesRoute,
+            turns: Mutex<VecDeque<ResponsesTurn>>,
+            bodies: Arc<Mutex<Vec<Value>>>,
+        }
+        #[async_trait]
+        impl ResponsesTransport for HookScript {
+            fn response_contract(
+                &self,
+            ) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+                Ok((self.route, ResponsesProtocol::Standard))
+            }
+            async fn create(
+                &self,
+                request: PreparedProviderRequest,
+            ) -> Result<ResponsesTurn, TransportError> {
+                self.bodies
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_slice(request.wire_body()).unwrap());
+                self.turns
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .ok_or_else(|| TransportError::Stream("script exhausted".into()))
+            }
+        }
+        for route in [ResponsesRoute::ChatGptPlan, ResponsesRoute::DeepSeek] {
+            let store = Arc::new(Store::memory().unwrap());
+            let bodies = Arc::new(Mutex::new(Vec::new()));
+            let mut invocation = Invocation::start::<TestAuth, _>(
+                HookScript {
+                    route,
+                    turns: Mutex::new(vec![turn(vec![call("hook-proof")]), final_turn()].into()),
+                    bodies: bodies.clone(),
+                },
+                store.clone(),
+                Arc::new(JobScheduler::new(1).unwrap()),
+                config(),
+                "hook-proof".into(),
+                CellBudget::new(Limits::default()),
+                vec![],
+                InvocationOptions {
+                    after_tool: true,
+                    ..InvocationOptions::default()
+                },
+            )
+            .unwrap();
+            let callback = match invocation.next().await {
+                Step::Callback(c) => c,
+                _ => panic!("callback"),
+            };
+            callback.complete(Ok(json!("original output"))).unwrap();
+            let hook = match invocation.next().await {
+                Step::HookRequested(h) => h,
+                _ => panic!("hook"),
+            };
+            let operation = hook.operation.clone();
+            let result_event = hook.ordinal;
+            hook.complete(HookAnnotation::Annotated("host hook λ\nexact".into()))
+                .unwrap();
+            let receipt = finish(&mut invocation).await;
+            assert!(
+                matches!(&receipt.outcome,Outcome::Text(text) if text=="done"),
+                "{:?}",
+                receipt.outcome
+            );
+            let canonical = Item(
+                json!({"type":"message","role":"developer","content":[{"type":"input_text","text":"host hook λ\nexact"}]}),
+            );
+            assert!(receipt.transcript.contains(&canonical));
+            let occurrences = store
+                .history_occurrences(receipt.requests.last().unwrap())
+                .unwrap();
+            let note = occurrences.iter().find(|o| o.item == canonical).unwrap();
+            assert!(!note.note);
+            assert!(note.overlays.is_empty());
+            let body = bodies.lock().unwrap()[1].clone();
+            let expected_role = if route == ResponsesRoute::DeepSeek {
+                "user"
+            } else {
+                "developer"
+            };
+            assert!(
+                body["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item["role"] == expected_role
+                        && item["content"] == canonical.0["content"])
+            );
+            let annotation_event = store
+                .events(Some(&operation.request))
+                .unwrap()
+                .into_iter()
+                .find(|e| e.kind == "model_tool_annotation")
+                .unwrap()
+                .id;
+            let before = store.context_history(&operation.request).unwrap().len();
+            assert_eq!(
+                store
+                    .append_model_tool_annotation(&operation, result_event, annotation_event)
+                    .unwrap(),
+                Some(note.hash.clone())
+            );
+            assert_eq!(
+                store.context_history(&operation.request).unwrap().len(),
+                before
+            );
+            assert!(
+                store
+                    .append_model_tool_annotation(&operation, result_event + 1, annotation_event)
+                    .is_err()
+            );
+            assert!(
+                store
+                    .record_event(
+                        Some(&operation.request),
+                        "model_tool_note_publication",
+                        &json!({})
+                    )
+                    .is_err()
+            );
+
+            let unproved = RequestId(format!("unproved-{route:?}"));
+            store.create_request(&unproved, None, "/root").unwrap();
+            store.append_items(&unproved, &[canonical.clone()]).unwrap();
+            let occurrences = store
+                .history_occurrences(&unproved)
+                .unwrap()
+                .into_iter()
+                .map(Some)
+                .collect::<Vec<_>>();
+            let dto = ResponsesRequest {
+                input: vec![canonical],
+                instructions: "fixed".into(),
+                tools: vec![].into(),
+                tools_allowed: None,
+                model: "offline".into(),
+                pinned_effort: Effort::Low,
+                session_id: "session".into(),
+                prompt_cache_comparison: None,
+            };
+            let result = store.prepare_provider_request(
+                &unproved,
+                &unproved,
+                dto,
+                &occurrences,
+                None,
+                crate::transport::PreparedTransportSelection::component((
+                    ResponsesRoute::DeepSeek,
+                    ResponsesProtocol::Standard,
+                )),
+                crate::store::ProviderRequestPurpose::Inference,
+            );
+            assert!(
+                result.is_err(),
+                "identical unproved occurrence must not acquire hook authorship"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn text_result_projects_only_ordered_assistant_output_and_retains_transcript() {
         let items = vec![

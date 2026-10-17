@@ -171,12 +171,17 @@ impl Store {
             }
             projected
         };
-        // context_note is issued by the authored seed/context owner, while
-        // unretained messages passed the explicit host-authored admission above.
-        // A role spelling or an absent provider envelope is not authorship proof.
+        // Editable context notes and protected committed hook annotations have
+        // separate issuers. Unretained messages passed host-authored admission
+        // above; role spelling and absent provider envelopes prove neither.
+        let hook_notes = self.model_tool_note_origins(occurrences)?;
         let authored = occurrences
             .iter()
-            .map(|occurrence| occurrence.as_ref().is_none_or(|occurrence| occurrence.note))
+            .map(|occurrence| {
+                occurrence.as_ref().is_none_or(|occurrence| {
+                    occurrence.note || hook_notes.contains(&occurrence.origin)
+                })
+            })
             .collect::<Vec<_>>();
         let body = client::normalize_for_selection(&request, &selection, &authored)?;
         let hashes = request

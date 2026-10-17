@@ -18,6 +18,7 @@ pub mod chat;
 pub mod forms;
 pub mod history;
 pub mod media;
+mod model_tool_note;
 mod output_publication;
 pub(crate) use output_publication::{RecoveryItem, RecoveryItemKind};
 mod prepared_request;
@@ -81,6 +82,8 @@ pub enum StoreError {
     InvalidMedia,
     #[error("actor outputs require typed host admission")]
     ActorOutputNeedsAuthority,
+    #[error("model tool notes require exact committed hook evidence")]
+    ModelToolNoteNeedsAuthority,
     #[error("actor output exceeds its bounds or has invalid identity/keys")]
     InvalidActorOutput,
     #[error("host refused actor output admission")]
@@ -1978,6 +1981,9 @@ impl Store {
         kind: &str,
         payload: &serde_json::Value,
     ) -> Result<i64> {
+        if kind == model_tool_note::EVENT_KIND {
+            return Err(StoreError::ModelToolNoteNeedsAuthority);
+        }
         if matches!(
             kind,
             actor_output::EVENT_KIND | "chat_message" | "actor_form_open" | "actor_form_update"
