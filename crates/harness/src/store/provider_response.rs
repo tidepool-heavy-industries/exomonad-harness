@@ -175,6 +175,30 @@ impl Store {
         ))
     }
 
+    /// Issued route and actual terminal state, independent of current startup
+    /// configuration. Missing legacy issuance does not imply a provider route.
+    pub(crate) fn provider_response_selection(
+        &self,
+        request: &RequestId,
+    ) -> Result<Option<(ResponsesRoute, ResponsesProtocol, ProviderResponseState)>> {
+        let raw: Option<(String, String, String)> = self
+            .lock()?
+            .query_row(
+                "SELECT route,protocol,state FROM provider_requests WHERE request_id=?1",
+                [&request.0],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        raw.map(|(route, protocol, state)| {
+            Ok((
+                serde_json::from_str(&route)?,
+                serde_json::from_str(&protocol)?,
+                parse_state(&state, request)?,
+            ))
+        })
+        .transpose()
+    }
+
     pub fn provider_response_state(
         &self,
         request: &RequestId,

@@ -344,6 +344,12 @@ pub enum ToolEncodingProfile {
     Native,
     FunctionOnlyExplicitDelivery,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResponseFinality {
+    ExplicitPhase,
+    CompletedAssistantText,
+}
 impl ToolEncodingProfile {
     /// Validate the actual retained call before parsing can erase wire fields.
     pub fn validate_invocation_item(self, item: &Item) -> Result<(), TransportError> {
@@ -379,6 +385,12 @@ pub enum ResponsesRoute {
 }
 
 impl ResponsesRoute {
+    pub const fn response_finality(self) -> ResponseFinality {
+        match self {
+            Self::ChatGptPlan => ResponseFinality::ExplicitPhase,
+            Self::DeepSeek => ResponseFinality::CompletedAssistantText,
+        }
+    }
     pub const fn tool_encoding_profile(self) -> ToolEncodingProfile {
         match self {
             Self::ChatGptPlan => ToolEncodingProfile::Native,
