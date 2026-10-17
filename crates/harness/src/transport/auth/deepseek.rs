@@ -95,3 +95,7 @@ impl Auth for DeepSeekAuth {
         Ok(key.to_owned())
     }
 }
+
+#[cfg(test)]
+#[path = "deepseek_tests.rs"]
+mod tests;

@@ -30,7 +30,10 @@ impl InferenceLimits {
         }
     }
     fn validate(self, route: ResponsesRoute) -> Result<(), TransportError> {
-        if self.connect_timeout_secs == 0
+        if std::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(self.total_timeout_secs))
+            .is_none()
+            || self.connect_timeout_secs == 0
             || self.total_timeout_secs < self.connect_timeout_secs
             || self.max_inflight == 0
             || self.max_inflight > Semaphore::MAX_PERMITS

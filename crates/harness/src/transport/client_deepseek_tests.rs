@@ -213,7 +213,7 @@ fn openai_default_wire_bytes_preserve_original_struct_serializer() {
     .unwrap();
     assert_eq!(
         std::str::from_utf8(wire.bytes()).unwrap(),
-        r#"{"model":"gpt-6.1-sol","instructions":"fixed","input":[{"type":"message","role":"user","content":"hello"}],"reasoning":{"effort":"low","summary":"auto"},"stream":true,"store":false,"prompt_cache_key":"session","include":["reasoning.encrypted_content"]}"#
+        r#"{"model":"gpt-6.1-sol","instructions":"fixed","input":[{"content":"hello","role":"user","type":"message"}],"reasoning":{"effort":"low","summary":"auto"},"stream":true,"store":false,"prompt_cache_key":"session","include":["reasoning.encrypted_content"]}"#
     );
 }
 
@@ -251,4 +251,37 @@ async fn deepseek_contract_mismatch_precedes_credentials_and_queue_cancellation_
     drop(held);
     let _released = selected.acquire().await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn deepseek_http_builder_uses_plain_json_without_openai_headers() {
+    let selected = admission("/offline/key");
+    let dto = request();
+    let bytes =
+        serde_json::to_vec(&deepseek_request(&dto, selected.contract().limits, &[false]).unwrap())
+            .unwrap();
+    let wire = native_http_request(
+        &reqwest::Client::new(),
+        &dto,
+        bytes.clone(),
+        "synthetic-token",
+        selected.contract(),
+    )
+    .build()
+    .unwrap();
+    assert_eq!(wire.url().as_str(), "https://api.deepseek.com/responses");
+    assert_eq!(
+        wire.headers()[reqwest::header::AUTHORIZATION],
+        "Bearer synthetic-token"
+    );
+    assert_eq!(wire.body().unwrap().as_bytes().unwrap(), bytes);
+    for absent in [
+        "session-id",
+        "thread-id",
+        "x-client-request-id",
+        "chatgpt-account-id",
+        "content-encoding",
+    ] {
+        assert!(!wire.headers().contains_key(absent), "unexpected {absent}");
+    }
 }

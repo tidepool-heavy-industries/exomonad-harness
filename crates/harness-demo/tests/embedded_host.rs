@@ -129,8 +129,13 @@ fn host(store: Arc<Store>, seen: Arc<Mutex<Vec<Value>>>) -> Arc<Host> {
 #[derive(Clone)]
 struct Offline;
 impl Auth for Offline {
-    fn admission(&self) -> Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError> {
-        harness::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from("/offline/synthetic-credential"))
+    fn admission(
+        &self,
+    ) -> Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError>
+    {
+        harness::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
+            "/offline/synthetic-credential",
+        ))
     }
     fn access(&self) -> Result<String, TransportError> {
         panic!("offline transport")

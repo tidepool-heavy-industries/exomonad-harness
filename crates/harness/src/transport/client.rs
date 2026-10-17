@@ -468,6 +468,24 @@ fn http_request(
     }
 }
 
+fn native_http_request(
+    http: &reqwest::Client,
+    request: &ResponsesRequest,
+    body: Vec<u8>,
+    token: &str,
+    contract: &super::NativeTransportContract,
+) -> reqwest::RequestBuilder {
+    match contract.route {
+        ResponsesRoute::ChatGptPlan => http_request(http, request, body, token),
+        ResponsesRoute::DeepSeek => http
+            .post(&contract.endpoint)
+            .bearer_auth(token)
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body),
+    }
+}
+
 pub(super) fn http_client() -> Result<reqwest::Client, TransportError> {
     http_client_with_limits(super::InferenceLimits::chatgpt_default())
 }
@@ -507,15 +525,7 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
     let token = tokio::task::spawn_blocking(move || auth.access())
         .await
         .map_err(|_| TransportError::Authentication)??;
-    let call = match admission.contract().route {
-        ResponsesRoute::ChatGptPlan => http_request(&http, &request, body, &token),
-        ResponsesRoute::DeepSeek => http
-            .post(&admission.contract().endpoint)
-            .bearer_auth(&token)
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body),
-    };
+    let call = native_http_request(&http, &request, body, &token, admission.contract());
     let response = match call.send().await {
         Ok(response) => response,
         Err(_) => {

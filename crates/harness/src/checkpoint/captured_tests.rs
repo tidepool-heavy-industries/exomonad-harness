@@ -33,8 +33,12 @@ fn config(actor: AgentPath) -> EngineConfig {
 #[derive(Clone)]
 struct FakeAuth;
 impl Auth for FakeAuth {
-    fn admission(&self) -> Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError> {
-        crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from("/offline/synthetic-credential"))
+    fn admission(
+        &self,
+    ) -> Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError> {
+        crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
+            "/offline/synthetic-credential",
+        ))
     }
     fn access(&self) -> std::result::Result<String, TransportError> {
         Ok("unused".into())

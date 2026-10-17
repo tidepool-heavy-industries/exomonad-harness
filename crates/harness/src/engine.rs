@@ -508,7 +508,9 @@ pub trait ResponsesTransport: Send + Sync {
 #[async_trait::async_trait]
 impl<A: Auth + Clone + 'static> ResponsesTransport for ResponsesClient<A> {
     fn prepare_submission(&self) -> Result<PreparedTransportSelection, TransportError> {
-        Ok(PreparedTransportSelection::native(self.admission()?.clone()))
+        Ok(PreparedTransportSelection::native(
+            self.admission()?.clone(),
+        ))
     }
 
     fn response_contract(
@@ -4993,9 +4995,14 @@ mod tests {
     #[derive(Clone)]
     struct FakeAuth;
     impl Auth for FakeAuth {
-    fn admission(&self) -> Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError> {
-        crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from("/offline/synthetic-credential"))
-    }
+        fn admission(
+            &self,
+        ) -> Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError>
+        {
+            crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
+                "/offline/synthetic-credential",
+            ))
+        }
         fn access(&self) -> Result<String, TransportError> {
             Ok("unused".into())
         }
