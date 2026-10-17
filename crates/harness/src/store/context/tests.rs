@@ -1465,7 +1465,7 @@ fn blocks_preserve_duplicate_call_order_orphans_and_cut_opaque_groups() {
 
     let c = store.lock().unwrap();
     let all = history(&c, &parent, true).unwrap();
-    let grouped = blocks(&c, &all, 10).unwrap();
+    let grouped = blocks(&c, &all, 10, None).unwrap();
     assert_eq!(grouped.len(), 5);
     assert!(matches!(grouped[0].block, ContextBlock::Text { .. }));
     assert_eq!(grouped[1].items.len(), 2);

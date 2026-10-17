@@ -371,6 +371,11 @@ fn text_body<'a>(item: &'a Item, selector: &ContextTextSelector) -> Option<&'a s
                 _ => None,
             }
         }
+        ContextTextSelector::ReasoningText { part } => (item.0["type"] == "reasoning")
+            .then(|| item.0["content"].as_array()?.get(*part as usize))
+            .flatten()
+            .filter(|part| part["type"] == "reasoning_text")
+            .and_then(|part| part["text"].as_str()),
         ContextTextSelector::ToolResultText => matches!(
             item.0["type"].as_str(),
             Some("function_call_output" | "custom_tool_call_output")
@@ -389,6 +394,9 @@ fn set_text_body(item: &mut Item, selector: &ContextTextSelector, text: &str) ->
             _ => unreachable!("validated message text"),
         },
         ContextTextSelector::ToolResultText => item.0["output"] = json!(text),
+        ContextTextSelector::ReasoningText { part } => {
+            item.0["content"][*part as usize]["text"] = json!(text);
+        }
     }
     Ok(())
 }
@@ -433,6 +441,7 @@ fn set_overlay(
         .sort_by_key(|overlay| match overlay.selector {
             ContextTextSelector::MessageText { part } => (0, part),
             ContextTextSelector::ToolResultText => (1, 0),
+            ContextTextSelector::ReasoningText { part } => (2, part),
         });
     Ok(())
 }
@@ -654,6 +663,7 @@ fn visible_texts(
     c: &Connection,
     owners: &HashMap<Origin, &Occurrence>,
     items: &[Occurrence],
+    reasoning_editable: &HashSet<Origin>,
 ) -> Result<Vec<ContextVisibleText>> {
     let mut fields = Vec::new();
     for occurrence in items {
@@ -672,6 +682,18 @@ fn visible_texts(
             Some("function_call_output" | "custom_tool_call_output") => {
                 vec![ContextTextSelector::ToolResultText]
             }
+            Some("reasoning") => occurrence.item.0["content"]
+                .as_array()
+                .map(|parts| {
+                    (0..parts.len())
+                        .filter_map(|part| {
+                            u32::try_from(part)
+                                .ok()
+                                .map(|part| ContextTextSelector::ReasoningText { part })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             _ => Vec::new(),
         };
         let projected = project_bodies(occurrence)?;
@@ -681,6 +703,8 @@ fn visible_texts(
             };
             let editable = if selector == ContextTextSelector::ToolResultText {
                 output_editable(c, owners.get(&occurrence.origin).copied(), occurrence)?
+            } else if matches!(selector, ContextTextSelector::ReasoningText { .. }) {
+                reasoning_editable.contains(&occurrence.origin)
             } else {
                 true
             };
@@ -870,7 +894,91 @@ pub(crate) fn capture_response_prefix(
     Ok((selected == envelope.origins[..cut]).then_some(selected))
 }
 
-fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBlock>> {
+/// Plaintext inspection is independent of edit admission. Only the exact
+/// completed provider envelope and selected transport can admit an overlay.
+fn reasoning_editable_origins(
+    all: &[Occurrence],
+    cut: usize,
+    evidence: &HashMap<Origin, std::sync::Arc<super::replay::ResponseEnvelope>>,
+    target: Option<&ContextProjectionTarget>,
+) -> HashSet<Origin> {
+    let Some(target) = target else {
+        return HashSet::new();
+    };
+    if !target.route.supports_plaintext_reasoning_edits() {
+        return HashSet::new();
+    }
+    let positions = occurrence_positions(all);
+    all.iter()
+        .take(cut)
+        .filter(|occurrence| {
+            if occurrence.item.0["type"] != "reasoning" {
+                return false;
+            }
+            let Some(envelope) = evidence.get(&occurrence.origin) else {
+                return false;
+            };
+            envelope.completeness == super::replay::ResponseCompleteness::Completed
+                && envelope.kind == super::replay::ResponseEnvelopeKind::ModelTurn
+                && envelope.model == target.model
+                && envelope.route == Some(target.route)
+                && envelope.protocol == Some(target.protocol)
+                && envelope.origins.iter().all(|origin| {
+                    let Some(indices) = positions.get(origin) else {
+                        return false;
+                    };
+                    let [index] = indices.as_slice() else {
+                        return false;
+                    };
+                    *index < cut
+                        && (all[*index].item.0["type"] != "reasoning"
+                            || plaintext_reasoning(&all[*index].item))
+                })
+        })
+        .map(|occurrence| occurrence.origin.clone())
+        .collect()
+}
+
+fn plaintext_reasoning(item: &Item) -> bool {
+    let Some(fields) = item.0.as_object() else {
+        return false;
+    };
+    fields
+        .keys()
+        .all(|key| matches!(key.as_str(), "type" | "id" | "status" | "content"))
+        && item.0["content"].as_array().is_some_and(|parts| {
+            !parts.is_empty()
+                && parts.iter().all(|part| {
+                    part.as_object().is_some_and(|fields| {
+                        fields.len() == 2
+                            && part["type"] == "reasoning_text"
+                            && part["text"].is_string()
+                    })
+                })
+        })
+}
+
+fn optional_projection_target(
+    c: &Connection,
+    identity: &ConversationIdentity,
+) -> Result<Option<ContextProjectionTarget>> {
+    let current = state(c, identity)?;
+    Ok(match (current.model, current.route, current.protocol) {
+        (Some(model), Some(route), Some(protocol)) => Some(ContextProjectionTarget {
+            model,
+            route,
+            protocol,
+        }),
+        _ => None,
+    })
+}
+
+fn blocks(
+    c: &Connection,
+    all: &[Occurrence],
+    cut: usize,
+    target: Option<&ContextProjectionTarget>,
+) -> Result<Vec<StoredBlock>> {
     let publication_ledger = super::output_publication::validate_history(c, all)?;
     // Group by the issuing occurrence. Wire call IDs can repeat, and an older
     // operation's output can arrive after a newer invocation.
@@ -932,6 +1040,7 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
         .collect::<HashSet<_>>();
     let positions = occurrence_positions(all);
     let evidence = response_evidence(c, all)?;
+    let reasoning_editable = reasoning_editable_origins(all, cut, &evidence, target);
     let mut opaque_bounds = HashMap::<Origin, (usize, usize, bool)>::new();
     let mut grouped_envelopes = HashSet::new();
     for origin in opaque_origins {
@@ -1041,7 +1150,7 @@ fn blocks(c: &Connection, all: &[Occurrence], cut: usize) -> Result<Vec<StoredBl
             } else {
                 ContextNativeKind::CompletedExchange
             };
-            let texts = visible_texts(c, &output_owners, &items)?;
+            let texts = visible_texts(c, &output_owners, &items, &reasoning_editable)?;
             result.push(StoredBlock {
                 block: ContextBlock::Native {
                     reference: reference(&items),
@@ -1140,6 +1249,23 @@ pub(super) fn checked_projection(
         }
     }
     let evidence = response_evidence(c, all)?;
+    let target = model
+        .zip(transport)
+        .map(|(model, (route, protocol))| ContextProjectionTarget {
+            model: model.into(),
+            route,
+            protocol,
+        });
+    let reasoning_editable = reasoning_editable_origins(all, all.len(), &evidence, target.as_ref());
+    if all.iter().any(|occurrence| {
+        occurrence
+            .overlays
+            .iter()
+            .any(|overlay| matches!(overlay.selector, ContextTextSelector::ReasoningText { .. }))
+            && !reasoning_editable.contains(&occurrence.origin)
+    }) {
+        return Err(ContextError::NativeEdit.into());
+    }
     let positions = occurrence_positions(all);
     let operations = all
         .iter()
@@ -1899,7 +2025,7 @@ impl Store {
         c.read_transaction(|tx| {
             let all = history(tx, head, true)?;
             let document = ContextDocument {
-                blocks: blocks(tx, &all, all.len())?
+                blocks: blocks(tx, &all, all.len(), None)?
                     .into_iter()
                     .map(|b| b.block)
                     .collect(),
@@ -1934,7 +2060,8 @@ impl Store {
             let [cut] = matches.as_slice() else {
                 return Err(ContextError::MissingCall.into());
             };
-            let stored = blocks(tx, &all, *cut)?;
+            let target = optional_projection_target(tx, &operation.origin)?;
+            let stored = blocks(tx, &all, *cut, target.as_ref())?;
             let document = ContextDocument {
                 blocks: stored.iter().map(|b| b.block.clone()).collect(),
             };
@@ -2341,7 +2468,12 @@ impl Store {
                     .iter()
                     .position(|i| i.origin == origin)
                     .unwrap_or(historic.len());
-                historic_blocks.extend(blocks(&tx, &historic, cut)?);
+                historic_blocks.extend(blocks(
+                    &tx,
+                    &historic,
+                    cut,
+                    optional_projection_target(tx, &snapshot.operation.origin)?.as_ref(),
+                )?);
             }
         }
         let mut available = snapshot.blocks.clone();
@@ -3215,3 +3347,6 @@ mod conversation_history_model_tests;
 
 #[cfg(test)]
 mod model_tool_projection_tests;
+
+#[cfg(test)]
+mod reasoning_tests;

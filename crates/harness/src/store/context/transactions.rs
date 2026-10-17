@@ -205,7 +205,8 @@ fn refresh_snapshot(
     let [cut] = cuts.as_slice() else {
         return Err(ContextError::MissingCall.into());
     };
-    let stored = blocks(c, &all, *cut)?;
+    let target = optional_projection_target(c, &snapshot.operation.origin)?;
+    let stored = blocks(c, &all, *cut, target.as_ref())?;
     let generation = state(c, &snapshot.operation.origin)?.generation;
     Ok(ContextSnapshot {
         document: ContextDocument {
@@ -313,6 +314,7 @@ fn record_unapplied(
 fn canonical_author(item: &Item) -> ContextTextAuthor {
     match item.0["type"].as_str() {
         Some("function_call_output" | "custom_tool_call_output") => ContextTextAuthor::Tool,
+        Some("reasoning") => ContextTextAuthor::Assistant,
         Some("message") => match item.0["role"].as_str() {
             Some("user") => ContextTextAuthor::User,
             Some("assistant") => ContextTextAuthor::Assistant,

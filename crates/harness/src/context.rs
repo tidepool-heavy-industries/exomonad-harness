@@ -89,8 +89,14 @@ pub enum ContextNativeKind {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContextTextSelector {
-    MessageText { part: u32 },
+    MessageText {
+        part: u32,
+    },
     ToolResultText,
+    /// Plaintext provider reasoning in one exact content part.
+    ReasoningText {
+        part: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
