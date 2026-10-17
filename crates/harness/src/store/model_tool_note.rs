@@ -52,22 +52,15 @@ fn annotation_item(
         .ok_or_else(|| invalid(result_event))?;
     let output: Item = serde_json::from_value(result["output"].clone())?;
     validate_replay_output(&operation.call, issued.call.input.kind(), &output)?;
-    let origin = serde_json::to_string(&operation.origin)?;
-    let retained: Option<String> = c.query_row("SELECT i.json FROM claims c JOIN items i ON i.hash=c.output_hash WHERE c.origin=?1 AND c.origin_request_id=?2 AND c.call_id=?3 AND c.state='settled' LIMIT 1",params![origin,operation.request.0,operation.call.0],|r|r.get(0)).optional()?;
-    if retained
-        .map(|s| serde_json::from_str::<Item>(&s))
-        .transpose()?
-        .as_ref()
-        != Some(&output)
-    {
-        return Err(invalid(result_event));
-    }
-    let published: bool = c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM request_items ri JOIN items i ON i.hash=ri.item_hash WHERE ri.output_operation=?1 AND i.json=?2)",
-        params![serde_json::to_string(operation)?, serde_json::to_string(&output)?],
-        |row| row.get(0),
-    )?;
-    if !published {
+    // Cleanup may retain a completed terminal without publishing ordinary
+    // history. The terminal owner validates all exact claims and formats.
+    let (hash, _, _) =
+        super::terminal::exact_terminal(c, operation)?.ok_or_else(|| invalid(result_event))?;
+    let retained: String =
+        c.query_row("SELECT json FROM items WHERE hash=?1", [&hash.0], |row| {
+            row.get(0)
+        })?;
+    if serde_json::from_str::<Item>(&retained)? != output {
         return Err(invalid(result_event));
     }
     let annotation = event(annotation_event, "model_tool_annotation")?;
@@ -219,5 +212,93 @@ impl Store {
             }
         }
         Ok(origins)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        item::ToolKind,
+        model::{CallId, RequestId},
+        provider::ToolFailure,
+        turn::JobOutput,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn retained_unpublished_completed_outputs_issue_exact_hook_authorship_after_reopen() {
+        let path =
+            std::env::temp_dir().join(format!("harness-hook-{}.sqlite", uuid::Uuid::new_v4()));
+        let mut retained = Vec::new();
+        {
+            let store = Store::open(&path).unwrap();
+            for (index, output) in [
+                JobOutput::Completed(Ok(json!("success"))),
+                JobOutput::Completed(Err(ToolFailure::from("failure"))),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let request = RequestId(format!("unpublished-{index}"));
+                store.create_request(&request, None, "/root").unwrap();
+                let call = CallId("same-call".into());
+                store.append_items(&request,&[Item(json!({"type":"function_call","call_id":call.0,"name":"probe","arguments":"{}"}))]).unwrap();
+                let operation = store.claim(&call, &request).unwrap();
+                store
+                    .write_job_output(&operation, ToolKind::Function, &output)
+                    .unwrap();
+                let output = store.replay_output_operation(&operation).unwrap().unwrap();
+                let result = store
+                    .record_event(
+                        Some(&request),
+                        "model_tool_result",
+                        &json!({"operation":operation,"output":output}),
+                    )
+                    .unwrap();
+                let annotation=store.record_event(Some(&request),"model_tool_annotation",&json!({"ordinal":result,"annotation":HookAnnotation::Annotated("retained cleanup hook".into())})).unwrap();
+                let hash = store
+                    .append_model_tool_annotation(&operation, result, annotation)
+                    .unwrap()
+                    .unwrap();
+                let history = store.history_occurrences(&request).unwrap();
+                assert!(history.iter().all(|o| o.output_operation.is_none()));
+                let note = history.iter().find(|o| o.hash == hash).unwrap();
+                assert!(!note.note);
+                assert_eq!(
+                    store
+                        .append_model_tool_annotation(&operation, result, annotation)
+                        .unwrap(),
+                    Some(hash.clone())
+                );
+                retained.push((operation, result, annotation, hash));
+            }
+        }
+        {
+            let store = Store::open(&path).unwrap();
+            for (operation, result, annotation, hash) in retained {
+                let history = store
+                    .history_occurrences(&operation.request)
+                    .unwrap()
+                    .into_iter()
+                    .map(Some)
+                    .collect::<Vec<_>>();
+                let origins = store.model_tool_note_origins(&history).unwrap();
+                assert!(origins.iter().any(|origin| origin.hash == hash));
+                assert_eq!(
+                    store
+                        .append_model_tool_annotation(&operation, result, annotation)
+                        .unwrap(),
+                    Some(hash)
+                );
+                assert!(
+                    history
+                        .iter()
+                        .flatten()
+                        .all(|o| o.output_operation.is_none())
+                );
+            }
+        }
+        std::fs::remove_file(path).unwrap();
     }
 }
