@@ -1333,6 +1333,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     continue;
                 }
                 let request = &record.source_request;
+                if matches!(
+                    record.item.0["type"].as_str(),
+                    Some("function_call" | "custom_tool_call")
+                ) {
+                    self.client
+                        .response_contract()?
+                        .0
+                        .tool_encoding_profile()
+                        .validate_invocation_item(&record.item)?;
+                }
                 let Some(call) = record
                     .item
                     .tool_call()
@@ -1367,7 +1377,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .invocation_item(&claim.operation.request, &claim.call_id)?
                 .ok_or_else(|| EngineError::MissingOperationInvocation(claim.operation.clone()))?;
             let tool_kind = invocation.input.kind();
-            let execution = self.provider.operation_execution(&claim.operation, &invocation, self.client.response_contract()?.0.tool_encoding_profile())?;
+            let execution = self.provider.operation_execution(
+                &claim.operation,
+                &invocation,
+                self.client.response_contract()?.0.tool_encoding_profile(),
+            )?;
             let same_call = |item: &Item| {
                 item.tool_call()
                     .ok()
@@ -1654,7 +1668,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .find_map(Item::configuration_effort)
                 .ok_or(EngineError::MissingEffortPin)?;
             let snapshot = tokio::select! {
-                result = self.provider.request_snapshot_with_encoding(self.client.response_contract()?.0.tool_encoding_profile()) => result,
+                result = self.provider.request_snapshot_with_encoding(history.contract.response_contract().0.tool_encoding_profile()) => result,
                 changed = cancellation.changed() => {
                     if changed.is_err() || *cancellation.borrow() {
                         return Err(EngineError::Cancelled { head_request: Some(parent.clone()) });
@@ -2789,7 +2803,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     async fn snapshot_provider(&self) -> Result<Arc<dyn Provider>, EngineError> {
         Ok(self
             .provider
-            .request_snapshot_with_encoding(self.client.response_contract()?.0.tool_encoding_profile())
+            .request_snapshot_with_encoding(
+                self.client.response_contract()?.0.tool_encoding_profile(),
+            )
             .await?
             .unwrap_or_else(|| self.provider.clone()))
     }
@@ -2875,14 +2891,29 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         if item.0["type"] != "function_call" && item.0["type"] != "custom_tool_call" {
             return Ok(DispatchResult::NotCall);
         }
+        self.client
+            .response_contract()?
+            .0
+            .tool_encoding_profile()
+            .validate_invocation_item(&item)?;
         let call = item
             .tool_call()
             .map_err(|_| EngineError::InvalidFunctionCall)?
             .ok_or(EngineError::InvalidFunctionCall)?;
         let settlement_owner = ToolSettlementOwner::for_invocation(&call);
-        let execution = if settlement_owner == ToolSettlementOwner::EngineYield { call.execution } else { provider.operation_execution(&OperationId {
-            origin: self.origin.clone(), request: request.clone(), call: call.call_id.clone()
-        }, &call, self.client.response_contract()?.0.tool_encoding_profile())? };
+        let execution = if settlement_owner == ToolSettlementOwner::EngineYield {
+            call.execution
+        } else {
+            provider.operation_execution(
+                &OperationId {
+                    origin: self.origin.clone(),
+                    request: request.clone(),
+                    call: call.call_id.clone(),
+                },
+                &call,
+                self.client.response_contract()?.0.tool_encoding_profile(),
+            )?
+        };
         let call_id = call.call_id;
         let operation = OperationId {
             origin: self.origin.clone(),

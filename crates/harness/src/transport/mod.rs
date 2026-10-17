@@ -338,7 +338,8 @@ fn diagnostic_suffix(diagnostic: Option<&HttpDiagnostic>) -> String {
 }
 
 /// The tool encoding implemented by an admitted provider route.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolEncodingProfile {
     Native,
     FunctionOnlyExplicitDelivery,
