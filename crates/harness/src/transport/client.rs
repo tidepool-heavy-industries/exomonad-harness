@@ -139,7 +139,7 @@ struct ToolChoice(&'static str);
 
 fn normalized_request(request: &ResponsesRequest) -> Result<RequestBody<'_>, TransportError> {
     if matches!(
-        effective_effort(request),
+        crate::item::Item::effective_effort(&request.input, request.pinned_effort),
         crate::model::Effort::None | crate::model::Effort::Max
     ) {
         return Err(TransportError::UnsupportedSemantics(
@@ -209,7 +209,7 @@ fn normalized_request(request: &ResponsesRequest) -> Result<RequestBody<'_>, Tra
         tools: has_tools.then(|| RequestTools::Host(vec![serde_json::json!({"type":"namespace","name":"functions","description":"Exomonad host tools","tools":tools})])),
         tool_choice: has_tools.then_some(ToolChoice("auto")),
         reasoning: Reasoning {
-            effort: request.input.iter().rev().find_map(crate::item::Item::configuration_effort).unwrap_or(request.pinned_effort),
+            effort: crate::item::Item::effective_effort(&request.input, request.pinned_effort),
             summary: "auto",
         },
         stream: true,
@@ -218,15 +218,6 @@ fn normalized_request(request: &ResponsesRequest) -> Result<RequestBody<'_>, Tra
         prompt_cache_options: request.prompt_cache_comparison.as_ref(),
         include: ["reasoning.encrypted_content"],
     })
-}
-
-fn effective_effort(request: &ResponsesRequest) -> crate::model::Effort {
-    request
-        .input
-        .iter()
-        .rev()
-        .find_map(crate::item::Item::configuration_effort)
-        .unwrap_or(request.pinned_effort)
 }
 
 fn deepseek_request(
@@ -242,7 +233,9 @@ fn deepseek_request(
     {
         return Err(TransportError::InvalidAdmission);
     }
-    if effective_effort(request) == crate::model::Effort::Medium {
+    if crate::item::Item::effective_effort(&request.input, request.pinned_effort)
+        == crate::model::Effort::Medium
+    {
         return Err(refuse(Unsupported::ReasoningEffort));
     }
     if request.prompt_cache_comparison.is_some() {
@@ -338,7 +331,7 @@ fn deepseek_request(
         }
         input.push(item);
     }
-    let mut body = serde_json::json!({"model":request.model,"input":input,"stream":true,"max_output_tokens":limits.max_output_tokens,"reasoning":{"effort":effective_effort(request)}});
+    let mut body = serde_json::json!({"model":request.model,"input":input,"stream":true,"max_output_tokens":limits.max_output_tokens,"reasoning":{"effort":crate::item::Item::effective_effort(&request.input, request.pinned_effort)}});
     if !request.instructions.is_empty() {
         body["instructions"] = Value::String(request.instructions.clone());
     }
@@ -811,8 +804,10 @@ mod tests {
         impl Auth for NoAuth {
             fn admission(
                 &self,
-            ) -> std::result::Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError>
-            {
+            ) -> std::result::Result<
+                crate::transport::NativeTransportAdmission,
+                crate::transport::TransportError,
+            > {
                 crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
                     "/offline/synthetic-credential",
                 ))

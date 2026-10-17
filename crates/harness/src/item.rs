@@ -179,6 +179,15 @@ impl Item {
 }
 
 impl Item {
+    /// The final positional setting wins; absence retains the admitted default.
+    pub fn effective_effort(items: &[Self], default: Effort) -> Effort {
+        items
+            .iter()
+            .rev()
+            .find_map(Self::configuration_effort)
+            .unwrap_or(default)
+    }
+
     /// Whether this is a positional reasoning-effort update.
     pub fn is_configuration_update(&self) -> bool {
         self.0.get("type").and_then(Value::as_str) == Some("configuration_update")
