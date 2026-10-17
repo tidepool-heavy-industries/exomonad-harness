@@ -270,6 +270,7 @@ impl StoreError {
             | Self::InvalidSvg(..)
             | Self::InvalidMedia
             | Self::ActorOutputNeedsAuthority
+            | Self::ModelToolNoteNeedsAuthority
             | Self::InvalidActorOutput
             | Self::ActorOutputRefused
             | Self::ActorOutputAuthority(..)
